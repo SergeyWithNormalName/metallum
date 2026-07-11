@@ -1,5 +1,8 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.Metallum;
+import com.metallum.client.hdr.EdrCapabilities;
+import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -35,6 +38,8 @@ final class MetalDevice implements GpuDeviceBackend {
     private final MemorySegment metalDeviceHandle;
     private final MemorySegment metalLayer;
     private final MemorySegment cocoaView;
+    private final MemorySegment edrMonitor;
+    private final HdrConfig hdrConfig;
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
@@ -50,6 +55,7 @@ final class MetalDevice implements GpuDeviceBackend {
             final MemorySegment metalDeviceHandle,
             final MemorySegment metalLayer,
             final String deviceName,
+            final MemorySegment cocoaWindow,
             final MemorySegment cocoaView
     ) {
         this.activeShaderSource = defaultShaderSource;
@@ -57,6 +63,11 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
+        this.hdrConfig = HdrConfig.load();
+        this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
+        if (MetalNativeBridge.isNullHandle(this.edrMonitor)) {
+            Metallum.LOGGER.warn("Failed to create EDR display monitor; HDR will use the safe SDR fallback");
+        }
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
@@ -182,6 +193,9 @@ final class MetalDevice implements GpuDeviceBackend {
         } catch (Throwable ignored) {
         }
         this.commandQueue.close();
+        if (!MetalNativeBridge.isNullHandle(this.edrMonitor)) {
+            MetalNativeBridge.metallum_release_object(this.edrMonitor);
+        }
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }
 
@@ -206,6 +220,18 @@ final class MetalDevice implements GpuDeviceBackend {
 
     void waitForSubmittedGpuWork() {
         this.commandEncoder.waitForSubmittedGpuWork();
+    }
+
+    void waitForPreviouslySubmittedGpuWork() {
+        this.commandEncoder.waitForPreviouslySubmittedGpuWork();
+    }
+
+    HdrConfig hdrConfig() {
+        return this.hdrConfig;
+    }
+
+    EdrCapabilities queryEdrCapabilities() {
+        return MetalNativeBridge.metallum_EDRMonitor_query(this.edrMonitor);
     }
 
     void queueResourceRelease(final MemorySegment handle) {

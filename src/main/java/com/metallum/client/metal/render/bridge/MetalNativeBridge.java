@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render.bridge;
 
+import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.metal.render.mtl.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -40,6 +41,12 @@ public final class MetalNativeBridge {
             createSystemDefaultDevice = downcall(lookup, "metallum_create_system_default_device", FunctionDescriptor.of(ValueLayout.ADDRESS));
             copyDeviceName = downcall(lookup, "metallum_copy_device_name", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
             NSWindowBackingScaleFactor = downcall(lookup, "metallum_NSWindow_backingScaleFactor", FunctionDescriptor.of(DOUBLE, ValueLayout.ADDRESS));
+            createEdrMonitor = downcallWithoutCritical(lookup, "metallum_create_edr_monitor", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            EDRMonitorQuery = downcallWithoutCritical(
+                    lookup,
+                    "metallum_EDRMonitor_query",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
@@ -176,7 +183,16 @@ public final class MetalNativeBridge {
             MTLCommandBufferEncodePresentTextureToDrawable = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLCommandBuffer_encodePresentTextureToDrawable",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            INT,
+                            FLOAT
+                    )
             );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createTexture2d = downcall(
@@ -245,7 +261,11 @@ public final class MetalNativeBridge {
                     "metallum_MTLDevice_makeRenderPipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
-            configureLayer = downcall(lookup, "metallum_configure_layer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, DOUBLE, DOUBLE, INT));
+            configureLayer = downcallWithoutCritical(
+                    lookup,
+                    "metallum_configure_layer",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, DOUBLE, DOUBLE, INT, INT, FLOAT)
+            );
             releaseObject = downcall(lookup, "metallum_release_object", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             getBufferContents = downcall(lookup, "metallum_get_buffer_contents", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             createFence = downcall(lookup, "metallum_create_fence", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -262,6 +282,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle createSystemDefaultDevice;
     private static final MethodHandle copyDeviceName;
     private static final MethodHandle NSWindowBackingScaleFactor;
+    private static final MethodHandle createEdrMonitor;
+    private static final MethodHandle EDRMonitorQuery;
     private static final MethodHandle createMetalLayer;
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
@@ -362,6 +384,28 @@ public final class MetalNativeBridge {
             return (double) NSWindowBackingScaleFactor.invokeExact(segment(window));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_NSWindow_backingScaleFactor", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_edr_monitor(final MemorySegment window) {
+        try {
+            return (MemorySegment) createEdrMonitor.invokeExact(segment(window));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_edr_monitor", throwable);
+        }
+    }
+
+    public static EdrCapabilities metallum_EDRMonitor_query(final MemorySegment monitor) {
+        if (isNullHandle(monitor)) {
+            return EdrCapabilities.SDR;
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment current = arena.allocate(FLOAT);
+            MemorySegment potential = arena.allocate(FLOAT);
+            EDRMonitorQuery.invokeExact(segment(monitor), current, potential);
+            return new EdrCapabilities(current.get(FLOAT, 0L), potential.get(FLOAT, 0L));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_EDRMonitor_query", throwable);
         }
     }
 
@@ -1207,17 +1251,49 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void metallum_configure_layer(final MemorySegment layer, final double width, final double height, final int immediatePresentMode) {
+    public static boolean metallum_configure_layer(
+            final MemorySegment layer,
+            final double width,
+            final double height,
+            final int immediatePresentMode,
+            final int outputMode,
+            final float contentHeadroom
+    ) {
         try {
-            configureLayer.invokeExact(segment(layer), width, height, immediatePresentMode);
+            return (int) configureLayer.invokeExact(
+                    segment(layer),
+                    width,
+                    height,
+                    immediatePresentMode,
+                    outputMode,
+                    contentHeadroom
+            ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_configure_layer", throwable);
         }
     }
 
-    public static void MTLCommandBuffer_encodePresentTextureToDrawable(final MemorySegment commandBuffer, final MemorySegment layer, final MemorySegment sourceTexture, final MemorySegment globalFence) {
+    public static void MTLCommandBuffer_encodePresentTextureToDrawable(
+            final MemorySegment commandBuffer,
+            final MemorySegment layer,
+            final MemorySegment sourceTexture,
+            final MemorySegment globalFence,
+            final int outputMode,
+            final int sourceEncoding,
+            final int diagnosticPattern,
+            final float currentHeadroom
+    ) {
         try {
-            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(segment(commandBuffer), segment(layer), segment(sourceTexture), segment(globalFence));
+            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(
+                    segment(commandBuffer),
+                    segment(layer),
+                    segment(sourceTexture),
+                    segment(globalFence),
+                    outputMode,
+                    sourceEncoding,
+                    diagnosticPattern,
+                    currentHeadroom
+            );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);
         }

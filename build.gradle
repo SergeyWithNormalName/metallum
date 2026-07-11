@@ -60,6 +60,23 @@ tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
 }
 
+tasks.register("hdrUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs the dependency-free HDR configuration tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.hdr.HdrConfigTests")
+}
+
+tasks.named("test", Test) {
+	// HDR tests use a dependency-free Java entry point instead of a JUnit engine.
+	failOnNoDiscoveredTests = false
+}
+
+tasks.named("check") {
+	dependsOn(tasks.named("hdrUnitTest"))
+}
+
 java {
 	withSourcesJar()
 

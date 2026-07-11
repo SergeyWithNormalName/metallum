@@ -17,13 +17,110 @@ private struct PipelineVariantKey: Hashable {
     let writeColor: Bool
 }
 
+private struct PresentPipelineKey: Hashable {
+    let deviceAddress: UInt
+    let colorFormat: MTLPixelFormat
+}
+
+private struct MetallumPresentUniforms {
+    var mode: UInt32
+    var sourceEncoding: UInt32
+    var diagnosticPattern: UInt32
+    var currentHeadroom: Float
+}
+
 private enum NativeState {
     static var debugLabelsEnabled = false
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
     static var clearPipelines: [PipelineVariantKey: MTLRenderPipelineState] = [:]
-    static var presentPipeline: MTLRenderPipelineState!
+    static var presentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var presentNearestSampler: MTLSamplerState!
     static var presentLinearSampler: MTLSamplerState!
+}
+
+private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
+    private weak var window: NSWindow?
+    private let lock = NSLock()
+    private var currentHeadroom: Float = 1.0
+    private var potentialHeadroom: Float = 1.0
+    private var refreshScheduled = false
+    private var lastRefreshUptime: TimeInterval = 0.0
+    private var observers: [NSObjectProtocol] = []
+
+    init(window: NSWindow) {
+        self.window = window
+        super.init()
+
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(
+            forName: NSWindow.didChangeScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+        observers.append(center.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+
+        requestRefresh()
+    }
+
+    deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    func snapshot() -> (current: Float, potential: Float) {
+        requestRefresh()
+        lock.lock()
+        defer { lock.unlock() }
+        return (currentHeadroom, potentialHeadroom)
+    }
+
+    private func requestRefresh() {
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        if refreshScheduled || now - lastRefreshUptime < 0.1 {
+            lock.unlock()
+            return
+        }
+        refreshScheduled = true
+        lock.unlock()
+
+        if Thread.isMainThread {
+            refreshOnMainThread()
+            return
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshOnMainThread()
+        }
+    }
+
+    private func refreshOnMainThread() {
+        let screen = window?.screen
+        let current = Float(max(
+            1.0,
+            screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0
+        ))
+        let potential = Float(max(
+            1.0,
+            screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
+        ))
+
+        lock.lock()
+        currentHeadroom = current.isFinite ? current : 1.0
+        potentialHeadroom = potential.isFinite ? potential : 1.0
+        refreshScheduled = false
+        lastRefreshUptime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
 }
 
 @inline(__always)
@@ -91,6 +188,29 @@ private func presentMslSource() -> String {
       float2 uv;
     };
 
+    struct PresentUniforms {
+      uint mode;
+      uint sourceEncoding;
+      uint diagnosticPattern;
+      float currentHeadroom;
+    };
+
+    float3 metallum_srgb_to_linear(float3 encoded) {
+      encoded = clamp(encoded, 0.0, 1.0);
+      float3 low = encoded / 12.92;
+      float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
+      return select(high, low, encoded <= float3(0.04045));
+    }
+
+    float metallum_diagnostic_level(float x) {
+      constexpr float levels[11] = {
+        0.0, 0.02, 0.10, 0.18, 0.50, 1.0,
+        1.25, 1.50, 2.0, 4.0, 8.0
+      };
+      uint index = min(uint(clamp(x, 0.0, 0.999999) * 11.0), 10u);
+      return levels[index];
+    }
+
     vertex PresentVertexOut metallum_present_vs(uint vertexId [[vertex_id]]) {
       const float2 positions[3] = {
         float2(-1.0,  1.0),
@@ -115,9 +235,33 @@ private func presentMslSource() -> String {
     fragment float4 metallum_present_fs(
       PresentVertexOut in [[stage_in]],
       texture2d<float> tex [[texture(0)]],
-      sampler smp [[sampler(0)]]
+      sampler smp [[sampler(0)]],
+      constant PresentUniforms& uniforms [[buffer(0)]]
     ) {
-      return tex.sample(smp, in.uv);
+      if (uniforms.diagnosticPattern != 0u) {
+        float level = metallum_diagnostic_level(in.uv.x);
+        float grid = step(0.012, fract(in.uv.x * 11.0));
+        float3 value = float3(level * grid);
+
+        // The lower strip identifies the current safe EDR ceiling in green.
+        if (in.uv.y > 0.92) {
+          value = in.uv.x <= min(uniforms.currentHeadroom / 8.0, 1.0)
+            ? float3(0.0, min(uniforms.currentHeadroom, 8.0), 0.0)
+            : float3(0.0);
+        }
+
+        return float4(uniforms.mode == 0u ? min(value, 1.0) : value, 1.0);
+      }
+
+      float4 source = tex.sample(smp, in.uv);
+      if (uniforms.mode == 0u) {
+        return float4(source.rgb, 1.0);
+      }
+
+      float3 linearColor = uniforms.sourceEncoding == 0u
+        ? metallum_srgb_to_linear(source.rgb)
+        : max(source.rgb, 0.0);
+      return float4(linearColor, 1.0);
     }
     """
 }
@@ -265,6 +409,25 @@ private func buildPresentPipeline(
     }
 }
 
+private func ensurePresentPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(
+        deviceAddress: objectAddress(device),
+        colorFormat: colorFormat
+    )
+    if let cached = NativeState.presentPipelines[key] {
+        return cached
+    }
+
+    let pipeline = buildPresentPipeline(device: device, colorFormat: colorFormat)
+    if let pipeline {
+        NativeState.presentPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
 private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
     let descriptor = MTLSamplerDescriptor()
     descriptor.minFilter = filter
@@ -290,7 +453,8 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {
-        NativeState.presentPipeline = buildPresentPipeline(device: device, colorFormat: .bgra8Unorm)
+        _ = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm)
+        _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
         NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
         NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
@@ -390,6 +554,31 @@ public func metallum_copy_device_name(
 @_cdecl("metallum_NSWindow_backingScaleFactor")
 public func metallum_NSWindow_backingScaleFactor(_ window: NSWindow) -> Double {
     Double(window.backingScaleFactor)
+}
+
+@_cdecl("metallum_create_edr_monitor")
+public func metallum_create_edr_monitor(_ window: NSWindow) -> UnsafeMutableRawPointer? {
+    retainedPointer(MetallumEdrMonitor(window: window))
+}
+
+@_cdecl("metallum_EDRMonitor_query")
+public func metallum_EDRMonitor_query(
+    _ rawMonitor: UnsafeMutableRawPointer?,
+    _ currentOut: UnsafeMutablePointer<Float>?,
+    _ potentialOut: UnsafeMutablePointer<Float>?
+) {
+    guard let rawMonitor else {
+        currentOut?.pointee = 1.0
+        potentialOut?.pointee = 1.0
+        return
+    }
+
+    let monitor = Unmanaged<MetallumEdrMonitor>
+        .fromOpaque(rawMonitor)
+        .takeUnretainedValue()
+    let snapshot = monitor.snapshot()
+    currentOut?.pointee = snapshot.current
+    potentialOut?.pointee = snapshot.potential
 }
 
 @_cdecl("metallum_create_metal_layer")
@@ -1228,12 +1417,49 @@ public func metallum_MTLRenderCommandEncoder_clearDraw(
 }
 
 @_cdecl("metallum_configure_layer")
-public func metallum_configure_layer(_ layer: CAMetalLayer, _ width: Double, _ height: Double, _ immediatePresentMode: Int32) {
-    layer.pixelFormat = .bgra8Unorm
+public func metallum_configure_layer(
+    _ layer: CAMetalLayer,
+    _ width: Double,
+    _ height: Double,
+    _ immediatePresentMode: Int32,
+    _ outputMode: Int32,
+    _ contentHeadroom: Float
+) -> Int32 {
+    guard width > 0.0, height > 0.0, (0...2).contains(outputMode) else {
+        return 0
+    }
+
+    let useEdr = outputMode != 0
+    let colorSpace = useEdr
+        ? CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
+        : nil
+    guard !useEdr || colorSpace != nil else {
+        return 0
+    }
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.pixelFormat = useEdr ? .rgba16Float : .bgra8Unorm
+    layer.colorspace = colorSpace
+    layer.edrMetadata = nil
+    if #available(macOS 26.0, *) {
+        layer.preferredDynamicRange = useEdr ? .high : .standard
+        layer.contentsHeadroom = useEdr
+            ? CGFloat(max(contentHeadroom, 1.01))
+            : 1.0
+        layer.wantsExtendedDynamicRangeContent = false
+    } else {
+        layer.wantsExtendedDynamicRangeContent = useEdr
+    }
+    if #available(macOS 15.0, *) {
+        layer.toneMapMode = .never
+    }
     layer.drawableSize = CGSize(width: width, height: height)
     layer.allowsNextDrawableTimeout = false
     layer.presentsWithTransaction = false
     layer.displaySyncEnabled = immediatePresentMode == 0
+    CATransaction.commit()
+    return 1
 }
 
 @_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
@@ -1241,10 +1467,22 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ commandBuffer: MTLCommandBuffer,
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
-    _ globalFence: MTLFence?
+    _ globalFence: MTLFence?,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ diagnosticPattern: Int32,
+    _ currentHeadroom: Float
 ) {
     return autoreleasepool {
         guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
+            return
+        }
+
+        guard let presentPipeline = ensurePresentPipeline(
+            device: commandBuffer.device,
+            colorFormat: drawable.texture.pixelFormat
+        ) else {
+            NSLog("[metallum] No present pipeline for drawable format %lu", drawable.texture.pixelFormat.rawValue)
             return
         }
 
@@ -1270,8 +1508,18 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             zfar: 1.0
         ))
 
-        encoder.setRenderPipelineState(NativeState.presentPipeline)
+        encoder.setRenderPipelineState(presentPipeline)
         encoder.setFragmentTexture(sourceTexture, index: 0)
+
+        var uniforms = MetallumPresentUniforms(
+            mode: UInt32(clamping: max(outputMode, 0)),
+            sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+            diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+            currentHeadroom: max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0)
+        )
+        withUnsafeBytes(of: &uniforms) { bytes in
+            encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
 
         let requiresScaling = sourceTexture.width != drawable.texture.width ||
                               sourceTexture.height != drawable.texture.height

@@ -1,5 +1,8 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.hdr.EdrCapabilities;
+import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -245,13 +248,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
     }
 
-    void presentTextureToDrawable(final MemorySegment drawable, final GpuTextureView textureView) {
+    void presentTextureToDrawable(
+            final MemorySegment drawable,
+            final GpuTextureView textureView,
+            final HdrOutputMode outputMode,
+            final HdrConfig hdrConfig,
+            final EdrCapabilities edrCapabilities
+    ) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
         flushPendingClear(source);
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
-        commandBuffer.encodePresentTextureToDrawable(drawable, source.nativeHandle(), fence);
+        commandBuffer.encodePresentTextureToDrawable(
+                drawable,
+                source.nativeHandle(),
+                fence,
+                outputMode.nativeValue(),
+                hdrConfig.sourceEncoding().nativeValue(),
+                hdrConfig.diagnosticPattern(),
+                edrCapabilities.currentHeadroom()
+        );
     }
 
     @Override
@@ -594,6 +611,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         } else {
             endEncoder();
         }
+        long latestSubmit = currentSubmitIndex - 1L;
+        if (latestSubmit >= MAX_SUBMITS_IN_FLIGHT) {
+            awaitSubmitCompletion(latestSubmit, Long.MAX_VALUE);
+        }
+    }
+
+    void waitForPreviouslySubmittedGpuWork() {
         long latestSubmit = currentSubmitIndex - 1L;
         if (latestSubmit >= MAX_SUBMITS_IN_FLIGHT) {
             awaitSubmitCompletion(latestSubmit, Long.MAX_VALUE);
