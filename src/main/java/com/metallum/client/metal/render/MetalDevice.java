@@ -94,13 +94,25 @@ final class MetalDevice implements GpuDeviceBackend {
         this.cocoaView = cocoaView;
         this.hdrConfig = HdrConfig.load();
         HdrMode configuredHdrMode = this.hdrConfig.mode();
-        HdrSemanticState.setRequested(
-                configuredHdrMode == HdrMode.AUTO || configuredHdrMode == HdrMode.ENHANCED
-        );
         this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
         if (MetalNativeBridge.isNullHandle(this.edrMonitor)) {
             Metallum.LOGGER.warn("Failed to create EDR display monitor; HDR will use the safe SDR fallback");
         }
+        EdrCapabilities initialEdrCapabilities = EdrCapabilities.SDR;
+        if (!MetalNativeBridge.isNullHandle(this.edrMonitor)) {
+            try {
+                initialEdrCapabilities = MetalNativeBridge.metallum_EDRMonitor_query(this.edrMonitor);
+            } catch (RuntimeException exception) {
+                Metallum.LOGGER.warn("Failed to query initial EDR capabilities; semantic HDR shaders will remain disabled", exception);
+            }
+        }
+        HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
+        Metallum.LOGGER.info(
+                "Semantic HDR shaders: {} (configured mode {}, potential EDR headroom {})",
+                HdrSemanticState.isRequested() ? "enabled" : "disabled",
+                configuredHdrMode,
+                initialEdrCapabilities.potentialHeadroom()
+        );
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
@@ -283,7 +295,9 @@ final class MetalDevice implements GpuDeviceBackend {
     void setHdrOutputMode(final HdrOutputMode outputMode, final float currentHeadroom) {
         this.hdrEnhancedActive = !this.hdrEnhancementUnavailable
                 && outputMode == HdrOutputMode.ENHANCED
-                && currentHeadroom > 1.001f;
+                && currentHeadroom > 1.001f
+                && this.hdrConfig.hdrStrength() > 0.0f
+                && !this.hdrConfig.diagnosticPattern();
         if (this.hdrEnhancedActive && !this.hdrEnhancementActivationLogged) {
             this.hdrEnhancementActivationLogged = true;
             Metallum.LOGGER.info("Semantic HDR enhancement is active with current EDR headroom {}", currentHeadroom);

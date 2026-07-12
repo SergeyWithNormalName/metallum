@@ -69,10 +69,15 @@ public final class HdrConfigTests {
 
     private static void testSemanticState() {
         require(!HdrSemanticState.isRequested(), "semantic MRT defaults off");
-        HdrSemanticState.setRequested(true);
-        require(HdrSemanticState.isRequested(), "semantic MRT can be requested before shader compilation");
-        HdrSemanticState.setRequested(false);
-        require(!HdrSemanticState.isRequested(), "semantic MRT request can be disabled");
+        EdrCapabilities hdr = new EdrCapabilities(1.0f, 4.0f);
+        HdrSemanticState.configure(HdrMode.AUTO, hdr);
+        require(HdrSemanticState.isRequested(), "auto requests semantic MRT on an HDR display");
+        HdrSemanticState.configure(HdrMode.EDR, hdr);
+        require(!HdrSemanticState.isRequested(), "EDR mode avoids semantic MRT");
+        HdrSemanticState.configure(HdrMode.ENHANCED, EdrCapabilities.SDR);
+        require(!HdrSemanticState.isRequested(), "SDR displays avoid semantic MRT");
+        HdrSemanticState.configure(HdrMode.OFF, hdr);
+        require(!HdrSemanticState.isRequested(), "off mode avoids semantic MRT");
     }
 
     private static void testSodiumShaderPatching() {

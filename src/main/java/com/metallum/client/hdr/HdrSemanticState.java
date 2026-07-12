@@ -10,7 +10,8 @@ public final class HdrSemanticState {
         return requested;
     }
 
-    public static void setRequested(final boolean requested) {
-        HdrSemanticState.requested = requested;
+    public static void configure(final HdrMode mode, final EdrCapabilities capabilities) {
+        requested = (mode == HdrMode.AUTO || mode == HdrMode.ENHANCED)
+                && capabilities.isHdrDisplay();
     }
 }

@@ -3,7 +3,7 @@
   "id": "metallum",
   "version": "${version}",
   "name": "Metallum",
-  "description": "This is an PoC Metal backend for Minecraft on macOS",
+  "description": "Experimental Metal rendering backend for Minecraft on macOS with native EDR HDR output",
   "authors": [
     "kokodio"
   ],
