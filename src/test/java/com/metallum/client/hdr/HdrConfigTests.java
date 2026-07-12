@@ -54,6 +54,8 @@ public final class HdrConfigTests {
         require(HdrSourceEncoding.SRGB.nativeValue(true) == 1, "FP16 uses extended sRGB source contract");
         require(HdrSourceEncoding.LINEAR.nativeValue(true) == 2, "explicit linear source contract is retained");
         require(!defaults.diagnosticPattern(), "default diagnostic flag");
+        require(defaults.withDiagnosticPattern(true).diagnosticPattern(), "diagnostic flag can be enabled");
+        require(!defaults.withDiagnosticPattern(true).withDiagnosticPattern(false).diagnosticPattern(), "diagnostic flag can be disabled");
 
         Properties invalid = new Properties();
         invalid.setProperty("hdrStrength", "NaN");

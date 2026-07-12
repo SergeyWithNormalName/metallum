@@ -76,14 +76,14 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                     )
                 )
                 .addOptionGroup(builder.createOptionGroup()
-                    .setName(Component.literal("Experimental & Debug"))
+                    .setName(Component.literal("Experimental & Diagnostics"))
                     .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "diagnostic_pattern"))
                         .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.literal("Diagnostic Pattern"))
-                        .setTooltip(Component.literal("Renders a diagnostic test pattern to calibrate HDR and display headroom. Applied dynamically."))
+                        .setName(Component.literal("Full-Screen HDR Calibration Pattern"))
+                        .setTooltip(Component.literal("Replaces the entire frame with an HDR calibration pattern. Press Esc to exit the pattern."))
                         .setDefaultValue(false)
                         .setBinding(
-                            val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), val, c.experimentalFp16())),
+                            val -> updateConfig(c -> c.withDiagnosticPattern(val)),
                             () -> getConfig().diagnosticPattern()
                         )
                     )

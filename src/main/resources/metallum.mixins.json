@@ -17,6 +17,7 @@
     "render.GameRendererAccessor",
     "render.GuiRendererHdrMixin",
     "render.HdrShaderMixin",
+    "render.KeyboardHandlerMixin",
     "render.ShaderManagerMixin",
     "render.ShaderSourceKeyAccessor",
     "render.PreferredGraphicsApiMixin",

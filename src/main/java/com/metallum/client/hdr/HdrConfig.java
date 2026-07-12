@@ -116,4 +116,8 @@ public record HdrConfig(
         }
     }
 
+    public HdrConfig withDiagnosticPattern(final boolean enabled) {
+        return new HdrConfig(mode, sourceEncoding, hdrStrength, bloomStrength, enabled, experimentalFp16);
+    }
+
 }
