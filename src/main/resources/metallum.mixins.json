@@ -15,6 +15,7 @@
     "render.ScreenshotMixin",
     "render.HdrSceneCaptureMixin",
     "render.GameRendererAccessor",
+    "render.GameRendererMetalFxMixin",
     "render.GuiRendererHdrMixin",
     "render.HdrShaderMixin",
     "render.KeyboardHandlerMixin",

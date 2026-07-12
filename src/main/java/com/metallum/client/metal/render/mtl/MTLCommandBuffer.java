@@ -141,14 +141,16 @@ public final class MTLCommandBuffer {
             final MemorySegment sourceTexture,
             final MemorySegment destinationTexture,
             final MemorySegment globalFence,
-            final int sourceEncoding
+            final int sourceEncoding,
+            final boolean spatialScalingEnabled
     ) {
         return MetalNativeBridge.MTLCommandBuffer_encodeHdrUiBackdrop(
                 handle(),
                 sourceTexture,
                 destinationTexture,
                 globalFence,
-                sourceEncoding
+                sourceEncoding,
+                spatialScalingEnabled
         );
     }
 

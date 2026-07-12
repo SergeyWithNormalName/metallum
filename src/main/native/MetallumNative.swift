@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Metal
+import MetalFX
 import QuartzCore
 import simd
 
@@ -103,6 +104,8 @@ private final class MetallumHdrPipelines {
 private final class MetallumHdrWorkspace {
     let sourceWidth: Int
     let sourceHeight: Int
+    let displayWidth: Int
+    let displayHeight: Int
     let emission: MTLTexture
     let bloomA: MTLTexture
     let bloomB: MTLTexture
@@ -116,6 +119,8 @@ private final class MetallumHdrWorkspace {
     init(
         sourceWidth: Int,
         sourceHeight: Int,
+        displayWidth: Int,
+        displayHeight: Int,
         emission: MTLTexture,
         bloomA: MTLTexture,
         bloomB: MTLTexture,
@@ -126,6 +131,8 @@ private final class MetallumHdrWorkspace {
     ) {
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
+        self.displayWidth = displayWidth
+        self.displayHeight = displayHeight
         self.emission = emission
         self.bloomA = bloomA
         self.bloomB = bloomB
@@ -138,11 +145,88 @@ private final class MetallumHdrWorkspace {
     }
 }
 
+private final class MetallumSpatialWorkspace {
+    let inputWidth: Int
+    let inputHeight: Int
+    let outputWidth: Int
+    let outputHeight: Int
+    let inputPixelFormat: MTLPixelFormat
+    let outputPixelFormat: MTLPixelFormat
+    let colorProcessingMode: MTLFXSpatialScalerColorProcessingMode
+    let scaler: MTLFXSpatialScaler
+    let output: MTLTexture
+
+    init(
+        inputWidth: Int,
+        inputHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        inputPixelFormat: MTLPixelFormat,
+        outputPixelFormat: MTLPixelFormat,
+        colorProcessingMode: MTLFXSpatialScalerColorProcessingMode,
+        scaler: MTLFXSpatialScaler,
+        output: MTLTexture
+    ) {
+        self.inputWidth = inputWidth
+        self.inputHeight = inputHeight
+        self.outputWidth = outputWidth
+        self.outputHeight = outputHeight
+        self.inputPixelFormat = inputPixelFormat
+        self.outputPixelFormat = outputPixelFormat
+        self.colorProcessingMode = colorProcessingMode
+        self.scaler = scaler
+        self.output = output
+    }
+}
+
 private struct MetallumHdrOutputs {
     let emission: MTLTexture
     let bloom: MTLTexture
     let uiMask: MTLTexture
     let adaptiveState: MTLBuffer
+}
+
+private final class MetallumGpuTimingStats: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sampleCount = 0
+    private var totalGpuSeconds = 0.0
+    private var maximumGpuSeconds = 0.0
+    private var intervalStart = ProcessInfo.processInfo.systemUptime
+
+    func record(_ commandBuffer: MTLCommandBuffer) {
+        if commandBuffer.status == .error {
+            NSLog(
+                "[metallum] Metal command buffer failed (%@): %@",
+                commandBuffer.label ?? "unlabeled",
+                String(describing: commandBuffer.error)
+            )
+            return
+        }
+        let duration = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+        guard duration.isFinite, duration > 0.0 else {
+            return
+        }
+        lock.lock()
+        sampleCount += 1
+        totalGpuSeconds += duration
+        maximumGpuSeconds = max(maximumGpuSeconds, duration)
+        if sampleCount >= 300 {
+            let now = ProcessInfo.processInfo.systemUptime
+            let completedFps = Double(sampleCount) / max(now - intervalStart, 1e-6)
+            NSLog(
+                "[metallum] GPU timing: %.3f ms average, %.3f ms max, %.1f completed FPS (%d frames)",
+                totalGpuSeconds * 1000.0 / Double(sampleCount),
+                maximumGpuSeconds * 1000.0,
+                completedFps,
+                sampleCount
+            )
+            sampleCount = 0
+            totalGpuSeconds = 0.0
+            maximumGpuSeconds = 0.0
+            intervalStart = now
+        }
+        lock.unlock()
+    }
 }
 
 private enum NativeState {
@@ -154,8 +238,12 @@ private enum NativeState {
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
+    static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
+    static let gpuTimingStats: MetallumGpuTimingStats? = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
+        ? MetallumGpuTimingStats()
+        : nil
 }
 
 private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
@@ -569,19 +657,29 @@ private func presentMslSource() -> String {
       float semanticStrength = 0.0;
       float semanticExact = 0.0;
       if (uniforms.semanticAvailable != 0u) {
-        uint2 sceneSize = uint2(sceneFrame.get_width(), sceneFrame.get_height());
-        uint2 maximumCoordinate = max(sceneSize, uint2(1u)) - 1u;
         float2 boundedUv = clamp(in.uv, float2(0.0), float2(0.999999));
-        uint2 coordinate = min(uint2(boundedUv * float2(sceneSize)), maximumCoordinate);
-        uint4 semanticBytes = uint4(round(clamp(semanticFrame.read(coordinate), 0.0, 1.0) * 255.0));
+        uint2 semanticSize = uint2(semanticFrame.get_width(), semanticFrame.get_height());
+        uint2 semanticMaximum = max(semanticSize, uint2(1u)) - 1u;
+        uint2 semanticCoordinate = min(
+          uint2(boundedUv * float2(semanticSize)),
+          semanticMaximum
+        );
+        uint4 semanticBytes = uint4(round(clamp(
+          semanticFrame.read(semanticCoordinate),
+          0.0,
+          1.0
+        ) * 255.0));
         uint code = semanticBytes.x;
         uint strengthCode = code & 127u;
         if (strengthCode != 0u) {
           uint markerPackedDepth = semanticBytes.y
             | (semanticBytes.z << 8u)
             | (semanticBytes.w << 16u);
+          uint2 depthSize = uint2(sceneDepthFrame.get_width(), sceneDepthFrame.get_height());
+          uint2 depthMaximum = max(depthSize, uint2(1u)) - 1u;
+          uint2 depthCoordinate = min(uint2(boundedUv * float2(depthSize)), depthMaximum);
           uint scenePackedDepth = uint(round(
-            clamp(sceneDepthFrame.read(coordinate), 0.0, 1.0) * 16777215.0
+            clamp(sceneDepthFrame.read(depthCoordinate), 0.0, 1.0) * 16777215.0
           ));
           if (markerPackedDepth + 2u >= scenePackedDepth) {
             semanticStrength = float(strengthCode) / 127.0;
@@ -1197,18 +1295,26 @@ private func ensureHdrFallbackDepthTexture(device: MTLDevice) -> MTLTexture? {
     return texture
 }
 
-private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeight: Int) -> MetallumHdrWorkspace? {
+private func ensureHdrWorkspace(
+    device: MTLDevice,
+    sourceWidth: Int,
+    sourceHeight: Int,
+    displayWidth: Int,
+    displayHeight: Int
+) -> MetallumHdrWorkspace? {
     let key = objectAddress(device)
     if let cached = NativeState.hdrWorkspaces[key],
        cached.sourceWidth == sourceWidth,
-       cached.sourceHeight == sourceHeight {
+       cached.sourceHeight == sourceHeight,
+       cached.displayWidth == displayWidth,
+       cached.displayHeight == displayHeight {
         return cached
     }
 
     let bloomWidth = max((sourceWidth + 3) / 4, 1)
     let bloomHeight = max((sourceHeight + 3) / 4, 1)
-    let maskWidth = max((sourceWidth + 1) / 2, 1)
-    let maskHeight = max((sourceHeight + 1) / 2, 1)
+    let maskWidth = max((displayWidth + 1) / 2, 1)
+    let maskHeight = max((displayHeight + 1) / 2, 1)
 
     func makeTexture(
         format: MTLPixelFormat,
@@ -1254,6 +1360,8 @@ private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeigh
     let workspace = MetallumHdrWorkspace(
         sourceWidth: sourceWidth,
         sourceHeight: sourceHeight,
+        displayWidth: displayWidth,
+        displayHeight: displayHeight,
         emission: emission,
         bloomA: bloomA,
         bloomB: bloomB,
@@ -1291,10 +1399,114 @@ private func makeHdrPassEncoder(
     return encoder
 }
 
+private func ensureSpatialWorkspace(
+    device: MTLDevice,
+    inputWidth: Int,
+    inputHeight: Int,
+    outputWidth: Int,
+    outputHeight: Int,
+    inputPixelFormat: MTLPixelFormat,
+    outputPixelFormat: MTLPixelFormat,
+    colorProcessingMode: MTLFXSpatialScalerColorProcessingMode
+) -> MetallumSpatialWorkspace? {
+    let key = objectAddress(device)
+    if let cached = NativeState.spatialWorkspaces[key],
+       cached.inputWidth == inputWidth,
+       cached.inputHeight == inputHeight,
+       cached.outputWidth == outputWidth,
+       cached.outputHeight == outputHeight,
+       cached.inputPixelFormat == inputPixelFormat,
+       cached.outputPixelFormat == outputPixelFormat,
+       cached.colorProcessingMode == colorProcessingMode {
+        return cached
+    }
+
+    guard MTLFXSpatialScalerDescriptor.supportsDevice(device) else {
+        return nil
+    }
+    let descriptor = MTLFXSpatialScalerDescriptor()
+    descriptor.inputWidth = inputWidth
+    descriptor.inputHeight = inputHeight
+    descriptor.outputWidth = outputWidth
+    descriptor.outputHeight = outputHeight
+    descriptor.colorTextureFormat = inputPixelFormat
+    descriptor.outputTextureFormat = outputPixelFormat
+    descriptor.colorProcessingMode = colorProcessingMode
+    guard let scaler = descriptor.makeSpatialScaler(device: device) else {
+        NSLog(
+            "[metallum] Failed to create MetalFX spatial scaler for %dx%d -> %dx%d, format %lu",
+            inputWidth,
+            inputHeight,
+            outputWidth,
+            outputHeight,
+            inputPixelFormat.rawValue
+        )
+        return nil
+    }
+
+    let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: outputPixelFormat,
+        width: outputWidth,
+        height: outputHeight,
+        mipmapped: false
+    )
+    textureDescriptor.storageMode = .private
+    textureDescriptor.hazardTrackingMode = .untracked
+    textureDescriptor.usage = scaler.outputTextureUsage.union(.shaderRead)
+    guard let output = device.makeTexture(descriptor: textureDescriptor) else {
+        NSLog("[metallum] Failed to allocate MetalFX spatial output")
+        return nil
+    }
+    output.label = "Metallum MetalFX spatial output"
+
+    let workspace = MetallumSpatialWorkspace(
+        inputWidth: inputWidth,
+        inputHeight: inputHeight,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
+        inputPixelFormat: inputPixelFormat,
+        outputPixelFormat: outputPixelFormat,
+        colorProcessingMode: colorProcessingMode,
+        scaler: scaler,
+        output: output
+    )
+    NativeState.spatialWorkspaces[key] = workspace
+    NSLog(
+        "[metallum] MetalFX spatial scaler ready: %dx%d -> %dx%d, input format %lu, output format %lu, input usage %lu, output usage %lu",
+        inputWidth,
+        inputHeight,
+        outputWidth,
+        outputHeight,
+        inputPixelFormat.rawValue,
+        outputPixelFormat.rawValue,
+        scaler.colorTextureUsage.rawValue,
+        scaler.outputTextureUsage.rawValue
+    )
+    return workspace
+}
+
+private func currentSpatialOutput(
+    device: MTLDevice,
+    inputTexture: MTLTexture,
+    outputWidth: Int,
+    outputHeight: Int
+) -> MTLTexture? {
+    guard let workspace = NativeState.spatialWorkspaces[objectAddress(device)],
+          workspace.inputWidth == inputTexture.width,
+          workspace.inputHeight == inputTexture.height,
+          workspace.outputWidth == outputWidth,
+          workspace.outputHeight == outputHeight,
+          workspace.inputPixelFormat == inputTexture.pixelFormat else {
+        return nil
+    }
+    return workspace.output
+}
+
 private func encodeHdrEffects(
     commandBuffer: MTLCommandBuffer,
     finalTexture: MTLTexture,
     sceneTexture: MTLTexture,
+    displaySceneTexture: MTLTexture,
     sceneDepthTexture: MTLTexture,
     semanticTexture: MTLTexture?,
     uiTexture: MTLTexture?,
@@ -1307,7 +1519,9 @@ private func encodeHdrEffects(
         let workspace = ensureHdrWorkspace(
             device: commandBuffer.device,
             sourceWidth: sceneTexture.width,
-            sourceHeight: sceneTexture.height
+            sourceHeight: sceneTexture.height,
+            displayWidth: displaySceneTexture.width,
+            displayHeight: displaySceneTexture.height
         ),
         let samplers = presentSamplers(device: commandBuffer.device)
     else {
@@ -1439,7 +1653,7 @@ private func encodeHdrEffects(
         uiCompare.waitForFence(globalFence, before: .fragment)
     }
     uiCompare.setFragmentTexture(uiTexture ?? finalTexture, index: 0)
-    uiCompare.setFragmentTexture(sceneTexture, index: 1)
+    uiCompare.setFragmentTexture(displaySceneTexture, index: 1)
     var uiCompareUniforms = MetallumHdrUiCompareUniforms(
         sourceEncoding: UInt32(clamping: min(max(sourceEncoding, 0), 2)),
         seededUiAvailable: uiTexture == nil ? 0 : 1,
@@ -1702,6 +1916,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
+        NativeState.spatialWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.presentNearestSamplers.removeValue(forKey: deviceAddress)
         NativeState.presentLinearSamplers.removeValue(forKey: deviceAddress)
     }
@@ -1860,6 +2075,11 @@ public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> U
     min(UInt64(device.maxBufferLength), device.recommendedMaxWorkingSetSize)
 }
 
+@_cdecl("metallum_MTLFXSpatialScaler_supportsDevice")
+public func metallum_MTLFXSpatialScaler_supportsDevice(_ device: MTLDevice) -> Int32 {
+    MTLFXSpatialScalerDescriptor.supportsDevice(device) ? 1 : 0
+}
+
 @_cdecl("metallum_MTLDevice_makeCommandQueue")
 public func metallum_MTLDevice_makeCommandQueue(
     _ device: MTLDevice,
@@ -1906,7 +2126,17 @@ public func metallum_create_semaphore() -> UnsafeMutableRawPointer? {
 @_cdecl("metallum_MTLCommandBuffer_commitWithSignal")
 public func metallum_MTLCommandBuffer_commitWithSignal(_ commandBuffer: MTLCommandBuffer, _ semaphore: DispatchSemaphore) {
     while semaphore.wait(timeout: .now()) == .success {}
-    commandBuffer.addCompletedHandler { _ in
+    commandBuffer.addCompletedHandler { completed in
+        if completed.status == .error || NativeState.gpuTimingStats != nil {
+            NativeState.gpuTimingStats?.record(completed)
+            if completed.status == .error && NativeState.gpuTimingStats == nil {
+                NSLog(
+                    "[metallum] Metal command buffer failed (%@): %@",
+                    completed.label ?? "unlabeled",
+                    String(describing: completed.error)
+                )
+            }
+        }
         semaphore.signal()
     }
     commandBuffer.commit()
@@ -2748,15 +2978,14 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
     _ sourceTexture: MTLTexture,
     _ destinationTexture: MTLTexture,
     _ globalFence: MTLFence?,
-    _ sourceEncoding: Int32
+    _ sourceEncoding: Int32,
+    _ spatialScalingEnabled: Int32
 ) -> Int32 {
     return autoreleasepool {
         guard
             (0...2).contains(sourceEncoding),
             sourceTexture.width > 0,
             sourceTexture.height > 0,
-            destinationTexture.width == sourceTexture.width,
-            destinationTexture.height == sourceTexture.height,
             destinationTexture.pixelFormat == .rgba8Unorm,
             sourceTexture.textureType == .type2D,
             destinationTexture.textureType == .type2D,
@@ -2770,6 +2999,42 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             globalFence == nil || objectAddress(globalFence!.device) == objectAddress(commandBuffer.device)
         else {
             return 0
+        }
+
+        let backdropSource: MTLTexture
+        if spatialScalingEnabled != 0 {
+            guard
+                destinationTexture.width >= sourceTexture.width,
+                destinationTexture.height >= sourceTexture.height,
+                sourceTexture.pixelFormat == .rgba8Unorm || sourceTexture.pixelFormat == .rgba16Float,
+                let workspace = ensureSpatialWorkspace(
+                    device: commandBuffer.device,
+                    inputWidth: sourceTexture.width,
+                    inputHeight: sourceTexture.height,
+                    outputWidth: destinationTexture.width,
+                    outputHeight: destinationTexture.height,
+                    inputPixelFormat: sourceTexture.pixelFormat,
+                    outputPixelFormat: sourceTexture.pixelFormat,
+                    colorProcessingMode: sourceTexture.pixelFormat == .rgba16Float ? .hdr : .perceptual
+                ),
+                sourceTexture.usage.isSuperset(of: workspace.scaler.colorTextureUsage)
+            else {
+                return -2
+            }
+            let output = workspace.output
+            workspace.scaler.colorTexture = sourceTexture
+            workspace.scaler.inputContentWidth = sourceTexture.width
+            workspace.scaler.inputContentHeight = sourceTexture.height
+            workspace.scaler.outputTexture = output
+            workspace.scaler.fence = globalFence
+            workspace.scaler.encode(commandBuffer: commandBuffer)
+            backdropSource = output
+        } else {
+            guard destinationTexture.width == sourceTexture.width,
+                  destinationTexture.height == sourceTexture.height else {
+                return 0
+            }
+            backdropSource = sourceTexture
         }
 
         guard
@@ -2786,7 +3051,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         if let globalFence {
             encoder.waitForFence(globalFence, before: .fragment)
         }
-        encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentTexture(backdropSource, index: 0)
         var uniforms = MetallumHdrUiBackdropUniforms(
             sourceEncoding: UInt32(sourceEncoding)
         )
@@ -2829,9 +3094,10 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             8.0
         )
         let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
-        let hasCompatibleDepth = sceneDepthTexture != nil
-            && sceneDepthTexture!.width == sourceTexture.width
-            && sceneDepthTexture!.height == sourceTexture.height
+        let hasCompatibleDepth = sceneTexture != nil
+            && sceneDepthTexture != nil
+            && sceneDepthTexture!.width == sceneTexture!.width
+            && sceneDepthTexture!.height == sceneTexture!.height
             && {
                 switch sceneDepthTexture!.pixelFormat {
                 case .depth32Float, .depth32Float_stencil8:
@@ -2842,32 +3108,41 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }()
         let hasCompatibleScene = canEnhance
             && sceneTexture != nil
-            && sceneTexture!.width == sourceTexture.width
-            && sceneTexture!.height == sourceTexture.height
             && hasCompatibleDepth
         let hasCompatibleSemantic = hasCompatibleScene
             && semanticTexture != nil
-            && semanticTexture!.width == sourceTexture.width
-            && semanticTexture!.height == sourceTexture.height
+            && semanticTexture!.width == sceneTexture!.width
+            && semanticTexture!.height == sceneTexture!.height
             && semanticTexture!.pixelFormat == .rgba8Unorm
         // The seeded RGBA8 target is a complete SDR frame. Keep it usable
         // independently of enhanced-scene eligibility so a headroom drop or
         // an Enhanced-to-EDR fallback cannot make the GUI disappear.
+        let candidateSpatialOutput = uiTexture.flatMap {
+            currentSpatialOutput(
+                device: commandBuffer.device,
+                inputTexture: sourceTexture,
+                outputWidth: $0.width,
+                outputHeight: $0.height
+            )
+        }
         let hasCompatibleUi = uiTexture != nil
-            && uiTexture!.width == sourceTexture.width
-            && uiTexture!.height == sourceTexture.height
             && uiTexture!.pixelFormat == .rgba8Unorm
             && uiTexture!.textureType == .type2D
             && uiTexture!.sampleCount == 1
             && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
+            && ((uiTexture!.width == sourceTexture.width && uiTexture!.height == sourceTexture.height)
+                || candidateSpatialOutput != nil)
+        let displaySceneTexture = candidateSpatialOutput ?? sceneTexture ?? sourceTexture
 
         if hasCompatibleScene {
             guard
                 ensureHdrPipelines(device: commandBuffer.device) != nil,
                 ensureHdrWorkspace(
                     device: commandBuffer.device,
-                    sourceWidth: sourceTexture.width,
-                    sourceHeight: sourceTexture.height
+                    sourceWidth: sceneTexture!.width,
+                    sourceHeight: sceneTexture!.height,
+                    displayWidth: displaySceneTexture.width,
+                    displayHeight: displaySceneTexture.height
                 ) != nil
             else {
                 return -1
@@ -2898,6 +3173,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 commandBuffer: commandBuffer,
                 finalTexture: sourceTexture,
                 sceneTexture: sceneTexture,
+                displaySceneTexture: displaySceneTexture,
                 sceneDepthTexture: sceneDepthTexture,
                 semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
                 uiTexture: hasCompatibleUi ? uiTexture : nil,

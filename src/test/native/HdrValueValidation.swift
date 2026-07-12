@@ -95,7 +95,8 @@ private typealias NativeBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // sourceTexture
     UnsafeRawPointer?, // destinationTexture
     UnsafeRawPointer?, // globalFence
-    Int32              // sourceEncoding
+    Int32,             // sourceEncoding
+    Int32              // spatialScalingEnabled
 ) -> Int32
 private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
@@ -1482,7 +1483,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 33, "HDR validation check count changed unexpectedly: \(passCount), expected 33")
+        try require(passCount == 34, "HDR validation check count changed unexpectedly: \(passCount), expected 34")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -3068,7 +3069,8 @@ private final class ValueValidation {
             objectPointer(extendedSource as AnyObject),
             objectPointer(extendedDestination as AnyObject),
             nil,
-            1
+            1,
+            0
         )
         try require(extendedStatus == 1, "Extended backdrop ABI returned \(extendedStatus)")
         extendedCommandBuffer.commit()
@@ -3097,7 +3099,8 @@ private final class ValueValidation {
             objectPointer(linearSource as AnyObject),
             objectPointer(linearDestination as AnyObject),
             nil,
-            2
+            2,
+            0
         )
         try require(linearStatus == 1, "Linear backdrop ABI returned \(linearStatus)")
         linearCommandBuffer.commit()
@@ -3108,6 +3111,39 @@ private final class ValueValidation {
                     "Linear backdrop mismatch: \(linearPixel)")
         passCount += 1
         print("PASS native seeded UI backdrop encodes linear RGB to SDR sRGB")
+
+        let scaledSource = try gpu.makeRgba16FloatTexture(
+            width: 8,
+            height: 8,
+            value: SIMD4<Float>(0.5, 1, 0, 1)
+        )
+        let scaledDestination = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(0, 0, 0, 255)
+        )
+        guard let scaledCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Spatial backdrop command buffer creation failed")
+        }
+        let scaledStatus = backdrop(
+            objectPointer(scaledCommandBuffer as AnyObject),
+            objectPointer(scaledSource as AnyObject),
+            objectPointer(scaledDestination as AnyObject),
+            nil,
+            2,
+            1
+        )
+        try require(scaledStatus == 1, "Spatial backdrop ABI returned \(scaledStatus)")
+        scaledCommandBuffer.commit()
+        scaledCommandBuffer.waitUntilCompleted()
+        try require(scaledCommandBuffer.status == .completed, "Spatial backdrop GPU command failed")
+        let scaledPixel = gpu.readRgba8(texture: scaledDestination)
+        try require(
+            abs(Int(scaledPixel.x) - 188) <= 2 && scaledPixel.y >= 252 && scaledPixel.z == 0 && scaledPixel.w == 0,
+            "Spatial backdrop mismatch: \(scaledPixel)"
+        )
+        passCount += 1
+        print("PASS native MetalFX backdrop scales FP16 scene before full-resolution SDR UI")
 
         guard
             let queue = gpu.device.makeCommandQueue(),

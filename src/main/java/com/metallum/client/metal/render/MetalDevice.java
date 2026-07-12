@@ -10,6 +10,7 @@ import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -60,6 +61,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final MemorySegment edrMonitor;
     private volatile HdrConfig hdrConfig;
     private final GpuDebugOptions debugOptions;
+    private final boolean spatialScalingSupported;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
@@ -85,6 +87,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private MemorySegment hdrUiHandle = MemorySegment.NULL;
     private long hdrUiSubmitIndex = Long.MIN_VALUE;
     private boolean hdrUiSuppressSceneEnhancement;
+    private boolean spatialSceneAvailable;
+    private long spatialSceneSubmitIndex = Long.MIN_VALUE;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -121,6 +125,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
+        this.spatialScalingSupported = MetalNativeBridge.MTLFXSpatialScaler_supportsDevice(metalDeviceHandle);
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle, metalLayer);
         MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         this.commandEncoder = new MetalCommandEncoder(this);
@@ -138,6 +143,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 configuredHdrMode,
                 HdrSceneState.isRequested() ? "enabled" : "disabled"
         );
+        Metallum.LOGGER.info("MetalFX spatial scaling support: {}", this.spatialScalingSupported ? "available" : "unavailable");
     }
 
     @Override
@@ -315,6 +321,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         return INSTANCE;
     }
 
+    public boolean supportsSpatialScaling() {
+        return this.spatialScalingSupported;
+    }
+
     public void updateHdrConfig(HdrConfig newConfig) {
         this.hdrConfig = newConfig;
         newConfig.save();
@@ -388,6 +398,10 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void captureHdrScene(final MetalGpuTexture source, @Nullable final MetalGpuTexture depth) {
+        this.spatialSceneAvailable = MetalFxSpatialScaling.isActive() && !source.isClosed();
+        this.spatialSceneSubmitIndex = this.spatialSceneAvailable
+                ? this.commandEncoder.currentSubmitIndex()
+                : Long.MIN_VALUE;
         if (!this.hdrEnhancedActive || source.isClosed() || depth == null || depth.isClosed()) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
@@ -470,12 +484,14 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void captureHdrUi(final MetalGpuTexture ui, final boolean suppressSceneEnhancement) {
-        if (!this.hdrEnhancedActive
-                || ui.isClosed()
-                || ui.getFormat() != GpuFormat.RGBA8_UNORM
-                || this.hdrSceneSnapshot == null
-                || ui.getWidth(0) != this.hdrSceneSnapshot.getWidth(0)
-                || ui.getHeight(0) != this.hdrSceneSnapshot.getHeight(0)) {
+        boolean spatialUi = MetalFxSpatialScaling.isActive()
+                && this.spatialSceneAvailable
+                && this.spatialSceneSubmitIndex == this.commandEncoder.currentSubmitIndex();
+        boolean hdrUi = this.hdrEnhancedActive
+                && this.hdrSceneSnapshot != null
+                && ui.getWidth(0) == this.hdrSceneSnapshot.getWidth(0)
+                && ui.getHeight(0) == this.hdrSceneSnapshot.getHeight(0);
+        if (ui.isClosed() || ui.getFormat() != GpuFormat.RGBA8_UNORM || (!spatialUi && !hdrUi)) {
             return;
         }
         this.hdrUiHandle = ui.nativeHandle();
@@ -487,17 +503,25 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MetalGpuTexture source,
             final MetalGpuTexture destination
     ) {
+        boolean spatial = MetalFxSpatialScaling.isActive();
         return this.isHdrSceneReadyForUi(source)
                 && !destination.isClosed()
                 && source != destination
                 && destination.getFormat() == GpuFormat.RGBA8_UNORM
-                && source.getWidth(0) == destination.getWidth(0)
-                && source.getHeight(0) == destination.getHeight(0)
+                && (spatial
+                        ? source.getWidth(0) <= destination.getWidth(0)
+                            && source.getHeight(0) <= destination.getHeight(0)
+                        : source.getWidth(0) == destination.getWidth(0)
+                            && source.getHeight(0) == destination.getHeight(0))
                 && this.commandEncoder.encodeHdrUiBackdrop(source, destination);
     }
 
     boolean isHdrSceneReadyForUi(final MetalGpuTexture source) {
-        return this.hdrEnhancedActive
+        boolean spatialReady = MetalFxSpatialScaling.isActive()
+                && this.spatialSceneAvailable
+                && this.spatialSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
+                && !source.isClosed();
+        boolean hdrReady = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
                 && this.hdrSceneSnapshot != null
@@ -505,6 +529,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && !source.isClosed()
                 && source.getWidth(0) == this.hdrSceneSnapshot.getWidth(0)
                 && source.getHeight(0) == this.hdrSceneSnapshot.getHeight(0);
+        return spatialReady || hdrReady;
     }
 
     HdrSceneInputs consumeHdrSceneInputs() {

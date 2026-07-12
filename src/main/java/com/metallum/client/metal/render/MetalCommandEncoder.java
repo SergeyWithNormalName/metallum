@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.SceneLinearClearColor;
@@ -321,7 +322,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 source.nativeHandle(),
                 destination.nativeHandle(),
                 fence,
-                sourceEncoding
+                sourceEncoding,
+                MetalFxSpatialScaling.isActive()
         );
     }
 

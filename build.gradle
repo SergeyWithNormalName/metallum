@@ -27,6 +27,7 @@ def macNativeCompilerArguments = [
 	"-target", "arm64-apple-macosx14.0",
 	"-framework", "Foundation",
 	"-framework", "Metal",
+	"-framework", "MetalFX",
 	"-framework", "QuartzCore"
 ]
 def swiftCompilerVersion = isMacOs ? providers.exec {
@@ -99,7 +100,53 @@ tasks.register("metalRuntimeUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metal.render.MetalRuntimeTests")
 }
 
+tasks.register("spatialScalingUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs MetalFX preset and render-resolution policy tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metalfx.SpatialScalingTests")
+}
+
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
+def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
+
+tasks.register("compileSpatialScalingValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native MetalFX spatial scaling validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/SpatialScalingValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(spatialScalingValidationBinary)
+
+	doFirst {
+		spatialScalingValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-o", spatialScalingValidationBinary.get().asFile.absolutePath,
+		"src/test/native/SpatialScalingValidation.swift"
+}
+
+tasks.register("spatialScalingValidation", Exec) {
+	group = "verification"
+	description = "Runs MetalFX HDR range, orientation and texture-contract checks"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("compileSpatialScalingValidation"))
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine spatialScalingValidationBinary.get().asFile.absolutePath
+}
 
 tasks.register("compileHdrValueValidation", Exec) {
 	group = "verification"
@@ -151,7 +198,9 @@ tasks.named("test", Test) {
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
+	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
+	dependsOn(tasks.named("spatialScalingValidation"))
 }
 
 java {

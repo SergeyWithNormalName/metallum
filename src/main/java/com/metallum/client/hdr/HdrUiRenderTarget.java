@@ -2,10 +2,12 @@ package com.metallum.client.hdr;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalHdrFrame;
+import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.Minecraft;
 import org.jspecify.annotations.Nullable;
 
 /** Owns the scene-seeded SDR target used by GuiRenderer in the FP16 scene mode. */
@@ -18,6 +20,7 @@ public final class HdrUiRenderTarget {
     private static boolean screenshotLogged;
     private static boolean lastUiFinished;
     private static boolean backdropBlurredThisFrame;
+    private static boolean spatialActiveThisFrame;
     @Nullable
     private static RenderTarget activeSource;
     @Nullable
@@ -32,7 +35,9 @@ public final class HdrUiRenderTarget {
         lastUiFinished = false;
         lastUiSource = null;
         backdropBlurredThisFrame = false;
-        if (unavailable || !HdrSceneState.isRequested()) {
+        spatialActiveThisFrame = MetalFxSpatialScaling.isActive();
+        if ((!HdrSceneState.isRequested() && !spatialActiveThisFrame)
+                || (unavailable && !spatialActiveThisFrame)) {
             return mainTarget;
         }
 
@@ -40,11 +45,17 @@ public final class HdrUiRenderTarget {
             if (!MetalHdrFrame.isSceneReadyForUi(mainTarget.getColorTextureView())) {
                 return mainTarget;
             }
-            if (target == null || target.width != mainTarget.width || target.height != mainTarget.height) {
+            int targetWidth = spatialActiveThisFrame
+                    ? Minecraft.getInstance().getWindow().getWidth()
+                    : mainTarget.width;
+            int targetHeight = spatialActiveThisFrame
+                    ? Minecraft.getInstance().getWindow().getHeight()
+                    : mainTarget.height;
+            if (target == null || target.width != targetWidth || target.height != targetHeight) {
                 TextureTarget replacement = new TextureTarget(
                         "Metallum SDR UI",
-                        mainTarget.width,
-                        mainTarget.height,
+                        targetWidth,
+                        targetHeight,
                         true,
                         GpuFormat.RGBA8_UNORM
                 );
@@ -68,9 +79,14 @@ public final class HdrUiRenderTarget {
             }
             activeThisFrame = true;
             activeSource = mainTarget;
+            unavailable = false;
             return target;
         } catch (Throwable throwable) {
-            disableAfterFailure(throwable);
+            if (spatialActiveThisFrame) {
+                disableScalingAfterFailure(throwable);
+            } else {
+                disableAfterFailure(throwable);
+            }
             return mainTarget;
         }
     }
@@ -82,7 +98,11 @@ public final class HdrUiRenderTarget {
                 lastUiFinished = true;
                 lastUiSource = activeSource;
             } catch (Throwable throwable) {
-                disableAfterFailure(throwable);
+                if (spatialActiveThisFrame) {
+                    disableScalingAfterFailure(throwable);
+                } else {
+                    disableAfterFailure(throwable);
+                }
             }
         } else {
             lastUiFinished = false;
@@ -91,6 +111,7 @@ public final class HdrUiRenderTarget {
         activeThisFrame = false;
         activeSource = null;
         backdropBlurredThisFrame = false;
+        spatialActiveThisFrame = false;
     }
 
     /** Marks a menu frame whose seeded scene was intentionally blurred. */
@@ -109,9 +130,7 @@ public final class HdrUiRenderTarget {
         boolean available = lastUiFinished
                 && target != null
                 && source == lastUiSource
-                && source != target
-                && source.width == target.width
-                && source.height == target.height;
+                && source != target;
         if (available && !screenshotLogged) {
             screenshotLogged = true;
             Metallum.LOGGER.info("F2 screenshot source: seeded SDR GUI composite");
@@ -125,6 +144,7 @@ public final class HdrUiRenderTarget {
         lastUiFinished = false;
         lastUiSource = null;
         backdropBlurredThisFrame = false;
+        spatialActiveThisFrame = false;
         if (target != null) {
             target.destroyBuffers();
             target = null;
@@ -138,6 +158,7 @@ public final class HdrUiRenderTarget {
         lastUiFinished = false;
         lastUiSource = null;
         backdropBlurredThisFrame = false;
+        spatialActiveThisFrame = false;
         if (target != null) {
             try {
                 target.destroyBuffers();
@@ -150,5 +171,23 @@ public final class HdrUiRenderTarget {
                 "Failed to prepare the seeded SDR UI target; rendering GUI into MainTarget for safety",
                 throwable
         );
+    }
+
+    private static void disableScalingAfterFailure(final Throwable throwable) {
+        activeThisFrame = false;
+        activeSource = null;
+        lastUiFinished = false;
+        lastUiSource = null;
+        backdropBlurredThisFrame = false;
+        spatialActiveThisFrame = false;
+        if (target != null) {
+            try {
+                target.destroyBuffers();
+            } catch (Throwable closeFailure) {
+                throwable.addSuppressed(closeFailure);
+            }
+            target = null;
+        }
+        MetalFxSpatialScaling.disableRuntimeAfterFailure(throwable);
     }
 }

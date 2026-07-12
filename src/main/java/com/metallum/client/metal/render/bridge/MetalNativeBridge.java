@@ -59,6 +59,11 @@ public final class MetalNativeBridge {
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
+            MTLFXSpatialScalerSupportsDevice = downcall(
+                    lookup,
+                    "metallum_MTLFXSpatialScaler_supportsDevice",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
             MTLDeviceMakeCommandQueue = downcall(
                     lookup,
                     "metallum_MTLDevice_makeCommandQueue",
@@ -221,6 +226,7 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            INT,
                             INT
                     )
             );
@@ -324,6 +330,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
+    private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
     private static final MethodHandle MTLCommandQueueMakeCommandBuffer;
     private static final MethodHandle MTLCommandBufferCommit;
@@ -502,6 +509,14 @@ public final class MetalNativeBridge {
             return (long) MTLDeviceMaxMemoryAllocationSize.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLDevice_maxMemoryAllocationSize", throwable);
+        }
+    }
+
+    public static boolean MTLFXSpatialScaler_supportsDevice(final MemorySegment device) {
+        try {
+            return (int) MTLFXSpatialScalerSupportsDevice.invokeExact(segment(device)) == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLFXSpatialScaler_supportsDevice", throwable);
         }
     }
 
@@ -1398,7 +1413,8 @@ public final class MetalNativeBridge {
             final MemorySegment sourceTexture,
             final MemorySegment destinationTexture,
             final MemorySegment globalFence,
-            final int sourceEncoding
+            final int sourceEncoding,
+            final boolean spatialScalingEnabled
     ) {
         try {
             return (int) MTLCommandBufferEncodeHdrUiBackdrop.invokeExact(
@@ -1406,7 +1422,8 @@ public final class MetalNativeBridge {
                     segment(sourceTexture),
                     segment(destinationTexture),
                     segment(globalFence),
-                    sourceEncoding
+                    sourceEncoding,
+                    spatialScalingEnabled ? 1 : 0
             ) == 1;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodeHdrUiBackdrop", throwable);

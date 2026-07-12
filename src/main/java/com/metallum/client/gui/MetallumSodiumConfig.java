@@ -4,11 +4,14 @@ import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
+import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.SpatialScalingMode;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
+import net.minecraft.client.Minecraft;
 
 import java.util.Locale;
 
@@ -22,7 +25,24 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
         builder.registerOwnModOptions()
             .setName("Metallum")
             .addPage(builder.createOptionPage()
-                .setName(Component.literal("Metallum HDR"))
+                .setName(Component.translatable("metallum.options.page"))
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.metalfx"))
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "spatial_scaling"),
+                                SpatialScalingMode.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.metalfx_spatial_scaling.name"))
+                            .setTooltip(MetallumSodiumConfig::spatialScalingTooltip)
+                            .setElementNameProvider(mode -> Component.translatable(mode.translationKey()))
+                            .setDefaultValue(SpatialScalingMode.OFF)
+                            .setBinding(
+                                    MetalFxSpatialScaling::setRequestedMode,
+                                    MetalFxSpatialScaling::requestedMode
+                            )
+                    )
+                )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.literal("HDR Mode & Output"))
                     .addOption(builder.createEnumOption(Identifier.fromNamespaceAndPath("metallum", "hdr_mode"), HdrMode.class)
@@ -104,6 +124,48 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     private static Component formatEnumValue(Enum<?> value) {
         String label = value.name().toLowerCase(Locale.ROOT).replace('_', ' ');
         return Component.literal(Character.toUpperCase(label.charAt(0)) + label.substring(1));
+    }
+
+    private static Component spatialScalingTooltip(final SpatialScalingMode mode) {
+        Minecraft minecraft = Minecraft.getInstance();
+        int displayWidth = minecraft != null && minecraft.getWindow() != null
+                ? minecraft.getWindow().getWidth()
+                : 1;
+        int displayHeight = minecraft != null && minecraft.getWindow() != null
+                ? minecraft.getWindow().getHeight()
+                : 1;
+        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.dimensions(
+                mode,
+                displayWidth,
+                displayHeight
+        );
+        if (!mode.enabled()) {
+            return Component.translatable(
+                    "metallum.options.metalfx_spatial_scaling.tooltip.off",
+                    dimensions.displayWidth(),
+                    dimensions.displayHeight()
+            );
+        }
+
+        if (!MetalFxSpatialScaling.isSupported() || MetalFxSpatialScaling.isRuntimeDisabled()) {
+            return Component.translatable(
+                    "metallum.options.metalfx_spatial_scaling.tooltip.unavailable",
+                    dimensions.displayWidth(),
+                    dimensions.displayHeight()
+            );
+        }
+
+        return Component.translatable(
+                "metallum.options.metalfx_spatial_scaling.tooltip.enabled",
+                dimensions.renderWidth(),
+                dimensions.renderHeight(),
+                dimensions.displayWidth(),
+                dimensions.displayHeight(),
+                mode.nominalLinearPercent(),
+                Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
+                Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
+                Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
+        );
     }
 
     private static HdrConfig getConfig() {
