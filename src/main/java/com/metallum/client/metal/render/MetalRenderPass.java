@@ -365,6 +365,7 @@ final class MetalRenderPass implements RenderPassBackend {
         MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
                 colorTextureView,
                 depthTextureView,
+                compiledPipeline != null && compiledPipeline.semanticOutput(),
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,

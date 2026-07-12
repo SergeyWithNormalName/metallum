@@ -35,7 +35,7 @@ private struct MetallumPresentUniforms {
 
 private struct MetallumHdrExtractUniforms {
     var sourceEncoding: UInt32
-    var _padding0: UInt32
+    var semanticAvailable: UInt32
     var sourceSize: SIMD2<UInt32>
 }
 
@@ -419,7 +419,7 @@ private func hdrEffectsMslSource() -> String {
 
     struct HdrExtractUniforms {
       uint sourceEncoding;
-      uint _padding0;
+      uint semanticAvailable;
       uint2 sourceSize;
     };
 
@@ -465,30 +465,67 @@ private func hdrEffectsMslSource() -> String {
     fragment float4 metallum_hdr_extract_fs(
       HdrVertexOut in [[stage_in]],
       texture2d<float> scene [[texture(0)]],
+      texture2d<float> semantic [[texture(1)]],
+      depth2d<float> sceneDepth [[texture(2)]],
       constant HdrExtractUniforms& uniforms [[buffer(0)]]
     ) {
       uint2 origin = uint2(in.position.xy) * 4u;
       uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
-      float3 averageColor = float3(0.0);
       float3 brightestColor = float3(0.0);
+      float3 semanticColor = float3(0.0);
       float averageY = 0.0;
       float maximumY = 0.0;
+      float semanticStrength = 0.0;
+      float semanticExact = 0.0;
 
       for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
         for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
           uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
-          float3 color = metallum_hdr_decode(scene.read(coordinate).rgb, uniforms.sourceEncoding);
+          float4 encodedSample = scene.read(coordinate);
+          float3 color = metallum_hdr_decode(encodedSample.rgb, uniforms.sourceEncoding);
           float y = metallum_hdr_luminance(color);
-          averageColor += color;
           averageY += y;
           if (y > maximumY) {
             maximumY = y;
             brightestColor = color;
           }
+
+          if (uniforms.semanticAvailable != 0u) {
+            uint4 semanticBytes = uint4(round(clamp(semantic.read(coordinate), 0.0, 1.0) * 255.0));
+            uint code = semanticBytes.x;
+            uint emission = code & 15u;
+            if ((code & 16u) != 0u && emission != 0u) {
+              uint markerPackedDepth = semanticBytes.y
+                | (semanticBytes.z << 8u)
+                | (semanticBytes.w << 16u);
+              uint scenePackedDepth = uint(round(
+                clamp(sceneDepth.read(coordinate), 0.0, 1.0) * 16777215.0
+              ));
+              // Minecraft 26.2 uses reversed-Z. A semantic fragment may be
+              // nearer than the stored scene depth when translucent terrain
+              // was rendered through an offscreen target, but it must not be
+              // clearly behind a later opaque fragment.
+              if (markerPackedDepth + 2u >= scenePackedDepth) {
+                float candidateStrength = float(emission) / 15.0;
+                float candidateExact = (code & 32u) != 0u ? 1.0 : 0.0;
+                float candidateScore = candidateStrength + candidateExact / 32.0;
+                float currentScore = semanticStrength + semanticExact / 32.0;
+                if (candidateScore > currentScore || (candidateScore == currentScore && y > metallum_hdr_luminance(semanticColor))) {
+                  semanticStrength = candidateStrength;
+                  semanticExact = candidateExact;
+                  semanticColor = color;
+                }
+              }
+            }
+          }
         }
       }
-      averageColor *= 1.0 / 16.0;
       averageY *= 1.0 / 16.0;
+
+      if (uniforms.semanticAvailable != 0u) {
+        float emissionGain = semanticStrength * mix(2.4, 3.2, semanticExact);
+        return float4(max(semanticColor, 0.0) * emissionGain, semanticStrength);
+      }
 
       uint2 center = min(origin + uint2(2u), maximumCoordinate);
       uint2 ringOffset = uint2(8u);
@@ -502,23 +539,17 @@ private func hdrEffectsMslSource() -> String {
       float maximum = max(brightestColor.r, max(brightestColor.g, brightestColor.b));
       float minimum = min(brightestColor.r, min(brightestColor.g, brightestColor.b));
       float saturation = (maximum - minimum) / max(maximum, 1e-5);
-      float warmth = max(min(averageColor.r, averageColor.g) - averageColor.b, 0.0);
       float contrast = max(maximumY - min(averageY, contextY), 0.0);
 
       float brightnessGate = smoothstep(0.28, 0.82, maximumY);
       float isolationGate = smoothstep(0.015, 0.18, contrast);
       float saturationGate = smoothstep(0.20, 0.70, saturation);
-      float warmthGate = smoothstep(0.025, 0.28, warmth);
-      float mask = clamp(max(
-        brightnessGate * warmthGate * 0.88,
-        max(
-          brightnessGate * isolationGate,
-          smoothstep(0.12, 0.55, maximumY) * saturationGate * isolationGate * 0.62
-        )
-      ), 0.0, 1.0);
-
-      float emissionGain = mask * (1.25 + 2.25 * mask);
-      return float4(max(brightestColor, 0.0) * emissionGain, mask);
+      float visualFallback = clamp(max(
+        brightnessGate * isolationGate,
+        smoothstep(0.12, 0.55, maximumY) * saturationGate * isolationGate * 0.55
+      ) * 0.48, 0.0, 1.0);
+      float emissionGain = visualFallback * (0.75 + 1.25 * visualFallback);
+      return float4(max(brightestColor, 0.0) * emissionGain, visualFallback);
     }
 
     fragment float4 metallum_hdr_blur_fs(
@@ -717,6 +748,8 @@ private func encodeHdrEffects(
     commandBuffer: MTLCommandBuffer,
     finalTexture: MTLTexture,
     sceneTexture: MTLTexture,
+    sceneDepthTexture: MTLTexture,
+    semanticTexture: MTLTexture?,
     globalFence: MTLFence?,
     sourceEncoding: Int32
 ) -> MetallumHdrOutputs? {
@@ -744,9 +777,11 @@ private func encodeHdrEffects(
         extract.waitForFence(globalFence, before: .fragment)
     }
     extract.setFragmentTexture(sceneTexture, index: 0)
+    extract.setFragmentTexture(semanticTexture ?? sceneTexture, index: 1)
+    extract.setFragmentTexture(sceneDepthTexture, index: 2)
     var extractUniforms = MetallumHdrExtractUniforms(
         sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
-        _padding0: 0,
+        semanticAvailable: semanticTexture == nil ? 0 : 1,
         sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height))
     )
     withUnsafeBytes(of: &extractUniforms) { bytes in
@@ -1585,6 +1620,7 @@ public func metallum_MTLDevice_makeDepthStencilState(
 public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     _ commandBuffer: MTLCommandBuffer,
     _ colorTexture: MTLTexture?,
+    _ semanticTexture: MTLTexture?,
     _ depthTexture: MTLTexture?,
     _ viewportWidth: Double,
     _ viewportHeight: Double,
@@ -1593,6 +1629,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     _ clearColorGreen: Float,
     _ clearColorBlue: Float,
     _ clearColorAlpha: Float,
+    _ clearSemanticEnabled: Int32,
     _ clearDepthEnabled: Int32,
     _ clearDepth: Double
 ) -> UnsafeMutableRawPointer? {
@@ -1613,6 +1650,13 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
                 renderPass.colorAttachments[0].loadAction = .load
             }
             renderPass.colorAttachments[0].storeAction = .store
+        }
+
+        if let semanticTexture {
+            renderPass.colorAttachments[1].texture = semanticTexture
+            renderPass.colorAttachments[1].loadAction = clearSemanticEnabled != 0 ? .clear : .load
+            renderPass.colorAttachments[1].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0)
+            renderPass.colorAttachments[1].storeAction = .store
         }
 
         if let depthTexture {
@@ -2067,6 +2111,8 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
     _ sceneTexture: MTLTexture?,
+    _ sceneDepthTexture: MTLTexture?,
+    _ semanticTexture: MTLTexture?,
     _ globalFence: MTLFence?,
     _ outputMode: Int32,
     _ sourceEncoding: Int32,
@@ -2085,10 +2131,27 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             8.0
         )
         let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
+        let hasCompatibleDepth = sceneDepthTexture != nil
+            && sceneDepthTexture!.width == sourceTexture.width
+            && sceneDepthTexture!.height == sourceTexture.height
+            && {
+                switch sceneDepthTexture!.pixelFormat {
+                case .depth16Unorm, .depth32Float, .depth24Unorm_stencil8, .depth32Float_stencil8:
+                    return true
+                default:
+                    return false
+                }
+            }()
         let hasCompatibleScene = canEnhance
             && sceneTexture != nil
             && sceneTexture!.width == sourceTexture.width
             && sceneTexture!.height == sourceTexture.height
+            && hasCompatibleDepth
+        let hasCompatibleSemantic = hasCompatibleScene
+            && semanticTexture != nil
+            && semanticTexture!.width == sourceTexture.width
+            && semanticTexture!.height == sourceTexture.height
+            && semanticTexture!.pixelFormat == .rgba8Unorm
 
         if hasCompatibleScene {
             guard
@@ -2122,11 +2185,13 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         var hdrOutputs: MetallumHdrOutputs?
         var hasHdrScene = false
-        if hasCompatibleScene, let sceneTexture {
+        if hasCompatibleScene, let sceneTexture, let sceneDepthTexture {
             hdrOutputs = encodeHdrEffects(
                 commandBuffer: commandBuffer,
                 finalTexture: sourceTexture,
                 sceneTexture: sceneTexture,
+                sceneDepthTexture: sceneDepthTexture,
+                semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
                 globalFence: globalFence,
                 sourceEncoding: sourceEncoding
             )
@@ -2344,11 +2409,19 @@ public func metallum_MTLRenderPipelineDescriptor_setVertexDescriptor(
 public func metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
     _ desc: MTLRenderPipelineDescriptor,
     _ colorFormat: MTLPixelFormat,
+    _ semanticFormat: MTLPixelFormat,
     _ depthFormat: MTLPixelFormat,
     _ stencilFormat: MTLPixelFormat
 ) {
     autoreleasepool {
-        desc.colorAttachments[0].pixelFormat = colorFormat
+        guard
+            let colorAttachment = desc.colorAttachments[0],
+            let semanticAttachment = desc.colorAttachments[1]
+        else {
+            return
+        }
+        colorAttachment.pixelFormat = colorFormat
+        semanticAttachment.pixelFormat = semanticFormat
         desc.depthAttachmentPixelFormat = depthFormat
         desc.stencilAttachmentPixelFormat = stencilFormat
     }
@@ -2357,6 +2430,7 @@ public func metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
 @_cdecl("metallum_MTLRenderPipelineDescriptor_setBlendState")
 public func metallum_MTLRenderPipelineDescriptor_setBlendState(
     _ desc: MTLRenderPipelineDescriptor,
+    _ attachmentIndex: Int32,
     _ enabled: Int32,
     _ srcRgb: MTLBlendFactor,
     _ dstRgb: MTLBlendFactor,
@@ -2367,17 +2441,23 @@ public func metallum_MTLRenderPipelineDescriptor_setBlendState(
     _ writeMask: MTLColorWriteMask
 ) {
     autoreleasepool {
-        desc.colorAttachments[0].writeMask = writeMask
+        guard attachmentIndex >= 0, attachmentIndex < 8 else {
+            return
+        }
+        guard let attachment = desc.colorAttachments[Int(attachmentIndex)] else {
+            return
+        }
+        attachment.writeMask = writeMask
         if enabled != 0 {
-            desc.colorAttachments[0].isBlendingEnabled = true
-            desc.colorAttachments[0].sourceRGBBlendFactor = srcRgb
-            desc.colorAttachments[0].destinationRGBBlendFactor = dstRgb
-            desc.colorAttachments[0].rgbBlendOperation = opRgb
-            desc.colorAttachments[0].sourceAlphaBlendFactor = srcAlpha
-            desc.colorAttachments[0].destinationAlphaBlendFactor = dstAlpha
-            desc.colorAttachments[0].alphaBlendOperation = opAlpha
+            attachment.isBlendingEnabled = true
+            attachment.sourceRGBBlendFactor = srcRgb
+            attachment.destinationRGBBlendFactor = dstRgb
+            attachment.rgbBlendOperation = opRgb
+            attachment.sourceAlphaBlendFactor = srcAlpha
+            attachment.destinationAlphaBlendFactor = dstAlpha
+            attachment.alphaBlendOperation = opAlpha
         } else {
-            desc.colorAttachments[0].isBlendingEnabled = false
+            attachment.isBlendingEnabled = false
         }
     }
 }

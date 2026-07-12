@@ -27,6 +27,9 @@ abstract class HdrSceneCaptureMixin {
             return;
         }
         GameRenderer self = (GameRenderer) (Object) this;
-        MetalHdrFrame.captureScene(self.mainRenderTarget().getColorTextureView());
+        MetalHdrFrame.captureScene(
+                self.mainRenderTarget().getColorTextureView(),
+                self.mainRenderTarget().getDepthTextureView()
+        );
     }
 }

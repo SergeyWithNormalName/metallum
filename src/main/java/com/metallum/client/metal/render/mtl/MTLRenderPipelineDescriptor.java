@@ -31,16 +31,23 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
         );
     }
 
-    public void setAttachmentFormats(final MTLPixelFormat colorFormat, final MTLPixelFormat depthFormat, final MTLPixelFormat stencilFormat) {
+    public void setAttachmentFormats(
+            final MTLPixelFormat colorFormat,
+            final MTLPixelFormat semanticFormat,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
                 this.handle,
                 colorFormat,
+                semanticFormat,
                 depthFormat,
                 stencilFormat
         );
     }
 
     public void setBlendState(
+            final int attachmentIndex,
             final MTLBlendFactor sourceColorBlendFactor,
             final MTLBlendFactor destinationColorBlendFactor,
             final MTLBlendOperation colorBlendOperation,
@@ -51,6 +58,7 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
     ) {
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setBlendState(
                 this.handle,
+                attachmentIndex,
                 1,
                 sourceColorBlendFactor.value,
                 destinationColorBlendFactor.value,
@@ -62,9 +70,10 @@ public final class MTLRenderPipelineDescriptor implements AutoCloseable {
         );
     }
 
-    public void disableBlending(final long writeMask) {
+    public void disableBlending(final int attachmentIndex, final long writeMask) {
         MetalNativeBridge.metallum_MTLRenderPipelineDescriptor_setBlendState(
                 this.handle,
+                attachmentIndex,
                 0,
                 0, 0, 0, 0, 0, 0,
                 writeMask

@@ -96,6 +96,7 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
                             DOUBLE,
                             DOUBLE,
                             INT,
@@ -103,6 +104,7 @@ public final class MetalNativeBridge {
                             FLOAT,
                             FLOAT,
                             FLOAT,
+                            INT,
                             INT,
                             DOUBLE
                     )
@@ -191,6 +193,8 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
                             INT,
                             INT,
                             INT,
@@ -254,12 +258,12 @@ public final class MetalNativeBridge {
             MTLRenderPipelineDescriptorSetAttachmentFormats = downcall(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setAttachmentFormats",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG)
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
             );
             MTLRenderPipelineDescriptorSetBlendState = downcall(
                     lookup,
                     "metallum_MTLRenderPipelineDescriptor_setBlendState",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
             );
             MTLDeviceMakeRenderPipelineState = downcall(
                     lookup,
@@ -786,6 +790,7 @@ public final class MetalNativeBridge {
     public static MemorySegment MTLCommandBuffer_makeRenderCommandEncoder(
             final MemorySegment commandBuffer,
             final MemorySegment colorTexture,
+            final MemorySegment semanticTexture,
             final MemorySegment depthTexture,
             final double viewportWidth,
             final double viewportHeight,
@@ -794,6 +799,7 @@ public final class MetalNativeBridge {
             final float clearColorGreen,
             final float clearColorBlue,
             final float clearColorAlpha,
+            final int clearSemanticEnabled,
             final int clearDepthEnabled,
             final double clearDepth
     ) {
@@ -801,6 +807,7 @@ public final class MetalNativeBridge {
             return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoder.invokeExact(
                     segment(commandBuffer),
                     segment(colorTexture),
+                    segment(semanticTexture),
                     segment(depthTexture),
                     viewportWidth,
                     viewportHeight,
@@ -809,6 +816,7 @@ public final class MetalNativeBridge {
                     clearColorGreen,
                     clearColorBlue,
                     clearColorAlpha,
+                    clearSemanticEnabled,
                     clearDepthEnabled,
                     clearDepth
             );
@@ -1216,11 +1224,18 @@ public final class MetalNativeBridge {
     public static void metallum_MTLRenderPipelineDescriptor_setAttachmentFormats(
             final MemorySegment desc,
             final MTLPixelFormat colorFormat,
+            final MTLPixelFormat semanticFormat,
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat
     ) {
         try {
-            MTLRenderPipelineDescriptorSetAttachmentFormats.invokeExact(segment(desc), colorFormat.value, depthFormat.value, stencilFormat.value);
+            MTLRenderPipelineDescriptorSetAttachmentFormats.invokeExact(
+                    segment(desc),
+                    colorFormat.value,
+                    semanticFormat.value,
+                    depthFormat.value,
+                    stencilFormat.value
+            );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderPipelineDescriptor_setAttachmentFormats", throwable);
         }
@@ -1228,6 +1243,7 @@ public final class MetalNativeBridge {
 
     public static void metallum_MTLRenderPipelineDescriptor_setBlendState(
             final MemorySegment desc,
+            final int attachmentIndex,
             final int enabled,
             final long srcRgb,
             final long dstRgb,
@@ -1240,6 +1256,7 @@ public final class MetalNativeBridge {
         try {
             MTLRenderPipelineDescriptorSetBlendState.invokeExact(
                     segment(desc),
+                    attachmentIndex,
                     enabled,
                     srcRgb,
                     dstRgb,
@@ -1292,6 +1309,8 @@ public final class MetalNativeBridge {
             final MemorySegment layer,
             final MemorySegment sourceTexture,
             final MemorySegment sceneTexture,
+            final MemorySegment sceneDepthTexture,
+            final MemorySegment semanticTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
@@ -1306,6 +1325,8 @@ public final class MetalNativeBridge {
                     segment(layer),
                     segment(sourceTexture),
                     segment(sceneTexture),
+                    segment(sceneDepthTexture),
+                    segment(semanticTexture),
                     segment(globalFence),
                     outputMode,
                     sourceEncoding,

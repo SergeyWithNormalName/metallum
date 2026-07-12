@@ -34,6 +34,17 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 final class MetalDevice implements GpuDeviceBackend {
+    record SemanticAttachment(MemorySegment texture, boolean clear) {
+    }
+
+    record HdrSceneInputs(MemorySegment scene, MemorySegment depth, MemorySegment semantic) {
+        private static final HdrSceneInputs NONE = new HdrSceneInputs(
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                MemorySegment.NULL
+        );
+    }
+
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
     private final MemorySegment metalDeviceHandle;
@@ -51,6 +62,12 @@ final class MetalDevice implements GpuDeviceBackend {
     private ShaderSource activeShaderSource;
     @Nullable
     private MetalGpuTexture hdrSceneSnapshot;
+    @Nullable
+    private MetalGpuTexture hdrSemanticMask;
+    private MemorySegment hdrSceneDepthHandle = MemorySegment.NULL;
+    private boolean hdrSemanticSceneAvailable;
+    private long hdrSemanticMaskClearedSubmitIndex = Long.MIN_VALUE;
+    private long hdrSemanticMaskTouchedSubmitIndex = Long.MIN_VALUE;
     private boolean hdrEnhancedActive;
     private boolean hdrEnhancementUnavailable;
     private boolean hdrSceneAvailable;
@@ -196,6 +213,10 @@ final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneSnapshot.close();
             this.hdrSceneSnapshot = null;
         }
+        if (this.hdrSemanticMask != null) {
+            this.hdrSemanticMask.close();
+            this.hdrSemanticMask = null;
+        }
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
         this.clearPipelineCache();
@@ -252,6 +273,7 @@ final class MetalDevice implements GpuDeviceBackend {
                 && currentHeadroom > 1.001f;
         if (!this.hdrEnhancedActive) {
             this.hdrSceneAvailable = false;
+            this.hdrSemanticSceneAvailable = false;
         }
     }
 
@@ -265,11 +287,46 @@ final class MetalDevice implements GpuDeviceBackend {
         this.hdrEnhancementUnavailable = true;
         this.hdrEnhancedActive = false;
         this.hdrSceneAvailable = false;
+        this.hdrSemanticSceneAvailable = false;
     }
 
-    void captureHdrScene(final MetalGpuTexture source) {
-        if (!this.hdrEnhancedActive || source.isClosed()) {
+    SemanticAttachment prepareHdrSemanticAttachment(final MetalGpuTexture source) {
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        if (this.hdrSemanticMask == null
+                || this.hdrSemanticMask.isClosed()
+                || this.hdrSemanticMask.getWidth(0) != width
+                || this.hdrSemanticMask.getHeight(0) != height) {
+            MetalGpuTexture replacement = new MetalGpuTexture(
+                    this,
+                    GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING,
+                    "Metallum HDR semantic mask",
+                    GpuFormat.RGBA8_UNORM,
+                    width,
+                    height,
+                    1,
+                    1
+            );
+            MetalGpuTexture previous = this.hdrSemanticMask;
+            this.hdrSemanticMask = replacement;
+            this.hdrSemanticMaskClearedSubmitIndex = Long.MIN_VALUE;
+            this.hdrSemanticMaskTouchedSubmitIndex = Long.MIN_VALUE;
+            if (previous != null) {
+                previous.close();
+            }
+        }
+
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        boolean clear = this.hdrSemanticMaskClearedSubmitIndex != submitIndex;
+        this.hdrSemanticMaskClearedSubmitIndex = submitIndex;
+        this.hdrSemanticMaskTouchedSubmitIndex = submitIndex;
+        return new SemanticAttachment(this.hdrSemanticMask.nativeHandle(), clear);
+    }
+
+    void captureHdrScene(final MetalGpuTexture source, @Nullable final MetalGpuTexture depth) {
+        if (!this.hdrEnhancedActive || source.isClosed() || depth == null || depth.isClosed()) {
             this.hdrSceneAvailable = false;
+            this.hdrSemanticSceneAvailable = false;
             return;
         }
 
@@ -304,19 +361,34 @@ final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
         this.hdrSceneAvailable = true;
         this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
+        this.hdrSceneDepthHandle = depth.nativeHandle();
+        this.hdrSemanticSceneAvailable = this.hdrSemanticMask != null
+                && !this.hdrSemanticMask.isClosed()
+                && this.hdrSemanticMask.getWidth(0) == width
+                && this.hdrSemanticMask.getHeight(0) == height
+                && this.hdrSemanticMaskTouchedSubmitIndex == this.hdrSceneSubmitIndex;
     }
 
-    MemorySegment consumeHdrSceneSnapshotHandle() {
+    HdrSceneInputs consumeHdrSceneInputs() {
         if (!this.hdrEnhancedActive
                 || !this.hdrSceneAvailable
                 || this.hdrSceneSubmitIndex != this.commandEncoder.currentSubmitIndex()
                 || this.hdrSceneSnapshot == null
                 || this.hdrSceneSnapshot.isClosed()) {
             this.hdrSceneAvailable = false;
-            return MemorySegment.NULL;
+            this.hdrSemanticSceneAvailable = false;
+            return HdrSceneInputs.NONE;
         }
         this.hdrSceneAvailable = false;
-        return this.hdrSceneSnapshot.nativeHandle();
+        MemorySegment semanticHandle = this.hdrSemanticSceneAvailable && this.hdrSemanticMask != null
+                ? this.hdrSemanticMask.nativeHandle()
+                : MemorySegment.NULL;
+        this.hdrSemanticSceneAvailable = false;
+        return new HdrSceneInputs(
+                this.hdrSceneSnapshot.nativeHandle(),
+                this.hdrSceneDepthHandle,
+                semanticHandle
+        );
     }
 
     void queueResourceRelease(final MemorySegment handle) {

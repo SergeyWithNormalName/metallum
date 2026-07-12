@@ -46,6 +46,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Nullable
     private MTLCommandEncoder currentEncoder;
     private MemorySegment renderColorAttachment = MemorySegment.NULL;
+    private MemorySegment renderSemanticAttachment = MemorySegment.NULL;
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
 
@@ -92,6 +93,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             currentEncoder = null;
         }
         renderColorAttachment = MemorySegment.NULL;
+        renderSemanticAttachment = MemorySegment.NULL;
         renderDepthAttachment = MemorySegment.NULL;
     }
 
@@ -133,6 +135,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     MTLRenderCommandEncoder renderCommandEncoder(
             final MetalGpuTextureView colorTextureView,
             @Nullable final MetalGpuTextureView depthTextureView,
+            final boolean semanticOutput,
             final int viewportWidth,
             final int viewportHeight,
             final boolean clearColorEnabled,
@@ -144,10 +147,18 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final double clearDepthValue
     ) {
         MemorySegment colorAttachment = colorTextureView.nativeHandle();
+        MetalDevice.SemanticAttachment semanticAttachment = semanticOutput
+                ? this.device.prepareHdrSemanticAttachment((MetalGpuTexture) colorTextureView.texture())
+                : null;
+        MemorySegment semanticHandle = semanticAttachment == null ? MemorySegment.NULL : semanticAttachment.texture();
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
+        boolean clearSemantic = semanticAttachment != null
+                && (semanticAttachment.clear() || clearColorEnabled || clearDepthEnabled);
         if (currentEncoder instanceof MTLRenderCommandEncoder enc
                 && MetalPipelineSupport.sameHandle(renderColorAttachment, colorAttachment)
-                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment)) {
+                && MetalPipelineSupport.sameHandle(renderSemanticAttachment, semanticHandle)
+                && MetalPipelineSupport.sameHandle(renderDepthAttachment, depthAttachment)
+                && !clearSemantic) {
             if (clearColorEnabled || clearDepthEnabled) {
                 enc.clearDraw(
                         colorAttachment,
@@ -169,6 +180,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder();
         MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
                 colorAttachment,
+                semanticHandle,
                 depthAttachment,
                 viewportWidth,
                 viewportHeight,
@@ -177,12 +189,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearColorGreen,
                 clearColorBlue,
                 clearColorAlpha,
+                clearSemantic ? 1 : 0,
                 clearDepthEnabled ? 1 : 0,
                 clearDepthValue
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
         currentEncoder = encoder;
         renderColorAttachment = colorAttachment;
+        renderSemanticAttachment = semanticHandle;
         renderDepthAttachment = depthAttachment;
         return encoder;
     }
@@ -260,10 +274,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
+        MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs();
         return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
                 source.nativeHandle(),
-                this.device.consumeHdrSceneSnapshotHandle(),
+                sceneInputs.scene(),
+                sceneInputs.depth(),
+                sceneInputs.semantic(),
                 fence,
                 outputMode.nativeValue(),
                 hdrConfig.sourceEncoding().nativeValue(),
@@ -657,6 +674,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         endEncoder();
         MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
                 colorClear != null ? texture.nativeHandle() : null,
+                null,
                 depthClear != null ? texture.nativeHandle() : null,
                 1.0, 1.0,
                 colorClear != null ? 1 : 0,
@@ -664,6 +682,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 colorClear != null ? colorClear.y() : 0.0F,
                 colorClear != null ? colorClear.z() : 0.0F,
                 colorClear != null ? colorClear.w() : 0.0F,
+                0,
                 depthClear != null ? 1 : 0,
                 depthClear != null ? depthClear : 1.0
         );

@@ -38,6 +38,7 @@ public final class MTLCommandBuffer {
 
     public MTLRenderCommandEncoder makeRenderCommandEncoder(
             final MemorySegment colorTexture,
+            final MemorySegment semanticTexture,
             final MemorySegment depthTexture,
             final double viewportWidth,
             final double viewportHeight,
@@ -46,12 +47,14 @@ public final class MTLCommandBuffer {
             final float clearColorGreen,
             final float clearColorBlue,
             final float clearColorAlpha,
+            final int clearSemanticEnabled,
             final int clearDepthEnabled,
             final double clearDepth
     ) {
         MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoder(
                 handle(),
                 colorTexture,
+                semanticTexture,
                 depthTexture,
                 viewportWidth,
                 viewportHeight,
@@ -60,6 +63,7 @@ public final class MTLCommandBuffer {
                 clearColorGreen,
                 clearColorBlue,
                 clearColorAlpha,
+                clearSemanticEnabled,
                 clearDepthEnabled,
                 clearDepth
         );
@@ -104,6 +108,8 @@ public final class MTLCommandBuffer {
             final MemorySegment layer,
             final MemorySegment sourceTexture,
             final MemorySegment sceneTexture,
+            final MemorySegment sceneDepthTexture,
+            final MemorySegment semanticTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
@@ -117,6 +123,8 @@ public final class MTLCommandBuffer {
                 layer,
                 sourceTexture,
                 sceneTexture,
+                sceneDepthTexture,
+                semanticTexture,
                 globalFence,
                 outputMode,
                 sourceEncoding,

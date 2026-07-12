@@ -9,12 +9,14 @@ public final class MetalHdrFrame {
     private MetalHdrFrame() {
     }
 
-    public static void captureScene(final GpuTextureView textureView) {
-        if (textureView == null || textureView.isClosed()) {
+    public static void captureScene(final GpuTextureView colorView, final GpuTextureView depthView) {
+        if (colorView == null || colorView.isClosed() || depthView == null || depthView.isClosed()) {
             return;
         }
-        if (textureView.texture() instanceof MetalGpuTexture texture) {
-            texture.device().captureHdrScene(texture);
+        if (colorView.texture() instanceof MetalGpuTexture color
+                && depthView.texture() instanceof MetalGpuTexture depth
+                && color.device() == depth.device()) {
+            color.device().captureHdrScene(color, depth);
         }
     }
 }

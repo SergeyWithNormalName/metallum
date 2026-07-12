@@ -8,6 +8,11 @@
   "client": [
     "render.HdrSceneCaptureMixin",
     "render.PreferredGraphicsApiMixin",
+    "render.SodiumHdrShaderMixin",
+    "sodium.BlockRendererHdrMixin",
+    "sodium.ChunkMeshBufferBuilderHdrMixin",
+    "sodium.ChunkVertexEncoderVertexHdrMixin",
+    "sodium.DefaultFluidRendererHdrMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.SodiumPreferredGraphicsApiMixin"

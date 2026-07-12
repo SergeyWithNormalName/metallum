@@ -45,6 +45,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final float depthBiasConstant;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
+    private final boolean semanticOutput;
 
     private final MemorySegment depthStencilState;
     private final MemorySegment withDepthPipeline;
@@ -78,6 +79,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
+        this.semanticOutput = fragmentMsl.contains("[[color(1)]]");
 
         MTLCompareFunction depthCompareOp;
         int depthWrite;
@@ -107,8 +109,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
         try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
-            this.withoutDepthPipeline = createPipeline(device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Invalid);
-            this.withDepthPipeline = createPipeline(device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Depth32Float);
+            this.withoutDepthPipeline = createPipeline(
+                    device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Invalid, this.semanticOutput
+            );
+            this.withDepthPipeline = createPipeline(
+                    device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Depth32Float, this.semanticOutput
+            );
         }
     }
 
@@ -119,7 +125,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MemorySegment fragmentFunction,
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat colorFormat,
-            final MTLPixelFormat depthFormat
+            final MTLPixelFormat depthFormat,
+            final boolean semanticOutput
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
@@ -132,11 +139,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
             pipelineDesc.setVertexDescriptor(vertexDescriptor);
-            pipelineDesc.setAttachmentFormats(colorFormat, depthFormat, MTLPixelFormat.Invalid);
+            pipelineDesc.setAttachmentFormats(
+                    colorFormat,
+                    semanticOutput ? MTLPixelFormat.RGBA8Unorm : MTLPixelFormat.Invalid,
+                    depthFormat,
+                    MTLPixelFormat.Invalid
+            );
 
             if (blendFunction.isPresent()) {
                 var function = blendFunction.get();
                 pipelineDesc.setBlendState(
+                        0,
                         MTLBlendFactor.from(function.color().sourceFactor()),
                         MTLBlendFactor.from(function.color().destFactor()),
                         MTLBlendOperation.from(function.color().op()),
@@ -146,7 +159,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         writeMask
                 );
             } else {
-                pipelineDesc.disableBlending(writeMask);
+                pipelineDesc.disableBlending(0, writeMask);
+            }
+            if (semanticOutput) {
+                pipelineDesc.disableBlending(1, MTLColorWriteMask.All.value);
             }
 
             return MetalNativeBridge.metallum_MTLDevice_makeRenderPipelineState(
@@ -208,6 +224,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     int vertexBufferCount() {
         return this.vertexBufferCount;
+    }
+
+    boolean semanticOutput() {
+        return this.semanticOutput;
     }
 
     private static MTLVertexDescriptor buildVertexDescriptor(
