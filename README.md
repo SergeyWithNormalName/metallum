@@ -47,7 +47,7 @@ If the game is moved from an SDR display to an HDR display, restart it so the HD
 - `mode=scene`: explicitly request scene-wide FP16 HDR. The aliases `hdr_scene` and `full` are also accepted.
 - `mode=enhanced`: run adaptive scene-wide reconstruction and semantic HDR from the ordinary `RGBA8` scene, without FP16 scene propagation. It still falls back safely when HDR output is unavailable.
 - `mode=edr`: EDR presentation of the ordinary SDR scene without semantic or scene-wide highlight enhancement.
-- `mode=off`: standard `BGRA8` SDR output. Semantic MRT shaders are not enabled in this mode.
+- `mode=off`: standard color-managed sRGB `BGRA8` SDR output. If HDR is disabled live after an FP16 scene started, the final pass converts scene-linear RGB back to sRGB instead of presenting the darker linear values directly. Semantic MRT shaders are not enabled when the game starts in this mode.
 - `sourceEncoding=srgb`: the safe configured fallback and legacy contract. Leave this setting at `srgb`; in scene mode Metallum automatically switches the effective scene contract to linear only after the atomic shader preflight succeeds. If validation fails, it forces the whole scene back to the encoded-color path. Manually selecting `linear` is neither required nor a way to bypass that safety gate.
 - `hdrStrength`: semantic highlight strength from `0.0` to `2.0`.
 - `bloomStrength`: bloom strength from `0.0` to `1.0`.

@@ -347,6 +347,23 @@ private func presentMslSource() -> String {
       return max(value, 0.0);
     }
 
+    float3 metallum_linear_to_srgb(float3 linearValue) {
+      float3 bounded = clamp(linearValue, 0.0, 1.0);
+      float3 low = bounded * 12.92;
+      float3 high = 1.055 * pow(bounded, float3(1.0 / 2.4)) - 0.055;
+      return select(high, low, bounded <= float3(0.0031308));
+    }
+
+    float3 metallum_encode_sdr(float3 value, uint sourceEncoding) {
+      // RGBA8 and legacy FP16 sources already contain display-encoded sRGB.
+      // A scene-linear FP16 source needs the inverse transfer when HDR output
+      // is disabled live, because the startup-only scene contract remains
+      // linear until Minecraft is restarted.
+      return sourceEncoding == 2u
+        ? metallum_linear_to_srgb(value)
+        : clamp(value, 0.0, 1.0);
+    }
+
     float metallum_luminance(float3 color) {
       return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
     }
@@ -428,14 +445,19 @@ private func presentMslSource() -> String {
             : float3(0.0);
         }
 
-        return float4(uniforms.mode == 0u ? min(value, 1.0) : value, 1.0);
+        return float4(
+          uniforms.mode == 0u ? metallum_linear_to_srgb(min(value, 1.0)) : value,
+          1.0
+        );
       }
 
       float4 source = finalFrame.sample(smp, in.uv);
       float4 encodedUi = uiFrame.sample(auxiliarySmp, in.uv);
       if (uniforms.mode == 0u) {
         return float4(
-          uniforms.uiAvailable != 0u ? clamp(encodedUi.rgb, 0.0, 1.0) : source.rgb,
+          uniforms.uiAvailable != 0u
+            ? clamp(encodedUi.rgb, 0.0, 1.0)
+            : metallum_encode_sdr(source.rgb, uniforms.sourceEncoding),
           1.0
         );
       }
@@ -2613,10 +2635,10 @@ public func metallum_configure_layer(
     }
 
     let useEdr = outputMode != 0
-    let colorSpace = useEdr
-        ? CGColorSpace(name: CGColorSpace.extendedLinearSRGB)
-        : nil
-    guard !useEdr || colorSpace != nil else {
+    let colorSpace = CGColorSpace(name: useEdr
+        ? CGColorSpace.extendedLinearSRGB
+        : CGColorSpace.sRGB)
+    guard colorSpace != nil else {
         return 0
     }
 

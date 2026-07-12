@@ -65,6 +65,14 @@ private typealias NativeUpdateLayerContentsHeadroomFunction = @convention(c) (
     UnsafeRawPointer?, // layer
     Float              // contentHeadroom
 ) -> Int32
+private typealias NativeConfigureLayerFunction = @convention(c) (
+    UnsafeRawPointer?, // layer
+    Double,            // width
+    Double,            // height
+    Int32,             // immediatePresentMode
+    Int32,             // outputMode
+    Float              // contentHeadroom
+) -> Int32
 private typealias NativeBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
     UnsafeRawPointer?, // sourceTexture
@@ -132,6 +140,14 @@ private func srgbToLinear(_ encoded: Float) -> Float {
         return encoded / 12.92
     }
     return Float(pow(Double((encoded + 0.055) / 1.055), 2.4))
+}
+
+private func linearToSrgb(_ linear: Float) -> Float {
+    let bounded = min(max(linear, 0.0), 1.0)
+    if bounded <= 0.0031308 {
+        return bounded * 12.92
+    }
+    return Float(1.055 * pow(Double(bounded), 1.0 / 2.4) - 0.055)
 }
 
 private func semanticPixel(
@@ -987,6 +1003,7 @@ private final class ValueValidation {
 
     func run() throws {
         try validateSdrIdentityAtHeadroomOne()
+        try validateSdrOutputTransferContracts()
         try validateNonsemanticWhiteUsesHeadroom()
         try validateMidtoneIdentity()
         try validateSaturatedSdrIdentity()
@@ -1063,6 +1080,57 @@ private final class ValueValidation {
         try require(abs(value.x - expected) < 0.004, "SDR identity expected \(expected), got \(rgbaDescription(value))")
         try require(value.x <= 1.001, "SDR identity escaped SDR range: \(rgbaDescription(value))")
         pass("SDR appearance identity at headroom 1", value)
+    }
+
+    private func validateSdrOutputTransferContracts() throws {
+        let aux = try auxiliaries()
+        let sceneLinear = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(srgbToLinear(0.5), 0.5, 1.5, 1)
+        )
+        let linearValue = try gpu.renderPresent(
+            finalFrame: sceneLinear,
+            sceneFrame: sceneLinear,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: baseUniforms(
+                mode: 0,
+                sourceEncoding: 2,
+                headroom: 1,
+                sceneAvailable: false
+            )
+        )
+        try require(abs(linearValue.x - 0.5) < 0.004,
+                    "Linear FP16 SDR red expected 0.5 sRGB, got \(rgbaDescription(linearValue))")
+        try require(abs(linearValue.y - linearToSrgb(0.5)) < 0.004,
+                    "Linear FP16 SDR green was not sRGB encoded: \(rgbaDescription(linearValue))")
+        try require(abs(linearValue.z - 1.0) < 0.004,
+                    "Linear FP16 SDR highlight was not clamped: \(rgbaDescription(linearValue))")
+
+        let extendedSrgb = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(0.5, 1.5, 0.25, 1)
+        )
+        let encodedValue = try gpu.renderPresent(
+            finalFrame: extendedSrgb,
+            sceneFrame: extendedSrgb,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: baseUniforms(
+                mode: 0,
+                sourceEncoding: 1,
+                headroom: 1,
+                sceneAvailable: false
+            )
+        )
+        try require(abs(encodedValue.x - 0.5) < 0.004 && abs(encodedValue.y - 1.0) < 0.004,
+                    "Encoded FP16 SDR source was double-transferred or unclamped: \(rgbaDescription(encodedValue))")
+        try require(abs(encodedValue.z - 0.25) < 0.004,
+                    "Encoded FP16 SDR source changed color: \(rgbaDescription(encodedValue))")
+        passCount += 1
+        print("PASS SDR output encodes linear FP16 and preserves encoded sRGB sources")
     }
 
     private func validateNonsemanticWhiteUsesHeadroom() throws {
@@ -2143,6 +2211,7 @@ private final class ValueValidation {
         }
         guard
             let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+            let configureLayerSymbol = dlsym(handle, "metallum_configure_layer"),
             let updateLayerHeadroomSymbol = dlsym(handle, "metallum_update_layer_contents_headroom"),
             let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
@@ -2150,6 +2219,7 @@ private final class ValueValidation {
             throw ValidationFailure.message("Native HDR present symbols are missing")
         }
         let initialize = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+        let configureLayer = unsafeBitCast(configureLayerSymbol, to: NativeConfigureLayerFunction.self)
         let updateLayerHeadroom = unsafeBitCast(
             updateLayerHeadroomSymbol,
             to: NativeUpdateLayerContentsHeadroomFunction.self
@@ -2184,6 +2254,28 @@ private final class ValueValidation {
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        let sdrConfigureStatus = configureLayer(objectPointer(layer), 16, 16, 1, 0, 1)
+        try require(sdrConfigureStatus == 1, "SDR layer configuration returned \(sdrConfigureStatus)")
+        try require(layer.pixelFormat == .bgra8Unorm, "SDR layer did not use BGRA8Unorm")
+        try require(
+            colorSpacesEqual(layer.colorspace, CGColorSpace(name: CGColorSpace.sRGB)),
+            "SDR layer did not declare the sRGB color space"
+        )
+        if #available(macOS 26.0, *) {
+            try require(abs(layer.contentsHeadroom - 1.0) < 0.0001,
+                        "SDR layer retained HDR contents headroom: \(layer.contentsHeadroom)")
+        }
+
+        let hdrConfigureStatus = configureLayer(objectPointer(layer), 16, 16, 1, 2, 4)
+        try require(hdrConfigureStatus == 1, "HDR layer reconfiguration returned \(hdrConfigureStatus)")
+        try require(layer.pixelFormat == .rgba16Float, "HDR layer did not restore RGBA16Float")
+        try require(
+            colorSpacesEqual(layer.colorspace, CGColorSpace(name: CGColorSpace.extendedLinearSRGB)),
+            "HDR layer did not restore extended-linear sRGB"
+        )
+        passCount += 1
+        print("PASS native layer switches between explicit sRGB SDR and extended-linear HDR")
 
         if #available(macOS 26.0, *) {
             layer.contentsHeadroom = 1.0
