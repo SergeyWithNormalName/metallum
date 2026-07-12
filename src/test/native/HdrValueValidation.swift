@@ -134,9 +134,17 @@ private func srgbToLinear(_ encoded: Float) -> Float {
     return Float(pow(Double((encoded + 0.055) / 1.055), 2.4))
 }
 
-private func semanticPixel(markerDepth: Float, code: UInt8) -> SIMD4<UInt8> {
+private func semanticPixel(
+    markerDepth: Float,
+    strength: UInt8 = 127,
+    exact: Bool = true
+) -> SIMD4<UInt8> {
     let clamped = min(max(markerDepth, 0.0), 1.0)
     let packed = UInt32((clamped * 16_777_215.0).rounded())
+    let boundedStrength = strength & 0x7f
+    let code = boundedStrength == 0
+        ? UInt8(0)
+        : boundedStrength | (exact ? UInt8(0x80) : UInt8(0))
     return SIMD4<UInt8>(
         code,
         UInt8(packed & 0xff),
@@ -524,8 +532,16 @@ private final class GpuHarness {
         return SIMD4<UInt8>(bytes[0], bytes[1], bytes[2], bytes[3])
     }
 
-    func makeSemanticTexture(markerDepth: Float, code: UInt8 = 63) throws -> MTLTexture {
-        try makeRgba8Texture(bytes: semanticPixel(markerDepth: markerDepth, code: code))
+    func makeSemanticTexture(
+        markerDepth: Float,
+        strength: UInt8 = 127,
+        exact: Bool = true
+    ) throws -> MTLTexture {
+        try makeRgba8Texture(bytes: semanticPixel(
+            markerDepth: markerDepth,
+            strength: strength,
+            exact: exact
+        ))
     }
 
     func renderExtract(
@@ -977,6 +993,7 @@ private final class ValueValidation {
         try validateBoundaryLinearRasterAndBlend()
         try validateSemanticVisibilityAndOcclusion()
         try validateFullResolutionSemanticTargets()
+        try validateLowSemanticStrengthGradient()
         try validateCoverageWeightedBloomSeed()
         try validateBloomPresentBoundsAndUiControl()
         try validateExtendedSrgbIsUnclipped()
@@ -1188,8 +1205,8 @@ private final class ValueValidation {
     private func validateFullResolutionSemanticTargets() throws {
         let white = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 255))
         let depth = try gpu.makeDepthTexture(clearDepth: 0.5)
-        let sun = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 28)
-        let exact = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 63)
+        let sun = try gpu.makeSemanticTexture(markerDepth: 0.5, strength: 102, exact: false)
+        let exact = try gpu.makeSemanticTexture(markerDepth: 0.5)
         let aux = try auxiliaries()
         let adaptive = identityAdaptiveState(headroom: 1.2)
         let uniforms = baseUniforms(headroom: 1.2, semanticAvailable: true)
@@ -1249,7 +1266,7 @@ private final class ValueValidation {
             repeating: SIMD4<UInt8>(0, 0, 0, 0),
             count: 16
         )
-        let exactPixel = semanticPixel(markerDepth: 0.5, code: 63)
+        let exactPixel = semanticPixel(markerDepth: 0.5)
         isolatedPixels[0] = exactPixel
         let isolated = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: isolatedPixels)
         let isolatedDepth = try gpu.makeDepthTexture(width: 4, height: 4, clearDepth: 0.5)
@@ -1304,6 +1321,78 @@ private final class ValueValidation {
                      sunValue.x, exactValue.x, horizontalNeighbor.x, verticalNeighbor.x))
     }
 
+    private func validateLowSemanticStrengthGradient() throws {
+        let scene = try gpu.makeRgba8Texture(
+            width: 4,
+            height: 4,
+            bytes: SIMD4<UInt8>(204, 204, 204, 255)
+        )
+        let depth = try gpu.makeDepthTexture(width: 4, height: 4, clearDepth: 0.5)
+        let strengthOne = try gpu.makeSemanticTexture(
+            markerDepth: 0.5,
+            strength: 1,
+            exact: false
+        )
+        let strengthTwo = try gpu.makeSemanticTexture(
+            markerDepth: 0.5,
+            strength: 2,
+            exact: false
+        )
+        let seedOne = try gpu.readRgba16Float(texture: gpu.renderExtract(
+            scene: scene,
+            semantic: strengthOne,
+            depth: depth,
+            sourceEncoding: 0
+        ))
+        let seedTwo = try gpu.readRgba16Float(texture: gpu.renderExtract(
+            scene: scene,
+            semantic: strengthTwo,
+            depth: depth,
+            sourceEncoding: 0
+        ))
+        let ratio = seedTwo.x / max(seedOne.x, 1e-8)
+        try require(seedOne.x > 0.0005,
+                    "Lowest nonzero semantic strength was discarded: \(rgbaDescription(seedOne))")
+        try require(ratio > 1.8 && ratio < 2.2,
+                    "Seven-bit semantic gradient is not monotonic: one=\(rgbaDescription(seedOne)), two=\(rgbaDescription(seedTwo))")
+
+        let white = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 255))
+        let zeroStrength = try gpu.makeSemanticTexture(
+            markerDepth: 0.5,
+            strength: 0,
+            exact: false
+        )
+        let aux = try auxiliaries()
+        let uniforms = baseUniforms(headroom: 4.0, semanticAvailable: true)
+        let untagged = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            semanticFrame: zeroStrength,
+            sceneDepthFrame: depth
+        )
+        let weakestTagged = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            semanticFrame: strengthOne,
+            sceneDepthFrame: depth
+        )
+        try require(abs(weakestTagged.x - untagged.x) < 0.02,
+                    "First semantic strength level introduced an HDR contour: zero=\(rgbaDescription(untagged)), one=\(rgbaDescription(weakestTagged))")
+        passCount += 1
+        print(String(format: "PASS seven-bit semantic strength preserves weak gradients without an authority contour: %.6f -> %.6f, edge %.4f",
+                     seedOne.x, seedTwo.x, abs(weakestTagged.x - untagged.x)))
+    }
+
     private func validateCoverageWeightedBloomSeed() throws {
         let scene = try gpu.makeRgba8Texture(
             width: 4,
@@ -1311,16 +1400,20 @@ private final class ValueValidation {
             bytes: SIMD4<UInt8>(204, 204, 204, 255)
         )
         let depth = try gpu.makeDepthTexture(width: 4, height: 4, clearDepth: 0.5)
-        let full = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 63)
+        let full = try gpu.makeSemanticTexture(markerDepth: 0.5)
         var sparsePixels = [SIMD4<UInt8>](
             repeating: SIMD4<UInt8>(0, 0, 0, 0),
             count: 16
         )
-        sparsePixels[0] = semanticPixel(markerDepth: 0.5, code: 63)
+        sparsePixels[0] = semanticPixel(markerDepth: 0.5)
         let sparse = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: sparsePixels)
-        var mixedPixels = [SIMD4<UInt8>](repeating: semanticPixel(markerDepth: 0.5, code: 17), count: 16)
+        var mixedPixels = [SIMD4<UInt8>](repeating: semanticPixel(
+            markerDepth: 0.5,
+            strength: 8,
+            exact: false
+        ), count: 16)
         for index in 0..<8 {
-            mixedPixels[index] = semanticPixel(markerDepth: 0.5, code: 63)
+            mixedPixels[index] = semanticPixel(markerDepth: 0.5)
         }
         let mixed = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: mixedPixels)
         let fullSeed = try gpu.readRgba16Float(texture: gpu.renderExtract(
@@ -1343,7 +1436,7 @@ private final class ValueValidation {
         ))
         let energyRatio = sparseSeed.x / max(fullSeed.x, 1e-6)
         let mixedRatio = mixedSeed.x / max(fullSeed.x, 1e-6)
-        let expectedMixedRatio: Float = 0.5 + 0.5 * ((0.20 / 15.0) / 0.42)
+        let expectedMixedRatio: Float = 0.5 + 0.5 * (((8.0 / 127.0) * 0.20) / 0.42)
         try require(fullSeed.x > 0.20 && fullSeed.x < 0.30,
                     "Full semantic bloom seed is outside its bounded range: \(rgbaDescription(fullSeed))")
         try require(abs(energyRatio - 1.0 / 16.0) < 0.01,

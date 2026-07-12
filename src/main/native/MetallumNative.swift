@@ -479,8 +479,8 @@ private func presentMslSource() -> String {
         uint2 coordinate = min(uint2(boundedUv * float2(sceneSize)), maximumCoordinate);
         uint4 semanticBytes = uint4(round(clamp(semanticFrame.read(coordinate), 0.0, 1.0) * 255.0));
         uint code = semanticBytes.x;
-        uint emission = code & 15u;
-        if ((code & 16u) != 0u && emission != 0u) {
+        uint strengthCode = code & 127u;
+        if (strengthCode != 0u) {
           uint markerPackedDepth = semanticBytes.y
             | (semanticBytes.z << 8u)
             | (semanticBytes.w << 16u);
@@ -488,8 +488,8 @@ private func presentMslSource() -> String {
             clamp(sceneDepthFrame.read(coordinate), 0.0, 1.0) * 16777215.0
           ));
           if (markerPackedDepth + 2u >= scenePackedDepth) {
-            semanticStrength = float(emission) / 15.0;
-            semanticExact = (code & 32u) != 0u ? 1.0 : 0.0;
+            semanticStrength = float(strengthCode) / 127.0;
+            semanticExact = (code & 128u) != 0u ? 1.0 : 0.0;
           }
         }
       }
@@ -532,9 +532,11 @@ private func presentMslSource() -> String {
       float semanticScale = 1.0
         + availableSemanticRange * semanticFraction * semanticDetail * strength;
       float3 semanticScene = sceneLinear * semanticScale;
-      float3 selectedScene = semanticStrength > 0.0
-        ? semanticScene
-        : inferredScene;
+      // Semantic strength is also confidence in source authorship. Fade weak
+      // markers into scene reconstruction so the first quantized level cannot
+      // replace the neighboring sky with a different HDR curve.
+      float semanticAuthority = smoothstep(0.0, 0.20, semanticStrength);
+      float3 selectedScene = mix(inferredScene, semanticScene, semanticAuthority);
       float3 sceneHdr = metallum_map_to_headroom(
         selectedScene + bloomContribution,
         uniforms.currentHeadroom
@@ -695,8 +697,8 @@ private func hdrEffectsMslSource() -> String {
           if (uniforms.semanticAvailable != 0u) {
             uint4 semanticBytes = uint4(round(clamp(semantic.read(coordinate), 0.0, 1.0) * 255.0));
             uint code = semanticBytes.x;
-            uint emission = code & 15u;
-            if ((code & 16u) != 0u && emission != 0u) {
+            uint strengthCode = code & 127u;
+            if (strengthCode != 0u) {
               uint markerPackedDepth = semanticBytes.y
                 | (semanticBytes.z << 8u)
                 | (semanticBytes.w << 16u);
@@ -708,8 +710,8 @@ private func hdrEffectsMslSource() -> String {
               // was rendered through an offscreen target, but it must not be
               // clearly behind a later opaque fragment.
               if (markerPackedDepth + 2u >= scenePackedDepth) {
-                float candidateStrength = float(emission) / 15.0;
-                float candidateExact = (code & 32u) != 0u ? 1.0 : 0.0;
+                float candidateStrength = float(strengthCode) / 127.0;
+                float candidateExact = (code & 128u) != 0u ? 1.0 : 0.0;
                 float candidateBloomGain = candidateStrength
                   * mix(0.20, 0.42, candidateExact);
                 semanticBloomSum += max(color, 0.0) * candidateBloomGain;

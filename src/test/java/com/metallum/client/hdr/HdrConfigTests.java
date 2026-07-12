@@ -479,6 +479,9 @@ public final class HdrConfigTests {
         require(patchedFragment.contains("flat in uint metallumHdrMaterial;"), "Sodium fragment material varying");
         require(patchedFragment.contains("layout(location = 1) out vec4 metallumHdrSemantic;"), "Sodium semantic MRT output");
         require(patchedFragment.contains("clamp(fragColor.a, 0.0, 1.0)"), "Sodium translucent emission scales with visible alpha");
+        require(patchedFragment.contains("float(metallumHdrSourceEmission) / 15.0"), "Sodium source emission is normalized before coverage encoding");
+        require(patchedFragment.contains("* 127.0"), "Sodium semantic strength uses seven-bit precision");
+        require(patchedFragment.contains("metallumHdrExact << 7u"), "Sodium exact flag occupies the semantic high bit");
         require(patchedFragment.contains("gl_FragCoord.z"), "Sodium semantic depth packing");
         require(patchedFragment.contains("16777215.0"), "24-bit semantic depth precision");
         require(!patchedFragment.contains("fragColor.a ="), "main color alpha remains untouched");
@@ -498,9 +501,11 @@ public final class HdrConfigTests {
         String entity = "out vec4 fragColor;\nvoid main() {\n" + entityAssignment + "\n}";
         String patchedEntity = VanillaHdrShaderPatcher.patchFragmentSource(VanillaHdrShaderPatcher.ENTITY, entity);
         require(patchedEntity.contains("#ifdef EMISSIVE\nlayout(location = 1) out vec4 metallumHdrSemantic;\n#endif"), "entity MRT declaration is emissive-only");
-        require(patchedEntity.contains("#ifdef EMISSIVE\n    uint metallumHdrEmission"), "entity semantic write is emissive-only");
-        require(patchedEntity.contains("clamp(fragColor.a, 0.0, 1.0) * 15.0"), "entity strength follows visible alpha");
-        require(patchedEntity.contains("(48u | metallumHdrEmission)"), "entity exact semantic flags");
+        require(patchedEntity.contains("#ifdef EMISSIVE\n    float metallumHdrCoverage"), "entity semantic write is emissive-only");
+        require(patchedEntity.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0);"), "entity strength follows visible alpha");
+        require(patchedEntity.contains("(15.0 / 15.0)"), "entity source emission is normalized");
+        require(patchedEntity.contains("* 127.0"), "entity semantic strength uses seven-bit precision");
+        require(patchedEntity.contains("(128u | metallumHdrStrength)"), "entity exact semantic flag");
         require(!patchedEntity.contains("discard;"), "entity patch never changes main color coverage");
         require(VanillaHdrShaderPatcher.patchFragmentSource(VanillaHdrShaderPatcher.ENTITY, patchedEntity).equals(patchedEntity), "entity patch idempotence");
 
@@ -536,7 +541,9 @@ public final class HdrConfigTests {
                 VanillaHdrShaderPatcher.CELESTIAL,
                 "out vec4 fragColor;\nvoid main() {\n    fragColor = color * ColorModulator;\n}"
         );
-        require(celestial.contains("dot(max(fragColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722))"), "celestial black background is luminance-gated");
+        require(celestial.contains("clamp(fragColor.a, 0.0, 1.0) * clamp(dot(max(fragColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0)"), "celestial strength follows its additive RGB contribution");
+        require(celestial.contains("(12.0 / 15.0)"), "celestial emission scale is preserved");
+        require(celestial.contains("(0u | metallumHdrStrength)"), "celestial remains a non-exact semantic source");
 
         String unknown = "out vec4 fragColor;\nvoid main() {\n    fragColor = ColorModulator;\n}";
         require(VanillaHdrShaderPatcher.patchFragmentSource("core/gui", unknown).equals(unknown), "GUI shader is never patched");
@@ -584,8 +591,14 @@ public final class HdrConfigTests {
         String source = "out vec4 fragColor;\nvoid main() {\n" + assignment + "\n}";
         String patched = VanillaHdrShaderPatcher.patchFragmentSource(path, source);
         require(patched.contains("layout(location = 1) out vec4 metallumHdrSemantic;"), label + " MRT output");
-        require(patched.contains("clamp(fragColor.a, 0.0, 1.0) * " + emission + ".0"), label + " alpha-scaled emission");
-        require(patched.contains("(" + (exact ? 48 : 16) + "u | metallumHdrEmission)"), label + " semantic flags");
+        if (path.equals(VanillaHdrShaderPatcher.CELESTIAL)) {
+            require(patched.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0) * clamp(dot(max(fragColor.rgb"), label + " contribution-scaled coverage");
+        } else {
+            require(patched.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0);"), label + " alpha-scaled coverage");
+        }
+        require(patched.contains("(" + emission + ".0 / 15.0)"), label + " normalized source emission");
+        require(patched.contains("* 127.0"), label + " seven-bit semantic strength");
+        require(patched.contains("(" + (exact ? 128 : 0) + "u | metallumHdrStrength)"), label + " semantic exact flag");
         require(patched.contains("gl_FragCoord.z"), label + " depth packing");
         require(!patched.contains("fragColor.a ="), label + " main color alpha remains untouched");
         require(VanillaHdrShaderPatcher.patchFragmentSource(path, patched).equals(patched), label + " patch idempotence");
