@@ -31,6 +31,26 @@ private struct HdrExtractUniforms {
     var sourceEncoding: UInt32
     var semanticAvailable: UInt32
     var sourceSize: SIMD2<UInt32>
+    var histogramEnabled: UInt32
+    var _padding0: UInt32
+}
+
+private struct HdrHistogramReduceUniforms {
+    var currentHeadroom: Float
+    var deltaTime: Float
+    var forceReset: UInt32
+    var _padding0: UInt32
+}
+
+private struct HdrAdaptiveState {
+    var breakpoint: Float
+    var inferredPeak: Float
+    var medianLog2: Float
+    var p90Log2: Float
+    var p99Log2: Float
+    var brightCoverage: Float
+    var currentHeadroom: Float
+    var valid: UInt32
 }
 
 private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Void
@@ -96,11 +116,25 @@ private func rgbaDescription(_ value: SIMD4<Float>) -> String {
     String(format: "(%.4f, %.4f, %.4f, %.4f)", value.x, value.y, value.z, value.w)
 }
 
+private func defaultAdaptiveState() -> HdrAdaptiveState {
+    HdrAdaptiveState(
+        breakpoint: 0.62,
+        inferredPeak: 2.65,
+        medianLog2: -2.0,
+        p90Log2: 0.0,
+        p99Log2: 0.0,
+        brightCoverage: 0.05,
+        currentHeadroom: 4.0,
+        valid: 1
+    )
+}
+
 private final class GpuHarness {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let presentPipeline: MTLRenderPipelineState
     private let extractPipeline: MTLRenderPipelineState
+    private let histogramReducePipeline: MTLComputePipelineState
     private let nearestSampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
 
@@ -132,7 +166,8 @@ private final class GpuHarness {
 
         guard
             let effectsVertex = effectsLibrary.makeFunction(name: "metallum_hdr_vs"),
-            let extractFragment = effectsLibrary.makeFunction(name: "metallum_hdr_extract_fs")
+            let extractFragment = effectsLibrary.makeFunction(name: "metallum_hdr_extract_fs"),
+            let histogramReduce = effectsLibrary.makeFunction(name: "metallum_hdr_histogram_reduce")
         else {
             throw ValidationFailure.message("HDR extract shader functions are missing")
         }
@@ -143,6 +178,7 @@ private final class GpuHarness {
         extractDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         extractDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.extractPipeline = try device.makeRenderPipelineState(descriptor: extractDescriptor)
+        self.histogramReducePipeline = try device.makeComputePipelineState(function: histogramReduce)
 
         func makeSampler(filter: MTLSamplerMinMagFilter) throws -> MTLSamplerState {
             let descriptor = MTLSamplerDescriptor()
@@ -184,6 +220,42 @@ private final class GpuHarness {
             values.append(bytes.y)
             values.append(bytes.z)
             values.append(bytes.w)
+        }
+        values.withUnsafeBytes { rawBytes in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: rawBytes.baseAddress!,
+                bytesPerRow: width * 4
+            )
+        }
+        return texture
+    }
+
+    func makeRgba8Texture(
+        width: Int,
+        height: Int,
+        pixels: [SIMD4<UInt8>]
+    ) throws -> MTLTexture {
+        try require(pixels.count == width * height, "RGBA8 pixel count does not match texture size")
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .shared
+        descriptor.usage = [.shaderRead, .renderTarget]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw ValidationFailure.message("RGBA8 patterned texture creation failed")
+        }
+        var values = [UInt8]()
+        values.reserveCapacity(pixels.count * 4)
+        for pixel in pixels {
+            values.append(pixel.x)
+            values.append(pixel.y)
+            values.append(pixel.z)
+            values.append(pixel.w)
         }
         values.withUnsafeBytes { rawBytes in
             texture.replace(
@@ -321,7 +393,13 @@ private final class GpuHarness {
         let outputWidth = max((scene.width + 3) / 4, 1)
         let outputHeight = max((scene.height + 3) / 4, 1)
         let output = try makePrivateRgba16FloatTexture(width: outputWidth, height: outputHeight)
-        guard let commandBuffer = queue.makeCommandBuffer() else {
+        guard
+            let commandBuffer = queue.makeCommandBuffer(),
+            let histogram = device.makeBuffer(
+                length: 64 * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            )
+        else {
             throw ValidationFailure.message("HDR extract command buffer creation failed")
         }
         let pass = MTLRenderPassDescriptor()
@@ -344,16 +422,151 @@ private final class GpuHarness {
         encoder.setFragmentTexture(scene, index: 0)
         encoder.setFragmentTexture(semantic, index: 1)
         encoder.setFragmentTexture(depth, index: 2)
+        encoder.setFragmentBuffer(histogram, offset: 0, index: 1)
         var uniforms = HdrExtractUniforms(
             sourceEncoding: sourceEncoding,
             semanticAvailable: semanticAvailable ? 1 : 0,
-            sourceSize: SIMD2<UInt32>(UInt32(scene.width), UInt32(scene.height))
+            sourceSize: SIMD2<UInt32>(UInt32(scene.width), UInt32(scene.height)),
+            histogramEnabled: 0,
+            _padding0: 0
         )
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<HdrExtractUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         try complete(commandBuffer, label: "HDR semantic extract")
         return output
+    }
+
+    func analyzeHistogram(
+        scene: MTLTexture,
+        sourceEncoding: UInt32 = 0,
+        currentHeadroom: Float = 4.0,
+        deltaTime: Float = 0.0,
+        forceReset: Bool = true,
+        previousState: HdrAdaptiveState? = nil,
+        semantic: MTLTexture? = nil,
+        sceneDepth: MTLTexture? = nil
+    ) throws -> (bins: [UInt32], state: HdrAdaptiveState) {
+        let outputWidth = max((scene.width + 3) / 4, 1)
+        let outputHeight = max((scene.height + 3) / 4, 1)
+        let output = try makePrivateRgba16FloatTexture(width: outputWidth, height: outputHeight)
+        let semanticTexture: MTLTexture
+        if let semantic {
+            semanticTexture = semantic
+        } else {
+            semanticTexture = try makeRgba8Texture(
+                width: scene.width,
+                height: scene.height,
+                bytes: SIMD4<UInt8>(0, 0, 0, 0)
+            )
+        }
+        let depthTexture: MTLTexture
+        if let sceneDepth {
+            depthTexture = sceneDepth
+        } else {
+            depthTexture = try makeDepthTexture(
+                width: scene.width,
+                height: scene.height,
+                clearDepth: 0.5
+            )
+        }
+        guard
+            let histogram = device.makeBuffer(
+                length: 64 * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+            ),
+            let commandBuffer = queue.makeCommandBuffer(),
+            let clear = commandBuffer.makeBlitCommandEncoder()
+        else {
+            throw ValidationFailure.message("Histogram validation resource creation failed")
+        }
+
+        var initialState = previousState ?? HdrAdaptiveState(
+            breakpoint: 0.70,
+            inferredPeak: 1.0,
+            medianLog2: -12.0,
+            p90Log2: -12.0,
+            p99Log2: -12.0,
+            brightCoverage: 0.0,
+            currentHeadroom: 1.0,
+            valid: 0
+        )
+        guard let stateBuffer = withUnsafeBytes(of: &initialState, { bytes in
+            device.makeBuffer(
+                bytes: bytes.baseAddress!,
+                length: bytes.count,
+                options: .storageModeShared
+            )
+        }) else {
+            throw ValidationFailure.message("Adaptive state buffer creation failed")
+        }
+
+        clear.fill(buffer: histogram, range: 0..<histogram.length, value: 0)
+        clear.endEncoding()
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let extract = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Histogram extract encoder creation failed")
+        }
+        extract.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(outputWidth),
+            height: Double(outputHeight),
+            znear: 0,
+            zfar: 1
+        ))
+        extract.setRenderPipelineState(extractPipeline)
+        extract.setFragmentTexture(scene, index: 0)
+        extract.setFragmentTexture(semanticTexture, index: 1)
+        extract.setFragmentTexture(depthTexture, index: 2)
+        extract.setFragmentBuffer(histogram, offset: 0, index: 1)
+        var extractUniforms = HdrExtractUniforms(
+            sourceEncoding: sourceEncoding,
+            semanticAvailable: semantic == nil ? 0 : 1,
+            sourceSize: SIMD2<UInt32>(UInt32(scene.width), UInt32(scene.height)),
+            histogramEnabled: 1,
+            _padding0: 0
+        )
+        extract.setFragmentBytes(
+            &extractUniforms,
+            length: MemoryLayout<HdrExtractUniforms>.stride,
+            index: 0
+        )
+        extract.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        extract.endEncoding()
+
+        guard let reduce = commandBuffer.makeComputeCommandEncoder() else {
+            throw ValidationFailure.message("Histogram reduction encoder creation failed")
+        }
+        reduce.setComputePipelineState(histogramReducePipeline)
+        reduce.setBuffer(histogram, offset: 0, index: 0)
+        reduce.setBuffer(stateBuffer, offset: 0, index: 1)
+        var reduceUniforms = HdrHistogramReduceUniforms(
+            currentHeadroom: currentHeadroom,
+            deltaTime: deltaTime,
+            forceReset: forceReset ? 1 : 0,
+            _padding0: 0
+        )
+        reduce.setBytes(
+            &reduceUniforms,
+            length: MemoryLayout<HdrHistogramReduceUniforms>.stride,
+            index: 2
+        )
+        reduce.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        reduce.endEncoding()
+        try complete(commandBuffer, label: "HDR histogram analysis")
+
+        let histogramWords = histogram.contents().assumingMemoryBound(to: UInt32.self)
+        let bins = Array(UnsafeBufferPointer(start: histogramWords, count: 64))
+        let state = stateBuffer.contents().assumingMemoryBound(to: HdrAdaptiveState.self).pointee
+        return (bins, state)
     }
 
     func renderPresent(
@@ -363,10 +576,19 @@ private final class GpuHarness {
         bloomFrame: MTLTexture,
         uiMaskFrame: MTLTexture,
         uiFrame: MTLTexture,
-        uniforms: PresentUniforms
+        uniforms: PresentUniforms,
+        adaptiveState: HdrAdaptiveState = defaultAdaptiveState()
     ) throws -> SIMD4<Float> {
         let output = try makePrivateRgba16FloatTexture(width: finalFrame.width, height: finalFrame.height)
-        guard let commandBuffer = queue.makeCommandBuffer() else {
+        var mutableAdaptiveState = adaptiveState
+        let adaptiveBuffer = withUnsafeBytes(of: &mutableAdaptiveState) { bytes in
+            device.makeBuffer(
+                bytes: bytes.baseAddress!,
+                length: bytes.count,
+                options: .storageModeShared
+            )
+        }
+        guard let commandBuffer = queue.makeCommandBuffer(), let adaptiveBuffer else {
             throw ValidationFailure.message("Present command buffer creation failed")
         }
         let pass = MTLRenderPassDescriptor()
@@ -400,6 +622,7 @@ private final class GpuHarness {
             length: MemoryLayout<PresentUniforms>.stride,
             index: 0
         )
+        encoder.setFragmentBuffer(adaptiveBuffer, offset: 0, index: 1)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         try complete(commandBuffer, label: "HDR present")
@@ -484,6 +707,10 @@ private final class ValueValidation {
         try validateSemanticVisibilityAndOcclusion()
         try validateExtendedSrgbIsUnclipped()
         try validateSdrUiCeiling()
+        try validateUniformMidgrayHistogram()
+        try validateSparseAndBroadWhiteTargets()
+        try validateImmediateHeadroomDropCap()
+        try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
@@ -682,6 +909,225 @@ private final class ValueValidation {
         pass("seeded SDR UI stays at or below 1.0", halfAlphaValue)
     }
 
+    private func validateUniformMidgrayHistogram() throws {
+        let scene = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(128, 128, 128, 255)
+        )
+        let analysis = try gpu.analyzeHistogram(scene: scene)
+        let total = analysis.bins.reduce(UInt32(0), +)
+        let linearMidgray = srgbToLinear(Float(128) / 255)
+        let expectedBin = min(max(Int((log2(Double(linearMidgray)) + 12.0) * 4.0), 0), 63)
+        try require(total == 16, "Uniform 16x16 scene must contribute 16 quarter cells, got \(total)")
+        try require(analysis.bins[expectedBin] == 16, "Midgray histogram bin \(expectedBin) contains \(analysis.bins[expectedBin]), expected 16")
+        let expectedQuantile = -12.0 + (Float(expectedBin) + 0.5) * 0.25
+        try require(abs(analysis.state.medianLog2 - expectedQuantile) < 0.001,
+                    "GPU p50 does not match the populated bin: \(analysis.state.medianLog2)")
+        try require(abs(analysis.state.p90Log2 - expectedQuantile) < 0.001,
+                    "GPU p90 does not match the populated bin: \(analysis.state.p90Log2)")
+        try require(abs(analysis.state.p99Log2 - expectedQuantile) < 0.001,
+                    "GPU p99 does not match the populated bin: \(analysis.state.p99Log2)")
+        try require(abs(analysis.state.breakpoint - 0.70) < 0.001, "Midgray breakpoint should stay at 0.70")
+        try require(abs(analysis.state.inferredPeak - 1.0) < 0.001, "Midgray must not infer an HDR peak")
+
+        let semanticScene = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(204, 204, 204, 255))
+        let semantic = try gpu.makeSemanticTexture(markerDepth: 0.5)
+        let semanticDepth = try gpu.makeDepthTexture(clearDepth: 0.5)
+        let excluded = try gpu.analyzeHistogram(
+            scene: semanticScene,
+            semantic: semantic,
+            sceneDepth: semanticDepth
+        )
+        try require(excluded.bins.reduce(UInt32(0), +) == 0,
+                    "A quarter cell with valid semantic emission entered the generic histogram")
+        passCount += 1
+        print("PASS 64-bin GPU histogram counts one midgray sample per quarter cell and excludes semantic emission")
+    }
+
+    private func validateSparseAndBroadWhiteTargets() throws {
+        let sparse = try makeQuarterCellScene(
+            cellsWide: 16,
+            cellsHigh: 16,
+            whiteCells: Set([0])
+        )
+        let broad = try gpu.makeRgba8Texture(
+            width: 64,
+            height: 64,
+            bytes: SIMD4<UInt8>(255, 255, 255, 255)
+        )
+        let sparseAnalysis = try gpu.analyzeHistogram(scene: sparse, currentHeadroom: 4)
+        let broadAnalysis = try gpu.analyzeHistogram(scene: broad, currentHeadroom: 4)
+        let sparseState = sparseAnalysis.state
+        let broadState = broadAnalysis.state
+
+        for (name, state) in [("sparse", sparseState), ("broad", broadState)] {
+            try require((0.48...0.70).contains(state.breakpoint),
+                        "\(name) breakpoint escaped [0.48, 0.70]: \(state.breakpoint)")
+            try require(state.inferredPeak >= 1.0 && state.inferredPeak <= 3.001,
+                        "\(name) inferred peak is unsafe: \(state.inferredPeak)")
+            try require(state.inferredPeak <= state.currentHeadroom + 0.001,
+                        "\(name) inferred peak exceeded headroom")
+        }
+        try require(abs(sparseState.brightCoverage - (1.0 / 256.0)) < 0.0002,
+                    "Sparse bright coverage mismatch: \(sparseState.brightCoverage)")
+        try require(broadState.brightCoverage > 0.99,
+                    "Broad white coverage mismatch: \(broadState.brightCoverage)")
+        try require(sparseState.inferredPeak > broadState.inferredPeak + 0.5,
+                    "Sparse highlight peak must exceed broad white: sparse=\(sparseState.inferredPeak), broad=\(broadState.inferredPeak)")
+        let broadExpansionFraction = (broadState.inferredPeak - 1.0) / 2.0
+        try require(broadExpansionFraction >= 0.349,
+                    "Broad white lost its 35% minimum expansion: \(broadExpansionFraction)")
+
+        // The p50 jump from midgray-dominated sparse content to full white is
+        // over two stops, so temporal state must reset instead of ghosting.
+        let medianJump = try gpu.analyzeHistogram(
+            scene: broad,
+            currentHeadroom: 4,
+            deltaTime: 1.0 / 60.0,
+            forceReset: false,
+            previousState: sparseState
+        ).state
+        try require(abs(medianJump.inferredPeak - broadState.inferredPeak) < 0.005,
+                    "Median jump did not reset adaptive peak")
+        passCount += 1
+        print(String(format: "PASS adaptive targets: sparse peak %.3f > broad %.3f; broad expansion %.1f%%",
+                     sparseState.inferredPeak, broadState.inferredPeak, broadExpansionFraction * 100.0))
+    }
+
+    private func validateImmediateHeadroomDropCap() throws {
+        let sparse = try makeQuarterCellScene(
+            cellsWide: 16,
+            cellsHigh: 16,
+            whiteCells: Set([0])
+        )
+        let highState = try gpu.analyzeHistogram(scene: sparse, currentHeadroom: 4).state
+        try require(highState.inferredPeak > 2.0, "Headroom cap test needs a high initial peak")
+        let dropped = try gpu.analyzeHistogram(
+            scene: sparse,
+            currentHeadroom: 1.5,
+            deltaTime: 1.0 / 60.0,
+            forceReset: false,
+            previousState: highState
+        ).state
+        try require(dropped.inferredPeak <= 1.5001,
+                    "Headroom drop was temporally delayed: \(dropped.inferredPeak)")
+        try require(dropped.inferredPeak >= 1.0, "Headroom drop produced an invalid peak")
+        passCount += 1
+        print(String(format: "PASS headroom drop caps inferred peak immediately: %.3f -> %.3f",
+                     highState.inferredPeak, dropped.inferredPeak))
+    }
+
+    private func validateFrameRateIndependentSmoothing() throws {
+        // Keep p50 fixed at midgray so the GPU path exercises temporal
+        // smoothing rather than the intentional >2-stop median reset.
+        let sparse = try makeQuarterCellScene(
+            cellsWide: 8,
+            cellsHigh: 8,
+            whiteCells: Set(0..<4)
+        )
+        let broadish = try makeQuarterCellScene(
+            cellsWide: 8,
+            cellsHigh: 8,
+            whiteCells: Set(0..<19)
+        )
+        let highTarget = try gpu.analyzeHistogram(scene: sparse, currentHeadroom: 4).state
+        let lowTarget = try gpu.analyzeHistogram(scene: broadish, currentHeadroom: 4).state
+        try require(abs(highTarget.medianLog2 - lowTarget.medianLog2) < 0.001,
+                    "GPU smoothing fixtures changed the median")
+        try require(highTarget.inferredPeak > lowTarget.inferredPeak,
+                    "GPU smoothing fixtures do not produce rise/fall targets")
+
+        let oneFrame: Float = 1.0 / 60.0
+        let gpuRise = try gpu.analyzeHistogram(
+            scene: sparse,
+            currentHeadroom: 4,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: lowTarget
+        ).state.inferredPeak
+        let expectedGpuRise = temporalSequence(
+            initial: lowTarget.inferredPeak,
+            target: highTarget.inferredPeak,
+            frames: 1,
+            deltaTime: oneFrame
+        )
+        let gpuFall = try gpu.analyzeHistogram(
+            scene: broadish,
+            currentHeadroom: 4,
+            deltaTime: oneFrame,
+            forceReset: false,
+            previousState: highTarget
+        ).state.inferredPeak
+        let expectedGpuFall = temporalSequence(
+            initial: highTarget.inferredPeak,
+            target: lowTarget.inferredPeak,
+            frames: 1,
+            deltaTime: oneFrame
+        )
+        try require(abs(gpuRise - expectedGpuRise) < 0.0002,
+                    "GPU rise does not use tau=0.75: got \(gpuRise), expected \(expectedGpuRise)")
+        try require(abs(gpuFall - expectedGpuFall) < 0.0002,
+                    "GPU fall does not use tau=0.12: got \(gpuFall), expected \(expectedGpuFall)")
+        let stalledReset = try gpu.analyzeHistogram(
+            scene: broadish,
+            currentHeadroom: 4,
+            deltaTime: 1.01,
+            forceReset: false,
+            previousState: highTarget
+        ).state.inferredPeak
+        try require(abs(stalledReset - lowTarget.inferredPeak) < 0.0002,
+                    "dt>1 second did not reset temporal state")
+
+        let rise30 = temporalSequence(initial: 1.0, target: 2.8, frames: 30, deltaTime: 1.0 / 30.0)
+        let rise120 = temporalSequence(initial: 1.0, target: 2.8, frames: 120, deltaTime: 1.0 / 120.0)
+        let fall30 = temporalSequence(initial: 2.8, target: 1.2, frames: 30, deltaTime: 1.0 / 30.0)
+        let fall120 = temporalSequence(initial: 2.8, target: 1.2, frames: 120, deltaTime: 1.0 / 120.0)
+        let expectedRise = Float(2.8 + (1.0 - 2.8) * exp(-1.0 / 0.75))
+        let expectedFall = Float(1.2 + (2.8 - 1.2) * exp(-1.0 / 0.12))
+        try require(abs(rise30 - rise120) < 0.0001 && abs(rise30 - expectedRise) < 0.0001,
+                    "Rise smoothing depends on frame rate: 30=\(rise30), 120=\(rise120)")
+        try require(abs(fall30 - fall120) < 0.0001 && abs(fall30 - expectedFall) < 0.0001,
+                    "Fall smoothing depends on frame rate: 30=\(fall30), 120=\(fall120)")
+        passCount += 1
+        print(String(format: "PASS GPU tau rise/fall and frame-rate-independent smoothing: %.4f / %.4f",
+                     gpuRise, gpuFall))
+    }
+
+    private func makeQuarterCellScene(
+        cellsWide: Int,
+        cellsHigh: Int,
+        whiteCells: Set<Int>
+    ) throws -> MTLTexture {
+        let width = cellsWide * 4
+        let height = cellsHigh * 4
+        var pixels = [SIMD4<UInt8>]()
+        pixels.reserveCapacity(width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let cell = (y / 4) * cellsWide + x / 4
+                let value: UInt8 = whiteCells.contains(cell) ? 255 : 128
+                pixels.append(SIMD4<UInt8>(value, value, value, 255))
+            }
+        }
+        return try gpu.makeRgba8Texture(width: width, height: height, pixels: pixels)
+    }
+
+    private func temporalSequence(
+        initial: Float,
+        target: Float,
+        frames: Int,
+        deltaTime: Float
+    ) -> Float {
+        var value = initial
+        for _ in 0..<frames {
+            let timeConstant: Float = target > value ? 0.75 : 0.12
+            let blend = Float(1.0 - exp(-Double(deltaTime / timeConstant)))
+            value += (target - value) * blend
+        }
+        return value
+    }
+
     private func validateNativeBackdropAndPresentAbi() throws {
         guard let handle = dlopen(nativeLibraryPath, RTLD_NOW | RTLD_LOCAL) else {
             let detail = dlerror().map { String(cString: $0) } ?? "unknown dlopen error"
@@ -822,8 +1268,34 @@ private final class ValueValidation {
         commandBuffer.waitUntilCompleted()
         let detail = commandBuffer.error.map(String.init(describing:)) ?? "unknown GPU error"
         try require(commandBuffer.status == .completed, "Native present command failed: \(detail)")
+
+        guard let noSceneCommandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("No-scene ABI smoke command buffer creation failed")
+        }
+        let noSceneStatus = present(
+            objectPointer(noSceneCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(source as AnyObject),
+            nil,
+            nil,
+            nil,
+            objectPointer(ui as AnyObject),
+            nil,
+            1,
+            0,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(noSceneStatus == 1, "No-scene present ABI returned \(noSceneStatus)")
+        noSceneCommandBuffer.commit()
+        noSceneCommandBuffer.waitUntilCompleted()
+        let noSceneDetail = noSceneCommandBuffer.error.map(String.init(describing:)) ?? "unknown GPU error"
+        try require(noSceneCommandBuffer.status == .completed,
+                    "No-scene present command failed: \(noSceneDetail)")
         passCount += 1
-        print("PASS native present ABI accepts uiTexture (8 pointer arguments)")
+        print("PASS native present ABI accepts uiTexture and binds adaptive fallback without a scene")
     }
 
     private func pass(_ name: String, _ value: SIMD4<Float>) {

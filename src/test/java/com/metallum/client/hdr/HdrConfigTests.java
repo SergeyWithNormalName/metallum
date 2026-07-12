@@ -31,10 +31,19 @@ public final class HdrConfigTests {
         require(config.hdrStrength() == 1.4f, "HDR strength parsing");
         require(config.bloomStrength() == 0.3f, "bloom strength parsing");
         require(config.diagnosticPattern(), "diagnostic flag parsing");
+        require(!config.experimentalFp16(), "legacy FP16 flag defaults off");
+
+        properties.setProperty("mode", "scene");
+        require(HdrConfig.from(properties).mode() == HdrMode.SCENE, "scene mode parsing");
+        properties.setProperty("mode", "hdr_scene");
+        require(HdrConfig.from(properties).mode() == HdrMode.SCENE, "hdr_scene alias parsing");
+        properties.setProperty("mode", "full");
+        require(HdrConfig.from(properties).mode() == HdrMode.SCENE, "full alias parsing");
 
         HdrConfig defaults = HdrConfig.from(new Properties());
         require(defaults.mode() == HdrMode.AUTO, "default mode");
         require(defaults.sourceEncoding() == HdrSourceEncoding.SRGB, "default source encoding");
+        require(!defaults.experimentalFp16(), "deprecated flag is absent from new defaults");
         require(HdrSourceEncoding.SRGB.nativeValue(false) == 0, "RGBA8 uses bounded sRGB source contract");
         require(HdrSourceEncoding.SRGB.nativeValue(true) == 1, "FP16 uses extended sRGB source contract");
         require(HdrSourceEncoding.LINEAR.nativeValue(true) == 2, "explicit linear source contract is retained");
@@ -67,8 +76,11 @@ public final class HdrConfigTests {
     private static void testOutputModeResolution() {
         EdrCapabilities hdr = new EdrCapabilities(2.0f, 8.0f);
         require(HdrMode.AUTO.resolve(hdr) == HdrOutputMode.ENHANCED, "auto enables enhanced HDR on an HDR display");
+        require(HdrMode.SCENE.resolve(hdr) == HdrOutputMode.ENHANCED, "scene mode uses enhanced HDR output");
         require(HdrMode.ENHANCED.resolve(hdr) == HdrOutputMode.ENHANCED, "enhanced mode on HDR display");
+        require(HdrMode.EDR.resolve(hdr) == HdrOutputMode.EDR, "explicit EDR output mode");
         require(HdrMode.OFF.resolve(hdr) == HdrOutputMode.SDR, "explicit SDR mode");
+        require(HdrMode.SCENE.resolve(EdrCapabilities.SDR) == HdrOutputMode.SDR, "scene mode falls back on an SDR display");
         require(HdrMode.ENHANCED.resolve(EdrCapabilities.SDR) == HdrOutputMode.SDR, "SDR display fallback");
     }
 
@@ -77,6 +89,10 @@ public final class HdrConfigTests {
         EdrCapabilities hdr = new EdrCapabilities(1.0f, 4.0f);
         HdrSemanticState.configure(HdrMode.AUTO, hdr);
         require(HdrSemanticState.isRequested(), "auto requests semantic MRT on an HDR display");
+        HdrSemanticState.configure(HdrMode.SCENE, hdr);
+        require(HdrSemanticState.isRequested(), "scene mode requests semantic MRT");
+        HdrSemanticState.configure(HdrMode.ENHANCED, hdr);
+        require(HdrSemanticState.isRequested(), "enhanced mode keeps semantic MRT");
         HdrSemanticState.configure(HdrMode.EDR, hdr);
         require(!HdrSemanticState.isRequested(), "EDR mode avoids semantic MRT");
         HdrSemanticState.configure(HdrMode.ENHANCED, EdrCapabilities.SDR);
@@ -88,17 +104,31 @@ public final class HdrConfigTests {
     private static void testSceneState() {
         Properties properties = new Properties();
         properties.setProperty("mode", "auto");
-        properties.setProperty("experimentalFp16", "true");
-        HdrConfig enabled = HdrConfig.from(properties);
+        HdrConfig automatic = HdrConfig.from(properties);
         EdrCapabilities hdr = new EdrCapabilities(1.0f, 4.0f);
 
         HdrSceneState.reset();
         require(!HdrSceneState.isRequested(), "FP16 scene path defaults off before device policy");
-        HdrSceneState.configure(enabled, hdr);
-        require(HdrSceneState.isRequested(), "FP16 scene path requires explicit config and HDR display");
+        HdrSceneState.configure(automatic, hdr);
+        require(HdrSceneState.isRequested(), "auto requests the FP16 scene path on an HDR display");
         require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB, "scene source contract follows configuration");
-        HdrSceneState.configure(enabled, EdrCapabilities.SDR);
+        HdrSceneState.configure(automatic, EdrCapabilities.SDR);
         require(!HdrSceneState.isRequested(), "FP16 scene path stays off on SDR displays");
+
+        properties.setProperty("mode", "scene");
+        HdrSceneState.configure(HdrConfig.from(properties), hdr);
+        require(HdrSceneState.isRequested(), "explicit scene mode requests FP16 without the legacy flag");
+
+        properties.setProperty("mode", "enhanced");
+        HdrSceneState.configure(HdrConfig.from(properties), hdr);
+        require(!HdrSceneState.isRequested(), "enhanced mode keeps the legacy semantic compositor by default");
+        properties.setProperty("experimentalFp16", "true");
+        HdrSceneState.configure(HdrConfig.from(properties), hdr);
+        require(HdrSceneState.isRequested(), "legacy flag still enables FP16 for enhanced mode");
+
+        properties.setProperty("mode", "edr");
+        HdrSceneState.configure(HdrConfig.from(properties), hdr);
+        require(!HdrSceneState.isRequested(), "EDR mode does not request the scene compositor");
 
         properties.setProperty("mode", "off");
         HdrSceneState.configure(HdrConfig.from(properties), hdr);

@@ -37,6 +37,8 @@ private struct MetallumHdrExtractUniforms {
     var sourceEncoding: UInt32
     var semanticAvailable: UInt32
     var sourceSize: SIMD2<UInt32>
+    var histogramEnabled: UInt32
+    var _padding0: UInt32
 }
 
 private struct MetallumHdrBlurUniforms {
@@ -54,8 +56,27 @@ private struct MetallumHdrUiCompareUniforms {
     var _padding0: SIMD2<UInt32>
 }
 
+private struct MetallumHdrHistogramReduceUniforms {
+    var currentHeadroom: Float
+    var deltaTime: Float
+    var forceReset: UInt32
+    var _padding0: UInt32
+}
+
+private struct MetallumHdrAdaptiveState {
+    var breakpoint: Float
+    var inferredPeak: Float
+    var medianLog2: Float
+    var p90Log2: Float
+    var p99Log2: Float
+    var brightCoverage: Float
+    var currentHeadroom: Float
+    var valid: UInt32
+}
+
 private final class MetallumHdrPipelines {
     let extract: MTLRenderPipelineState
+    let histogramReduce: MTLComputePipelineState
     let blur: MTLRenderPipelineState
     let uiBackdrop: MTLRenderPipelineState
     let uiCompare: MTLRenderPipelineState
@@ -63,12 +84,14 @@ private final class MetallumHdrPipelines {
 
     init(
         extract: MTLRenderPipelineState,
+        histogramReduce: MTLComputePipelineState,
         blur: MTLRenderPipelineState,
         uiBackdrop: MTLRenderPipelineState,
         uiCompare: MTLRenderPipelineState,
         uiDilate: MTLRenderPipelineState
     ) {
         self.extract = extract
+        self.histogramReduce = histogramReduce
         self.blur = blur
         self.uiBackdrop = uiBackdrop
         self.uiCompare = uiCompare
@@ -84,6 +107,9 @@ private final class MetallumHdrWorkspace {
     let bloomB: MTLTexture
     let uiMaskA: MTLTexture
     let uiMaskB: MTLTexture
+    let histogram: MTLBuffer
+    let adaptiveState: MTLBuffer
+    var lastHistogramUptime: TimeInterval?
 
     init(
         sourceWidth: Int,
@@ -92,7 +118,9 @@ private final class MetallumHdrWorkspace {
         bloomA: MTLTexture,
         bloomB: MTLTexture,
         uiMaskA: MTLTexture,
-        uiMaskB: MTLTexture
+        uiMaskB: MTLTexture,
+        histogram: MTLBuffer,
+        adaptiveState: MTLBuffer
     ) {
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
@@ -101,6 +129,9 @@ private final class MetallumHdrWorkspace {
         self.bloomB = bloomB
         self.uiMaskA = uiMaskA
         self.uiMaskB = uiMaskB
+        self.histogram = histogram
+        self.adaptiveState = adaptiveState
+        self.lastHistogramUptime = nil
     }
 }
 
@@ -108,6 +139,7 @@ private struct MetallumHdrOutputs {
     let emission: MTLTexture
     let bloom: MTLTexture
     let uiMask: MTLTexture
+    let adaptiveState: MTLBuffer
 }
 
 private enum NativeState {
@@ -117,6 +149,7 @@ private enum NativeState {
     static var presentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
+    static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
 }
@@ -282,6 +315,17 @@ private func presentMslSource() -> String {
       uint uiAvailable;
     };
 
+    struct HdrAdaptiveState {
+      float breakpoint;
+      float inferredPeak;
+      float medianLog2;
+      float p90Log2;
+      float p99Log2;
+      float brightCoverage;
+      float currentHeadroom;
+      uint valid;
+    };
+
     float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
       float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
       float3 low = magnitude / 12.92;
@@ -366,7 +410,8 @@ private func presentMslSource() -> String {
       texture2d<float> uiFrame [[texture(5)]],
       sampler smp [[sampler(0)]],
       sampler auxiliarySmp [[sampler(1)]],
-      constant PresentUniforms& uniforms [[buffer(0)]]
+      constant PresentUniforms& uniforms [[buffer(0)]],
+      constant HdrAdaptiveState& adaptive [[buffer(1)]]
     ) {
       if (uniforms.diagnosticPattern != 0u) {
         float level = metallum_diagnostic_level(in.uv.x);
@@ -421,13 +466,18 @@ private func presentMslSource() -> String {
       float localY = emissionSample.a;
       float detail = max(sceneSignal - localY, 0.0);
       float localIsolation = smoothstep(0.06, 0.42, detail);
-      float expansionStart = mix(0.62, 0.47, localIsolation);
+      float adaptiveBreakpoint = clamp(adaptive.breakpoint, 0.48, 0.70);
+      float isolatedBreakpoint = max(0.48, adaptiveBreakpoint - 0.15);
+      float expansionStart = mix(adaptiveBreakpoint, isolatedBreakpoint, localIsolation);
       float expansionX = clamp((min(sceneSignal, 1.0) - expansionStart)
         / max(1.0 - expansionStart, 1e-5), 0.0, 1.0);
       float expansionCurve = expansionX * expansionX * (3.0 - 2.0 * expansionX);
-      float broadAreaLimiter = mix(1.0, 0.58, smoothstep(0.62, 0.98, localY));
-      float inferredPeak = 1.0 + min(2.0, 0.55 * (uniforms.currentHeadroom - 1.0))
-        * strength * broadAreaLimiter;
+      float adaptivePeak = clamp(
+        adaptive.inferredPeak,
+        1.0,
+        min(uniforms.currentHeadroom, 3.0)
+      );
+      float inferredPeak = 1.0 + (adaptivePeak - 1.0) * strength;
       float inferredY = max(sceneSignal, min(sceneSignal, 1.0)
         + (inferredPeak - 1.0) * expansionCurve);
       float3 inferredScene = sceneLinear * (inferredY / max(sceneSignal, 1e-6));
@@ -478,6 +528,8 @@ private func hdrEffectsMslSource() -> String {
       uint sourceEncoding;
       uint semanticAvailable;
       uint2 sourceSize;
+      uint histogramEnabled;
+      uint _padding0;
     };
 
     struct HdrBlurUniforms {
@@ -493,6 +545,24 @@ private func hdrEffectsMslSource() -> String {
       uint sourceEncoding;
       uint seededUiAvailable;
       uint2 _padding0;
+    };
+
+    struct HdrHistogramReduceUniforms {
+      float currentHeadroom;
+      float deltaTime;
+      uint forceReset;
+      uint _padding0;
+    };
+
+    struct HdrAdaptiveState {
+      float breakpoint;
+      float inferredPeak;
+      float medianLog2;
+      float p90Log2;
+      float p99Log2;
+      float brightCoverage;
+      float currentHeadroom;
+      uint valid;
     };
 
     vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
@@ -555,7 +625,8 @@ private func hdrEffectsMslSource() -> String {
       texture2d<float> scene [[texture(0)]],
       texture2d<float> semantic [[texture(1)]],
       depth2d<float> sceneDepth [[texture(2)]],
-      constant HdrExtractUniforms& uniforms [[buffer(0)]]
+      constant HdrExtractUniforms& uniforms [[buffer(0)]],
+      device atomic_uint* histogram [[buffer(1)]]
     ) {
       uint2 origin = uint2(in.position.xy) * 4u;
       uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
@@ -610,6 +681,15 @@ private func hdrEffectsMslSource() -> String {
       }
       averageY *= 1.0 / 16.0;
 
+      // Each quarter-resolution fragment contributes exactly one sample.
+      // Source-authored semantic emitters are excluded so they do not teach
+      // the generic scene reconstruction to boost themselves a second time.
+      if (uniforms.histogramEnabled != 0u && semanticStrength <= 0.0) {
+        float logY = clamp(log2(max(averageY, exp2(-12.0))), -12.0, 4.0);
+        uint bin = min(uint((logY + 12.0) * 4.0), 63u);
+        atomic_fetch_add_explicit(&histogram[bin], 1u, memory_order_relaxed);
+      }
+
       if (uniforms.semanticAvailable != 0u) {
         float emissionGain = semanticStrength * mix(2.4, 3.2, semanticExact);
         return float4(max(semanticColor, 0.0) * emissionGain, averageY);
@@ -618,6 +698,135 @@ private func hdrEffectsMslSource() -> String {
       // Keeping the old visual fallback would apply two unrelated heuristics
       // to the same pixel and create excessive halos.
       return float4(0.0, 0.0, 0.0, averageY);
+    }
+
+    float metallum_hdr_temporal_scalar(float current, float target, float deltaTime) {
+      float timeConstant = target > current ? 0.75 : 0.12;
+      float blend = 1.0 - exp(-max(deltaTime, 0.0) / timeConstant);
+      return mix(current, target, clamp(blend, 0.0, 1.0));
+    }
+
+    kernel void metallum_hdr_histogram_reduce(
+      device atomic_uint* histogram [[buffer(0)]],
+      device HdrAdaptiveState* stateBuffer [[buffer(1)]],
+      constant HdrHistogramReduceUniforms& uniforms [[buffer(2)]],
+      uint index [[thread_position_in_grid]]
+    ) {
+      if (index != 0u) {
+        return;
+      }
+
+      uint bins[64];
+      uint total = 0u;
+      uint brightCount = 0u;
+      for (uint bin = 0u; bin < 64u; ++bin) {
+        uint count = atomic_load_explicit(&histogram[bin], memory_order_relaxed);
+        bins[bin] = count;
+        total += count;
+        // Bin 46 starts at log2(Y)=-0.5 (Y~=0.707), a stable quantized
+        // threshold for SDR highlights in this 0.25-stop histogram.
+        if (bin >= 46u) {
+          brightCount += count;
+        }
+      }
+
+      HdrAdaptiveState previous = stateBuffer[0];
+      float safeHeadroom = clamp(uniforms.currentHeadroom, 1.0, 8.0);
+      float maximumInferredPeak = min(safeHeadroom, 3.0);
+      if (total == 0u) {
+        if (previous.valid == 0u) {
+          previous.breakpoint = 0.70;
+          previous.inferredPeak = 1.0;
+        }
+        previous.breakpoint = clamp(previous.breakpoint, 0.48, 0.70);
+        previous.inferredPeak = clamp(previous.inferredPeak, 1.0, maximumInferredPeak);
+        previous.currentHeadroom = safeHeadroom;
+        stateBuffer[0] = previous;
+        return;
+      }
+
+      uint rank50 = max(uint(ceil(float(total) * 0.50)), 1u);
+      uint rank90 = max(uint(ceil(float(total) * 0.90)), 1u);
+      uint rank99 = max(uint(ceil(float(total) * 0.99)), 1u);
+      uint cumulative = 0u;
+      uint bin50 = 63u;
+      uint bin90 = 63u;
+      uint bin99 = 63u;
+      bool found50 = false;
+      bool found90 = false;
+      bool found99 = false;
+      for (uint bin = 0u; bin < 64u; ++bin) {
+        cumulative += bins[bin];
+        if (!found50 && cumulative >= rank50) {
+          bin50 = bin;
+          found50 = true;
+        }
+        if (!found90 && cumulative >= rank90) {
+          bin90 = bin;
+          found90 = true;
+        }
+        if (!found99 && cumulative >= rank99) {
+          bin99 = bin;
+          found99 = true;
+        }
+      }
+
+      float p50Log2 = -12.0 + (float(bin50) + 0.5) * 0.25;
+      float p90Log2 = -12.0 + (float(bin90) + 0.5) * 0.25;
+      float p99Log2 = -12.0 + (float(bin99) + 0.5) * 0.25;
+      float p90Y = exp2(p90Log2);
+      float p99Y = exp2(p99Log2);
+      float brightCoverage = float(brightCount) / max(float(total), 1.0);
+
+      float isolatedPresence = brightCount == 0u
+        ? 0.0
+        : 1.0 - smoothstep(0.02, 0.08, brightCoverage);
+      float upperHighlightSignal = max(
+        smoothstep(0.55, 1.0, p99Y),
+        isolatedPresence
+      );
+      float broadHighlightSignal = smoothstep(0.35, 0.95, p90Y);
+      float breakpointSignal = max(broadHighlightSignal, 0.5 * upperHighlightSignal);
+      float targetBreakpoint = clamp(0.70 - 0.22 * breakpointSignal, 0.48, 0.70);
+
+      // Sparse highlights can approach 92% of the inferred EDR range. Broad
+      // white deliberately retains 35% so snow, clouds and pale skies still
+      // gain depth without turning the entire frame into a light source.
+      float sparseWeight = 1.0 - smoothstep(0.08, 0.55, brightCoverage);
+      float expansionFraction = upperHighlightSignal * mix(0.35, 0.92, sparseWeight);
+      float targetPeak = 1.0
+        + (maximumInferredPeak - 1.0) * clamp(expansionFraction, 0.0, 0.92);
+      targetPeak = min(targetPeak, maximumInferredPeak);
+
+      bool reset = uniforms.forceReset != 0u
+        || previous.valid == 0u
+        || uniforms.deltaTime > 1.0
+        || abs(p50Log2 - previous.medianLog2) > 2.0;
+      float breakpoint = reset
+        ? targetBreakpoint
+        // A lower breakpoint means more HDR expansion, so invert it while
+        // applying the same slow-rise / fast-fall response as inferredPeak.
+        : -metallum_hdr_temporal_scalar(
+            -previous.breakpoint,
+            -targetBreakpoint,
+            uniforms.deltaTime
+          );
+      float inferredPeak = reset
+        ? targetPeak
+        : metallum_hdr_temporal_scalar(previous.inferredPeak, targetPeak, uniforms.deltaTime);
+
+      HdrAdaptiveState next;
+      next.breakpoint = clamp(breakpoint, 0.48, 0.70);
+      // This cap is deliberately immediate, independent of temporal fall, so
+      // an EDR headroom drop can never leave an over-range frame in flight.
+      next.inferredPeak = clamp(inferredPeak, 1.0, maximumInferredPeak);
+      next.medianLog2 = p50Log2;
+      next.p90Log2 = p90Log2;
+      next.p99Log2 = p99Log2;
+      next.brightCoverage = clamp(brightCoverage, 0.0, 1.0);
+      next.currentHeadroom = safeHeadroom;
+      next.valid = 1u;
+      stateBuffer[0] = next;
     }
 
     fragment float4 metallum_hdr_blur_fs(
@@ -710,6 +919,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         guard
             let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
             let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
+            let histogramReduceFunction = library.makeFunction(name: "metallum_hdr_histogram_reduce"),
             let blurFunction = library.makeFunction(name: "metallum_hdr_blur_fs"),
             let uiBackdropFunction = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs"),
             let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
@@ -733,6 +943,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
 
         return try MetallumHdrPipelines(
             extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
+            histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
             blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
             uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
             uiCompare: makePipeline(uiCompareFunction, colorFormat: .r8Unorm),
@@ -754,6 +965,43 @@ private func ensureHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         NativeState.hdrPipelines[key] = pipelines
     }
     return pipelines
+}
+
+private func makeHdrAdaptiveStateBuffer(device: MTLDevice, label: String) -> MTLBuffer? {
+    var initialState = MetallumHdrAdaptiveState(
+        breakpoint: 0.70,
+        inferredPeak: 1.0,
+        medianLog2: -12.0,
+        p90Log2: -12.0,
+        p99Log2: -12.0,
+        brightCoverage: 0.0,
+        currentHeadroom: 1.0,
+        valid: 0
+    )
+    let buffer = withUnsafeBytes(of: &initialState) { bytes in
+        device.makeBuffer(
+            bytes: bytes.baseAddress!,
+            length: bytes.count,
+            options: .storageModeShared
+        )
+    }
+    buffer?.label = label
+    return buffer
+}
+
+private func ensureHdrFallbackAdaptiveState(device: MTLDevice) -> MTLBuffer? {
+    let key = objectAddress(device)
+    if let cached = NativeState.hdrFallbackAdaptiveStates[key] {
+        return cached
+    }
+    let buffer = makeHdrAdaptiveStateBuffer(
+        device: device,
+        label: "Metallum HDR fallback adaptive state"
+    )
+    if let buffer {
+        NativeState.hdrFallbackAdaptiveStates[key] = buffer
+    }
+    return buffer
 }
 
 private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeight: Int) -> MetallumHdrWorkspace? {
@@ -796,7 +1044,15 @@ private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeigh
         let bloomA = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom A"),
         let bloomB = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom B"),
         let uiMaskA = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask A"),
-        let uiMaskB = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask B")
+        let uiMaskB = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask B"),
+        let histogram = device.makeBuffer(
+            length: 64 * MemoryLayout<UInt32>.stride,
+            options: .storageModePrivate
+        ),
+        let adaptiveState = makeHdrAdaptiveStateBuffer(
+            device: device,
+            label: "Metallum HDR adaptive state"
+        )
     else {
         NSLog("[metallum] Failed to allocate HDR workspace for %dx%d", sourceWidth, sourceHeight)
         return nil
@@ -809,8 +1065,11 @@ private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeigh
         bloomA: bloomA,
         bloomB: bloomB,
         uiMaskA: uiMaskA,
-        uiMaskB: uiMaskB
+        uiMaskB: uiMaskB,
+        histogram: histogram,
+        adaptiveState: adaptiveState
     )
+    histogram.label = "Metallum HDR luminance histogram"
     NativeState.hdrWorkspaces[key] = workspace
     return workspace
 }
@@ -847,7 +1106,8 @@ private func encodeHdrEffects(
     semanticTexture: MTLTexture?,
     uiTexture: MTLTexture?,
     globalFence: MTLFence?,
-    sourceEncoding: Int32
+    sourceEncoding: Int32,
+    currentHeadroom: Float
 ) -> MetallumHdrOutputs? {
     guard
         let pipelines = ensureHdrPipelines(device: commandBuffer.device),
@@ -862,6 +1122,23 @@ private func encodeHdrEffects(
     }
     let linearSampler = samplers.linear
 
+    let now = ProcessInfo.processInfo.systemUptime
+    let previousUptime = workspace.lastHistogramUptime
+    let deltaTime = previousUptime.map { max(now - $0, 0.0) } ?? 0.0
+    let forceReset = previousUptime == nil || deltaTime > 1.0
+    workspace.lastHistogramUptime = now
+
+    guard let histogramClear = commandBuffer.makeBlitCommandEncoder() else {
+        return nil
+    }
+    histogramClear.label = "Metallum HDR histogram clear"
+    histogramClear.fill(
+        buffer: workspace.histogram,
+        range: 0..<workspace.histogram.length,
+        value: 0
+    )
+    histogramClear.endEncoding()
+
     guard let extract = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: workspace.emission,
@@ -875,10 +1152,13 @@ private func encodeHdrEffects(
     extract.setFragmentTexture(sceneTexture, index: 0)
     extract.setFragmentTexture(semanticTexture ?? sceneTexture, index: 1)
     extract.setFragmentTexture(sceneDepthTexture, index: 2)
+    extract.setFragmentBuffer(workspace.histogram, offset: 0, index: 1)
     var extractUniforms = MetallumHdrExtractUniforms(
-        sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+        sourceEncoding: UInt32(clamping: min(max(sourceEncoding, 0), 2)),
         semanticAvailable: semanticTexture == nil ? 0 : 1,
-        sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height))
+        sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height)),
+        histogramEnabled: 1,
+        _padding0: 0
     )
     withUnsafeBytes(of: &extractUniforms) { bytes in
         extract.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
@@ -888,6 +1168,28 @@ private func encodeHdrEffects(
         extract.updateFence(globalFence, after: .fragment)
     }
     extract.endEncoding()
+
+    guard let histogramReduce = commandBuffer.makeComputeCommandEncoder() else {
+        return nil
+    }
+    histogramReduce.label = "Metallum HDR histogram reduction"
+    histogramReduce.setComputePipelineState(pipelines.histogramReduce)
+    histogramReduce.setBuffer(workspace.histogram, offset: 0, index: 0)
+    histogramReduce.setBuffer(workspace.adaptiveState, offset: 0, index: 1)
+    var reduceUniforms = MetallumHdrHistogramReduceUniforms(
+        currentHeadroom: currentHeadroom,
+        deltaTime: Float(min(deltaTime, 2.0)),
+        forceReset: forceReset ? 1 : 0,
+        _padding0: 0
+    )
+    withUnsafeBytes(of: &reduceUniforms) { bytes in
+        histogramReduce.setBytes(bytes.baseAddress!, length: bytes.count, index: 2)
+    }
+    histogramReduce.dispatchThreads(
+        MTLSize(width: 1, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+    )
+    histogramReduce.endEncoding()
 
     guard let horizontal = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
@@ -967,7 +1269,8 @@ private func encodeHdrEffects(
     return MetallumHdrOutputs(
         emission: workspace.emission,
         bloom: workspace.bloomB,
-        uiMask: workspace.uiMaskB
+        uiMask: workspace.uiMaskB,
+        adaptiveState: workspace.adaptiveState
     )
 }
 
@@ -1173,6 +1476,7 @@ public func metallum_init_pipelines(_ device: MTLDevice) {
         _ = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm)
         _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
         _ = ensureHdrPipelines(device: device)
+        _ = ensureHdrFallbackAdaptiveState(device: device)
         NativeState.presentLinearSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .linear)
         NativeState.presentNearestSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
@@ -1196,6 +1500,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         }
         NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
+        NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.presentNearestSamplers.removeValue(forKey: deviceAddress)
         NativeState.presentLinearSamplers.removeValue(forKey: deviceAddress)
     }
@@ -2369,12 +2674,23 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
                 uiTexture: hasCompatibleUi ? uiTexture : nil,
                 globalFence: globalFence,
-                sourceEncoding: sourceEncoding
+                sourceEncoding: sourceEncoding,
+                currentHeadroom: effectiveHeadroom
             )
             guard hdrOutputs != nil else {
                 return -1
             }
             hasHdrScene = true
+        }
+
+        let adaptiveState: MTLBuffer?
+        if hasHdrScene {
+            adaptiveState = hdrOutputs?.adaptiveState
+        } else {
+            adaptiveState = ensureHdrFallbackAdaptiveState(device: commandBuffer.device)
+        }
+        guard let adaptiveState else {
+            return -1
         }
 
         let renderPass = MTLRenderPassDescriptor()
@@ -2420,6 +2736,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
         }
+        encoder.setFragmentBuffer(adaptiveState, offset: 0, index: 1)
 
         let requiresScaling = sourceTexture.width != drawable.texture.width ||
                               sourceTexture.height != drawable.texture.height

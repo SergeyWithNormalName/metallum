@@ -6,6 +6,7 @@ public enum HdrMode {
     OFF,
     EDR,
     ENHANCED,
+    SCENE,
     AUTO;
 
     static HdrMode parse(final String value) {
@@ -16,6 +17,7 @@ public enum HdrMode {
             case "off", "sdr", "false", "0" -> OFF;
             case "edr", "edr_sdr" -> EDR;
             case "enhanced", "hdr", "on", "true", "1" -> ENHANCED;
+            case "scene", "hdr_scene", "full" -> SCENE;
             default -> AUTO;
         };
     }
@@ -27,7 +29,7 @@ public enum HdrMode {
         return switch (this) {
             case OFF -> HdrOutputMode.SDR;
             case EDR -> HdrOutputMode.EDR;
-            case ENHANCED, AUTO -> HdrOutputMode.ENHANCED;
+            case ENHANCED, SCENE, AUTO -> HdrOutputMode.ENHANCED;
         };
     }
 }

@@ -25,9 +25,11 @@ public final class HdrSceneState {
 
     public static void configure(final HdrConfig config, final EdrCapabilities capabilities) {
         sourceEncoding = config.sourceEncoding();
-        requested = config.experimentalFp16()
-                && config.mode() != HdrMode.OFF
-                && capabilities.isHdrDisplay();
+        HdrMode mode = config.mode();
+        boolean modeRequestsScene = mode == HdrMode.AUTO
+                || mode == HdrMode.SCENE
+                || (mode == HdrMode.ENHANCED && config.experimentalFp16());
+        requested = modeRequestsScene && capabilities.isHdrDisplay();
     }
 
     public static void reset() {

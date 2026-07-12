@@ -11,7 +11,7 @@ public final class HdrSemanticState {
     }
 
     public static void configure(final HdrMode mode, final EdrCapabilities capabilities) {
-        requested = (mode == HdrMode.AUTO || mode == HdrMode.ENHANCED)
+        requested = (mode == HdrMode.AUTO || mode == HdrMode.SCENE || mode == HdrMode.ENHANCED)
                 && capabilities.isHdrDisplay();
     }
 

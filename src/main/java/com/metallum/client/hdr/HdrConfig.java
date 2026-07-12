@@ -68,7 +68,6 @@ public record HdrConfig(
         properties.setProperty("hdrStrength", "1.0");
         properties.setProperty("bloomStrength", "0.22");
         properties.setProperty("diagnosticPattern", "false");
-        properties.setProperty("experimentalFp16", "false");
         return properties;
     }
 
