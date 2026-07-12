@@ -288,6 +288,11 @@ public final class MetalNativeBridge {
                     "metallum_configure_layer",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, DOUBLE, DOUBLE, INT, INT, FLOAT)
             );
+            updateLayerContentsHeadroom = downcallWithoutCritical(
+                    lookup,
+                    "metallum_update_layer_contents_headroom",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, FLOAT)
+            );
             releaseObject = downcall(lookup, "metallum_release_object", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             getBufferContents = downcall(lookup, "metallum_get_buffer_contents", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             createFence = downcall(lookup, "metallum_create_fence", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -366,6 +371,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderPipelineDescriptorSetBlendState;
     private static final MethodHandle MTLDeviceMakeRenderPipelineState;
     private static final MethodHandle configureLayer;
+    private static final MethodHandle updateLayerContentsHeadroom;
     private static final MethodHandle releaseObject;
     private static final MethodHandle getBufferContents;
     private static final MethodHandle createFence;
@@ -1315,6 +1321,17 @@ public final class MetalNativeBridge {
             ) != 0;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_configure_layer", throwable);
+        }
+    }
+
+    public static boolean metallum_update_layer_contents_headroom(
+            final MemorySegment layer,
+            final float contentHeadroom
+    ) {
+        try {
+            return (int) updateLayerContentsHeadroom.invokeExact(segment(layer), contentHeadroom) != 0;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_update_layer_contents_headroom", throwable);
         }
     }
 

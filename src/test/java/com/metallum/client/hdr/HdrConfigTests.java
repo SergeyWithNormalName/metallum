@@ -10,6 +10,7 @@ public final class HdrConfigTests {
         testConfigurationParsing();
         testCapabilitySanitization();
         testOutputModeResolution();
+        testLayerHeadroomPolicy();
         testSemanticState();
         testSceneState();
         testSodiumShaderPatching();
@@ -82,6 +83,49 @@ public final class HdrConfigTests {
         require(HdrMode.OFF.resolve(hdr) == HdrOutputMode.SDR, "explicit SDR mode");
         require(HdrMode.SCENE.resolve(EdrCapabilities.SDR) == HdrOutputMode.SDR, "scene mode falls back on an SDR display");
         require(HdrMode.ENHANCED.resolve(EdrCapabilities.SDR) == HdrOutputMode.SDR, "SDR display fallback");
+    }
+
+    private static void testLayerHeadroomPolicy() {
+        EdrCapabilities bootstrap = new EdrCapabilities(1.0f, 4.0f);
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(HdrOutputMode.ENHANCED, false, bootstrap) == 4.0f,
+                "HDR layer request uses potential headroom to bootstrap EDR"
+        );
+
+        EdrCapabilities active = new EdrCapabilities(3.0f, 4.0f);
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(HdrOutputMode.ENHANCED, false, active) == 4.0f,
+                "live display headroom does not feed the layer content declaration"
+        );
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(
+                        HdrOutputMode.EDR,
+                        false,
+                        new EdrCapabilities(1.2f, 1.8f)
+                ) == 1.8f,
+                "normal EDR output requests the display potential"
+        );
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(
+                        HdrOutputMode.ENHANCED,
+                        false,
+                        new EdrCapabilities(4.0f, 12.0f)
+                ) == HdrConfig.OUTPUT_HEADROOM,
+                "layer request is capped to the renderer output range"
+        );
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(HdrOutputMode.EDR, true, bootstrap)
+                        == HdrConfig.OUTPUT_HEADROOM,
+                "HDR diagnostic ramp requests its full eight-times range"
+        );
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(HdrOutputMode.SDR, true, bootstrap) == 1.0f,
+                "SDR output never requests EDR even for diagnostics"
+        );
+        require(
+                HdrLayerPolicy.requestedContentsHeadroom(HdrOutputMode.EDR, false, EdrCapabilities.SDR) == 1.0f,
+                "forced EDR on an SDR display does not invent headroom"
+        );
     }
 
     private static void testSemanticState() {

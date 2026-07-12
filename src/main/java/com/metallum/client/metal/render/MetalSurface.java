@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.hdr.HdrLayerPolicy;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandBuffer;
@@ -31,7 +32,9 @@ final class MetalSurface implements GpuSurfaceBackend {
     private MetalCommandEncoder pendingPresentEncoder;
     private EdrCapabilities edrCapabilities = EdrCapabilities.SDR;
     private HdrOutputMode outputMode = HdrOutputMode.SDR;
+    private float lastRequestedContentsHeadroom = Float.NaN;
     private boolean monitorFailureLogged;
+    private boolean contentsHeadroomFailureLogged;
     @Nullable
     private HdrOutputMode forcedOutputModeUntilReconfigure;
     private boolean drawableFailureLogged;
@@ -150,6 +153,9 @@ final class MetalSurface implements GpuSurfaceBackend {
                 : this.device.availableHdrOutputMode(this.hdrConfig.mode().resolve(this.edrCapabilities));
         this.device.setHdrOutputMode(desiredMode, this.edrCapabilities.currentHeadroom());
         if (desiredMode == this.outputMode || this.configuration == null) {
+            if (this.configuration != null) {
+                this.updateContentsHeadroomIfNeeded(desiredMode);
+            }
             return;
         }
 
@@ -177,14 +183,64 @@ final class MetalSurface implements GpuSurfaceBackend {
     }
 
     private boolean configureNative(final HdrOutputMode mode) {
-        return MetalNativeBridge.metallum_configure_layer(
+        float contentHeadroom = this.requestedContentsHeadroom(mode);
+        boolean configured = MetalNativeBridge.metallum_configure_layer(
                 this.metalLayer,
                 this.configuration.width(),
                 this.configuration.height(),
                 this.configuration.presentMode() == GpuSurface.PresentMode.MAILBOX ? 1 : 0,
                 mode.nativeValue(),
-                HdrConfig.OUTPUT_HEADROOM
+                contentHeadroom
         );
+        if (configured) {
+            this.lastRequestedContentsHeadroom = contentHeadroom;
+            this.contentsHeadroomFailureLogged = false;
+        }
+        return configured;
+    }
+
+    private void updateContentsHeadroomIfNeeded(final HdrOutputMode mode) {
+        float contentHeadroom = this.requestedContentsHeadroom(mode);
+        if (Float.compare(contentHeadroom, this.lastRequestedContentsHeadroom) == 0) {
+            return;
+        }
+
+        // Record the request even if the optional metadata update fails. The
+        // next retry should be caused by a real mode/potential-headroom change,
+        // not by every rendered frame.
+        this.lastRequestedContentsHeadroom = contentHeadroom;
+        try {
+            if (MetalNativeBridge.metallum_update_layer_contents_headroom(this.metalLayer, contentHeadroom)) {
+                this.contentsHeadroomFailureLogged = false;
+                return;
+            }
+            this.logContentsHeadroomFailure(null);
+        } catch (RuntimeException exception) {
+            this.logContentsHeadroomFailure(exception);
+        }
+    }
+
+    private float requestedContentsHeadroom(final HdrOutputMode mode) {
+        return HdrLayerPolicy.requestedContentsHeadroom(
+                mode,
+                this.hdrConfig.diagnosticPattern(),
+                this.edrCapabilities
+        );
+    }
+
+    private void logContentsHeadroomFailure(@Nullable final RuntimeException exception) {
+        if (this.contentsHeadroomFailureLogged) {
+            return;
+        }
+        this.contentsHeadroomFailureLogged = true;
+        if (exception == null) {
+            Metallum.LOGGER.warn("Failed to update CAMetalLayer content headroom; keeping the previous declaration");
+        } else {
+            Metallum.LOGGER.warn(
+                    "Failed to update CAMetalLayer content headroom; keeping the previous declaration",
+                    exception
+            );
+        }
     }
 
     private void setOutputMode(final HdrOutputMode mode) {

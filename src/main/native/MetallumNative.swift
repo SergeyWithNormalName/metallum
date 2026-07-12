@@ -2468,6 +2468,26 @@ public func metallum_MTLRenderCommandEncoder_clearDraw(
     }
 }
 
+@inline(__always)
+private func sanitizedLayerContentsHeadroom(_ contentHeadroom: Float) -> CGFloat {
+    let finiteHeadroom = contentHeadroom.isFinite ? contentHeadroom : 1.0
+    return CGFloat(min(max(finiteHeadroom, 1.0), 8.0))
+}
+
+@_cdecl("metallum_update_layer_contents_headroom")
+public func metallum_update_layer_contents_headroom(
+    _ layer: CAMetalLayer,
+    _ contentHeadroom: Float
+) -> Int32 {
+    if #available(macOS 26.0, *) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contentsHeadroom = sanitizedLayerContentsHeadroom(contentHeadroom)
+        CATransaction.commit()
+    }
+    return 1
+}
+
 @_cdecl("metallum_configure_layer")
 public func metallum_configure_layer(
     _ layer: CAMetalLayer,
@@ -2497,7 +2517,7 @@ public func metallum_configure_layer(
     if #available(macOS 26.0, *) {
         layer.preferredDynamicRange = useEdr ? .high : .standard
         layer.contentsHeadroom = useEdr
-            ? CGFloat(max(contentHeadroom, 1.01))
+            ? sanitizedLayerContentsHeadroom(contentHeadroom)
             : 1.0
         layer.wantsExtendedDynamicRangeContent = false
     } else {

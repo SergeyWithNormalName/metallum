@@ -54,6 +54,10 @@ private struct HdrAdaptiveState {
 }
 
 private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Void
+private typealias NativeUpdateLayerContentsHeadroomFunction = @convention(c) (
+    UnsafeRawPointer?, // layer
+    Float              // contentHeadroom
+) -> Int32
 private typealias NativeBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
     UnsafeRawPointer?, // sourceTexture
@@ -86,6 +90,17 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
 
 private func objectPointer(_ object: AnyObject) -> UnsafeRawPointer {
     UnsafeRawPointer(Unmanaged.passUnretained(object).toOpaque())
+}
+
+private func colorSpacesEqual(_ lhs: CGColorSpace?, _ rhs: CGColorSpace?) -> Bool {
+    switch (lhs, rhs) {
+    case (nil, nil):
+        return true
+    case let (lhs?, rhs?):
+        return CFEqual(lhs, rhs)
+    default:
+        return false
+    }
 }
 
 private func embeddedMsl(functionName: String, sourcePath: String) throws -> String {
@@ -1135,12 +1150,17 @@ private final class ValueValidation {
         }
         guard
             let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+            let updateLayerHeadroomSymbol = dlsym(handle, "metallum_update_layer_contents_headroom"),
             let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
         else {
             throw ValidationFailure.message("Native HDR present symbols are missing")
         }
         let initialize = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+        let updateLayerHeadroom = unsafeBitCast(
+            updateLayerHeadroomSymbol,
+            to: NativeUpdateLayerContentsHeadroomFunction.self
+        )
         let backdrop = unsafeBitCast(backdropSymbol, to: NativeBackdropFunction.self)
         let present = unsafeBitCast(presentSymbol, to: NativePresentFunction.self)
 
@@ -1164,12 +1184,41 @@ private final class ValueValidation {
         layer.framebufferOnly = false
         layer.drawableSize = CGSize(width: 16, height: 16)
         layer.allowsNextDrawableTimeout = false
+        layer.displaySyncEnabled = false
         view.wantsLayer = true
         view.layer = layer
         window.contentView = view
         window.orderFrontRegardless()
         defer { window.orderOut(nil) }
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        if #available(macOS 26.0, *) {
+            layer.contentsHeadroom = 1.0
+        }
+        let originalPixelFormat = layer.pixelFormat
+        let originalColorSpace = layer.colorspace
+        let originalDrawableSize = layer.drawableSize
+        let originalDisplaySyncEnabled = layer.displaySyncEnabled
+        let updateStatus = updateLayerHeadroom(objectPointer(layer), 2.5)
+        try require(updateStatus == 1, "Layer contents-headroom ABI returned \(updateStatus)")
+        if #available(macOS 26.0, *) {
+            try require(
+                abs(layer.contentsHeadroom - 2.5) < 0.0001,
+                "Layer contents headroom was not updated: \(layer.contentsHeadroom)"
+            )
+        }
+        try require(layer.pixelFormat == originalPixelFormat, "Layer headroom update changed pixel format")
+        try require(
+            colorSpacesEqual(layer.colorspace, originalColorSpace),
+            "Layer headroom update changed color space"
+        )
+        try require(layer.drawableSize == originalDrawableSize, "Layer headroom update changed drawable size")
+        try require(
+            layer.displaySyncEnabled == originalDisplaySyncEnabled,
+            "Layer headroom update changed display sync"
+        )
+        passCount += 1
+        print("PASS native layer contents-headroom ABI changes only the EDR declaration")
 
         initialize(objectPointer(gpu.device as AnyObject))
         guard let backdropQueue = gpu.device.makeCommandQueue() else {
