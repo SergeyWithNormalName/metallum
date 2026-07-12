@@ -12,8 +12,8 @@ The default `auto` mode enables the scene-wide HDR path when macOS reports an ED
 - an FP16 Minecraft MainTarget, FP16 scene continuations, and an extended-range world lightmap;
 - an atomic shader preflight which, when successful, decodes supported vanilla and Sodium raster output at the FP16 boundary so Metal's fixed-function blending operates on linear RGB;
 - the display's live EDR headroom as the output limit;
-- scene- and headroom-adaptive highlight reconstruction that preserves ordinary shadows and midtones;
-- source-authored emission from Minecraft and Sodium, plus FP16 local highlights and bloom;
+- scene- and headroom-adaptive highlight reconstruction that lets illuminated sky, clouds, foliage, and terrain use EDR while preserving ordinary shadows and midtones;
+- full-resolution, depth-validated source-authored emission from Minecraft and Sodium, plus coverage-weighted FP16 bloom that does not flatten emissive texture detail;
 - a separately seeded SDR GUI target, so HUD, text, menus, blur, vignette, and destination-dependent overlays retain their normal SDR appearance;
 - depth-aware semantic masking, so an emissive source hidden behind nearer geometry cannot bloom through it;
 - safe fallback from enhanced HDR to EDR and then SDR if native setup or presentation fails.

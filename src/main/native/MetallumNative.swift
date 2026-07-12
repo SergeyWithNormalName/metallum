@@ -31,6 +31,7 @@ private struct MetallumPresentUniforms {
     var bloomStrength: Float
     var sceneAvailable: UInt32
     var uiAvailable: UInt32
+    var semanticAvailable: UInt32
 }
 
 private struct MetallumHdrExtractUniforms {
@@ -150,6 +151,7 @@ private enum NativeState {
     static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
+    static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
 }
@@ -313,6 +315,7 @@ private func presentMslSource() -> String {
       float bloomStrength;
       uint sceneAvailable;
       uint uiAvailable;
+      uint semanticAvailable;
     };
 
     struct HdrAdaptiveState {
@@ -349,9 +352,7 @@ private func presentMslSource() -> String {
     }
 
     float metallum_peak_metric(float3 color) {
-      float mean = (color.r + color.g + color.b) / 3.0;
-      float3 delta = color - mean;
-      return mean + sqrt((2.0 / 3.0) * dot(delta, delta) + 1e-8);
+      return max(color.r, max(color.g, color.b));
     }
 
     float3 metallum_map_to_headroom(float3 color, float headroom) {
@@ -408,6 +409,8 @@ private func presentMslSource() -> String {
       texture2d<float> bloomFrame [[texture(3)]],
       texture2d<float> uiMaskFrame [[texture(4)]],
       texture2d<float> uiFrame [[texture(5)]],
+      texture2d<float> semanticFrame [[texture(6)]],
+      depth2d<float> sceneDepthFrame [[texture(7)]],
       sampler smp [[sampler(0)]],
       sampler auxiliarySmp [[sampler(1)]],
       constant PresentUniforms& uniforms [[buffer(0)]],
@@ -452,23 +455,57 @@ private func presentMslSource() -> String {
       float strength = uniforms.hdrStrength * headroomActivation;
       float3 sceneLinear = metallum_decode(sceneFrame.sample(smp, in.uv).rgb, uniforms.sourceEncoding);
       float4 emissionSample = max(emissionFrame.sample(auxiliarySmp, in.uv), 0.0);
-      float3 localEmission = emissionSample.rgb;
       float3 bloom = max(bloomFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
-      float bloomScale = uniforms.bloomStrength * strength
-        * min(0.75 + 0.45 * (uniforms.currentHeadroom - 1.0), 2.5);
+      float availableBloomRange = min(max(uniforms.currentHeadroom - 1.0, 0.0), 2.0);
+      float bloomScale = uniforms.bloomStrength * strength * availableBloomRange;
+      float3 bloomContribution = bloom * bloomScale;
+      float maximumBloomPeak = 0.15 * availableBloomRange;
+      float bloomPeak = metallum_peak_metric(bloomContribution);
+      if (bloomPeak > maximumBloomPeak && maximumBloomPeak > 0.0) {
+        bloomContribution *= maximumBloomPeak / bloomPeak;
+      }
       float2 uiControl = clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).rg, 0.0, 1.0);
       float sceneVisibility = (1.0 - uiControl.r) * (1.0 - uiControl.g);
+
+      // Direct semantic reconstruction is full-resolution. The quarter-size
+      // emission texture is deliberately used only as a coverage-weighted
+      // bloom seed so one bright texel cannot flatten or enlarge a 4x4 cell.
+      float semanticStrength = 0.0;
+      float semanticExact = 0.0;
+      if (uniforms.semanticAvailable != 0u) {
+        uint2 sceneSize = uint2(sceneFrame.get_width(), sceneFrame.get_height());
+        uint2 maximumCoordinate = max(sceneSize, uint2(1u)) - 1u;
+        float2 boundedUv = clamp(in.uv, float2(0.0), float2(0.999999));
+        uint2 coordinate = min(uint2(boundedUv * float2(sceneSize)), maximumCoordinate);
+        uint4 semanticBytes = uint4(round(clamp(semanticFrame.read(coordinate), 0.0, 1.0) * 255.0));
+        uint code = semanticBytes.x;
+        uint emission = code & 15u;
+        if ((code & 16u) != 0u && emission != 0u) {
+          uint markerPackedDepth = semanticBytes.y
+            | (semanticBytes.z << 8u)
+            | (semanticBytes.w << 16u);
+          uint scenePackedDepth = uint(round(
+            clamp(sceneDepthFrame.read(coordinate), 0.0, 1.0) * 16777215.0
+          ));
+          if (markerPackedDepth + 2u >= scenePackedDepth) {
+            semanticStrength = float(emission) / 15.0;
+            semanticExact = (code & 32u) != 0u ? 1.0 : 0.0;
+          }
+        }
+      }
 
       // Scene-wide highlight reconstruction. The SDR artistic exposure is
       // preserved below the shoulder; isolated and broadly bright world
       // highlights can use EDR without multiplying shadows or midtones.
       float sceneY = metallum_luminance(sceneLinear);
-      float sceneSignal = max(sceneY, 0.22 * metallum_peak_metric(sceneLinear));
+      float scenePeak = metallum_peak_metric(sceneLinear);
+      float chromaticHighlightGate = smoothstep(0.18, 0.45, sceneY);
+      float sceneSignal = max(sceneY, scenePeak * chromaticHighlightGate);
       float localY = emissionSample.a;
-      float detail = max(sceneSignal - localY, 0.0);
-      float localIsolation = smoothstep(0.06, 0.42, detail);
-      float adaptiveBreakpoint = clamp(adaptive.breakpoint, 0.48, 0.70);
-      float isolatedBreakpoint = max(0.48, adaptiveBreakpoint - 0.15);
+      float isolationDetail = max(sceneY - localY, 0.0);
+      float localIsolation = smoothstep(0.06, 0.42, isolationDetail);
+      float adaptiveBreakpoint = clamp(adaptive.breakpoint, 0.34, 0.70);
+      float isolatedBreakpoint = max(0.34, adaptiveBreakpoint - 0.15);
       float expansionStart = mix(adaptiveBreakpoint, isolatedBreakpoint, localIsolation);
       float expansionX = clamp((min(sceneSignal, 1.0) - expansionStart)
         / max(1.0 - expansionStart, 1e-5), 0.0, 1.0);
@@ -478,20 +515,28 @@ private func presentMslSource() -> String {
         1.0,
         min(uniforms.currentHeadroom, 3.0)
       );
-      float inferredPeak = 1.0 + (adaptivePeak - 1.0) * strength;
-      float inferredY = max(sceneSignal, min(sceneSignal, 1.0)
-        + (inferredPeak - 1.0) * expansionCurve);
-      float3 inferredScene = sceneLinear * (inferredY / max(sceneSignal, 1e-6));
+      float adaptiveActivation = smoothstep(1.0, 1.02, adaptivePeak);
+      float reconstructedPeak = scenePeak
+        + max(adaptivePeak - scenePeak, 0.0)
+        * expansionCurve * strength * adaptiveActivation;
+      float3 inferredScene = sceneLinear
+        * (reconstructedPeak / max(scenePeak, 1e-6));
 
-      // Semantic light is source-authored. Select it by luminance instead of
-      // adding it on top of inferred expansion, which would double-boost the
-      // same sun, lava or emissive texture.
-      float3 semanticScene = sceneLinear + localEmission * strength;
-      float3 selectedScene = metallum_luminance(semanticScene) > metallum_luminance(inferredScene)
+      // Semantic light is source-authored, but its body stays tied to the
+      // actual display range and to the source texel's brightness. This keeps
+      // the hierarchy and texture detail instead of driving every emitter to
+      // the same EDR ceiling.
+      float availableSemanticRange = max(min(uniforms.currentHeadroom, 4.0) - 1.0, 0.0);
+      float semanticFraction = semanticStrength * mix(0.55, 0.78, semanticExact);
+      float semanticDetail = smoothstep(0.12, 0.90, scenePeak);
+      float semanticScale = 1.0
+        + availableSemanticRange * semanticFraction * semanticDetail * strength;
+      float3 semanticScene = sceneLinear * semanticScale;
+      float3 selectedScene = semanticStrength > 0.0
         ? semanticScene
         : inferredScene;
       float3 sceneHdr = metallum_map_to_headroom(
-        selectedScene + bloom * bloomScale,
+        selectedScene + bloomContribution,
         uniforms.currentHeadroom
       );
       float3 mappedSceneBase = metallum_map_to_headroom(sceneLinear, uniforms.currentHeadroom);
@@ -635,12 +680,9 @@ private func hdrEffectsMslSource() -> String {
     ) {
       uint2 origin = uint2(in.position.xy) * 4u;
       uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
-      float3 brightestColor = float3(0.0);
-      float3 semanticColor = float3(0.0);
+      float3 semanticBloomSum = float3(0.0);
       float averageY = 0.0;
-      float maximumY = 0.0;
       float semanticStrength = 0.0;
-      float semanticExact = 0.0;
 
       for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
         for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
@@ -649,10 +691,6 @@ private func hdrEffectsMslSource() -> String {
           float3 color = metallum_hdr_decode(encodedSample.rgb, uniforms.sourceEncoding);
           float y = metallum_hdr_luminance(color);
           averageY += y;
-          if (y > maximumY) {
-            maximumY = y;
-            brightestColor = color;
-          }
 
           if (uniforms.semanticAvailable != 0u) {
             uint4 semanticBytes = uint4(round(clamp(semantic.read(coordinate), 0.0, 1.0) * 255.0));
@@ -672,13 +710,10 @@ private func hdrEffectsMslSource() -> String {
               if (markerPackedDepth + 2u >= scenePackedDepth) {
                 float candidateStrength = float(emission) / 15.0;
                 float candidateExact = (code & 32u) != 0u ? 1.0 : 0.0;
-                float candidateScore = candidateStrength + candidateExact / 32.0;
-                float currentScore = semanticStrength + semanticExact / 32.0;
-                if (candidateScore > currentScore || (candidateScore == currentScore && y > metallum_hdr_luminance(semanticColor))) {
-                  semanticStrength = candidateStrength;
-                  semanticExact = candidateExact;
-                  semanticColor = color;
-                }
+                float candidateBloomGain = candidateStrength
+                  * mix(0.20, 0.42, candidateExact);
+                semanticBloomSum += max(color, 0.0) * candidateBloomGain;
+                semanticStrength = max(semanticStrength, candidateStrength);
               }
             }
           }
@@ -696,8 +731,10 @@ private func hdrEffectsMslSource() -> String {
       }
 
       if (uniforms.semanticAvailable != 0u) {
-        float emissionGain = semanticStrength * mix(2.4, 3.2, semanticExact);
-        return float4(max(semanticColor, 0.0) * emissionGain, averageY);
+        return float4(
+          semanticBloomSum * (1.0 / 16.0),
+          averageY
+        );
       }
       // Generic scene reconstruction now handles non-semantic highlights.
       // Keeping the old visual fallback would apply two unrelated heuristics
@@ -743,7 +780,7 @@ private func hdrEffectsMslSource() -> String {
           previous.breakpoint = 0.70;
           previous.inferredPeak = 1.0;
         }
-        previous.breakpoint = clamp(previous.breakpoint, 0.48, 0.70);
+        previous.breakpoint = clamp(previous.breakpoint, 0.34, 0.70);
         previous.inferredPeak = clamp(previous.inferredPeak, 1.0, maximumInferredPeak);
         previous.currentHeadroom = safeHeadroom;
         stateBuffer[0] = previous;
@@ -790,15 +827,24 @@ private func hdrEffectsMslSource() -> String {
         smoothstep(0.55, 1.0, p99Y),
         isolatedPresence
       );
-      float broadHighlightSignal = smoothstep(0.35, 0.95, p90Y);
+      float broadHighlightSignal = smoothstep(0.24, 0.50, p90Y);
       float breakpointSignal = max(broadHighlightSignal, 0.5 * upperHighlightSignal);
-      float targetBreakpoint = clamp(0.70 - 0.22 * breakpointSignal, 0.48, 0.70);
+      float targetBreakpoint = clamp(0.70 - 0.36 * breakpointSignal, 0.34, 0.70);
 
       // Sparse highlights can approach 92% of the inferred EDR range. Broad
-      // white deliberately retains 35% so snow, clouds and pale skies still
-      // gain depth without turning the entire frame into a light source.
+      // outdoor light receives a larger fraction when headroom is scarce, so
+      // sky and clouds visibly enter EDR at 1.2x without becoming multi-stop
+      // emitters on a high-headroom display. Dense white remains restrained.
       float sparseWeight = 1.0 - smoothstep(0.08, 0.55, brightCoverage);
-      float expansionFraction = upperHighlightSignal * mix(0.35, 0.92, sparseWeight);
+      float mappingHeadroom = min(safeHeadroom, 3.0);
+      float lowHeadroomWeight = exp(-1.5 * max(mappingHeadroom - 1.0, 0.0));
+      float denseFraction = mix(0.16, 0.35, lowHeadroomWeight);
+      float broadSparseFraction = mix(0.20, 0.92, lowHeadroomWeight);
+      float sparseExpansion = upperHighlightSignal
+        * mix(denseFraction, 0.92, sparseWeight);
+      float broadExpansion = broadHighlightSignal
+        * mix(denseFraction, broadSparseFraction, sparseWeight);
+      float expansionFraction = max(sparseExpansion, broadExpansion);
       float targetPeak = 1.0
         + (maximumInferredPeak - 1.0) * clamp(expansionFraction, 0.0, 0.92);
       targetPeak = min(targetPeak, maximumInferredPeak);
@@ -821,7 +867,7 @@ private func hdrEffectsMslSource() -> String {
         : metallum_hdr_temporal_scalar(previous.inferredPeak, targetPeak, uniforms.deltaTime);
 
       HdrAdaptiveState next;
-      next.breakpoint = clamp(breakpoint, 0.48, 0.70);
+      next.breakpoint = clamp(breakpoint, 0.34, 0.70);
       // This cap is deliberately immediate, independent of temporal fall, so
       // an EDR headroom drop can never leave an over-range frame in flight.
       next.inferredPeak = clamp(inferredPeak, 1.0, maximumInferredPeak);
@@ -1042,6 +1088,27 @@ private func ensureHdrFallbackAdaptiveState(device: MTLDevice) -> MTLBuffer? {
         NativeState.hdrFallbackAdaptiveStates[key] = buffer
     }
     return buffer
+}
+
+private func ensureHdrFallbackDepthTexture(device: MTLDevice) -> MTLTexture? {
+    let key = objectAddress(device)
+    if let cached = NativeState.hdrFallbackDepthTextures[key] {
+        return cached
+    }
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .depth32Float,
+        width: 1,
+        height: 1,
+        mipmapped: false
+    )
+    descriptor.storageMode = .private
+    descriptor.usage = [.shaderRead]
+    let texture = device.makeTexture(descriptor: descriptor)
+    texture?.label = "Metallum HDR fallback depth"
+    if let texture {
+        NativeState.hdrFallbackDepthTextures[key] = texture
+    }
+    return texture
 }
 
 private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeight: Int) -> MetallumHdrWorkspace? {
@@ -1517,6 +1584,7 @@ public func metallum_init_pipelines(_ device: MTLDevice) {
         _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
         _ = ensureHdrPipelines(device: device)
         _ = ensureHdrFallbackAdaptiveState(device: device)
+        _ = ensureHdrFallbackDepthTexture(device: device)
         NativeState.presentLinearSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .linear)
         NativeState.presentNearestSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
@@ -1541,6 +1609,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
+        NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
         NativeState.presentNearestSamplers.removeValue(forKey: deviceAddress)
         NativeState.presentLinearSamplers.removeValue(forKey: deviceAddress)
     }
@@ -2753,6 +2822,15 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return -1
         }
 
+        let presentDepthTexture: MTLTexture
+        if hasHdrScene, let sceneDepthTexture {
+            presentDepthTexture = sceneDepthTexture
+        } else if let fallbackDepth = ensureHdrFallbackDepthTexture(device: commandBuffer.device) {
+            presentDepthTexture = fallbackDepth
+        } else {
+            return -1
+        }
+
         let renderPass = MTLRenderPassDescriptor()
         renderPass.colorAttachments[0].texture = drawable.texture
         renderPass.colorAttachments[0].loadAction = .dontCare
@@ -2782,6 +2860,8 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
         encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
         encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 5)
+        encoder.setFragmentTexture(hasCompatibleSemantic ? semanticTexture : sourceTexture, index: 6)
+        encoder.setFragmentTexture(presentDepthTexture, index: 7)
 
         var uniforms = MetallumPresentUniforms(
             mode: UInt32(clamping: max(outputMode, 0)),
@@ -2791,7 +2871,8 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
             bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
             sceneAvailable: hasHdrScene ? 1 : 0,
-            uiAvailable: hasCompatibleUi ? 1 : 0
+            uiAvailable: hasCompatibleUi ? 1 : 0,
+            semanticAvailable: hasCompatibleSemantic ? 1 : 0
         )
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)

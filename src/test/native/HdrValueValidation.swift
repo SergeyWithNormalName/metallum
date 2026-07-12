@@ -25,6 +25,7 @@ private struct PresentUniforms {
     var bloomStrength: Float
     var sceneAvailable: UInt32
     var uiAvailable: UInt32
+    var semanticAvailable: UInt32
 }
 
 private struct HdrExtractUniforms {
@@ -133,6 +134,17 @@ private func srgbToLinear(_ encoded: Float) -> Float {
     return Float(pow(Double((encoded + 0.055) / 1.055), 2.4))
 }
 
+private func semanticPixel(markerDepth: Float, code: UInt8) -> SIMD4<UInt8> {
+    let clamped = min(max(markerDepth, 0.0), 1.0)
+    let packed = UInt32((clamped * 16_777_215.0).rounded())
+    return SIMD4<UInt8>(
+        code,
+        UInt8(packed & 0xff),
+        UInt8((packed >> 8) & 0xff),
+        UInt8((packed >> 16) & 0xff)
+    )
+}
+
 private func boundaryBlendMslSource() -> String {
     """
     #include <metal_stdlib>
@@ -181,6 +193,19 @@ private func defaultAdaptiveState() -> HdrAdaptiveState {
         p99Log2: 0.0,
         brightCoverage: 0.05,
         currentHeadroom: 4.0,
+        valid: 1
+    )
+}
+
+private func identityAdaptiveState(headroom: Float) -> HdrAdaptiveState {
+    HdrAdaptiveState(
+        breakpoint: 0.70,
+        inferredPeak: 1.0,
+        medianLog2: -2.0,
+        p90Log2: -2.0,
+        p99Log2: -2.0,
+        brightCoverage: 0.0,
+        currentHeadroom: headroom,
         valid: 1
     )
 }
@@ -500,14 +525,7 @@ private final class GpuHarness {
     }
 
     func makeSemanticTexture(markerDepth: Float, code: UInt8 = 63) throws -> MTLTexture {
-        let clamped = min(max(markerDepth, 0.0), 1.0)
-        let packed = UInt32((clamped * 16_777_215.0).rounded())
-        return try makeRgba8Texture(bytes: SIMD4<UInt8>(
-            code,
-            UInt8(packed & 0xff),
-            UInt8((packed >> 8) & 0xff),
-            UInt8((packed >> 16) & 0xff)
-        ))
+        try makeRgba8Texture(bytes: semanticPixel(markerDepth: markerDepth, code: code))
     }
 
     func renderExtract(
@@ -770,9 +788,22 @@ private final class GpuHarness {
         uiMaskFrame: MTLTexture,
         uiFrame: MTLTexture,
         uniforms: PresentUniforms,
-        adaptiveState: HdrAdaptiveState = defaultAdaptiveState()
+        adaptiveState: HdrAdaptiveState = defaultAdaptiveState(),
+        semanticFrame: MTLTexture? = nil,
+        sceneDepthFrame: MTLTexture? = nil,
+        readCoordinate: SIMD2<Int>? = nil
     ) throws -> SIMD4<Float> {
         let output = try makePrivateRgba16FloatTexture(width: finalFrame.width, height: finalFrame.height)
+        let boundDepth: MTLTexture
+        if let sceneDepthFrame {
+            boundDepth = sceneDepthFrame
+        } else {
+            boundDepth = try makeDepthTexture(
+                width: finalFrame.width,
+                height: finalFrame.height,
+                clearDepth: 1.0
+            )
+        }
         var mutableAdaptiveState = adaptiveState
         let adaptiveBuffer = withUnsafeBytes(of: &mutableAdaptiveState) { bytes in
             device.makeBuffer(
@@ -807,6 +838,8 @@ private final class GpuHarness {
         encoder.setFragmentTexture(bloomFrame, index: 3)
         encoder.setFragmentTexture(uiMaskFrame, index: 4)
         encoder.setFragmentTexture(uiFrame, index: 5)
+        encoder.setFragmentTexture(semanticFrame ?? finalFrame, index: 6)
+        encoder.setFragmentTexture(boundDepth, index: 7)
         encoder.setFragmentSamplerState(nearestSampler, index: 0)
         encoder.setFragmentSamplerState(linearSampler, index: 1)
         var mutableUniforms = uniforms
@@ -819,7 +852,8 @@ private final class GpuHarness {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         try complete(commandBuffer, label: "HDR present")
-        return try readRgba16Float(texture: output, x: output.width / 2, y: output.height / 2)
+        let coordinate = readCoordinate ?? SIMD2<Int>(output.width / 2, output.height / 2)
+        return try readRgba16Float(texture: output, x: coordinate.x, y: coordinate.y)
     }
 
     func renderBoundaryLinearBlend(
@@ -939,8 +973,12 @@ private final class ValueValidation {
         try validateSdrIdentityAtHeadroomOne()
         try validateNonsemanticWhiteUsesHeadroom()
         try validateMidtoneIdentity()
+        try validateSaturatedSdrIdentity()
         try validateBoundaryLinearRasterAndBlend()
         try validateSemanticVisibilityAndOcclusion()
+        try validateFullResolutionSemanticTargets()
+        try validateCoverageWeightedBloomSeed()
+        try validateBloomPresentBoundsAndUiControl()
         try validateExtendedSrgbIsUnclipped()
         try validateSdrUiCeiling()
         try validateSeededUiQuantizationAndDeterminism()
@@ -949,6 +987,7 @@ private final class ValueValidation {
         try validateUiControlDilationChannels()
         try validateTwoChannelPresentVisibility()
         try validateUniformMidgrayHistogram()
+        try validateOutdoorSkyReconstruction()
         try validateSparseAndBroadWhiteTargets()
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
@@ -961,7 +1000,8 @@ private final class ValueValidation {
         sourceEncoding: UInt32 = 0,
         headroom: Float = 4,
         sceneAvailable: Bool = true,
-        uiAvailable: Bool = false
+        uiAvailable: Bool = false,
+        semanticAvailable: Bool = false
     ) -> PresentUniforms {
         PresentUniforms(
             mode: mode,
@@ -971,7 +1011,8 @@ private final class ValueValidation {
             hdrStrength: 1,
             bloomStrength: 0,
             sceneAvailable: sceneAvailable ? 1 : 0,
-            uiAvailable: uiAvailable ? 1 : 0
+            uiAvailable: uiAvailable ? 1 : 0,
+            semanticAvailable: semanticAvailable ? 1 : 0
         )
     }
 
@@ -1041,6 +1082,25 @@ private final class ValueValidation {
         pass("midtone remains appearance-identical", value)
     }
 
+    private func validateSaturatedSdrIdentity() throws {
+        let yellow = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 0, 255))
+        let aux = try auxiliaries()
+        let value = try gpu.renderPresent(
+            finalFrame: yellow,
+            sceneFrame: yellow,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: baseUniforms(headroom: 1.2),
+            adaptiveState: identityAdaptiveState(headroom: 1.2)
+        )
+        try require(abs(value.x - 1.0) < 0.004 && abs(value.y - 1.0) < 0.004,
+                    "SDR yellow was darkened by the HDR peak metric: \(rgbaDescription(value))")
+        try require(abs(value.z) < 0.002, "SDR yellow changed hue: \(rgbaDescription(value))")
+        pass("saturated SDR yellow preserves reference white and hue", value)
+    }
+
     private func validateBoundaryLinearRasterAndBlend() throws {
         let opaqueMidgray = try gpu.renderBoundaryLinearBlend(
             encodedSource: SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
@@ -1080,7 +1140,8 @@ private final class ValueValidation {
             sourceEncoding: 0
         )
         let visibleExtract = try gpu.readRgba16Float(texture: visibleEmission)
-        try require(visibleExtract.x > 1.8, "Visible semantic marker produced no HDR emission: \(rgbaDescription(visibleExtract))")
+        try require(visibleExtract.x > 0.20 && visibleExtract.x < 0.30,
+                    "Visible semantic marker produced an invalid bloom seed: \(rgbaDescription(visibleExtract))")
 
         let visibleValue = try gpu.renderPresent(
             finalFrame: scene,
@@ -1089,7 +1150,9 @@ private final class ValueValidation {
             bloomFrame: aux.bloom,
             uiMaskFrame: aux.uiMask,
             uiFrame: aux.transparentUi,
-            uniforms: baseUniforms()
+            uniforms: baseUniforms(semanticAvailable: true),
+            semanticFrame: visibleSemantic,
+            sceneDepthFrame: visibleDepth
         )
         try require(visibleValue.x > 1.05, "Visible semantic light did not enter EDR: \(rgbaDescription(visibleValue))")
         pass("visible semantic marker emits HDR", visibleValue)
@@ -1112,12 +1175,283 @@ private final class ValueValidation {
             bloomFrame: aux.bloom,
             uiMaskFrame: aux.uiMask,
             uiFrame: aux.transparentUi,
-            uniforms: baseUniforms()
+            uniforms: baseUniforms(semanticAvailable: true),
+            semanticFrame: occludedSemantic,
+            sceneDepthFrame: occludingDepth
         )
         let expectedBase = srgbToLinear(0.8)
         try require(abs(occludedValue.x - expectedBase) < 0.01, "Occluded semantic marker changed the scene: \(rgbaDescription(occludedValue))")
         try require(occludedValue.x <= 1.001, "Occluded semantic marker entered EDR: \(rgbaDescription(occludedValue))")
         pass("occluded semantic marker is rejected", occludedValue)
+    }
+
+    private func validateFullResolutionSemanticTargets() throws {
+        let white = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 255))
+        let depth = try gpu.makeDepthTexture(clearDepth: 0.5)
+        let sun = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 28)
+        let exact = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 63)
+        let aux = try auxiliaries()
+        let adaptive = identityAdaptiveState(headroom: 1.2)
+        let uniforms = baseUniforms(headroom: 1.2, semanticAvailable: true)
+
+        let sunValue = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: adaptive,
+            semanticFrame: sun,
+            sceneDepthFrame: depth
+        )
+        let exactValue = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: adaptive,
+            semanticFrame: exact,
+            sceneDepthFrame: depth
+        )
+        var aggressiveAdaptive = adaptive
+        aggressiveAdaptive.breakpoint = 0.34
+        aggressiveAdaptive.inferredPeak = 2.8
+        let sunWithAggressiveHistory = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: aggressiveAdaptive,
+            semanticFrame: sun,
+            sceneDepthFrame: depth
+        )
+        try require(sunValue.x > 1.05 && sunValue.x < 1.14,
+                    "Low-headroom sun target clipped or stayed SDR: \(rgbaDescription(sunValue))")
+        try require(exactValue.x > sunValue.x + 0.02 && exactValue.x < 1.18,
+                    "Exact emitter lost its bounded hierarchy: sun=\(rgbaDescription(sunValue)), exact=\(rgbaDescription(exactValue))")
+        try require(abs(sunWithAggressiveHistory.x - sunValue.x) < 0.004,
+                    "Generic adaptive history overrode authoritative semantic brightness: \(rgbaDescription(sunWithAggressiveHistory))")
+
+        let gray = try gpu.makeRgba8Texture(
+            width: 4,
+            height: 4,
+            bytes: SIMD4<UInt8>(204, 204, 204, 255)
+        )
+        var isolatedPixels = [SIMD4<UInt8>](
+            repeating: SIMD4<UInt8>(0, 0, 0, 0),
+            count: 16
+        )
+        let exactPixel = semanticPixel(markerDepth: 0.5, code: 63)
+        isolatedPixels[0] = exactPixel
+        let isolated = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: isolatedPixels)
+        let isolatedDepth = try gpu.makeDepthTexture(width: 4, height: 4, clearDepth: 0.5)
+        let base = srgbToLinear(0.8)
+        let tagged = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: adaptive,
+            semanticFrame: isolated,
+            sceneDepthFrame: isolatedDepth,
+            readCoordinate: SIMD2<Int>(0, 3)
+        )
+        let horizontalNeighbor = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: adaptive,
+            semanticFrame: isolated,
+            sceneDepthFrame: isolatedDepth,
+            readCoordinate: SIMD2<Int>(1, 3)
+        )
+        let verticalNeighbor = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: uniforms,
+            adaptiveState: adaptive,
+            semanticFrame: isolated,
+            sceneDepthFrame: isolatedDepth,
+            readCoordinate: SIMD2<Int>(0, 2)
+        )
+        try require(tagged.x > base + 0.035,
+                    "Tagged full-resolution texel did not receive semantic HDR: \(rgbaDescription(tagged))")
+        try require(abs(horizontalNeighbor.x - base) < 0.006,
+                    "Semantic HDR leaked horizontally from a tagged texel: \(rgbaDescription(horizontalNeighbor))")
+        try require(abs(verticalNeighbor.x - base) < 0.006,
+                    "Semantic HDR used the wrong vertically flipped source row: \(rgbaDescription(verticalNeighbor))")
+        passCount += 1
+        print(String(format: "PASS full-resolution semantic targets preserve hierarchy, XY isolation, and Y flip: sun %.3f, exact %.3f, neighbors %.3f/%.3f",
+                     sunValue.x, exactValue.x, horizontalNeighbor.x, verticalNeighbor.x))
+    }
+
+    private func validateCoverageWeightedBloomSeed() throws {
+        let scene = try gpu.makeRgba8Texture(
+            width: 4,
+            height: 4,
+            bytes: SIMD4<UInt8>(204, 204, 204, 255)
+        )
+        let depth = try gpu.makeDepthTexture(width: 4, height: 4, clearDepth: 0.5)
+        let full = try gpu.makeSemanticTexture(markerDepth: 0.5, code: 63)
+        var sparsePixels = [SIMD4<UInt8>](
+            repeating: SIMD4<UInt8>(0, 0, 0, 0),
+            count: 16
+        )
+        sparsePixels[0] = semanticPixel(markerDepth: 0.5, code: 63)
+        let sparse = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: sparsePixels)
+        var mixedPixels = [SIMD4<UInt8>](repeating: semanticPixel(markerDepth: 0.5, code: 17), count: 16)
+        for index in 0..<8 {
+            mixedPixels[index] = semanticPixel(markerDepth: 0.5, code: 63)
+        }
+        let mixed = try gpu.makeRgba8Texture(width: 4, height: 4, pixels: mixedPixels)
+        let fullSeed = try gpu.readRgba16Float(texture: gpu.renderExtract(
+            scene: scene,
+            semantic: full,
+            depth: depth,
+            sourceEncoding: 0
+        ))
+        let sparseSeed = try gpu.readRgba16Float(texture: gpu.renderExtract(
+            scene: scene,
+            semantic: sparse,
+            depth: depth,
+            sourceEncoding: 0
+        ))
+        let mixedSeed = try gpu.readRgba16Float(texture: gpu.renderExtract(
+            scene: scene,
+            semantic: mixed,
+            depth: depth,
+            sourceEncoding: 0
+        ))
+        let energyRatio = sparseSeed.x / max(fullSeed.x, 1e-6)
+        let mixedRatio = mixedSeed.x / max(fullSeed.x, 1e-6)
+        let expectedMixedRatio: Float = 0.5 + 0.5 * ((0.20 / 15.0) / 0.42)
+        try require(fullSeed.x > 0.20 && fullSeed.x < 0.30,
+                    "Full semantic bloom seed is outside its bounded range: \(rgbaDescription(fullSeed))")
+        try require(abs(energyRatio - 1.0 / 16.0) < 0.01,
+                    "One semantic texel did not contribute 1/16 bloom energy: ratio=\(energyRatio)")
+        try require(abs(mixedRatio - expectedMixedRatio) < 0.01,
+                    "Mixed semantic strengths were not accumulated per texel: ratio=\(mixedRatio), expected=\(expectedMixedRatio)")
+        passCount += 1
+        print(String(format: "PASS quarter-resolution bloom seed is coverage weighted: one %.4f, mixed %.4f",
+                     energyRatio, mixedRatio))
+    }
+
+    private func validateBloomPresentBoundsAndUiControl() throws {
+        let gray = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(128, 128, 128, 255))
+        let bloom = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(1, 1, 1, 1)
+        )
+        let aux = try auxiliaries()
+        let base = srgbToLinear(Float(128) / 255.0)
+
+        var lowUniforms = baseUniforms(headroom: 1.2)
+        lowUniforms.bloomStrength = 0.18
+        let low = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: lowUniforms,
+            adaptiveState: identityAdaptiveState(headroom: 1.2)
+        )
+        let lowDelta = low.x - base
+        try require(lowDelta >= 0.028 && lowDelta <= 0.031,
+                    "Low-headroom bloom escaped its 15%-of-range cap: delta=\(lowDelta)")
+
+        var highUniforms = baseUniforms(headroom: 3.0)
+        highUniforms.bloomStrength = 0.18
+        let high = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: highUniforms,
+            adaptiveState: identityAdaptiveState(headroom: 3.0)
+        )
+        let highDelta = high.x - base
+        try require(highDelta >= 0.295 && highDelta <= 0.305,
+                    "High-headroom bloom escaped its bounded scale: delta=\(highDelta)")
+
+        let halfUiControl = try gpu.makeRg8Texture(bytes: SIMD2<UInt8>(128, 0))
+        let controlled = try gpu.renderPresent(
+            finalFrame: gray,
+            sceneFrame: gray,
+            emissionFrame: aux.emission,
+            bloomFrame: bloom,
+            uiMaskFrame: halfUiControl,
+            uiFrame: aux.transparentUi,
+            uniforms: lowUniforms,
+            adaptiveState: identityAdaptiveState(headroom: 1.2)
+        )
+        let controlledRatio = (controlled.x - base) / max(lowDelta, 1e-6)
+        let expectedRatio = 1.0 - Float(128) / 255.0
+        try require(abs(controlledRatio - expectedRatio) < 0.01,
+                    "UI control did not attenuate bloom with the complete HDR delta: ratio=\(controlledRatio)")
+
+        let brightUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 0))
+        let brightScene = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(204, 204, 204, 255))
+        let brightSceneLinear = srgbToLinear(0.8)
+        let sceneAverage = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(0, 0, 0, brightSceneLinear)
+        )
+        var aggressive = identityAdaptiveState(headroom: 1.2)
+        aggressive.breakpoint = 0.34
+        aggressive.inferredPeak = 2.8
+        let capped = try gpu.renderPresent(
+            finalFrame: brightScene,
+            sceneFrame: brightScene,
+            emissionFrame: sceneAverage,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: brightUi,
+            uniforms: baseUniforms(headroom: 1.2, uiAvailable: true),
+            adaptiveState: aggressive
+        )
+        let partialControl = try gpu.makeRg8Texture(bytes: SIMD2<UInt8>(128, 128))
+        let partiallyControlled = try gpu.renderPresent(
+            finalFrame: brightScene,
+            sceneFrame: brightScene,
+            emissionFrame: sceneAverage,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: partialControl,
+            uiFrame: brightUi,
+            uniforms: baseUniforms(headroom: 1.2, uiAvailable: true),
+            adaptiveState: aggressive
+        )
+        try require(capped.x >= 1.19 && capped.x <= 1.2005,
+                    "Seeded UI base plus HDR delta escaped the drawable headroom cap: \(rgbaDescription(capped))")
+        try require(partiallyControlled.x > 1.0 && partiallyControlled.x < capped.x - 0.02,
+                    "Partial R/G UI control was not monotonic below the headroom cap: \(rgbaDescription(partiallyControlled))")
+        passCount += 1
+        print(String(format: "PASS bloom/UI delta stays bounded and monotonic: low %.3f, high %.3f, visibility %.3f, cap %.3f",
+                     lowDelta, highDelta, controlledRatio, capped.x))
     }
 
     private func validateExtendedSrgbIsUnclipped() throws {
@@ -1419,6 +1753,109 @@ private final class ValueValidation {
         print("PASS 64-bin GPU histogram counts one midgray sample per quarter cell and excludes semantic emission")
     }
 
+    private func validateOutdoorSkyReconstruction() throws {
+        let cellsWide = 8
+        let cellsHigh = 8
+        let width = cellsWide * 4
+        let height = cellsHigh * 4
+        let sky = SIMD4<UInt8>(132, 168, 241, 255)
+        let cloud = SIMD4<UInt8>(210, 220, 240, 255)
+        let landscape = SIMD4<UInt8>(100, 140, 80, 255)
+        var pixels = [SIMD4<UInt8>](repeating: sky, count: width * height)
+        for cell in 0..<(cellsWide * cellsHigh) {
+            let cellColor: SIMD4<UInt8>
+            if cell < 12 {
+                cellColor = landscape
+            } else if cell < 52 {
+                cellColor = sky
+            } else {
+                cellColor = cloud
+            }
+            let cellX = cell % cellsWide
+            let cellY = cell / cellsWide
+            for y in 0..<4 {
+                for x in 0..<4 {
+                    pixels[(cellY * 4 + y) * width + cellX * 4 + x] = cellColor
+                }
+            }
+        }
+
+        let outdoor = try gpu.makeRgba8Texture(width: width, height: height, pixels: pixels)
+        let analysis = try gpu.analyzeHistogram(scene: outdoor, currentHeadroom: 1.2)
+        try require(analysis.state.breakpoint <= 0.45,
+                    "Outdoor scene did not lower the reconstruction breakpoint: \(analysis.state.breakpoint)")
+        try require(analysis.state.inferredPeak >= 1.10 && analysis.state.inferredPeak <= 1.201,
+                    "Outdoor scene did not allocate bounded low-headroom EDR: \(analysis.state.inferredPeak)")
+
+        let skyFrame = try gpu.makeRgba8Texture(bytes: sky)
+        let skyR = srgbToLinear(Float(sky.x) / 255.0)
+        let skyG = srgbToLinear(Float(sky.y) / 255.0)
+        let skyB = srgbToLinear(Float(sky.z) / 255.0)
+        let skyY = 0.2126 * skyR + 0.7152 * skyG + 0.0722 * skyB
+        let emission = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(0, 0, 0, skyY)
+        )
+        let aux = try auxiliaries()
+        let value = try gpu.renderPresent(
+            finalFrame: skyFrame,
+            sceneFrame: skyFrame,
+            emissionFrame: emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: baseUniforms(headroom: 1.2),
+            adaptiveState: analysis.state
+        )
+        let outputPeak = max(value.x, max(value.y, value.z))
+        try require(outputPeak > 1.01 && outputPeak <= 1.201,
+                    "Blue outdoor sky did not enter safe EDR: \(rgbaDescription(value))")
+
+        var disabledUniforms = baseUniforms(headroom: 1.2)
+        disabledUniforms.hdrStrength = 0
+        let disabled = try gpu.renderPresent(
+            finalFrame: skyFrame,
+            sceneFrame: skyFrame,
+            emissionFrame: emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: disabledUniforms,
+            adaptiveState: analysis.state
+        )
+        try require(abs(disabled.x - skyR) < 0.004
+                    && abs(disabled.y - skyG) < 0.004
+                    && abs(disabled.z - skyB) < 0.004,
+                    "hdrStrength=0 changed the outdoor scene: \(rgbaDescription(disabled))")
+
+        let darkBlue = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(0, 0, 200, 255))
+        let darkBlueLinear = srgbToLinear(Float(200) / 255.0)
+        let darkBlueY = 0.0722 * darkBlueLinear
+        let darkEmission = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(0, 0, 0, darkBlueY)
+        )
+        let darkValue = try gpu.renderPresent(
+            finalFrame: darkBlue,
+            sceneFrame: darkBlue,
+            emissionFrame: darkEmission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: aux.uiMask,
+            uiFrame: aux.transparentUi,
+            uniforms: baseUniforms(headroom: 1.2),
+            adaptiveState: analysis.state
+        )
+        try require(abs(darkValue.x) < 0.002
+                    && abs(darkValue.y) < 0.002
+                    && abs(darkValue.z - darkBlueLinear) < 0.004,
+                    "Outdoor adaptation made a dark saturated texel emissive: \(rgbaDescription(darkValue))")
+        passCount += 1
+        print(String(format: "PASS outdoor sky uses low-headroom EDR without lifting dark chroma: peak %.3f",
+                     outputPeak))
+    }
+
     private func validateSparseAndBroadWhiteTargets() throws {
         let sparse = try makeQuarterCellScene(
             cellsWide: 16,
@@ -1432,12 +1869,14 @@ private final class ValueValidation {
         )
         let sparseAnalysis = try gpu.analyzeHistogram(scene: sparse, currentHeadroom: 4)
         let broadAnalysis = try gpu.analyzeHistogram(scene: broad, currentHeadroom: 4)
+        let broadAtThree = try gpu.analyzeHistogram(scene: broad, currentHeadroom: 3).state
+        let broadAtEight = try gpu.analyzeHistogram(scene: broad, currentHeadroom: 8).state
         let sparseState = sparseAnalysis.state
         let broadState = broadAnalysis.state
 
         for (name, state) in [("sparse", sparseState), ("broad", broadState)] {
-            try require((0.48...0.70).contains(state.breakpoint),
-                        "\(name) breakpoint escaped [0.48, 0.70]: \(state.breakpoint)")
+            try require((0.34...0.70).contains(state.breakpoint),
+                        "\(name) breakpoint escaped [0.34, 0.70]: \(state.breakpoint)")
             try require(state.inferredPeak >= 1.0 && state.inferredPeak <= 3.001,
                         "\(name) inferred peak is unsafe: \(state.inferredPeak)")
             try require(state.inferredPeak <= state.currentHeadroom + 0.001,
@@ -1450,8 +1889,10 @@ private final class ValueValidation {
         try require(sparseState.inferredPeak > broadState.inferredPeak + 0.5,
                     "Sparse highlight peak must exceed broad white: sparse=\(sparseState.inferredPeak), broad=\(broadState.inferredPeak)")
         let broadExpansionFraction = (broadState.inferredPeak - 1.0) / 2.0
-        try require(broadExpansionFraction >= 0.349,
-                    "Broad white lost its 35% minimum expansion: \(broadExpansionFraction)")
+        try require(broadExpansionFraction >= 0.15 && broadExpansionFraction <= 0.36,
+                    "Broad white escaped its restrained expansion band: \(broadExpansionFraction)")
+        try require(abs(broadAtEight.inferredPeak - broadAtThree.inferredPeak) < 0.002,
+                    "Broad target became darker above the 3x reconstruction ceiling: H3=\(broadAtThree.inferredPeak), H8=\(broadAtEight.inferredPeak)")
 
         // The p50 jump from midgray-dominated sparse content to full white is
         // over two stops, so temporal state must reset instead of ghosting.
