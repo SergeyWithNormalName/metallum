@@ -2136,7 +2136,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && sceneDepthTexture!.height == sourceTexture.height
             && {
                 switch sceneDepthTexture!.pixelFormat {
-                case .depth16Unorm, .depth32Float, .depth24Unorm_stencil8, .depth32Float_stencil8:
+                case .depth32Float, .depth32Float_stencil8:
                     return true
                 default:
                     return false

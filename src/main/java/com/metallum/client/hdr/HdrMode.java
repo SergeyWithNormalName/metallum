@@ -26,8 +26,8 @@ public enum HdrMode {
         }
         return switch (this) {
             case OFF -> HdrOutputMode.SDR;
-            case EDR, AUTO -> HdrOutputMode.EDR;
-            case ENHANCED -> HdrOutputMode.ENHANCED;
+            case EDR -> HdrOutputMode.EDR;
+            case ENHANCED, AUTO -> HdrOutputMode.ENHANCED;
         };
     }
 }

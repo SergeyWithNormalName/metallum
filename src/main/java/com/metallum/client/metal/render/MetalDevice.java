@@ -3,7 +3,9 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
+import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -63,6 +65,8 @@ final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private MetalGpuTexture hdrSceneSnapshot;
     @Nullable
+    private MetalGpuTexture hdrSceneDepthSnapshot;
+    @Nullable
     private MetalGpuTexture hdrSemanticMask;
     private MemorySegment hdrSceneDepthHandle = MemorySegment.NULL;
     private boolean hdrSemanticSceneAvailable;
@@ -70,6 +74,7 @@ final class MetalDevice implements GpuDeviceBackend {
     private long hdrSemanticMaskTouchedSubmitIndex = Long.MIN_VALUE;
     private boolean hdrEnhancedActive;
     private boolean hdrEnhancementUnavailable;
+    private boolean hdrEnhancementActivationLogged;
     private boolean hdrSceneAvailable;
     private long hdrSceneSubmitIndex = Long.MIN_VALUE;
 
@@ -88,6 +93,10 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
         this.hdrConfig = HdrConfig.load();
+        HdrMode configuredHdrMode = this.hdrConfig.mode();
+        HdrSemanticState.setRequested(
+                configuredHdrMode == HdrMode.AUTO || configuredHdrMode == HdrMode.ENHANCED
+        );
         this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
         if (MetalNativeBridge.isNullHandle(this.edrMonitor)) {
             Metallum.LOGGER.warn("Failed to create EDR display monitor; HDR will use the safe SDR fallback");
@@ -213,6 +222,10 @@ final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneSnapshot.close();
             this.hdrSceneSnapshot = null;
         }
+        if (this.hdrSceneDepthSnapshot != null) {
+            this.hdrSceneDepthSnapshot.close();
+            this.hdrSceneDepthSnapshot = null;
+        }
         if (this.hdrSemanticMask != null) {
             this.hdrSemanticMask.close();
             this.hdrSemanticMask = null;
@@ -271,6 +284,10 @@ final class MetalDevice implements GpuDeviceBackend {
         this.hdrEnhancedActive = !this.hdrEnhancementUnavailable
                 && outputMode == HdrOutputMode.ENHANCED
                 && currentHeadroom > 1.001f;
+        if (this.hdrEnhancedActive && !this.hdrEnhancementActivationLogged) {
+            this.hdrEnhancementActivationLogged = true;
+            Metallum.LOGGER.info("Semantic HDR enhancement is active with current EDR headroom {}", currentHeadroom);
+        }
         if (!this.hdrEnhancedActive) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
@@ -332,6 +349,11 @@ final class MetalDevice implements GpuDeviceBackend {
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
+        if (depth.getWidth(0) != width || depth.getHeight(0) != height) {
+            this.hdrSceneAvailable = false;
+            this.hdrSemanticSceneAvailable = false;
+            return;
+        }
         if (this.hdrSceneSnapshot == null
                 || this.hdrSceneSnapshot.isClosed()
                 || this.hdrSceneSnapshot.getWidth(0) != width
@@ -358,10 +380,37 @@ final class MetalDevice implements GpuDeviceBackend {
             }
         }
 
+        if (this.hdrSceneDepthSnapshot == null
+                || this.hdrSceneDepthSnapshot.isClosed()
+                || this.hdrSceneDepthSnapshot.getWidth(0) != width
+                || this.hdrSceneDepthSnapshot.getHeight(0) != height
+                || this.hdrSceneDepthSnapshot.getFormat() != depth.getFormat()) {
+            if (this.hdrSceneDepthSnapshot != null) {
+                this.hdrSceneDepthSnapshot.close();
+            }
+            try {
+                this.hdrSceneDepthSnapshot = new MetalGpuTexture(
+                        this,
+                        GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+                        "Metallum HDR scene depth snapshot",
+                        depth.getFormat(),
+                        width,
+                        height,
+                        1,
+                        1
+                );
+            } catch (RuntimeException exception) {
+                this.disableHdrEnhancement();
+                Metallum.LOGGER.error("Failed to allocate the HDR scene depth snapshot; continuing with EDR output", exception);
+                return;
+            }
+        }
+
         this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
+        this.commandEncoder.copyTextureToTexture(depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height);
         this.hdrSceneAvailable = true;
         this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
-        this.hdrSceneDepthHandle = depth.nativeHandle();
+        this.hdrSceneDepthHandle = this.hdrSceneDepthSnapshot.nativeHandle();
         this.hdrSemanticSceneAvailable = this.hdrSemanticMask != null
                 && !this.hdrSemanticMask.isClosed()
                 && this.hdrSemanticMask.getWidth(0) == width

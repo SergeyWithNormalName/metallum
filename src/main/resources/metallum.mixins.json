@@ -7,8 +7,8 @@
   ],
   "client": [
     "render.HdrSceneCaptureMixin",
+    "render.HdrShaderMixin",
     "render.PreferredGraphicsApiMixin",
-    "render.SodiumHdrShaderMixin",
     "sodium.BlockRendererHdrMixin",
     "sodium.ChunkMeshBufferBuilderHdrMixin",
     "sodium.ChunkVertexEncoderVertexHdrMixin",

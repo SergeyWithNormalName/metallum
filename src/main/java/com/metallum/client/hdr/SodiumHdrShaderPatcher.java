@@ -58,7 +58,8 @@ public final class SodiumHdrShaderPatcher {
                 patched,
                 "    fragColor = _linearFog(color, v_FragDistance, u_FogColor, u_EnvironmentFog, u_RenderFog, fadeFactor);",
                 "    fragColor = _linearFog(color, v_FragDistance, u_FogColor, u_EnvironmentFog, u_RenderFog, fadeFactor);\n"
-                        + "    uint metallumHdrEmission = (" + MATERIAL_VARYING + " >> 3u) & 15u;\n"
+                        + "    uint metallumHdrSourceEmission = (" + MATERIAL_VARYING + " >> 3u) & 15u;\n"
+                        + "    uint metallumHdrEmission = uint(round(float(metallumHdrSourceEmission) * clamp(fragColor.a, 0.0, 1.0)));\n"
                         + "    uint metallumHdrExact = (" + MATERIAL_VARYING + " >> 7u) & 1u;\n"
                         + "    uint metallumHdrCode = metallumHdrEmission == 0u\n"
                         + "            ? 0u\n"
