@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.metal.render.MetalHdrFrame;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import org.spongepowered.asm.mixin.Mixin;
@@ -32,6 +33,7 @@ abstract class MainTargetMixin {
             // inherited resize path. Keep RenderTarget.format in sync so a
             // resize/fullscreen transition cannot silently return to RGBA8.
             ((RenderTargetAccessor) this).metallum$setFormat(GpuFormat.RGBA16_FLOAT);
+            MetalHdrFrame.markSceneColor(((MainTarget) (Object) this).getColorTexture());
             com.metallum.Metallum.LOGGER.info("MainTarget color format: RGBA16_FLOAT");
         }
     }

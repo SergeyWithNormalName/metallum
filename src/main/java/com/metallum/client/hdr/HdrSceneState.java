@@ -10,7 +10,7 @@ package com.metallum.client.hdr;
  */
 public final class HdrSceneState {
     private static volatile boolean requested;
-    private static volatile HdrSourceEncoding sourceEncoding = HdrSourceEncoding.SRGB;
+    private static volatile HdrSourceEncoding configuredSourceEncoding = HdrSourceEncoding.SRGB;
 
     private HdrSceneState() {
     }
@@ -20,11 +20,21 @@ public final class HdrSceneState {
     }
 
     public static HdrSourceEncoding sourceEncoding() {
-        return sourceEncoding;
+        if (requested && SceneLinearPreflightGate.isActive()) {
+            return HdrSourceEncoding.LINEAR;
+        }
+        // A requested FP16 scene whose preflight failed must remain wholly on
+        // the legacy gamma contract, even if an old config requested LINEAR.
+        return requested ? HdrSourceEncoding.SRGB : configuredSourceEncoding;
+    }
+
+    public static HdrSourceEncoding configuredSourceEncoding() {
+        return configuredSourceEncoding;
     }
 
     public static void configure(final HdrConfig config, final EdrCapabilities capabilities) {
-        sourceEncoding = config.sourceEncoding();
+        SceneLinearPreflightGate.reset();
+        configuredSourceEncoding = config.sourceEncoding();
         HdrMode mode = config.mode();
         boolean modeRequestsScene = mode == HdrMode.AUTO
                 || mode == HdrMode.SCENE
@@ -34,6 +44,7 @@ public final class HdrSceneState {
 
     public static void reset() {
         requested = false;
-        sourceEncoding = HdrSourceEncoding.SRGB;
+        configuredSourceEncoding = HdrSourceEncoding.SRGB;
+        SceneLinearPreflightGate.reset();
     }
 }

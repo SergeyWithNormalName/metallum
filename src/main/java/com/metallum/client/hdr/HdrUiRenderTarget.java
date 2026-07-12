@@ -17,6 +17,7 @@ public final class HdrUiRenderTarget {
     private static boolean activationLogged;
     private static boolean screenshotLogged;
     private static boolean lastUiFinished;
+    private static boolean backdropBlurredThisFrame;
     @Nullable
     private static RenderTarget activeSource;
     @Nullable
@@ -30,6 +31,7 @@ public final class HdrUiRenderTarget {
         activeSource = null;
         lastUiFinished = false;
         lastUiSource = null;
+        backdropBlurredThisFrame = false;
         if (unavailable || !HdrSceneState.isRequested()) {
             return mainTarget;
         }
@@ -76,7 +78,7 @@ public final class HdrUiRenderTarget {
     public static void finish() {
         if (activeThisFrame && target != null) {
             try {
-                MetalHdrFrame.captureUi(target.getColorTextureView());
+                MetalHdrFrame.captureUi(target.getColorTextureView(), backdropBlurredThisFrame);
                 lastUiFinished = true;
                 lastUiSource = activeSource;
             } catch (Throwable throwable) {
@@ -88,6 +90,14 @@ public final class HdrUiRenderTarget {
         }
         activeThisFrame = false;
         activeSource = null;
+        backdropBlurredThisFrame = false;
+    }
+
+    /** Marks a menu frame whose seeded scene was intentionally blurred. */
+    public static void markBackdropBlurred() {
+        if (activeThisFrame) {
+            backdropBlurredThisFrame = true;
+        }
     }
 
     @Nullable
@@ -114,6 +124,7 @@ public final class HdrUiRenderTarget {
         activeSource = null;
         lastUiFinished = false;
         lastUiSource = null;
+        backdropBlurredThisFrame = false;
         if (target != null) {
             target.destroyBuffers();
             target = null;
@@ -126,6 +137,7 @@ public final class HdrUiRenderTarget {
         activeSource = null;
         lastUiFinished = false;
         lastUiSource = null;
+        backdropBlurredThisFrame = false;
         if (target != null) {
             try {
                 target.destroyBuffers();

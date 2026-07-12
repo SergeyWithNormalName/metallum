@@ -1,6 +1,8 @@
 package com.metallum.client.hdr;
 
 import java.util.Properties;
+import java.util.HashMap;
+import java.util.Map;
 
 public final class HdrConfigTests {
     private HdrConfigTests() {
@@ -14,6 +16,8 @@ public final class HdrConfigTests {
         testSemanticState();
         testSceneState();
         testPipelineShaderFlavorPolicy();
+        testSceneLinearShaderPatchingAndGate();
+        SceneLinearClearColorTests.run();
         testSodiumShaderPatching();
         testVanillaShaderPatching();
         testLightmapShaderPatching();
@@ -250,6 +254,216 @@ public final class HdrConfigTests {
                 HdrPipelinePolicy.selectFlavor(unknown, true, true) == HdrShaderFlavor.LEGACY,
                 "unknown FP16 pipeline safely stays legacy"
         );
+    }
+
+    private static void testSceneLinearShaderPatchingAndGate() {
+        String raster = "#version 330\nout vec4 fragColor;\nvoid main() {\n"
+                + "    fragColor = vec4(0.5, 1.5, -0.5, 0.25);\n}\n";
+        SceneLinearShaderPatcher.Result rasterPatch = SceneLinearShaderPatcher.patch(
+                "minecraft",
+                "core/item",
+                SceneLinearShaderPatcher.Stage.FRAGMENT,
+                HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                raster
+        );
+        require(rasterPatch.success(), "raster boundary patch succeeds");
+        require(SceneLinearShaderPatcher.isRasterPatched(rasterPatch.source()), "raster boundary marker");
+        require(
+                SceneLinearShaderPatcher.patch(
+                        "minecraft",
+                        "core/item",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT,
+                        HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                        rasterPatch.source()
+                ).source().equals(rasterPatch.source()),
+                "raster boundary patch is idempotent"
+        );
+        require(
+                SceneLinearShaderPatcher.patch(
+                        "minecraft",
+                        "core/item",
+                        SceneLinearShaderPatcher.Stage.VERTEX,
+                        HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                        raster
+                ).source().equals(raster),
+                "scene raster vertex source stays unchanged"
+        );
+        require(
+                !SceneLinearShaderPatcher.patch(
+                        "minecraft",
+                        "core/item",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT,
+                        HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                        "void main() {}"
+                ).success(),
+                "malformed raster source fails closed"
+        );
+
+        String invert = "#version 330\nuniform sampler2D InSampler;\nin vec2 texCoord;\n"
+                + "out vec4 fragColor;\nvoid main() {\n"
+                + "    vec4 diffuseColor = texture(InSampler, texCoord);\n"
+                + "    fragColor = vec4((1.0 - diffuseColor).rgb, 1.0);\n}\n";
+        SceneLinearShaderPatcher.Result postPatch = SceneLinearShaderPatcher.patch(
+                "minecraft",
+                "post/invert",
+                SceneLinearShaderPatcher.Stage.FRAGMENT,
+                HdrShaderFlavor.SCENE_POST_LINEAR,
+                invert
+        );
+        require(postPatch.success(), "display-authored post patch succeeds");
+        require(SceneLinearShaderPatcher.isDisplayPostPatched(postPatch.source()), "post encode/decode wrapper");
+        require(
+                SceneLinearShaderPatcher.patch(
+                        "minecraft",
+                        "post/invert",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT,
+                        HdrShaderFlavor.SCENE_POST_LINEAR,
+                        postPatch.source()
+                ).source().equals(postPatch.source()),
+                "display-authored post patch is idempotent"
+        );
+        require(
+                SceneLinearShaderPatcher.patch(
+                        "minecraft",
+                        "post/box_blur",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT,
+                        HdrShaderFlavor.SCENE_POST_LINEAR,
+                        raster
+                ).source().equals(raster),
+                "linear blur remains pass-through"
+        );
+
+        float halfLinear = SceneLinearShaderPatcher.extendedSrgbToLinear(0.5f);
+        require(Math.abs(halfLinear - 0.21404114f) < 0.00001f, "exact sRGB boundary decode");
+        require(
+                Math.abs(SceneLinearShaderPatcher.extendedSrgbToLinear(-0.5f) + halfLinear) < 0.00001f,
+                "extended sRGB decode preserves negative sign"
+        );
+        require(
+                Math.abs(SceneLinearShaderPatcher.linearToExtendedSrgb(halfLinear) - 0.5f) < 0.00001f,
+                "linear boundary encoding round trip"
+        );
+
+        Map<SceneLinearPreflightGate.ShaderKey, String> sources = requiredSceneShaderSources(raster);
+        SceneLinearPreflightGate.Evaluation active = SceneLinearPreflightGate.evaluate(
+                sources,
+                true,
+                false,
+                true
+        );
+        require(active.active(), "complete vanilla and Sodium source generation passes preflight");
+
+        Map<SceneLinearPreflightGate.ShaderKey, String> missing = new HashMap<>(sources);
+        missing.remove(new SceneLinearPreflightGate.ShaderKey(
+                "minecraft",
+                "core/item",
+                SceneLinearShaderPatcher.Stage.FRAGMENT
+        ));
+        require(
+                !SceneLinearPreflightGate.evaluate(missing, true, false, true).active(),
+                "missing required raster source disables the entire generation"
+        );
+        require(
+                !SceneLinearPreflightGate.evaluate(sources, true, true, true).active(),
+                "Iris disables the linear scene contract"
+        );
+
+        Properties linearProperties = new Properties();
+        linearProperties.setProperty("mode", "scene");
+        linearProperties.setProperty("sourceEncoding", "linear");
+        HdrSceneState.reset();
+        SceneLinearPreflightGate.resetForTests();
+        HdrSceneState.configure(HdrConfig.from(linearProperties), new EdrCapabilities(1.0f, 4.0f));
+        require(
+                HdrSceneState.configuredSourceEncoding() == HdrSourceEncoding.LINEAR,
+                "configured source encoding is retained"
+        );
+        require(
+                HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB,
+                "failed or pending preflight forces the legacy gamma contract"
+        );
+        SceneLinearPreflightGate.beginCandidate(active);
+        require(!SceneLinearPreflightGate.isActive(), "candidate stays invisible before pipeline compilation commits");
+        require(SceneLinearPreflightGate.shouldCompileSceneVariants(), "active candidate compiles scene variants");
+        require(
+                HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB,
+                "pending candidate keeps presentation on the legacy gamma contract"
+        );
+        SceneLinearPreflightGate.commitCandidate();
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.LINEAR, "committed gate selects linear source encoding");
+
+        SceneLinearPreflightGate.beginCandidate(active);
+        SceneLinearPreflightGate.rejectSceneVariant("synthetic compile failure");
+        require(!SceneLinearPreflightGate.shouldCompileSceneVariants(), "compile failure stops optional variants");
+        SceneLinearPreflightGate.commitCandidate();
+        require(!SceneLinearPreflightGate.isActive(), "rejected generation cannot become active at apply return");
+        require(
+                HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB,
+                "rejected generation atomically retains the gamma contract"
+        );
+
+        SceneLinearPreflightGate.install(active);
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.LINEAR, "directly installed gate selects linear source encoding");
+        SceneLinearPreflightGate.install(new SceneLinearPreflightGate.Evaluation(false, "test fallback"));
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB, "gate failure atomically restores gamma");
+        SceneLinearPreflightGate.resetForTests();
+        HdrSceneState.reset();
+    }
+
+    private static Map<SceneLinearPreflightGate.ShaderKey, String> requiredSceneShaderSources(
+            final String raster
+    ) {
+        Map<SceneLinearPreflightGate.ShaderKey, String> sources = new HashMap<>();
+        for (String path : HdrPipelinePolicy.requiredVanillaRasterFragmentShaders()) {
+            sources.put(
+                    new SceneLinearPreflightGate.ShaderKey(
+                            "minecraft",
+                            path,
+                            SceneLinearShaderPatcher.Stage.FRAGMENT
+                    ),
+                    raster
+            );
+        }
+        sources.put(
+                new SceneLinearPreflightGate.ShaderKey(
+                        "sodium",
+                        "blocks/block_layer_opaque",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT
+                ),
+                raster
+        );
+        sources.put(
+                new SceneLinearPreflightGate.ShaderKey(
+                        "minecraft",
+                        "post/invert",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT
+                ),
+                "out vec4 fragColor;\nvoid main() {\n"
+                        + "    vec4 diffuseColor = texture(InSampler, texCoord);\n"
+                        + "    fragColor = diffuseColor;\n}\n"
+        );
+        sources.put(
+                new SceneLinearPreflightGate.ShaderKey(
+                        "minecraft",
+                        "post/color_convolve",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT
+                ),
+                "out vec4 fragColor;\nvoid main() {\n"
+                        + "    vec4 InTexel = texture(InSampler, texCoord);\n"
+                        + "    fragColor = InTexel;\n}\n"
+        );
+        sources.put(
+                new SceneLinearPreflightGate.ShaderKey(
+                        "minecraft",
+                        "post/bits",
+                        SceneLinearShaderPatcher.Stage.FRAGMENT
+                ),
+                "out vec4 fragColor;\nvoid main() {\n"
+                        + "    vec2 fractPix = vec2(0.0);\n"
+                        + "    vec4 baseTexel = texture(InSampler, texCoord - fractPix);\n"
+                        + "    fragColor = baseTexel;\n}\n"
+        );
+        return sources;
     }
 
     private static void testSodiumShaderPatching() {

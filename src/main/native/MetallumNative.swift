@@ -456,7 +456,8 @@ private func presentMslSource() -> String {
       float3 bloom = max(bloomFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
       float bloomScale = uniforms.bloomStrength * strength
         * min(0.75 + 0.45 * (uniforms.currentHeadroom - 1.0), 2.5);
-      float sceneVisibility = 1.0 - clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).r, 0.0, 1.0);
+      float2 uiControl = clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).rg, 0.0, 1.0);
+      float sceneVisibility = (1.0 - uiControl.r) * (1.0 - uiControl.g);
 
       // Scene-wide highlight reconstruction. The SDR artistic exposure is
       // preserved below the shoulder; isolated and broadly bright world
@@ -614,6 +615,10 @@ private func hdrEffectsMslSource() -> String {
       return sourceEncoding == 2u
         ? metallum_hdr_linear_to_srgb(value)
         : clamp(value, 0.0, 1.0);
+    }
+
+    float3 metallum_hdr_quantize_unorm8(float3 value) {
+      return floor(clamp(value, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
     }
 
     float metallum_hdr_luminance(float3 color) {
@@ -871,27 +876,61 @@ private func hdrEffectsMslSource() -> String {
       uint2 sourceSize = uint2(finalFrame.get_width(), finalFrame.get_height());
       uint2 maximumCoordinate = max(sourceSize, uint2(1u)) - 1u;
       uint2 origin = uint2(in.position.xy) * 2u;
-      float difference = 0.0;
+      constexpr float residualTolerance = 1.1 / 255.0;
+      float hardCoverage = 0.0;
+      float dimmingCoverage = 0.0;
       for (uint yIndex = 0u; yIndex < 2u; ++yIndex) {
         for (uint xIndex = 0u; xIndex < 2u; ++xIndex) {
           uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
           float4 finalValue = finalFrame.read(coordinate);
           float3 sceneValue = sceneFrame.read(coordinate).rgb;
           if (uniforms.seededUiAvailable != 0u) {
-            sceneValue = metallum_hdr_sdr_encoded_appearance(
-              sceneValue,
-              uniforms.sourceEncoding
+            float3 expectedBackdrop = metallum_hdr_quantize_unorm8(
+              metallum_hdr_sdr_encoded_appearance(
+                sceneValue,
+                uniforms.sourceEncoding
+              )
             );
-          }
-          float3 delta = abs(finalValue.rgb - sceneValue);
-          difference = max(difference, max(delta.r, max(delta.g, delta.b)));
-          if (uniforms.seededUiAvailable != 0u) {
-            difference = max(difference, clamp(finalValue.a, 0.0, 1.0));
+            float alphaCoverage = clamp(finalValue.a, 0.0, 1.0);
+            hardCoverage = max(hardCoverage, alphaCoverage);
+
+            // The seeded target stores ordinary source-over coverage in alpha.
+            // Alpha-zero GUI passes need their RGB operation classified:
+            // multiplicative darkening (the vanilla vignette) attenuates the
+            // HDR delta continuously, while invert/additive changes mask it.
+            if (alphaCoverage == 0.0) {
+              float3 finalEncoded = clamp(finalValue.rgb, 0.0, 1.0);
+              float3 delta = finalEncoded - expectedBackdrop;
+              float difference = max(abs(delta.r), max(abs(delta.g), abs(delta.b)));
+              if (difference > residualTolerance) {
+                bool darkeningOnly = all(finalEncoded <= expectedBackdrop + residualTolerance);
+                if (darkeningOnly) {
+                  float expectedY = metallum_hdr_luminance(
+                    metallum_hdr_srgb_to_linear(expectedBackdrop, false)
+                  );
+                  float finalY = metallum_hdr_luminance(
+                    metallum_hdr_srgb_to_linear(finalEncoded, false)
+                  );
+                  float transmission = expectedY > 1e-7
+                    ? clamp(finalY / expectedY, 0.0, 1.0)
+                    : 1.0;
+                  dimmingCoverage = max(dimmingCoverage, 1.0 - transmission);
+                } else {
+                  hardCoverage = 1.0;
+                }
+              }
+            }
+          } else {
+            float3 delta = abs(finalValue.rgb - sceneValue);
+            float difference = max(delta.r, max(delta.g, delta.b));
+            hardCoverage = max(
+              hardCoverage,
+              smoothstep(0.25 / 255.0, 0.75 / 255.0, difference)
+            );
           }
         }
       }
-      float mask = smoothstep(0.25 / 255.0, 0.75 / 255.0, difference);
-      return float4(mask, 0.0, 0.0, 1.0);
+      return float4(hardCoverage, dimmingCoverage, 0.0, 1.0);
     }
 
     fragment float4 metallum_hdr_ui_dilate_fs(
@@ -901,14 +940,15 @@ private func hdrEffectsMslSource() -> String {
       uint2 sourceSize = uint2(source.get_width(), source.get_height());
       int2 maximumCoordinate = int2(max(sourceSize, uint2(1u)) - 1u);
       int2 center = int2(in.position.xy);
-      float mask = 0.0;
+      float2 centerControl = source.read(uint2(clamp(center, int2(0), maximumCoordinate))).rg;
+      float hardCoverage = 0.0;
       for (int yOffset = -1; yOffset <= 1; ++yOffset) {
         for (int xOffset = -1; xOffset <= 1; ++xOffset) {
           uint2 coordinate = uint2(clamp(center + int2(xOffset, yOffset), int2(0), maximumCoordinate));
-          mask = max(mask, source.read(coordinate).r);
+          hardCoverage = max(hardCoverage, source.read(coordinate).r);
         }
       }
-      return float4(mask, 0.0, 0.0, 1.0);
+      return float4(hardCoverage, centerControl.g, 0.0, 1.0);
     }
     """
 }
@@ -946,8 +986,8 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
             blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
             uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
-            uiCompare: makePipeline(uiCompareFunction, colorFormat: .r8Unorm),
-            uiDilate: makePipeline(uiDilateFunction, colorFormat: .r8Unorm)
+            uiCompare: makePipeline(uiCompareFunction, colorFormat: .rg8Unorm),
+            uiDilate: makePipeline(uiDilateFunction, colorFormat: .rg8Unorm)
         )
     } catch {
         NSLog("[metallum] Failed to create HDR effect pipelines: %@", String(describing: error))
@@ -1043,8 +1083,8 @@ private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeigh
         let emission = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR emission"),
         let bloomA = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom A"),
         let bloomB = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom B"),
-        let uiMaskA = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask A"),
-        let uiMaskB = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask B"),
+        let uiMaskA = makeTexture(format: .rg8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI control A"),
+        let uiMaskB = makeTexture(format: .rg8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI control B"),
         let histogram = device.makeBuffer(
             length: 64 * MemoryLayout<UInt32>.stride,
             options: .storageModePrivate

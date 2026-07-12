@@ -1,8 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.HdrPipelinePolicy;
-import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.BindGroupLayout.UniformDescription;
@@ -55,22 +55,36 @@ final class MetalCrossShaderCompiler {
             );
             variants.put(HdrShaderFlavor.LEGACY, legacy);
 
-            if (HdrSceneState.isRequested() && role.supportsSceneLinearFlavor()) {
+            if (SceneLinearPreflightGate.shouldCompileSceneVariants() && role.supportsSceneLinearFlavor()) {
                 HdrShaderFlavor sceneFlavor = role.sceneLinearFlavor();
-                MetalCompiledRenderPipeline.ShaderVariantSource sceneLinear = compileVariant(
-                        device,
-                        pipeline,
-                        shaderSource,
-                        sceneFlavor
-                );
-                validateVariantParity(pipeline, legacy, sceneLinear);
-                variants.put(sceneFlavor, sceneLinear);
+                try {
+                    MetalCompiledRenderPipeline.ShaderVariantSource sceneLinear = compileVariant(
+                            device,
+                            pipeline,
+                            shaderSource,
+                            sceneFlavor
+                    );
+                    validateVariantParity(pipeline, legacy, sceneLinear);
+                    variants.put(sceneFlavor, sceneLinear);
+                } catch (ShaderCompileException | RuntimeException exception) {
+                    SceneLinearPreflightGate.rejectSceneVariant(
+                            "failed to compile " + sceneFlavor + " for " + pipeline.getLocation()
+                                    + ": " + failureMessage(exception)
+                    );
+                }
             }
 
             return new MetalCompiledRenderPipeline(device, pipeline, role, variants);
         } catch (ShaderCompileException e) {
             throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
         }
+    }
+
+    private static String failureMessage(final Exception exception) {
+        String message = exception.getMessage();
+        return message == null || message.isBlank()
+                ? exception.getClass().getSimpleName()
+                : message;
     }
 
     private static MetalCompiledRenderPipeline.ShaderVariantSource compileVariant(

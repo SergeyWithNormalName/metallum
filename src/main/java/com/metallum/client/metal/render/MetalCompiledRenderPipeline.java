@@ -1,8 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.HdrPipelinePolicy;
-import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -110,7 +110,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         if (legacy == null) {
             throw new IllegalArgumentException("Pipeline is missing its legacy shader flavor: " + info.getLocation());
         }
-        if (HdrSceneState.isRequested()
+        if (SceneLinearPreflightGate.shouldCompileSceneVariants()
                 && hdrRole.supportsSceneLinearFlavor()
                 && !variants.containsKey(hdrRole.sceneLinearFlavor())) {
             throw new IllegalArgumentException("Pipeline is missing its scene-linear shader flavor: " + info.getLocation());
@@ -148,6 +148,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     device.getOrCompileFunction(variant.fragmentMsl(), variant.fragmentEntryPoint()),
                     variant.semanticOutput()
             );
+            if (entry.getKey() != HdrShaderFlavor.LEGACY && !functions.isValid()) {
+                SceneLinearPreflightGate.rejectSceneVariant(
+                        "Metal rejected " + entry.getKey() + " functions for " + info.getLocation()
+                );
+                continue;
+            }
             compiledFunctions.put(entry.getKey(), functions);
             allFunctionsValid &= functions.isValid();
         }
@@ -386,11 +392,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         boolean rgba16Float = colorFormat == MTLPixelFormat.RGBA16Float;
         HdrShaderFlavor flavor = HdrPipelinePolicy.selectFlavor(
                 this.hdrRole,
-                HdrSceneState.isRequested(),
+                SceneLinearPreflightGate.isActive(),
                 rgba16Float
         );
         if (rgba16Float
-                && HdrSceneState.isRequested()
+                && SceneLinearPreflightGate.isActive()
                 && this.hdrRole == HdrPipelinePolicy.Role.UNKNOWN
                 && UNKNOWN_FP16_PIPELINES_LOGGED.add(this.info.getLocation().toString())) {
             com.metallum.Metallum.LOGGER.warn(
@@ -432,6 +438,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     boolean semanticOutput() {
         return this.semanticOutput;
+    }
+
+    boolean sceneColorRole() {
+        return this.hdrRole.supportsSceneLinearFlavor();
     }
 
     private static MTLVertexDescriptor buildVertexDescriptor(

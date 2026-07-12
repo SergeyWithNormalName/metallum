@@ -52,6 +52,10 @@ abstract class GuiRendererHdrMixin {
                     uiTarget,
                     ((GameRendererAccessor) renderer).metallum$getResourcePool()
             );
+            // The UI texture now contains a deliberately blurred copy of the
+            // world. A sharp HDR scene delta must not be composited back over
+            // that backdrop during presentation.
+            HdrUiRenderTarget.markBackdropBlurred();
         }
     }
 

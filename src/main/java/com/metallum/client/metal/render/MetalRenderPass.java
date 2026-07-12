@@ -1,5 +1,6 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -104,6 +105,9 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void setPipeline(final @NonNull RenderPipeline pipeline) {
         MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
+        if (compiled.sceneColorRole()) {
+            ((MetalGpuTexture) this.colorTexture.texture()).markSceneColorClearRole();
+        }
         if (this.compiledPipeline != compiled) {
             this.compiledPipeline = compiled;
             vertexBuffersDirty = true;
@@ -359,9 +363,17 @@ final class MetalRenderPass implements RenderPassBackend {
 
     private MTLRenderCommandEncoder renderEncoder() {
         MetalGpuTextureView colorTextureView = (MetalGpuTextureView) colorTexture;
+        MetalGpuTexture colorAttachment = (MetalGpuTexture) colorTexture.texture();
         MetalGpuTextureView depthTextureView = depthTexture == null ? null : (MetalGpuTextureView) depthTexture;
         boolean clearColorNow = clearColor != null;
         boolean clearDepthNow = clearDepthEnabled;
+        boolean decodeClearColor = clearColorNow && SceneLinearClearColor.shouldDecode(
+                colorAttachment.getFormat() == GpuFormat.RGBA16_FLOAT,
+                colorAttachment.hasSceneColorClearRole()
+        );
+        SceneLinearClearColor.Rgb linearClear = decodeClearColor
+                ? SceneLinearClearColor.extendedSrgbToLinear(clearColor.x(), clearColor.y(), clearColor.z())
+                : null;
         MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
                 colorTextureView,
                 depthTextureView,
@@ -369,9 +381,9 @@ final class MetalRenderPass implements RenderPassBackend {
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,
-                clearColorNow ? clearColor.x() : 0.0F,
-                clearColorNow ? clearColor.y() : 0.0F,
-                clearColorNow ? clearColor.z() : 0.0F,
+                linearClear != null ? linearClear.red() : clearColorNow ? clearColor.x() : 0.0F,
+                linearClear != null ? linearClear.green() : clearColorNow ? clearColor.y() : 0.0F,
+                linearClear != null ? linearClear.blue() : clearColorNow ? clearColor.z() : 0.0F,
                 clearColorNow ? clearColor.w() : 0.0F,
                 clearDepthNow,
                 clearDepthValue

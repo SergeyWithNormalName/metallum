@@ -3,6 +3,8 @@ package com.metallum.client.metal.render;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrOutputMode;
+import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -288,7 +290,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 sceneInputs.ui(),
                 fence,
                 outputMode.nativeValue(),
-                hdrConfig.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
+                HdrSceneState.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
                 hdrConfig.diagnosticPattern(),
                 Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
                 hdrConfig.hdrStrength(),
@@ -310,7 +312,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         pendingDepthClears.remove(destination);
         destination.markContentsDirty();
         endEncoder();
-        int sourceEncoding = this.device.hdrConfig().sourceEncoding().nativeValue(
+        int sourceEncoding = HdrSceneState.sourceEncoding().nativeValue(
                 source.getFormat() == GpuFormat.RGBA16_FLOAT
         );
         return commandBuffer().encodeHdrUiBackdrop(
@@ -357,11 +359,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         depth.markContentsDirty();
         submitRenderPass();
         endEncoder();
+        SceneLinearClearColor.Rgb linearClear = decodeClearRgbIfNeeded(color, clearColorCopy);
         commandBuffer().clearColorDepthTexturesRegion(
                 color.nativeHandle(),
-                clearColorCopy.x(),
-                clearColorCopy.y(),
-                clearColorCopy.z(),
+                linearClear != null ? linearClear.red() : clearColorCopy.x(),
+                linearClear != null ? linearClear.green() : clearColorCopy.y(),
+                linearClear != null ? linearClear.blue() : clearColorCopy.z(),
                 clearColorCopy.w(),
                 depth.nativeHandle(),
                 clearDepth,
@@ -697,7 +700,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
 
-        if (texture.clearIsRedundant(colorClear, depthClear)) {
+        SceneLinearClearColor.Rgb linearClear = decodeClearRgbIfNeeded(texture, colorClear);
+        if (texture.clearIsRedundant(colorClear, depthClear, linearClear != null)) {
             return;
         }
 
@@ -708,9 +712,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 depthClear != null ? texture.nativeHandle() : null,
                 1.0, 1.0,
                 colorClear != null ? 1 : 0,
-                colorClear != null ? colorClear.x() : 0.0F,
-                colorClear != null ? colorClear.y() : 0.0F,
-                colorClear != null ? colorClear.z() : 0.0F,
+                linearClear != null ? linearClear.red() : colorClear != null ? colorClear.x() : 0.0F,
+                linearClear != null ? linearClear.green() : colorClear != null ? colorClear.y() : 0.0F,
+                linearClear != null ? linearClear.blue() : colorClear != null ? colorClear.z() : 0.0F,
                 colorClear != null ? colorClear.w() : 0.0F,
                 0,
                 depthClear != null ? 1 : 0,
@@ -718,7 +722,24 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
         currentEncoder = encoder;
-        texture.recordMaterializedClear(colorClear, depthClear);
+        texture.recordMaterializedClear(colorClear, depthClear, linearClear != null);
+    }
+
+    private static SceneLinearClearColor.Rgb decodeClearRgbIfNeeded(
+            final MetalGpuTexture texture,
+            @Nullable final Vector4fc clearColor
+    ) {
+        if (clearColor == null || !SceneLinearClearColor.shouldDecode(
+                texture.getFormat() == GpuFormat.RGBA16_FLOAT,
+                texture.hasSceneColorClearRole()
+        )) {
+            return null;
+        }
+        return SceneLinearClearColor.extendedSrgbToLinear(
+                clearColor.x(),
+                clearColor.y(),
+                clearColor.z()
+        );
     }
 
     private static boolean isFullTextureView(final GpuTextureView textureView) {

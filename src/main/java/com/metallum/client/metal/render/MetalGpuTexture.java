@@ -20,8 +20,10 @@ final class MetalGpuTexture extends GpuTexture {
     private boolean closed;
     @Nullable
     private Vector4fc materializedColorClear;
+    private boolean materializedColorClearDecoded;
     @Nullable
     private Double materializedDepthClear;
+    private boolean sceneColorClearRole;
     private int views = 1;
     @Nullable
     private MemorySegment nativeHandle;
@@ -62,23 +64,48 @@ final class MetalGpuTexture extends GpuTexture {
         return this.getFormat().blockSize();
     }
 
-    void recordMaterializedClear(@Nullable final Vector4fc color, @Nullable final Double depth) {
+    void recordMaterializedClear(
+            @Nullable final Vector4fc color,
+            @Nullable final Double depth,
+            final boolean colorDecoded
+    ) {
         if (color != null) {
             this.materializedColorClear = color;
+            this.materializedColorClearDecoded = colorDecoded;
         }
         if (depth != null) {
             this.materializedDepthClear = depth;
         }
     }
 
-    boolean clearIsRedundant(@Nullable final Vector4fc color, @Nullable final Double depth) {
-        return (color == null || color.equals(this.materializedColorClear))
+    boolean clearIsRedundant(
+            @Nullable final Vector4fc color,
+            @Nullable final Double depth,
+            final boolean colorDecoded
+    ) {
+        return (color == null || (color.equals(this.materializedColorClear)
+                && colorDecoded == this.materializedColorClearDecoded))
                 && (depth == null || depth.equals(this.materializedDepthClear));
     }
 
     void markContentsDirty() {
         this.materializedColorClear = null;
         this.materializedDepthClear = null;
+    }
+
+    void markSceneColorClearRole() {
+        if (!this.sceneColorClearRole) {
+            // A cached logical clear is only redundant while its color-space
+            // contract is unchanged. The declaration is attachment-owned and
+            // intentionally sticky: an unknown pipeline must not turn a
+            // scene-color target back into numerical/gamma data.
+            this.materializedColorClear = null;
+            this.sceneColorClearRole = true;
+        }
+    }
+
+    boolean hasSceneColorClearRole() {
+        return this.sceneColorClearRole;
     }
 
     MemorySegment nativeHandle() {

@@ -75,6 +75,10 @@ public final class HdrPipelinePolicy {
     private HdrPipelinePolicy() {
     }
 
+    static Set<String> requiredVanillaRasterFragmentShaders() {
+        return VANILLA_SCENE_FRAGMENT_SHADERS;
+    }
+
     public static Role classify(
             final String pipelineNamespace,
             final String pipelinePath,

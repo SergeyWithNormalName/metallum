@@ -10,6 +10,7 @@ The default `auto` mode enables the scene-wide HDR path when macOS reports an ED
 
 - an `RGBA16Float` `CAMetalLayer` in extended linear sRGB;
 - an FP16 Minecraft MainTarget, FP16 scene continuations, and an extended-range world lightmap;
+- an atomic shader preflight which, when successful, decodes supported vanilla and Sodium raster output at the FP16 boundary so Metal's fixed-function blending operates on linear RGB;
 - the display's live EDR headroom as the output limit;
 - scene- and headroom-adaptive highlight reconstruction that preserves ordinary shadows and midtones;
 - source-authored emission from Minecraft and Sodium, plus FP16 local highlights and bloom;
@@ -19,7 +20,7 @@ The default `auto` mode enables the scene-wide HDR path when macOS reports an ED
 
 Semantic HDR currently covers Sodium terrain and fluids, luminous block states and emissive quads, plus vanilla emissive entities, beacon beams, lightning/dragon rays, stars, and the sun/moon pass. Transparent contributions are weighted by their actual alpha.
 
-This produces real extended-range scene values and display pixels above `1.0`; it is not merely an HDR-capable swapchain. It does **not** turn Minecraft into a physically linear renderer: vanilla shaders, texture authoring, and several blending decisions still follow Minecraft's original rendering assumptions. The reconstruction is designed to improve highlight range while preserving the intended SDR base image.
+This produces real extended-range scene values and display pixels above `1.0`; it is not merely an HDR-capable swapchain. The current linearization is deliberately limited to the raster-output boundary: after successful preflight, the final encoded RGB from supported scene shaders is decoded before it reaches the FP16 target, so ordinary fixed-function alpha blending happens in linear light. It does **not** yet make the whole Minecraft shader pipeline physically linear. Texture and material composition, lightmap application, fog, and other shader-local color math still follow Minecraft's original encoded-color assumptions before that boundary conversion; moving those operations to linear light is Phase C work. If preflight cannot validate every required shader, Metallum keeps the entire scene on the safe encoded-color path rather than mixing color contracts within one frame.
 
 ### Configuration
 
@@ -47,7 +48,7 @@ If the game is moved from an SDR display to an HDR display, restart it so the HD
 - `mode=enhanced`: run adaptive scene-wide reconstruction and semantic HDR from the ordinary `RGBA8` scene, without FP16 scene propagation. It still falls back safely when HDR output is unavailable.
 - `mode=edr`: EDR presentation of the ordinary SDR scene without semantic or scene-wide highlight enhancement.
 - `mode=off`: standard `BGRA8` SDR output. Semantic MRT shaders are not enabled in this mode.
-- `sourceEncoding=srgb`: the current contract. In scene mode, FP16 stores extended-range sRGB-encoded values which are decoded before HDR display mapping. Use `linear` only if the entire upstream scene is genuinely linear.
+- `sourceEncoding=srgb`: the safe configured fallback and legacy contract. Leave this setting at `srgb`; in scene mode Metallum automatically switches the effective scene contract to linear only after the atomic shader preflight succeeds. If validation fails, it forces the whole scene back to the encoded-color path. Manually selecting `linear` is neither required nor a way to bypass that safety gate.
 - `hdrStrength`: semantic highlight strength from `0.0` to `2.0`.
 - `bloomStrength`: bloom strength from `0.0` to `1.0`.
 - `diagnosticPattern=true`: replaces the frame with an EDR ramp up to `8.0`; the green strip shows the current safe display headroom.

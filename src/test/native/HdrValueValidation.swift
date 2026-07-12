@@ -42,6 +42,12 @@ private struct HdrHistogramReduceUniforms {
     var _padding0: UInt32
 }
 
+private struct HdrUiCompareUniforms {
+    var sourceEncoding: UInt32
+    var seededUiAvailable: UInt32
+    var _padding0: SIMD2<UInt32>
+}
+
 private struct HdrAdaptiveState {
     var breakpoint: Float
     var inferredPeak: Float
@@ -127,6 +133,41 @@ private func srgbToLinear(_ encoded: Float) -> Float {
     return Float(pow(Double((encoded + 0.055) / 1.055), 2.4))
 }
 
+private func boundaryBlendMslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct BoundaryVertexOut {
+      float4 position [[position]];
+    };
+
+    vertex BoundaryVertexOut metallum_boundary_blend_vs(uint vertexId [[vertex_id]]) {
+      const float2 positions[3] = {
+        float2(-1.0,  1.0),
+        float2( 3.0,  1.0),
+        float2(-1.0, -3.0)
+      };
+      BoundaryVertexOut out;
+      out.position = float4(positions[vertexId], 0.0, 1.0);
+      return out;
+    }
+
+    float3 metallum_boundary_srgb_to_linear(float3 encoded) {
+      float3 bounded = clamp(encoded, 0.0, 1.0);
+      float3 low = bounded / 12.92;
+      float3 high = pow((bounded + 0.055) / 1.055, float3(2.4));
+      return select(high, low, bounded <= float3(0.04045));
+    }
+
+    fragment float4 metallum_boundary_blend_fs(
+      BoundaryVertexOut in [[stage_in]],
+      constant float4& encodedColor [[buffer(0)]]) {
+      return float4(metallum_boundary_srgb_to_linear(encodedColor.rgb), encodedColor.a);
+    }
+    """
+}
+
 private func rgbaDescription(_ value: SIMD4<Float>) -> String {
     String(format: "(%.4f, %.4f, %.4f, %.4f)", value.x, value.y, value.z, value.w)
 }
@@ -149,6 +190,9 @@ private final class GpuHarness {
     private let queue: MTLCommandQueue
     private let presentPipeline: MTLRenderPipelineState
     private let extractPipeline: MTLRenderPipelineState
+    private let uiComparePipeline: MTLRenderPipelineState
+    private let uiDilatePipeline: MTLRenderPipelineState
+    private let boundaryBlendPipeline: MTLRenderPipelineState
     private let histogramReducePipeline: MTLComputePipelineState
     private let nearestSampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
@@ -182,9 +226,11 @@ private final class GpuHarness {
         guard
             let effectsVertex = effectsLibrary.makeFunction(name: "metallum_hdr_vs"),
             let extractFragment = effectsLibrary.makeFunction(name: "metallum_hdr_extract_fs"),
-            let histogramReduce = effectsLibrary.makeFunction(name: "metallum_hdr_histogram_reduce")
+            let histogramReduce = effectsLibrary.makeFunction(name: "metallum_hdr_histogram_reduce"),
+            let uiCompareFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_compare_fs"),
+            let uiDilateFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_dilate_fs")
         else {
-            throw ValidationFailure.message("HDR extract shader functions are missing")
+            throw ValidationFailure.message("HDR effects shader functions are missing")
         }
         let extractDescriptor = MTLRenderPipelineDescriptor()
         extractDescriptor.label = "Metallum HDR value validation extract"
@@ -194,6 +240,47 @@ private final class GpuHarness {
         extractDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.extractPipeline = try device.makeRenderPipelineState(descriptor: extractDescriptor)
         self.histogramReducePipeline = try device.makeComputePipelineState(function: histogramReduce)
+
+        func makeUiControlPipeline(
+            fragment: MTLFunction,
+            label: String
+        ) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.label = label
+            descriptor.vertexFunction = effectsVertex
+            descriptor.fragmentFunction = fragment
+            descriptor.colorAttachments[0].pixelFormat = .rg8Unorm
+            descriptor.colorAttachments[0].isBlendingEnabled = false
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+        self.uiComparePipeline = try makeUiControlPipeline(
+            fragment: uiCompareFragment,
+            label: "Metallum seeded UI control validation compare"
+        )
+        self.uiDilatePipeline = try makeUiControlPipeline(
+            fragment: uiDilateFragment,
+            label: "Metallum seeded UI control validation dilation"
+        )
+
+        let boundaryLibrary = try device.makeLibrary(source: boundaryBlendMslSource(), options: nil)
+        guard
+            let boundaryVertex = boundaryLibrary.makeFunction(name: "metallum_boundary_blend_vs"),
+            let boundaryFragment = boundaryLibrary.makeFunction(name: "metallum_boundary_blend_fs")
+        else {
+            throw ValidationFailure.message("Boundary-linear blend shader functions are missing")
+        }
+        let boundaryDescriptor = MTLRenderPipelineDescriptor()
+        boundaryDescriptor.label = "Metallum HDR boundary-linear blend validation"
+        boundaryDescriptor.vertexFunction = boundaryVertex
+        boundaryDescriptor.fragmentFunction = boundaryFragment
+        let boundaryAttachment = boundaryDescriptor.colorAttachments[0]!
+        boundaryAttachment.pixelFormat = .rgba16Float
+        boundaryAttachment.isBlendingEnabled = true
+        boundaryAttachment.sourceRGBBlendFactor = .sourceAlpha
+        boundaryAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        boundaryAttachment.sourceAlphaBlendFactor = .one
+        boundaryAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.boundaryBlendPipeline = try device.makeRenderPipelineState(descriptor: boundaryDescriptor)
 
         func makeSampler(filter: MTLSamplerMinMagFilter) throws -> MTLSamplerState {
             let descriptor = MTLSamplerDescriptor()
@@ -322,9 +409,13 @@ private final class GpuHarness {
         return texture
     }
 
-    func makeR8Texture(width: Int = 2, height: Int = 2, value: UInt8 = 0) throws -> MTLTexture {
+    func makeRg8Texture(
+        width: Int = 2,
+        height: Int = 2,
+        bytes: SIMD2<UInt8> = SIMD2<UInt8>(repeating: 0)
+    ) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm,
+            pixelFormat: .rg8Unorm,
             width: width,
             height: height,
             mipmapped: false
@@ -332,18 +423,39 @@ private final class GpuHarness {
         descriptor.storageMode = .shared
         descriptor.usage = [.shaderRead, .renderTarget]
         guard let texture = device.makeTexture(descriptor: descriptor) else {
-            throw ValidationFailure.message("R8 texture creation failed")
+            throw ValidationFailure.message("RG8 texture creation failed")
         }
-        let values = [UInt8](repeating: value, count: width * height)
+        var values = [UInt8]()
+        values.reserveCapacity(width * height * 2)
+        for _ in 0..<(width * height) {
+            values.append(bytes.x)
+            values.append(bytes.y)
+        }
         values.withUnsafeBytes { rawBytes in
             texture.replace(
                 region: MTLRegionMake2D(0, 0, width, height),
                 mipmapLevel: 0,
                 withBytes: rawBytes.baseAddress!,
-                bytesPerRow: width
+                bytesPerRow: width * 2
             )
         }
         return texture
+    }
+
+    func readRg8(texture: MTLTexture) throws -> [SIMD2<UInt8>] {
+        try require(texture.pixelFormat == .rg8Unorm, "Readback requires RG8Unorm")
+        var bytes = [UInt8](repeating: 0, count: texture.width * texture.height * 2)
+        bytes.withUnsafeMutableBytes { rawBytes in
+            texture.getBytes(
+                rawBytes.baseAddress!,
+                bytesPerRow: texture.width * 2,
+                from: MTLRegionMake2D(0, 0, texture.width, texture.height),
+                mipmapLevel: 0
+            )
+        }
+        return stride(from: 0, to: bytes.count, by: 2).map {
+            SIMD2<UInt8>(bytes[$0], bytes[$0 + 1])
+        }
     }
 
     func makeDepthTexture(width: Int = 4, height: Int = 4, clearDepth: Double) throws -> MTLTexture {
@@ -584,6 +696,72 @@ private final class GpuHarness {
         return (bins, state)
     }
 
+    func renderUiControl(
+        finalFrame: MTLTexture,
+        sceneFrame: MTLTexture,
+        sourceEncoding: UInt32,
+        seededUiAvailable: Bool
+    ) throws -> [SIMD2<UInt8>] {
+        try require(
+            finalFrame.width == sceneFrame.width && finalFrame.height == sceneFrame.height,
+            "UI control inputs must have matching dimensions"
+        )
+        let outputWidth = max((finalFrame.width + 1) / 2, 1)
+        let outputHeight = max((finalFrame.height + 1) / 2, 1)
+        let compared = try makeRg8Texture(width: outputWidth, height: outputHeight)
+        let dilated = try makeRg8Texture(width: outputWidth, height: outputHeight)
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("UI control command buffer creation failed")
+        }
+
+        func beginPass(
+            target: MTLTexture,
+            pipeline: MTLRenderPipelineState
+        ) throws -> MTLRenderCommandEncoder {
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = target
+            pass.colorAttachments[0].loadAction = .dontCare
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+                throw ValidationFailure.message("UI control render encoder creation failed")
+            }
+            encoder.setViewport(MTLViewport(
+                originX: 0,
+                originY: 0,
+                width: Double(target.width),
+                height: Double(target.height),
+                znear: 0,
+                zfar: 1
+            ))
+            encoder.setRenderPipelineState(pipeline)
+            return encoder
+        }
+
+        let compare = try beginPass(target: compared, pipeline: uiComparePipeline)
+        compare.setFragmentTexture(finalFrame, index: 0)
+        compare.setFragmentTexture(sceneFrame, index: 1)
+        var uniforms = HdrUiCompareUniforms(
+            sourceEncoding: sourceEncoding,
+            seededUiAvailable: seededUiAvailable ? 1 : 0,
+            _padding0: SIMD2<UInt32>(repeating: 0)
+        )
+        compare.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<HdrUiCompareUniforms>.stride,
+            index: 0
+        )
+        compare.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        compare.endEncoding()
+
+        let dilate = try beginPass(target: dilated, pipeline: uiDilatePipeline)
+        dilate.setFragmentTexture(compared, index: 0)
+        dilate.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        dilate.endEncoding()
+
+        try complete(commandBuffer, label: "two-channel seeded UI control")
+        return try readRg8(texture: dilated)
+    }
+
     func renderPresent(
         finalFrame: MTLTexture,
         sceneFrame: MTLTexture,
@@ -642,6 +820,48 @@ private final class GpuHarness {
         encoder.endEncoding()
         try complete(commandBuffer, label: "HDR present")
         return try readRgba16Float(texture: output, x: output.width / 2, y: output.height / 2)
+    }
+
+    func renderBoundaryLinearBlend(
+        encodedSource: SIMD4<Float>,
+        clearColor: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 0)
+    ) throws -> SIMD4<Float> {
+        let output = try makePrivateRgba16FloatTexture(width: 4, height: 4)
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Boundary-linear blend command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(
+            Double(clearColor.x),
+            Double(clearColor.y),
+            Double(clearColor.z),
+            Double(clearColor.w)
+        )
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Boundary-linear blend encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(output.width),
+            height: Double(output.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(boundaryBlendPipeline)
+        var mutableSource = encodedSource
+        encoder.setFragmentBytes(
+            &mutableSource,
+            length: MemoryLayout<SIMD4<Float>>.stride,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "boundary-linear fixed-function blend")
+        return try readRgba16Float(texture: output, x: 2, y: 2)
     }
 
     func readRgba16Float(texture: MTLTexture, x: Int = 0, y: Int = 0) throws -> SIMD4<Float> {
@@ -719,9 +939,15 @@ private final class ValueValidation {
         try validateSdrIdentityAtHeadroomOne()
         try validateNonsemanticWhiteUsesHeadroom()
         try validateMidtoneIdentity()
+        try validateBoundaryLinearRasterAndBlend()
         try validateSemanticVisibilityAndOcclusion()
         try validateExtendedSrgbIsUnclipped()
         try validateSdrUiCeiling()
+        try validateSeededUiQuantizationAndDeterminism()
+        try validateContinuousVignetteControl()
+        try validateHardAndFallbackUiControl()
+        try validateUiControlDilationChannels()
+        try validateTwoChannelPresentVisibility()
         try validateUniformMidgrayHistogram()
         try validateSparseAndBroadWhiteTargets()
         try validateImmediateHeadroomDropCap()
@@ -758,7 +984,7 @@ private final class ValueValidation {
         (
             try gpu.makeRgba16FloatTexture(width: 1, height: 1, value: SIMD4<Float>(0, 0, 0, 0)),
             try gpu.makeRgba16FloatTexture(width: 1, height: 1, value: SIMD4<Float>(0, 0, 0, 0)),
-            try gpu.makeR8Texture(),
+            try gpu.makeRg8Texture(),
             try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(0, 0, 0, 0))
         )
     }
@@ -813,6 +1039,33 @@ private final class ValueValidation {
         let expected = srgbToLinear(Float(128) / 255)
         try require(abs(value.x - expected) < 0.004, "HDR midtone drifted: expected \(expected), got \(rgbaDescription(value))")
         pass("midtone remains appearance-identical", value)
+    }
+
+    private func validateBoundaryLinearRasterAndBlend() throws {
+        let opaqueMidgray = try gpu.renderBoundaryLinearBlend(
+            encodedSource: SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
+        )
+        let expectedMidgray = srgbToLinear(0.5)
+        try require(
+            abs(opaqueMidgray.x - expectedMidgray) < 0.003,
+            "Boundary decode expected encoded 0.5 to become \(expectedMidgray), got \(rgbaDescription(opaqueMidgray))"
+        )
+        pass("raster boundary decodes encoded 0.5 into linear FP16", opaqueMidgray)
+
+        let halfAlphaWhite = try gpu.renderBoundaryLinearBlend(
+            encodedSource: SIMD4<Float>(1.0, 1.0, 1.0, 0.5)
+        )
+        let expectedLinearBlend: Float = 0.5
+        let lateDecodeResult = srgbToLinear(0.5)
+        try require(
+            abs(halfAlphaWhite.x - expectedLinearBlend) < 0.003,
+            "Linear fixed-function blend expected 0.5, got \(rgbaDescription(halfAlphaWhite))"
+        )
+        try require(
+            halfAlphaWhite.x > lateDecodeResult + 0.25,
+            "Blend still resembles encoded blend followed by late decode (\(lateDecodeResult)): \(rgbaDescription(halfAlphaWhite))"
+        )
+        pass("50%-alpha white blends to 0.5 linear instead of late-decode 0.214", halfAlphaWhite)
     }
 
     private func validateSemanticVisibilityAndOcclusion() throws {
@@ -922,6 +1175,212 @@ private final class ValueValidation {
         try require(abs(halfAlphaValue.x - expectedAlpha) < 0.006, "Seeded SDR UI expected \(expectedAlpha), got \(rgbaDescription(halfAlphaValue))")
         try require(halfAlphaValue.x <= 1.001, "Half-alpha SDR UI exceeded SDR white: \(rgbaDescription(halfAlphaValue))")
         pass("seeded SDR UI stays at or below 1.0", halfAlphaValue)
+    }
+
+    private func validateSeededUiQuantizationAndDeterminism() throws {
+        // This value is almost half an RGBA8 step above byte 128. Comparing
+        // the quantized backdrop with the raw FP16 source used to create a
+        // false mask near 0.5 even though no UI had been drawn.
+        let encodedHalfStep = (Float(128) + 0.49) / 255.0
+        let scene = try gpu.makeRgba16FloatTexture(
+            width: 4,
+            height: 4,
+            value: SIMD4<Float>(encodedHalfStep, encodedHalfStep, encodedHalfStep, 1)
+        )
+        let unchangedBackdrop = try gpu.makeRgba8Texture(
+            width: 4,
+            height: 4,
+            bytes: SIMD4<UInt8>(128, 128, 128, 0)
+        )
+        let first = try gpu.renderUiControl(
+            finalFrame: unchangedBackdrop,
+            sceneFrame: scene,
+            sourceEncoding: 1,
+            seededUiAvailable: true
+        )
+        try require(
+            first.allSatisfy { $0 == SIMD2<UInt8>(0, 0) },
+            "Unchanged half-LSB backdrop created UI control values: \(first)"
+        )
+        for iteration in 0..<8 {
+            let repeated = try gpu.renderUiControl(
+                finalFrame: unchangedBackdrop,
+                sceneFrame: scene,
+                sourceEncoding: 1,
+                seededUiAvailable: true
+            )
+            try require(repeated == first, "Static UI control changed on deterministic repeat \(iteration)")
+        }
+        passCount += 1
+        print("PASS seeded RGBA8 quantization yields exact zero and deterministic UI control")
+    }
+
+    private func validateContinuousVignetteControl() throws {
+        let baseline: UInt8 = 204
+        let dimmedValues: [UInt8] = [204, 190, 170, 140]
+        var finalPixels = [SIMD4<UInt8>]()
+        finalPixels.reserveCapacity(dimmedValues.count * 4)
+        for _ in 0..<2 {
+            for value in dimmedValues {
+                finalPixels.append(SIMD4<UInt8>(value, value, value, 0))
+                finalPixels.append(SIMD4<UInt8>(value, value, value, 0))
+            }
+        }
+        let scene = try gpu.makeRgba8Texture(
+            width: 8,
+            height: 2,
+            bytes: SIMD4<UInt8>(baseline, baseline, baseline, 255)
+        )
+        let vignette = try gpu.makeRgba8Texture(width: 8, height: 2, pixels: finalPixels)
+        let control = try gpu.renderUiControl(
+            finalFrame: vignette,
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(control.count == dimmedValues.count, "Unexpected vignette control dimensions")
+
+        let baselineLinear = srgbToLinear(Float(baseline) / 255.0)
+        for (index, value) in dimmedValues.enumerated() {
+            let expectedCoverage = 1.0 - srgbToLinear(Float(value) / 255.0) / baselineLinear
+            let expectedByte = Int((min(max(expectedCoverage, 0.0), 1.0) * 255.0).rounded())
+            try require(control[index].x == 0, "Vignette became hard UI coverage at cell \(index): \(control)")
+            try require(
+                abs(Int(control[index].y) - expectedByte) <= 2,
+                "Vignette transmission mismatch at cell \(index): got \(control[index].y), expected \(expectedByte)"
+            )
+        }
+        try require(
+            zip(control, control.dropFirst()).allSatisfy { pair in pair.0.y < pair.1.y },
+            "Vignette dimming coverage is not continuous and monotonic: \(control)"
+        )
+        try require(control[1].y > 0 && control[1].y < 255, "Vignette control collapsed to a binary mask")
+        passCount += 1
+        print("PASS alpha-zero vignette produces continuous bounded-linear dimming coverage")
+    }
+
+    private func validateHardAndFallbackUiControl() throws {
+        let scene = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(64, 128, 200, 255))
+
+        let opaqueHud = try gpu.renderUiControl(
+            finalFrame: gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(64, 128, 200, 255)),
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(opaqueHud.allSatisfy { $0 == SIMD2<UInt8>(255, 0) }, "Opaque HUD control mismatch: \(opaqueHud)")
+
+        let halfAlphaHud = try gpu.renderUiControl(
+            finalFrame: gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(64, 128, 200, 128)),
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(halfAlphaHud.allSatisfy { $0 == SIMD2<UInt8>(128, 0) }, "Half-alpha HUD control mismatch: \(halfAlphaHud)")
+
+        let invert = try gpu.renderUiControl(
+            finalFrame: gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(191, 127, 55, 0)),
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(invert.allSatisfy { $0 == SIMD2<UInt8>(255, 0) }, "Alpha-zero invert was not hard-covered: \(invert)")
+
+        let fallbackScene = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(100, 100, 50, 255))
+        let fallbackDifference = try gpu.renderUiControl(
+            finalFrame: gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(150, 100, 50, 255)),
+            sceneFrame: fallbackScene,
+            sourceEncoding: 0,
+            seededUiAvailable: false
+        )
+        try require(
+            fallbackDifference.allSatisfy { $0 == SIMD2<UInt8>(255, 0) },
+            "Unseeded RGB fallback was not retained in hard coverage: \(fallbackDifference)"
+        )
+        let fallbackIdentity = try gpu.renderUiControl(
+            finalFrame: fallbackScene,
+            sceneFrame: fallbackScene,
+            sourceEncoding: 0,
+            seededUiAvailable: false
+        )
+        try require(
+            fallbackIdentity.allSatisfy { $0 == SIMD2<UInt8>(0, 0) },
+            "Unseeded identical frames created UI coverage: \(fallbackIdentity)"
+        )
+        passCount += 1
+        print("PASS hard HUD/invert coverage and unseeded RGB fallback remain isolated in R")
+    }
+
+    private func validateUiControlDilationChannels() throws {
+        let baseline: UInt8 = 200
+        let cells = [
+            SIMD4<UInt8>(baseline, baseline, baseline, 255),
+            SIMD4<UInt8>(100, 100, 100, 0),
+            SIMD4<UInt8>(baseline, baseline, baseline, 0)
+        ]
+        var pixels = [SIMD4<UInt8>]()
+        for _ in 0..<2 {
+            for cell in cells {
+                pixels.append(cell)
+                pixels.append(cell)
+            }
+        }
+        let scene = try gpu.makeRgba8Texture(
+            width: 6,
+            height: 2,
+            bytes: SIMD4<UInt8>(baseline, baseline, baseline, 255)
+        )
+        let final = try gpu.makeRgba8Texture(width: 6, height: 2, pixels: pixels)
+        let control = try gpu.renderUiControl(
+            finalFrame: final,
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(control.count == 3, "Unexpected dilation fixture dimensions")
+        try require(control[0].x == 255 && control[1].x == 255 && control[2].x == 0,
+                    "Hard coverage dilation mismatch: \(control)")
+        let expectedDimming = Int(((1.0 - srgbToLinear(Float(100) / 255.0)
+            / srgbToLinear(Float(baseline) / 255.0)) * 255.0).rounded())
+        try require(control[0].y == 0 && abs(Int(control[1].y) - expectedDimming) <= 2 && control[2].y == 0,
+                    "Dilation did not preserve each center's dimming channel: \(control)")
+        passCount += 1
+        print("PASS dilation expands hard coverage only and preserves center dimming coverage")
+    }
+
+    private func validateTwoChannelPresentVisibility() throws {
+        let white = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 255))
+        let ui = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 0))
+        let aux = try auxiliaries()
+        let noControl = try gpu.makeRg8Texture(bytes: SIMD2<UInt8>(0, 0))
+        let twoChannelControl = try gpu.makeRg8Texture(bytes: SIMD2<UInt8>(64, 128))
+        let uniforms = baseUniforms(uiAvailable: true)
+        let unmasked = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: noControl,
+            uiFrame: ui,
+            uniforms: uniforms
+        )
+        let controlled = try gpu.renderPresent(
+            finalFrame: white,
+            sceneFrame: white,
+            emissionFrame: aux.emission,
+            bloomFrame: aux.bloom,
+            uiMaskFrame: twoChannelControl,
+            uiFrame: ui,
+            uniforms: uniforms
+        )
+        let expectedVisibility = (1.0 - Float(64) / 255.0) * (1.0 - Float(128) / 255.0)
+        let measuredVisibility = (controlled.x - 1.0) / (unmasked.x - 1.0)
+        try require(
+            abs(measuredVisibility - expectedVisibility) < 0.01,
+            "Present did not multiply hard and dimming visibility: got \(measuredVisibility), expected \(expectedVisibility)"
+        )
+        passCount += 1
+        print(String(format: "PASS present multiplies R/G UI visibility: %.4f", measuredVisibility))
     }
 
     private func validateUniformMidgrayHistogram() throws {

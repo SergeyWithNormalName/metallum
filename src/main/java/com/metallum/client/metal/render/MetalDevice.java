@@ -8,6 +8,7 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -82,6 +83,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long hdrSceneSubmitIndex = Long.MIN_VALUE;
     private MemorySegment hdrUiHandle = MemorySegment.NULL;
     private long hdrUiSubmitIndex = Long.MIN_VALUE;
+    private boolean hdrUiSuppressSceneEnhancement;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -337,6 +339,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrEnhancedActive = false;
         this.hdrSceneAvailable = false;
         this.hdrSemanticSceneAvailable = false;
+        this.hdrUiSuppressSceneEnhancement = false;
     }
 
     SemanticAttachment prepareHdrSemanticAttachment(final MetalGpuTexture source) {
@@ -445,6 +448,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
         this.hdrUiHandle = MemorySegment.NULL;
         this.hdrUiSubmitIndex = Long.MIN_VALUE;
+        this.hdrUiSuppressSceneEnhancement = false;
         this.hdrSceneDepthHandle = this.hdrSceneDepthSnapshot.nativeHandle();
         this.hdrSemanticSceneAvailable = this.hdrSemanticMask != null
                 && !this.hdrSemanticMask.isClosed()
@@ -453,7 +457,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSemanticMaskTouchedSubmitIndex == this.hdrSceneSubmitIndex;
     }
 
-    void captureHdrUi(final MetalGpuTexture ui) {
+    void captureHdrUi(final MetalGpuTexture ui, final boolean suppressSceneEnhancement) {
         if (!this.hdrEnhancedActive
                 || ui.isClosed()
                 || ui.getFormat() != GpuFormat.RGBA8_UNORM
@@ -464,6 +468,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.hdrUiHandle = ui.nativeHandle();
         this.hdrUiSubmitIndex = this.commandEncoder.currentSubmitIndex();
+        this.hdrUiSuppressSceneEnhancement = suppressSceneEnhancement;
     }
 
     boolean prepareHdrUiBackdrop(
@@ -499,7 +504,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
                 && this.hdrSceneSnapshot != null
-                && !this.hdrSceneSnapshot.isClosed();
+                && !this.hdrSceneSnapshot.isClosed()
+                && !(this.hdrUiSubmitIndex == submitIndex && this.hdrUiSuppressSceneEnhancement);
         if (!sceneValid) {
             return MetalNativeBridge.isNullHandle(uiHandle)
                     ? HdrSceneInputs.NONE
@@ -546,7 +552,21 @@ public final class MetalDevice implements GpuDeviceBackend {
             // Phase A intentionally gives the optional scene flavors GLSL
             // identical to LEGACY. Distinct keys let later raster and post
             // patches evolve without mutating RGBA8 GUI shaders.
-            String sourceWithDefines = prepareShaderSource(source, k.defines());
+            SceneLinearShaderPatcher.Result patch = SceneLinearShaderPatcher.patch(
+                    k.id().getNamespace(),
+                    k.id().getPath(),
+                    k.type() == ShaderType.VERTEX
+                            ? SceneLinearShaderPatcher.Stage.VERTEX
+                            : SceneLinearShaderPatcher.Stage.FRAGMENT,
+                    k.flavor(),
+                    source
+            );
+            if (!patch.success()) {
+                throw new IllegalStateException(
+                        "Failed to prepare " + k.flavor() + " shader " + k.id() + ": " + patch.failureReason()
+                );
+            }
+            String sourceWithDefines = prepareShaderSource(patch.source(), k.defines());
             try (GlslCompiler glslCompiler = new GlslCompiler()) {
                 return glslCompiler.createIntermediary(
                         k.id().toDebugFileName() + "_" + k.flavor().name().toLowerCase(Locale.ROOT),
