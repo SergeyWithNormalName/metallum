@@ -1,5 +1,8 @@
 package com.metallum.client.metal.render;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public final class MetalRuntimeTests {
     private MetalRuntimeTests() {
     }
@@ -8,6 +11,7 @@ public final class MetalRuntimeTests {
         testDestructionQueueDefersReentrantAdds();
         testDestructionQueueToleratesReentrantRotation();
         testDestructionQueueClose();
+        testTexelViewCacheReuseAndInvalidation();
         testFenceTimeoutRounding();
     }
 
@@ -63,6 +67,42 @@ public final class MetalRuntimeTests {
         queue.add(null);
         queue.close();
         require(executions[0] == 1, "close did not drain queued destruction exactly once");
+    }
+
+    private static void testTexelViewCacheReuseAndInvalidation() {
+        List<String> released = new ArrayList<>();
+        MetalGpuBuffer.TexelViewCache<String> cache = new MetalGpuBuffer.TexelViewCache<>(2, released::add);
+        MetalGpuBuffer.TexelViewKey firstKey = new MetalGpuBuffer.TexelViewKey(70L, 0L, 16L, 64L);
+        int[] creations = new int[1];
+
+        String first = cache.getOrCreate(firstKey, ignored -> "view-" + ++creations[0]);
+        String reused = cache.getOrCreate(firstKey, ignored -> "view-" + ++creations[0]);
+        String differentRange = cache.getOrCreate(
+                new MetalGpuBuffer.TexelViewKey(70L, 64L, 16L, 64L),
+                ignored -> "view-" + ++creations[0]
+        );
+        require(first == reused, "identical texel view keys did not reuse the cached view");
+        require(!first.equals(differentRange), "different texel ranges reused the same cached view");
+        require(creations[0] == 2 && cache.size() == 2, "texel view cache creation count mismatch");
+
+        cache.drain();
+        require(cache.size() == 0, "texel view cache did not clear after backing invalidation");
+        require(released.size() == 2 && released.contains(first) && released.contains(differentRange),
+                "backing invalidation did not release every cached texel view");
+
+        String afterInvalidation = cache.getOrCreate(firstKey, ignored -> "view-" + ++creations[0]);
+        require(!first.equals(afterInvalidation), "backing invalidation reused a stale texel view");
+        require(creations[0] == 3, "texel view was not recreated for the new backing");
+
+        MetalGpuBuffer.TexelViewKey failedKey = new MetalGpuBuffer.TexelViewKey(0L, 0L, 1L, 4L);
+        require(cache.getOrCreate(failedKey, ignored -> null) == null, "failed texel view creation returned a value");
+        require(cache.getOrCreate(failedKey, ignored -> "retry") != null,
+                "failed texel view creation was cached instead of allowing a retry");
+
+        MetalGpuBuffer.TexelViewKey overflowKey = new MetalGpuBuffer.TexelViewKey(70L, 128L, 16L, 64L);
+        cache.getOrCreate(overflowKey, ignored -> "overflow");
+        require(cache.size() == 2, "texel view cache exceeded its configured bound");
+        require(released.contains(afterInvalidation), "least-recently-used texel view was not released on eviction");
     }
 
     private static void testFenceTimeoutRounding() {

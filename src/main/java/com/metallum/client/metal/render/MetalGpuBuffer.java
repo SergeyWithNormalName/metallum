@@ -14,9 +14,16 @@ import org.jspecify.annotations.Nullable;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 @Environment(EnvType.CLIENT)
 class MetalGpuBuffer extends GpuBuffer {
+    // Keep hot descriptor ranges without retaining an unbounded number of
+    // native views when callers bind many transient slices of one buffer.
+    private static final int MAX_CACHED_TEXEL_VIEWS = 64;
     private final MetalDevice device;
     private final boolean cpuAccessible;
     private final boolean dynamic;
@@ -26,11 +33,13 @@ class MetalGpuBuffer extends GpuBuffer {
     private MemorySegment nativeHandle;
     @Nullable
     private ByteBuffer storage;
+    private final TexelViewCache<MemorySegment> texelViews;
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
         super(usage, size);
         this.device = device;
+        this.texelViews = new TexelViewCache<>(MAX_CACHED_TEXEL_VIEWS, device::queueResourceRelease);
 
         this.dynamic = isDynamic(usage);
         this.cpuAccessible = isCpuAccessible(usage) || this.dynamic;
@@ -58,6 +67,7 @@ class MetalGpuBuffer extends GpuBuffer {
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size, final @Nullable MemorySegment wrappedHandle) {
         super(usage, size);
         this.device = device;
+        this.texelViews = new TexelViewCache<>(MAX_CACHED_TEXEL_VIEWS, device::queueResourceRelease);
         this.cpuAccessible = false;
         this.dynamic = false;
         this.resourceOptions = 0L;
@@ -104,8 +114,35 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
+        // A texture view retains its backing. Queue all old views before the
+        // caller queues that backing for reuse by the dynamic buffer pool.
+        this.releaseTexelViews();
         this.nativeHandle = handle;
         this.storage = storage;
+    }
+
+    MemorySegment texelTextureView(
+            final long pixelFormat,
+            final long offset,
+            final long texelCount,
+            final long byteLength
+    ) {
+        TexelViewKey key = new TexelViewKey(pixelFormat, offset, texelCount, byteLength);
+        MemorySegment view = this.texelViews.getOrCreate(key, ignored -> {
+            MemorySegment created = MetalNativeBridge.metallum_create_buffer_texture_view(
+                    this.nativeHandle(),
+                    pixelFormat,
+                    offset,
+                    texelCount,
+                    1L,
+                    byteLength
+            );
+            return MetalNativeBridge.isNullHandle(created) ? null : created;
+        });
+        if (view == null) {
+            throw new IllegalStateException("Failed to create Metal texel buffer texture");
+        }
+        return view;
     }
 
     @Override
@@ -120,6 +157,7 @@ class MetalGpuBuffer extends GpuBuffer {
         }
         this.closed = true;
         this.storage = null;
+        this.releaseTexelViews();
         if (this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
@@ -163,5 +201,56 @@ class MetalGpuBuffer extends GpuBuffer {
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
         MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
         return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
+    }
+
+    private void releaseTexelViews() {
+        this.texelViews.drain();
+    }
+
+    record TexelViewKey(long pixelFormat, long offset, long texelCount, long byteLength) {
+    }
+
+    static final class TexelViewCache<T> {
+        private final int maxEntries;
+        private final Consumer<T> release;
+        private final Map<TexelViewKey, T> views = new LinkedHashMap<>(16, 0.75f, true);
+
+        TexelViewCache(final int maxEntries, final Consumer<T> release) {
+            if (maxEntries <= 0) {
+                throw new IllegalArgumentException("Texel view cache must hold at least one entry");
+            }
+            this.maxEntries = maxEntries;
+            this.release = release;
+        }
+
+        @Nullable
+        T getOrCreate(final TexelViewKey key, final Function<TexelViewKey, @Nullable T> factory) {
+            T cached = this.views.get(key);
+            if (cached != null) {
+                return cached;
+            }
+
+            T created = factory.apply(key);
+            if (created == null) {
+                return null;
+            }
+            this.views.put(key, created);
+            if (this.views.size() > this.maxEntries) {
+                var eldest = this.views.entrySet().iterator();
+                T evicted = eldest.next().getValue();
+                eldest.remove();
+                this.release.accept(evicted);
+            }
+            return created;
+        }
+
+        void drain() {
+            this.views.values().forEach(this.release);
+            this.views.clear();
+        }
+
+        int size() {
+            return this.views.size();
+        }
     }
 }

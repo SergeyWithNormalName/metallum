@@ -249,7 +249,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MetalRenderPass renderPass = new MetalRenderPass(
                 device,
                 this,
-                descriptor.label(),
                 colorTexture,
                 depthTexture,
                 renderArea,

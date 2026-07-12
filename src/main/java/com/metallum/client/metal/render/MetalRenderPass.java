@@ -36,8 +36,6 @@ final class MetalRenderPass implements RenderPassBackend {
     static final int MAX_VERTEX_BUFFERS = RenderPass.MAX_VERTEX_BUFFERS;
     private final MetalDevice device;
     private final MetalCommandEncoder commandEncoder;
-    @Nullable
-    private final String label;
     private final GpuTextureView colorTexture;
     @Nullable
     private final GpuTextureView depthTexture;
@@ -64,7 +62,6 @@ final class MetalRenderPass implements RenderPassBackend {
     MetalRenderPass(
             final MetalDevice device,
             final MetalCommandEncoder encoder,
-            final Supplier<String> label,
             final GpuTextureView colorTexture,
             @Nullable final GpuTextureView depthTexture,
             final RenderPass.RenderArea renderArea,
@@ -74,7 +71,6 @@ final class MetalRenderPass implements RenderPassBackend {
     ) {
         this.device = device;
         this.commandEncoder = encoder;
-        this.label = device.useLabels() ? label.get() : null;
         this.colorTexture = colorTexture;
         this.depthTexture = depthTexture;
         this.renderArea = renderArea;
@@ -633,20 +629,19 @@ final class MetalRenderPass implements RenderPassBackend {
             throw new IllegalStateException("Texel buffer " + binding.name() + " length " + texelByteLength + " is not a valid " + texelFormat + " range");
         }
         long texelCount = texelByteLength / pixelSize;
-        MemorySegment texelTexture = MetalNativeBridge.metallum_create_buffer_texture_view(
-                texelBuffer.nativeHandle(),
-                pixelFormat,
-                texelSlice.offset(),
-                texelCount,
-                1L,
-                texelByteLength
-        );
-        if (MetalNativeBridge.isNullHandle(texelTexture)) {
-            throw new IllegalStateException("Failed to create Metal texel buffer texture for " + binding.name());
+        MemorySegment texelTexture;
+        try {
+            texelTexture = texelBuffer.texelTextureView(
+                    pixelFormat,
+                    texelSlice.offset(),
+                    texelCount,
+                    texelByteLength
+            );
+        } catch (IllegalStateException exception) {
+            throw new IllegalStateException("Failed to create Metal texel buffer texture for " + binding.name(), exception);
         }
 
         enc.setTexture(texelTexture, binding.bindingIndex(), binding.stageMask());
-        commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(texelTexture));
     }
 
     record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {
