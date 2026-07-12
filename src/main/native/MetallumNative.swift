@@ -111,6 +111,7 @@ private final class MetallumHdrWorkspace {
     let histogram: MTLBuffer
     let adaptiveState: MTLBuffer
     var lastHistogramUptime: TimeInterval?
+    var histogramNeedsInitialization: Bool
 
     init(
         sourceWidth: Int,
@@ -133,6 +134,7 @@ private final class MetallumHdrWorkspace {
         self.histogram = histogram
         self.adaptiveState = adaptiveState
         self.lastHistogramUptime = nil
+        self.histogramNeedsInitialization = true
     }
 }
 
@@ -397,6 +399,74 @@ private func presentMslSource() -> String {
       return levels[index];
     }
 
+    float metallum_visible_delta_scale(
+      float3 mappedBaseColor,
+      float3 visibleDelta,
+      float currentHeadroom
+    ) {
+      if (metallum_peak_metric(mappedBaseColor + visibleDelta) <= currentHeadroom) {
+        return 1.0;
+      }
+
+      // Near the representable headroom boundary, float addition may absorb
+      // a sub-ULP positive delta. Preserve the legacy predicate sequence for
+      // this rare saturated-base path instead of relying on a ratio formed by
+      // subtracting nearly equal floats.
+      constexpr float floatEpsilon = 1.1920928955078125e-7;
+      float baseMargin = currentHeadroom - metallum_peak_metric(mappedBaseColor);
+      if (baseMargin <= max(currentHeadroom, 1.0) * (4.0 * floatEpsilon)) {
+        float low = 0.0;
+        float high = 1.0;
+        for (uint iteration = 0u; iteration < 7u; ++iteration) {
+          float candidate = 0.5 * (low + high);
+          if (metallum_peak_metric(mappedBaseColor + visibleDelta * candidate)
+              <= currentHeadroom) {
+            low = candidate;
+          } else {
+            high = candidate;
+          }
+        }
+        return low;
+      }
+
+      float allowedScale = 1.0;
+      if (visibleDelta.r > 0.0) {
+        allowedScale = min(
+          allowedScale,
+          (currentHeadroom - mappedBaseColor.r) / visibleDelta.r
+        );
+      }
+      if (visibleDelta.g > 0.0) {
+        allowedScale = min(
+          allowedScale,
+          (currentHeadroom - mappedBaseColor.g) / visibleDelta.g
+        );
+      }
+      if (visibleDelta.b > 0.0) {
+        allowedScale = min(
+          allowedScale,
+          (currentHeadroom - mappedBaseColor.b) / visibleDelta.b
+        );
+      }
+
+      // Preserve the exact 1/128 result of the previous seven-step binary
+      // search. Division can round across a bin boundary, so validate the
+      // estimated bin and its successor with the original peak predicate.
+      constexpr float scaleStep = 1.0 / 128.0;
+      float quantizedScale = floor(clamp(allowedScale, 0.0, 1.0) * 128.0) * scaleStep;
+      if (metallum_peak_metric(mappedBaseColor + visibleDelta * quantizedScale)
+          > currentHeadroom) {
+        quantizedScale = max(0.0, quantizedScale - scaleStep);
+      }
+      float nextScale = min(1.0, quantizedScale + scaleStep);
+      if (nextScale > quantizedScale
+          && metallum_peak_metric(mappedBaseColor + visibleDelta * nextScale)
+            <= currentHeadroom) {
+        quantizedScale = nextScale;
+      }
+      return quantizedScale;
+    }
+
     vertex PresentVertexOut metallum_present_vs(uint vertexId [[vertex_id]]) {
       const float2 positions[3] = {
         float2(-1.0,  1.0),
@@ -451,13 +521,17 @@ private func presentMslSource() -> String {
         );
       }
 
-      float4 source = finalFrame.sample(smp, in.uv);
-      float4 encodedUi = uiFrame.sample(auxiliarySmp, in.uv);
+      float4 displayBase;
+      if (uniforms.uiAvailable != 0u) {
+        displayBase = uiFrame.sample(auxiliarySmp, in.uv);
+      } else {
+        displayBase = finalFrame.sample(smp, in.uv);
+      }
       if (uniforms.mode == 0u) {
         return float4(
           uniforms.uiAvailable != 0u
-            ? clamp(encodedUi.rgb, 0.0, 1.0)
-            : metallum_encode_sdr(source.rgb, uniforms.sourceEncoding),
+            ? clamp(displayBase.rgb, 0.0, 1.0)
+            : metallum_encode_sdr(displayBase.rgb, uniforms.sourceEncoding),
           1.0
         );
       }
@@ -466,8 +540,8 @@ private func presentMslSource() -> String {
       // premultiplied overlay. It is therefore the display-referred base and
       // must always be decoded as bounded sRGB regardless of scene encoding.
       float3 linearColor = uniforms.uiAvailable != 0u
-        ? metallum_srgb_to_linear(clamp(encodedUi.rgb, 0.0, 1.0), false)
-        : metallum_decode(source.rgb, uniforms.sourceEncoding);
+        ? metallum_srgb_to_linear(clamp(displayBase.rgb, 0.0, 1.0), false)
+        : metallum_decode(displayBase.rgb, uniforms.sourceEncoding);
       float3 mappedBaseColor = metallum_map_to_headroom(linearColor, uniforms.currentHeadroom);
       if (uniforms.mode != 2u || uniforms.sceneAvailable == 0u || uniforms.currentHeadroom <= 1.001) {
         return float4(mappedBaseColor, 1.0);
@@ -566,19 +640,11 @@ private func presentMslSource() -> String {
       float3 mappedSceneBase = metallum_map_to_headroom(sceneLinear, uniforms.currentHeadroom);
       float3 hdrDelta = sceneHdr - mappedSceneBase;
       float3 visibleDelta = sceneVisibility * hdrDelta;
-      if (metallum_peak_metric(mappedBaseColor + visibleDelta) > uniforms.currentHeadroom) {
-        float low = 0.0;
-        float high = 1.0;
-        for (uint iteration = 0u; iteration < 7u; ++iteration) {
-          float candidate = 0.5 * (low + high);
-          if (metallum_peak_metric(mappedBaseColor + visibleDelta * candidate) <= uniforms.currentHeadroom) {
-            low = candidate;
-          } else {
-            high = candidate;
-          }
-        }
-        visibleDelta *= low;
-      }
+      visibleDelta *= metallum_visible_delta_scale(
+        mappedBaseColor,
+        visibleDelta,
+        uniforms.currentHeadroom
+      );
       return float4(mappedBaseColor + visibleDelta, 1.0);
     }
     """
@@ -786,7 +852,7 @@ private func hdrEffectsMslSource() -> String {
       uint total = 0u;
       uint brightCount = 0u;
       for (uint bin = 0u; bin < 64u; ++bin) {
-        uint count = atomic_load_explicit(&histogram[bin], memory_order_relaxed);
+        uint count = atomic_exchange_explicit(&histogram[bin], 0u, memory_order_relaxed);
         bins[bin] = count;
         total += count;
         // Bin 46 starts at log2(Y)=-0.5 (Y~=0.707), a stable quantized
@@ -911,14 +977,10 @@ private func hdrEffectsMslSource() -> String {
       constant HdrBlurUniforms& uniforms [[buffer(0)]]
     ) {
       float4 result = source.sample(smp, in.uv) * 0.2270270270;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 1.0) * 0.1945945946;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 1.0) * 0.1945945946;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 2.0) * 0.1216216216;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 2.0) * 0.1216216216;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 3.0) * 0.0540540541;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 3.0) * 0.0540540541;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 4.0) * 0.0162162162;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 4.0) * 0.0162162162;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 1.3846153846) * 0.3162162162;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 1.3846153846) * 0.3162162162;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 3.2307692308) * 0.0702702703;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 3.2307692308) * 0.0702702703;
       return result;
     }
 
@@ -1259,16 +1321,18 @@ private func encodeHdrEffects(
     let forceReset = previousUptime == nil || deltaTime > 1.0
     workspace.lastHistogramUptime = now
 
-    guard let histogramClear = commandBuffer.makeBlitCommandEncoder() else {
-        return nil
+    if workspace.histogramNeedsInitialization {
+        guard let histogramClear = commandBuffer.makeBlitCommandEncoder() else {
+            return nil
+        }
+        histogramClear.label = "Metallum HDR histogram initialization"
+        histogramClear.fill(
+            buffer: workspace.histogram,
+            range: 0..<workspace.histogram.length,
+            value: 0
+        )
+        histogramClear.endEncoding()
     }
-    histogramClear.label = "Metallum HDR histogram clear"
-    histogramClear.fill(
-        buffer: workspace.histogram,
-        range: 0..<workspace.histogram.length,
-        value: 0
-    )
-    histogramClear.endEncoding()
 
     guard let extract = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
@@ -1301,6 +1365,9 @@ private func encodeHdrEffects(
     extract.endEncoding()
 
     guard let histogramReduce = commandBuffer.makeComputeCommandEncoder() else {
+        // Extract may already have populated the histogram. Ensure a later
+        // recovery attempt cannot mix this partial frame into fresh data.
+        workspace.histogramNeedsInitialization = true
         return nil
     }
     histogramReduce.label = "Metallum HDR histogram reduction"
@@ -1321,6 +1388,7 @@ private func encodeHdrEffects(
         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
     )
     histogramReduce.endEncoding()
+    workspace.histogramNeedsInitialization = false
 
     guard let horizontal = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
