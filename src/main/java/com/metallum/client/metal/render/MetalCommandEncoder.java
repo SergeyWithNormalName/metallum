@@ -78,6 +78,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     MTLBlitCommandEncoder blitCommandEncoder() {
+        if (currentEncoder instanceof MTLBlitCommandEncoder blitEncoder) {
+            return blitEncoder;
+        }
         endEncoder();
         MTLBlitCommandEncoder encoder = commandBuffer().makeBlitCommandEncoder();
         encoder.waitForFence(fence);
@@ -402,7 +405,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 destination.offset(),
                 length
         );
-        endEncoder();
     }
 
     private void orphanWrite(final MetalGpuBuffer buffer, final long offset, final ByteBuffer data) {
@@ -454,7 +456,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 target.offset(),
                 source.length()
         );
-        endEncoder();
     }
 
     @Override
@@ -490,7 +491,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 rowBytes,
                 bytesPerImage
         );
-        endEncoder();
     }
 
     @Override
@@ -529,7 +529,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 rowBytes,
                 rowBytes * sourceHeight
         );
-        endEncoder();
     }
 
     @Override
@@ -570,8 +569,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 rowBytes,
                 bytesPerImage
         );
-
-        endEncoder();
         queueForDestroy(callback);
     }
 
@@ -603,7 +600,6 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 width,
                 height
         );
-        endEncoder();
     }
 
     @Override

@@ -55,7 +55,11 @@ public final class MetalNativeBridge {
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
-            MTLDeviceMakeCommandQueue = downcall(lookup, "metallum_MTLDevice_makeCommandQueue", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            MTLDeviceMakeCommandQueue = downcall(
+                    lookup,
+                    "metallum_MTLDevice_makeCommandQueue",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             MTLCommandQueueMakeCommandBuffer = downcall(lookup, "metallum_MTLCommandQueue_makeCommandBuffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLCommandBufferCommit = downcall(lookup, "metallum_MTLCommandBuffer_commit", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             createSemaphore = downcall(lookup, "metallum_create_semaphore", FunctionDescriptor.of(ValueLayout.ADDRESS));
@@ -496,17 +500,28 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static MemorySegment MTLDevice_makeCommandQueue(final MemorySegment device) {
+    public static MemorySegment MTLDevice_makeCommandQueue(final MemorySegment device, final MemorySegment layer) {
         try {
-            return (MemorySegment) MTLDeviceMakeCommandQueue.invokeExact(segment(device));
+            return (MemorySegment) MTLDeviceMakeCommandQueue.invokeExact(segment(device), segment(layer));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLDevice_makeCommandQueue", throwable);
         }
     }
 
     public static MemorySegment MTLCommandQueue_makeCommandBuffer(final MemorySegment commandQueue, final String label) {
-        try (Arena arena = Arena.ofConfined()) {
-            return (MemorySegment) MTLCommandQueueMakeCommandBuffer.invokeExact(segment(commandQueue), toCString(arena, label));
+        try {
+            if (label == null) {
+                return (MemorySegment) MTLCommandQueueMakeCommandBuffer.invokeExact(
+                        segment(commandQueue),
+                        MemorySegment.NULL
+                );
+            }
+            try (Arena arena = Arena.ofConfined()) {
+                return (MemorySegment) MTLCommandQueueMakeCommandBuffer.invokeExact(
+                        segment(commandQueue),
+                        toCString(arena, label)
+                );
+            }
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandQueue_makeCommandBuffer", throwable);
         }

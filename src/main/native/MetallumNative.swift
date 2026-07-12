@@ -1796,9 +1796,19 @@ public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> U
 }
 
 @_cdecl("metallum_MTLDevice_makeCommandQueue")
-public func metallum_MTLDevice_makeCommandQueue(_ device: MTLDevice) -> UnsafeMutableRawPointer? {
+public func metallum_MTLDevice_makeCommandQueue(
+    _ device: MTLDevice,
+    _ layer: CAMetalLayer
+) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(device.makeCommandQueue())
+        guard layer.device === device, let queue = device.makeCommandQueue() else {
+            return nil
+        }
+        if #available(macOS 26.0, *),
+           let residencySet = layer.residencySet as MTLResidencySet? {
+            queue.addResidencySet(residencySet)
+        }
+        return retainedPointer(queue)
     }
 }
 
@@ -2660,7 +2670,7 @@ public func metallum_configure_layer(
         layer.toneMapMode = .never
     }
     layer.drawableSize = CGSize(width: width, height: height)
-    layer.allowsNextDrawableTimeout = false
+    layer.allowsNextDrawableTimeout = true
     layer.presentsWithTransaction = false
     layer.displaySyncEnabled = immediatePresentMode == 0
     CATransaction.commit()

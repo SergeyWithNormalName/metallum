@@ -15,8 +15,8 @@ public final class MTLCommandQueue {
         this.handle = handle;
     }
 
-    public static MTLCommandQueue create(final MemorySegment device) {
-        MemorySegment handle = MetalNativeBridge.MTLDevice_makeCommandQueue(device);
+    public static MTLCommandQueue create(final MemorySegment device, final MemorySegment layer) {
+        MemorySegment handle = MetalNativeBridge.MTLDevice_makeCommandQueue(device, layer);
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("Failed to create Metal command queue");
         }
