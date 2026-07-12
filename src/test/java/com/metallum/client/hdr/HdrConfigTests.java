@@ -532,20 +532,12 @@ public final class HdrConfigTests {
                 false,
                 "stars"
         );
-        requireVanillaPatch(
-                VanillaHdrShaderPatcher.CELESTIAL,
-                "    fragColor = color * ColorModulator;",
-                12,
-                false,
-                "celestial"
-        );
-        String celestial = VanillaHdrShaderPatcher.patchFragmentSource(
-                VanillaHdrShaderPatcher.CELESTIAL,
-                "out vec4 fragColor;\nvoid main() {\n    fragColor = color * ColorModulator;\n}"
-        );
-        require(celestial.contains("clamp(fragColor.a, 0.0, 1.0) * clamp(dot(max(fragColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0)"), "celestial strength follows its additive RGB contribution");
-        require(celestial.contains("(12.0 / 15.0)"), "celestial emission scale is preserved");
-        require(celestial.contains("(0u | metallumHdrStrength)"), "celestial remains a non-exact semantic source");
+        String celestial = "out vec4 fragColor;\nvoid main() {\n"
+                + "    vec4 color = texture(Sampler0, texCoord0);\n"
+                + "    if (color.a == 0.0) { discard; }\n"
+                + "    fragColor = color * ColorModulator;\n}";
+        require(!VanillaHdrShaderPatcher.isTarget("core/position_tex"), "celestial texture quad is not a frame-wide semantic mask");
+        require(VanillaHdrShaderPatcher.patchFragmentSource("core/position_tex", celestial).equals(celestial), "celestial texture quad stays on scene-wide HDR reconstruction");
 
         String unknown = "out vec4 fragColor;\nvoid main() {\n    fragColor = ColorModulator;\n}";
         require(VanillaHdrShaderPatcher.patchFragmentSource("core/gui", unknown).equals(unknown), "GUI shader is never patched");
@@ -593,11 +585,7 @@ public final class HdrConfigTests {
         String source = "out vec4 fragColor;\nvoid main() {\n" + assignment + "\n}";
         String patched = VanillaHdrShaderPatcher.patchFragmentSource(path, source);
         require(patched.contains("layout(location = 1) out vec4 metallumHdrSemantic;"), label + " MRT output");
-        if (path.equals(VanillaHdrShaderPatcher.CELESTIAL)) {
-            require(patched.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0) * clamp(dot(max(fragColor.rgb"), label + " contribution-scaled coverage");
-        } else {
-            require(patched.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0);"), label + " alpha-scaled coverage");
-        }
+        require(patched.contains("float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0);"), label + " alpha-scaled coverage");
         require(patched.contains("(" + emission + ".0 / 15.0)"), label + " normalized source emission");
         require(patched.contains("* 127.0"), label + " seven-bit semantic strength");
         require(patched.contains("(" + (exact ? 128 : 0) + "u | metallumHdrStrength)"), label + " semantic exact flag");

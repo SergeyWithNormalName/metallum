@@ -5,7 +5,6 @@ public final class VanillaHdrShaderPatcher {
     public static final String BEACON_BEAM = "core/rendertype_beacon_beam";
     public static final String LIGHTNING = "core/rendertype_lightning";
     public static final String STARS = "core/stars";
-    public static final String CELESTIAL = "core/position_tex";
 
     private static final String COLOR_OUTPUT = "out vec4 fragColor;";
     private static final String SEMANTIC_OUTPUT = "metallumHdrSemantic";
@@ -16,36 +15,25 @@ public final class VanillaHdrShaderPatcher {
             "    fragColor = apply_fog(color, sphericalVertexDistance, cylindricalVertexDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd, FogColor);",
             15,
             true,
-            true,
-            false
+            true
     );
     private static final Target BEACON_BEAM_TARGET = new Target(
             "    fragColor = apply_fog(color, fragmentDistance, fragmentDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd, FogColor);",
             15,
             true,
-            false,
             false
     );
     private static final Target LIGHTNING_TARGET = new Target(
             "    fragColor = vertexColor * ColorModulator * (1.0f - total_fog_value(sphericalVertexDistance, cylindricalVertexDistance, FogEnvironmentalStart, FogEnvironmentalEnd, FogRenderDistanceStart, FogRenderDistanceEnd));",
             15,
             true,
-            false,
             false
     );
     private static final Target STARS_TARGET = new Target(
             "    fragColor = ColorModulator;",
             7,
             false,
-            false,
             false
-    );
-    private static final Target CELESTIAL_TARGET = new Target(
-            "    fragColor = color * ColorModulator;",
-            12,
-            false,
-            false,
-            true
     );
 
     private VanillaHdrShaderPatcher() {
@@ -67,7 +55,7 @@ public final class VanillaHdrShaderPatcher {
         String declaration = target.emissiveGuard()
                 ? COLOR_OUTPUT + "\n#ifdef EMISSIVE\nlayout(location = 1) out vec4 " + SEMANTIC_OUTPUT + ";\n#endif"
                 : COLOR_OUTPUT + "\nlayout(location = 1) out vec4 " + SEMANTIC_OUTPUT + ";";
-        String write = semanticWrite(target.emission(), target.exact(), target.contributionWeighted());
+        String write = semanticWrite(target.emission(), target.exact());
         if (target.emissiveGuard()) {
             write = "#ifdef EMISSIVE\n" + write + "\n#endif";
         }
@@ -82,14 +70,10 @@ public final class VanillaHdrShaderPatcher {
 
     private static String semanticWrite(
             final int emission,
-            final boolean exact,
-            final boolean contributionWeighted
+            final boolean exact
     ) {
-        String coverage = contributionWeighted
-                ? "clamp(fragColor.a, 0.0, 1.0) * clamp(dot(max(fragColor.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0)"
-                : "clamp(fragColor.a, 0.0, 1.0)";
         int exactFlag = exact ? SEMANTIC_EXACT_BIT : 0;
-        return "    float metallumHdrCoverage = " + coverage + ";\n"
+        return "    float metallumHdrCoverage = clamp(fragColor.a, 0.0, 1.0);\n"
                 + "    uint metallumHdrStrength = uint(round(clamp(metallumHdrCoverage * ("
                 + emission + ".0 / 15.0), 0.0, 1.0) * " + SEMANTIC_STRENGTH_MAX + ".0));\n"
                 + "    uint metallumHdrCode = metallumHdrStrength == 0u\n"
@@ -109,7 +93,6 @@ public final class VanillaHdrShaderPatcher {
             case BEACON_BEAM -> BEACON_BEAM_TARGET;
             case LIGHTNING -> LIGHTNING_TARGET;
             case STARS -> STARS_TARGET;
-            case CELESTIAL -> CELESTIAL_TARGET;
             default -> null;
         };
     }
@@ -126,8 +109,7 @@ public final class VanillaHdrShaderPatcher {
             String assignment,
             int emission,
             boolean exact,
-            boolean emissiveGuard,
-            boolean contributionWeighted
+            boolean emissiveGuard
     ) {
     }
 }
