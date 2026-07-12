@@ -285,6 +285,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 sceneInputs.scene(),
                 sceneInputs.depth(),
                 sceneInputs.semantic(),
+                sceneInputs.ui(),
                 fence,
                 outputMode.nativeValue(),
                 hdrConfig.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
@@ -292,6 +293,31 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
+        );
+    }
+
+    boolean encodeHdrUiBackdrop(
+            final MetalGpuTexture source,
+            final MetalGpuTexture destination
+    ) {
+        if (source == destination || source.isClosed() || destination.isClosed()) {
+            return false;
+        }
+
+        submitRenderPass();
+        flushPendingClear(source);
+        pendingColorClears.remove(destination);
+        pendingDepthClears.remove(destination);
+        destination.markContentsDirty();
+        endEncoder();
+        int sourceEncoding = this.device.hdrConfig().sourceEncoding().nativeValue(
+                source.getFormat() == GpuFormat.RGBA16_FLOAT
+        );
+        return commandBuffer().encodeHdrUiBackdrop(
+                source.nativeHandle(),
+                destination.nativeHandle(),
+                fence,
+                sourceEncoding
         );
     }
 

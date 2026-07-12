@@ -195,12 +195,25 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
                             INT,
                             INT,
                             INT,
                             FLOAT,
                             FLOAT,
                             FLOAT
+                    )
+            );
+            MTLCommandBufferEncodeHdrUiBackdrop = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodeHdrUiBackdrop",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
                     )
             );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
@@ -336,6 +349,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
+    private static final MethodHandle MTLCommandBufferEncodeHdrUiBackdrop;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTextureView;
@@ -1311,6 +1325,7 @@ public final class MetalNativeBridge {
             final MemorySegment sceneTexture,
             final MemorySegment sceneDepthTexture,
             final MemorySegment semanticTexture,
+            final MemorySegment uiTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
@@ -1327,6 +1342,7 @@ public final class MetalNativeBridge {
                     segment(sceneTexture),
                     segment(sceneDepthTexture),
                     segment(semanticTexture),
+                    segment(uiTexture),
                     segment(globalFence),
                     outputMode,
                     sourceEncoding,
@@ -1337,6 +1353,26 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);
+        }
+    }
+
+    public static boolean MTLCommandBuffer_encodeHdrUiBackdrop(
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MemorySegment globalFence,
+            final int sourceEncoding
+    ) {
+        try {
+            return (int) MTLCommandBufferEncodeHdrUiBackdrop.invokeExact(
+                    segment(commandBuffer),
+                    segment(sourceTexture),
+                    segment(destinationTexture),
+                    segment(globalFence),
+                    sourceEncoding
+            ) == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLCommandBuffer_encodeHdrUiBackdrop", throwable);
         }
     }
 

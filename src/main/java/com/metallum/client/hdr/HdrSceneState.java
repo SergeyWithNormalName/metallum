@@ -10,6 +10,7 @@ package com.metallum.client.hdr;
  */
 public final class HdrSceneState {
     private static volatile boolean requested;
+    private static volatile HdrSourceEncoding sourceEncoding = HdrSourceEncoding.SRGB;
 
     private HdrSceneState() {
     }
@@ -18,7 +19,12 @@ public final class HdrSceneState {
         return requested;
     }
 
+    public static HdrSourceEncoding sourceEncoding() {
+        return sourceEncoding;
+    }
+
     public static void configure(final HdrConfig config, final EdrCapabilities capabilities) {
+        sourceEncoding = config.sourceEncoding();
         requested = config.experimentalFp16()
                 && config.mode() != HdrMode.OFF
                 && capabilities.isHdrDisplay();
@@ -26,5 +32,6 @@ public final class HdrSceneState {
 
     public static void reset() {
         requested = false;
+        sourceEncoding = HdrSourceEncoding.SRGB;
     }
 }

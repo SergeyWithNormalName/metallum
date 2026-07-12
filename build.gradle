@@ -68,6 +68,52 @@ tasks.register("hdrUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.hdr.HdrConfigTests")
 }
 
+def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
+
+tasks.register("compileHdrValueValidation", Exec) {
+	group = "verification"
+	description = "Compiles the macOS Metal HDR numerical validation harness"
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+
+	inputs.file("src/test/native/HdrValueValidation.swift")
+	outputs.file(hdrValueValidationBinary)
+
+	doFirst {
+		hdrValueValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "AppKit",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "QuartzCore",
+		"-o", hdrValueValidationBinary.get().asFile.absolutePath,
+		"src/test/native/HdrValueValidation.swift"
+}
+
+tasks.register("hdrValueValidation", Exec) {
+	group = "verification"
+	description = "Runs bounded GPU readback checks for HDR values and the native present ABI"
+	onlyIf {
+		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
+	}
+	dependsOn(tasks.named("buildMacNative"), tasks.named("compileHdrValueValidation"))
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file("src/main/resources/natives/macos/libmetallum.dylib")
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	commandLine hdrValueValidationBinary.get().asFile.absolutePath,
+		file("src/main/native/MetallumNative.swift").absolutePath,
+		file("src/main/resources/natives/macos/libmetallum.dylib").absolutePath
+}
+
 tasks.named("test", Test) {
 	// HDR tests use a dependency-free Java entry point instead of a JUnit engine.
 	failOnNoDiscoveredTests = false

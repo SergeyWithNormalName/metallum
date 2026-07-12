@@ -110,6 +110,7 @@ public final class MTLCommandBuffer {
             final MemorySegment sceneTexture,
             final MemorySegment sceneDepthTexture,
             final MemorySegment semanticTexture,
+            final MemorySegment uiTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
@@ -125,6 +126,7 @@ public final class MTLCommandBuffer {
                 sceneTexture,
                 sceneDepthTexture,
                 semanticTexture,
+                uiTexture,
                 globalFence,
                 outputMode,
                 sourceEncoding,
@@ -133,6 +135,21 @@ public final class MTLCommandBuffer {
                 hdrStrength,
                 bloomStrength
         ));
+    }
+
+    public boolean encodeHdrUiBackdrop(
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MemorySegment globalFence,
+            final int sourceEncoding
+    ) {
+        return MetalNativeBridge.MTLCommandBuffer_encodeHdrUiBackdrop(
+                handle(),
+                sourceTexture,
+                destinationTexture,
+                globalFence,
+                sourceEncoding
+        );
     }
 
     public void commit() {

@@ -40,8 +40,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     record SemanticAttachment(MemorySegment texture, boolean clear) {
     }
 
-    record HdrSceneInputs(MemorySegment scene, MemorySegment depth, MemorySegment semantic) {
+    record HdrSceneInputs(MemorySegment scene, MemorySegment depth, MemorySegment semantic, MemorySegment ui) {
         private static final HdrSceneInputs NONE = new HdrSceneInputs(
+                MemorySegment.NULL,
                 MemorySegment.NULL,
                 MemorySegment.NULL,
                 MemorySegment.NULL
@@ -78,6 +79,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean hdrEnhancementActivationLogged;
     private boolean hdrSceneAvailable;
     private long hdrSceneSubmitIndex = Long.MIN_VALUE;
+    private MemorySegment hdrUiHandle = MemorySegment.NULL;
+    private long hdrUiSubmitIndex = Long.MIN_VALUE;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -439,6 +442,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.copyTextureToTexture(depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height);
         this.hdrSceneAvailable = true;
         this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
+        this.hdrUiHandle = MemorySegment.NULL;
+        this.hdrUiSubmitIndex = Long.MIN_VALUE;
         this.hdrSceneDepthHandle = this.hdrSceneDepthSnapshot.nativeHandle();
         this.hdrSemanticSceneAvailable = this.hdrSemanticMask != null
                 && !this.hdrSemanticMask.isClosed()
@@ -447,25 +452,72 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSemanticMaskTouchedSubmitIndex == this.hdrSceneSubmitIndex;
     }
 
-    HdrSceneInputs consumeHdrSceneInputs() {
+    void captureHdrUi(final MetalGpuTexture ui) {
         if (!this.hdrEnhancedActive
-                || !this.hdrSceneAvailable
-                || this.hdrSceneSubmitIndex != this.commandEncoder.currentSubmitIndex()
+                || ui.isClosed()
+                || ui.getFormat() != GpuFormat.RGBA8_UNORM
                 || this.hdrSceneSnapshot == null
-                || this.hdrSceneSnapshot.isClosed()) {
-            this.hdrSceneAvailable = false;
-            this.hdrSemanticSceneAvailable = false;
-            return HdrSceneInputs.NONE;
+                || ui.getWidth(0) != this.hdrSceneSnapshot.getWidth(0)
+                || ui.getHeight(0) != this.hdrSceneSnapshot.getHeight(0)) {
+            return;
         }
-        this.hdrSceneAvailable = false;
-        MemorySegment semanticHandle = this.hdrSemanticSceneAvailable && this.hdrSemanticMask != null
+        this.hdrUiHandle = ui.nativeHandle();
+        this.hdrUiSubmitIndex = this.commandEncoder.currentSubmitIndex();
+    }
+
+    boolean prepareHdrUiBackdrop(
+            final MetalGpuTexture source,
+            final MetalGpuTexture destination
+    ) {
+        return this.isHdrSceneReadyForUi(source)
+                && !destination.isClosed()
+                && source != destination
+                && destination.getFormat() == GpuFormat.RGBA8_UNORM
+                && source.getWidth(0) == destination.getWidth(0)
+                && source.getHeight(0) == destination.getHeight(0)
+                && this.commandEncoder.encodeHdrUiBackdrop(source, destination);
+    }
+
+    boolean isHdrSceneReadyForUi(final MetalGpuTexture source) {
+        return this.hdrEnhancedActive
+                && this.hdrSceneAvailable
+                && this.hdrSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
+                && this.hdrSceneSnapshot != null
+                && !this.hdrSceneSnapshot.isClosed()
+                && !source.isClosed()
+                && source.getWidth(0) == this.hdrSceneSnapshot.getWidth(0)
+                && source.getHeight(0) == this.hdrSceneSnapshot.getHeight(0);
+    }
+
+    HdrSceneInputs consumeHdrSceneInputs() {
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        MemorySegment uiHandle = this.hdrUiSubmitIndex == submitIndex
+                ? this.hdrUiHandle
+                : MemorySegment.NULL;
+        boolean sceneValid = this.hdrEnhancedActive
+                && this.hdrSceneAvailable
+                && this.hdrSceneSubmitIndex == submitIndex
+                && this.hdrSceneSnapshot != null
+                && !this.hdrSceneSnapshot.isClosed();
+        if (!sceneValid) {
+            return MetalNativeBridge.isNullHandle(uiHandle)
+                    ? HdrSceneInputs.NONE
+                    : new HdrSceneInputs(
+                            MemorySegment.NULL,
+                            MemorySegment.NULL,
+                            MemorySegment.NULL,
+                            uiHandle
+                    );
+        }
+        MemorySegment semanticHandle = this.hdrSemanticSceneAvailable
+                && this.hdrSemanticMask != null
                 ? this.hdrSemanticMask.nativeHandle()
                 : MemorySegment.NULL;
-        this.hdrSemanticSceneAvailable = false;
         return new HdrSceneInputs(
                 this.hdrSceneSnapshot.nativeHandle(),
                 this.hdrSceneDepthHandle,
-                semanticHandle
+                semanticHandle,
+                uiHandle
         );
     }
 

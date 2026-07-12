@@ -96,6 +96,7 @@ public final class HdrConfigTests {
         require(!HdrSceneState.isRequested(), "FP16 scene path defaults off before device policy");
         HdrSceneState.configure(enabled, hdr);
         require(HdrSceneState.isRequested(), "FP16 scene path requires explicit config and HDR display");
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB, "scene source contract follows configuration");
         HdrSceneState.configure(enabled, EdrCapabilities.SDR);
         require(!HdrSceneState.isRequested(), "FP16 scene path stays off on SDR displays");
 
@@ -103,6 +104,8 @@ public final class HdrConfigTests {
         HdrSceneState.configure(HdrConfig.from(properties), hdr);
         require(!HdrSceneState.isRequested(), "explicit SDR mode disables FP16 scene path");
         HdrSceneState.reset();
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB, "scene source contract reset");
+        require(Math.abs(HdrScreenshot.linearToSrgb(0.21404114f) - 0.5f) < 0.0001f, "linear screenshot conversion");
     }
 
     private static void testSodiumShaderPatching() {

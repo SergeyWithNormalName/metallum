@@ -30,7 +30,7 @@ private struct MetallumPresentUniforms {
     var hdrStrength: Float
     var bloomStrength: Float
     var sceneAvailable: UInt32
-    var _padding0: Float
+    var uiAvailable: UInt32
 }
 
 private struct MetallumHdrExtractUniforms {
@@ -44,20 +44,33 @@ private struct MetallumHdrBlurUniforms {
     var _padding0: SIMD2<Float>
 }
 
+private struct MetallumHdrUiBackdropUniforms {
+    var sourceEncoding: UInt32
+}
+
+private struct MetallumHdrUiCompareUniforms {
+    var sourceEncoding: UInt32
+    var seededUiAvailable: UInt32
+    var _padding0: SIMD2<UInt32>
+}
+
 private final class MetallumHdrPipelines {
     let extract: MTLRenderPipelineState
     let blur: MTLRenderPipelineState
+    let uiBackdrop: MTLRenderPipelineState
     let uiCompare: MTLRenderPipelineState
     let uiDilate: MTLRenderPipelineState
 
     init(
         extract: MTLRenderPipelineState,
         blur: MTLRenderPipelineState,
+        uiBackdrop: MTLRenderPipelineState,
         uiCompare: MTLRenderPipelineState,
         uiDilate: MTLRenderPipelineState
     ) {
         self.extract = extract
         self.blur = blur
+        self.uiBackdrop = uiBackdrop
         self.uiCompare = uiCompare
         self.uiDilate = uiDilate
     }
@@ -266,7 +279,7 @@ private func presentMslSource() -> String {
       float hdrStrength;
       float bloomStrength;
       uint sceneAvailable;
-      float _padding0;
+      uint uiAvailable;
     };
 
     float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
@@ -350,6 +363,7 @@ private func presentMslSource() -> String {
       texture2d<float> emissionFrame [[texture(2)]],
       texture2d<float> bloomFrame [[texture(3)]],
       texture2d<float> uiMaskFrame [[texture(4)]],
+      texture2d<float> uiFrame [[texture(5)]],
       sampler smp [[sampler(0)]],
       sampler auxiliarySmp [[sampler(1)]],
       constant PresentUniforms& uniforms [[buffer(0)]]
@@ -370,11 +384,20 @@ private func presentMslSource() -> String {
       }
 
       float4 source = finalFrame.sample(smp, in.uv);
+      float4 encodedUi = uiFrame.sample(auxiliarySmp, in.uv);
       if (uniforms.mode == 0u) {
-        return float4(source.rgb, 1.0);
+        return float4(
+          uniforms.uiAvailable != 0u ? clamp(encodedUi.rgb, 0.0, 1.0) : source.rgb,
+          1.0
+        );
       }
 
-      float3 linearColor = metallum_decode(source.rgb, uniforms.sourceEncoding);
+      // A seeded UI texture is a complete SDR composite, not a transparent
+      // premultiplied overlay. It is therefore the display-referred base and
+      // must always be decoded as bounded sRGB regardless of scene encoding.
+      float3 linearColor = uniforms.uiAvailable != 0u
+        ? metallum_srgb_to_linear(clamp(encodedUi.rgb, 0.0, 1.0), false)
+        : metallum_decode(source.rgb, uniforms.sourceEncoding);
       float3 mappedBaseColor = metallum_map_to_headroom(linearColor, uniforms.currentHeadroom);
       if (uniforms.mode != 2u || uniforms.sceneAvailable == 0u || uniforms.currentHeadroom <= 1.001) {
         return float4(mappedBaseColor, 1.0);
@@ -462,6 +485,16 @@ private func hdrEffectsMslSource() -> String {
       float2 _padding0;
     };
 
+    struct HdrUiBackdropUniforms {
+      uint sourceEncoding;
+    };
+
+    struct HdrUiCompareUniforms {
+      uint sourceEncoding;
+      uint seededUiAvailable;
+      uint2 _padding0;
+    };
+
     vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
       const float2 positions[3] = {
         float2(-1.0,  1.0),
@@ -495,6 +528,22 @@ private func hdrEffectsMslSource() -> String {
         return max(metallum_hdr_srgb_to_linear(value, true), 0.0);
       }
       return max(value, 0.0);
+    }
+
+    float3 metallum_hdr_linear_to_srgb(float3 linearValue) {
+      float3 bounded = clamp(linearValue, 0.0, 1.0);
+      float3 low = bounded * 12.92;
+      float3 high = 1.055 * pow(bounded, float3(1.0 / 2.4)) - 0.055;
+      return select(high, low, bounded <= float3(0.0031308));
+    }
+
+    float3 metallum_hdr_sdr_encoded_appearance(float3 value, uint sourceEncoding) {
+      // SRGB and extended-SRGB scene values are already display encoded. A
+      // linear source needs an explicit bounded transfer into the RGBA8 UI
+      // target so the seeded backdrop represents the same SDR appearance.
+      return sourceEncoding == 2u
+        ? metallum_hdr_linear_to_srgb(value)
+        : clamp(value, 0.0, 1.0);
     }
 
     float metallum_hdr_luminance(float3 color) {
@@ -589,10 +638,26 @@ private func hdrEffectsMslSource() -> String {
       return result;
     }
 
+    fragment float4 metallum_hdr_ui_backdrop_fs(
+      HdrVertexOut in [[stage_in]],
+      texture2d<float> source [[texture(0)]],
+      constant HdrUiBackdropUniforms& uniforms [[buffer(0)]]
+    ) {
+      uint2 sourceSize = uint2(source.get_width(), source.get_height());
+      uint2 maximumCoordinate = max(sourceSize, uint2(1u)) - 1u;
+      uint2 coordinate = min(uint2(in.position.xy), maximumCoordinate);
+      float3 encoded = metallum_hdr_sdr_encoded_appearance(
+        source.read(coordinate).rgb,
+        uniforms.sourceEncoding
+      );
+      return float4(encoded, 0.0);
+    }
+
     fragment float4 metallum_hdr_ui_compare_fs(
       HdrVertexOut in [[stage_in]],
       texture2d<float> finalFrame [[texture(0)]],
-      texture2d<float> sceneFrame [[texture(1)]]
+      texture2d<float> sceneFrame [[texture(1)]],
+      constant HdrUiCompareUniforms& uniforms [[buffer(0)]]
     ) {
       uint2 sourceSize = uint2(finalFrame.get_width(), finalFrame.get_height());
       uint2 maximumCoordinate = max(sourceSize, uint2(1u)) - 1u;
@@ -601,10 +666,19 @@ private func hdrEffectsMslSource() -> String {
       for (uint yIndex = 0u; yIndex < 2u; ++yIndex) {
         for (uint xIndex = 0u; xIndex < 2u; ++xIndex) {
           uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
-          float3 finalValue = finalFrame.read(coordinate).rgb;
+          float4 finalValue = finalFrame.read(coordinate);
           float3 sceneValue = sceneFrame.read(coordinate).rgb;
-          float3 delta = abs(finalValue - sceneValue);
+          if (uniforms.seededUiAvailable != 0u) {
+            sceneValue = metallum_hdr_sdr_encoded_appearance(
+              sceneValue,
+              uniforms.sourceEncoding
+            );
+          }
+          float3 delta = abs(finalValue.rgb - sceneValue);
           difference = max(difference, max(delta.r, max(delta.g, delta.b)));
+          if (uniforms.seededUiAvailable != 0u) {
+            difference = max(difference, clamp(finalValue.a, 0.0, 1.0));
+          }
         }
       }
       float mask = smoothstep(0.25 / 255.0, 0.75 / 255.0, difference);
@@ -637,6 +711,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
             let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
             let blurFunction = library.makeFunction(name: "metallum_hdr_blur_fs"),
+            let uiBackdropFunction = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs"),
             let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
             let uiDilateFunction = library.makeFunction(name: "metallum_hdr_ui_dilate_fs")
         else {
@@ -659,6 +734,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         return try MetallumHdrPipelines(
             extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
             blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
+            uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
             uiCompare: makePipeline(uiCompareFunction, colorFormat: .r8Unorm),
             uiDilate: makePipeline(uiDilateFunction, colorFormat: .r8Unorm)
         )
@@ -769,6 +845,7 @@ private func encodeHdrEffects(
     sceneTexture: MTLTexture,
     sceneDepthTexture: MTLTexture,
     semanticTexture: MTLTexture?,
+    uiTexture: MTLTexture?,
     globalFence: MTLFence?,
     sourceEncoding: Int32
 ) -> MetallumHdrOutputs? {
@@ -860,8 +937,16 @@ private func encodeHdrEffects(
     if let globalFence {
         uiCompare.waitForFence(globalFence, before: .fragment)
     }
-    uiCompare.setFragmentTexture(finalTexture, index: 0)
+    uiCompare.setFragmentTexture(uiTexture ?? finalTexture, index: 0)
     uiCompare.setFragmentTexture(sceneTexture, index: 1)
+    var uiCompareUniforms = MetallumHdrUiCompareUniforms(
+        sourceEncoding: UInt32(clamping: min(max(sourceEncoding, 0), 2)),
+        seededUiAvailable: uiTexture == nil ? 0 : 1,
+        _padding0: SIMD2<UInt32>(repeating: 0)
+    )
+    withUnsafeBytes(of: &uiCompareUniforms) { bytes in
+        uiCompare.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
     uiCompare.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     if let globalFence {
         uiCompare.updateFence(globalFence, after: .fragment)
@@ -2124,6 +2209,66 @@ public func metallum_configure_layer(
     return 1
 }
 
+@_cdecl("metallum_MTLCommandBuffer_encodeHdrUiBackdrop")
+public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
+    _ commandBuffer: MTLCommandBuffer,
+    _ sourceTexture: MTLTexture,
+    _ destinationTexture: MTLTexture,
+    _ globalFence: MTLFence?,
+    _ sourceEncoding: Int32
+) -> Int32 {
+    return autoreleasepool {
+        guard
+            (0...2).contains(sourceEncoding),
+            sourceTexture.width > 0,
+            sourceTexture.height > 0,
+            destinationTexture.width == sourceTexture.width,
+            destinationTexture.height == sourceTexture.height,
+            destinationTexture.pixelFormat == .rgba8Unorm,
+            sourceTexture.textureType == .type2D,
+            destinationTexture.textureType == .type2D,
+            sourceTexture.sampleCount == 1,
+            destinationTexture.sampleCount == 1,
+            sourceTexture.usage.contains(.shaderRead),
+            destinationTexture.usage.contains(.renderTarget),
+            objectAddress(sourceTexture) != objectAddress(destinationTexture),
+            objectAddress(sourceTexture.device) == objectAddress(commandBuffer.device),
+            objectAddress(destinationTexture.device) == objectAddress(commandBuffer.device),
+            globalFence == nil || objectAddress(globalFence!.device) == objectAddress(commandBuffer.device)
+        else {
+            return 0
+        }
+
+        guard
+            let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+            let encoder = makeHdrPassEncoder(
+                commandBuffer: commandBuffer,
+                target: destinationTexture,
+                pipeline: pipelines.uiBackdrop
+            )
+        else {
+            return -1
+        }
+
+        if let globalFence {
+            encoder.waitForFence(globalFence, before: .fragment)
+        }
+        encoder.setFragmentTexture(sourceTexture, index: 0)
+        var uniforms = MetallumHdrUiBackdropUniforms(
+            sourceEncoding: UInt32(sourceEncoding)
+        )
+        withUnsafeBytes(of: &uniforms) { bytes in
+            encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
+        encoder.endEncoding()
+        return 1
+    }
+}
+
 @_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
 public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ commandBuffer: MTLCommandBuffer,
@@ -2132,6 +2277,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ sceneTexture: MTLTexture?,
     _ sceneDepthTexture: MTLTexture?,
     _ semanticTexture: MTLTexture?,
+    _ uiTexture: MTLTexture?,
     _ globalFence: MTLFence?,
     _ outputMode: Int32,
     _ sourceEncoding: Int32,
@@ -2171,6 +2317,16 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && semanticTexture!.width == sourceTexture.width
             && semanticTexture!.height == sourceTexture.height
             && semanticTexture!.pixelFormat == .rgba8Unorm
+        // The seeded RGBA8 target is a complete SDR frame. Keep it usable
+        // independently of enhanced-scene eligibility so a headroom drop or
+        // an Enhanced-to-EDR fallback cannot make the GUI disappear.
+        let hasCompatibleUi = uiTexture != nil
+            && uiTexture!.width == sourceTexture.width
+            && uiTexture!.height == sourceTexture.height
+            && uiTexture!.pixelFormat == .rgba8Unorm
+            && uiTexture!.textureType == .type2D
+            && uiTexture!.sampleCount == 1
+            && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
 
         if hasCompatibleScene {
             guard
@@ -2211,6 +2367,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 sceneTexture: sceneTexture,
                 sceneDepthTexture: sceneDepthTexture,
                 semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
+                uiTexture: hasCompatibleUi ? uiTexture : nil,
                 globalFence: globalFence,
                 sourceEncoding: sourceEncoding
             )
@@ -2248,6 +2405,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.emission : sourceTexture, index: 2)
         encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
         encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
+        encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 5)
 
         var uniforms = MetallumPresentUniforms(
             mode: UInt32(clamping: max(outputMode, 0)),
@@ -2257,7 +2415,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
             bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
             sceneAvailable: hasHdrScene ? 1 : 0,
-            _padding0: 0.0
+            uiAvailable: hasCompatibleUi ? 1 : 0
         )
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
