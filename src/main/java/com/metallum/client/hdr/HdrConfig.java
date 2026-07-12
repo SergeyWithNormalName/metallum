@@ -97,4 +97,23 @@ public record HdrConfig(
         }
     }
 
+    public void save() {
+        Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        Properties properties = new Properties();
+        properties.setProperty("mode", mode.name().toLowerCase(java.util.Locale.ROOT));
+        properties.setProperty("sourceEncoding", sourceEncoding.name().toLowerCase(java.util.Locale.ROOT));
+        properties.setProperty("hdrStrength", Float.toString(hdrStrength));
+        properties.setProperty("bloomStrength", Float.toString(bloomStrength));
+        properties.setProperty("diagnosticPattern", Boolean.toString(diagnosticPattern));
+        properties.setProperty("experimentalFp16", Boolean.toString(experimentalFp16));
+        try {
+            Files.createDirectories(path.getParent());
+            try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
+                properties.store(writer, "Metallum HDR settings");
+            }
+        } catch (IOException exception) {
+            Metallum.LOGGER.warn("Failed to save HDR config at {}", path, exception);
+        }
+    }
+
 }

@@ -53,11 +53,12 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
+    private static volatile MetalDevice INSTANCE;
     private final MemorySegment metalDeviceHandle;
     private final MemorySegment metalLayer;
     private final MemorySegment cocoaView;
     private final MemorySegment edrMonitor;
-    private final HdrConfig hdrConfig;
+    private volatile HdrConfig hdrConfig;
     private final GpuDebugOptions debugOptions;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
@@ -94,6 +95,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MemorySegment cocoaWindow,
             final MemorySegment cocoaView
     ) {
+        INSTANCE = this;
         this.activeShaderSource = defaultShaderSource;
         this.debugOptions = debugOptions;
         this.metalDeviceHandle = metalDeviceHandle;
@@ -306,6 +308,15 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     public HdrConfig hdrConfig() {
         return this.hdrConfig;
+    }
+
+    public static MetalDevice getInstance() {
+        return INSTANCE;
+    }
+
+    public void updateHdrConfig(HdrConfig newConfig) {
+        this.hdrConfig = newConfig;
+        newConfig.save();
     }
 
     EdrCapabilities queryEdrCapabilities() {
