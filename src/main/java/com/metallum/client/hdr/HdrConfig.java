@@ -14,8 +14,12 @@ import java.util.Properties;
 public record HdrConfig(
         HdrMode mode,
         HdrSourceEncoding sourceEncoding,
+        float hdrStrength,
+        float bloomStrength,
         boolean diagnosticPattern
 ) {
+    public static final float OUTPUT_HEADROOM = 8.0f;
+
     private static final String FILE_NAME = "metallum-hdr.properties";
 
     public static HdrConfig load() {
@@ -49,6 +53,8 @@ public record HdrConfig(
         return new HdrConfig(
                 HdrMode.parse(properties.getProperty("mode")),
                 HdrSourceEncoding.parse(properties.getProperty("sourceEncoding")),
+                parseFloat(properties, "hdrStrength", 1.0f, 0.0f, 2.0f),
+                parseFloat(properties, "bloomStrength", 0.22f, 0.0f, 1.0f),
                 Boolean.parseBoolean(properties.getProperty("diagnosticPattern", "false"))
         );
     }
@@ -57,6 +63,8 @@ public record HdrConfig(
         Properties properties = new Properties();
         properties.setProperty("mode", "auto");
         properties.setProperty("sourceEncoding", "srgb");
+        properties.setProperty("hdrStrength", "1.0");
+        properties.setProperty("bloomStrength", "0.22");
         properties.setProperty("diagnosticPattern", "false");
         return properties;
     }
@@ -69,6 +77,21 @@ public record HdrConfig(
             }
         } catch (IOException exception) {
             Metallum.LOGGER.warn("Failed to create default HDR config at {}", path, exception);
+        }
+    }
+
+    private static float parseFloat(
+            final Properties properties,
+            final String key,
+            final float fallback,
+            final float minimum,
+            final float maximum
+    ) {
+        try {
+            float parsed = Float.parseFloat(properties.getProperty(key, Float.toString(fallback)));
+            return Float.isFinite(parsed) ? Math.clamp(parsed, minimum, maximum) : fallback;
+        } catch (NumberFormatException ignored) {
+            return fallback;
         }
     }
 

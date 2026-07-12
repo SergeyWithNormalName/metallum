@@ -8,6 +8,20 @@ import java.lang.foreign.MemorySegment;
 
 @Environment(EnvType.CLIENT)
 public final class MTLCommandBuffer {
+    public enum PresentResult {
+        FAILED,
+        NO_DRAWABLE,
+        PRESENTED;
+
+        private static PresentResult fromNative(final int value) {
+            return switch (value) {
+                case 1 -> PRESENTED;
+                case 0 -> NO_DRAWABLE;
+                default -> FAILED;
+            };
+        }
+    }
+
     private MemorySegment handle;
 
     MTLCommandBuffer(final MemorySegment handle) {
@@ -86,25 +100,31 @@ public final class MTLCommandBuffer {
         );
     }
 
-    public void encodePresentTextureToDrawable(
+    public PresentResult encodePresentTextureToDrawable(
             final MemorySegment layer,
             final MemorySegment sourceTexture,
+            final MemorySegment sceneTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
             final boolean diagnosticPattern,
-            final float currentHeadroom
+            final float currentHeadroom,
+            final float hdrStrength,
+            final float bloomStrength
     ) {
-        MetalNativeBridge.MTLCommandBuffer_encodePresentTextureToDrawable(
+        return PresentResult.fromNative(MetalNativeBridge.MTLCommandBuffer_encodePresentTextureToDrawable(
                 handle(),
                 layer,
                 sourceTexture,
+                sceneTexture,
                 globalFence,
                 outputMode,
                 sourceEncoding,
                 diagnosticPattern ? 1 : 0,
-                currentHeadroom
-        );
+                currentHeadroom,
+                hdrStrength,
+                bloomStrength
+        ));
     }
 
     public void commit() {

@@ -5,6 +5,7 @@ import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLCommandBuffer;
 import com.mojang.blaze3d.systems.CommandEncoderBackend;
 import com.mojang.blaze3d.systems.GpuSurface;
 import com.mojang.blaze3d.systems.GpuSurfaceBackend;
@@ -13,6 +14,7 @@ import com.mojang.blaze3d.textures.GpuTextureView;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Collection;
@@ -30,7 +32,10 @@ final class MetalSurface implements GpuSurfaceBackend {
     private EdrCapabilities edrCapabilities = EdrCapabilities.SDR;
     private HdrOutputMode outputMode = HdrOutputMode.SDR;
     private boolean monitorFailureLogged;
-    private boolean forceSdrUntilReconfigure;
+    @Nullable
+    private HdrOutputMode forcedOutputModeUntilReconfigure;
+    private boolean drawableFailureLogged;
+    private boolean presentFailureLogged;
 
     MetalSurface(final MetalDevice device, final MemorySegment metalLayer) {
         this.device = device;
@@ -45,16 +50,18 @@ final class MetalSurface implements GpuSurfaceBackend {
         }
 
         this.configuration = config;
-        this.forceSdrUntilReconfigure = false;
+        this.forcedOutputModeUntilReconfigure = null;
         this.refreshEdrCapabilities();
-        HdrOutputMode desiredMode = this.hdrConfig.mode().resolve(this.edrCapabilities);
+        HdrOutputMode desiredMode = this.device.availableHdrOutputMode(
+                this.hdrConfig.mode().resolve(this.edrCapabilities)
+        );
         if (desiredMode != this.outputMode) {
             this.device.waitForPreviouslySubmittedGpuWork();
         }
         if (!this.configureNative(desiredMode)) {
             if (desiredMode != HdrOutputMode.SDR && this.configureNative(HdrOutputMode.SDR)) {
                 desiredMode = HdrOutputMode.SDR;
-                this.forceSdrUntilReconfigure = true;
+                this.forcedOutputModeUntilReconfigure = HdrOutputMode.SDR;
                 Metallum.LOGGER.warn("Metal rejected the requested HDR layer configuration; using SDR");
             } else {
                 throw new SurfaceException("Failed to configure CAMetalLayer for " + desiredMode);
@@ -79,13 +86,46 @@ final class MetalSurface implements GpuSurfaceBackend {
         }
 
         this.refreshOutputModeIfNeeded();
-        metalEncoder.presentTextureToDrawable(
+        MTLCommandBuffer.PresentResult result = metalEncoder.presentTextureToDrawable(
                 metalLayer,
                 textureView,
                 this.outputMode,
                 this.hdrConfig,
                 this.edrCapabilities
         );
+        if (result == MTLCommandBuffer.PresentResult.FAILED && this.outputMode != HdrOutputMode.SDR) {
+            this.device.waitForPreviouslySubmittedGpuWork();
+            HdrOutputMode fallbackMode = this.outputMode == HdrOutputMode.ENHANCED
+                    ? HdrOutputMode.EDR
+                    : HdrOutputMode.SDR;
+            if (this.outputMode == HdrOutputMode.ENHANCED) {
+                this.device.disableHdrEnhancement();
+            }
+            this.forcedOutputModeUntilReconfigure = fallbackMode;
+            if (this.configureNative(fallbackMode)) {
+                this.setOutputMode(fallbackMode);
+                result = metalEncoder.presentTextureToDrawable(
+                        metalLayer,
+                        textureView,
+                        this.outputMode,
+                        this.hdrConfig,
+                        this.edrCapabilities
+                );
+                Metallum.LOGGER.warn("HDR presentation failed; switched Metal output to {}", fallbackMode);
+            }
+        }
+        if (result == MTLCommandBuffer.PresentResult.NO_DRAWABLE && !this.drawableFailureLogged) {
+            this.drawableFailureLogged = true;
+            Metallum.LOGGER.warn("CAMetalLayer did not provide a drawable; dropping frames until one is available");
+        } else if (result == MTLCommandBuffer.PresentResult.PRESENTED) {
+            this.drawableFailureLogged = false;
+        }
+        if (result == MTLCommandBuffer.PresentResult.FAILED && !this.presentFailureLogged) {
+            this.presentFailureLogged = true;
+            Metallum.LOGGER.error("Metal presentation failed; this frame will be dropped");
+        } else if (result == MTLCommandBuffer.PresentResult.PRESENTED) {
+            this.presentFailureLogged = false;
+        }
         this.pendingPresentEncoder = metalEncoder;
     }
 
@@ -105,9 +145,10 @@ final class MetalSurface implements GpuSurfaceBackend {
 
     private void refreshOutputModeIfNeeded() {
         this.refreshEdrCapabilities();
-        HdrOutputMode desiredMode = this.forceSdrUntilReconfigure
-                ? HdrOutputMode.SDR
-                : this.hdrConfig.mode().resolve(this.edrCapabilities);
+        HdrOutputMode desiredMode = this.forcedOutputModeUntilReconfigure != null
+                ? this.forcedOutputModeUntilReconfigure
+                : this.device.availableHdrOutputMode(this.hdrConfig.mode().resolve(this.edrCapabilities));
+        this.device.setHdrOutputMode(desiredMode, this.edrCapabilities.currentHeadroom());
         if (desiredMode == this.outputMode || this.configuration == null) {
             return;
         }
@@ -118,9 +159,8 @@ final class MetalSurface implements GpuSurfaceBackend {
             return;
         }
 
-        if (desiredMode != HdrOutputMode.SDR) {
-            this.forceSdrUntilReconfigure = true;
-        }
+        this.forcedOutputModeUntilReconfigure = this.outputMode;
+        this.device.setHdrOutputMode(this.outputMode, this.edrCapabilities.currentHeadroom());
         Metallum.LOGGER.error("Failed to switch Metal output to {}; keeping {}", desiredMode, this.outputMode);
     }
 
@@ -143,11 +183,12 @@ final class MetalSurface implements GpuSurfaceBackend {
                 this.configuration.height(),
                 this.configuration.presentMode() == GpuSurface.PresentMode.MAILBOX ? 1 : 0,
                 mode.nativeValue(),
-                8.0f
+                HdrConfig.OUTPUT_HEADROOM
         );
     }
 
     private void setOutputMode(final HdrOutputMode mode) {
+        this.device.setHdrOutputMode(mode, this.edrCapabilities.currentHeadroom());
         if (mode == this.outputMode) {
             return;
         }

@@ -52,6 +52,7 @@ public final class MetalNativeBridge {
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
             initPipelines = downcall(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             MTLDeviceMakeCommandQueue = downcall(lookup, "metallum_MTLDevice_makeCommandQueue", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -183,7 +184,9 @@ public final class MetalNativeBridge {
             MTLCommandBufferEncodePresentTextureToDrawable = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLCommandBuffer_encodePresentTextureToDrawable",
-                    FunctionDescriptor.ofVoid(
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
@@ -191,6 +194,8 @@ public final class MetalNativeBridge {
                             INT,
                             INT,
                             INT,
+                            FLOAT,
+                            FLOAT,
                             FLOAT
                     )
             );
@@ -351,6 +356,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
     private static final MethodHandle MTLBlitCommandEncoderWaitForFence;
     private static final MethodHandle initPipelines;
+    private static final MethodHandle releaseDeviceCaches;
 
 
     private static MethodHandle downcall(final SymbolLookup lookup, final String symbol, final FunctionDescriptor descriptor) {
@@ -446,6 +452,14 @@ public final class MetalNativeBridge {
             initPipelines.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_init_pipelines", throwable);
+        }
+    }
+
+    public static void metallum_release_device_caches(final MemorySegment device) {
+        try {
+            releaseDeviceCaches.invokeExact(segment(device));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_release_device_caches", throwable);
         }
     }
 
@@ -1273,26 +1287,32 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void MTLCommandBuffer_encodePresentTextureToDrawable(
+    public static int MTLCommandBuffer_encodePresentTextureToDrawable(
             final MemorySegment commandBuffer,
             final MemorySegment layer,
             final MemorySegment sourceTexture,
+            final MemorySegment sceneTexture,
             final MemorySegment globalFence,
             final int outputMode,
             final int sourceEncoding,
             final int diagnosticPattern,
-            final float currentHeadroom
+            final float currentHeadroom,
+            final float hdrStrength,
+            final float bloomStrength
     ) {
         try {
-            MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(
+            return (int) MTLCommandBufferEncodePresentTextureToDrawable.invokeExact(
                     segment(commandBuffer),
                     segment(layer),
                     segment(sourceTexture),
+                    segment(sceneTexture),
                     segment(globalFence),
                     outputMode,
                     sourceEncoding,
                     diagnosticPattern,
-                    currentHeadroom
+                    currentHeadroom,
+                    hdrStrength,
+                    bloomStrength
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodePresentTextureToDrawable", throwable);

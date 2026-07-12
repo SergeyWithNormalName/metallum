@@ -248,7 +248,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
     }
 
-    void presentTextureToDrawable(
+    MTLCommandBuffer.PresentResult presentTextureToDrawable(
             final MemorySegment drawable,
             final GpuTextureView textureView,
             final HdrOutputMode outputMode,
@@ -260,14 +260,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
-        commandBuffer.encodePresentTextureToDrawable(
+        return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
                 source.nativeHandle(),
+                this.device.consumeHdrSceneSnapshotHandle(),
                 fence,
                 outputMode.nativeValue(),
                 hdrConfig.sourceEncoding().nativeValue(),
                 hdrConfig.diagnosticPattern(),
-                edrCapabilities.currentHeadroom()
+                Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
+                hdrConfig.hdrStrength(),
+                hdrConfig.bloomStrength()
         );
     }
 
@@ -622,6 +625,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (latestSubmit >= MAX_SUBMITS_IN_FLIGHT) {
             awaitSubmitCompletion(latestSubmit, Long.MAX_VALUE);
         }
+    }
+
+    long currentSubmitIndex() {
+        return this.currentSubmitIndex;
     }
 
     @Override

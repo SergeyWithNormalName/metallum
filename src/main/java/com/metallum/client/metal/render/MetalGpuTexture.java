@@ -40,7 +40,7 @@ final class MetalGpuTexture extends GpuTexture {
         this.device = device;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
 
-        this.nativeHandle = MetalNativeBridge.metallum_create_texture_2d(
+        MemorySegment createdTexture = MetalNativeBridge.metallum_create_texture_2d(
                 device.metalDeviceHandle(),
                 this.mtlPixelFormat,
                 width,
@@ -52,6 +52,10 @@ final class MetalGpuTexture extends GpuTexture {
                 MTLStorageMode.Private,
                 label
         );
+        if (MetalNativeBridge.isNullHandle(createdTexture)) {
+            throw new IllegalStateException("Metal failed to allocate texture '" + label + "' (" + width + "x" + height + ")");
+        }
+        this.nativeHandle = createdTexture;
     }
 
     int pixelSize() {
@@ -82,6 +86,10 @@ final class MetalGpuTexture extends GpuTexture {
             throw new IllegalStateException("Native Metal texture is closed");
         }
         return this.nativeHandle;
+    }
+
+    MetalDevice device() {
+        return this.device;
     }
 
     void queueNativeRelease(final MemorySegment handle) {

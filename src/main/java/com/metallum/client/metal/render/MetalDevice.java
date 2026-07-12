@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.Metallum;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -48,6 +49,12 @@ final class MetalDevice implements GpuDeviceBackend {
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
     private ShaderSource activeShaderSource;
+    @Nullable
+    private MetalGpuTexture hdrSceneSnapshot;
+    private boolean hdrEnhancedActive;
+    private boolean hdrEnhancementUnavailable;
+    private boolean hdrSceneAvailable;
+    private long hdrSceneSubmitIndex = Long.MIN_VALUE;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -185,6 +192,10 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        if (this.hdrSceneSnapshot != null) {
+            this.hdrSceneSnapshot.close();
+            this.hdrSceneSnapshot = null;
+        }
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
         this.clearPipelineCache();
@@ -196,6 +207,7 @@ final class MetalDevice implements GpuDeviceBackend {
         if (!MetalNativeBridge.isNullHandle(this.edrMonitor)) {
             MetalNativeBridge.metallum_release_object(this.edrMonitor);
         }
+        MetalNativeBridge.metallum_release_device_caches(this.metalDeviceHandle);
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
     }
 
@@ -232,6 +244,79 @@ final class MetalDevice implements GpuDeviceBackend {
 
     EdrCapabilities queryEdrCapabilities() {
         return MetalNativeBridge.metallum_EDRMonitor_query(this.edrMonitor);
+    }
+
+    void setHdrOutputMode(final HdrOutputMode outputMode, final float currentHeadroom) {
+        this.hdrEnhancedActive = !this.hdrEnhancementUnavailable
+                && outputMode == HdrOutputMode.ENHANCED
+                && currentHeadroom > 1.001f;
+        if (!this.hdrEnhancedActive) {
+            this.hdrSceneAvailable = false;
+        }
+    }
+
+    HdrOutputMode availableHdrOutputMode(final HdrOutputMode requestedMode) {
+        return requestedMode == HdrOutputMode.ENHANCED && this.hdrEnhancementUnavailable
+                ? HdrOutputMode.EDR
+                : requestedMode;
+    }
+
+    void disableHdrEnhancement() {
+        this.hdrEnhancementUnavailable = true;
+        this.hdrEnhancedActive = false;
+        this.hdrSceneAvailable = false;
+    }
+
+    void captureHdrScene(final MetalGpuTexture source) {
+        if (!this.hdrEnhancedActive || source.isClosed()) {
+            this.hdrSceneAvailable = false;
+            return;
+        }
+
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        if (this.hdrSceneSnapshot == null
+                || this.hdrSceneSnapshot.isClosed()
+                || this.hdrSceneSnapshot.getWidth(0) != width
+                || this.hdrSceneSnapshot.getHeight(0) != height
+                || this.hdrSceneSnapshot.getFormat() != source.getFormat()) {
+            if (this.hdrSceneSnapshot != null) {
+                this.hdrSceneSnapshot.close();
+            }
+            try {
+                this.hdrSceneSnapshot = new MetalGpuTexture(
+                        this,
+                        GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+                        "Metallum HDR scene snapshot",
+                        source.getFormat(),
+                        width,
+                        height,
+                        1,
+                        1
+                );
+            } catch (RuntimeException exception) {
+                this.disableHdrEnhancement();
+                Metallum.LOGGER.error("Failed to allocate the HDR scene snapshot; continuing with EDR output", exception);
+                return;
+            }
+        }
+
+        this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
+        this.hdrSceneAvailable = true;
+        this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
+    }
+
+    MemorySegment consumeHdrSceneSnapshotHandle() {
+        if (!this.hdrEnhancedActive
+                || !this.hdrSceneAvailable
+                || this.hdrSceneSubmitIndex != this.commandEncoder.currentSubmitIndex()
+                || this.hdrSceneSnapshot == null
+                || this.hdrSceneSnapshot.isClosed()) {
+            this.hdrSceneAvailable = false;
+            return MemorySegment.NULL;
+        }
+        this.hdrSceneAvailable = false;
+        return this.hdrSceneSnapshot.nativeHandle();
     }
 
     void queueResourceRelease(final MemorySegment handle) {

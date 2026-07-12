@@ -6,6 +6,7 @@
   "mixins": [
   ],
   "client": [
+    "render.HdrSceneCaptureMixin",
     "render.PreferredGraphicsApiMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",

@@ -27,6 +27,74 @@ private struct MetallumPresentUniforms {
     var sourceEncoding: UInt32
     var diagnosticPattern: UInt32
     var currentHeadroom: Float
+    var hdrStrength: Float
+    var bloomStrength: Float
+    var sceneAvailable: UInt32
+    var _padding0: Float
+}
+
+private struct MetallumHdrExtractUniforms {
+    var sourceEncoding: UInt32
+    var _padding0: UInt32
+    var sourceSize: SIMD2<UInt32>
+}
+
+private struct MetallumHdrBlurUniforms {
+    var texelStep: SIMD2<Float>
+    var _padding0: SIMD2<Float>
+}
+
+private final class MetallumHdrPipelines {
+    let extract: MTLRenderPipelineState
+    let blur: MTLRenderPipelineState
+    let uiCompare: MTLRenderPipelineState
+    let uiDilate: MTLRenderPipelineState
+
+    init(
+        extract: MTLRenderPipelineState,
+        blur: MTLRenderPipelineState,
+        uiCompare: MTLRenderPipelineState,
+        uiDilate: MTLRenderPipelineState
+    ) {
+        self.extract = extract
+        self.blur = blur
+        self.uiCompare = uiCompare
+        self.uiDilate = uiDilate
+    }
+}
+
+private final class MetallumHdrWorkspace {
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let emission: MTLTexture
+    let bloomA: MTLTexture
+    let bloomB: MTLTexture
+    let uiMaskA: MTLTexture
+    let uiMaskB: MTLTexture
+
+    init(
+        sourceWidth: Int,
+        sourceHeight: Int,
+        emission: MTLTexture,
+        bloomA: MTLTexture,
+        bloomB: MTLTexture,
+        uiMaskA: MTLTexture,
+        uiMaskB: MTLTexture
+    ) {
+        self.sourceWidth = sourceWidth
+        self.sourceHeight = sourceHeight
+        self.emission = emission
+        self.bloomA = bloomA
+        self.bloomB = bloomB
+        self.uiMaskA = uiMaskA
+        self.uiMaskB = uiMaskB
+    }
+}
+
+private struct MetallumHdrOutputs {
+    let emission: MTLTexture
+    let bloom: MTLTexture
+    let uiMask: MTLTexture
 }
 
 private enum NativeState {
@@ -34,8 +102,10 @@ private enum NativeState {
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
     static var clearPipelines: [PipelineVariantKey: MTLRenderPipelineState] = [:]
     static var presentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
-    static var presentNearestSampler: MTLSamplerState!
-    static var presentLinearSampler: MTLSamplerState!
+    static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
+    static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
+    static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
+    static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
 }
 
 private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
@@ -193,6 +263,10 @@ private func presentMslSource() -> String {
       uint sourceEncoding;
       uint diagnosticPattern;
       float currentHeadroom;
+      float hdrStrength;
+      float bloomStrength;
+      uint sceneAvailable;
+      float _padding0;
     };
 
     float3 metallum_srgb_to_linear(float3 encoded) {
@@ -200,6 +274,38 @@ private func presentMslSource() -> String {
       float3 low = encoded / 12.92;
       float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
       return select(high, low, encoded <= float3(0.04045));
+    }
+
+    float3 metallum_decode(float3 value, uint sourceEncoding) {
+      return sourceEncoding == 0u
+        ? metallum_srgb_to_linear(value)
+        : max(value, 0.0);
+    }
+
+    float metallum_luminance(float3 color) {
+      return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+    }
+
+    float metallum_peak_metric(float3 color) {
+      float mean = (color.r + color.g + color.b) / 3.0;
+      float3 delta = color - mean;
+      return mean + sqrt((2.0 / 3.0) * dot(delta, delta) + 1e-8);
+    }
+
+    float3 metallum_map_to_headroom(float3 color, float headroom) {
+      color = max(color, 0.0);
+      if (headroom <= 1.0001) {
+        return min(color, 1.0);
+      }
+
+      float peak = metallum_peak_metric(color);
+      float knee = 1.0 + 0.65 * (headroom - 1.0);
+      if (peak > knee) {
+        float span = max(headroom - knee, 1e-5);
+        float mappedPeak = knee + span * (1.0 - exp(-(peak - knee) / span));
+        color *= mappedPeak / max(peak, 1e-6);
+      }
+      return color;
     }
 
     float metallum_diagnostic_level(float x) {
@@ -234,8 +340,13 @@ private func presentMslSource() -> String {
 
     fragment float4 metallum_present_fs(
       PresentVertexOut in [[stage_in]],
-      texture2d<float> tex [[texture(0)]],
+      texture2d<float> finalFrame [[texture(0)]],
+      texture2d<float> sceneFrame [[texture(1)]],
+      texture2d<float> emissionFrame [[texture(2)]],
+      texture2d<float> bloomFrame [[texture(3)]],
+      texture2d<float> uiMaskFrame [[texture(4)]],
       sampler smp [[sampler(0)]],
+      sampler auxiliarySmp [[sampler(1)]],
       constant PresentUniforms& uniforms [[buffer(0)]]
     ) {
       if (uniforms.diagnosticPattern != 0u) {
@@ -253,17 +364,472 @@ private func presentMslSource() -> String {
         return float4(uniforms.mode == 0u ? min(value, 1.0) : value, 1.0);
       }
 
-      float4 source = tex.sample(smp, in.uv);
+      float4 source = finalFrame.sample(smp, in.uv);
       if (uniforms.mode == 0u) {
         return float4(source.rgb, 1.0);
       }
 
-      float3 linearColor = uniforms.sourceEncoding == 0u
-        ? metallum_srgb_to_linear(source.rgb)
-        : max(source.rgb, 0.0);
-      return float4(linearColor, 1.0);
+      float3 linearColor = metallum_decode(source.rgb, uniforms.sourceEncoding);
+      if (uniforms.mode != 2u || uniforms.sceneAvailable == 0u || uniforms.currentHeadroom <= 1.001) {
+        return float4(linearColor, 1.0);
+      }
+
+      float headroomActivation = smoothstep(1.0, 1.15, uniforms.currentHeadroom);
+      float strength = uniforms.hdrStrength * headroomActivation;
+      float3 sceneLinear = metallum_decode(sceneFrame.sample(smp, in.uv).rgb, uniforms.sourceEncoding);
+      float3 localEmission = max(emissionFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
+      float3 bloom = max(bloomFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
+      float bloomScale = uniforms.bloomStrength * strength
+        * min(0.75 + 0.45 * (uniforms.currentHeadroom - 1.0), 2.5);
+      float sceneVisibility = 1.0 - clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).r, 0.0, 1.0);
+
+      float3 sceneHdr = metallum_map_to_headroom(
+        sceneLinear + localEmission * strength + bloom * bloomScale,
+        uniforms.currentHeadroom
+      );
+      float3 hdrDelta = max(sceneHdr - sceneLinear, 0.0);
+      float3 visibleDelta = sceneVisibility * hdrDelta;
+      if (metallum_peak_metric(linearColor + visibleDelta) > uniforms.currentHeadroom) {
+        float low = 0.0;
+        float high = 1.0;
+        for (uint iteration = 0u; iteration < 7u; ++iteration) {
+          float candidate = 0.5 * (low + high);
+          if (metallum_peak_metric(linearColor + visibleDelta * candidate) <= uniforms.currentHeadroom) {
+            low = candidate;
+          } else {
+            high = candidate;
+          }
+        }
+        visibleDelta *= low;
+      }
+      return float4(linearColor + visibleDelta, 1.0);
     }
     """
+}
+
+private func hdrEffectsMslSource() -> String {
+    """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct HdrVertexOut {
+      float4 position [[position]];
+      float2 uv;
+    };
+
+    struct HdrExtractUniforms {
+      uint sourceEncoding;
+      uint _padding0;
+      uint2 sourceSize;
+    };
+
+    struct HdrBlurUniforms {
+      float2 texelStep;
+      float2 _padding0;
+    };
+
+    vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
+      const float2 positions[3] = {
+        float2(-1.0,  1.0),
+        float2( 3.0,  1.0),
+        float2(-1.0, -3.0)
+      };
+      const float2 uvs[3] = {
+        float2(0.0,  1.0),
+        float2(2.0,  1.0),
+        float2(0.0, -1.0)
+      };
+      HdrVertexOut out;
+      out.position = float4(positions[vertexId], 0.0, 1.0);
+      out.uv = uvs[vertexId];
+      return out;
+    }
+
+    float3 metallum_hdr_srgb_to_linear(float3 encoded) {
+      encoded = clamp(encoded, 0.0, 1.0);
+      float3 low = encoded / 12.92;
+      float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
+      return select(high, low, encoded <= float3(0.04045));
+    }
+
+    float3 metallum_hdr_decode(float3 value, uint sourceEncoding) {
+      return sourceEncoding == 0u
+        ? metallum_hdr_srgb_to_linear(value)
+        : max(value, 0.0);
+    }
+
+    float metallum_hdr_luminance(float3 color) {
+      return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+    }
+
+    fragment float4 metallum_hdr_extract_fs(
+      HdrVertexOut in [[stage_in]],
+      texture2d<float> scene [[texture(0)]],
+      constant HdrExtractUniforms& uniforms [[buffer(0)]]
+    ) {
+      uint2 origin = uint2(in.position.xy) * 4u;
+      uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
+      float3 averageColor = float3(0.0);
+      float3 brightestColor = float3(0.0);
+      float averageY = 0.0;
+      float maximumY = 0.0;
+
+      for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
+        for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
+          uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
+          float3 color = metallum_hdr_decode(scene.read(coordinate).rgb, uniforms.sourceEncoding);
+          float y = metallum_hdr_luminance(color);
+          averageColor += color;
+          averageY += y;
+          if (y > maximumY) {
+            maximumY = y;
+            brightestColor = color;
+          }
+        }
+      }
+      averageColor *= 1.0 / 16.0;
+      averageY *= 1.0 / 16.0;
+
+      uint2 center = min(origin + uint2(2u), maximumCoordinate);
+      uint2 ringOffset = uint2(8u);
+      float contextY = 0.25 * (
+        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(min(center.x + ringOffset.x, maximumCoordinate.x), center.y)).rgb, uniforms.sourceEncoding)) +
+        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x > ringOffset.x ? center.x - ringOffset.x : 0u, center.y)).rgb, uniforms.sourceEncoding)) +
+        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x, min(center.y + ringOffset.y, maximumCoordinate.y))).rgb, uniforms.sourceEncoding)) +
+        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x, center.y > ringOffset.y ? center.y - ringOffset.y : 0u)).rgb, uniforms.sourceEncoding))
+      );
+
+      float maximum = max(brightestColor.r, max(brightestColor.g, brightestColor.b));
+      float minimum = min(brightestColor.r, min(brightestColor.g, brightestColor.b));
+      float saturation = (maximum - minimum) / max(maximum, 1e-5);
+      float warmth = max(min(averageColor.r, averageColor.g) - averageColor.b, 0.0);
+      float contrast = max(maximumY - min(averageY, contextY), 0.0);
+
+      float brightnessGate = smoothstep(0.28, 0.82, maximumY);
+      float isolationGate = smoothstep(0.015, 0.18, contrast);
+      float saturationGate = smoothstep(0.20, 0.70, saturation);
+      float warmthGate = smoothstep(0.025, 0.28, warmth);
+      float mask = clamp(max(
+        brightnessGate * warmthGate * 0.88,
+        max(
+          brightnessGate * isolationGate,
+          smoothstep(0.12, 0.55, maximumY) * saturationGate * isolationGate * 0.62
+        )
+      ), 0.0, 1.0);
+
+      float emissionGain = mask * (1.25 + 2.25 * mask);
+      return float4(max(brightestColor, 0.0) * emissionGain, mask);
+    }
+
+    fragment float4 metallum_hdr_blur_fs(
+      HdrVertexOut in [[stage_in]],
+      texture2d<float> source [[texture(0)]],
+      sampler smp [[sampler(0)]],
+      constant HdrBlurUniforms& uniforms [[buffer(0)]]
+    ) {
+      float4 result = source.sample(smp, in.uv) * 0.2270270270;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 1.0) * 0.1945945946;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 1.0) * 0.1945945946;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 2.0) * 0.1216216216;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 2.0) * 0.1216216216;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 3.0) * 0.0540540541;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 3.0) * 0.0540540541;
+      result += source.sample(smp, in.uv + uniforms.texelStep * 4.0) * 0.0162162162;
+      result += source.sample(smp, in.uv - uniforms.texelStep * 4.0) * 0.0162162162;
+      return result;
+    }
+
+    fragment float4 metallum_hdr_ui_compare_fs(
+      HdrVertexOut in [[stage_in]],
+      texture2d<float> finalFrame [[texture(0)]],
+      texture2d<float> sceneFrame [[texture(1)]]
+    ) {
+      uint2 sourceSize = uint2(finalFrame.get_width(), finalFrame.get_height());
+      uint2 maximumCoordinate = max(sourceSize, uint2(1u)) - 1u;
+      uint2 origin = uint2(in.position.xy) * 2u;
+      float difference = 0.0;
+      for (uint yIndex = 0u; yIndex < 2u; ++yIndex) {
+        for (uint xIndex = 0u; xIndex < 2u; ++xIndex) {
+          uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
+          float3 finalValue = finalFrame.read(coordinate).rgb;
+          float3 sceneValue = sceneFrame.read(coordinate).rgb;
+          float3 delta = abs(finalValue - sceneValue);
+          difference = max(difference, max(delta.r, max(delta.g, delta.b)));
+        }
+      }
+      float mask = smoothstep(0.25 / 255.0, 0.75 / 255.0, difference);
+      return float4(mask, 0.0, 0.0, 1.0);
+    }
+
+    fragment float4 metallum_hdr_ui_dilate_fs(
+      HdrVertexOut in [[stage_in]],
+      texture2d<float> source [[texture(0)]]
+    ) {
+      uint2 sourceSize = uint2(source.get_width(), source.get_height());
+      int2 maximumCoordinate = int2(max(sourceSize, uint2(1u)) - 1u);
+      int2 center = int2(in.position.xy);
+      float mask = 0.0;
+      for (int yOffset = -1; yOffset <= 1; ++yOffset) {
+        for (int xOffset = -1; xOffset <= 1; ++xOffset) {
+          uint2 coordinate = uint2(clamp(center + int2(xOffset, yOffset), int2(0), maximumCoordinate));
+          mask = max(mask, source.read(coordinate).r);
+        }
+      }
+      return float4(mask, 0.0, 0.0, 1.0);
+    }
+    """
+}
+
+private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
+    do {
+        let library = try device.makeLibrary(source: hdrEffectsMslSource(), options: nil)
+        guard
+            let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
+            let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
+            let blurFunction = library.makeFunction(name: "metallum_hdr_blur_fs"),
+            let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
+            let uiDilateFunction = library.makeFunction(name: "metallum_hdr_ui_dilate_fs")
+        else {
+            NSLog("[metallum] Failed to create HDR effect shader functions")
+            return nil
+        }
+
+        func makePipeline(
+            _ fragmentFunction: MTLFunction,
+            colorFormat: MTLPixelFormat
+        ) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorFormat
+            descriptor.colorAttachments[0].isBlendingEnabled = false
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+
+        return try MetallumHdrPipelines(
+            extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
+            blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
+            uiCompare: makePipeline(uiCompareFunction, colorFormat: .r8Unorm),
+            uiDilate: makePipeline(uiDilateFunction, colorFormat: .r8Unorm)
+        )
+    } catch {
+        NSLog("[metallum] Failed to create HDR effect pipelines: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func ensureHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
+    let key = objectAddress(device)
+    if let cached = NativeState.hdrPipelines[key] {
+        return cached
+    }
+    let pipelines = buildHdrPipelines(device: device)
+    if let pipelines {
+        NativeState.hdrPipelines[key] = pipelines
+    }
+    return pipelines
+}
+
+private func ensureHdrWorkspace(device: MTLDevice, sourceWidth: Int, sourceHeight: Int) -> MetallumHdrWorkspace? {
+    let key = objectAddress(device)
+    if let cached = NativeState.hdrWorkspaces[key],
+       cached.sourceWidth == sourceWidth,
+       cached.sourceHeight == sourceHeight {
+        return cached
+    }
+
+    let bloomWidth = max((sourceWidth + 3) / 4, 1)
+    let bloomHeight = max((sourceHeight + 3) / 4, 1)
+    let maskWidth = max((sourceWidth + 1) / 2, 1)
+    let maskHeight = max((sourceHeight + 1) / 2, 1)
+
+    func makeTexture(
+        format: MTLPixelFormat,
+        width: Int,
+        height: Int,
+        label: String
+    ) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.hazardTrackingMode = .tracked
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        texture.label = label
+        return texture
+    }
+
+    guard
+        let emission = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR emission"),
+        let bloomA = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom A"),
+        let bloomB = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom B"),
+        let uiMaskA = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask A"),
+        let uiMaskB = makeTexture(format: .r8Unorm, width: maskWidth, height: maskHeight, label: "Metallum HDR UI mask B")
+    else {
+        NSLog("[metallum] Failed to allocate HDR workspace for %dx%d", sourceWidth, sourceHeight)
+        return nil
+    }
+
+    let workspace = MetallumHdrWorkspace(
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        emission: emission,
+        bloomA: bloomA,
+        bloomB: bloomB,
+        uiMaskA: uiMaskA,
+        uiMaskB: uiMaskB
+    )
+    NativeState.hdrWorkspaces[key] = workspace
+    return workspace
+}
+
+private func makeHdrPassEncoder(
+    commandBuffer: MTLCommandBuffer,
+    target: MTLTexture,
+    pipeline: MTLRenderPipelineState
+) -> MTLRenderCommandEncoder? {
+    let descriptor = MTLRenderPassDescriptor()
+    descriptor.colorAttachments[0].texture = target
+    descriptor.colorAttachments[0].loadAction = .dontCare
+    descriptor.colorAttachments[0].storeAction = .store
+    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        return nil
+    }
+    encoder.setViewport(MTLViewport(
+        originX: 0.0,
+        originY: 0.0,
+        width: Double(target.width),
+        height: Double(target.height),
+        znear: 0.0,
+        zfar: 1.0
+    ))
+    encoder.setRenderPipelineState(pipeline)
+    return encoder
+}
+
+private func encodeHdrEffects(
+    commandBuffer: MTLCommandBuffer,
+    finalTexture: MTLTexture,
+    sceneTexture: MTLTexture,
+    globalFence: MTLFence?,
+    sourceEncoding: Int32
+) -> MetallumHdrOutputs? {
+    guard
+        let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+        let workspace = ensureHdrWorkspace(
+            device: commandBuffer.device,
+            sourceWidth: sceneTexture.width,
+            sourceHeight: sceneTexture.height
+        ),
+        let samplers = presentSamplers(device: commandBuffer.device)
+    else {
+        return nil
+    }
+    let linearSampler = samplers.linear
+
+    guard let extract = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.emission,
+        pipeline: pipelines.extract
+    ) else {
+        return nil
+    }
+    if let globalFence {
+        extract.waitForFence(globalFence, before: .fragment)
+    }
+    extract.setFragmentTexture(sceneTexture, index: 0)
+    var extractUniforms = MetallumHdrExtractUniforms(
+        sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+        _padding0: 0,
+        sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height))
+    )
+    withUnsafeBytes(of: &extractUniforms) { bytes in
+        extract.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    extract.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        extract.updateFence(globalFence, after: .fragment)
+    }
+    extract.endEncoding()
+
+    guard let horizontal = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.bloomA,
+        pipeline: pipelines.blur
+    ) else {
+        return nil
+    }
+    horizontal.setFragmentTexture(workspace.emission, index: 0)
+    horizontal.setFragmentSamplerState(linearSampler, index: 0)
+    var horizontalUniforms = MetallumHdrBlurUniforms(
+        texelStep: SIMD2<Float>(1.0 / Float(workspace.emission.width), 0.0),
+        _padding0: SIMD2<Float>(repeating: 0.0)
+    )
+    withUnsafeBytes(of: &horizontalUniforms) { bytes in
+        horizontal.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    horizontal.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    horizontal.endEncoding()
+
+    guard let vertical = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.bloomB,
+        pipeline: pipelines.blur
+    ) else {
+        return nil
+    }
+    vertical.setFragmentTexture(workspace.bloomA, index: 0)
+    vertical.setFragmentSamplerState(linearSampler, index: 0)
+    var verticalUniforms = MetallumHdrBlurUniforms(
+        texelStep: SIMD2<Float>(0.0, 1.0 / Float(workspace.bloomA.height)),
+        _padding0: SIMD2<Float>(repeating: 0.0)
+    )
+    withUnsafeBytes(of: &verticalUniforms) { bytes in
+        vertical.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    vertical.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    vertical.endEncoding()
+
+    guard let uiCompare = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.uiMaskA,
+        pipeline: pipelines.uiCompare
+    ) else {
+        return nil
+    }
+    if let globalFence {
+        uiCompare.waitForFence(globalFence, before: .fragment)
+    }
+    uiCompare.setFragmentTexture(finalTexture, index: 0)
+    uiCompare.setFragmentTexture(sceneTexture, index: 1)
+    uiCompare.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        uiCompare.updateFence(globalFence, after: .fragment)
+    }
+    uiCompare.endEncoding()
+
+    guard let uiDilate = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.uiMaskB,
+        pipeline: pipelines.uiDilate
+    ) else {
+        return nil
+    }
+    uiDilate.setFragmentTexture(workspace.uiMaskA, index: 0)
+    uiDilate.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    uiDilate.endEncoding()
+
+    return MetallumHdrOutputs(
+        emission: workspace.emission,
+        bloom: workspace.bloomB,
+        uiMask: workspace.uiMaskB
+    )
 }
 
 private struct MetallumClearUniforms {
@@ -438,6 +1004,17 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
     return device.makeSamplerState(descriptor: descriptor)
 }
 
+private func presentSamplers(device: MTLDevice) -> (nearest: MTLSamplerState, linear: MTLSamplerState)? {
+    let key = objectAddress(device)
+    guard
+        let nearest = NativeState.presentNearestSamplers[key],
+        let linear = NativeState.presentLinearSamplers[key]
+    else {
+        return nil
+    }
+    return (nearest, linear)
+}
+
 private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: MTLPixelFormat, _ depthFormat: MTLPixelFormat, _ writeColor: Bool = true) -> MTLRenderPipelineState? {
     let key = PipelineVariantKey(deviceAddress: objectAddress(device), colorFormat: colorFormat, depthFormat: depthFormat, writeColor: writeColor)
     if let cached = NativeState.clearPipelines[key] {
@@ -453,13 +1030,35 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {
+        let deviceAddress = objectAddress(device)
         _ = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm)
         _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
-        NativeState.presentLinearSampler = buildPresentSampler(device: device, filter: .linear)
-        NativeState.presentNearestSampler = buildPresentSampler(device: device, filter: .nearest)
+        _ = ensureHdrPipelines(device: device)
+        NativeState.presentLinearSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .linear)
+        NativeState.presentNearestSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .rgba8Unorm, .depth32Float)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .invalid)
+    }
+}
+
+@_cdecl("metallum_release_device_caches")
+public func metallum_release_device_caches(_ device: MTLDevice) {
+    autoreleasepool {
+        let deviceAddress = objectAddress(device)
+        NativeState.depthStencilStates = NativeState.depthStencilStates.filter {
+            $0.key.deviceAddress != deviceAddress
+        }
+        NativeState.clearPipelines = NativeState.clearPipelines.filter {
+            $0.key.deviceAddress != deviceAddress
+        }
+        NativeState.presentPipelines = NativeState.presentPipelines.filter {
+            $0.key.deviceAddress != deviceAddress
+        }
+        NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
+        NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
+        NativeState.presentNearestSamplers.removeValue(forKey: deviceAddress)
+        NativeState.presentLinearSamplers.removeValue(forKey: deviceAddress)
     }
 }
 
@@ -1467,23 +2066,74 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ commandBuffer: MTLCommandBuffer,
     _ layer: CAMetalLayer,
     _ sourceTexture: MTLTexture,
+    _ sceneTexture: MTLTexture?,
     _ globalFence: MTLFence?,
     _ outputMode: Int32,
     _ sourceEncoding: Int32,
     _ diagnosticPattern: Int32,
-    _ currentHeadroom: Float
-) {
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float
+) -> Int32 {
     return autoreleasepool {
-        guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
-            return
+        guard (0...2).contains(outputMode) else {
+            return -1
+        }
+
+        let effectiveHeadroom = min(
+            max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
+            8.0
+        )
+        let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
+        let hasCompatibleScene = canEnhance
+            && sceneTexture != nil
+            && sceneTexture!.width == sourceTexture.width
+            && sceneTexture!.height == sourceTexture.height
+
+        if hasCompatibleScene {
+            guard
+                ensureHdrPipelines(device: commandBuffer.device) != nil,
+                ensureHdrWorkspace(
+                    device: commandBuffer.device,
+                    sourceWidth: sourceTexture.width,
+                    sourceHeight: sourceTexture.height
+                ) != nil
+            else {
+                return -1
+            }
         }
 
         guard let presentPipeline = ensurePresentPipeline(
             device: commandBuffer.device,
-            colorFormat: drawable.texture.pixelFormat
+            colorFormat: layer.pixelFormat
         ) else {
-            NSLog("[metallum] No present pipeline for drawable format %lu", drawable.texture.pixelFormat.rawValue)
-            return
+            NSLog("[metallum] No present pipeline for layer format %lu", layer.pixelFormat.rawValue)
+            return -1
+        }
+
+        guard let samplers = presentSamplers(device: commandBuffer.device) else {
+            NSLog("[metallum] No present samplers for Metal device")
+            return -1
+        }
+
+        guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
+            return 0
+        }
+
+        var hdrOutputs: MetallumHdrOutputs?
+        var hasHdrScene = false
+        if hasCompatibleScene, let sceneTexture {
+            hdrOutputs = encodeHdrEffects(
+                commandBuffer: commandBuffer,
+                finalTexture: sourceTexture,
+                sceneTexture: sceneTexture,
+                globalFence: globalFence,
+                sourceEncoding: sourceEncoding
+            )
+            guard hdrOutputs != nil else {
+                return -1
+            }
+            hasHdrScene = true
         }
 
         let renderPass = MTLRenderPassDescriptor()
@@ -1492,7 +2142,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].storeAction = .store
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-            return
+            return -1
         }
 
         if let globalFence {
@@ -1510,12 +2160,20 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         encoder.setRenderPipelineState(presentPipeline)
         encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentTexture(hasHdrScene ? sceneTexture : sourceTexture, index: 1)
+        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.emission : sourceTexture, index: 2)
+        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
+        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
 
         var uniforms = MetallumPresentUniforms(
             mode: UInt32(clamping: max(outputMode, 0)),
             sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
             diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
-            currentHeadroom: max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0)
+            currentHeadroom: effectiveHeadroom,
+            hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+            bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
+            sceneAvailable: hasHdrScene ? 1 : 0,
+            _padding0: 0.0
         )
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
@@ -1524,8 +2182,9 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         let requiresScaling = sourceTexture.width != drawable.texture.width ||
                               sourceTexture.height != drawable.texture.height
 
-        let sampler = requiresScaling ? NativeState.presentLinearSampler : NativeState.presentNearestSampler
+        let sampler = requiresScaling ? samplers.linear : samplers.nearest
         encoder.setFragmentSamplerState(sampler, index: 0)
+        encoder.setFragmentSamplerState(samplers.linear, index: 1)
 
         encoder.drawPrimitives(
             type: .triangle,
@@ -1533,8 +2192,13 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             vertexCount: 3
         )
 
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
+
         encoder.endEncoding()
         commandBuffer.present(drawable)
+        return 1
     }
 }
 
