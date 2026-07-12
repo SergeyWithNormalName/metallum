@@ -7,6 +7,7 @@ import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrSemanticState;
+import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -529,18 +530,31 @@ public final class MetalDevice implements GpuDeviceBackend {
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
     }
 
-    IntermediaryShaderModule getOrCompileShader(final Identifier id, final ShaderType type, final ShaderDefines defines, final ShaderSource shaderSource) {
-        ShaderCompilationKey key = new ShaderCompilationKey(id, type, defines);
+    IntermediaryShaderModule getOrCompileShader(
+            final Identifier id,
+            final ShaderType type,
+            final ShaderDefines defines,
+            final ShaderSource shaderSource,
+            final HdrShaderFlavor flavor
+    ) {
+        ShaderCompilationKey key = new ShaderCompilationKey(id, type, defines, flavor);
         return this.shaderCache.computeIfAbsent(key, k -> {
             String source = shaderSource.get(k.id(), k.type());
             if (source == null) {
                 return IntermediaryShaderModule.INVALID;
             }
+            // Phase A intentionally gives the optional scene flavors GLSL
+            // identical to LEGACY. Distinct keys let later raster and post
+            // patches evolve without mutating RGBA8 GUI shaders.
             String sourceWithDefines = prepareShaderSource(source, k.defines());
             try (GlslCompiler glslCompiler = new GlslCompiler()) {
-                return glslCompiler.createIntermediary(k.id().toDebugFileName(), sourceWithDefines, k.type());
+                return glslCompiler.createIntermediary(
+                        k.id().toDebugFileName() + "_" + k.flavor().name().toLowerCase(Locale.ROOT),
+                        sourceWithDefines,
+                        k.type()
+                );
             } catch (ShaderCompileException e) {
-                throw new IllegalStateException("Failed to compile shader " + k.id(), e);
+                throw new IllegalStateException("Failed to compile " + k.flavor() + " shader " + k.id(), e);
             }
         });
     }
@@ -558,7 +572,12 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
     }
 
-    private record ShaderCompilationKey(Identifier id, ShaderType type, ShaderDefines defines) {
+    private record ShaderCompilationKey(
+            Identifier id,
+            ShaderType type,
+            ShaderDefines defines,
+            HdrShaderFlavor flavor
+    ) {
     }
 
     private record MslFunctionKey(String msl, String entryPoint) {

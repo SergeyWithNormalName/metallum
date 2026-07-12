@@ -1,5 +1,8 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.hdr.HdrPipelinePolicy;
+import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -19,6 +22,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Environment(EnvType.CLIENT)
 final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoCloseable {
@@ -36,6 +41,27 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                            @Nullable GpuFormat texelBufferFormat) {
     }
 
+    record ShaderVariantSource(
+            String vertexMsl,
+            String fragmentMsl,
+            String vertexEntryPoint,
+            String fragmentEntryPoint,
+            List<ResourceBinding> resources,
+            boolean semanticOutput
+    ) {
+    }
+
+    private record ShaderFunctions(
+            MemorySegment vertex,
+            MemorySegment fragment,
+            boolean semanticOutput
+    ) {
+        boolean isValid() {
+            return !MetalNativeBridge.isNullHandle(this.vertex)
+                    && !MetalNativeBridge.isNullHandle(this.fragment);
+        }
+    }
+
     private final List<ResourceBinding> resources;
     private final Map<String, ResourceBinding> resourcesByName;
     private final long allResourceMask;
@@ -47,38 +73,57 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
     private final boolean semanticOutput;
+    private final HdrPipelinePolicy.Role hdrRole;
+    private final Map<HdrShaderFlavor, ShaderFunctions> shaderFunctions;
 
     private static final java.util.concurrent.atomic.AtomicInteger compilationCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final Set<String> FLAVOR_SELECTIONS_LOGGED = ConcurrentHashMap.newKeySet();
+    private static final Set<String> UNKNOWN_FP16_PIPELINES_LOGGED = ConcurrentHashMap.newKeySet();
 
     private final MemorySegment depthStencilState;
     private final MetalDevice device;
     private final RenderPipeline info;
-    private final MemorySegment vertexFunction;
-    private final MemorySegment fragmentFunction;
     private final boolean isValid;
     private boolean closed = false;
 
     private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
 
-    private record PipelineKey(MTLPixelFormat colorFormat, MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat) {}
+    private record PipelineKey(
+            HdrShaderFlavor flavor,
+            MTLPixelFormat colorFormat,
+            MTLPixelFormat depthFormat,
+            MTLPixelFormat stencilFormat
+    ) {
+    }
 
     MetalCompiledRenderPipeline(
             final MetalDevice device,
             final RenderPipeline info,
-            final String vertexMsl,
-            final String fragmentMsl,
-            final String vertexEntryPoint,
-            final String fragmentEntryPoint,
-            final List<ResourceBinding> resources
+            final HdrPipelinePolicy.Role hdrRole,
+            final Map<HdrShaderFlavor, ShaderVariantSource> variants
     ) {
         this.device = device;
         this.info = info;
-        this.resources = resources;
-        this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
+        this.hdrRole = hdrRole;
+
+        ShaderVariantSource legacy = variants.get(HdrShaderFlavor.LEGACY);
+        if (legacy == null) {
+            throw new IllegalArgumentException("Pipeline is missing its legacy shader flavor: " + info.getLocation());
+        }
+        if (HdrSceneState.isRequested()
+                && hdrRole.supportsSceneLinearFlavor()
+                && !variants.containsKey(hdrRole.sceneLinearFlavor())) {
+            throw new IllegalArgumentException("Pipeline is missing its scene-linear shader flavor: " + info.getLocation());
+        }
+
+        this.resources = legacy.resources();
+        this.resourcesByName = this.resources.stream().collect(
+                java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding)
+        );
 
         int maxBindingIndex = -1;
         long resourceMask = 0L;
-        for (ResourceBinding binding : resources) {
+        for (ResourceBinding binding : this.resources) {
             maxBindingIndex = Math.max(maxBindingIndex, binding.bindingIndex());
             resourceMask |= 1L << binding.bindingIndex();
         }
@@ -87,12 +132,26 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
         this.allResourceMask = resourceMask;
 
-        this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(resources);
+        this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(this.resources);
         this.cullMode = info.isCull() ? MTLCullMode.Back : MTLCullMode.None;
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
-        this.semanticOutput = fragmentMsl.contains("[[color(1)]]");
+        this.semanticOutput = legacy.semanticOutput();
+
+        Map<HdrShaderFlavor, ShaderFunctions> compiledFunctions = new java.util.EnumMap<>(HdrShaderFlavor.class);
+        boolean allFunctionsValid = true;
+        for (Map.Entry<HdrShaderFlavor, ShaderVariantSource> entry : variants.entrySet()) {
+            ShaderVariantSource variant = entry.getValue();
+            ShaderFunctions functions = new ShaderFunctions(
+                    device.getOrCompileFunction(variant.vertexMsl(), variant.vertexEntryPoint()),
+                    device.getOrCompileFunction(variant.fragmentMsl(), variant.fragmentEntryPoint()),
+                    variant.semanticOutput()
+            );
+            compiledFunctions.put(entry.getKey(), functions);
+            allFunctionsValid &= functions.isValid();
+        }
+        this.shaderFunctions = Map.copyOf(compiledFunctions);
 
         MTLCompareFunction depthCompareOp;
         int depthWrite;
@@ -117,53 +176,59 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         var colorTarget = info.getColorTargetState();
         MTLPixelFormat colorFormat = colorTarget != null ? MTLPixelFormat.from(colorTarget.format()) : MTLPixelFormat.RGBA8Unorm;
+        HdrShaderFlavor initialFlavor = selectFlavor(colorFormat);
+        ShaderFunctions initialFunctions = this.shaderFunctions.get(initialFlavor);
 
-        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
-
-        if (!MetalNativeBridge.isNullHandle(this.vertexFunction) && !MetalNativeBridge.isNullHandle(this.fragmentFunction)) {
+        MemorySegment withoutDepth = MemorySegment.NULL;
+        if (allFunctionsValid && initialFunctions != null && initialFunctions.isValid()) {
             try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
                 int id1 = compilationCounter.incrementAndGet();
                 com.metallum.Metallum.LOGGER.debug(
-                        "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth=Invalid, stencil=Invalid), semanticAttachmentFormat={}",
-                        info.getLocation(), id1, colorFormat, this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+                        "Pipeline compile call: name={}, compilationId={}, key=(flavor={}, color={}, depth=Invalid, stencil=Invalid), semanticAttachmentFormat={}",
+                        info.getLocation(), id1, initialFlavor, colorFormat,
+                        initialFunctions.semanticOutput() ? "RGBA8Unorm" : "Invalid"
                 );
-                MemorySegment withoutDepth = createPipeline(
-                        device, info, this.vertexFunction, this.fragmentFunction, vertexDescriptor,
-                        colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid, this.semanticOutput
+                withoutDepth = createPipeline(
+                        device, info, initialFunctions.vertex(), initialFunctions.fragment(), vertexDescriptor,
+                        colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid, initialFunctions.semanticOutput()
                 );
                 if (!MetalNativeBridge.isNullHandle(withoutDepth)) {
                     OwnedPipelineHandle ownedWithoutDepth = new OwnedPipelineHandle(withoutDepth, info.getLocation().toString(), id1);
-                    this.pipelines.put(new PipelineKey(colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid), ownedWithoutDepth);
+                    this.pipelines.put(
+                            new PipelineKey(initialFlavor, colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid),
+                            ownedWithoutDepth
+                    );
                     com.metallum.Metallum.LOGGER.debug(
-                            "Pipeline cached: name={}, compilationId={}, handle=0x{}",
-                            info.getLocation(), id1, Long.toHexString(withoutDepth.address())
+                            "Pipeline cached: name={}, flavor={}, compilationId={}, handle=0x{}",
+                            info.getLocation(), initialFlavor, id1, Long.toHexString(withoutDepth.address())
                     );
                 }
 
                 int id2 = compilationCounter.incrementAndGet();
                 com.metallum.Metallum.LOGGER.debug(
-                        "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth=Depth32Float, stencil=Invalid), semanticAttachmentFormat={}",
-                        info.getLocation(), id2, colorFormat, this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+                        "Pipeline compile call: name={}, compilationId={}, key=(flavor={}, color={}, depth=Depth32Float, stencil=Invalid), semanticAttachmentFormat={}",
+                        info.getLocation(), id2, initialFlavor, colorFormat,
+                        initialFunctions.semanticOutput() ? "RGBA8Unorm" : "Invalid"
                 );
                 MemorySegment withDepth = createPipeline(
-                        device, info, this.vertexFunction, this.fragmentFunction, vertexDescriptor,
-                        colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid, this.semanticOutput
+                        device, info, initialFunctions.vertex(), initialFunctions.fragment(), vertexDescriptor,
+                        colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid,
+                        initialFunctions.semanticOutput()
                 );
                 if (!MetalNativeBridge.isNullHandle(withDepth)) {
                     OwnedPipelineHandle ownedWithDepth = new OwnedPipelineHandle(withDepth, info.getLocation().toString(), id2);
-                    this.pipelines.put(new PipelineKey(colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid), ownedWithDepth);
+                    this.pipelines.put(
+                            new PipelineKey(initialFlavor, colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid),
+                            ownedWithDepth
+                    );
                     com.metallum.Metallum.LOGGER.debug(
-                            "Pipeline cached: name={}, compilationId={}, handle=0x{}",
-                            info.getLocation(), id2, Long.toHexString(withDepth.address())
+                            "Pipeline cached: name={}, flavor={}, compilationId={}, handle=0x{}",
+                            info.getLocation(), initialFlavor, id2, Long.toHexString(withDepth.address())
                     );
                 }
-
-                this.isValid = !MetalNativeBridge.isNullHandle(withoutDepth);
             }
-        } else {
-            this.isValid = false;
         }
+        this.isValid = allFunctionsValid && !MetalNativeBridge.isNullHandle(withoutDepth);
     }
 
     private static MemorySegment createPipeline(
@@ -263,7 +328,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         if (this.closed) {
             throw new IllegalStateException("Pipeline has been closed: " + this.info.getLocation());
         }
-        PipelineKey key = new PipelineKey(colorFormat, depthFormat, stencilFormat);
+        HdrShaderFlavor flavor = selectFlavor(colorFormat);
+        ShaderFunctions functions = this.shaderFunctions.get(flavor);
+        if (functions == null || !functions.isValid()) {
+            throw new IllegalStateException(
+                    "Shader flavor " + flavor + " is unavailable for pipeline " + this.info.getLocation()
+            );
+        }
+        logFlavorSelectionOnce(flavor, colorFormat);
+
+        PipelineKey key = new PipelineKey(flavor, colorFormat, depthFormat, stencilFormat);
         OwnedPipelineHandle owned = this.pipelines.get(key);
         if (owned != null) {
             return owned.handle;
@@ -271,9 +345,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         int compileId = compilationCounter.incrementAndGet();
         com.metallum.Metallum.LOGGER.debug(
-                "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth={}, stencil={}), semanticAttachmentFormat={}",
-                this.info.getLocation(), compileId, colorFormat, depthFormat, stencilFormat,
-                this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+                "Pipeline compile call: name={}, compilationId={}, key=(flavor={}, color={}, depth={}, stencil={}), semanticAttachmentFormat={}",
+                this.info.getLocation(), compileId, flavor, colorFormat, depthFormat, stencilFormat,
+                functions.semanticOutput() ? "RGBA8Unorm" : "Invalid"
         );
 
         MemorySegment pipeline;
@@ -281,13 +355,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             pipeline = createPipeline(
                     this.device,
                     this.info,
-                    this.vertexFunction,
-                    this.fragmentFunction,
+                    functions.vertex(),
+                    functions.fragment(),
                     vertexDescriptor,
                     colorFormat,
                     depthFormat,
                     stencilFormat,
-                    this.semanticOutput
+                    functions.semanticOutput()
             );
         }
 
@@ -300,12 +374,44 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         OwnedPipelineHandle ownedHandle = new OwnedPipelineHandle(pipeline, this.info.getLocation().toString(), compileId);
         com.metallum.Metallum.LOGGER.debug(
-                "Pipeline cached: name={}, compilationId={}, handle=0x{}",
-                this.info.getLocation(), compileId, Long.toHexString(pipeline.address())
+                "Pipeline cached: name={}, flavor={}, compilationId={}, handle=0x{}",
+                this.info.getLocation(), flavor, compileId, Long.toHexString(pipeline.address())
         );
 
         this.pipelines.put(key, ownedHandle);
         return pipeline;
+    }
+
+    private HdrShaderFlavor selectFlavor(final MTLPixelFormat colorFormat) {
+        boolean rgba16Float = colorFormat == MTLPixelFormat.RGBA16Float;
+        HdrShaderFlavor flavor = HdrPipelinePolicy.selectFlavor(
+                this.hdrRole,
+                HdrSceneState.isRequested(),
+                rgba16Float
+        );
+        if (rgba16Float
+                && HdrSceneState.isRequested()
+                && this.hdrRole == HdrPipelinePolicy.Role.UNKNOWN
+                && UNKNOWN_FP16_PIPELINES_LOGGED.add(this.info.getLocation().toString())) {
+            com.metallum.Metallum.LOGGER.warn(
+                    "Unclassified pipeline {} is rendering to an FP16 attachment; Phase A keeps the LEGACY shader flavor",
+                    this.info.getLocation()
+            );
+        }
+        return flavor;
+    }
+
+    private void logFlavorSelectionOnce(
+            final HdrShaderFlavor flavor,
+            final MTLPixelFormat colorFormat
+    ) {
+        String key = this.info.getLocation() + "|" + this.hdrRole + "|" + colorFormat + "|" + flavor;
+        if (FLAVOR_SELECTIONS_LOGGED.add(key)) {
+            com.metallum.Metallum.LOGGER.debug(
+                    "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",
+                    this.info.getLocation(), this.hdrRole, colorFormat, flavor
+            );
+        }
     }
 
     MTLCullMode cullMode() {

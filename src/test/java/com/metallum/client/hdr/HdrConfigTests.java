@@ -13,6 +13,7 @@ public final class HdrConfigTests {
         testLayerHeadroomPolicy();
         testSemanticState();
         testSceneState();
+        testPipelineShaderFlavorPolicy();
         testSodiumShaderPatching();
         testVanillaShaderPatching();
         testLightmapShaderPatching();
@@ -180,6 +181,75 @@ public final class HdrConfigTests {
         HdrSceneState.reset();
         require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB, "scene source contract reset");
         require(Math.abs(HdrScreenshot.linearToSrgb(0.21404114f) - 0.5f) < 0.0001f, "linear screenshot conversion");
+    }
+
+    private static void testPipelineShaderFlavorPolicy() {
+        HdrPipelinePolicy.Role item = HdrPipelinePolicy.classify(
+                "minecraft", "pipeline/item_cutout",
+                "minecraft", "core/item",
+                "minecraft", "core/item"
+        );
+        require(item == HdrPipelinePolicy.Role.SCENE_RASTER, "vanilla item scene policy");
+        require(
+                HdrPipelinePolicy.selectFlavor(item, true, true) == HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                "known FP16 scene raster selects raster-linear"
+        );
+        require(
+                HdrPipelinePolicy.selectFlavor(item, true, false) == HdrShaderFlavor.LEGACY,
+                "known RGBA8 raster always stays legacy"
+        );
+        require(
+                HdrPipelinePolicy.selectFlavor(item, false, true) == HdrShaderFlavor.LEGACY,
+                "FP16 raster stays legacy outside scene HDR"
+        );
+
+        HdrPipelinePolicy.Role post = HdrPipelinePolicy.classify(
+                "minecraft", "pipeline/post/box_blur",
+                "minecraft", "post/rotscale",
+                "minecraft", "post/box_blur"
+        );
+        require(post == HdrPipelinePolicy.Role.SCENE_POST, "vanilla blur scene-post policy");
+        require(
+                HdrPipelinePolicy.selectFlavor(post, true, true) == HdrShaderFlavor.SCENE_POST_LINEAR,
+                "FP16 scene post selects post-linear"
+        );
+        require(
+                HdrPipelinePolicy.selectFlavor(post, true, false) == HdrShaderFlavor.LEGACY,
+                "RGBA8 GUI blur stays legacy"
+        );
+
+        HdrPipelinePolicy.Role lightmap = HdrPipelinePolicy.classify(
+                "minecraft", "pipeline/lightmap",
+                "minecraft", "core/screenquad",
+                "minecraft", "core/lightmap"
+        );
+        require(lightmap == HdrPipelinePolicy.Role.LIGHTMAP_DATA, "lightmap data policy");
+        require(
+                HdrPipelinePolicy.selectFlavor(lightmap, true, true) == HdrShaderFlavor.LEGACY,
+                "FP16 lightmap never selects scene-color flavor"
+        );
+
+        HdrPipelinePolicy.Role sodium = HdrPipelinePolicy.classify(
+                "sodium", "pipeline/translucent_terrain",
+                "sodium", "blocks/block_layer_opaque",
+                "sodium", "blocks/block_layer_opaque"
+        );
+        require(sodium == HdrPipelinePolicy.Role.SCENE_RASTER, "Sodium terrain scene policy");
+        require(
+                HdrPipelinePolicy.selectFlavor(sodium, true, true) == HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                "Sodium FP16 terrain selects raster-linear"
+        );
+
+        HdrPipelinePolicy.Role unknown = HdrPipelinePolicy.classify(
+                "examplemod", "pipeline/custom",
+                "examplemod", "core/custom",
+                "examplemod", "core/custom"
+        );
+        require(unknown == HdrPipelinePolicy.Role.UNKNOWN, "unknown mod pipeline policy");
+        require(
+                HdrPipelinePolicy.selectFlavor(unknown, true, true) == HdrShaderFlavor.LEGACY,
+                "unknown FP16 pipeline safely stays legacy"
+        );
     }
 
     private static void testSodiumShaderPatching() {
