@@ -15,6 +15,7 @@ import net.fabricmc.api.Environment;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -47,9 +48,19 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final int vertexBufferCount;
     private final boolean semanticOutput;
 
+    private static final java.util.concurrent.atomic.AtomicInteger compilationCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+
     private final MemorySegment depthStencilState;
-    private final MemorySegment withDepthPipeline;
-    private final MemorySegment withoutDepthPipeline;
+    private final MetalDevice device;
+    private final RenderPipeline info;
+    private final MemorySegment vertexFunction;
+    private final MemorySegment fragmentFunction;
+    private final boolean isValid;
+    private boolean closed = false;
+
+    private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
+
+    private record PipelineKey(MTLPixelFormat colorFormat, MTLPixelFormat depthFormat, MTLPixelFormat stencilFormat) {}
 
     MetalCompiledRenderPipeline(
             final MetalDevice device,
@@ -60,6 +71,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final String fragmentEntryPoint,
             final List<ResourceBinding> resources
     ) {
+        this.device = device;
+        this.info = info;
         this.resources = resources;
         this.resourcesByName = resources.stream().collect(java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding));
 
@@ -105,16 +118,51 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         var colorTarget = info.getColorTargetState();
         MTLPixelFormat colorFormat = colorTarget != null ? MTLPixelFormat.from(colorTarget.format()) : MTLPixelFormat.RGBA8Unorm;
 
-        MemorySegment vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
-        MemorySegment fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
+        this.vertexFunction = device.getOrCompileFunction(vertexMsl, vertexEntryPoint);
+        this.fragmentFunction = device.getOrCompileFunction(fragmentMsl, fragmentEntryPoint);
 
-        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
-            this.withoutDepthPipeline = createPipeline(
-                    device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Invalid, this.semanticOutput
-            );
-            this.withDepthPipeline = createPipeline(
-                    device, info, vertexFunction, fragmentFunction, vertexDescriptor, colorFormat, MTLPixelFormat.Depth32Float, this.semanticOutput
-            );
+        if (!MetalNativeBridge.isNullHandle(this.vertexFunction) && !MetalNativeBridge.isNullHandle(this.fragmentFunction)) {
+            try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
+                int id1 = compilationCounter.incrementAndGet();
+                com.metallum.Metallum.LOGGER.debug(
+                        "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth=Invalid, stencil=Invalid), semanticAttachmentFormat={}",
+                        info.getLocation(), id1, colorFormat, this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+                );
+                MemorySegment withoutDepth = createPipeline(
+                        device, info, this.vertexFunction, this.fragmentFunction, vertexDescriptor,
+                        colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid, this.semanticOutput
+                );
+                if (!MetalNativeBridge.isNullHandle(withoutDepth)) {
+                    OwnedPipelineHandle ownedWithoutDepth = new OwnedPipelineHandle(withoutDepth, info.getLocation().toString(), id1);
+                    this.pipelines.put(new PipelineKey(colorFormat, MTLPixelFormat.Invalid, MTLPixelFormat.Invalid), ownedWithoutDepth);
+                    com.metallum.Metallum.LOGGER.debug(
+                            "Pipeline cached: name={}, compilationId={}, handle=0x{}",
+                            info.getLocation(), id1, Long.toHexString(withoutDepth.address())
+                    );
+                }
+
+                int id2 = compilationCounter.incrementAndGet();
+                com.metallum.Metallum.LOGGER.debug(
+                        "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth=Depth32Float, stencil=Invalid), semanticAttachmentFormat={}",
+                        info.getLocation(), id2, colorFormat, this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+                );
+                MemorySegment withDepth = createPipeline(
+                        device, info, this.vertexFunction, this.fragmentFunction, vertexDescriptor,
+                        colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid, this.semanticOutput
+                );
+                if (!MetalNativeBridge.isNullHandle(withDepth)) {
+                    OwnedPipelineHandle ownedWithDepth = new OwnedPipelineHandle(withDepth, info.getLocation().toString(), id2);
+                    this.pipelines.put(new PipelineKey(colorFormat, MTLPixelFormat.Depth32Float, MTLPixelFormat.Invalid), ownedWithDepth);
+                    com.metallum.Metallum.LOGGER.debug(
+                            "Pipeline cached: name={}, compilationId={}, handle=0x{}",
+                            info.getLocation(), id2, Long.toHexString(withDepth.address())
+                    );
+                }
+
+                this.isValid = !MetalNativeBridge.isNullHandle(withoutDepth);
+            }
+        } else {
+            this.isValid = false;
         }
     }
 
@@ -126,6 +174,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLVertexDescriptor vertexDescriptor,
             final MTLPixelFormat colorFormat,
             final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat,
             final boolean semanticOutput
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
@@ -143,7 +192,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     colorFormat,
                     semanticOutput ? MTLPixelFormat.RGBA8Unorm : MTLPixelFormat.Invalid,
                     depthFormat,
-                    MTLPixelFormat.Invalid
+                    stencilFormat
             );
 
             if (blendFunction.isPresent()) {
@@ -174,7 +223,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     @Override
     public boolean isValid() {
-        return !MetalNativeBridge.isNullHandle(this.withoutDepthPipeline);
+        return this.isValid;
     }
 
     List<ResourceBinding> resources() {
@@ -206,8 +255,57 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.depthStencilState;
     }
 
-    MemorySegment getNativePipeline(final boolean useDepth) {
-        return useDepth && !MetalNativeBridge.isNullHandle(this.withDepthPipeline) ? this.withDepthPipeline : this.withoutDepthPipeline;
+    public synchronized MemorySegment getNativePipeline(
+            final MTLPixelFormat colorFormat,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        if (this.closed) {
+            throw new IllegalStateException("Pipeline has been closed: " + this.info.getLocation());
+        }
+        PipelineKey key = new PipelineKey(colorFormat, depthFormat, stencilFormat);
+        OwnedPipelineHandle owned = this.pipelines.get(key);
+        if (owned != null) {
+            return owned.handle;
+        }
+
+        int compileId = compilationCounter.incrementAndGet();
+        com.metallum.Metallum.LOGGER.debug(
+                "Pipeline compile call: name={}, compilationId={}, key=(color={}, depth={}, stencil={}), semanticAttachmentFormat={}",
+                this.info.getLocation(), compileId, colorFormat, depthFormat, stencilFormat,
+                this.semanticOutput ? "RGBA8Unorm" : "Invalid"
+        );
+
+        MemorySegment pipeline;
+        try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(this.info, this.firstAvailableVertexBufferSlot)) {
+            pipeline = createPipeline(
+                    this.device,
+                    this.info,
+                    this.vertexFunction,
+                    this.fragmentFunction,
+                    vertexDescriptor,
+                    colorFormat,
+                    depthFormat,
+                    stencilFormat,
+                    this.semanticOutput
+            );
+        }
+
+        if (MetalNativeBridge.isNullHandle(pipeline)) {
+            throw new IllegalStateException(
+                    String.format("Failed to compile native pipeline variant: name=%s, compilationId=%d, color=%s, depth=%s, stencil=%s",
+                            this.info.getLocation(), compileId, colorFormat, depthFormat, stencilFormat)
+            );
+        }
+
+        OwnedPipelineHandle ownedHandle = new OwnedPipelineHandle(pipeline, this.info.getLocation().toString(), compileId);
+        com.metallum.Metallum.LOGGER.debug(
+                "Pipeline cached: name={}, compilationId={}, handle=0x{}",
+                this.info.getLocation(), compileId, Long.toHexString(pipeline.address())
+        );
+
+        this.pipelines.put(key, ownedHandle);
+        return pipeline;
     }
 
     MTLCullMode cullMode() {
@@ -275,12 +373,64 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     }
 
     @Override
-    public void close() {
-        if (!MetalNativeBridge.isNullHandle(this.withDepthPipeline)) {
-            MetalNativeBridge.metallum_release_object(this.withDepthPipeline);
+    public synchronized void close() {
+        if (this.closed) {
+            com.metallum.Metallum.LOGGER.debug(
+                    "Pipeline close ignored (already closed): name={}",
+                    this.info.getLocation()
+            );
+            return;
         }
-        if (!MetalNativeBridge.isNullHandle(this.withoutDepthPipeline)) {
-            MetalNativeBridge.metallum_release_object(this.withoutDepthPipeline);
+
+        com.metallum.Metallum.LOGGER.debug(
+                "Pipeline close start: name={}",
+                this.info.getLocation()
+        );
+
+        this.closed = true;
+
+        // Snapshot handles to release and clear map immediately
+        List<OwnedPipelineHandle> handlesToRelease = new java.util.ArrayList<>(this.pipelines.values());
+        this.pipelines.clear();
+
+        for (OwnedPipelineHandle owned : handlesToRelease) {
+            if (owned != null) {
+                owned.release();
+            }
+        }
+
+        com.metallum.Metallum.LOGGER.debug(
+                "Pipeline close end: name={}",
+                this.info.getLocation()
+        );
+    }
+
+    private static final class OwnedPipelineHandle {
+        final MemorySegment handle;
+        private final String pipelineName;
+        private final int compilationId;
+        private boolean released = false;
+
+        OwnedPipelineHandle(MemorySegment handle, String pipelineName, int compilationId) {
+            this.handle = handle;
+            this.pipelineName = pipelineName;
+            this.compilationId = compilationId;
+        }
+
+        synchronized void release() {
+            if (this.released) {
+                com.metallum.Metallum.LOGGER.warn(
+                        "Pipeline duplicate release attempted: name={}, compilationId={}, handle=0x{}",
+                        this.pipelineName, this.compilationId, Long.toHexString(this.handle.address())
+                );
+                return;
+            }
+            this.released = true;
+            com.metallum.Metallum.LOGGER.debug(
+                    "Pipeline release: name={}, compilationId={}, releasing=0x{}",
+                    this.pipelineName, this.compilationId, Long.toHexString(this.handle.address())
+            );
+            MetalNativeBridge.metallum_release_object(this.handle);
         }
     }
 }

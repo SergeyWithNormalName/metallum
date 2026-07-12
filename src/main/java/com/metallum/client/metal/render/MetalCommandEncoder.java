@@ -5,6 +5,7 @@ import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
+import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.buffers.GpuFence;
@@ -152,8 +153,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 : null;
         MemorySegment semanticHandle = semanticAttachment == null ? MemorySegment.NULL : semanticAttachment.texture();
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
-        boolean clearSemantic = semanticAttachment != null
-                && (semanticAttachment.clear() || clearColorEnabled || clearDepthEnabled);
+        // The semantic mask accumulates contributions from every scene target
+        // in the current submitted frame. An offscreen color/depth clear (for
+        // example Fabulous translucent terrain) must not erase opaque markers
+        // already written by the main target.
+        boolean clearSemantic = semanticAttachment != null && semanticAttachment.clear();
         if (currentEncoder instanceof MTLRenderCommandEncoder enc
                 && MetalPipelineSupport.sameHandle(renderColorAttachment, colorAttachment)
                 && MetalPipelineSupport.sameHandle(renderSemanticAttachment, semanticHandle)
@@ -283,7 +287,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 sceneInputs.semantic(),
                 fence,
                 outputMode.nativeValue(),
-                hdrConfig.sourceEncoding().nativeValue(),
+                hdrConfig.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
                 hdrConfig.diagnosticPattern(),
                 Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
                 hdrConfig.hdrStrength(),

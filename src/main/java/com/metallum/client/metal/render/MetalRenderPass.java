@@ -469,8 +469,11 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         if (pipelineDirty) {
-            boolean useDepth = depthAttachmentFormat().value != MTLPixelFormat.Invalid.value;
-            MemorySegment pipelineHandle = compiledPipeline.getNativePipeline(useDepth);
+            MTLPixelFormat colorFormat = colorAttachmentFormat();
+            MTLPixelFormat depthFormat = depthAttachmentFormat();
+            MTLPixelFormat stencilFormat = stencilAttachmentFormat();
+            boolean useDepth = depthFormat.value != MTLPixelFormat.Invalid.value;
+            MemorySegment pipelineHandle = compiledPipeline.getNativePipeline(colorFormat, depthFormat, stencilFormat);
             if (MetalNativeBridge.isNullHandle(pipelineHandle)) {
                 throw new IllegalStateException("Native pipeline is unavailable");
             }

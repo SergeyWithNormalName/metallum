@@ -14,4 +14,8 @@ public final class HdrSemanticState {
         requested = (mode == HdrMode.AUTO || mode == HdrMode.ENHANCED)
                 && capabilities.isHdrDisplay();
     }
+
+    public static void reset() {
+        requested = false;
+    }
 }

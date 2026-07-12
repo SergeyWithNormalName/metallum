@@ -11,8 +11,10 @@ public final class HdrConfigTests {
         testCapabilitySanitization();
         testOutputModeResolution();
         testSemanticState();
+        testSceneState();
         testSodiumShaderPatching();
         testVanillaShaderPatching();
+        testLightmapShaderPatching();
     }
 
     private static void testConfigurationParsing() {
@@ -33,6 +35,9 @@ public final class HdrConfigTests {
         HdrConfig defaults = HdrConfig.from(new Properties());
         require(defaults.mode() == HdrMode.AUTO, "default mode");
         require(defaults.sourceEncoding() == HdrSourceEncoding.SRGB, "default source encoding");
+        require(HdrSourceEncoding.SRGB.nativeValue(false) == 0, "RGBA8 uses bounded sRGB source contract");
+        require(HdrSourceEncoding.SRGB.nativeValue(true) == 1, "FP16 uses extended sRGB source contract");
+        require(HdrSourceEncoding.LINEAR.nativeValue(true) == 2, "explicit linear source contract is retained");
         require(!defaults.diagnosticPattern(), "default diagnostic flag");
 
         Properties invalid = new Properties();
@@ -78,6 +83,26 @@ public final class HdrConfigTests {
         require(!HdrSemanticState.isRequested(), "SDR displays avoid semantic MRT");
         HdrSemanticState.configure(HdrMode.OFF, hdr);
         require(!HdrSemanticState.isRequested(), "off mode avoids semantic MRT");
+    }
+
+    private static void testSceneState() {
+        Properties properties = new Properties();
+        properties.setProperty("mode", "auto");
+        properties.setProperty("experimentalFp16", "true");
+        HdrConfig enabled = HdrConfig.from(properties);
+        EdrCapabilities hdr = new EdrCapabilities(1.0f, 4.0f);
+
+        HdrSceneState.reset();
+        require(!HdrSceneState.isRequested(), "FP16 scene path defaults off before device policy");
+        HdrSceneState.configure(enabled, hdr);
+        require(HdrSceneState.isRequested(), "FP16 scene path requires explicit config and HDR display");
+        HdrSceneState.configure(enabled, EdrCapabilities.SDR);
+        require(!HdrSceneState.isRequested(), "FP16 scene path stays off on SDR displays");
+
+        properties.setProperty("mode", "off");
+        HdrSceneState.configure(HdrConfig.from(properties), hdr);
+        require(!HdrSceneState.isRequested(), "explicit SDR mode disables FP16 scene path");
+        HdrSceneState.reset();
     }
 
     private static void testSodiumShaderPatching() {
@@ -155,6 +180,37 @@ public final class HdrConfigTests {
         String unknown = "out vec4 fragColor;\nvoid main() {\n    fragColor = ColorModulator;\n}";
         require(VanillaHdrShaderPatcher.patchFragmentSource("core/gui", unknown).equals(unknown), "GUI shader is never patched");
         require(VanillaHdrShaderPatcher.patchFragmentSource(VanillaHdrShaderPatcher.STARS, "out vec4 fragColor;\nvoid main() {}").equals("out vec4 fragColor;\nvoid main() {}"), "anchor mismatch stays unchanged");
+    }
+
+    private static void testLightmapShaderPatching() {
+        String clamp = "    color = clamp(color, 0.0, 1.0);";
+        String gamma = "    vec3 notGamma = notGamma(color);\n"
+                + "    color = mix(color, notGamma, lightmapInfo.BrightnessFactor);";
+        String output = "    fragColor = vec4(color, 1.0);";
+        String source = "void main() {\n" + clamp + "\n" + gamma + "\n" + output + "\n}";
+
+        require(LightmapHdrShaderPatcher.isTarget("core/lightmap"), "vanilla lightmap target");
+        require(!LightmapHdrShaderPatcher.isTarget("core/gui"), "non-lightmap shader is not targeted");
+
+        String patched = LightmapHdrShaderPatcher.patchFragmentSource(source);
+        require(LightmapHdrShaderPatcher.isPatched(patched), "lightmap patch marker");
+        require(patched.contains("vec3 metallumHdrUnclampedColor = max(color, vec3(0.0));"), "unclamped light is preserved");
+        require(patched.contains(clamp), "vanilla SDR clamp remains the base curve");
+        require(patched.contains(gamma), "vanilla brightness curve remains unchanged");
+        require(patched.contains("max(metallumHdrUnclampedColor - vec3(1.0), vec3(0.0))"), "only lighting excess above SDR white is extended");
+        require(patched.contains("metallumHdrExcess / (vec3(1.0) + metallumHdrExcess)"), "lighting excess uses a bounded shoulder");
+        require(patched.contains("fragColor = vec4(color + metallumHdrCompressedExcess, 1.0);"), "compressed excess is added after the vanilla base");
+        require(LightmapHdrShaderPatcher.patchFragmentSource(patched).equals(patched), "lightmap patch idempotence");
+
+        String missingOutput = "void main() {\n" + clamp + "\n}";
+        require(LightmapHdrShaderPatcher.patchFragmentSource(missingOutput).equals(missingOutput), "missing lightmap output anchor stays unchanged");
+
+        String duplicateClamp = "void main() {\n" + clamp + "\n" + clamp + "\n" + output + "\n}";
+        require(LightmapHdrShaderPatcher.patchFragmentSource(duplicateClamp).equals(duplicateClamp), "ambiguous lightmap clamp anchors stay unchanged");
+
+        String partialPatch = "void main() {\n    // METALLUM_HDR_LIGHTMAP_EXCESS\n" + clamp + "\n" + output + "\n}";
+        require(!LightmapHdrShaderPatcher.isPatched(partialPatch), "partial lightmap patch is not accepted");
+        require(LightmapHdrShaderPatcher.patchFragmentSource(partialPatch).equals(partialPatch), "partial lightmap patch fails safely");
     }
 
     private static void requireVanillaPatch(

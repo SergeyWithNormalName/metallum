@@ -6,6 +6,12 @@
   "mixins": [
   ],
   "client": [
+    "render.MainTargetMixin",
+    "render.RenderTargetAccessor",
+    "render.RenderPassMixin",
+    "render.LevelRendererMixin",
+    "render.PostChainMixin",
+    "render.LightmapMixin",
     "render.HdrSceneCaptureMixin",
     "render.HdrShaderMixin",
     "render.PreferredGraphicsApiMixin",

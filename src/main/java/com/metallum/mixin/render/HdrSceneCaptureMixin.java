@@ -2,7 +2,6 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.metal.render.MetalHdrFrame;
 import net.minecraft.client.DeltaTracker;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -15,7 +14,8 @@ abstract class HdrSceneCaptureMixin {
             method = "render",
             at = @At(
                     value = "INVOKE",
-                    target = "Lnet/minecraft/client/gui/render/GuiRenderer;render()V"
+                    target = "Lcom/mojang/blaze3d/systems/CommandEncoder;clearDepthTexture(Lcom/mojang/blaze3d/textures/GpuTexture;D)V",
+                    ordinal = 0
             )
     )
     private void metallum$captureSceneBeforeGui(
@@ -23,9 +23,6 @@ abstract class HdrSceneCaptureMixin {
             final boolean renderLevel,
             final CallbackInfo ci
     ) {
-        if (Minecraft.getInstance().gui.screen() != null || Minecraft.getInstance().gui.overlay() != null) {
-            return;
-        }
         GameRenderer self = (GameRenderer) (Object) this;
         MetalHdrFrame.captureScene(
                 self.mainRenderTarget().getColorTextureView(),

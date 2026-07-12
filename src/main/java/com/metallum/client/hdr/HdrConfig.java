@@ -16,7 +16,8 @@ public record HdrConfig(
         HdrSourceEncoding sourceEncoding,
         float hdrStrength,
         float bloomStrength,
-        boolean diagnosticPattern
+        boolean diagnosticPattern,
+        boolean experimentalFp16
 ) {
     public static final float OUTPUT_HEADROOM = 8.0f;
 
@@ -55,7 +56,8 @@ public record HdrConfig(
                 HdrSourceEncoding.parse(properties.getProperty("sourceEncoding")),
                 parseFloat(properties, "hdrStrength", 1.0f, 0.0f, 2.0f),
                 parseFloat(properties, "bloomStrength", 0.22f, 0.0f, 1.0f),
-                Boolean.parseBoolean(properties.getProperty("diagnosticPattern", "false"))
+                Boolean.parseBoolean(properties.getProperty("diagnosticPattern", "false")),
+                Boolean.parseBoolean(properties.getProperty("experimentalFp16", "false"))
         );
     }
 
@@ -66,6 +68,7 @@ public record HdrConfig(
         properties.setProperty("hdrStrength", "1.0");
         properties.setProperty("bloomStrength", "0.22");
         properties.setProperty("diagnosticPattern", "false");
+        properties.setProperty("experimentalFp16", "false");
         return properties;
     }
 

@@ -5,6 +5,7 @@ import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
+import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
@@ -35,7 +36,7 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
-final class MetalDevice implements GpuDeviceBackend {
+public final class MetalDevice implements GpuDeviceBackend {
     record SemanticAttachment(MemorySegment texture, boolean clear) {
     }
 
@@ -92,6 +93,11 @@ final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
+        // These policies are process-global only because Minecraft constructs
+        // one render backend. Clear stale state before any fallible native
+        // initialization so another backend can never inherit Metal policy.
+        HdrSemanticState.reset();
+        HdrSceneState.reset();
         this.hdrConfig = HdrConfig.load();
         HdrMode configuredHdrMode = this.hdrConfig.mode();
         this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
@@ -106,18 +112,24 @@ final class MetalDevice implements GpuDeviceBackend {
                 Metallum.LOGGER.warn("Failed to query initial EDR capabilities; semantic HDR shaders will remain disabled", exception);
             }
         }
+        MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
+        this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
+        MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        this.commandEncoder = new MetalCommandEncoder(this);
+        this.deviceInfo = buildDeviceInfo(deviceName);
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
+        HdrSceneState.configure(this.hdrConfig, initialEdrCapabilities);
         Metallum.LOGGER.info(
                 "Semantic HDR shaders: {} (configured mode {}, potential EDR headroom {})",
                 HdrSemanticState.isRequested() ? "enabled" : "disabled",
                 configuredHdrMode,
                 initialEdrCapabilities.potentialHeadroom()
         );
-        MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
-        this.commandQueue = MTLCommandQueue.create(metalDeviceHandle);
-        MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
-        this.commandEncoder = new MetalCommandEncoder(this);
-        this.deviceInfo = buildDeviceInfo(deviceName);
+        Metallum.LOGGER.info(
+                "Configured HDR mode: {}, FP16 scene path: {}",
+                configuredHdrMode,
+                HdrSceneState.isRequested() ? "enabled" : "disabled"
+        );
     }
 
     @Override
@@ -230,6 +242,8 @@ final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        HdrSemanticState.reset();
+        HdrSceneState.reset();
         if (this.hdrSceneSnapshot != null) {
             this.hdrSceneSnapshot.close();
             this.hdrSceneSnapshot = null;
@@ -284,7 +298,7 @@ final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.waitForPreviouslySubmittedGpuWork();
     }
 
-    HdrConfig hdrConfig() {
+    public HdrConfig hdrConfig() {
         return this.hdrConfig;
     }
 
@@ -387,6 +401,7 @@ final class MetalDevice implements GpuDeviceBackend {
                         1,
                         1
                 );
+                com.metallum.Metallum.LOGGER.info("Pre-GUI scene capture format: " + source.getFormat());
             } catch (RuntimeException exception) {
                 this.disableHdrEnhancement();
                 Metallum.LOGGER.error("Failed to allocate the HDR scene snapshot; continuing with EDR output", exception);

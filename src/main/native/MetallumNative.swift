@@ -269,17 +269,22 @@ private func presentMslSource() -> String {
       float _padding0;
     };
 
-    float3 metallum_srgb_to_linear(float3 encoded) {
-      encoded = clamp(encoded, 0.0, 1.0);
-      float3 low = encoded / 12.92;
-      float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
-      return select(high, low, encoded <= float3(0.04045));
+    float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
+      float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
+      float3 low = magnitude / 12.92;
+      float3 high = pow((magnitude + 0.055) / 1.055, float3(2.4));
+      float3 decoded = select(high, low, magnitude <= float3(0.04045));
+      return extendedRange ? copysign(decoded, encoded) : decoded;
     }
 
     float3 metallum_decode(float3 value, uint sourceEncoding) {
-      return sourceEncoding == 0u
-        ? metallum_srgb_to_linear(value)
-        : max(value, 0.0);
+      if (sourceEncoding == 0u) {
+        return metallum_srgb_to_linear(value, false);
+      }
+      if (sourceEncoding == 1u) {
+        return max(metallum_srgb_to_linear(value, true), 0.0);
+      }
+      return max(value, 0.0);
     }
 
     float metallum_luminance(float3 color) {
@@ -370,31 +375,60 @@ private func presentMslSource() -> String {
       }
 
       float3 linearColor = metallum_decode(source.rgb, uniforms.sourceEncoding);
+      float3 mappedBaseColor = metallum_map_to_headroom(linearColor, uniforms.currentHeadroom);
       if (uniforms.mode != 2u || uniforms.sceneAvailable == 0u || uniforms.currentHeadroom <= 1.001) {
-        return float4(linearColor, 1.0);
+        return float4(mappedBaseColor, 1.0);
       }
 
       float headroomActivation = smoothstep(1.0, 1.15, uniforms.currentHeadroom);
       float strength = uniforms.hdrStrength * headroomActivation;
       float3 sceneLinear = metallum_decode(sceneFrame.sample(smp, in.uv).rgb, uniforms.sourceEncoding);
-      float3 localEmission = max(emissionFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
+      float4 emissionSample = max(emissionFrame.sample(auxiliarySmp, in.uv), 0.0);
+      float3 localEmission = emissionSample.rgb;
       float3 bloom = max(bloomFrame.sample(auxiliarySmp, in.uv).rgb, 0.0);
       float bloomScale = uniforms.bloomStrength * strength
         * min(0.75 + 0.45 * (uniforms.currentHeadroom - 1.0), 2.5);
       float sceneVisibility = 1.0 - clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).r, 0.0, 1.0);
 
+      // Scene-wide highlight reconstruction. The SDR artistic exposure is
+      // preserved below the shoulder; isolated and broadly bright world
+      // highlights can use EDR without multiplying shadows or midtones.
+      float sceneY = metallum_luminance(sceneLinear);
+      float sceneSignal = max(sceneY, 0.22 * metallum_peak_metric(sceneLinear));
+      float localY = emissionSample.a;
+      float detail = max(sceneSignal - localY, 0.0);
+      float localIsolation = smoothstep(0.06, 0.42, detail);
+      float expansionStart = mix(0.62, 0.47, localIsolation);
+      float expansionX = clamp((min(sceneSignal, 1.0) - expansionStart)
+        / max(1.0 - expansionStart, 1e-5), 0.0, 1.0);
+      float expansionCurve = expansionX * expansionX * (3.0 - 2.0 * expansionX);
+      float broadAreaLimiter = mix(1.0, 0.58, smoothstep(0.62, 0.98, localY));
+      float inferredPeak = 1.0 + min(2.0, 0.55 * (uniforms.currentHeadroom - 1.0))
+        * strength * broadAreaLimiter;
+      float inferredY = max(sceneSignal, min(sceneSignal, 1.0)
+        + (inferredPeak - 1.0) * expansionCurve);
+      float3 inferredScene = sceneLinear * (inferredY / max(sceneSignal, 1e-6));
+
+      // Semantic light is source-authored. Select it by luminance instead of
+      // adding it on top of inferred expansion, which would double-boost the
+      // same sun, lava or emissive texture.
+      float3 semanticScene = sceneLinear + localEmission * strength;
+      float3 selectedScene = metallum_luminance(semanticScene) > metallum_luminance(inferredScene)
+        ? semanticScene
+        : inferredScene;
       float3 sceneHdr = metallum_map_to_headroom(
-        sceneLinear + localEmission * strength + bloom * bloomScale,
+        selectedScene + bloom * bloomScale,
         uniforms.currentHeadroom
       );
-      float3 hdrDelta = max(sceneHdr - sceneLinear, 0.0);
+      float3 mappedSceneBase = metallum_map_to_headroom(sceneLinear, uniforms.currentHeadroom);
+      float3 hdrDelta = sceneHdr - mappedSceneBase;
       float3 visibleDelta = sceneVisibility * hdrDelta;
-      if (metallum_peak_metric(linearColor + visibleDelta) > uniforms.currentHeadroom) {
+      if (metallum_peak_metric(mappedBaseColor + visibleDelta) > uniforms.currentHeadroom) {
         float low = 0.0;
         float high = 1.0;
         for (uint iteration = 0u; iteration < 7u; ++iteration) {
           float candidate = 0.5 * (low + high);
-          if (metallum_peak_metric(linearColor + visibleDelta * candidate) <= uniforms.currentHeadroom) {
+          if (metallum_peak_metric(mappedBaseColor + visibleDelta * candidate) <= uniforms.currentHeadroom) {
             low = candidate;
           } else {
             high = candidate;
@@ -402,7 +436,7 @@ private func presentMslSource() -> String {
         }
         visibleDelta *= low;
       }
-      return float4(linearColor + visibleDelta, 1.0);
+      return float4(mappedBaseColor + visibleDelta, 1.0);
     }
     """
 }
@@ -445,17 +479,22 @@ private func hdrEffectsMslSource() -> String {
       return out;
     }
 
-    float3 metallum_hdr_srgb_to_linear(float3 encoded) {
-      encoded = clamp(encoded, 0.0, 1.0);
-      float3 low = encoded / 12.92;
-      float3 high = pow((encoded + 0.055) / 1.055, float3(2.4));
-      return select(high, low, encoded <= float3(0.04045));
+    float3 metallum_hdr_srgb_to_linear(float3 encoded, bool extendedRange) {
+      float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
+      float3 low = magnitude / 12.92;
+      float3 high = pow((magnitude + 0.055) / 1.055, float3(2.4));
+      float3 decoded = select(high, low, magnitude <= float3(0.04045));
+      return extendedRange ? copysign(decoded, encoded) : decoded;
     }
 
     float3 metallum_hdr_decode(float3 value, uint sourceEncoding) {
-      return sourceEncoding == 0u
-        ? metallum_hdr_srgb_to_linear(value)
-        : max(value, 0.0);
+      if (sourceEncoding == 0u) {
+        return metallum_hdr_srgb_to_linear(value, false);
+      }
+      if (sourceEncoding == 1u) {
+        return max(metallum_hdr_srgb_to_linear(value, true), 0.0);
+      }
+      return max(value, 0.0);
     }
 
     float metallum_hdr_luminance(float3 color) {
@@ -524,32 +563,12 @@ private func hdrEffectsMslSource() -> String {
 
       if (uniforms.semanticAvailable != 0u) {
         float emissionGain = semanticStrength * mix(2.4, 3.2, semanticExact);
-        return float4(max(semanticColor, 0.0) * emissionGain, semanticStrength);
+        return float4(max(semanticColor, 0.0) * emissionGain, averageY);
       }
-
-      uint2 center = min(origin + uint2(2u), maximumCoordinate);
-      uint2 ringOffset = uint2(8u);
-      float contextY = 0.25 * (
-        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(min(center.x + ringOffset.x, maximumCoordinate.x), center.y)).rgb, uniforms.sourceEncoding)) +
-        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x > ringOffset.x ? center.x - ringOffset.x : 0u, center.y)).rgb, uniforms.sourceEncoding)) +
-        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x, min(center.y + ringOffset.y, maximumCoordinate.y))).rgb, uniforms.sourceEncoding)) +
-        metallum_hdr_luminance(metallum_hdr_decode(scene.read(uint2(center.x, center.y > ringOffset.y ? center.y - ringOffset.y : 0u)).rgb, uniforms.sourceEncoding))
-      );
-
-      float maximum = max(brightestColor.r, max(brightestColor.g, brightestColor.b));
-      float minimum = min(brightestColor.r, min(brightestColor.g, brightestColor.b));
-      float saturation = (maximum - minimum) / max(maximum, 1e-5);
-      float contrast = max(maximumY - min(averageY, contextY), 0.0);
-
-      float brightnessGate = smoothstep(0.28, 0.82, maximumY);
-      float isolationGate = smoothstep(0.015, 0.18, contrast);
-      float saturationGate = smoothstep(0.20, 0.70, saturation);
-      float visualFallback = clamp(max(
-        brightnessGate * isolationGate,
-        smoothstep(0.12, 0.55, maximumY) * saturationGate * isolationGate * 0.55
-      ) * 0.48, 0.0, 1.0);
-      float emissionGain = visualFallback * (0.75 + 1.25 * visualFallback);
-      return float4(max(brightestColor, 0.0) * emissionGain, visualFallback);
+      // Generic scene reconstruction now handles non-semantic highlights.
+      // Keeping the old visual fallback would apply two unrelated heuristics
+      // to the same pixel and create excessive halos.
+      return float4(0.0, 0.0, 0.0, averageY);
     }
 
     fragment float4 metallum_hdr_blur_fs(
