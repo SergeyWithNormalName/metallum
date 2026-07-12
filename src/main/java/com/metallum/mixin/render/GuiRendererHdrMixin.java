@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrUiRenderTarget;
+import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.render.GuiRenderer;
@@ -48,10 +49,13 @@ abstract class GuiRendererHdrMixin {
                 LevelTargetBundle.MAIN_TARGETS
         );
         if (blur != null) {
-            blur.process(
-                    uiTarget,
-                    ((GameRendererAccessor) renderer).metallum$getResourcePool()
+            FrameGraphBuilder frame = new FrameGraphBuilder();
+            PostChain.TargetBundle targets = PostChain.TargetBundle.of(
+                    PostChain.MAIN_TARGET_ID,
+                    frame.importExternal("main", uiTarget)
             );
+            blur.addToFrame(frame, uiTarget.width, uiTarget.height, targets);
+            frame.execute(((GameRendererAccessor) renderer).metallum$getResourcePool());
             // The UI texture now contains a deliberately blurred copy of the
             // world. A sharp HDR scene delta must not be composited back over
             // that backdrop during presentation.

@@ -5,14 +5,36 @@ plugins {
 
 version = project.mod_version
 group = project.maven_group
+def artifactProjectName = project.name
 
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
 }
 
 repositories {
-	maven { url "https://api.modrinth.com/maven" }
+	maven { url = uri("https://api.modrinth.com/maven") }
 }
+
+def isMacOs = System.getProperty("os.name").startsWith("Mac")
+def isAppleSiliconMac = isMacOs && System.getProperty("os.arch") in ["aarch64", "arm64"]
+def macNativeSource = layout.projectDirectory.file("src/main/native/MetallumNative.swift")
+def macNativeLibrary = layout.buildDirectory.file("generated/metallum/natives/macos/libmetallum.dylib")
+def macNativeCompilerArguments = [
+	"-O",
+	"-whole-module-optimization",
+	"-emit-library",
+	"-module-name", "metallum_native",
+	"-target", "arm64-apple-macosx14.0",
+	"-framework", "Foundation",
+	"-framework", "Metal",
+	"-framework", "QuartzCore"
+]
+def swiftCompilerVersion = isMacOs ? providers.exec {
+	commandLine "swiftc", "--version"
+}.standardOutput.asText.map { it.trim() } : providers.provider { "not-macos" }
+def macOsSdkVersion = isMacOs ? providers.exec {
+	commandLine "xcrun", "--sdk", "macosx", "--show-sdk-version"
+}.standardOutput.asText.map { it.trim() } : providers.provider { "not-macos" }
 
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -23,6 +45,9 @@ dependencies {
 
 processResources {
 	inputs.property "version", project.version
+	from(macNativeLibrary) {
+		into "natives/macos"
+	}
 
 	filesMatching("fabric.mod.json") {
 		expand "version": inputs.properties.version
@@ -30,26 +55,23 @@ processResources {
 }
 
 tasks.register("buildMacNative", Exec) {
-	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
-	}
+	onlyIf { isMacOs }
+
+	inputs.file(macNativeSource)
+	inputs.property("compilerArguments", macNativeCompilerArguments)
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(macNativeLibrary)
 
 	workingDir project.projectDir
 	doFirst {
-		file("src/main/resources/natives/macos").mkdirs()
+		macNativeLibrary.get().asFile.parentFile.mkdirs()
 	}
 
 	commandLine "swiftc",
-		"-O",
-		"-whole-module-optimization",
-		"-emit-library",
-		"-module-name", "metallum_native",
-		"-target", "arm64-apple-macosx14.0",
-		"-framework", "Foundation",
-		"-framework", "Metal",
-		"-framework", "QuartzCore",
-		"-o", "src/main/resources/natives/macos/libmetallum.dylib",
-		"src/main/native/MetallumNative.swift"
+		*macNativeCompilerArguments,
+		"-o", macNativeLibrary.get().asFile.absolutePath,
+		macNativeSource.asFile.absolutePath
 }
 
 tasks.named("processResources") {
@@ -58,6 +80,7 @@ tasks.named("processResources") {
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25
+	it.options.compilerArgs.add("-Xlint:deprecation")
 }
 
 tasks.register("hdrUnitTest", JavaExec) {
@@ -81,11 +104,11 @@ def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValue
 tasks.register("compileHdrValueValidation", Exec) {
 	group = "verification"
 	description = "Compiles the macOS Metal HDR numerical validation harness"
-	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
-	}
+	onlyIf { isAppleSiliconMac }
 
 	inputs.file("src/test/native/HdrValueValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
 	outputs.file(hdrValueValidationBinary)
 
 	doFirst {
@@ -107,19 +130,17 @@ tasks.register("compileHdrValueValidation", Exec) {
 tasks.register("hdrValueValidation", Exec) {
 	group = "verification"
 	description = "Runs bounded GPU readback checks for HDR values and the native present ABI"
-	onlyIf {
-		org.gradle.internal.os.OperatingSystem.current().isMacOsX()
-	}
+	onlyIf { isAppleSiliconMac }
 	dependsOn(tasks.named("buildMacNative"), tasks.named("compileHdrValueValidation"))
 
 	inputs.file("src/main/native/MetallumNative.swift")
-	inputs.file("src/main/resources/natives/macos/libmetallum.dylib")
+	inputs.file(macNativeLibrary)
 
 	environment "MTL_DEBUG_LAYER", "1"
 	environment "MTL_SHADER_VALIDATION", "1"
 	commandLine hdrValueValidationBinary.get().asFile.absolutePath,
 		file("src/main/native/MetallumNative.swift").absolutePath,
-		file("src/main/resources/natives/macos/libmetallum.dylib").absolutePath
+		macNativeLibrary.get().asFile.absolutePath
 }
 
 tasks.named("test", Test) {
@@ -130,6 +151,7 @@ tasks.named("test", Test) {
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
+	dependsOn(tasks.named("hdrValueValidation"))
 }
 
 java {
@@ -140,10 +162,10 @@ java {
 }
 
 jar {
-	inputs.property "projectName", project.name
+	inputs.property "projectName", artifactProjectName
 
 	from("LICENSE") {
-		rename { "${it}_${project.name}"}
+		rename { "${it}_${artifactProjectName}"}
 	}
 }
 
