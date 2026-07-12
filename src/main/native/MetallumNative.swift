@@ -1807,22 +1807,19 @@ public func metallum_create_edr_monitor(_ window: NSWindow) -> UnsafeMutableRawP
 
 @_cdecl("metallum_EDRMonitor_query")
 public func metallum_EDRMonitor_query(
-    _ rawMonitor: UnsafeMutableRawPointer?,
-    _ currentOut: UnsafeMutablePointer<Float>?,
-    _ potentialOut: UnsafeMutablePointer<Float>?
-) {
+    _ rawMonitor: UnsafeMutableRawPointer?
+) -> UInt64 {
     guard let rawMonitor else {
-        currentOut?.pointee = 1.0
-        potentialOut?.pointee = 1.0
-        return
+        return UInt64(Float(1.0).bitPattern)
+            | (UInt64(Float(1.0).bitPattern) << 32)
     }
 
     let monitor = Unmanaged<MetallumEdrMonitor>
         .fromOpaque(rawMonitor)
         .takeUnretainedValue()
     let snapshot = monitor.snapshot()
-    currentOut?.pointee = snapshot.current
-    potentialOut?.pointee = snapshot.potential
+    return UInt64(snapshot.current.bitPattern)
+        | (UInt64(snapshot.potential.bitPattern) << 32)
 }
 
 @_cdecl("metallum_create_metal_layer")

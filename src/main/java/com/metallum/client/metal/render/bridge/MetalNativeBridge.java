@@ -45,13 +45,17 @@ public final class MetalNativeBridge {
             EDRMonitorQuery = downcallWithoutCritical(
                     lookup,
                     "metallum_EDRMonitor_query",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS)
             );
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
-            initPipelines = downcall(lookup, "metallum_init_pipelines", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            initPipelines = downcallWithoutCritical(
+                    lookup,
+                    "metallum_init_pipelines",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
@@ -282,7 +286,7 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderPipelineDescriptor_setBlendState",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT, INT, LONG, LONG, LONG, LONG, LONG, LONG, LONG)
             );
-            MTLDeviceMakeRenderPipelineState = downcall(
+            MTLDeviceMakeRenderPipelineState = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLDevice_makeRenderPipelineState",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
@@ -433,11 +437,12 @@ public final class MetalNativeBridge {
         if (isNullHandle(monitor)) {
             return EdrCapabilities.SDR;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment current = arena.allocate(FLOAT);
-            MemorySegment potential = arena.allocate(FLOAT);
-            EDRMonitorQuery.invokeExact(segment(monitor), current, potential);
-            return new EdrCapabilities(current.get(FLOAT, 0L), potential.get(FLOAT, 0L));
+        try {
+            long packed = (long) EDRMonitorQuery.invokeExact(segment(monitor));
+            return new EdrCapabilities(
+                    Float.intBitsToFloat((int) packed),
+                    Float.intBitsToFloat((int) (packed >>> 32))
+            );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_EDRMonitor_query", throwable);
         }

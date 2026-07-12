@@ -68,6 +68,14 @@ tasks.register("hdrUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.hdr.HdrConfigTests")
 }
 
+tasks.register("metalRuntimeUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free Metal runtime lifecycle tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.MetalRuntimeTests")
+}
+
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
 
 tasks.register("compileHdrValueValidation", Exec) {
@@ -121,6 +129,7 @@ tasks.named("test", Test) {
 
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
+	dependsOn(tasks.named("metalRuntimeUnitTest"))
 }
 
 java {

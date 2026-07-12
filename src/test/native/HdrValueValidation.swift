@@ -71,6 +71,13 @@ private struct HeadroomLimiterCase {
 }
 
 private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Void
+private typealias NativeCreateEdrMonitorFunction = @convention(c) (
+    UnsafeRawPointer? // window
+) -> UnsafeMutableRawPointer?
+private typealias NativeEdrMonitorQueryFunction = @convention(c) (
+    UnsafeMutableRawPointer? // monitor
+) -> UInt64
+private typealias NativeReleaseFunction = @convention(c) (UnsafeMutableRawPointer?) -> Void
 private typealias NativeUpdateLayerContentsHeadroomFunction = @convention(c) (
     UnsafeRawPointer?, // layer
     Float              // contentHeadroom
@@ -2919,6 +2926,9 @@ private final class ValueValidation {
         }
         guard
             let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+            let createEdrMonitorSymbol = dlsym(handle, "metallum_create_edr_monitor"),
+            let edrMonitorQuerySymbol = dlsym(handle, "metallum_EDRMonitor_query"),
+            let releaseSymbol = dlsym(handle, "metallum_release_object"),
             let configureLayerSymbol = dlsym(handle, "metallum_configure_layer"),
             let updateLayerHeadroomSymbol = dlsym(handle, "metallum_update_layer_contents_headroom"),
             let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
@@ -2927,6 +2937,15 @@ private final class ValueValidation {
             throw ValidationFailure.message("Native HDR present symbols are missing")
         }
         let initialize = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+        let createEdrMonitor = unsafeBitCast(
+            createEdrMonitorSymbol,
+            to: NativeCreateEdrMonitorFunction.self
+        )
+        let queryEdrMonitor = unsafeBitCast(
+            edrMonitorQuerySymbol,
+            to: NativeEdrMonitorQueryFunction.self
+        )
+        let release = unsafeBitCast(releaseSymbol, to: NativeReleaseFunction.self)
         let configureLayer = unsafeBitCast(configureLayerSymbol, to: NativeConfigureLayerFunction.self)
         let updateLayerHeadroom = unsafeBitCast(
             updateLayerHeadroomSymbol,
@@ -2963,6 +2982,19 @@ private final class ValueValidation {
         defer { window.orderOut(nil) }
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
 
+        guard let edrMonitor = createEdrMonitor(objectPointer(window)) else {
+            throw ValidationFailure.message("Native EDR monitor creation returned nil")
+        }
+        let packedHeadroom = queryEdrMonitor(edrMonitor)
+        release(edrMonitor)
+        let currentHeadroom = Float(bitPattern: UInt32(truncatingIfNeeded: packedHeadroom))
+        let potentialHeadroom = Float(bitPattern: UInt32(truncatingIfNeeded: packedHeadroom >> 32))
+        try require(
+            currentHeadroom.isFinite && currentHeadroom >= 1.0
+                && potentialHeadroom.isFinite && potentialHeadroom >= currentHeadroom,
+            "Packed EDR monitor ABI returned invalid values: current \(currentHeadroom), potential \(potentialHeadroom)"
+        )
+
         let sdrConfigureStatus = configureLayer(objectPointer(layer), 16, 16, 1, 0, 1)
         try require(sdrConfigureStatus == 1, "SDR layer configuration returned \(sdrConfigureStatus)")
         try require(layer.pixelFormat == .bgra8Unorm, "SDR layer did not use BGRA8Unorm")
@@ -2983,7 +3015,7 @@ private final class ValueValidation {
             "HDR layer did not restore extended-linear sRGB"
         )
         passCount += 1
-        print("PASS native layer switches between explicit sRGB SDR and extended-linear HDR")
+        print("PASS packed EDR monitor ABI and native layer SDR/HDR switching")
 
         if #available(macOS 26.0, *) {
             layer.contentsHeadroom = 1.0

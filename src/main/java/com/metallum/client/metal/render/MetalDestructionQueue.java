@@ -10,6 +10,7 @@ import java.util.List;
 @Environment(EnvType.CLIENT)
 final class MetalDestructionQueue {
     private final List<Runnable>[] queues;
+    private List<Runnable> spareQueue = new ArrayList<>();
     private int currentQueueIndex;
 
     @SuppressWarnings("unchecked")
@@ -30,12 +31,26 @@ final class MetalDestructionQueue {
     void rotate() {
         this.currentQueueIndex = (this.currentQueueIndex + 1) % this.queues.length;
         List<Runnable> toDestroy = this.queues[this.currentQueueIndex];
-        this.queues[this.currentQueueIndex] = new ArrayList<>();
-        for (Runnable destroyAction : toDestroy) {
-            try {
-                destroyAction.run();
-            } catch (Exception e) {
-                Metallum.LOGGER.error("[metallum] Destroy action threw an exception; resource may have leaked", e);
+        List<Runnable> replacement = this.spareQueue;
+        this.spareQueue = null;
+        if (replacement == null) {
+            // rotate() is not expected from a destruction callback, but keep
+            // that rare reentrant path correct without aliasing queue slots.
+            replacement = new ArrayList<>();
+        }
+        this.queues[this.currentQueueIndex] = replacement;
+        try {
+            for (Runnable destroyAction : toDestroy) {
+                try {
+                    destroyAction.run();
+                } catch (Exception e) {
+                    Metallum.LOGGER.error("[metallum] Destroy action threw an exception; resource may have leaked", e);
+                }
+            }
+        } finally {
+            toDestroy.clear();
+            if (this.spareQueue == null) {
+                this.spareQueue = toDestroy;
             }
         }
     }
