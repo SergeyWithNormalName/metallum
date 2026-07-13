@@ -6,19 +6,11 @@ import com.mojang.blaze3d.systems.RenderPass;
 import net.caffeinemc.mods.sodium.client.gpu.device.context.VKIndirectContext;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegion;
 import net.caffeinemc.mods.sodium.client.render.viewport.CameraTransform;
-import org.lwjgl.vulkan.VkDrawIndexedIndirectCommand;
 
 import java.nio.ByteBuffer;
 
 public final class MetalDrawContext extends VKIndirectContext {
     private static final int PUSH_CONSTANT_SIZE = 20;
-    private static final int INDIRECT_SLOT_SIZE = VkDrawIndexedIndirectCommand.SIZEOF;
-
-    static {
-        if (PUSH_CONSTANT_RANGE != PUSH_CONSTANT_SIZE || INDIRECT_SLOT_SIZE != PUSH_CONSTANT_SIZE) {
-            throw new IllegalStateException("Sodium push constants no longer fit exactly one indirect ring slot");
-        }
-    }
 
     private MetalRenderPass metalPass;
 
@@ -34,20 +26,17 @@ public final class MetalDrawContext extends VKIndirectContext {
         float y = getCameraTranslation(region.getOriginY(), camera.intY, camera.fracY);
         float z = getCameraTranslation(region.getOriginZ(), camera.intZ, camera.fracZ);
 
+        long byteOffset = this.addCommand(PUSH_CONSTANT_SIZE);
         GpuBufferSlice.MappedView mapped = this.mappedView;
         if (mapped == null) {
             throw new IllegalStateException("Sodium indirect ring is not mapped");
         }
-        if (this.currentOffset < 0) {
+        if (byteOffset < 0) {
             throw new IllegalStateException("Sodium indirect ring offset is negative");
         }
 
         GpuBufferSlice ringSlice = mapped.slice();
         ByteBuffer data = mapped.data();
-        // Sodium measures currentOffset in VkDrawIndexedIndirectCommand slots.
-        // Its 20-byte push payload fits exactly one slot, so reserving one keeps
-        // subsequent indirect batches non-overlapping without another buffer.
-        long byteOffset = Math.multiplyExact((long) this.currentOffset, INDIRECT_SLOT_SIZE);
         long byteEnd = Math.addExact(byteOffset, PUSH_CONSTANT_SIZE);
         if (byteEnd > ringSlice.length() || byteEnd > data.capacity()) {
             throw new IllegalStateException(
@@ -65,8 +54,6 @@ public final class MetalDrawContext extends VKIndirectContext {
         data.putInt(dataOffset + 16, region.getId());
 
         GpuBufferSlice pushConstantsBufferSlice = ringSlice.slice(byteOffset, PUSH_CONSTANT_SIZE);
-        this.currentOffset = Math.incrementExact(this.currentOffset);
-
         this.metalPass.setUniform("push_constants", pushConstantsBufferSlice);
     }
 }
