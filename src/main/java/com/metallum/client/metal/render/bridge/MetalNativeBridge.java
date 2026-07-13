@@ -234,9 +234,34 @@ public final class MetalNativeBridge {
                             INT,
                             INT,
                             INT,
+                            INT,
                             FLOAT,
                             FLOAT,
                             FLOAT
+                    )
+            );
+            MTLRenderCommandEncoderEncodePreparedHdrUiBackdrop = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG
+                    )
+            );
+            MTLCommandBufferMaterializePreparedHdrUiBackdrop = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
                     )
             );
             MTLCommandBufferEncodeSpatialScreenshot = downcallWithoutCritical(
@@ -393,6 +418,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
     private static final MethodHandle MTLCommandBufferEncodeHdrUiBackdrop;
+    private static final MethodHandle MTLRenderCommandEncoderEncodePreparedHdrUiBackdrop;
+    private static final MethodHandle MTLCommandBufferMaterializePreparedHdrUiBackdrop;
     private static final MethodHandle MTLCommandBufferEncodeSpatialScreenshot;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createTexture2d;
@@ -873,7 +900,7 @@ public final class MetalNativeBridge {
             final MemorySegment depthTexture,
             final double viewportWidth,
             final double viewportHeight,
-            final int clearColorEnabled,
+            final int colorLoadAction,
             final float clearColorRed,
             final float clearColorGreen,
             final float clearColorBlue,
@@ -891,7 +918,7 @@ public final class MetalNativeBridge {
                     segment(depthTexture),
                     viewportWidth,
                     viewportHeight,
-                    clearColorEnabled,
+                    colorLoadAction,
                     clearColorRed,
                     clearColorGreen,
                     clearColorBlue,
@@ -1447,6 +1474,7 @@ public final class MetalNativeBridge {
             final boolean spatialScalingEnabled,
             final boolean hdrPrecomposeEnabled,
             final boolean perceptualScalingEnabled,
+            final boolean deferSpatialHdrUiSeed,
             final float currentHeadroom,
             final float hdrStrength,
             final float bloomStrength
@@ -1463,12 +1491,53 @@ public final class MetalNativeBridge {
                     spatialScalingEnabled ? 1 : 0,
                     hdrPrecomposeEnabled ? 1 : 0,
                     perceptualScalingEnabled ? 1 : 0,
+                    deferSpatialHdrUiSeed ? 1 : 0,
                     currentHeadroom,
                     hdrStrength,
                     bloomStrength
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_encodeHdrUiBackdrop", throwable);
+        }
+    }
+
+    public static int MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop(
+            final MemorySegment commandBuffer,
+            final MemorySegment encoder,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        try {
+            return (int) MTLRenderCommandEncoderEncodePreparedHdrUiBackdrop.invokeExact(
+                    segment(commandBuffer),
+                    segment(encoder),
+                    segment(sourceTexture),
+                    segment(destinationTexture),
+                    depthFormat.value,
+                    stencilFormat.value
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop", throwable);
+        }
+    }
+
+    public static int MTLCommandBuffer_materializePreparedHdrUiBackdrop(
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MemorySegment globalFence
+    ) {
+        try {
+            return (int) MTLCommandBufferMaterializePreparedHdrUiBackdrop.invokeExact(
+                    segment(commandBuffer),
+                    segment(sourceTexture),
+                    segment(destinationTexture),
+                    segment(globalFence)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop", throwable);
         }
     }
 

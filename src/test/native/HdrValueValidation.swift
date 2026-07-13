@@ -101,9 +101,18 @@ private typealias NativeBackdropFunction = @convention(c) (
     Int32,             // spatialScalingEnabled
     Int32,             // hdrPrecomposeEnabled
     Int32,             // perceptualScalingEnabled
+    Int32,             // deferSpatialHdrUiSeed
     Float,             // currentHeadroom
     Float,             // hdrStrength
     Float              // bloomStrength
+) -> Int32
+private typealias NativeFusedBackdropFunction = @convention(c) (
+    UnsafeRawPointer?, // commandBuffer
+    UnsafeRawPointer?, // renderCommandEncoder
+    UnsafeRawPointer?, // sourceTexture
+    UnsafeRawPointer?, // destinationTexture
+    UInt,              // depthFormat
+    UInt               // stencilFormat
 ) -> Int32
 private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
@@ -385,6 +394,8 @@ private final class GpuHarness {
     private let uiComparePipeline: MTLRenderPipelineState
     private let uiDilatePipeline: MTLRenderPipelineState
     private let boundaryBlendPipeline: MTLRenderPipelineState
+    private let uiAlphaBlendPipeline: MTLRenderPipelineState
+    private let uiAlphaBlendDepthPipeline: MTLRenderPipelineState
     private let histogramReducePipeline: MTLComputePipelineState
     private let headroomLimiterTestPipeline: MTLComputePipelineState
     private let nearestSampler: MTLSamplerState
@@ -535,6 +546,26 @@ private final class GpuHarness {
         boundaryAttachment.sourceAlphaBlendFactor = .one
         boundaryAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         self.boundaryBlendPipeline = try device.makeRenderPipelineState(descriptor: boundaryDescriptor)
+
+        let uiAlphaBlendDescriptor = MTLRenderPipelineDescriptor()
+        uiAlphaBlendDescriptor.label = "Metallum fused UI seed alpha blend validation"
+        uiAlphaBlendDescriptor.vertexFunction = boundaryVertex
+        uiAlphaBlendDescriptor.fragmentFunction = boundaryFragment
+        let uiAlphaAttachment = uiAlphaBlendDescriptor.colorAttachments[0]!
+        uiAlphaAttachment.pixelFormat = .rgba8Unorm
+        uiAlphaAttachment.isBlendingEnabled = true
+        uiAlphaAttachment.sourceRGBBlendFactor = .sourceAlpha
+        uiAlphaAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        uiAlphaAttachment.sourceAlphaBlendFactor = .one
+        uiAlphaAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        self.uiAlphaBlendPipeline = try device.makeRenderPipelineState(
+            descriptor: uiAlphaBlendDescriptor
+        )
+        uiAlphaBlendDescriptor.label = "Metallum fused UI seed depth alpha blend validation"
+        uiAlphaBlendDescriptor.depthAttachmentPixelFormat = .depth32Float
+        self.uiAlphaBlendDepthPipeline = try device.makeRenderPipelineState(
+            descriptor: uiAlphaBlendDescriptor
+        )
 
         func makeSampler(filter: MTLSamplerMinMagFilter) throws -> MTLSamplerState {
             let descriptor = MTLSamplerDescriptor()
@@ -788,6 +819,20 @@ private final class GpuHarness {
             )
         }
         return SIMD4<UInt8>(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+
+    func readRgba8Bytes(texture: MTLTexture) throws -> [UInt8] {
+        try require(texture.pixelFormat == .rgba8Unorm, "RGBA8 byte readback requires RGBA8Unorm")
+        var bytes = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
+        bytes.withUnsafeMutableBytes { rawBytes in
+            texture.getBytes(
+                rawBytes.baseAddress!,
+                bytesPerRow: texture.width * 4,
+                from: MTLRegionMake2D(0, 0, texture.width, texture.height),
+                mipmapLevel: 0
+            )
+        }
+        return bytes
     }
 
     func makePrivateRgba8Texture(width: Int, height: Int) throws -> MTLTexture {
@@ -1608,6 +1653,23 @@ private final class GpuHarness {
         return try readRgba16Float(texture: output, x: 2, y: 2)
     }
 
+    func encodeUiAlphaOverlay(
+        encoder: MTLRenderCommandEncoder,
+        encodedSource: SIMD4<Float>,
+        depthAttached: Bool = false
+    ) {
+        encoder.setRenderPipelineState(
+            depthAttached ? uiAlphaBlendDepthPipeline : uiAlphaBlendPipeline
+        )
+        var mutableSource = encodedSource
+        encoder.setFragmentBytes(
+            &mutableSource,
+            length: MemoryLayout<SIMD4<Float>>.stride,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    }
+
     func readRgba16Float(texture: MTLTexture, x: Int = 0, y: Int = 0) throws -> SIMD4<Float> {
         try require(texture.pixelFormat == .rgba16Float, "Readback requires RGBA16Float")
         let bytesPerRow = ((texture.width * 8 + 255) / 256) * 256
@@ -1708,7 +1770,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 40, "HDR validation check count changed unexpectedly: \(passCount), expected 40")
+        try require(passCount == 41, "HDR validation check count changed unexpectedly: \(passCount), expected 41")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -3406,6 +3468,10 @@ private final class ValueValidation {
             let configureLayerSymbol = dlsym(handle, "metallum_configure_layer"),
             let updateLayerHeadroomSymbol = dlsym(handle, "metallum_update_layer_contents_headroom"),
             let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
+            let fusedBackdropSymbol = dlsym(
+                handle,
+                "metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop"
+            ),
             let spatialScreenshotSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeSpatialScreenshot"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
         else {
@@ -3427,6 +3493,10 @@ private final class ValueValidation {
             to: NativeUpdateLayerContentsHeadroomFunction.self
         )
         let backdrop = unsafeBitCast(backdropSymbol, to: NativeBackdropFunction.self)
+        let fusedBackdrop = unsafeBitCast(
+            fusedBackdropSymbol,
+            to: NativeFusedBackdropFunction.self
+        )
         let spatialScreenshot = unsafeBitCast(
             spatialScreenshotSymbol,
             to: NativeSpatialScreenshotFunction.self
@@ -3553,6 +3623,7 @@ private final class ValueValidation {
             0,
             0,
             0,
+            0,
             1,
             1,
             0
@@ -3587,6 +3658,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             0,
             0,
             0,
@@ -3628,6 +3700,7 @@ private final class ValueValidation {
             1,
             0,
             0,
+            0,
             1,
             1,
             0
@@ -3659,6 +3732,7 @@ private final class ValueValidation {
             1,
             0,
             1,
+            0,
             1,
             1,
             0
@@ -3719,6 +3793,7 @@ private final class ValueValidation {
             1,
             0,
             1,
+            0,
             1,
             1,
             0
@@ -3773,6 +3848,7 @@ private final class ValueValidation {
             2,
             0,
             1,
+            0,
             0,
             4,
             1,
@@ -3858,6 +3934,7 @@ private final class ValueValidation {
             1,
             1,
             0,
+            0,
             4,
             1,
             0
@@ -3935,6 +4012,183 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS native FP16 HDR precompose and F2 composite preserve orientation")
+
+        let guiOverlay = SIMD4<Float>(0.85, 0.20, 0.60, 0.50)
+        guard let referenceGuiCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Standalone UI blend reference command buffer creation failed")
+        }
+        let referenceGuiPass = MTLRenderPassDescriptor()
+        referenceGuiPass.colorAttachments[0].texture = precomposedUi
+        referenceGuiPass.colorAttachments[0].loadAction = .load
+        referenceGuiPass.colorAttachments[0].storeAction = .store
+        guard let referenceGuiEncoder = referenceGuiCommandBuffer.makeRenderCommandEncoder(
+            descriptor: referenceGuiPass
+        ) else {
+            throw ValidationFailure.message("Standalone UI blend reference encoder creation failed")
+        }
+        referenceGuiEncoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(precomposedUi.width),
+            height: Double(precomposedUi.height),
+            znear: 0,
+            zfar: 1
+        ))
+        gpu.encodeUiAlphaOverlay(encoder: referenceGuiEncoder, encodedSource: guiOverlay)
+        referenceGuiEncoder.endEncoding()
+        referenceGuiCommandBuffer.commit()
+        referenceGuiCommandBuffer.waitUntilCompleted()
+        try require(
+            referenceGuiCommandBuffer.status == .completed,
+            "Standalone UI blend reference failed: \(String(describing: referenceGuiCommandBuffer.error))"
+        )
+        let referenceGuiBytes = try gpu.readRgba8Bytes(texture: precomposedUi)
+
+        let fusedUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(255, 0, 255, 255)
+        )
+        guard
+            let fusedCommandBuffer = backdropQueue.makeCommandBuffer(),
+            let fusedFence = gpu.device.makeFence()
+        else {
+            throw ValidationFailure.message("Fused UI seed command resources are unavailable")
+        }
+        let deferredStatus = backdrop(
+            objectPointer(fusedCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(fusedUi as AnyObject),
+            objectPointer(precomposedDepth as AnyObject),
+            nil,
+            objectPointer(fusedFence as AnyObject),
+            2,
+            1,
+            1,
+            0,
+            1,
+            4,
+            1,
+            0
+        )
+        try require(deferredStatus == 2, "Deferred spatial HDR backdrop returned \(deferredStatus)")
+        let fusedPass = MTLRenderPassDescriptor()
+        fusedPass.colorAttachments[0].texture = fusedUi
+        fusedPass.colorAttachments[0].loadAction = .dontCare
+        fusedPass.colorAttachments[0].storeAction = .store
+        guard let fusedEncoder = fusedCommandBuffer.makeRenderCommandEncoder(descriptor: fusedPass) else {
+            throw ValidationFailure.message("Fused UI render encoder creation failed")
+        }
+        fusedEncoder.waitForFence(fusedFence, before: .fragment)
+        let fusedStatus = fusedBackdrop(
+            objectPointer(fusedCommandBuffer as AnyObject),
+            objectPointer(fusedEncoder as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(fusedUi as AnyObject),
+            MTLPixelFormat.invalid.rawValue,
+            MTLPixelFormat.invalid.rawValue
+        )
+        try require(fusedStatus == 1, "Prepared UI seed did not fuse into the GUI encoder")
+        let consumedAgainStatus = fusedBackdrop(
+            objectPointer(fusedCommandBuffer as AnyObject),
+            objectPointer(fusedEncoder as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(fusedUi as AnyObject),
+            MTLPixelFormat.invalid.rawValue,
+            MTLPixelFormat.invalid.rawValue
+        )
+        try require(consumedAgainStatus == 0, "Prepared UI seed was consumed more than once")
+        gpu.encodeUiAlphaOverlay(encoder: fusedEncoder, encodedSource: guiOverlay)
+        fusedEncoder.endEncoding()
+        fusedCommandBuffer.commit()
+        fusedCommandBuffer.waitUntilCompleted()
+        try require(
+            fusedCommandBuffer.status == .completed,
+            "Fused UI seed command failed: \(String(describing: fusedCommandBuffer.error))"
+        )
+        let fusedGuiBytes = try gpu.readRgba8Bytes(texture: fusedUi)
+        try require(
+            fusedGuiBytes == referenceGuiBytes,
+            "Fused seed + GUI alpha blend differs from standalone 16x16 RGBA8 output"
+        )
+
+        let fusedDepthUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(255, 0, 255, 255)
+        )
+        let fusedGuiDepth = try gpu.makeDepthTexture(width: 16, height: 16, clearDepth: 0.5)
+        guard
+            let fusedDepthCommandBuffer = backdropQueue.makeCommandBuffer(),
+            let fusedDepthFence = gpu.device.makeFence()
+        else {
+            throw ValidationFailure.message("Depth-compatible fused UI seed resources are unavailable")
+        }
+        let deferredDepthStatus = backdrop(
+            objectPointer(fusedDepthCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(fusedDepthUi as AnyObject),
+            objectPointer(precomposedDepth as AnyObject),
+            nil,
+            objectPointer(fusedDepthFence as AnyObject),
+            2,
+            1,
+            1,
+            0,
+            1,
+            4,
+            1,
+            0
+        )
+        try require(
+            deferredDepthStatus == 2,
+            "Depth-compatible deferred spatial HDR backdrop returned \(deferredDepthStatus)"
+        )
+        let fusedDepthPass = MTLRenderPassDescriptor()
+        fusedDepthPass.colorAttachments[0].texture = fusedDepthUi
+        fusedDepthPass.colorAttachments[0].loadAction = .dontCare
+        fusedDepthPass.colorAttachments[0].storeAction = .store
+        fusedDepthPass.depthAttachment.texture = fusedGuiDepth
+        fusedDepthPass.depthAttachment.loadAction = .clear
+        fusedDepthPass.depthAttachment.clearDepth = 0.0
+        fusedDepthPass.depthAttachment.storeAction = .store
+        guard let fusedDepthEncoder = fusedDepthCommandBuffer.makeRenderCommandEncoder(
+            descriptor: fusedDepthPass
+        ) else {
+            throw ValidationFailure.message("Depth-compatible fused UI encoder creation failed")
+        }
+        fusedDepthEncoder.waitForFence(fusedDepthFence, before: .fragment)
+        let fusedDepthStatus = fusedBackdrop(
+            objectPointer(fusedDepthCommandBuffer as AnyObject),
+            objectPointer(fusedDepthEncoder as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(fusedDepthUi as AnyObject),
+            MTLPixelFormat.depth32Float.rawValue,
+            MTLPixelFormat.invalid.rawValue
+        )
+        try require(
+            fusedDepthStatus == 1,
+            "Prepared UI seed did not support the GUI Depth32Float attachment"
+        )
+        gpu.encodeUiAlphaOverlay(
+            encoder: fusedDepthEncoder,
+            encodedSource: guiOverlay,
+            depthAttached: true
+        )
+        fusedDepthEncoder.endEncoding()
+        fusedDepthCommandBuffer.commit()
+        fusedDepthCommandBuffer.waitUntilCompleted()
+        try require(
+            fusedDepthCommandBuffer.status == .completed,
+            "Depth-compatible fused UI seed command failed: \(String(describing: fusedDepthCommandBuffer.error))"
+        )
+        let fusedDepthGuiBytes = try gpu.readRgba8Bytes(texture: fusedDepthUi)
+        try require(
+            fusedDepthGuiBytes == referenceGuiBytes,
+            "Depth-compatible fused seed + GUI blend differs from standalone 16x16 RGBA8 output"
+        )
+        passCount += 1
+        print("PASS deferred spatial HDR seed is byte-exact in color-only and Depth32Float GUI passes")
 
         guard
             let queue = gpu.device.makeCommandQueue(),

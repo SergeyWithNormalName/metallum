@@ -53,6 +53,7 @@ abstract class GuiRendererHdrMixin {
                 LevelTargetBundle.MAIN_TARGETS
         );
         if (blur != null) {
+            HdrUiRenderTarget.ensureBackdropMaterialized();
             FrameGraphBuilder frame = new FrameGraphBuilder();
             PostChain.TargetBundle targets = PostChain.TargetBundle.of(
                     PostChain.MAIN_TARGET_ID,

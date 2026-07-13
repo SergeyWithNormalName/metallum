@@ -557,6 +557,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (ui.isClosed() || ui.getFormat() != GpuFormat.RGBA8_UNORM || (!spatialUi && !hdrUi)) {
             return;
         }
+        this.commandEncoder.prepareTextureForRead(ui);
         this.hdrUiHandle = ui.nativeHandle();
         this.hdrUiSubmitIndex = this.commandEncoder.currentSubmitIndex();
         this.hdrUiSuppressSceneEnhancement = suppressSceneEnhancement;
@@ -626,6 +627,16 @@ public final class MetalDevice implements GpuDeviceBackend {
             );
         }
         return result > 0;
+    }
+
+    void materializeHdrUiBackdrop(final MetalGpuTexture ui) {
+        if (!ui.isClosed()) {
+            this.commandEncoder.prepareTextureForRead(ui);
+        }
+    }
+
+    void resolvePendingUiSeedForTexture(final MetalGpuTexture texture) {
+        this.commandEncoder.discardPendingUiSeedForTexture(texture);
     }
 
     boolean isSpatialHdrPrecomposedForCurrentSubmit() {

@@ -152,6 +152,7 @@ final class MetalGpuTexture extends GpuTexture {
         if (this.closed) {
             return;
         }
+        this.device.resolvePendingUiSeedForTexture(this);
         this.closed = true;
         this.removeView();
     }

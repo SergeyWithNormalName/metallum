@@ -33,6 +33,9 @@ import java.util.OptionalDouble;
 @Environment(EnvType.CLIENT)
 final class MetalCommandEncoder implements CommandEncoderBackend {
     public static final int MAX_SUBMITS_IN_FLIGHT = 3;
+    private static final int COLOR_LOAD = 0;
+    private static final int COLOR_CLEAR = 1;
+    private static final int COLOR_DONT_CARE = 2;
     private static final long MAX_DYNAMIC_BACKING_POOL_BYTES = 64L * 1024L * 1024L;
     private static final int MAX_DYNAMIC_BACKINGS_PER_SIZE = 64;
     private final MetalDevice device;
@@ -55,6 +58,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final DynamicBackingPool<MemorySegment> dynamicBackingPool;
     private MetalGpuTimingStage gpuTimingStage = MetalGpuTimingStage.NONE;
+    private final PendingUiSeedState<PendingUiSeed> pendingUiSeeds = new PendingUiSeedState<>();
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -123,6 +127,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         submitRenderPass();
+        materializePendingUiSeed();
         endEncoder();
 
         int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
@@ -162,11 +167,35 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final double clearDepthValue
     ) {
         MemorySegment colorAttachment = colorTextureView.nativeHandle();
+        PendingUiSeed seed = this.pendingUiSeeds.peek();
+        boolean fusePendingSeed = seed != null
+                && currentEncoder == null
+                && seed.canFuse(
+                        colorTextureView,
+                        viewportWidth,
+                        viewportHeight,
+                        clearColorEnabled,
+                        semanticOutput,
+                        currentSubmitIndex
+                );
+        if (seed != null && !fusePendingSeed) {
+            materializePendingUiSeed();
+            seed = null;
+        }
         MetalDevice.SemanticAttachment semanticAttachment = semanticOutput
                 ? this.device.prepareHdrSemanticAttachment((MetalGpuTexture) colorTextureView.texture())
                 : null;
         MemorySegment semanticHandle = semanticAttachment == null ? MemorySegment.NULL : semanticAttachment.texture();
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
+        MetalGpuTexture depthTexture = depthTextureView == null
+                ? null
+                : (MetalGpuTexture) depthTextureView.texture();
+        MTLPixelFormat depthFormat = depthTexture == null
+                ? MTLPixelFormat.Invalid
+                : depthTexture.mtlPixelFormat();
+        MTLPixelFormat stencilFormat = depthTexture == null
+                ? MTLPixelFormat.Invalid
+                : depthTexture.mtlStencilPixelFormat();
         // The semantic mask accumulates contributions from every scene target
         // in the current submitted frame. An offscreen color/depth clear (for
         // example Fabulous translucent terrain) must not erase opaque markers
@@ -196,13 +225,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
 
         endEncoder();
-        MTLRenderCommandEncoder encoder = commandBuffer().makeRenderCommandEncoder(
+        MTLCommandBuffer activeCommandBuffer = commandBuffer();
+        MTLRenderCommandEncoder encoder = activeCommandBuffer.makeRenderCommandEncoder(
                 colorAttachment,
                 semanticHandle,
                 depthAttachment,
                 viewportWidth,
                 viewportHeight,
-                clearColorEnabled ? 1 : 0,
+                fusePendingSeed ? COLOR_DONT_CARE : clearColorEnabled ? COLOR_CLEAR : COLOR_LOAD,
                 clearColorRed,
                 clearColorGreen,
                 clearColorBlue,
@@ -217,6 +247,45 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         renderColorAttachment = colorAttachment;
         renderSemanticAttachment = semanticHandle;
         renderDepthAttachment = depthAttachment;
+        if (fusePendingSeed && seed != null) {
+            if (encoder.encodePreparedHdrUiBackdrop(
+                    activeCommandBuffer,
+                    seed.source.nativeHandle(),
+                    seed.destination.nativeHandle(),
+                    depthFormat,
+                    stencilFormat
+            )) {
+                this.pendingUiSeeds.consume(seed);
+                return encoder;
+            }
+
+            // A failed prepared-state validation must never expose the
+            // dontCare attachment. Close the empty pass, materialize through
+            // the standalone safety path, then reopen the GUI pass with LOAD.
+            endEncoder();
+            materializePendingUiSeed();
+            encoder = activeCommandBuffer.makeRenderCommandEncoder(
+                    colorAttachment,
+                    semanticHandle,
+                    depthAttachment,
+                    viewportWidth,
+                    viewportHeight,
+                    clearColorEnabled ? COLOR_CLEAR : COLOR_LOAD,
+                    clearColorRed,
+                    clearColorGreen,
+                    clearColorBlue,
+                    clearColorAlpha,
+                    clearSemantic ? 1 : 0,
+                    clearDepthEnabled ? 1 : 0,
+                    clearDepthValue,
+                    this.gpuTimingStage.nativeId()
+            );
+            encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
+            currentEncoder = encoder;
+            renderColorAttachment = colorAttachment;
+            renderSemanticAttachment = semanticHandle;
+            renderDepthAttachment = depthAttachment;
+        }
         return encoder;
     }
 
@@ -288,8 +357,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final EdrCapabilities edrCapabilities
     ) {
         MetalGpuTexture source = (MetalGpuTexture) textureView.texture();
-        flushPendingClear(source);
+        prepareTextureForRead(source);
         submitRenderPass();
+        materializePendingUiSeed();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
         MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs();
@@ -321,6 +391,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final float currentHeadroom,
             final HdrConfig hdrConfig
     ) {
+        materializePendingUiSeed();
         if (source == destination || source.isClosed() || destination.isClosed()) {
             return 0;
         }
@@ -334,7 +405,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         int sourceEncoding = HdrSceneState.sourceEncoding().nativeValue(
                 source.getFormat() == GpuFormat.RGBA16_FLOAT
         );
-        return commandBuffer().encodeHdrUiBackdrop(
+        boolean deferSpatialHdrUiSeed = MetalFxSpatialScaling.isActive() && hdrPrecomposeEnabled;
+        int result = commandBuffer().encodeHdrUiBackdrop(
                 source.nativeHandle(),
                 destination.nativeHandle(),
                 sceneDepthTexture,
@@ -344,10 +416,88 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 MetalFxSpatialScaling.isActive(),
                 hdrPrecomposeEnabled,
                 perceptualScalingEnabled,
+                deferSpatialHdrUiSeed,
                 currentHeadroom,
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
         );
+        if (result == 2 && deferSpatialHdrUiSeed) {
+            this.pendingUiSeeds.arm(new PendingUiSeed(
+                    source,
+                    destination,
+                    sceneDepthTexture,
+                    semanticTexture,
+                    sourceEncoding,
+                    perceptualScalingEnabled,
+                    currentHeadroom,
+                    hdrConfig.hdrStrength(),
+                    hdrConfig.bloomStrength(),
+                    currentSubmitIndex
+            ));
+        }
+        return result;
+    }
+
+    boolean materializePendingUiSeedForRead(final MetalGpuTexture texture) {
+        PendingUiSeed seed = this.pendingUiSeeds.peek();
+        if (seed != null && seed.destination == texture) {
+            materializePendingUiSeed();
+            return true;
+        }
+        return false;
+    }
+
+    void discardPendingUiSeedForTexture(final MetalGpuTexture texture) {
+        PendingUiSeed seed = this.pendingUiSeeds.peek();
+        if (seed != null && (seed.source == texture || seed.destination == texture)) {
+            // Re-run the ordinary backdrop before a live destination can be
+            // destroyed or replaced. This also invalidates the native record.
+            materializePendingUiSeed();
+        }
+    }
+
+    void materializePendingUiSeed() {
+        PendingUiSeed seed = this.pendingUiSeeds.peek();
+        if (seed == null) {
+            return;
+        }
+        if (seed.submitIndex != currentSubmitIndex
+                || seed.source.isClosed()
+                || seed.destination.isClosed()) {
+            this.pendingUiSeeds.consume(seed);
+            throw new IllegalStateException("Deferred HDR UI seed escaped its source submit or texture lifetime");
+        }
+
+        endEncoder();
+        MTLCommandBuffer activeCommandBuffer = commandBuffer();
+        int result = activeCommandBuffer.materializePreparedHdrUiBackdrop(
+                seed.source.nativeHandle(),
+                seed.destination.nativeHandle(),
+                fence
+        );
+        if (result != 1) {
+            // Prepared-state loss is recoverable: rebuild the existing,
+            // proven standalone result=2 path with deferral disabled.
+            result = activeCommandBuffer.encodeHdrUiBackdrop(
+                    seed.source.nativeHandle(),
+                    seed.destination.nativeHandle(),
+                    seed.sceneDepthTexture,
+                    seed.semanticTexture,
+                    fence,
+                    seed.sourceEncoding,
+                    true,
+                    true,
+                    seed.perceptualScalingEnabled,
+                    false,
+                    seed.currentHeadroom,
+                    seed.hdrStrength,
+                    seed.bloomStrength
+            );
+        }
+        if (result <= 0) {
+            throw new IllegalStateException("Failed to materialize deferred HDR UI seed: " + result);
+        }
+        this.pendingUiSeeds.consume(seed);
     }
 
     boolean encodeSpatialScreenshot(
@@ -365,8 +515,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return false;
         }
         submitRenderPass();
-        flushPendingClear(rawScene);
-        flushPendingClear(ui);
+        prepareTextureForRead(rawScene);
+        prepareTextureForRead(ui);
         pendingColorClears.remove(destination);
         pendingDepthClears.remove(destination);
         destination.markContentsDirty();
@@ -386,13 +536,16 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     @Override
     public void clearColorTexture(final @NonNull GpuTexture colorTexture, final @NonNull Vector4fc clearColor) {
-        pendingColorClears.put((MetalGpuTexture) colorTexture, new Vector4f(clearColor));
+        MetalGpuTexture color = (MetalGpuTexture) colorTexture;
+        materializePendingUiSeedForRead(color);
+        pendingColorClears.put(color, new Vector4f(clearColor));
     }
 
     @Override
     public void clearColorAndDepthTextures(final @NonNull GpuTexture colorTexture, final @NonNull Vector4fc clearColor, final @NonNull GpuTexture depthTexture, final double clearDepth) {
         MetalGpuTexture color = (MetalGpuTexture) colorTexture;
         MetalGpuTexture depth = (MetalGpuTexture) depthTexture;
+        materializePendingUiSeedForRead(color);
         pendingColorClears.put(color, new Vector4f(clearColor));
         pendingDepthClears.put(depth, clearDepth);
     }
@@ -410,6 +563,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         MetalGpuTexture color = (MetalGpuTexture) colorTexture;
         MetalGpuTexture depth = (MetalGpuTexture) depthTexture;
+        materializePendingUiSeedForRead(color);
         Vector4fc clearColorCopy = new Vector4f(clearColor);
         if (isFullTextureRegion(color, depth, regionX, regionY, regionWidth, regionHeight)) {
             pendingColorClears.put(color, clearColorCopy);
@@ -646,7 +800,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final int height
     ) {
         MetalGpuTexture texture = (MetalGpuTexture) source;
-        flushPendingClear(texture);
+        prepareTextureForRead(texture);
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination;
         int bytesPerPixel = texture.pixelSize();
         int rowBytes = width * bytesPerPixel;
@@ -683,7 +837,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         MetalGpuTexture srcTexture = (MetalGpuTexture) source;
         MetalGpuTexture dstTexture = (MetalGpuTexture) destination;
-        flushPendingClear(srcTexture);
+        prepareTextureForRead(srcTexture);
         flushPendingClearForWrite(dstTexture);
         MTLBlitCommandEncoder blit = blitCommandEncoder();
         blit.copyFromTextureToTexture(
@@ -722,6 +876,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     void close() {
         submitRenderPass();
+        materializePendingUiSeed();
         endEncoder();
         for (int slot = 0; slot < inFlight.length; slot++) {
             InFlight f = inFlight[slot];
@@ -791,11 +946,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private void flushPendingClearForWrite(final MetalGpuTexture texture) {
+        materializePendingUiSeedForRead(texture);
         flushPendingClear(texture);
         texture.markContentsDirty();
     }
 
+    boolean prepareTextureForRead(final MetalGpuTexture texture) {
+        boolean restartedEncoder = materializePendingUiSeedForRead(texture);
+        flushPendingClear(texture);
+        return restartedEncoder;
+    }
+
     void flushPendingClear(final MetalGpuTexture texture) {
+        materializePendingUiSeedForRead(texture);
         Vector4fc colorClear = pendingColorClears.remove(texture);
         Double depthClear = pendingDepthClears.remove(texture);
         if (colorClear == null && depthClear == null) {
@@ -865,6 +1028,91 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 && height == color.getHeight(0)
                 && width == depth.getWidth(0)
                 && height == depth.getHeight(0);
+    }
+
+    static boolean canFusePendingUiSeed(
+            final boolean exactDestination,
+            final boolean fullTextureView,
+            final int viewportWidth,
+            final int viewportHeight,
+            final int destinationWidth,
+            final int destinationHeight,
+            final boolean clearColorEnabled,
+            final boolean semanticOutput,
+            final long pendingSubmitIndex,
+            final long activeSubmitIndex
+    ) {
+        return pendingSubmitIndex == activeSubmitIndex
+                && exactDestination
+                && fullTextureView
+                && viewportWidth == destinationWidth
+                && viewportHeight == destinationHeight
+                && !clearColorEnabled
+                && !semanticOutput;
+    }
+
+    static final class PendingUiSeedState<T> {
+        @Nullable
+        private T value;
+
+        void arm(final T next) {
+            if (next == null || this.value != null) {
+                throw new IllegalStateException("Pending UI seed must be resolved before re-arming");
+            }
+            this.value = next;
+        }
+
+        @Nullable
+        T peek() {
+            return this.value;
+        }
+
+        boolean consume(final T expected) {
+            if (expected == null || this.value != expected) {
+                return false;
+            }
+            this.value = null;
+            return true;
+        }
+
+        boolean isPending() {
+            return this.value != null;
+        }
+    }
+
+    private record PendingUiSeed(
+            MetalGpuTexture source,
+            MetalGpuTexture destination,
+            MemorySegment sceneDepthTexture,
+            MemorySegment semanticTexture,
+            int sourceEncoding,
+            boolean perceptualScalingEnabled,
+            float currentHeadroom,
+            float hdrStrength,
+            float bloomStrength,
+            long submitIndex
+    ) {
+        boolean canFuse(
+                final MetalGpuTextureView colorTextureView,
+                final int viewportWidth,
+                final int viewportHeight,
+                final boolean clearColorEnabled,
+                final boolean semanticOutput,
+                final long activeSubmitIndex
+        ) {
+            return canFusePendingUiSeed(
+                    colorTextureView.texture() == destination,
+                    isFullTextureView(colorTextureView),
+                    viewportWidth,
+                    viewportHeight,
+                    destination.getWidth(0),
+                    destination.getHeight(0),
+                    clearColorEnabled,
+                    semanticOutput,
+                    submitIndex,
+                    activeSubmitIndex
+            );
+        }
     }
 
     private record InFlight(long index, MTLCommandBuffer buffer, MemorySegment completedSemaphore) {

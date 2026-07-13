@@ -28,6 +28,7 @@ public final class MetalRuntimeTests {
         testEdrRefreshThrottle();
         testGpuTimingDetailGate();
         testGpuTimingStageAbi();
+        testPendingUiSeedConsumeOnceLifecycle();
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -207,6 +208,56 @@ public final class MetalRuntimeTests {
                 "disabled GPU timing unexpectedly enabled stage markers");
         require(MetalGpuTiming.detailEnabled("1", "1"),
                 "explicit GPU timing detail did not enable stage markers");
+    }
+
+    private static void testPendingUiSeedConsumeOnceLifecycle() {
+        MetalCommandEncoder.PendingUiSeedState<Object> pending =
+                new MetalCommandEncoder.PendingUiSeedState<>();
+        Object exactDestination = new Object();
+        Object mismatchedDestination = new Object();
+
+        pending.arm(exactDestination);
+        require(pending.isPending() && pending.peek() == exactDestination,
+                "deferred UI seed did not arm");
+        require(!pending.consume(mismatchedDestination) && pending.isPending(),
+                "mismatched render target consumed the deferred UI seed");
+        require(pending.consume(exactDestination) && !pending.isPending(),
+                "exact render target did not consume the deferred UI seed");
+        require(!pending.consume(exactDestination),
+                "deferred UI seed was consumed more than once");
+
+        pending.arm(exactDestination);
+        boolean rejectedRearm = false;
+        try {
+            pending.arm(mismatchedDestination);
+        } catch (IllegalStateException expected) {
+            rejectedRearm = true;
+        }
+        require(rejectedRearm && pending.peek() == exactDestination,
+                "pending UI seed re-arm replaced unresolved state");
+        require(pending.consume(exactDestination) && !pending.isPending(),
+                "submit/read materialization did not resolve pending state exactly once");
+
+        require(MetalCommandEncoder.canFusePendingUiSeed(
+                        true, true, 3024, 1964, 3024, 1964,
+                        false, false, 7L, 7L
+                ), "exact pending UI destination was not eligible for fusion");
+        require(!MetalCommandEncoder.canFusePendingUiSeed(
+                        false, true, 3024, 1964, 3024, 1964,
+                        false, false, 7L, 7L
+                ), "mismatched UI destination was eligible for fusion");
+        require(!MetalCommandEncoder.canFusePendingUiSeed(
+                        true, true, 3024, 1964, 3024, 1964,
+                        false, false, 7L, 8L
+                ), "stale-submit UI seed was eligible for fusion");
+        require(!MetalCommandEncoder.canFusePendingUiSeed(
+                        true, true, 3024, 1964, 3024, 1964,
+                        true, false, 7L, 7L
+                ), "explicit color clear was incorrectly fused after the UI seed");
+        require(!MetalCommandEncoder.canFusePendingUiSeed(
+                        true, true, 3024, 1964, 3024, 1964,
+                        false, true, 7L, 7L
+                ), "semantic MRT pass was incorrectly fused with the UI seed");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

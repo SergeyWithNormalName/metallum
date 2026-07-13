@@ -52,6 +52,11 @@ private struct MetallumHdrUiBackdropUniforms {
     var sourceEncoding: UInt32
 }
 
+private struct MetallumHdrUiBackdropPipelineKey: Hashable {
+    let depthFormat: UInt
+    let stencilFormat: UInt
+}
+
 private struct MetallumHdrUiCompareUniforms {
     var sourceEncoding: UInt32
     var seededUiAvailable: UInt32
@@ -82,6 +87,9 @@ private final class MetallumHdrPipelines {
     let histogramReduce: MTLComputePipelineState
     let blur: MTLRenderPipelineState
     let uiBackdrop: MTLRenderPipelineState
+    let uiBackdropVertexFunction: MTLFunction
+    let uiBackdropFragmentFunction: MTLFunction
+    var uiBackdropAttachmentVariants: [MetallumHdrUiBackdropPipelineKey: MTLRenderPipelineState]
     let uiCompare: MTLRenderPipelineState
     let uiDilate: MTLRenderPipelineState
 
@@ -90,6 +98,8 @@ private final class MetallumHdrPipelines {
         histogramReduce: MTLComputePipelineState,
         blur: MTLRenderPipelineState,
         uiBackdrop: MTLRenderPipelineState,
+        uiBackdropVertexFunction: MTLFunction,
+        uiBackdropFragmentFunction: MTLFunction,
         uiCompare: MTLRenderPipelineState,
         uiDilate: MTLRenderPipelineState
     ) {
@@ -97,6 +107,9 @@ private final class MetallumHdrPipelines {
         self.histogramReduce = histogramReduce
         self.blur = blur
         self.uiBackdrop = uiBackdrop
+        self.uiBackdropVertexFunction = uiBackdropVertexFunction
+        self.uiBackdropFragmentFunction = uiBackdropFragmentFunction
+        self.uiBackdropAttachmentVariants = [:]
         self.uiCompare = uiCompare
         self.uiDilate = uiDilate
     }
@@ -161,6 +174,7 @@ private final class MetallumSpatialWorkspace {
     let perceptualInput: MTLTexture?
     var output: MTLTexture?
     let usesDirectOutput: Bool
+    var preparedUiSeed: MetallumPreparedSpatialUiSeed?
 
     init(
         sourcePixelFormat: MTLPixelFormat,
@@ -188,7 +202,19 @@ private final class MetallumSpatialWorkspace {
         self.perceptualInput = perceptualInput
         self.output = output
         self.usesDirectOutput = usesDirectOutput
+        self.preparedUiSeed = nil
     }
+}
+
+private struct MetallumPreparedSpatialUiSeed {
+    let commandBufferAddress: UInt
+    let sourceTextureAddress: UInt
+    let destinationTextureAddress: UInt
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let outputWidth: Int
+    let outputHeight: Int
+    let output: MTLTexture
 }
 
 private struct MetallumHdrOutputs {
@@ -2104,6 +2130,8 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
             blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
             uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
+            uiBackdropVertexFunction: vertexFunction,
+            uiBackdropFragmentFunction: uiBackdropFunction,
             uiCompare: makePipeline(uiCompareFunction, colorFormat: .rg8Unorm),
             uiDilate: makePipeline(uiDilateFunction, colorFormat: .rg8Unorm)
         )
@@ -2123,6 +2151,46 @@ private func ensureHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         NativeState.hdrPipelines[key] = pipelines
     }
     return pipelines
+}
+
+private func ensureHdrUiBackdropPipeline(
+    device: MTLDevice,
+    pipelines: MetallumHdrPipelines,
+    depthFormat: MTLPixelFormat,
+    stencilFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    if depthFormat == .invalid && stencilFormat == .invalid {
+        return pipelines.uiBackdrop
+    }
+    let key = MetallumHdrUiBackdropPipelineKey(
+        depthFormat: depthFormat.rawValue,
+        stencilFormat: stencilFormat.rawValue
+    )
+    if let cached = pipelines.uiBackdropAttachmentVariants[key] {
+        return cached
+    }
+
+    let descriptor = MTLRenderPipelineDescriptor()
+    descriptor.label = "Metallum fused HDR UI backdrop"
+    descriptor.vertexFunction = pipelines.uiBackdropVertexFunction
+    descriptor.fragmentFunction = pipelines.uiBackdropFragmentFunction
+    descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+    descriptor.colorAttachments[0].isBlendingEnabled = false
+    descriptor.depthAttachmentPixelFormat = depthFormat
+    descriptor.stencilAttachmentPixelFormat = stencilFormat
+    do {
+        let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        pipelines.uiBackdropAttachmentVariants[key] = pipeline
+        return pipeline
+    } catch {
+        NSLog(
+            "[metallum] Failed to create fused HDR UI backdrop pipeline for depth %lu / stencil %lu: %@",
+            depthFormat.rawValue,
+            stencilFormat.rawValue,
+            String(describing: error)
+        )
+        return nil
+    }
 }
 
 private func makeHdrAdaptiveStateBuffer(device: MTLDevice, label: String) -> MTLBuffer? {
@@ -2427,6 +2495,73 @@ private func currentSpatialOutput(
         return nil
     }
     return output
+}
+
+private func validatedPreparedSpatialUiSeed(
+    commandBuffer: MTLCommandBuffer,
+    sourceTexture: MTLTexture,
+    destinationTexture: MTLTexture
+) -> (MetallumSpatialWorkspace, MetallumPreparedSpatialUiSeed)? {
+    guard let workspace = NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)],
+          let prepared = workspace.preparedUiSeed,
+          let currentOutput = workspace.output,
+          objectAddress(currentOutput) == objectAddress(prepared.output),
+          prepared.commandBufferAddress == objectAddress(commandBuffer),
+          prepared.sourceTextureAddress == objectAddress(sourceTexture),
+          prepared.destinationTextureAddress == objectAddress(destinationTexture),
+          prepared.sourceWidth == sourceTexture.width,
+          prepared.sourceHeight == sourceTexture.height,
+          prepared.outputWidth == destinationTexture.width,
+          prepared.outputHeight == destinationTexture.height,
+          prepared.outputWidth == prepared.output.width,
+          prepared.outputHeight == prepared.output.height,
+          prepared.output.pixelFormat == .rgba16Float,
+          prepared.output.textureType == .type2D,
+          prepared.output.sampleCount == 1,
+          prepared.output.usage.contains(.shaderRead),
+          objectAddress(prepared.output.device) == objectAddress(commandBuffer.device),
+          destinationTexture.pixelFormat == .rgba8Unorm,
+          destinationTexture.textureType == .type2D,
+          destinationTexture.sampleCount == 1,
+          destinationTexture.usage.contains(.renderTarget),
+          objectAddress(sourceTexture.device) == objectAddress(commandBuffer.device),
+          objectAddress(destinationTexture.device) == objectAddress(commandBuffer.device)
+    else {
+        NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)]?.preparedUiSeed = nil
+        return nil
+    }
+    return (workspace, prepared)
+}
+
+private func encodePreparedSpatialUiSeedDraw(
+    encoder: MTLRenderCommandEncoder,
+    output: MTLTexture,
+    destination: MTLTexture,
+    pipeline: MTLRenderPipelineState
+) {
+    encoder.setViewport(MTLViewport(
+        originX: 0.0,
+        originY: 0.0,
+        width: Double(destination.width),
+        height: Double(destination.height),
+        znear: 0.0,
+        zfar: 1.0
+    ))
+    encoder.setScissorRect(MTLScissorRect(
+        x: 0,
+        y: 0,
+        width: destination.width,
+        height: destination.height
+    ))
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setCullMode(.none)
+    encoder.setTriangleFillMode(.fill)
+    encoder.setFragmentTexture(output, index: 0)
+    var uniforms = MetallumHdrUiBackdropUniforms(sourceEncoding: 2)
+    withUnsafeBytes(of: &uniforms) { bytes in
+        encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 }
 
 private func currentNativeHdrWorldComposite(
@@ -3869,7 +4004,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     _ depthTexture: MTLTexture?,
     _ viewportWidth: Double,
     _ viewportHeight: Double,
-    _ clearColorEnabled: Int32,
+    _ colorLoadAction: Int32,
     _ clearColorRed: Float,
     _ clearColorGreen: Float,
     _ clearColorBlue: Float,
@@ -3889,11 +4024,15 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
         let renderPass = MTLRenderPassDescriptor()
         if let colorTexture {
             renderPass.colorAttachments[0].texture = colorTexture
-            if clearColorEnabled != 0 {
+            if colorLoadAction == 1 {
                 renderPass.colorAttachments[0].loadAction = .clear
                 renderPass.colorAttachments[0].clearColor = makeClearColor(red: clearColorRed, green: clearColorGreen, blue: clearColorBlue, alpha: clearColorAlpha)
-            } else {
+            } else if colorLoadAction == 0 {
                 renderPass.colorAttachments[0].loadAction = .load
+            } else if colorLoadAction == 2 {
+                renderPass.colorAttachments[0].loadAction = .dontCare
+            } else {
+                return nil
             }
             renderPass.colorAttachments[0].storeAction = .store
         }
@@ -4389,11 +4528,16 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
     _ spatialScalingEnabled: Int32,
     _ hdrPrecomposeEnabled: Int32,
     _ perceptualScalingEnabled: Int32,
+    _ deferSpatialHdrUiSeed: Int32,
     _ currentHeadroom: Float,
     _ hdrStrength: Float,
     _ bloomStrength: Float
 ) -> Int32 {
     return autoreleasepool {
+        // Prepared spatial outputs are single-use and command-buffer scoped.
+        // Any new backdrop request invalidates an unconsumed record before it
+        // can be mistaken for this frame's MetalFX output.
+        NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)]?.preparedUiSeed = nil
         guard
             (0...2).contains(sourceEncoding),
             sourceTexture.width > 0,
@@ -4600,6 +4744,22 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 // result used by final presentation. The final shader can
                 // reconstruct this quantized SDR seed directly from that
                 // texture, eliminating a second raw-scene sample per pixel.
+                if deferSpatialHdrUiSeed != 0 {
+                    guard ensureHdrPipelines(device: commandBuffer.device) != nil else {
+                        return -1
+                    }
+                    workspace.preparedUiSeed = MetallumPreparedSpatialUiSeed(
+                        commandBufferAddress: objectAddress(commandBuffer),
+                        sourceTextureAddress: objectAddress(sourceTexture),
+                        destinationTextureAddress: objectAddress(destinationTexture),
+                        sourceWidth: sourceTexture.width,
+                        sourceHeight: sourceTexture.height,
+                        outputWidth: destinationTexture.width,
+                        outputHeight: destinationTexture.height,
+                        output: output
+                    )
+                    return 2
+                }
                 backdropSource = output
                 backdropEncoding = 2
             } else {
@@ -4652,6 +4812,94 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         }
         encoder.endEncoding()
         return hdrPrecomposed ? 2 : 1
+    }
+}
+
+@_cdecl("metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop")
+public func metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop(
+    _ commandBuffer: MTLCommandBuffer,
+    _ encoder: MTLRenderCommandEncoder,
+    _ sourceTexture: MTLTexture,
+    _ destinationTexture: MTLTexture,
+    _ depthFormat: MTLPixelFormat,
+    _ stencilFormat: MTLPixelFormat
+) -> Int32 {
+    return autoreleasepool {
+        guard let (workspace, prepared) = validatedPreparedSpatialUiSeed(
+                  commandBuffer: commandBuffer,
+                  sourceTexture: sourceTexture,
+                  destinationTexture: destinationTexture
+              ), let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+              let pipeline = ensureHdrUiBackdropPipeline(
+                device: commandBuffer.device,
+                pipelines: pipelines,
+                depthFormat: depthFormat,
+                stencilFormat: stencilFormat
+              ) else {
+            return 0
+        }
+
+        // The Java render encoder has already waited on the shared frame
+        // fence. Keep the seed and all following GUI draws in this one render
+        // pass; its normal endEncoder update is the sole producer fence.
+        encodePreparedSpatialUiSeedDraw(
+            encoder: encoder,
+            output: prepared.output,
+            destination: destinationTexture,
+            pipeline: pipeline
+        )
+        workspace.preparedUiSeed = nil
+        return 1
+    }
+}
+
+@_cdecl("metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop")
+public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
+    _ commandBuffer: MTLCommandBuffer,
+    _ sourceTexture: MTLTexture,
+    _ destinationTexture: MTLTexture,
+    _ globalFence: MTLFence?
+) -> Int32 {
+    return autoreleasepool {
+        guard globalFence == nil
+                || objectAddress(globalFence!.device) == objectAddress(commandBuffer.device),
+              let (workspace, prepared) = validatedPreparedSpatialUiSeed(
+                commandBuffer: commandBuffer,
+                sourceTexture: sourceTexture,
+                destinationTexture: destinationTexture
+              ), let pipelines = ensureHdrPipelines(device: commandBuffer.device) else {
+            return 0
+        }
+
+        if let globalFence {
+            guard let dependencyWait = commandBuffer.makeBlitCommandEncoder() else {
+                return 0
+            }
+            dependencyWait.label = "Metallum UI backdrop dependency fallback"
+            dependencyWait.waitForFence(globalFence)
+            dependencyWait.endEncoding()
+        }
+
+        guard let encoder = makeHdrPassEncoder(
+            commandBuffer: commandBuffer,
+            target: destinationTexture,
+            pipeline: pipelines.uiBackdrop,
+            stage: .uiSeed
+        ) else {
+            return 0
+        }
+        encodePreparedSpatialUiSeedDraw(
+            encoder: encoder,
+            output: prepared.output,
+            destination: destinationTexture,
+            pipeline: pipelines.uiBackdrop
+        )
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
+        encoder.endEncoding()
+        workspace.preparedUiSeed = nil
+        return 1
     }
 }
 

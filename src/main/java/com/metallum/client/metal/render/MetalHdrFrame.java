@@ -69,6 +69,14 @@ public final class MetalHdrFrame {
         return false;
     }
 
+    public static void materializeUiBackdrop(final GpuTextureView uiColorView) {
+        if (uiColorView != null
+                && !uiColorView.isClosed()
+                && uiColorView.texture() instanceof MetalGpuTexture ui) {
+            ui.device().materializeHdrUiBackdrop(ui);
+        }
+    }
+
     public static boolean isSceneReadyForUi(final GpuTextureView mainColorView) {
         if (mainColorView == null || mainColorView.isClosed()) {
             return false;

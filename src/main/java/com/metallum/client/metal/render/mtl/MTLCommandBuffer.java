@@ -42,7 +42,7 @@ public final class MTLCommandBuffer {
             final MemorySegment depthTexture,
             final double viewportWidth,
             final double viewportHeight,
-            final int clearColorEnabled,
+            final int colorLoadAction,
             final float clearColorRed,
             final float clearColorGreen,
             final float clearColorBlue,
@@ -59,7 +59,7 @@ public final class MTLCommandBuffer {
                 depthTexture,
                 viewportWidth,
                 viewportHeight,
-                clearColorEnabled,
+                colorLoadAction,
                 clearColorRed,
                 clearColorGreen,
                 clearColorBlue,
@@ -151,6 +151,7 @@ public final class MTLCommandBuffer {
             final boolean spatialScalingEnabled,
             final boolean hdrPrecomposeEnabled,
             final boolean perceptualScalingEnabled,
+            final boolean deferSpatialHdrUiSeed,
             final float currentHeadroom,
             final float hdrStrength,
             final float bloomStrength
@@ -166,9 +167,23 @@ public final class MTLCommandBuffer {
                 spatialScalingEnabled,
                 hdrPrecomposeEnabled,
                 perceptualScalingEnabled,
+                deferSpatialHdrUiSeed,
                 currentHeadroom,
                 hdrStrength,
                 bloomStrength
+        );
+    }
+
+    public int materializePreparedHdrUiBackdrop(
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MemorySegment globalFence
+    ) {
+        return MetalNativeBridge.MTLCommandBuffer_materializePreparedHdrUiBackdrop(
+                handle(),
+                sourceTexture,
+                destinationTexture,
+                globalFence
         );
     }
 
@@ -229,7 +244,7 @@ public final class MTLCommandBuffer {
         handle = MemorySegment.NULL;
     }
 
-    private MemorySegment handle() {
+    MemorySegment handle() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("MTLCommandBuffer is closed");
         }

@@ -117,7 +117,9 @@ final class MetalRenderPass implements RenderPassBackend {
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
             updateTextureBinding(this.samplers, name, textureView, sampler);
-            commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
+            if (commandEncoder.prepareTextureForRead((MetalGpuTexture) textureView.texture())) {
+                invalidateNativeEncoderState();
+            }
             markDescriptorDirty(name);
         } else if (textureView == null && sampler == null) {
             samplers.remove(name);
@@ -287,6 +289,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void draw(final int vertexCount, final int instanceCount, final int firstVertex, final int firstInstance) {
+        if (vertexCount <= 0 || instanceCount <= 0) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
         MTLRenderCommandEncoder enc = renderEncoder();
 
@@ -449,7 +454,13 @@ final class MetalRenderPass implements RenderPassBackend {
             final MTLIndexType indexType,
             final int baseInstance
     ) {
+        if (indexCount <= 0 || instanceCount <= 0) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
+        if (primitiveType == MTLPrimitiveType.TriangleFan && indexCount < 3) {
+            return;
+        }
 
         long indexOffsetBytes = (long) firstIndex * indexType.bytes;
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
@@ -571,6 +582,15 @@ final class MetalRenderPass implements RenderPassBackend {
             if (binding != null) {
                 dirtyDescriptorMask |= 1L << binding.bindingIndex();
             }
+        }
+    }
+
+    private void invalidateNativeEncoderState() {
+        this.pipelineDirty = true;
+        this.scissorDirty = true;
+        this.vertexBuffersDirty = true;
+        if (this.compiledPipeline != null) {
+            this.dirtyDescriptorMask |= this.compiledPipeline.allResourceMask();
         }
     }
 

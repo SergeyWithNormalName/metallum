@@ -68,6 +68,7 @@ public final class HdrUiRenderTarget {
                 TextureTarget previous = target;
                 target = replacement;
                 if (previous != null) {
+                    MetalHdrFrame.materializeUiBackdrop(previous.getColorTextureView());
                     previous.destroyBuffers();
                 }
             }
@@ -129,6 +130,13 @@ public final class HdrUiRenderTarget {
     public static void markBackdropBlurred() {
         if (activeThisFrame) {
             backdropBlurredThisFrame = true;
+        }
+    }
+
+    /** Resolves a deferred MetalFX HDR seed before blur or another texture read. */
+    public static void ensureBackdropMaterialized() {
+        if (activeThisFrame && target != null) {
+            MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
         }
     }
 
@@ -195,6 +203,7 @@ public final class HdrUiRenderTarget {
         spatialHdrPrecomposedThisFrame = false;
         lastSpatialHdrPrecomposed = false;
         if (target != null) {
+            MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
             target.destroyBuffers();
             target = null;
         }
@@ -216,6 +225,7 @@ public final class HdrUiRenderTarget {
         lastSpatialHdrPrecomposed = false;
         if (target != null) {
             try {
+                MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
                 target.destroyBuffers();
             } catch (Throwable closeFailure) {
                 throwable.addSuppressed(closeFailure);
@@ -239,6 +249,7 @@ public final class HdrUiRenderTarget {
         lastSpatialHdrPrecomposed = false;
         if (target != null) {
             try {
+                MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
                 target.destroyBuffers();
             } catch (Throwable closeFailure) {
                 throwable.addSuppressed(closeFailure);

@@ -13,6 +13,23 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         super(handle);
     }
 
+    public boolean encodePreparedHdrUiBackdrop(
+            final MTLCommandBuffer commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment destinationTexture,
+            final MTLPixelFormat depthFormat,
+            final MTLPixelFormat stencilFormat
+    ) {
+        return MetalNativeBridge.MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop(
+                commandBuffer.handle(),
+                handle(),
+                sourceTexture,
+                destinationTexture,
+                depthFormat,
+                stencilFormat
+        ) == 1;
+    }
+
     public void setRenderPipelineState(final MemorySegment pipeline) {
         MetalNativeBridge.MTLRenderCommandEncoder_setRenderPipelineState(handle(), pipeline);
     }
