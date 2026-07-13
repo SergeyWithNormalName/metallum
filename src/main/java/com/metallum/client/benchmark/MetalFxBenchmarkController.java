@@ -216,6 +216,14 @@ public final class MetalFxBenchmarkController {
     private void selectMonitor(final Minecraft minecraft, final Window window) {
         PointerBuffer monitors = GLFW.glfwGetMonitors();
         if (monitors == null) {
+            // GLFW may temporarily fail to materialize the monitor list on
+            // macOS even though the primary display remains queryable. The
+            // built-in Retina benchmark targets that primary display, so use
+            // it as a safe fallback instead of failing a valid run.
+            long primaryMonitor = GLFW.glfwGetPrimaryMonitor();
+            if (primaryMonitor != 0L && selectMonitorCandidate(window, primaryMonitor)) {
+                return;
+            }
             if (this.stageFrames >= WINDOW_TRANSITION_TIMEOUT_FRAMES) {
                 fail(minecraft, "GLFW returned no monitors before timeout");
             }
@@ -223,29 +231,36 @@ public final class MetalFxBenchmarkController {
         }
 
         for (int index = 0; index < monitors.limit(); index++) {
-            long monitor = monitors.get(index);
-            String name = GLFW.glfwGetMonitorName(monitor);
-            GLFWVidMode.Buffer modes = GLFW.glfwGetVideoModes(monitor);
-            Metallum.LOGGER.info(
-                    "METALLUM_BENCHMARK EVENT=MONITOR handle={} name={} modes={}",
-                    monitor,
-                    name,
-                    summarizeModes(modes)
-            );
-            if (name == null || !name.toLowerCase(Locale.ROOT).contains(this.monitorName.toLowerCase(Locale.ROOT))) {
-                continue;
-            }
-            VideoMode best = bestExactMode(monitor, modes);
-            if (best != null) {
-                this.targetMonitor = monitor;
-                this.targetVideoMode = best;
-                transition(GLFW.glfwGetWindowMonitor(window.handle()) == 0L
-                        ? Stage.MOVE_WINDOWED
-                        : Stage.EXIT_FULLSCREEN);
+            if (selectMonitorCandidate(window, monitors.get(index))) {
                 return;
             }
         }
         fail(minecraft, "requested external monitor or exact video mode was not found");
+    }
+
+    private boolean selectMonitorCandidate(final Window window, final long monitor) {
+        String name = GLFW.glfwGetMonitorName(monitor);
+        GLFWVidMode.Buffer modes = GLFW.glfwGetVideoModes(monitor);
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=MONITOR handle={} name={} modes={}",
+                monitor,
+                name,
+                summarizeModes(modes)
+        );
+        if (name == null
+                || !name.toLowerCase(Locale.ROOT).contains(this.monitorName.toLowerCase(Locale.ROOT))) {
+            return false;
+        }
+        VideoMode best = bestExactMode(monitor, modes);
+        if (best == null) {
+            return false;
+        }
+        this.targetMonitor = monitor;
+        this.targetVideoMode = best;
+        transition(GLFW.glfwGetWindowMonitor(window.handle()) == 0L
+                ? Stage.MOVE_WINDOWED
+                : Stage.EXIT_FULLSCREEN);
+        return true;
     }
 
     private void selectCurrentWindow(final Minecraft minecraft, final Window window) {
@@ -295,7 +310,16 @@ public final class MetalFxBenchmarkController {
             GLFWVidMode mode = modes.get(index);
             int framebufferWidth = Math.round(mode.width() * scaleX[0]);
             int framebufferHeight = Math.round(mode.height() * scaleY[0]);
-            if (framebufferWidth != this.targetWidth || framebufferHeight != this.targetHeight) {
+            boolean scaledMatch = framebufferWidth == this.targetWidth
+                    && framebufferHeight == this.targetHeight;
+            // GLFW reports the built-in Retina display modes in backing
+            // pixels, while some external HiDPI displays expose logical mode
+            // dimensions that still need the monitor content scale. Accept
+            // either representation and verify the actual framebuffer after
+            // entering fullscreen.
+            boolean backingPixelMatch = mode.width() == this.targetWidth
+                    && mode.height() == this.targetHeight;
+            if (!scaledMatch && !backingPixelMatch) {
                 continue;
             }
             VideoMode candidate = new VideoMode(
