@@ -185,6 +185,7 @@ tasks.register("hdrValueValidation", Exec) {
 
 	environment "MTL_DEBUG_LAYER", "1"
 	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 	commandLine hdrValueValidationBinary.get().asFile.absolutePath,
 		file("src/main/native/MetallumNative.swift").absolutePath,
 		macNativeLibrary.get().asFile.absolutePath

@@ -100,6 +100,7 @@ private typealias NativeBackdropFunction = @convention(c) (
     Int32,             // sourceEncoding
     Int32,             // spatialScalingEnabled
     Int32,             // hdrPrecomposeEnabled
+    Int32,             // perceptualScalingEnabled
     Float,             // currentHeadroom
     Float,             // hdrStrength
     Float              // bloomStrength
@@ -786,6 +787,65 @@ private final class GpuHarness {
                 mipmapLevel: 0
             )
         }
+        return SIMD4<UInt8>(bytes[0], bytes[1], bytes[2], bytes[3])
+    }
+
+    func makePrivateRgba8Texture(width: Int, height: Int) throws -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .renderTarget]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw ValidationFailure.message("Private RGBA8 texture creation failed")
+        }
+        return texture
+    }
+
+    func clearPrivateRgba8(_ texture: MTLTexture, color: MTLClearColor) throws {
+        try require(texture.pixelFormat == .rgba8Unorm, "Private RGBA8 clear requires RGBA8Unorm")
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Private RGBA8 clear command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = color
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Private RGBA8 clear encoder creation failed")
+        }
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "RGBA8 private sentinel clear")
+    }
+
+    func readPrivateRgba8(texture: MTLTexture, x: Int = 0, y: Int = 0) throws -> SIMD4<UInt8> {
+        try require(texture.pixelFormat == .rgba8Unorm, "Private readback requires RGBA8Unorm")
+        let bytesPerRow = ((texture.width * 4 + 255) / 256) * 256
+        let byteCount = bytesPerRow * texture.height
+        guard let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw ValidationFailure.message("Private RGBA8 readback resource creation failed")
+        }
+        encoder.copy(
+            from: texture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+            to: buffer,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: byteCount
+        )
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "RGBA8 private readback")
+        let offset = y * bytesPerRow + x * 4
+        let bytes = buffer.contents().advanced(by: offset).assumingMemoryBound(to: UInt8.self)
         return SIMD4<UInt8>(bytes[0], bytes[1], bytes[2], bytes[3])
     }
 
@@ -1647,7 +1707,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 36, "HDR validation check count changed unexpectedly: \(passCount), expected 36")
+        try require(passCount == 38, "HDR validation check count changed unexpectedly: \(passCount), expected 38")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -3453,6 +3513,7 @@ private final class ValueValidation {
             1,
             0,
             0,
+            0,
             1,
             1,
             0
@@ -3487,6 +3548,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             0,
             0,
             1,
@@ -3526,6 +3588,7 @@ private final class ValueValidation {
             2,
             1,
             0,
+            0,
             1,
             1,
             0
@@ -3541,6 +3604,111 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS native MetalFX backdrop scales FP16 scene before full-resolution SDR UI")
+
+        let perceptualDestination = try gpu.makePrivateRgba8Texture(width: 16, height: 16)
+        guard let perceptualCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Perceptual spatial command buffer creation failed")
+        }
+        let perceptualStatus = backdrop(
+            objectPointer(perceptualCommandBuffer as AnyObject),
+            objectPointer(scaledSource as AnyObject),
+            objectPointer(perceptualDestination as AnyObject),
+            nil,
+            nil,
+            nil,
+            2,
+            1,
+            0,
+            1,
+            1,
+            1,
+            0
+        )
+        try require(perceptualStatus == 3, "Perceptual spatial backdrop ABI returned \(perceptualStatus)")
+        perceptualCommandBuffer.commit()
+        perceptualCommandBuffer.waitUntilCompleted()
+        try require(
+            perceptualCommandBuffer.status == .completed,
+            "Perceptual spatial backdrop GPU command failed: \(String(describing: perceptualCommandBuffer.error))"
+        )
+        let perceptualPixel = try gpu.readPrivateRgba8(texture: perceptualDestination)
+        try require(
+            abs(Int(perceptualPixel.x) - 188) <= 2
+                && perceptualPixel.y >= 252
+                && perceptualPixel.z == 0
+                && perceptualPixel.w == 255,
+            "Perceptual spatial backdrop mismatch: \(perceptualPixel)"
+        )
+        passCount += 1
+        print("PASS native MetalFX SDR fast path tone-maps low-res and writes full-resolution GUI directly")
+
+        let quadrantPixels = (0..<8).flatMap { y in
+            (0..<8).map { x in
+                switch (x < 4, y < 4) {
+                case (true, true):
+                    return SIMD4<Float>(1, 0, 0, 1)
+                case (false, true):
+                    return SIMD4<Float>(0, 1, 0, 1)
+                case (true, false):
+                    return SIMD4<Float>(0, 0, 1, 1)
+                case (false, false):
+                    return SIMD4<Float>(1, 1, 0, 1)
+                }
+            }
+        }
+        let quadrantSource = try gpu.makeRgba16FloatTexture(
+            width: 8,
+            height: 8,
+            pixels: quadrantPixels
+        )
+        let quadrantDestination = try gpu.makePrivateRgba8Texture(width: 16, height: 16)
+        try gpu.clearPrivateRgba8(
+            quadrantDestination,
+            color: MTLClearColor(red: 1, green: 0, blue: 1, alpha: 1)
+        )
+        guard let quadrantCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Perceptual quadrant command buffer creation failed")
+        }
+        let quadrantStatus = backdrop(
+            objectPointer(quadrantCommandBuffer as AnyObject),
+            objectPointer(quadrantSource as AnyObject),
+            objectPointer(quadrantDestination as AnyObject),
+            nil,
+            nil,
+            nil,
+            2,
+            1,
+            0,
+            1,
+            1,
+            1,
+            0
+        )
+        try require(quadrantStatus == 3, "Perceptual quadrant backdrop ABI returned \(quadrantStatus)")
+        quadrantCommandBuffer.commit()
+        quadrantCommandBuffer.waitUntilCompleted()
+        try require(
+            quadrantCommandBuffer.status == .completed,
+            "Perceptual quadrant GPU command failed: \(String(describing: quadrantCommandBuffer.error))"
+        )
+        let quadrantTopLeft = try gpu.readPrivateRgba8(texture: quadrantDestination, x: 0, y: 0)
+        let quadrantTopRight = try gpu.readPrivateRgba8(texture: quadrantDestination, x: 15, y: 0)
+        let quadrantBottomLeft = try gpu.readPrivateRgba8(texture: quadrantDestination, x: 0, y: 15)
+        let quadrantBottomRight = try gpu.readPrivateRgba8(texture: quadrantDestination, x: 15, y: 15)
+        try require(
+            quadrantTopLeft.x > 220 && quadrantTopLeft.y < 32 && quadrantTopLeft.z < 32
+                && quadrantTopRight.x < 32 && quadrantTopRight.y > 220 && quadrantTopRight.z < 32
+                && quadrantBottomLeft.x < 32 && quadrantBottomLeft.y < 32 && quadrantBottomLeft.z > 220
+                && quadrantBottomRight.x > 220 && quadrantBottomRight.y > 220 && quadrantBottomRight.z < 32,
+            "Perceptual direct output flipped, clipped, or left a border unwritten: TL \(quadrantTopLeft), TR \(quadrantTopRight), BL \(quadrantBottomLeft), BR \(quadrantBottomRight)"
+        )
+        try require(
+            [quadrantTopLeft, quadrantTopRight, quadrantBottomLeft, quadrantBottomRight]
+                .allSatisfy { $0.w == 255 },
+            "Perceptual direct output did not preserve the opaque final-composite alpha contract: TL \(quadrantTopLeft), TR \(quadrantTopRight), BL \(quadrantBottomLeft), BR \(quadrantBottomRight)"
+        )
+        passCount += 1
+        print("PASS native MetalFX SDR direct output preserves orientation, borders and opaque composite alpha")
 
         let precomposedPixels = (0..<8).flatMap { y in
             Array(
@@ -3577,6 +3745,7 @@ private final class ValueValidation {
             2,
             1,
             1,
+            0,
             4,
             1,
             0

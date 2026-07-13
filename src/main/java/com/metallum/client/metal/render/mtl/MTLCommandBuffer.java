@@ -148,6 +148,7 @@ public final class MTLCommandBuffer {
             final int sourceEncoding,
             final boolean spatialScalingEnabled,
             final boolean hdrPrecomposeEnabled,
+            final boolean perceptualScalingEnabled,
             final float currentHeadroom,
             final float hdrStrength,
             final float bloomStrength
@@ -162,6 +163,7 @@ public final class MTLCommandBuffer {
                 sourceEncoding,
                 spatialScalingEnabled,
                 hdrPrecomposeEnabled,
+                perceptualScalingEnabled,
                 currentHeadroom,
                 hdrStrength,
                 bloomStrength

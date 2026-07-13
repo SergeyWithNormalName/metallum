@@ -6,6 +6,7 @@
   "mixins": [
   ],
   "client": [
+    "benchmark.MinecraftBenchmarkMixin",
     "render.MainTargetMixin",
     "render.RenderTargetAccessor",
     "render.RenderPassMixin",

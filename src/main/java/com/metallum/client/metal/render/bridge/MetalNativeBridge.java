@@ -232,6 +232,7 @@ public final class MetalNativeBridge {
                             INT,
                             INT,
                             INT,
+                            INT,
                             FLOAT,
                             FLOAT,
                             FLOAT
@@ -1442,6 +1443,7 @@ public final class MetalNativeBridge {
             final int sourceEncoding,
             final boolean spatialScalingEnabled,
             final boolean hdrPrecomposeEnabled,
+            final boolean perceptualScalingEnabled,
             final float currentHeadroom,
             final float hdrStrength,
             final float bloomStrength
@@ -1457,6 +1459,7 @@ public final class MetalNativeBridge {
                     sourceEncoding,
                     spatialScalingEnabled ? 1 : 0,
                     hdrPrecomposeEnabled ? 1 : 0,
+                    perceptualScalingEnabled ? 1 : 0,
                     currentHeadroom,
                     hdrStrength,
                     bloomStrength

@@ -92,6 +92,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long hdrSemanticMaskClearedSubmitIndex = Long.MIN_VALUE;
     private long hdrSemanticMaskTouchedSubmitIndex = Long.MIN_VALUE;
     private boolean hdrEnhancedActive;
+    private HdrOutputMode hdrOutputMode = HdrOutputMode.SDR;
     private float hdrCurrentHeadroom = 1.0f;
     private boolean hdrEnhancementUnavailable;
     private boolean hdrEnhancementActivationLogged;
@@ -104,6 +105,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
     private long spatialHdrPrecomposedSubmitIndex = Long.MIN_VALUE;
     private boolean spatialHdrPrecomposeLogged;
+    private boolean spatialPerceptualDirectLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -353,6 +355,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void setHdrOutputMode(final HdrOutputMode outputMode, final float currentHeadroom) {
+        this.hdrOutputMode = outputMode;
         this.hdrCurrentHeadroom = Float.isFinite(currentHeadroom)
                 ? Math.clamp(currentHeadroom, 1.0f, HdrConfig.OUTPUT_HEADROOM)
                 : 1.0f;
@@ -569,6 +572,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrDirectSceneSource == source
                 && !this.hdrConfig.diagnosticPattern()
                 && !MetalNativeBridge.isNullHandle(this.hdrSceneDepthHandle);
+        boolean directPerceptual = spatial
+                && this.hdrOutputMode == HdrOutputMode.SDR
+                && !precomposeHdr;
         MemorySegment semanticHandle = precomposeHdr
                 && this.hdrSemanticSceneAvailable
                 && this.hdrSemanticMask != null
@@ -580,6 +586,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 precomposeHdr ? this.hdrSceneDepthHandle : MemorySegment.NULL,
                 semanticHandle,
                 precomposeHdr,
+                directPerceptual,
                 this.hdrCurrentHeadroom,
                 this.hdrConfig
         );
@@ -588,6 +595,12 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.spatialHdrPrecomposeLogged = true;
             Metallum.LOGGER.info(
                     "MetalFX HDR fast path is active: low-resolution HDR precompose, spatial scale, full-resolution UI composite"
+            );
+        }
+        if (result == 3 && !this.spatialPerceptualDirectLogged) {
+            this.spatialPerceptualDirectLogged = true;
+            Metallum.LOGGER.info(
+                    "MetalFX SDR fast path is active: low-resolution perceptual input, direct full-resolution GUI output"
             );
         }
         return result > 0;

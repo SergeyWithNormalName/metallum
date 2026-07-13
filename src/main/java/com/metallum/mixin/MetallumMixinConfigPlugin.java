@@ -14,17 +14,20 @@ import java.util.Set;
 
 public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
+    private static final String BENCHMARK_MIXIN = "com.metallum.mixin.benchmark.MinecraftBenchmarkMixin";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
     private boolean isMacOs;
     private boolean isDefaultGraphicsApi;
+    private boolean benchmarkEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
         String osName = System.getProperty("os.name", "");
         this.isMacOs = osName.toLowerCase(Locale.ROOT).contains("mac");
         this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
+        this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
     }
 
     @Override
@@ -36,6 +39,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (!this.isMacOs) {
             return false;
+        }
+        if (BENCHMARK_MIXIN.equals(mixinClassName)) {
+            return this.benchmarkEnabled && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");

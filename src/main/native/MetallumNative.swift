@@ -147,6 +147,7 @@ private final class MetallumHdrWorkspace {
 }
 
 private final class MetallumSpatialWorkspace {
+    let sourcePixelFormat: MTLPixelFormat
     let inputWidth: Int
     let inputHeight: Int
     let outputWidth: Int
@@ -155,9 +156,12 @@ private final class MetallumSpatialWorkspace {
     let outputPixelFormat: MTLPixelFormat
     let colorProcessingMode: MTLFXSpatialScalerColorProcessingMode
     let scaler: MTLFXSpatialScaler
-    let output: MTLTexture
+    let perceptualInput: MTLTexture?
+    var output: MTLTexture?
+    let usesDirectOutput: Bool
 
     init(
+        sourcePixelFormat: MTLPixelFormat,
         inputWidth: Int,
         inputHeight: Int,
         outputWidth: Int,
@@ -166,8 +170,11 @@ private final class MetallumSpatialWorkspace {
         outputPixelFormat: MTLPixelFormat,
         colorProcessingMode: MTLFXSpatialScalerColorProcessingMode,
         scaler: MTLFXSpatialScaler,
-        output: MTLTexture
+        perceptualInput: MTLTexture?,
+        output: MTLTexture?,
+        usesDirectOutput: Bool
     ) {
+        self.sourcePixelFormat = sourcePixelFormat
         self.inputWidth = inputWidth
         self.inputHeight = inputHeight
         self.outputWidth = outputWidth
@@ -176,7 +183,9 @@ private final class MetallumSpatialWorkspace {
         self.outputPixelFormat = outputPixelFormat
         self.colorProcessingMode = colorProcessingMode
         self.scaler = scaler
+        self.perceptualInput = perceptualInput
         self.output = output
+        self.usesDirectOutput = usesDirectOutput
     }
 }
 
@@ -1632,23 +1641,27 @@ private func makeHdrPassEncoder(
 
 private func ensureSpatialWorkspace(
     device: MTLDevice,
+    sourcePixelFormat: MTLPixelFormat,
     inputWidth: Int,
     inputHeight: Int,
     outputWidth: Int,
     outputHeight: Int,
     inputPixelFormat: MTLPixelFormat,
     outputPixelFormat: MTLPixelFormat,
-    colorProcessingMode: MTLFXSpatialScalerColorProcessingMode
+    colorProcessingMode: MTLFXSpatialScalerColorProcessingMode,
+    usesDirectOutput: Bool
 ) -> MetallumSpatialWorkspace? {
     let key = objectAddress(device)
     if let cached = NativeState.spatialWorkspaces[key],
+       cached.sourcePixelFormat == sourcePixelFormat,
        cached.inputWidth == inputWidth,
        cached.inputHeight == inputHeight,
        cached.outputWidth == outputWidth,
        cached.outputHeight == outputHeight,
        cached.inputPixelFormat == inputPixelFormat,
        cached.outputPixelFormat == outputPixelFormat,
-       cached.colorProcessingMode == colorProcessingMode {
+       cached.colorProcessingMode == colorProcessingMode,
+       cached.usesDirectOutput == usesDirectOutput {
         return cached
     }
 
@@ -1675,22 +1688,46 @@ private func ensureSpatialWorkspace(
         return nil
     }
 
-    let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-        pixelFormat: outputPixelFormat,
-        width: outputWidth,
-        height: outputHeight,
-        mipmapped: false
-    )
-    textureDescriptor.storageMode = .private
-    textureDescriptor.hazardTrackingMode = .untracked
-    textureDescriptor.usage = scaler.outputTextureUsage.union(.shaderRead)
-    guard let output = device.makeTexture(descriptor: textureDescriptor) else {
-        NSLog("[metallum] Failed to allocate MetalFX spatial output")
-        return nil
+    var perceptualInput: MTLTexture?
+    if sourcePixelFormat != inputPixelFormat {
+        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: inputPixelFormat,
+            width: inputWidth,
+            height: inputHeight,
+            mipmapped: false
+        )
+        inputDescriptor.storageMode = .private
+        inputDescriptor.hazardTrackingMode = .tracked
+        inputDescriptor.usage = scaler.colorTextureUsage.union([.renderTarget, .shaderRead])
+        guard let allocated = device.makeTexture(descriptor: inputDescriptor) else {
+            NSLog("[metallum] Failed to allocate MetalFX perceptual input")
+            return nil
+        }
+        allocated.label = "Metallum MetalFX perceptual input"
+        perceptualInput = allocated
     }
-    output.label = "Metallum MetalFX spatial output"
+
+    var output: MTLTexture?
+    if !usesDirectOutput {
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: outputPixelFormat,
+            width: outputWidth,
+            height: outputHeight,
+            mipmapped: false
+        )
+        textureDescriptor.storageMode = .private
+        textureDescriptor.hazardTrackingMode = .untracked
+        textureDescriptor.usage = scaler.outputTextureUsage.union(.shaderRead)
+        guard let allocated = device.makeTexture(descriptor: textureDescriptor) else {
+            NSLog("[metallum] Failed to allocate MetalFX spatial output")
+            return nil
+        }
+        allocated.label = "Metallum MetalFX spatial output"
+        output = allocated
+    }
 
     let workspace = MetallumSpatialWorkspace(
+        sourcePixelFormat: sourcePixelFormat,
         inputWidth: inputWidth,
         inputHeight: inputHeight,
         outputWidth: outputWidth,
@@ -1699,17 +1736,20 @@ private func ensureSpatialWorkspace(
         outputPixelFormat: outputPixelFormat,
         colorProcessingMode: colorProcessingMode,
         scaler: scaler,
-        output: output
+        perceptualInput: perceptualInput,
+        output: output,
+        usesDirectOutput: usesDirectOutput
     )
     NativeState.spatialWorkspaces[key] = workspace
     NSLog(
-        "[metallum] MetalFX spatial scaler ready: %dx%d -> %dx%d, input format %lu, output format %lu, input usage %lu, output usage %lu",
+        "[metallum] MetalFX spatial scaler ready: %dx%d -> %dx%d, input format %lu, output format %lu, direct output %d, input usage %lu, output usage %lu",
         inputWidth,
         inputHeight,
         outputWidth,
         outputHeight,
         inputPixelFormat.rawValue,
         outputPixelFormat.rawValue,
+        usesDirectOutput ? 1 : 0,
         scaler.colorTextureUsage.rawValue,
         scaler.outputTextureUsage.rawValue
     )
@@ -1727,10 +1767,13 @@ private func currentSpatialOutput(
           workspace.inputHeight == inputTexture.height,
           workspace.outputWidth == outputWidth,
           workspace.outputHeight == outputHeight,
-          workspace.inputPixelFormat == inputTexture.pixelFormat else {
+          workspace.sourcePixelFormat == inputTexture.pixelFormat,
+          let output = workspace.output,
+          output.width == outputWidth,
+          output.height == outputHeight else {
         return nil
     }
-    return workspace.output
+    return output
 }
 
 private func encodeHdrWorldEffects(
@@ -3488,6 +3531,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
     _ sourceEncoding: Int32,
     _ spatialScalingEnabled: Int32,
     _ hdrPrecomposeEnabled: Int32,
+    _ perceptualScalingEnabled: Int32,
     _ currentHeadroom: Float,
     _ hdrStrength: Float,
     _ bloomStrength: Float
@@ -3547,7 +3591,11 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 && sourceTexture.pixelFormat == .rgba16Float
                 && compatibleDepth
                 && compatibleSemantic
+            let useDirectPerceptualOutput = perceptualScalingEnabled != 0 && !canPrecomposeHdr
             let scalerInput: MTLTexture
+            let scalerInputPixelFormat: MTLPixelFormat
+            let scalerOutputPixelFormat: MTLPixelFormat
+            let scalerColorProcessingMode: MTLFXSpatialScalerColorProcessingMode
             if canPrecomposeHdr {
                 guard let composite = encodeSpatialHdrWorldComposite(
                     commandBuffer: commandBuffer,
@@ -3565,36 +3613,102 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                     return -3
                 }
                 scalerInput = composite
+                scalerInputPixelFormat = composite.pixelFormat
+                scalerOutputPixelFormat = composite.pixelFormat
+                scalerColorProcessingMode = .hdr
                 hdrPrecomposed = true
+            } else if useDirectPerceptualOutput && sourceTexture.pixelFormat == .rgba16Float {
+                scalerInput = sourceTexture
+                scalerInputPixelFormat = .rgba8Unorm
+                scalerOutputPixelFormat = .rgba8Unorm
+                scalerColorProcessingMode = .perceptual
             } else {
                 scalerInput = sourceTexture
+                scalerInputPixelFormat = sourceTexture.pixelFormat
+                scalerOutputPixelFormat = sourceTexture.pixelFormat
+                scalerColorProcessingMode = sourceTexture.pixelFormat == .rgba16Float ? .hdr : .perceptual
             }
             guard
                 destinationTexture.width >= sourceTexture.width,
                 destinationTexture.height >= sourceTexture.height,
-                scalerInput.pixelFormat == .rgba8Unorm || scalerInput.pixelFormat == .rgba16Float,
+                scalerInputPixelFormat == .rgba8Unorm || scalerInputPixelFormat == .rgba16Float,
                 let workspace = ensureSpatialWorkspace(
                     device: commandBuffer.device,
+                    sourcePixelFormat: sourceTexture.pixelFormat,
                     inputWidth: scalerInput.width,
                     inputHeight: scalerInput.height,
                     outputWidth: destinationTexture.width,
                     outputHeight: destinationTexture.height,
-                    inputPixelFormat: scalerInput.pixelFormat,
-                    outputPixelFormat: scalerInput.pixelFormat,
-                    colorProcessingMode: scalerInput.pixelFormat == .rgba16Float ? .hdr : .perceptual
-                ),
-                scalerInput.usage.isSuperset(of: workspace.scaler.colorTextureUsage)
+                    inputPixelFormat: scalerInputPixelFormat,
+                    outputPixelFormat: scalerOutputPixelFormat,
+                    colorProcessingMode: scalerColorProcessingMode,
+                    usesDirectOutput: useDirectPerceptualOutput
+                )
             else {
                 return -2
             }
-            let output = workspace.output
-            workspace.scaler.colorTexture = scalerInput
+
+            let preparedScalerInput: MTLTexture
+            if let perceptualInput = workspace.perceptualInput {
+                guard let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+                      let encoder = makeHdrPassEncoder(
+                        commandBuffer: commandBuffer,
+                        target: perceptualInput,
+                        pipeline: pipelines.uiBackdrop
+                      ) else {
+                    return -1
+                }
+                if let globalFence {
+                    encoder.waitForFence(globalFence, before: .fragment)
+                }
+                encoder.setFragmentTexture(sourceTexture, index: 0)
+                var uniforms = MetallumHdrUiBackdropUniforms(
+                    sourceEncoding: UInt32(sourceEncoding)
+                )
+                withUnsafeBytes(of: &uniforms) { bytes in
+                    encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+                }
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                if let globalFence {
+                    encoder.updateFence(globalFence, after: .fragment)
+                }
+                encoder.endEncoding()
+                preparedScalerInput = perceptualInput
+            } else {
+                preparedScalerInput = scalerInput
+            }
+
+            let output: MTLTexture
+            if useDirectPerceptualOutput {
+                guard destinationTexture.usage.isSuperset(of: workspace.scaler.outputTextureUsage) else {
+                    return -2
+                }
+                output = destinationTexture
+                workspace.output = destinationTexture
+            } else if let allocatedOutput = workspace.output {
+                output = allocatedOutput
+            } else {
+                return -2
+            }
+            guard preparedScalerInput.usage.isSuperset(of: workspace.scaler.colorTextureUsage) else {
+                return -2
+            }
+            workspace.scaler.colorTexture = preparedScalerInput
             workspace.scaler.inputContentWidth = scalerInput.width
             workspace.scaler.inputContentHeight = scalerInput.height
             workspace.scaler.outputTexture = output
             workspace.scaler.fence = globalFence
             workspace.scaler.encode(commandBuffer: commandBuffer)
-            if hdrPrecomposed {
+            if useDirectPerceptualOutput {
+                // The scaler writes the tone-mapped scene directly into the
+                // full-resolution GUI target. GUI rendering follows in the
+                // same command buffer, so no full-resolution seed copy or
+                // intermediate output texture is required on SDR displays.
+                // MetalFX defines this complete display-referred composite as
+                // opaque; the SDR present path intentionally consumes RGB and
+                // writes drawable alpha 1, while GUI source-over remains valid.
+                return 3
+            } else if hdrPrecomposed {
                 // Seed the GUI from the same full-resolution MetalFX HDR
                 // result used by final presentation. The final shader can
                 // reconstruct this quantized SDR seed directly from that

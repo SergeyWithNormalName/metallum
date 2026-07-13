@@ -308,6 +308,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MemorySegment sceneDepthTexture,
             final MemorySegment semanticTexture,
             final boolean hdrPrecomposeEnabled,
+            final boolean perceptualScalingEnabled,
             final float currentHeadroom,
             final HdrConfig hdrConfig
     ) {
@@ -333,6 +334,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 sourceEncoding,
                 MetalFxSpatialScaling.isActive(),
                 hdrPrecomposeEnabled,
+                perceptualScalingEnabled,
                 currentHeadroom,
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
