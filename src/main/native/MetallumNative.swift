@@ -105,8 +105,8 @@ private final class MetallumHdrPipelines {
 private final class MetallumHdrWorkspace {
     let sourceWidth: Int
     let sourceHeight: Int
-    let displayWidth: Int
-    let displayHeight: Int
+    var displayWidth: Int
+    var displayHeight: Int
     let emission: MTLTexture
     let bloomA: MTLTexture
     let bloomB: MTLTexture
@@ -1556,9 +1556,19 @@ private func ensureHdrWorkspace(
     let key = objectAddress(device)
     if let cached = NativeState.hdrWorkspaces[key],
        cached.sourceWidth == sourceWidth,
-       cached.sourceHeight == sourceHeight,
-       cached.displayWidth == displayWidth,
-       cached.displayHeight == displayHeight {
+       cached.sourceHeight == sourceHeight {
+        if cached.displayWidth != displayWidth || cached.displayHeight != displayHeight {
+            // The large quarter-resolution world textures depend only on the
+            // scene resolution. A display-only resize (for example a MetalFX
+            // mode transition) needs new UI masks, not a second allocation of
+            // the entire HDR workspace.
+            cached.displayWidth = displayWidth
+            cached.displayHeight = displayHeight
+            cached.uiMaskA = nil
+            cached.uiMaskB = nil
+            cached.lastHistogramUptime = nil
+            cached.histogramNeedsInitialization = true
+        }
         return cached
     }
 
@@ -1881,6 +1891,17 @@ private func encodeHdrWorldEffects(
     histogramReduce.endEncoding()
     workspace.histogramNeedsInitialization = false
 
+    if semanticTexture == nil {
+        // Extract still builds the luminance histogram, but its RGB is exactly
+        // zero without semantic emission. Reusing that zero texture preserves
+        // the present result and skips two quarter-resolution blur passes.
+        return MetallumHdrWorldOutputs(
+            emission: workspace.emission,
+            bloom: workspace.emission,
+            adaptiveState: workspace.adaptiveState
+        )
+    }
+
     guard let horizontal = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: workspace.bloomA,
@@ -1949,9 +1970,12 @@ private func encodeHdrUiMask(
         return nil
     }
 
-    if workspace.uiMaskA == nil || workspace.uiMaskB == nil {
-        let maskWidth = max((displayWidth + 1) / 2, 1)
-        let maskHeight = max((displayHeight + 1) / 2, 1)
+    let maskWidth = max((displayWidth + 1) / 2, 1)
+    let maskHeight = max((displayHeight + 1) / 2, 1)
+    if workspace.uiMaskA?.width != maskWidth
+        || workspace.uiMaskA?.height != maskHeight
+        || workspace.uiMaskB?.width != maskWidth
+        || workspace.uiMaskB?.height != maskHeight {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rg8Unorm,
             width: maskWidth,
