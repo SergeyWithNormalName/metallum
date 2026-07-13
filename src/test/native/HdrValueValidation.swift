@@ -1697,6 +1697,7 @@ private final class ValueValidation {
         try validateSeededUiQuantizationAndDeterminism()
         try validateContinuousVignetteControl()
         try validateHardAndFallbackUiControl()
+        try validateMixedSeededUiControl()
         try validateUiControlDilationChannels()
         try validateTwoChannelPresentVisibility()
         try validateSpatialPrecomposedPresent()
@@ -1707,7 +1708,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 38, "HDR validation check count changed unexpectedly: \(passCount), expected 38")
+        try require(passCount == 39, "HDR validation check count changed unexpectedly: \(passCount), expected 39")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -2605,6 +2606,44 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS hard HUD/invert coverage and unseeded RGB fallback remain isolated in R")
+    }
+
+    private func validateMixedSeededUiControl() throws {
+        let baseline: UInt8 = 200
+        let dimmed: UInt8 = 100
+        let scene = try gpu.makeRgba8Texture(
+            width: 2,
+            height: 2,
+            bytes: SIMD4<UInt8>(baseline, baseline, baseline, 255)
+        )
+        let final = try gpu.makeRgba8Texture(
+            width: 2,
+            height: 2,
+            pixels: [
+                // Covered RGB is deliberately unrelated to the seeded backdrop.
+                // Its alpha is the complete hard-coverage contract, so it must
+                // not be reclassified by the alpha-zero RGB path.
+                SIMD4<UInt8>(20, 250, 40, 128),
+                SIMD4<UInt8>(baseline, baseline, baseline, 0),
+                SIMD4<UInt8>(dimmed, dimmed, dimmed, 0),
+                SIMD4<UInt8>(baseline, baseline, baseline, 0)
+            ]
+        )
+        let control = try gpu.renderUiControl(
+            finalFrame: final,
+            sceneFrame: scene,
+            sourceEncoding: 0,
+            seededUiAvailable: true
+        )
+        try require(control.count == 1, "Unexpected mixed seeded UI control dimensions")
+        let expectedDimming = Int(((1.0 - srgbToLinear(Float(dimmed) / 255.0)
+            / srgbToLinear(Float(baseline) / 255.0)) * 255.0).rounded())
+        try require(
+            control[0].x == 128 && abs(Int(control[0].y) - expectedDimming) <= 2,
+            "Mixed covered/alpha-zero UI control mismatch: \(control), expected dimming \(expectedDimming)"
+        )
+        passCount += 1
+        print("PASS mixed 2x2 seeded UI keeps alpha coverage separate from alpha-zero RGB classification")
     }
 
     private func validateUiControlDilationChannels() throws {

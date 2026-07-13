@@ -1357,17 +1357,7 @@ private func hdrEffectsMslSource() -> String {
         for (uint xIndex = 0u; xIndex < 2u; ++xIndex) {
           uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
           float4 finalValue = finalFrame.read(coordinate);
-          float2 sceneUv = (float2(coordinate) + 0.5) / float2(sourceSize);
-          float3 sceneValue = uniforms.scaleScene != 0u
-            ? sceneFrame.sample(smp, sceneUv).rgb
-            : sceneFrame.read(coordinate).rgb;
           if (uniforms.seededUiAvailable != 0u) {
-            float3 expectedBackdrop = metallum_hdr_quantize_unorm8(
-              metallum_hdr_sdr_encoded_appearance(
-                sceneValue,
-                uniforms.sourceEncoding
-              )
-            );
             float alphaCoverage = clamp(finalValue.a, 0.0, 1.0);
             hardCoverage = max(hardCoverage, alphaCoverage);
 
@@ -1376,6 +1366,16 @@ private func hdrEffectsMslSource() -> String {
             // multiplicative darkening (the vanilla vignette) attenuates the
             // HDR delta continuously, while invert/additive changes mask it.
             if (alphaCoverage == 0.0) {
+              float2 sceneUv = (float2(coordinate) + 0.5) / float2(sourceSize);
+              float3 sceneValue = uniforms.scaleScene != 0u
+                ? sceneFrame.sample(smp, sceneUv).rgb
+                : sceneFrame.read(coordinate).rgb;
+              float3 expectedBackdrop = metallum_hdr_quantize_unorm8(
+                metallum_hdr_sdr_encoded_appearance(
+                  sceneValue,
+                  uniforms.sourceEncoding
+                )
+              );
               float3 finalEncoded = clamp(finalValue.rgb, 0.0, 1.0);
               float3 delta = finalEncoded - expectedBackdrop;
               float difference = max(abs(delta.r), max(abs(delta.g), abs(delta.b)));
@@ -1398,6 +1398,10 @@ private func hdrEffectsMslSource() -> String {
               }
             }
           } else {
+            float2 sceneUv = (float2(coordinate) + 0.5) / float2(sourceSize);
+            float3 sceneValue = uniforms.scaleScene != 0u
+              ? sceneFrame.sample(smp, sceneUv).rgb
+              : sceneFrame.read(coordinate).rgb;
             float3 delta = abs(finalValue.rgb - sceneValue);
             float difference = max(delta.r, max(delta.g, delta.b));
             hardCoverage = max(
