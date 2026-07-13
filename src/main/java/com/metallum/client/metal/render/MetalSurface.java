@@ -24,6 +24,7 @@ import java.util.Set;
 
 @Environment(EnvType.CLIENT)
 final class MetalSurface implements GpuSurfaceBackend {
+    static final long EDR_REFRESH_INTERVAL_NANOS = 100_000_000L;
     private static final Set<GpuSurface.PresentMode> SUPPORTED_PRESENT_MODES = EnumSet.of(GpuSurface.PresentMode.FIFO, GpuSurface.PresentMode.MAILBOX);
     private final MetalDevice device;
     private final MemorySegment metalLayer;
@@ -31,6 +32,7 @@ final class MetalSurface implements GpuSurfaceBackend {
     private MetalCommandEncoder pendingPresentEncoder;
     private EdrCapabilities edrCapabilities = EdrCapabilities.SDR;
     private HdrOutputMode outputMode = HdrOutputMode.SDR;
+    private long lastEdrRefreshNanos = Long.MIN_VALUE;
     private float lastRequestedContentsHeadroom = Float.NaN;
     private boolean monitorFailureLogged;
     private boolean contentsHeadroomFailureLogged;
@@ -52,7 +54,7 @@ final class MetalSurface implements GpuSurfaceBackend {
 
         this.configuration = config;
         this.forcedOutputModeUntilReconfigure = null;
-        this.refreshEdrCapabilities();
+        this.refreshEdrCapabilities(true);
         HdrOutputMode desiredMode = this.device.availableHdrOutputMode(
                 this.device.hdrConfig().mode().resolve(this.edrCapabilities)
         );
@@ -145,7 +147,7 @@ final class MetalSurface implements GpuSurfaceBackend {
     }
 
     private void refreshOutputModeIfNeeded() {
-        this.refreshEdrCapabilities();
+        this.refreshEdrCapabilities(false);
         HdrOutputMode desiredMode = this.forcedOutputModeUntilReconfigure != null
                 ? this.forcedOutputModeUntilReconfigure
                 : this.device.availableHdrOutputMode(this.device.hdrConfig().mode().resolve(this.edrCapabilities));
@@ -168,7 +170,12 @@ final class MetalSurface implements GpuSurfaceBackend {
         Metallum.LOGGER.error("Failed to switch Metal output to {}; keeping {}", desiredMode, this.outputMode);
     }
 
-    private void refreshEdrCapabilities() {
+    private void refreshEdrCapabilities(final boolean force) {
+        long now = System.nanoTime();
+        if (!force && !shouldRefreshEdrCapabilities(this.lastEdrRefreshNanos, now)) {
+            return;
+        }
+        this.lastEdrRefreshNanos = now;
         try {
             this.edrCapabilities = this.device.queryEdrCapabilities();
         } catch (RuntimeException exception) {
@@ -178,6 +185,12 @@ final class MetalSurface implements GpuSurfaceBackend {
                 Metallum.LOGGER.warn("Failed to query EDR display capabilities; using SDR", exception);
             }
         }
+    }
+
+    static boolean shouldRefreshEdrCapabilities(final long lastRefreshNanos, final long nowNanos) {
+        return lastRefreshNanos == Long.MIN_VALUE
+                || nowNanos < lastRefreshNanos
+                || nowNanos - lastRefreshNanos >= EDR_REFRESH_INTERVAL_NANOS;
     }
 
     private boolean configureNative(final HdrOutputMode mode) {

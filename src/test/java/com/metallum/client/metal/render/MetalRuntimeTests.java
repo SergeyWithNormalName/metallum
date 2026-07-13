@@ -25,6 +25,7 @@ public final class MetalRuntimeTests {
         testDynamicBackingPoolBoundsAndReuse();
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
+        testEdrRefreshThrottle();
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -154,6 +155,18 @@ public final class MetalRuntimeTests {
                 MetalFence.timeoutMillis(Long.MAX_VALUE) == 9_223_372_036_855L,
                 "maximum timeout overflowed"
         );
+    }
+
+    private static void testEdrRefreshThrottle() {
+        long interval = MetalSurface.EDR_REFRESH_INTERVAL_NANOS;
+        require(MetalSurface.shouldRefreshEdrCapabilities(Long.MIN_VALUE, 5L),
+                "initial EDR capability query was throttled");
+        require(!MetalSurface.shouldRefreshEdrCapabilities(1_000L, 1_000L + interval - 1L),
+                "EDR capability query ignored the refresh interval");
+        require(MetalSurface.shouldRefreshEdrCapabilities(1_000L, 1_000L + interval),
+                "EDR capability query did not run at the refresh boundary");
+        require(MetalSurface.shouldRefreshEdrCapabilities(10_000L, 9_000L),
+                "EDR capability query did not recover from a backwards clock sample");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {
