@@ -26,6 +26,7 @@ public final class MetalRuntimeTests {
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
+        testGpuTimingDetailGate();
         testGpuTimingStageAbi();
     }
 
@@ -192,6 +193,19 @@ public final class MetalRuntimeTests {
         }
         require(MetalGpuTimingStage.NONE.nativeId() == -1,
                 "GPU timing NONE sentinel does not match the native ABI");
+    }
+
+    private static void testGpuTimingDetailGate() {
+        require(!MetalGpuTiming.detailEnabled(null, null),
+                "GPU timing detail was enabled without timing flags");
+        require(!MetalGpuTiming.detailEnabled("1", null),
+                "production-equivalent GPU timing unexpectedly enabled stage markers");
+        require(!MetalGpuTiming.detailEnabled(null, "1"),
+                "GPU timing detail flag bypassed the primary timing gate");
+        require(!MetalGpuTiming.detailEnabled("0", "1"),
+                "disabled GPU timing unexpectedly enabled stage markers");
+        require(MetalGpuTiming.detailEnabled("1", "1"),
+                "explicit GPU timing detail did not enable stage markers");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {
