@@ -43,12 +43,19 @@ public final class MetalDevice implements GpuDeviceBackend {
     record SemanticAttachment(MemorySegment texture, boolean clear) {
     }
 
-    record HdrSceneInputs(MemorySegment scene, MemorySegment depth, MemorySegment semantic, MemorySegment ui) {
+    record HdrSceneInputs(
+            MemorySegment scene,
+            MemorySegment depth,
+            MemorySegment semantic,
+            MemorySegment ui,
+            boolean spatialHdrPrecomposed
+    ) {
         private static final HdrSceneInputs NONE = new HdrSceneInputs(
                 MemorySegment.NULL,
                 MemorySegment.NULL,
                 MemorySegment.NULL,
-                MemorySegment.NULL
+                MemorySegment.NULL,
+                false
         );
     }
 
@@ -74,12 +81,18 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private MetalGpuTexture hdrSceneDepthSnapshot;
     @Nullable
+    private MetalGpuTexture hdrDirectSceneSource;
+    @Nullable
     private MetalGpuTexture hdrSemanticMask;
+    private MemorySegment hdrSceneColorHandle = MemorySegment.NULL;
     private MemorySegment hdrSceneDepthHandle = MemorySegment.NULL;
+    private int hdrSceneWidth;
+    private int hdrSceneHeight;
     private boolean hdrSemanticSceneAvailable;
     private long hdrSemanticMaskClearedSubmitIndex = Long.MIN_VALUE;
     private long hdrSemanticMaskTouchedSubmitIndex = Long.MIN_VALUE;
     private boolean hdrEnhancedActive;
+    private float hdrCurrentHeadroom = 1.0f;
     private boolean hdrEnhancementUnavailable;
     private boolean hdrEnhancementActivationLogged;
     private boolean hdrSceneAvailable;
@@ -89,6 +102,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean hdrUiSuppressSceneEnhancement;
     private boolean spatialSceneAvailable;
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
+    private long spatialHdrPrecomposedSubmitIndex = Long.MIN_VALUE;
+    private boolean spatialHdrPrecomposeLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -266,6 +281,9 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneDepthSnapshot.close();
             this.hdrSceneDepthSnapshot = null;
         }
+        this.hdrDirectSceneSource = null;
+        this.hdrSceneColorHandle = MemorySegment.NULL;
+        this.hdrSceneDepthHandle = MemorySegment.NULL;
         if (this.hdrSemanticMask != null) {
             this.hdrSemanticMask.close();
             this.hdrSemanticMask = null;
@@ -335,6 +353,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void setHdrOutputMode(final HdrOutputMode outputMode, final float currentHeadroom) {
+        this.hdrCurrentHeadroom = Float.isFinite(currentHeadroom)
+                ? Math.clamp(currentHeadroom, 1.0f, HdrConfig.OUTPUT_HEADROOM)
+                : 1.0f;
         this.hdrEnhancedActive = !this.hdrEnhancementUnavailable
                 && outputMode == HdrOutputMode.ENHANCED
                 && currentHeadroom > 1.001f
@@ -347,6 +368,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (!this.hdrEnhancedActive) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
+            this.hdrDirectSceneSource = null;
+            this.hdrSceneColorHandle = MemorySegment.NULL;
         }
     }
 
@@ -361,6 +384,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrEnhancedActive = false;
         this.hdrSceneAvailable = false;
         this.hdrSemanticSceneAvailable = false;
+        this.hdrDirectSceneSource = null;
+        this.hdrSceneColorHandle = MemorySegment.NULL;
         this.hdrUiSuppressSceneEnhancement = false;
     }
 
@@ -405,6 +430,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (!this.hdrEnhancedActive || source.isClosed() || depth == null || depth.isClosed()) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
+            this.hdrDirectSceneSource = null;
+            this.hdrSceneColorHandle = MemorySegment.NULL;
             return;
         }
 
@@ -413,32 +440,37 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (depth.getWidth(0) != width || depth.getHeight(0) != height) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
+            this.hdrDirectSceneSource = null;
+            this.hdrSceneColorHandle = MemorySegment.NULL;
             return;
         }
-        if (this.hdrSceneSnapshot == null
-                || this.hdrSceneSnapshot.isClosed()
-                || this.hdrSceneSnapshot.getWidth(0) != width
-                || this.hdrSceneSnapshot.getHeight(0) != height
-                || this.hdrSceneSnapshot.getFormat() != source.getFormat()) {
-            if (this.hdrSceneSnapshot != null) {
-                this.hdrSceneSnapshot.close();
-            }
-            try {
-                this.hdrSceneSnapshot = new MetalGpuTexture(
-                        this,
-                        GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                        "Metallum HDR scene snapshot",
-                        source.getFormat(),
-                        width,
-                        height,
-                        1,
-                        1
-                );
-                com.metallum.Metallum.LOGGER.info("Pre-GUI scene capture format: " + source.getFormat());
-            } catch (RuntimeException exception) {
-                this.disableHdrEnhancement();
-                Metallum.LOGGER.error("Failed to allocate the HDR scene snapshot; continuing with EDR output", exception);
-                return;
+        boolean directSpatialScene = MetalFxSpatialScaling.isActive();
+        if (!directSpatialScene) {
+            if (this.hdrSceneSnapshot == null
+                    || this.hdrSceneSnapshot.isClosed()
+                    || this.hdrSceneSnapshot.getWidth(0) != width
+                    || this.hdrSceneSnapshot.getHeight(0) != height
+                    || this.hdrSceneSnapshot.getFormat() != source.getFormat()) {
+                if (this.hdrSceneSnapshot != null) {
+                    this.hdrSceneSnapshot.close();
+                }
+                try {
+                    this.hdrSceneSnapshot = new MetalGpuTexture(
+                            this,
+                            GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+                            "Metallum HDR scene snapshot",
+                            source.getFormat(),
+                            width,
+                            height,
+                            1,
+                            1
+                    );
+                    com.metallum.Metallum.LOGGER.info("Pre-GUI scene capture format: " + source.getFormat());
+                } catch (RuntimeException exception) {
+                    this.disableHdrEnhancement();
+                    Metallum.LOGGER.error("Failed to allocate the HDR scene snapshot; continuing with EDR output", exception);
+                    return;
+                }
             }
         }
 
@@ -468,9 +500,22 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
 
-        this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
+        if (directSpatialScene) {
+            if (this.hdrSceneSnapshot != null) {
+                this.hdrSceneSnapshot.close();
+                this.hdrSceneSnapshot = null;
+            }
+            this.hdrDirectSceneSource = source;
+            this.hdrSceneColorHandle = source.nativeHandle();
+        } else {
+            this.hdrDirectSceneSource = null;
+            this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
+            this.hdrSceneColorHandle = this.hdrSceneSnapshot.nativeHandle();
+        }
         this.commandEncoder.copyTextureToTexture(depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height);
         this.hdrSceneAvailable = true;
+        this.hdrSceneWidth = width;
+        this.hdrSceneHeight = height;
         this.hdrSceneSubmitIndex = this.commandEncoder.currentSubmitIndex();
         this.hdrUiHandle = MemorySegment.NULL;
         this.hdrUiSubmitIndex = Long.MIN_VALUE;
@@ -488,9 +533,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.spatialSceneAvailable
                 && this.spatialSceneSubmitIndex == this.commandEncoder.currentSubmitIndex();
         boolean hdrUi = this.hdrEnhancedActive
-                && this.hdrSceneSnapshot != null
-                && ui.getWidth(0) == this.hdrSceneSnapshot.getWidth(0)
-                && ui.getHeight(0) == this.hdrSceneSnapshot.getHeight(0);
+                && this.hdrSceneAvailable
+                && ui.getWidth(0) == this.hdrSceneWidth
+                && ui.getHeight(0) == this.hdrSceneHeight;
         if (ui.isClosed() || ui.getFormat() != GpuFormat.RGBA8_UNORM || (!spatialUi && !hdrUi)) {
             return;
         }
@@ -504,7 +549,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MetalGpuTexture destination
     ) {
         boolean spatial = MetalFxSpatialScaling.isActive();
-        return this.isHdrSceneReadyForUi(source)
+        boolean compatible = this.isHdrSceneReadyForUi(source)
                 && !destination.isClosed()
                 && source != destination
                 && destination.getFormat() == GpuFormat.RGBA8_UNORM
@@ -512,8 +557,67 @@ public final class MetalDevice implements GpuDeviceBackend {
                         ? source.getWidth(0) <= destination.getWidth(0)
                             && source.getHeight(0) <= destination.getHeight(0)
                         : source.getWidth(0) == destination.getWidth(0)
-                            && source.getHeight(0) == destination.getHeight(0))
-                && this.commandEncoder.encodeHdrUiBackdrop(source, destination);
+                            && source.getHeight(0) == destination.getHeight(0));
+        if (!compatible) {
+            return false;
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        boolean precomposeHdr = spatial
+                && this.hdrEnhancedActive
+                && this.hdrSceneAvailable
+                && this.hdrSceneSubmitIndex == submitIndex
+                && this.hdrDirectSceneSource == source
+                && !this.hdrConfig.diagnosticPattern()
+                && !MetalNativeBridge.isNullHandle(this.hdrSceneDepthHandle);
+        MemorySegment semanticHandle = precomposeHdr
+                && this.hdrSemanticSceneAvailable
+                && this.hdrSemanticMask != null
+                ? this.hdrSemanticMask.nativeHandle()
+                : MemorySegment.NULL;
+        int result = this.commandEncoder.encodeHdrUiBackdrop(
+                source,
+                destination,
+                precomposeHdr ? this.hdrSceneDepthHandle : MemorySegment.NULL,
+                semanticHandle,
+                precomposeHdr,
+                this.hdrCurrentHeadroom,
+                this.hdrConfig
+        );
+        this.spatialHdrPrecomposedSubmitIndex = result == 2 ? submitIndex : Long.MIN_VALUE;
+        if (result == 2 && !this.spatialHdrPrecomposeLogged) {
+            this.spatialHdrPrecomposeLogged = true;
+            Metallum.LOGGER.info(
+                    "MetalFX HDR fast path is active: low-resolution HDR precompose, spatial scale, full-resolution UI composite"
+            );
+        }
+        return result > 0;
+    }
+
+    boolean isSpatialHdrPrecomposedForCurrentSubmit() {
+        return this.spatialHdrPrecomposedSubmitIndex == this.commandEncoder.currentSubmitIndex();
+    }
+
+    boolean prepareSpatialScreenshot(
+            final MetalGpuTexture rawScene,
+            final MetalGpuTexture ui,
+            final MetalGpuTexture destination
+    ) {
+        return MetalFxSpatialScaling.isActive()
+                && this.hdrEnhancedActive
+                && !rawScene.isClosed()
+                && !ui.isClosed()
+                && !destination.isClosed()
+                && rawScene.getFormat() == GpuFormat.RGBA16_FLOAT
+                && ui.getFormat() == GpuFormat.RGBA8_UNORM
+                && destination.getFormat() == GpuFormat.RGBA8_UNORM
+                && ui.getWidth(0) == destination.getWidth(0)
+                && ui.getHeight(0) == destination.getHeight(0)
+                && this.commandEncoder.encodeSpatialScreenshot(
+                        rawScene,
+                        ui,
+                        destination,
+                        this.hdrCurrentHeadroom
+                );
     }
 
     boolean isHdrSceneReadyForUi(final MetalGpuTexture source) {
@@ -524,11 +628,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean hdrReady = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
-                && this.hdrSceneSnapshot != null
-                && !this.hdrSceneSnapshot.isClosed()
+                && !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle)
+                && (this.hdrDirectSceneSource == null || !this.hdrDirectSceneSource.isClosed())
                 && !source.isClosed()
-                && source.getWidth(0) == this.hdrSceneSnapshot.getWidth(0)
-                && source.getHeight(0) == this.hdrSceneSnapshot.getHeight(0);
+                && source.getWidth(0) == this.hdrSceneWidth
+                && source.getHeight(0) == this.hdrSceneHeight;
         return spatialReady || hdrReady;
     }
 
@@ -540,8 +644,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean sceneValid = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
-                && this.hdrSceneSnapshot != null
-                && !this.hdrSceneSnapshot.isClosed()
+                && !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle)
+                && (this.hdrDirectSceneSource == null
+                    || (!this.hdrDirectSceneSource.isClosed() && MetalFxSpatialScaling.isActive()))
                 && !(this.hdrUiSubmitIndex == submitIndex && this.hdrUiSuppressSceneEnhancement);
         if (!sceneValid) {
             return MetalNativeBridge.isNullHandle(uiHandle)
@@ -550,7 +655,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                             MemorySegment.NULL,
                             MemorySegment.NULL,
                             MemorySegment.NULL,
-                            uiHandle
+                            uiHandle,
+                            false
                     );
         }
         MemorySegment semanticHandle = this.hdrSemanticSceneAvailable
@@ -558,10 +664,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                 ? this.hdrSemanticMask.nativeHandle()
                 : MemorySegment.NULL;
         return new HdrSceneInputs(
-                this.hdrSceneSnapshot.nativeHandle(),
+                this.hdrSceneColorHandle,
                 this.hdrSceneDepthHandle,
                 semanticHandle,
-                uiHandle
+                uiHandle,
+                this.spatialHdrPrecomposedSubmitIndex == submitIndex
+                        && !MetalNativeBridge.isNullHandle(uiHandle)
         );
     }
 

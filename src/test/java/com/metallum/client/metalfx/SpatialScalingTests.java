@@ -36,8 +36,8 @@ public final class SpatialScalingTests {
                 3024,
                 1964
         );
-        require(quality.renderWidth() == 2268 && quality.renderHeight() == 1473, "quality dimensions");
-        require(Math.abs(quality.actualPixelScale() - 0.5625f) < 0.0001f, "quality pixel workload");
+        require(quality.renderWidth() == 2016 && quality.renderHeight() == 1309, "quality dimensions");
+        require(Math.abs(quality.actualPixelScale() - 0.4443f) < 0.0001f, "quality pixel workload");
 
         MetalFxSpatialScaling.Dimensions performance = MetalFxSpatialScaling.dimensions(
                 SpatialScalingMode.PERFORMANCE,

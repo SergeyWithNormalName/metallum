@@ -94,9 +94,15 @@ private typealias NativeBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
     UnsafeRawPointer?, // sourceTexture
     UnsafeRawPointer?, // destinationTexture
+    UnsafeRawPointer?, // sceneDepthTexture
+    UnsafeRawPointer?, // semanticTexture
     UnsafeRawPointer?, // globalFence
     Int32,             // sourceEncoding
-    Int32              // spatialScalingEnabled
+    Int32,             // spatialScalingEnabled
+    Int32,             // hdrPrecomposeEnabled
+    Float,             // currentHeadroom
+    Float,             // hdrStrength
+    Float              // bloomStrength
 ) -> Int32
 private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
@@ -107,12 +113,22 @@ private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // semanticTexture
     UnsafeRawPointer?, // uiTexture
     UnsafeRawPointer?, // globalFence
+    Int32,             // spatialHdrPrecomposed
     Int32,             // outputMode
     Int32,             // sourceEncoding
     Int32,             // diagnosticPattern
     Float,             // currentHeadroom
     Float,             // hdrStrength
     Float              // bloomStrength
+) -> Int32
+private typealias NativeSpatialScreenshotFunction = @convention(c) (
+    UnsafeRawPointer?, // commandBuffer
+    UnsafeRawPointer?, // rawSceneTexture
+    UnsafeRawPointer?, // uiTexture
+    UnsafeRawPointer?, // destinationTexture
+    UnsafeRawPointer?, // globalFence
+    Int32,             // sourceEncoding
+    Float              // currentHeadroom
 ) -> Int32
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -359,6 +375,9 @@ private final class GpuHarness {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let presentPipeline: MTLRenderPipelineState
+    private let worldPresentPipeline: MTLRenderPipelineState
+    private let spatialWorldPipeline: MTLRenderPipelineState
+    private let spatialPresentPipeline: MTLRenderPipelineState
     private let extractPipeline: MTLRenderPipelineState
     private let blurPipeline: MTLRenderPipelineState
     private let legacyBlurPipeline: MTLRenderPipelineState
@@ -387,7 +406,10 @@ private final class GpuHarness {
 
         guard
             let presentVertex = presentLibrary.makeFunction(name: "metallum_present_vs"),
+            let offscreenVertex = presentLibrary.makeFunction(name: "metallum_offscreen_vs"),
             let presentFragment = presentLibrary.makeFunction(name: "metallum_present_fs"),
+            let spatialWorldFragment = presentLibrary.makeFunction(name: "metallum_spatial_world_fs"),
+            let spatialPresentFragment = presentLibrary.makeFunction(name: "metallum_spatial_present_fs"),
             let headroomLimiterTest = presentLibrary.makeFunction(name: "metallum_test_headroom_limiter")
         else {
             throw ValidationFailure.message("Present shader functions are missing")
@@ -399,6 +421,33 @@ private final class GpuHarness {
         presentDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         presentDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.presentPipeline = try device.makeRenderPipelineState(descriptor: presentDescriptor)
+        let worldPresentDescriptor = MTLRenderPipelineDescriptor()
+        worldPresentDescriptor.label = "Metallum spatial HDR world validation present"
+        worldPresentDescriptor.vertexFunction = offscreenVertex
+        worldPresentDescriptor.fragmentFunction = presentFragment
+        worldPresentDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        worldPresentDescriptor.colorAttachments[0].isBlendingEnabled = false
+        self.worldPresentPipeline = try device.makeRenderPipelineState(
+            descriptor: worldPresentDescriptor
+        )
+        let spatialWorldDescriptor = MTLRenderPipelineDescriptor()
+        spatialWorldDescriptor.label = "Metallum specialized spatial HDR world validation"
+        spatialWorldDescriptor.vertexFunction = offscreenVertex
+        spatialWorldDescriptor.fragmentFunction = spatialWorldFragment
+        spatialWorldDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        spatialWorldDescriptor.colorAttachments[0].isBlendingEnabled = false
+        self.spatialWorldPipeline = try device.makeRenderPipelineState(
+            descriptor: spatialWorldDescriptor
+        )
+        let spatialPresentDescriptor = MTLRenderPipelineDescriptor()
+        spatialPresentDescriptor.label = "Metallum spatial HDR value validation present"
+        spatialPresentDescriptor.vertexFunction = presentVertex
+        spatialPresentDescriptor.fragmentFunction = spatialPresentFragment
+        spatialPresentDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        spatialPresentDescriptor.colorAttachments[0].isBlendingEnabled = false
+        self.spatialPresentPipeline = try device.makeRenderPipelineState(
+            descriptor: spatialPresentDescriptor
+        )
         self.headroomLimiterTestPipeline = try device.makeComputePipelineState(
             function: headroomLimiterTest
         )
@@ -1237,7 +1286,8 @@ private final class GpuHarness {
         adaptiveState: HdrAdaptiveState = defaultAdaptiveState(),
         semanticFrame: MTLTexture? = nil,
         sceneDepthFrame: MTLTexture? = nil,
-        readCoordinate: SIMD2<Int>? = nil
+        readCoordinate: SIMD2<Int>? = nil,
+        offscreen: Bool = false
     ) throws -> SIMD4<Float> {
         let output = try makePrivateRgba16FloatTexture(width: finalFrame.width, height: finalFrame.height)
         let boundDepth: MTLTexture
@@ -1277,7 +1327,7 @@ private final class GpuHarness {
             znear: 0,
             zfar: 1
         ))
-        encoder.setRenderPipelineState(presentPipeline)
+        encoder.setRenderPipelineState(offscreen ? worldPresentPipeline : presentPipeline)
         encoder.setFragmentTexture(finalFrame, index: 0)
         encoder.setFragmentTexture(sceneFrame, index: 1)
         encoder.setFragmentTexture(emissionFrame, index: 2)
@@ -1300,6 +1350,119 @@ private final class GpuHarness {
         try complete(commandBuffer, label: "HDR present")
         let coordinate = readCoordinate ?? SIMD2<Int>(output.width / 2, output.height / 2)
         return try readRgba16Float(texture: output, x: coordinate.x, y: coordinate.y)
+    }
+
+    func renderSpatialPresent(
+        uiFrame: MTLTexture,
+        spatialHdrFrame: MTLTexture,
+        sourceEncoding: UInt32,
+        currentHeadroom: Float
+    ) throws -> SIMD4<Float> {
+        let output = try makePrivateRgba16FloatTexture(width: uiFrame.width, height: uiFrame.height)
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Spatial present command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Spatial present encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(output.width),
+            height: Double(output.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(spatialPresentPipeline)
+        encoder.setFragmentTexture(uiFrame, index: 0)
+        encoder.setFragmentTexture(spatialHdrFrame, index: 1)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.setFragmentSamplerState(linearSampler, index: 1)
+        var uniforms = PresentUniforms(
+            mode: 2,
+            sourceEncoding: sourceEncoding,
+            diagnosticPattern: 0,
+            currentHeadroom: currentHeadroom,
+            hdrStrength: 0,
+            bloomStrength: 0,
+            sceneAvailable: 1,
+            uiAvailable: 1,
+            semanticAvailable: 0
+        )
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<PresentUniforms>.stride,
+            index: 0
+        )
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "spatial HDR present")
+        return try readRgba16Float(texture: output)
+    }
+
+    func renderSpatialWorld(
+        sceneFrame: MTLTexture,
+        emissionFrame: MTLTexture,
+        bloomFrame: MTLTexture,
+        semanticFrame: MTLTexture,
+        sceneDepthFrame: MTLTexture,
+        uniforms: PresentUniforms,
+        adaptiveState: HdrAdaptiveState
+    ) throws -> SIMD4<Float> {
+        let output = try makePrivateRgba16FloatTexture(
+            width: sceneFrame.width,
+            height: sceneFrame.height
+        )
+        var mutableAdaptiveState = adaptiveState
+        let adaptiveBuffer = withUnsafeBytes(of: &mutableAdaptiveState) { bytes in
+            device.makeBuffer(
+                bytes: bytes.baseAddress!,
+                length: bytes.count,
+                options: .storageModeShared
+            )
+        }
+        guard let commandBuffer = queue.makeCommandBuffer(), let adaptiveBuffer else {
+            throw ValidationFailure.message("Spatial world command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Spatial world encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(output.width),
+            height: Double(output.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(spatialWorldPipeline)
+        encoder.setFragmentTexture(sceneFrame, index: 0)
+        encoder.setFragmentTexture(emissionFrame, index: 1)
+        encoder.setFragmentTexture(bloomFrame, index: 2)
+        encoder.setFragmentTexture(semanticFrame, index: 3)
+        encoder.setFragmentTexture(sceneDepthFrame, index: 4)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.setFragmentSamplerState(linearSampler, index: 1)
+        var mutableUniforms = uniforms
+        encoder.setFragmentBytes(
+            &mutableUniforms,
+            length: MemoryLayout<PresentUniforms>.stride,
+            index: 0
+        )
+        encoder.setFragmentBuffer(adaptiveBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "specialized spatial HDR world")
+        return try readRgba16Float(texture: output)
     }
 
     func compareHeadroomLimiter(
@@ -1476,6 +1639,7 @@ private final class ValueValidation {
         try validateHardAndFallbackUiControl()
         try validateUiControlDilationChannels()
         try validateTwoChannelPresentVisibility()
+        try validateSpatialPrecomposedPresent()
         try validateAnalyticHeadroomLimiter()
         try validateUniformMidgrayHistogram()
         try validateOutdoorSkyReconstruction()
@@ -1483,7 +1647,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 34, "HDR validation check count changed unexpectedly: \(passCount), expected 34")
+        try require(passCount == 36, "HDR validation check count changed unexpectedly: \(passCount), expected 36")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -2455,6 +2619,216 @@ private final class ValueValidation {
         print(String(format: "PASS present multiplies R/G UI visibility: %.4f", measuredVisibility))
     }
 
+    private func validateSpatialPrecomposedPresent() throws {
+        let parityScene = try gpu.makeRgba8Texture(
+            bytes: SIMD4<UInt8>(204, 179, 128, 255)
+        )
+        let parityEmission = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(0.08, 0.04, 0.02, 0.30)
+        )
+        let parityBloom = try gpu.makeRgba16FloatTexture(
+            width: 1,
+            height: 1,
+            value: SIMD4<Float>(0.06, 0.03, 0.01, 0)
+        )
+        let paritySemantic = try gpu.makeSemanticTexture(markerDepth: 0.5)
+        let parityDepth = try gpu.makeDepthTexture(clearDepth: 0.5)
+        let parityMask = try gpu.makeRg8Texture(bytes: SIMD2<UInt8>(0, 0))
+        let parityUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(0, 0, 0, 0))
+        var parityUniforms = baseUniforms(semanticAvailable: true)
+        parityUniforms.bloomStrength = 0.22
+        let parityAdaptive = defaultAdaptiveState()
+        let generalWorld = try gpu.renderPresent(
+            finalFrame: parityScene,
+            sceneFrame: parityScene,
+            emissionFrame: parityEmission,
+            bloomFrame: parityBloom,
+            uiMaskFrame: parityMask,
+            uiFrame: parityUi,
+            uniforms: parityUniforms,
+            adaptiveState: parityAdaptive,
+            semanticFrame: paritySemantic,
+            sceneDepthFrame: parityDepth,
+            offscreen: true
+        )
+        let specializedWorld = try gpu.renderSpatialWorld(
+            sceneFrame: parityScene,
+            emissionFrame: parityEmission,
+            bloomFrame: parityBloom,
+            semanticFrame: paritySemantic,
+            sceneDepthFrame: parityDepth,
+            uniforms: parityUniforms,
+            adaptiveState: parityAdaptive
+        )
+        try require(
+            abs(generalWorld.x - specializedWorld.x) < 0.003
+                && abs(generalWorld.y - specializedWorld.y) < 0.003
+                && abs(generalWorld.z - specializedWorld.z) < 0.003,
+            "Specialized spatial world diverged from general HDR present: general \(rgbaDescription(generalWorld)), specialized \(rgbaDescription(specializedWorld))"
+        )
+
+        let verticalScene = try gpu.makeRgba16FloatTexture(
+            width: 2,
+            height: 2,
+            pixels: [
+                SIMD4<Float>(0.1, 0.1, 0.1, 1),
+                SIMD4<Float>(0.1, 0.1, 0.1, 1),
+                SIMD4<Float>(0.8, 0.8, 0.8, 1),
+                SIMD4<Float>(0.8, 0.8, 0.8, 1)
+            ]
+        )
+        let orientationAux = try auxiliaries()
+        let orientationUniforms = baseUniforms(
+            mode: 1,
+            sourceEncoding: 2,
+            headroom: 4,
+            sceneAvailable: false
+        )
+        let worldTop = try gpu.renderPresent(
+            finalFrame: verticalScene,
+            sceneFrame: verticalScene,
+            emissionFrame: orientationAux.emission,
+            bloomFrame: orientationAux.bloom,
+            uiMaskFrame: orientationAux.uiMask,
+            uiFrame: orientationAux.transparentUi,
+            uniforms: orientationUniforms,
+            readCoordinate: SIMD2<Int>(0, 0),
+            offscreen: true
+        )
+        let worldBottom = try gpu.renderPresent(
+            finalFrame: verticalScene,
+            sceneFrame: verticalScene,
+            emissionFrame: orientationAux.emission,
+            bloomFrame: orientationAux.bloom,
+            uiMaskFrame: orientationAux.uiMask,
+            uiFrame: orientationAux.transparentUi,
+            uniforms: orientationUniforms,
+            readCoordinate: SIMD2<Int>(0, 1),
+            offscreen: true
+        )
+        try require(
+            abs(worldTop.x - 0.1) < 0.002 && abs(worldBottom.x - 0.8) < 0.002,
+            "Spatial world precompose flipped vertically: top \(rgbaDescription(worldTop)), bottom \(rgbaDescription(worldBottom))"
+        )
+
+        let spatialHdr = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(1.5, 1.25, 1.0, 1)
+        )
+        // The MetalFX HDR seed clamps to SDR white in the GUI target. The
+        // fast path must reconstruct that exact quantized seed before adding
+        // the HDR delta, otherwise untouched pixels acquire a seam.
+        let seededUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 0))
+        let untouched = try gpu.renderSpatialPresent(
+            uiFrame: seededUi,
+            spatialHdrFrame: spatialHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        try require(
+            abs(untouched.x - 1.5) < 0.002
+                && abs(untouched.y - 1.25) < 0.002
+                && abs(untouched.z - 1.0) < 0.002,
+            "Spatial precomposed present changed an untouched pixel: \(rgbaDescription(untouched))"
+        )
+
+        let opaqueUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(64, 96, 128, 255))
+        let hiddenScene = try gpu.renderSpatialPresent(
+            uiFrame: opaqueUi,
+            spatialHdrFrame: spatialHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        let expectedUi = SIMD3<Float>(
+            srgbToLinear(Float(64) / 255.0),
+            srgbToLinear(Float(96) / 255.0),
+            srgbToLinear(Float(128) / 255.0)
+        )
+        try require(
+            abs(hiddenScene.x - expectedUi.x) < 0.002
+                && abs(hiddenScene.y - expectedUi.y) < 0.002
+                && abs(hiddenScene.z - expectedUi.z) < 0.002,
+            "Spatial precomposed present leaked HDR through opaque UI: \(rgbaDescription(hiddenScene))"
+        )
+
+        let halfUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(128, 128, 128, 128))
+        let halfCovered = try gpu.renderSpatialPresent(
+            uiFrame: halfUi,
+            spatialHdrFrame: spatialHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        let halfBase = srgbToLinear(Float(128) / 255.0)
+        let halfVisibility = 1.0 - Float(128) / 255.0
+        let expectedHalfRed = halfBase + halfVisibility * (1.5 - 1.0)
+        try require(
+            abs(halfCovered.x - expectedHalfRed) < 0.003,
+            "Spatial precompose did not preserve partial alpha coverage: \(rgbaDescription(halfCovered))"
+        )
+
+        let vignetteUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(128, 128, 128, 0))
+        let vignette = try gpu.renderSpatialPresent(
+            uiFrame: vignetteUi,
+            spatialHdrFrame: spatialHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        let expectedVignetteRed = halfBase * 1.5
+        try require(
+            abs(vignette.x - expectedVignetteRed) < 0.003,
+            "Spatial precompose vignette transmission is incorrect: \(rgbaDescription(vignette))"
+        )
+
+        let boundedHdr = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        )
+        let invertUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 0))
+        let inverted = try gpu.renderSpatialPresent(
+            uiFrame: invertUi,
+            spatialHdrFrame: boundedHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        try require(
+            abs(inverted.x - 1.0) < 0.002,
+            "Spatial precompose leaked the scene through alpha-zero invert: \(rgbaDescription(inverted))"
+        )
+
+        let ringingHdr = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(-0.1, -0.1, -0.1, 1)
+        )
+        let ringingUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(128, 128, 128, 128))
+        let ringingCovered = try gpu.renderSpatialPresent(
+            uiFrame: ringingUi,
+            spatialHdrFrame: ringingHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        try require(
+            abs(ringingCovered.x - halfBase) < 0.002,
+            "Negative MetalFX ringing darkened translucent UI: \(rgbaDescription(ringingCovered))"
+        )
+        let overshootHdr = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(5.0, 3.0, 1.0, 1)
+        )
+        let overshootUi = try gpu.makeRgba8Texture(bytes: SIMD4<UInt8>(255, 255, 255, 0))
+        let limitedOvershoot = try gpu.renderSpatialPresent(
+            uiFrame: overshootUi,
+            spatialHdrFrame: overshootHdr,
+            sourceEncoding: 2,
+            currentHeadroom: 4
+        )
+        try require(
+            abs(limitedOvershoot.x - 4.0) < 0.01
+                && abs(limitedOvershoot.y - 2.5) < 0.01
+                && abs(limitedOvershoot.z - 1.0) < 0.01,
+            "Spatial early-out changed hue while limiting MetalFX overshoot: \(rgbaDescription(limitedOvershoot))"
+        )
+        passCount += 1
+        print("PASS spatial precompose preserves orientation, alpha, vignette, and invert semantics")
+    }
+
     private func validateAnalyticHeadroomLimiter() throws {
         func peak(_ value: SIMD3<Float>) -> Float {
             max(value.x, max(value.y, value.z))
@@ -2933,6 +3307,7 @@ private final class ValueValidation {
             let configureLayerSymbol = dlsym(handle, "metallum_configure_layer"),
             let updateLayerHeadroomSymbol = dlsym(handle, "metallum_update_layer_contents_headroom"),
             let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
+            let spatialScreenshotSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeSpatialScreenshot"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
         else {
             throw ValidationFailure.message("Native HDR present symbols are missing")
@@ -2953,6 +3328,10 @@ private final class ValueValidation {
             to: NativeUpdateLayerContentsHeadroomFunction.self
         )
         let backdrop = unsafeBitCast(backdropSymbol, to: NativeBackdropFunction.self)
+        let spatialScreenshot = unsafeBitCast(
+            spatialScreenshotSymbol,
+            to: NativeSpatialScreenshotFunction.self
+        )
         let present = unsafeBitCast(presentSymbol, to: NativePresentFunction.self)
 
         let application = NSApplication.shared
@@ -3069,6 +3448,12 @@ private final class ValueValidation {
             objectPointer(extendedSource as AnyObject),
             objectPointer(extendedDestination as AnyObject),
             nil,
+            nil,
+            nil,
+            1,
+            0,
+            0,
+            1,
             1,
             0
         )
@@ -3099,7 +3484,13 @@ private final class ValueValidation {
             objectPointer(linearSource as AnyObject),
             objectPointer(linearDestination as AnyObject),
             nil,
+            nil,
+            nil,
             2,
+            0,
+            0,
+            1,
+            1,
             0
         )
         try require(linearStatus == 1, "Linear backdrop ABI returned \(linearStatus)")
@@ -3130,8 +3521,14 @@ private final class ValueValidation {
             objectPointer(scaledSource as AnyObject),
             objectPointer(scaledDestination as AnyObject),
             nil,
+            nil,
+            nil,
             2,
-            1
+            1,
+            0,
+            1,
+            1,
+            0
         )
         try require(scaledStatus == 1, "Spatial backdrop ABI returned \(scaledStatus)")
         scaledCommandBuffer.commit()
@@ -3144,6 +3541,119 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS native MetalFX backdrop scales FP16 scene before full-resolution SDR UI")
+
+        let precomposedPixels = (0..<8).flatMap { y in
+            Array(
+                repeating: SIMD4<Float>(
+                    y < 4 ? 0.1 : 0.8,
+                    y < 4 ? 0.1 : 0.8,
+                    y < 4 ? 0.1 : 0.8,
+                    1
+                ),
+                count: 8
+            )
+        }
+        let precomposedSource = try gpu.makeRgba16FloatTexture(
+            width: 8,
+            height: 8,
+            pixels: precomposedPixels
+        )
+        let precomposedDepth = try gpu.makeDepthTexture(width: 8, height: 8, clearDepth: 0.5)
+        let precomposedUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(0, 0, 0, 255)
+        )
+        guard let precomposedCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Spatial HDR precompose command buffer creation failed")
+        }
+        let precomposedBackdropStatus = backdrop(
+            objectPointer(precomposedCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(precomposedUi as AnyObject),
+            objectPointer(precomposedDepth as AnyObject),
+            nil,
+            nil,
+            2,
+            1,
+            1,
+            4,
+            1,
+            0
+        )
+        try require(
+            precomposedBackdropStatus == 2,
+            "Spatial HDR precompose backdrop returned \(precomposedBackdropStatus)"
+        )
+        let precomposedPresentStatus = present(
+            objectPointer(precomposedCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(precomposedDepth as AnyObject),
+            nil,
+            objectPointer(precomposedUi as AnyObject),
+            nil,
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            precomposedPresentStatus == 1,
+            "Spatial HDR precomposed present returned \(precomposedPresentStatus)"
+        )
+        precomposedCommandBuffer.commit()
+        precomposedCommandBuffer.waitUntilCompleted()
+        let precomposedDetail = precomposedCommandBuffer.error.map(String.init(describing:))
+            ?? "unknown GPU error"
+        try require(
+            precomposedCommandBuffer.status == .completed,
+            "Spatial HDR precomposed GPU command failed: \(precomposedDetail)"
+        )
+        let precomposedTop = gpu.readRgba8(texture: precomposedUi, x: 8, y: 0)
+        let precomposedBottom = gpu.readRgba8(texture: precomposedUi, x: 8, y: 15)
+        try require(
+            precomposedTop.x < 110 && precomposedBottom.x > 210,
+            "Spatial raw UI seed flipped or flattened the vertical gradient: top \(precomposedTop), bottom \(precomposedBottom)"
+        )
+        let spatialScreenshotDestination = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(0, 0, 0, 0)
+        )
+        guard let spatialScreenshotCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Spatial screenshot command buffer creation failed")
+        }
+        let spatialScreenshotStatus = spatialScreenshot(
+            objectPointer(spatialScreenshotCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(precomposedUi as AnyObject),
+            objectPointer(spatialScreenshotDestination as AnyObject),
+            nil,
+            2,
+            4
+        )
+        try require(spatialScreenshotStatus == 1, "Spatial screenshot ABI returned \(spatialScreenshotStatus)")
+        spatialScreenshotCommandBuffer.commit()
+        spatialScreenshotCommandBuffer.waitUntilCompleted()
+        let spatialScreenshotDetail = spatialScreenshotCommandBuffer.error.map(String.init(describing:))
+            ?? "unknown GPU error"
+        try require(
+            spatialScreenshotCommandBuffer.status == .completed,
+            "Spatial screenshot GPU command failed: \(spatialScreenshotDetail)"
+        )
+        let screenshotTop = gpu.readRgba8(texture: spatialScreenshotDestination, x: 8, y: 0)
+        let screenshotBottom = gpu.readRgba8(texture: spatialScreenshotDestination, x: 8, y: 15)
+        try require(
+            screenshotTop.x < screenshotBottom.x,
+            "Spatial screenshot flipped or flattened the world: top \(screenshotTop), bottom \(screenshotBottom)"
+        )
+        passCount += 1
+        print("PASS native FP16 HDR precompose and F2 composite preserve orientation")
 
         guard
             let queue = gpu.device.makeCommandQueue(),
@@ -3166,6 +3676,7 @@ private final class ValueValidation {
             objectPointer(semantic as AnyObject),
             objectPointer(ui as AnyObject),
             nil,
+            0,
             2,
             0,
             0,
@@ -3191,6 +3702,7 @@ private final class ValueValidation {
             nil,
             objectPointer(ui as AnyObject),
             nil,
+            0,
             1,
             0,
             0,

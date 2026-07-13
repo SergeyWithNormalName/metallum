@@ -14,13 +14,18 @@ import org.jspecify.annotations.Nullable;
 public final class HdrUiRenderTarget {
     @Nullable
     private static TextureTarget target;
+    @Nullable
+    private static TextureTarget screenshotTarget;
     private static boolean activeThisFrame;
     private static boolean unavailable;
     private static boolean activationLogged;
     private static boolean screenshotLogged;
+    private static boolean screenshotFallbackLogged;
     private static boolean lastUiFinished;
     private static boolean backdropBlurredThisFrame;
     private static boolean spatialActiveThisFrame;
+    private static boolean spatialHdrPrecomposedThisFrame;
+    private static boolean lastSpatialHdrPrecomposed;
     @Nullable
     private static RenderTarget activeSource;
     @Nullable
@@ -36,6 +41,7 @@ public final class HdrUiRenderTarget {
         lastUiSource = null;
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = MetalFxSpatialScaling.isActive();
+        spatialHdrPrecomposedThisFrame = false;
         if ((!HdrSceneState.isRequested() && !spatialActiveThisFrame)
                 || (unavailable && !spatialActiveThisFrame)) {
             return mainTarget;
@@ -72,6 +78,9 @@ public final class HdrUiRenderTarget {
             )) {
                 throw new IllegalStateException("Metal rejected the SDR UI backdrop");
             }
+            spatialHdrPrecomposedThisFrame = MetalHdrFrame.isSpatialHdrPrecomposed(
+                    mainTarget.getColorTextureView()
+            );
             RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(target.getDepthTexture(), 0.0);
             if (!activationLogged) {
                 activationLogged = true;
@@ -110,8 +119,10 @@ public final class HdrUiRenderTarget {
         }
         activeThisFrame = false;
         activeSource = null;
+        lastSpatialHdrPrecomposed = spatialHdrPrecomposedThisFrame && !backdropBlurredThisFrame;
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = false;
+        spatialHdrPrecomposedThisFrame = false;
     }
 
     /** Marks a menu frame whose seeded scene was intentionally blurred. */
@@ -131,11 +142,47 @@ public final class HdrUiRenderTarget {
                 && target != null
                 && source == lastUiSource
                 && source != target;
+        RenderTarget screenshotSource = available ? target : source;
+        if (available && lastSpatialHdrPrecomposed) {
+            try {
+                if (screenshotTarget == null
+                        || screenshotTarget.width != target.width
+                        || screenshotTarget.height != target.height) {
+                    TextureTarget replacement = new TextureTarget(
+                            "Metallum spatial screenshot",
+                            target.width,
+                            target.height,
+                            false,
+                            GpuFormat.RGBA8_UNORM
+                    );
+                    TextureTarget previous = screenshotTarget;
+                    screenshotTarget = replacement;
+                    if (previous != null) {
+                        previous.destroyBuffers();
+                    }
+                }
+                if (MetalHdrFrame.prepareSpatialScreenshot(
+                        source.getColorTextureView(),
+                        target.getColorTextureView(),
+                        screenshotTarget.getColorTextureView()
+                )) {
+                    screenshotSource = screenshotTarget;
+                } else if (!screenshotFallbackLogged) {
+                    screenshotFallbackLogged = true;
+                    Metallum.LOGGER.warn("F2 spatial composite was unavailable; using the seeded SDR GUI target");
+                }
+            } catch (Throwable throwable) {
+                if (!screenshotFallbackLogged) {
+                    screenshotFallbackLogged = true;
+                    Metallum.LOGGER.warn("Failed to prepare the F2 spatial composite; using the seeded SDR GUI target", throwable);
+                }
+            }
+        }
         if (available && !screenshotLogged) {
             screenshotLogged = true;
-            Metallum.LOGGER.info("F2 screenshot source: seeded SDR GUI composite");
+            Metallum.LOGGER.info("F2 screenshot source: full-resolution SDR GUI composite");
         }
-        return available ? target : source;
+        return screenshotSource;
     }
 
     public static void destroy() {
@@ -145,9 +192,15 @@ public final class HdrUiRenderTarget {
         lastUiSource = null;
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = false;
+        spatialHdrPrecomposedThisFrame = false;
+        lastSpatialHdrPrecomposed = false;
         if (target != null) {
             target.destroyBuffers();
             target = null;
+        }
+        if (screenshotTarget != null) {
+            screenshotTarget.destroyBuffers();
+            screenshotTarget = null;
         }
     }
 
@@ -159,6 +212,8 @@ public final class HdrUiRenderTarget {
         lastUiSource = null;
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = false;
+        spatialHdrPrecomposedThisFrame = false;
+        lastSpatialHdrPrecomposed = false;
         if (target != null) {
             try {
                 target.destroyBuffers();
@@ -180,6 +235,8 @@ public final class HdrUiRenderTarget {
         lastUiSource = null;
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = false;
+        spatialHdrPrecomposedThisFrame = false;
+        lastSpatialHdrPrecomposed = false;
         if (target != null) {
             try {
                 target.destroyBuffers();

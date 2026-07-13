@@ -165,7 +165,7 @@ private enum SpatialScalingValidation {
             throw ValidationError.failed("No Metal device")
         }
         try require(MTLFXSpatialScalerDescriptor.supportsDevice(device), "MetalFX spatial scaling unsupported")
-        try validatePreset(device: device, inputWidth: 192, inputHeight: 108, outputWidth: 256, outputHeight: 144, label: "Quality")
+        try validatePreset(device: device, inputWidth: 171, inputHeight: 96, outputWidth: 256, outputHeight: 144, label: "Quality")
         try validatePreset(device: device, inputWidth: 128, inputHeight: 72, outputWidth: 256, outputHeight: 144, label: "Performance")
     }
 }

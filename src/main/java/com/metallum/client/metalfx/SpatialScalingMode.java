@@ -4,7 +4,7 @@ import java.util.Locale;
 
 public enum SpatialScalingMode {
     OFF(1.0f, "metallum.options.metalfx_spatial_scaling.off"),
-    QUALITY(0.75f, "metallum.options.metalfx_spatial_scaling.quality"),
+    QUALITY(2.0f / 3.0f, "metallum.options.metalfx_spatial_scaling.quality"),
     PERFORMANCE(0.50f, "metallum.options.metalfx_spatial_scaling.performance");
 
     private final float linearScale;

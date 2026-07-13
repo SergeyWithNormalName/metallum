@@ -292,6 +292,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 sceneInputs.semantic(),
                 sceneInputs.ui(),
                 fence,
+                sceneInputs.spatialHdrPrecomposed(),
                 outputMode.nativeValue(),
                 HdrSceneState.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
                 hdrConfig.diagnosticPattern(),
@@ -301,12 +302,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         );
     }
 
-    boolean encodeHdrUiBackdrop(
+    int encodeHdrUiBackdrop(
             final MetalGpuTexture source,
-            final MetalGpuTexture destination
+            final MetalGpuTexture destination,
+            final MemorySegment sceneDepthTexture,
+            final MemorySegment semanticTexture,
+            final boolean hdrPrecomposeEnabled,
+            final float currentHeadroom,
+            final HdrConfig hdrConfig
     ) {
         if (source == destination || source.isClosed() || destination.isClosed()) {
-            return false;
+            return 0;
         }
 
         submitRenderPass();
@@ -321,10 +327,50 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return commandBuffer().encodeHdrUiBackdrop(
                 source.nativeHandle(),
                 destination.nativeHandle(),
+                sceneDepthTexture,
+                semanticTexture,
                 fence,
                 sourceEncoding,
-                MetalFxSpatialScaling.isActive()
+                MetalFxSpatialScaling.isActive(),
+                hdrPrecomposeEnabled,
+                currentHeadroom,
+                hdrConfig.hdrStrength(),
+                hdrConfig.bloomStrength()
         );
+    }
+
+    boolean encodeSpatialScreenshot(
+            final MetalGpuTexture rawScene,
+            final MetalGpuTexture ui,
+            final MetalGpuTexture destination,
+            final float currentHeadroom
+    ) {
+        if (rawScene == ui
+                || rawScene == destination
+                || ui == destination
+                || rawScene.isClosed()
+                || ui.isClosed()
+                || destination.isClosed()) {
+            return false;
+        }
+        submitRenderPass();
+        flushPendingClear(rawScene);
+        flushPendingClear(ui);
+        pendingColorClears.remove(destination);
+        pendingDepthClears.remove(destination);
+        destination.markContentsDirty();
+        endEncoder();
+        int sourceEncoding = HdrSceneState.sourceEncoding().nativeValue(
+                rawScene.getFormat() == GpuFormat.RGBA16_FLOAT
+        );
+        return commandBuffer().encodeSpatialScreenshot(
+                rawScene.nativeHandle(),
+                ui.nativeHandle(),
+                destination.nativeHandle(),
+                fence,
+                sourceEncoding,
+                currentHeadroom
+        ) == 1;
     }
 
     @Override

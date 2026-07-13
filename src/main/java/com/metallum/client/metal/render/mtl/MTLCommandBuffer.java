@@ -112,6 +112,7 @@ public final class MTLCommandBuffer {
             final MemorySegment semanticTexture,
             final MemorySegment uiTexture,
             final MemorySegment globalFence,
+            final boolean spatialHdrPrecomposed,
             final int outputMode,
             final int sourceEncoding,
             final boolean diagnosticPattern,
@@ -128,6 +129,7 @@ public final class MTLCommandBuffer {
                 semanticTexture,
                 uiTexture,
                 globalFence,
+                spatialHdrPrecomposed ? 1 : 0,
                 outputMode,
                 sourceEncoding,
                 diagnosticPattern ? 1 : 0,
@@ -137,20 +139,51 @@ public final class MTLCommandBuffer {
         ));
     }
 
-    public boolean encodeHdrUiBackdrop(
+    public int encodeHdrUiBackdrop(
             final MemorySegment sourceTexture,
             final MemorySegment destinationTexture,
+            final MemorySegment sceneDepthTexture,
+            final MemorySegment semanticTexture,
             final MemorySegment globalFence,
             final int sourceEncoding,
-            final boolean spatialScalingEnabled
+            final boolean spatialScalingEnabled,
+            final boolean hdrPrecomposeEnabled,
+            final float currentHeadroom,
+            final float hdrStrength,
+            final float bloomStrength
     ) {
         return MetalNativeBridge.MTLCommandBuffer_encodeHdrUiBackdrop(
                 handle(),
                 sourceTexture,
                 destinationTexture,
+                sceneDepthTexture,
+                semanticTexture,
                 globalFence,
                 sourceEncoding,
-                spatialScalingEnabled
+                spatialScalingEnabled,
+                hdrPrecomposeEnabled,
+                currentHeadroom,
+                hdrStrength,
+                bloomStrength
+        );
+    }
+
+    public int encodeSpatialScreenshot(
+            final MemorySegment rawSceneTexture,
+            final MemorySegment uiTexture,
+            final MemorySegment destinationTexture,
+            final MemorySegment globalFence,
+            final int sourceEncoding,
+            final float currentHeadroom
+    ) {
+        return MetalNativeBridge.MTLCommandBuffer_encodeSpatialScreenshot(
+                handle(),
+                rawSceneTexture,
+                uiTexture,
+                destinationTexture,
+                globalFence,
+                sourceEncoding,
+                currentHeadroom
         );
     }
 

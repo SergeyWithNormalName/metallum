@@ -76,4 +76,34 @@ public final class MetalHdrFrame {
         return mainColorView.texture() instanceof MetalGpuTexture color
                 && color.device().isHdrSceneReadyForUi(color);
     }
+
+    public static boolean isSpatialHdrPrecomposed(final GpuTextureView mainColorView) {
+        return mainColorView != null
+                && !mainColorView.isClosed()
+                && mainColorView.texture() instanceof MetalGpuTexture color
+                && color.device().isSpatialHdrPrecomposedForCurrentSubmit();
+    }
+
+    public static boolean prepareSpatialScreenshot(
+            final GpuTextureView mainColorView,
+            final GpuTextureView uiColorView,
+            final GpuTextureView destinationColorView
+    ) {
+        if (mainColorView == null
+                || mainColorView.isClosed()
+                || uiColorView == null
+                || uiColorView.isClosed()
+                || destinationColorView == null
+                || destinationColorView.isClosed()) {
+            return false;
+        }
+        if (mainColorView.texture() instanceof MetalGpuTexture source
+                && uiColorView.texture() instanceof MetalGpuTexture ui
+                && destinationColorView.texture() instanceof MetalGpuTexture destination
+                && source.device() == ui.device()
+                && source.device() == destination.device()) {
+            return source.device().prepareSpatialScreenshot(source, ui, destination);
+        }
+        return false;
+    }
 }
