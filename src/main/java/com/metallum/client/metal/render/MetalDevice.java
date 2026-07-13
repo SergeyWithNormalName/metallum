@@ -105,6 +105,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
     private long spatialHdrPrecomposedSubmitIndex = Long.MIN_VALUE;
     private boolean spatialHdrPrecomposeLogged;
+    private boolean nativeHdrPrecomposeLogged;
     private boolean spatialPerceptualDirectLogged;
 
     MetalDevice(
@@ -579,11 +580,10 @@ public final class MetalDevice implements GpuDeviceBackend {
             return false;
         }
         long submitIndex = this.commandEncoder.currentSubmitIndex();
-        boolean precomposeHdr = spatial
-                && this.hdrEnhancedActive
+        boolean precomposeHdr = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
-                && this.hdrDirectSceneSource == source
+                && (this.hdrDirectSceneSource == null || this.hdrDirectSceneSource == source)
                 && !this.hdrConfig.diagnosticPattern()
                 && !MetalNativeBridge.isNullHandle(this.hdrSceneDepthHandle);
         boolean directPerceptual = spatial
@@ -604,7 +604,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.hdrCurrentHeadroom,
                 this.hdrConfig
         );
-        this.spatialHdrPrecomposedSubmitIndex = result == 2 ? submitIndex : Long.MIN_VALUE;
+        this.spatialHdrPrecomposedSubmitIndex = result == 2 || result == 4
+                ? submitIndex
+                : Long.MIN_VALUE;
         if (result == 2 && !this.spatialHdrPrecomposeLogged) {
             this.spatialHdrPrecomposeLogged = true;
             Metallum.LOGGER.info(
@@ -615,6 +617,12 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.spatialPerceptualDirectLogged = true;
             Metallum.LOGGER.info(
                     "MetalFX SDR fast path is active: low-resolution perceptual input, direct full-resolution GUI output"
+            );
+        }
+        if (result == 4 && !this.nativeHdrPrecomposeLogged) {
+            this.nativeHdrPrecomposeLogged = true;
+            Metallum.LOGGER.info(
+                    "Native-resolution HDR fast path is active: fused HDR reconstruction and SDR UI seed, lightweight final composite"
             );
         }
         return result > 0;

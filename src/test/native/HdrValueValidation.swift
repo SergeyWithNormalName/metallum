@@ -1708,7 +1708,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 39, "HDR validation check count changed unexpectedly: \(passCount), expected 39")
+        try require(passCount == 40, "HDR validation check count changed unexpectedly: \(passCount), expected 40")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -3748,6 +3748,79 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS native MetalFX SDR direct output preserves orientation, borders and opaque composite alpha")
+
+        let nativePrecomposeSource = try gpu.makeRgba16FloatTexture(
+            width: 16,
+            height: 16,
+            value: SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        )
+        let nativePrecomposeDepth = try gpu.makeDepthTexture(width: 16, height: 16, clearDepth: 0.5)
+        let nativePrecomposeUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(0, 0, 0, 255)
+        )
+        guard let nativePrecomposeCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Native HDR precompose command buffer creation failed")
+        }
+        let nativePrecomposeStatus = backdrop(
+            objectPointer(nativePrecomposeCommandBuffer as AnyObject),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(nativePrecomposeUi as AnyObject),
+            objectPointer(nativePrecomposeDepth as AnyObject),
+            nil,
+            nil,
+            2,
+            0,
+            1,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            nativePrecomposeStatus == 4,
+            "Native HDR fused precompose returned \(nativePrecomposeStatus)"
+        )
+        let nativePrecomposePresentStatus = present(
+            objectPointer(nativePrecomposeCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(nativePrecomposeDepth as AnyObject),
+            nil,
+            objectPointer(nativePrecomposeUi as AnyObject),
+            nil,
+            1,
+            2,
+            2,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            nativePrecomposePresentStatus == 1,
+            "Native HDR fused precomposed present returned \(nativePrecomposePresentStatus)"
+        )
+        nativePrecomposeCommandBuffer.commit()
+        nativePrecomposeCommandBuffer.waitUntilCompleted()
+        let nativePrecomposeDetail = nativePrecomposeCommandBuffer.error.map(String.init(describing:))
+            ?? "unknown GPU error"
+        try require(
+            nativePrecomposeCommandBuffer.status == .completed,
+            "Native HDR fused precompose GPU command failed: \(nativePrecomposeDetail)"
+        )
+        let nativePrecomposePixel = gpu.readRgba8(texture: nativePrecomposeUi, x: 8, y: 8)
+        try require(
+            nativePrecomposePixel.x >= 205 && nativePrecomposePixel.x <= 215
+                && nativePrecomposePixel.y == nativePrecomposePixel.x
+                && nativePrecomposePixel.z == nativePrecomposePixel.x
+                && nativePrecomposePixel.w == 0,
+            "Native HDR fused UI seed mismatch: \(nativePrecomposePixel)"
+        )
+        passCount += 1
+        print("PASS native-resolution HDR reconstruction fuses the exact SDR UI seed and uses lightweight present")
 
         let precomposedPixels = (0..<8).flatMap { y in
             Array(
