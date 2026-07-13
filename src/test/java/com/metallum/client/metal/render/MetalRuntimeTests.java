@@ -182,6 +182,7 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.BLOOM_VERTICAL,
                 MetalGpuTimingStage.HDR_RECONSTRUCTION,
                 MetalGpuTimingStage.METAL_FX,
+                MetalGpuTimingStage.UI_SEED,
                 MetalGpuTimingStage.UI,
                 MetalGpuTimingStage.PRESENT
         };

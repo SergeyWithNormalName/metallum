@@ -12,10 +12,11 @@ public enum MetalGpuTimingStage {
     BLOOM_VERTICAL(6),
     HDR_RECONSTRUCTION(7),
     METAL_FX(8),
-    UI(9),
-    PRESENT(10);
+    UI_SEED(9),
+    UI(10),
+    PRESENT(11);
 
-    public static final int PROFILED_STAGE_COUNT = 11;
+    public static final int PROFILED_STAGE_COUNT = 12;
 
     private final int nativeId;
 

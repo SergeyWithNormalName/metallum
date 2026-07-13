@@ -214,8 +214,9 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case bloomVertical = 6
     case hdrReconstruction = 7
     case metalFx = 8
-    case ui = 9
-    case present = 10
+    case uiSeed = 9
+    case ui = 10
+    case present = 11
 
     var reportName: String {
         switch self {
@@ -228,7 +229,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .bloomVertical: "bloom vertical"
         case .hdrReconstruction: "HDR reconstruction"
         case .metalFx: "MetalFX"
-        case .ui: "UI"
+        case .uiSeed: "UI seed"
+        case .ui: "UI draw"
         case .present: "present"
         }
     }
@@ -519,10 +521,13 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
 }
 
 private final class MetallumGpuTimingStats: @unchecked Sendable {
+    private static let reportFrameCount = 300
+
     private let lock = NSLock()
     private var sampleCount = 0
     private var totalGpuSeconds = 0.0
     private var maximumGpuSeconds = 0.0
+    private var gpuSecondSamples = Array(repeating: 0.0, count: reportFrameCount)
     private var stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
     private var stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
     private var stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
@@ -553,6 +558,9 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             return
         }
         lock.lock()
+        if sampleCount < Self.reportFrameCount {
+            gpuSecondSamples[sampleCount] = duration
+        }
         sampleCount += 1
         totalGpuSeconds += duration
         maximumGpuSeconds = max(maximumGpuSeconds, duration)
@@ -565,14 +573,25 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 stageCounts[stage.rawValue] += 1
             }
         }
-        if sampleCount >= 300 {
+        if sampleCount >= Self.reportFrameCount {
             let now = ProcessInfo.processInfo.systemUptime
             let completedFps = Double(sampleCount) / max(now - intervalStart, 1e-6)
+            let sortedGpuSeconds = gpuSecondSamples.sorted()
+            func percentile(_ fraction: Double) -> Double {
+                let index = min(
+                    max(Int(ceil(fraction * Double(sortedGpuSeconds.count))) - 1, 0),
+                    sortedGpuSeconds.count - 1
+                )
+                return sortedGpuSeconds[index]
+            }
             var lines = [String(format:
-                "[metallum] GPU timing (%d presented frames, %.1f FPS): total %.3f ms avg / %.3f ms max",
+                "[metallum] GPU timing (%d presented frames, %.1f FPS): frame %.3f ms avg / %.3f p50 / %.3f p95 / %.3f p99 / %.3f max",
                 sampleCount,
                 completedFps,
                 totalGpuSeconds * 1000.0 / Double(sampleCount),
+                percentile(0.50) * 1000.0,
+                percentile(0.95) * 1000.0,
+                percentile(0.99) * 1000.0,
                 maximumGpuSeconds * 1000.0
             )]
             if NativeState.gpuTimingDetailEnabled {
@@ -614,6 +633,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             sampleCount = 0
             totalGpuSeconds = 0.0
             maximumGpuSeconds = 0.0
+            gpuSecondSamples = Array(repeating: 0.0, count: Self.reportFrameCount)
             stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
             stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
             stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
@@ -4613,7 +4633,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 commandBuffer: commandBuffer,
                 target: destinationTexture,
                 pipeline: pipelines.uiBackdrop,
-                stage: .ui
+                stage: .uiSeed
             )
         else {
             return -1
