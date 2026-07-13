@@ -345,6 +345,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         return this.spatialScalingSupported;
     }
 
+    public HdrOutputMode hdrOutputMode() {
+        return this.hdrOutputMode;
+    }
+
     public void updateHdrConfig(HdrConfig newConfig) {
         this.hdrConfig = newConfig;
         newConfig.save();
@@ -355,6 +359,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void setHdrOutputMode(final HdrOutputMode outputMode, final float currentHeadroom) {
+        HdrOutputMode previousOutputMode = this.hdrOutputMode;
         this.hdrOutputMode = outputMode;
         this.hdrCurrentHeadroom = Float.isFinite(currentHeadroom)
                 ? Math.clamp(currentHeadroom, 1.0f, HdrConfig.OUTPUT_HEADROOM)
@@ -374,6 +379,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrDirectSceneSource = null;
             this.hdrSceneColorHandle = MemorySegment.NULL;
         }
+        MetalFxSpatialScaling.onHdrOutputModeChanged(previousOutputMode, outputMode);
     }
 
     HdrOutputMode availableHdrOutputMode(final HdrOutputMode requestedMode) {

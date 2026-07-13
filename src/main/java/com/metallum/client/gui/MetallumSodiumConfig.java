@@ -2,6 +2,7 @@ package com.metallum.client.gui;
 
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
+import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
@@ -134,12 +135,22 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
         int displayHeight = minecraft != null && minecraft.getWindow() != null
                 ? minecraft.getWindow().getHeight()
                 : 1;
+        MetalDevice device = MetalDevice.getInstance();
+        HdrOutputMode outputMode = device != null ? device.hdrOutputMode() : HdrOutputMode.SDR;
+        SpatialScalingMode resolvedMode = MetalFxSpatialScaling.resolveRequestedMode(mode, outputMode);
         MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.dimensions(
-                mode,
+                resolvedMode,
                 displayWidth,
                 displayHeight
         );
-        if (!mode.enabled()) {
+        if (mode == SpatialScalingMode.AUTO && !resolvedMode.enabled()) {
+            return Component.translatable(
+                    "metallum.options.metalfx_spatial_scaling.tooltip.auto_off",
+                    dimensions.displayWidth(),
+                    dimensions.displayHeight()
+            );
+        }
+        if (!resolvedMode.enabled()) {
             return Component.translatable(
                     "metallum.options.metalfx_spatial_scaling.tooltip.off",
                     dimensions.displayWidth(),
@@ -155,13 +166,30 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
             );
         }
 
+        String tooltipKey = mode == SpatialScalingMode.AUTO
+                ? "metallum.options.metalfx_spatial_scaling.tooltip.auto_enabled"
+                : "metallum.options.metalfx_spatial_scaling.tooltip.enabled";
+        if (mode == SpatialScalingMode.AUTO) {
+            return Component.translatable(
+                    tooltipKey,
+                    Component.translatable(resolvedMode.translationKey()),
+                    dimensions.renderWidth(),
+                    dimensions.renderHeight(),
+                    dimensions.displayWidth(),
+                    dimensions.displayHeight(),
+                    resolvedMode.nominalLinearPercent(),
+                    Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
+                    Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
+                    Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
+            );
+        }
         return Component.translatable(
-                "metallum.options.metalfx_spatial_scaling.tooltip.enabled",
+                tooltipKey,
                 dimensions.renderWidth(),
                 dimensions.renderHeight(),
                 dimensions.displayWidth(),
                 dimensions.displayHeight(),
-                mode.nominalLinearPercent(),
+                resolvedMode.nominalLinearPercent(),
                 Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f

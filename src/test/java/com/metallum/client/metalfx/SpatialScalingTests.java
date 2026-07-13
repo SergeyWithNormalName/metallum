@@ -1,5 +1,7 @@
 package com.metallum.client.metalfx;
 
+import com.metallum.client.hdr.HdrOutputMode;
+
 import java.util.Properties;
 
 public final class SpatialScalingTests {
@@ -8,6 +10,9 @@ public final class SpatialScalingTests {
 
     public static void main(final String[] args) {
         testModeParsing();
+        testAutoResolution();
+        testAutoResizePolicy();
+        testRequestedModeSelection();
         testPresetDimensions();
         testOddAndTinyDimensions();
     }
@@ -19,8 +24,108 @@ public final class SpatialScalingTests {
         require(MetalFxSpatialScaling.from(properties) == SpatialScalingMode.QUALITY, "quality parsing");
         properties.setProperty("mode", "PERFORMANCE");
         require(MetalFxSpatialScaling.from(properties) == SpatialScalingMode.PERFORMANCE, "performance parsing");
+        properties.setProperty("mode", "auto");
+        require(MetalFxSpatialScaling.from(properties) == SpatialScalingMode.AUTO, "auto parsing");
         properties.setProperty("mode", "corrupt");
         require(MetalFxSpatialScaling.from(properties) == SpatialScalingMode.OFF, "corrupt fallback");
+    }
+
+    private static void testAutoResolution() {
+        require(
+                MetalFxSpatialScaling.resolveRequestedMode(SpatialScalingMode.AUTO, HdrOutputMode.SDR)
+                        == SpatialScalingMode.OFF,
+                "auto SDR policy"
+        );
+        require(
+                MetalFxSpatialScaling.resolveRequestedMode(SpatialScalingMode.AUTO, HdrOutputMode.EDR)
+                        == SpatialScalingMode.OFF,
+                "auto EDR policy"
+        );
+        require(
+                MetalFxSpatialScaling.resolveRequestedMode(SpatialScalingMode.AUTO, HdrOutputMode.ENHANCED)
+                        == SpatialScalingMode.PERFORMANCE,
+                "auto enhanced policy"
+        );
+        require(
+                MetalFxSpatialScaling.resolveRequestedMode(SpatialScalingMode.AUTO, null)
+                        == SpatialScalingMode.OFF,
+                "auto unknown-output fallback"
+        );
+        for (SpatialScalingMode forced : new SpatialScalingMode[] {
+                SpatialScalingMode.OFF,
+                SpatialScalingMode.QUALITY,
+                SpatialScalingMode.PERFORMANCE
+        }) {
+            for (HdrOutputMode outputMode : HdrOutputMode.values()) {
+                require(
+                        MetalFxSpatialScaling.resolveRequestedMode(forced, outputMode) == forced,
+                        "forced preset changed by auto policy"
+                );
+            }
+        }
+    }
+
+    private static void testRequestedModeSelection() {
+        require(
+                MetalFxSpatialScaling.selectRequestedMode(SpatialScalingMode.AUTO, null)
+                        == SpatialScalingMode.AUTO,
+                "persisted policy selection"
+        );
+        require(
+                MetalFxSpatialScaling.selectRequestedMode(
+                        SpatialScalingMode.AUTO,
+                        SpatialScalingMode.QUALITY
+                ) == SpatialScalingMode.QUALITY,
+                "benchmark override selection"
+        );
+        expectIllegalArgument(
+                () -> MetalFxSpatialScaling.selectRequestedMode(
+                        SpatialScalingMode.OFF,
+                        SpatialScalingMode.AUTO
+                ),
+                "automatic benchmark override"
+        );
+    }
+
+    private static void testAutoResizePolicy() {
+        require(
+                !MetalFxSpatialScaling.requiresResizeForOutputModeChange(
+                        SpatialScalingMode.AUTO,
+                        HdrOutputMode.SDR,
+                        HdrOutputMode.EDR
+                ),
+                "auto native-output transition resize"
+        );
+        require(
+                MetalFxSpatialScaling.requiresResizeForOutputModeChange(
+                        SpatialScalingMode.AUTO,
+                        HdrOutputMode.SDR,
+                        HdrOutputMode.ENHANCED
+                ),
+                "auto enhanced activation resize"
+        );
+        require(
+                MetalFxSpatialScaling.requiresResizeForOutputModeChange(
+                        SpatialScalingMode.AUTO,
+                        HdrOutputMode.ENHANCED,
+                        HdrOutputMode.EDR
+                ),
+                "auto enhanced fallback resize"
+        );
+        for (SpatialScalingMode forced : new SpatialScalingMode[] {
+                SpatialScalingMode.OFF,
+                SpatialScalingMode.QUALITY,
+                SpatialScalingMode.PERFORMANCE
+        }) {
+            require(
+                    !MetalFxSpatialScaling.requiresResizeForOutputModeChange(
+                            forced,
+                            HdrOutputMode.SDR,
+                            HdrOutputMode.ENHANCED
+                    ),
+                    "forced preset output transition resize"
+            );
+        }
     }
 
     private static void testPresetDimensions() {
@@ -46,6 +151,10 @@ public final class SpatialScalingTests {
         );
         require(performance.renderWidth() == 1512 && performance.renderHeight() == 982, "performance dimensions");
         require(Math.abs(performance.actualPixelScale() - 0.25f) < 0.0001f, "performance pixel workload");
+        expectIllegalArgument(
+                () -> MetalFxSpatialScaling.dimensions(SpatialScalingMode.AUTO, 3024, 1964),
+                "unresolved auto dimensions"
+        );
     }
 
     private static void testOddAndTinyDimensions() {
@@ -57,6 +166,9 @@ public final class SpatialScalingTests {
                 {5120, 2880}
         }) {
             for (SpatialScalingMode mode : SpatialScalingMode.values()) {
+                if (!mode.concrete()) {
+                    continue;
+                }
                 MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.dimensions(
                         mode,
                         display[0],
@@ -73,6 +185,15 @@ public final class SpatialScalingTests {
                 }
             }
         }
+    }
+
+    private static void expectIllegalArgument(final Runnable action, final String message) {
+        try {
+            action.run();
+        } catch (IllegalArgumentException expected) {
+            return;
+        }
+        throw new AssertionError(message);
     }
 
     private static void require(final boolean condition, final String message) {

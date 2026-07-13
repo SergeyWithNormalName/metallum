@@ -1,6 +1,7 @@
 package com.metallum.client.metalfx;
 
 import com.metallum.Metallum;
+import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.metal.render.MetalDevice;
 import net.fabricmc.loader.api.FabricLoader;
 
@@ -37,6 +38,7 @@ public final class MetalFxSpatialScaling {
     private static volatile int configuredDisplayWidth;
     private static volatile int configuredDisplayHeight;
     private static volatile boolean runtimeDisabled;
+    private static volatile SpatialScalingMode benchmarkOverride;
     private static final AtomicBoolean RESIZE_PENDING = new AtomicBoolean();
 
     private MetalFxSpatialScaling() {
@@ -49,10 +51,14 @@ public final class MetalFxSpatialScaling {
 
     public static SpatialScalingMode effectiveMode() {
         ensureConfigLoaded();
-        SpatialScalingMode mode = requestedMode;
         MetalDevice device = MetalDevice.getInstance();
-        return mode.enabled() && !runtimeDisabled && device != null && device.supportsSpatialScaling()
-                ? mode
+        if (runtimeDisabled || device == null || !device.supportsSpatialScaling()) {
+            return SpatialScalingMode.OFF;
+        }
+        SpatialScalingMode selectedMode = selectRequestedMode(requestedMode, benchmarkOverride);
+        SpatialScalingMode resolvedMode = resolveRequestedMode(selectedMode, device.hdrOutputMode());
+        return resolvedMode.enabled()
+                ? resolvedMode
                 : SpatialScalingMode.OFF;
     }
 
@@ -82,6 +88,33 @@ public final class MetalFxSpatialScaling {
         }
     }
 
+    /** Installs a non-persistent concrete preset for the automated benchmark. */
+    public static void setBenchmarkOverride(final SpatialScalingMode mode) {
+        ensureConfigLoaded();
+        SpatialScalingMode concreteMode = mode == null ? SpatialScalingMode.OFF : mode;
+        if (!concreteMode.concrete()) {
+            throw new IllegalArgumentException("The benchmark requires a concrete MetalFX preset");
+        }
+        SpatialScalingMode previous = benchmarkOverride;
+        boolean wasRuntimeDisabled = runtimeDisabled;
+        benchmarkOverride = concreteMode;
+        runtimeDisabled = false;
+        if (previous != concreteMode || wasRuntimeDisabled) {
+            requestRendererResize();
+        }
+    }
+
+    /** Restores the persisted user policy after an automated benchmark. */
+    public static void clearBenchmarkOverride() {
+        ensureConfigLoaded();
+        if (benchmarkOverride == null) {
+            return;
+        }
+        benchmarkOverride = null;
+        runtimeDisabled = false;
+        requestRendererResize();
+    }
+
     public static void disableRuntimeAfterFailure(final Throwable cause) {
         if (runtimeDisabled) {
             return;
@@ -102,6 +135,9 @@ public final class MetalFxSpatialScaling {
         int safeDisplayWidth = Math.max(displayWidth, 1);
         int safeDisplayHeight = Math.max(displayHeight, 1);
         SpatialScalingMode safeMode = mode == null ? SpatialScalingMode.OFF : mode;
+        if (!safeMode.concrete()) {
+            throw new IllegalArgumentException("AUTO must be resolved before calculating render dimensions");
+        }
         if (!safeMode.enabled()) {
             return new Dimensions(safeDisplayWidth, safeDisplayHeight, safeDisplayWidth, safeDisplayHeight);
         }
@@ -115,6 +151,35 @@ public final class MetalFxSpatialScaling {
 
     public static Dimensions effectiveDimensions(final int displayWidth, final int displayHeight) {
         return dimensions(effectiveMode(), displayWidth, displayHeight);
+    }
+
+    /** Pure requested-policy resolver. Forced presets are returned unchanged. */
+    public static SpatialScalingMode resolveRequestedMode(
+            final SpatialScalingMode requested,
+            final HdrOutputMode outputMode
+    ) {
+        SpatialScalingMode safeRequested = requested == null ? SpatialScalingMode.OFF : requested;
+        if (safeRequested != SpatialScalingMode.AUTO) {
+            return safeRequested;
+        }
+        return outputMode == HdrOutputMode.ENHANCED
+                ? SpatialScalingMode.PERFORMANCE
+                : SpatialScalingMode.OFF;
+    }
+
+    /** Requests a safe next-frame resize if AUTO changes its concrete preset. */
+    public static void onHdrOutputModeChanged(
+            final HdrOutputMode previousMode,
+            final HdrOutputMode currentMode
+    ) {
+        ensureConfigLoaded();
+        if (runtimeDisabled || !isSupported()) {
+            return;
+        }
+        SpatialScalingMode selectedMode = selectRequestedMode(requestedMode, benchmarkOverride);
+        if (requiresResizeForOutputModeChange(selectedMode, previousMode, currentMode)) {
+            requestRendererResize();
+        }
     }
 
     public static void recordDisplaySize(final int width, final int height) {
@@ -136,6 +201,29 @@ public final class MetalFxSpatialScaling {
 
     static SpatialScalingMode from(final Properties properties) {
         return SpatialScalingMode.parse(properties.getProperty("mode"));
+    }
+
+    static SpatialScalingMode selectRequestedMode(
+            final SpatialScalingMode persistedMode,
+            final SpatialScalingMode overrideMode
+    ) {
+        SpatialScalingMode safePersistedMode = persistedMode == null ? SpatialScalingMode.OFF : persistedMode;
+        if (overrideMode == null) {
+            return safePersistedMode;
+        }
+        if (!overrideMode.concrete()) {
+            throw new IllegalArgumentException("A runtime override must be a concrete MetalFX preset");
+        }
+        return overrideMode;
+    }
+
+    static boolean requiresResizeForOutputModeChange(
+            final SpatialScalingMode selectedMode,
+            final HdrOutputMode previousMode,
+            final HdrOutputMode currentMode
+    ) {
+        return resolveRequestedMode(selectedMode, previousMode)
+                != resolveRequestedMode(selectedMode, currentMode);
     }
 
     private static int scaledDimension(final int displayDimension, final float scale) {

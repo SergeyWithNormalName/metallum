@@ -3,9 +3,12 @@
   "metallum.options.group.metalfx": "MetalFX",
   "metallum.options.metalfx_spatial_scaling.name": "MetalFX Spatial Scaling",
   "metallum.options.metalfx_spatial_scaling.off": "Off",
+  "metallum.options.metalfx_spatial_scaling.auto": "Auto",
   "metallum.options.metalfx_spatial_scaling.quality": "Quality",
   "metallum.options.metalfx_spatial_scaling.performance": "Performance",
   "metallum.options.metalfx_spatial_scaling.tooltip.off": "Native rendering: %s×%s (100%%). MetalFX Spatial Scaling is disabled.",
+  "metallum.options.metalfx_spatial_scaling.tooltip.auto_off": "Auto selected native rendering: %s×%s (100%%). Measurements favor native rendering for SDR; EDR also stays native conservatively.",
+  "metallum.options.metalfx_spatial_scaling.tooltip.auto_enabled": "Auto selected %s. World: %s×%s → %s×%s. Preset: %s%% per axis; actual: %s%% × %s%%, or %s%% of native pixels. The interface remains at full resolution.",
   "metallum.options.metalfx_spatial_scaling.tooltip.unavailable": "Native rendering: %s×%s (100%%). MetalFX Spatial Scaling is unavailable or was disabled by the safe runtime fallback.",
   "metallum.options.metalfx_spatial_scaling.tooltip.enabled": "World: %s×%s → %s×%s. Preset: %s%% per axis; actual: %s%% × %s%%, or %s%% of native pixels. The interface remains at full resolution."
 }

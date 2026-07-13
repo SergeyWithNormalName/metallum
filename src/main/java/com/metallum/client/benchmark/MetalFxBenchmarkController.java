@@ -64,7 +64,6 @@ public final class MetalFxBenchmarkController {
     private long targetMonitor;
     private VideoMode targetVideoMode;
     private Optional<VideoMode> originalFullscreenMode = Optional.empty();
-    private SpatialScalingMode originalScalingMode = SpatialScalingMode.OFF;
     private final AtomicBoolean survivalGuardTaskPending = new AtomicBoolean();
     private UUID guardedPlayerId;
     private volatile boolean survivalGuardApplied;
@@ -92,7 +91,11 @@ public final class MetalFxBenchmarkController {
         List<SpatialScalingMode> parsed = new ArrayList<>();
         try {
             for (String value : env("METALLUM_BENCHMARK_SEQUENCE", "OFF").split(",")) {
-                parsed.add(SpatialScalingMode.valueOf(value.trim().toUpperCase(Locale.ROOT)));
+                SpatialScalingMode mode = SpatialScalingMode.valueOf(value.trim().toUpperCase(Locale.ROOT));
+                if (!mode.concrete()) {
+                    throw new IllegalArgumentException("AUTO is not a benchmark preset");
+                }
+                parsed.add(mode);
             }
             if (parsed.isEmpty()) {
                 error = "benchmark sequence is empty";
@@ -131,7 +134,6 @@ public final class MetalFxBenchmarkController {
         if (!this.originalClientStateCaptured) {
             Window window = minecraft.getWindow();
             this.originalFullscreenMode = window.getPreferredFullscreenVideoMode();
-            this.originalScalingMode = MetalFxSpatialScaling.requestedMode();
             this.originalClientStateCaptured = true;
         }
         // Automated runs intentionally have no input. Keep Minecraft's AFK
@@ -430,7 +432,7 @@ public final class MetalFxBenchmarkController {
 
     private void startSegment() {
         SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
-        MetalFxSpatialScaling.setRequestedMode(mode);
+        MetalFxSpatialScaling.setBenchmarkOverride(mode);
         this.segmentFrame = 0;
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=SEGMENT_START index={} total={} mode={} warmup={} measure={}",
@@ -464,7 +466,7 @@ public final class MetalFxBenchmarkController {
         this.stage = Stage.STOPPING;
         restoreSurvivalGuard(minecraft);
         minecraft.getWindow().setPreferredFullscreenVideoMode(this.originalFullscreenMode);
-        MetalFxSpatialScaling.setRequestedMode(this.originalScalingMode);
+        MetalFxSpatialScaling.clearBenchmarkOverride();
         minecraft.stop();
     }
 
