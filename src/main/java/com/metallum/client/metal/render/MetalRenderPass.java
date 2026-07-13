@@ -28,6 +28,8 @@ import java.lang.foreign.MemorySegment;
 import java.nio.IntBuffer;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 @Environment(EnvType.CLIENT)
@@ -114,7 +116,7 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
-            samplers.put(name, new TextureViewAndSampler(textureView, sampler));
+            updateTextureBinding(this.samplers, name, textureView, sampler);
             commandEncoder.flushPendingClear((MetalGpuTexture) textureView.texture());
             markDescriptorDirty(name);
         } else if (textureView == null && sampler == null) {
@@ -519,7 +521,9 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         if (dirtyDescriptorMask != 0) {
-            for (MetalCompiledRenderPipeline.ResourceBinding binding : compiledPipeline.resources()) {
+            List<MetalCompiledRenderPipeline.ResourceBinding> resources = compiledPipeline.resources();
+            for (int resourceIndex = 0; resourceIndex < resources.size(); resourceIndex++) {
+                MetalCompiledRenderPipeline.ResourceBinding binding = resources.get(resourceIndex);
                 if ((dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
                     pushDescriptor(enc, binding);
                 }
@@ -644,7 +648,42 @@ final class MetalRenderPass implements RenderPassBackend {
         enc.setTexture(texelTexture, binding.bindingIndex(), binding.stageMask());
     }
 
-    record TextureViewAndSampler(GpuTextureView textureView, GpuSampler sampler) {
+    static TextureViewAndSampler updateTextureBinding(
+            final Map<String, TextureViewAndSampler> bindings,
+            final String name,
+            final GpuTextureView textureView,
+            final GpuSampler sampler
+    ) {
+        TextureViewAndSampler binding = bindings.get(name);
+        if (binding == null) {
+            binding = new TextureViewAndSampler(textureView, sampler);
+            bindings.put(name, binding);
+        } else {
+            binding.update(textureView, sampler);
+        }
+        return binding;
+    }
+
+    static final class TextureViewAndSampler {
+        private GpuTextureView textureView;
+        private GpuSampler sampler;
+
+        TextureViewAndSampler(final GpuTextureView textureView, final GpuSampler sampler) {
+            this.update(textureView, sampler);
+        }
+
+        void update(final GpuTextureView textureView, final GpuSampler sampler) {
+            this.textureView = textureView;
+            this.sampler = sampler;
+        }
+
+        GpuTextureView textureView() {
+            return this.textureView;
+        }
+
+        GpuSampler sampler() {
+            return this.sampler;
+        }
     }
 
     private static boolean sameSlice(@Nullable final GpuBufferSlice left, @Nullable final GpuBufferSlice right) {

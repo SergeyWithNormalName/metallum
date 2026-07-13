@@ -1,7 +1,15 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.textures.AddressMode;
+import com.mojang.blaze3d.textures.FilterMode;
+import com.mojang.blaze3d.textures.GpuSampler;
+import com.mojang.blaze3d.textures.GpuTextureView;
+
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalDouble;
 
 public final class MetalRuntimeTests {
     private MetalRuntimeTests() {
@@ -12,6 +20,7 @@ public final class MetalRuntimeTests {
         testDestructionQueueToleratesReentrantRotation();
         testDestructionQueueClose();
         testTexelViewCacheReuseAndInvalidation();
+        testTextureBindingHolderUpdatesInPlace();
         testFenceTimeoutRounding();
     }
 
@@ -124,6 +133,78 @@ public final class MetalRuntimeTests {
                 MetalFence.timeoutMillis(Long.MAX_VALUE) == 9_223_372_036_855L,
                 "maximum timeout overflowed"
         );
+    }
+
+    private static void testTextureBindingHolderUpdatesInPlace() {
+        FakeTextureView firstView = new FakeTextureView();
+        FakeTextureView secondView = new FakeTextureView();
+        FakeSampler firstSampler = new FakeSampler();
+        FakeSampler secondSampler = new FakeSampler();
+        Map<String, MetalRenderPass.TextureViewAndSampler> bindings = new HashMap<>();
+        MetalRenderPass.TextureViewAndSampler originalBinding = MetalRenderPass.updateTextureBinding(
+                bindings, "Sampler0", firstView, firstSampler
+        );
+
+        MetalRenderPass.TextureViewAndSampler rebound = MetalRenderPass.updateTextureBinding(
+                bindings, "Sampler0", secondView, secondSampler
+        );
+
+        require(rebound == originalBinding, "texture binding holder was replaced instead of updated");
+        require(bindings.size() == 1 && bindings.get("Sampler0") == originalBinding,
+                "texture binding map did not retain the original holder");
+        require(rebound.textureView() == secondView, "texture binding holder retained the previous texture view");
+        require(rebound.sampler() == secondSampler, "texture binding holder retained the previous sampler");
+    }
+
+    private static final class FakeTextureView extends GpuTextureView {
+        private FakeTextureView() {
+            super(null, 0, 1);
+        }
+
+        @Override
+        public void close() {
+        }
+
+        @Override
+        public boolean isClosed() {
+            return false;
+        }
+    }
+
+    private static final class FakeSampler extends GpuSampler {
+        @Override
+        public AddressMode getAddressModeU() {
+            return AddressMode.CLAMP_TO_EDGE;
+        }
+
+        @Override
+        public AddressMode getAddressModeV() {
+            return AddressMode.CLAMP_TO_EDGE;
+        }
+
+        @Override
+        public FilterMode getMinFilter() {
+            return FilterMode.NEAREST;
+        }
+
+        @Override
+        public FilterMode getMagFilter() {
+            return FilterMode.NEAREST;
+        }
+
+        @Override
+        public int getMaxAnisotropy() {
+            return 1;
+        }
+
+        @Override
+        public OptionalDouble getMaxLod() {
+            return OptionalDouble.empty();
+        }
+
+        @Override
+        public void close() {
+        }
     }
 
     private static void require(final boolean condition, final String message) {
