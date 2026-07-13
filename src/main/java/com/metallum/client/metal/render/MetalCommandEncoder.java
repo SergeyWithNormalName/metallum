@@ -15,7 +15,6 @@ import com.mojang.blaze3d.buffers.GpuFence;
 import com.mojang.blaze3d.systems.*;
 import com.mojang.blaze3d.textures.GpuTexture;
 import com.mojang.blaze3d.textures.GpuTextureView;
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 import org.joml.Vector4f;
@@ -34,6 +33,8 @@ import java.util.OptionalDouble;
 @Environment(EnvType.CLIENT)
 final class MetalCommandEncoder implements CommandEncoderBackend {
     public static final int MAX_SUBMITS_IN_FLIGHT = 3;
+    private static final long MAX_DYNAMIC_BACKING_POOL_BYTES = 64L * 1024L * 1024L;
+    private static final int MAX_DYNAMIC_BACKINGS_PER_SIZE = 64;
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
@@ -52,10 +53,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment renderColorAttachment = MemorySegment.NULL;
     private MemorySegment renderSemanticAttachment = MemorySegment.NULL;
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
-    private final Long2ObjectOpenHashMap<java.util.ArrayDeque<MemorySegment>> dynamicBackingPool = new Long2ObjectOpenHashMap<>();
+    private final DynamicBackingPool<MemorySegment> dynamicBackingPool;
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
+        this.dynamicBackingPool = new DynamicBackingPool<>(
+                MAX_DYNAMIC_BACKING_POOL_BYTES,
+                MAX_DYNAMIC_BACKINGS_PER_SIZE,
+                MetalNativeBridge::metallum_release_object
+        );
         this.transientMemory = new MetalTransientMemory(device, this);
         fence = MetalNativeBridge.metallum_create_fence(device.metalDeviceHandle());
         if (MetalNativeBridge.isNullHandle(fence)) {
@@ -458,16 +464,20 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
     private void orphanWrite(final MetalGpuBuffer buffer, final long offset, final ByteBuffer data) {
         long size = buffer.allocationSize();
+        int dataLength = data.remaining();
+        long writeEnd = Math.addExact(offset, dataLength);
+        if (offset < 0L || writeEnd > buffer.size()) {
+            throw new IndexOutOfBoundsException(
+                    "Dynamic buffer write is outside the logical buffer: offset=" + offset
+                            + ", length=" + dataLength + ", size=" + buffer.size()
+            );
+        }
         MemorySegment old = buffer.nativeHandle();
         MemorySegment fresh = acquireDynamicBacking(size, buffer.resourceOptions());
         ByteBuffer freshStorage = MetalNativeBridge.nativeByteBufferView(
                 MetalNativeBridge.metallum_get_buffer_contents(fresh), size).order(ByteOrder.nativeOrder());
 
-        if (offset != 0 || data.remaining() != buffer.size()) {
-            ByteBuffer previous = buffer.currentStorage();
-            previous.clear();
-            freshStorage.duplicate().put(previous);
-        }
+        copyPreservedDynamicRanges(buffer.currentStorage(), freshStorage, offset, dataLength, buffer.size());
 
         ByteBuffer dst = freshStorage.duplicate().order(ByteOrder.nativeOrder());
         dst.position(Math.toIntExact(offset));
@@ -478,9 +488,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private MemorySegment acquireDynamicBacking(final long size, final long resourceOptions) {
-        java.util.ArrayDeque<MemorySegment> bucket = dynamicBackingPool.get(size);
-        if (bucket != null && !bucket.isEmpty()) {
-            return bucket.pop();
+        MemorySegment pooled = this.dynamicBackingPool.take(size);
+        if (pooled != null) {
+            return pooled;
         }
         MemorySegment handle = MetalNativeBridge.metallum_create_buffer(device.metalDeviceHandle(), size, resourceOptions);
         if (MetalNativeBridge.isNullHandle(handle)) {
@@ -490,7 +500,42 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private void recycleDynamicBacking(final MemorySegment handle, final long size) {
-        queueForDestroy(() -> dynamicBackingPool.computeIfAbsent(size, k -> new java.util.ArrayDeque<>()).push(handle));
+        queueForDestroy(() -> this.dynamicBackingPool.offer(handle, size));
+    }
+
+    static void copyPreservedDynamicRanges(
+            final ByteBuffer previous,
+            final ByteBuffer fresh,
+            final long writeOffset,
+            final int writeLength,
+            final long logicalSize
+    ) {
+        long writeEnd = Math.addExact(writeOffset, writeLength);
+        if (writeOffset < 0L || writeLength < 0 || writeEnd > logicalSize
+                || logicalSize > previous.capacity() || logicalSize > fresh.capacity()) {
+            throw new IndexOutOfBoundsException("Invalid dynamic buffer preservation range");
+        }
+        copyDynamicRange(previous, fresh, 0L, writeOffset);
+        copyDynamicRange(previous, fresh, writeEnd, logicalSize);
+    }
+
+    private static void copyDynamicRange(
+            final ByteBuffer source,
+            final ByteBuffer destination,
+            final long start,
+            final long end
+    ) {
+        if (end <= start) {
+            return;
+        }
+        int intStart = Math.toIntExact(start);
+        int intEnd = Math.toIntExact(end);
+        ByteBuffer sourceRange = source.duplicate();
+        sourceRange.position(intStart);
+        sourceRange.limit(intEnd);
+        ByteBuffer destinationRange = destination.duplicate();
+        destinationRange.position(intStart);
+        destinationRange.put(sourceRange);
     }
 
     @Override
@@ -695,12 +740,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         transientMemory.close();
         device.queueResourceRelease(fence);
         destroyQueue.close();
-        for (java.util.ArrayDeque<MemorySegment> bucket : dynamicBackingPool.values()) {
-            for (MemorySegment handle : bucket) {
-                MetalNativeBridge.metallum_release_object(handle);
-            }
-        }
-        dynamicBackingPool.clear();
+        dynamicBackingPool.drain();
     }
 
     void waitForSubmittedGpuWork() {

@@ -21,6 +21,8 @@ public final class MetalRuntimeTests {
         testDestructionQueueClose();
         testTexelViewCacheReuseAndInvalidation();
         testTextureBindingHolderUpdatesInPlace();
+        testDynamicBackingPoolBoundsAndReuse();
+        testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
     }
 
@@ -154,6 +156,54 @@ public final class MetalRuntimeTests {
                 "texture binding map did not retain the original holder");
         require(rebound.textureView() == secondView, "texture binding holder retained the previous texture view");
         require(rebound.sampler() == secondSampler, "texture binding holder retained the previous sampler");
+    }
+
+    private static void testDynamicBackingPoolBoundsAndReuse() {
+        List<String> released = new ArrayList<>();
+        DynamicBackingPool<String> pool = new DynamicBackingPool<>(16L, 2, released::add);
+
+        pool.offer("four-a", 4L);
+        pool.offer("four-b", 4L);
+        pool.offer("four-overflow", 4L);
+        require(released.equals(List.of("four-overflow")), "per-size backing limit did not release overflow");
+        require(pool.pooledEntries() == 2 && pool.pooledBytes() == 8L, "pooled backing accounting mismatch");
+
+        require("four-b".equals(pool.take(4L)), "dynamic backing pool did not reuse the newest exact-size entry");
+        require(pool.pooledEntries() == 1 && pool.pooledBytes() == 4L, "take did not update pool accounting");
+
+        pool.offer("sixteen", 16L);
+        require(released.contains("four-a"), "byte budget did not evict the least-recently-used bucket");
+        require(pool.pooledEntries() == 1 && pool.pooledBytes() == 16L, "byte-bounded pool retained excess entries");
+
+        pool.offer("oversized", 32L);
+        require(released.contains("oversized"), "oversized backing was retained");
+        pool.drain();
+        require(released.contains("sixteen"), "drain did not release retained backing");
+        require(pool.pooledEntries() == 0 && pool.pooledBytes() == 0L, "drain did not reset pool accounting");
+    }
+
+    private static void testPartialDynamicWritePreservation() {
+        java.nio.ByteBuffer previous = java.nio.ByteBuffer.allocate(16);
+        java.nio.ByteBuffer fresh = java.nio.ByteBuffer.allocate(16);
+        for (int index = 0; index < 16; index++) {
+            previous.put(index, (byte) index);
+            fresh.put(index, (byte) -1);
+        }
+
+        MetalCommandEncoder.copyPreservedDynamicRanges(previous, fresh, 4L, 4, 16L);
+        for (int index = 0; index < 16; index++) {
+            byte expected = index >= 4 && index < 8 ? (byte) -1 : (byte) index;
+            require(fresh.get(index) == expected, "partial dynamic write preserved the wrong byte at " + index);
+        }
+
+        java.nio.ByteBuffer fullWrite = java.nio.ByteBuffer.allocate(16);
+        for (int index = 0; index < 16; index++) {
+            fullWrite.put(index, (byte) -1);
+        }
+        MetalCommandEncoder.copyPreservedDynamicRanges(previous, fullWrite, 0L, 16, 16L);
+        for (int index = 0; index < 16; index++) {
+            require(fullWrite.get(index) == (byte) -1, "full dynamic write copied obsolete contents");
+        }
     }
 
     private static final class FakeTextureView extends GpuTextureView {
