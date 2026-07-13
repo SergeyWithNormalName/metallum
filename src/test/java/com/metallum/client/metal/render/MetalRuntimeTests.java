@@ -18,6 +18,7 @@ public final class MetalRuntimeTests {
     public static void main(final String[] args) {
         testDestructionQueueDefersReentrantAdds();
         testDestructionQueueToleratesReentrantRotation();
+        testDestructionQueueSpreadsBurst();
         testDestructionQueueClose();
         testTexelViewCacheReuseAndInvalidation();
         testTextureBindingHolderUpdatesInPlace();
@@ -78,6 +79,24 @@ public final class MetalRuntimeTests {
         queue.add(null);
         queue.close();
         require(executions[0] == 1, "close did not drain queued destruction exactly once");
+    }
+
+    private static void testDestructionQueueSpreadsBurst() {
+        MetalDestructionQueue queue = new MetalDestructionQueue(3, 2);
+        int[] executions = new int[1];
+        for (int index = 0; index < 5; index++) {
+            queue.add(() -> executions[0]++);
+        }
+
+        queue.rotate();
+        queue.rotate();
+        require(executions[0] == 0, "destruction burst ran before the GPU-safe delay");
+        queue.rotate();
+        require(executions[0] == 2, "destruction burst ignored the per-frame drain budget");
+        queue.rotate();
+        require(executions[0] == 4, "destruction backlog did not continue on the next frame");
+        queue.close();
+        require(executions[0] == 5, "close did not drain the remaining destruction backlog");
     }
 
     private static void testTexelViewCacheReuseAndInvalidation() {
