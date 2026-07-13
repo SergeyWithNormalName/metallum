@@ -8,8 +8,8 @@ public enum MetalGpuTimingStage {
     ENTITIES(2),
     HDR_EXTRACT(3),
     HISTOGRAM_EXPOSURE(4),
-    BLOOM_HORIZONTAL(5),
-    BLOOM_VERTICAL(6),
+    BLOOM_HORIZONTAL(5), // Historical ABI slot now records the combined bloom pass.
+    BLOOM_VERTICAL(6),   // Reserved to keep following native stage IDs stable.
     HDR_RECONSTRUCTION(7),
     METAL_FX(8),
     UI_SEED(9),

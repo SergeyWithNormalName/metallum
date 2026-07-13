@@ -43,11 +43,6 @@ private struct MetallumHdrExtractUniforms {
     var _padding0: UInt32
 }
 
-private struct MetallumHdrBlurUniforms {
-    var texelStep: SIMD2<Float>
-    var _padding0: SIMD2<Float>
-}
-
 private struct MetallumHdrUiBackdropUniforms {
     var sourceEncoding: UInt32
 }
@@ -85,7 +80,7 @@ private struct MetallumHdrAdaptiveState {
 private final class MetallumHdrPipelines {
     let extract: MTLRenderPipelineState
     let histogramReduce: MTLComputePipelineState
-    let blur: MTLRenderPipelineState
+    let blur: MTLComputePipelineState
     let uiBackdrop: MTLRenderPipelineState
     let uiBackdropVertexFunction: MTLFunction
     let uiBackdropFragmentFunction: MTLFunction
@@ -96,7 +91,7 @@ private final class MetallumHdrPipelines {
     init(
         extract: MTLRenderPipelineState,
         histogramReduce: MTLComputePipelineState,
-        blur: MTLRenderPipelineState,
+        blur: MTLComputePipelineState,
         uiBackdrop: MTLRenderPipelineState,
         uiBackdropVertexFunction: MTLFunction,
         uiBackdropFragmentFunction: MTLFunction,
@@ -121,8 +116,7 @@ private final class MetallumHdrWorkspace {
     var displayWidth: Int
     var displayHeight: Int
     let emission: MTLTexture
-    let bloomA: MTLTexture
-    let bloomB: MTLTexture
+    let bloom: MTLTexture
     var worldComposite: MTLTexture?
     var worldCompositeCommandBufferAddress: UInt?
     var uiMaskA: MTLTexture?
@@ -138,8 +132,7 @@ private final class MetallumHdrWorkspace {
         displayWidth: Int,
         displayHeight: Int,
         emission: MTLTexture,
-        bloomA: MTLTexture,
-        bloomB: MTLTexture,
+        bloom: MTLTexture,
         histogram: MTLBuffer,
         adaptiveState: MTLBuffer
     ) {
@@ -148,8 +141,7 @@ private final class MetallumHdrWorkspace {
         self.displayWidth = displayWidth
         self.displayHeight = displayHeight
         self.emission = emission
-        self.bloomA = bloomA
-        self.bloomB = bloomB
+        self.bloom = bloom
         self.worldComposite = nil
         self.worldCompositeCommandBufferAddress = nil
         self.uiMaskA = nil
@@ -251,8 +243,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .entities: "entities/features"
         case .hdrExtract: "HDR extract + histogram"
         case .histogramExposure: "exposure reduction"
-        case .bloomHorizontal: "bloom horizontal"
-        case .bloomVertical: "bloom vertical"
+        case .bloomHorizontal: "bloom combined"
+        case .bloomVertical: "bloom vertical (reserved)"
         case .hdrReconstruction: "HDR reconstruction"
         case .metalFx: "MetalFX"
         case .uiSeed: "UI seed"
@@ -1732,11 +1724,6 @@ private func hdrEffectsMslSource() -> String {
       uint _padding0;
     };
 
-    struct HdrBlurUniforms {
-      float2 texelStep;
-      float2 _padding0;
-    };
-
     struct HdrUiBackdropUniforms {
       uint sourceEncoding;
     };
@@ -2082,18 +2069,106 @@ private func hdrEffectsMslSource() -> String {
       stateBuffer[0] = next;
     }
 
-    fragment float4 metallum_hdr_blur_fs(
-      HdrVertexOut in [[stage_in]],
-      texture2d<float> source [[texture(0)]],
-      sampler smp [[sampler(0)]],
-      constant HdrBlurUniforms& uniforms [[buffer(0)]]
+    // One compute dispatch preserves the previous separable 9-tap Gaussian,
+    // but keeps both the source tile and horizontal FP16 intermediate in
+    // threadgroup memory. A four-pixel halo lets the vertical stage finish
+    // without a second texture or command encoder.
+    constant constexpr uint metallum_hdr_blur_tile_width = 16u;
+    constant constexpr uint metallum_hdr_blur_tile_height = 16u;
+    constant constexpr uint metallum_hdr_blur_radius = 4u;
+    constant constexpr uint metallum_hdr_blur_source_width =
+      metallum_hdr_blur_tile_width + 2u * metallum_hdr_blur_radius;
+    constant constexpr uint metallum_hdr_blur_source_height =
+      metallum_hdr_blur_tile_height + 2u * metallum_hdr_blur_radius;
+    constant constexpr uint metallum_hdr_blur_horizontal_rows =
+      metallum_hdr_blur_tile_height + 2u * metallum_hdr_blur_radius;
+    constant constexpr uint metallum_hdr_blur_thread_width = 16u;
+    constant constexpr uint metallum_hdr_blur_thread_height = 16u;
+    constant constexpr float metallum_hdr_blur_weights[5] = {
+      0.2270270270,
+      0.1945945946,
+      0.1216216216,
+      0.0540540541,
+      0.0162162162
+    };
+
+    kernel void metallum_hdr_blur(
+      texture2d<float, access::read> source [[texture(0)]],
+      texture2d<float, access::write> destination [[texture(1)]],
+      threadgroup half4* sourceTile [[threadgroup(0)]],
+      threadgroup half4* horizontalTile [[threadgroup(1)]],
+      uint2 localPosition [[thread_position_in_threadgroup]],
+      uint2 groupPosition [[threadgroup_position_in_grid]]
     ) {
-      float4 result = source.sample(smp, in.uv) * 0.2270270270;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 1.3846153846) * 0.3162162162;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 1.3846153846) * 0.3162162162;
-      result += source.sample(smp, in.uv + uniforms.texelStep * 3.2307692308) * 0.0702702703;
-      result += source.sample(smp, in.uv - uniforms.texelStep * 3.2307692308) * 0.0702702703;
-      return result;
+      const uint lane = localPosition.y * metallum_hdr_blur_thread_width
+        + localPosition.x;
+      const uint laneCount = metallum_hdr_blur_thread_width
+        * metallum_hdr_blur_thread_height;
+      const uint sourceValueCount = metallum_hdr_blur_source_width
+        * metallum_hdr_blur_source_height;
+      const uint horizontalValueCount = metallum_hdr_blur_tile_width
+        * metallum_hdr_blur_horizontal_rows;
+      const int maximumX = int(source.get_width()) - 1;
+      const int maximumY = int(source.get_height()) - 1;
+      const int tileOriginX = int(groupPosition.x * metallum_hdr_blur_tile_width);
+      const int tileOriginY = int(groupPosition.y * metallum_hdr_blur_tile_height);
+
+      for (uint index = lane; index < sourceValueCount; index += laneCount) {
+        const uint tileX = index % metallum_hdr_blur_source_width;
+        const uint tileY = index / metallum_hdr_blur_source_width;
+        const int sourceX = clamp(
+          tileOriginX + int(tileX) - int(metallum_hdr_blur_radius),
+          0,
+          maximumX
+        );
+        const int sourceY = clamp(
+          tileOriginY + int(tileY) - int(metallum_hdr_blur_radius),
+          0,
+          maximumY
+        );
+        sourceTile[index] = half4(source.read(uint2(sourceX, sourceY)));
+      }
+
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+
+      for (uint index = lane; index < horizontalValueCount; index += laneCount) {
+        const uint localX = index % metallum_hdr_blur_tile_width;
+        const uint haloY = index / metallum_hdr_blur_tile_width;
+        const uint sourceCenter = haloY * metallum_hdr_blur_source_width
+          + localX + metallum_hdr_blur_radius;
+        float4 horizontal = float4(sourceTile[sourceCenter]) * metallum_hdr_blur_weights[0];
+        for (uint offset = 1u; offset <= metallum_hdr_blur_radius; ++offset) {
+          horizontal += float4(sourceTile[sourceCenter + offset])
+            * metallum_hdr_blur_weights[offset];
+          horizontal += float4(sourceTile[sourceCenter - offset])
+            * metallum_hdr_blur_weights[offset];
+        }
+        // Match the old RGBA16Float intermediate instead of retaining extra
+        // precision that would subtly change the established bloom image.
+        horizontalTile[index] = half4(horizontal);
+      }
+
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+
+      const uint outputX = groupPosition.x * metallum_hdr_blur_tile_width
+        + localPosition.x;
+      const uint outputY = groupPosition.y * metallum_hdr_blur_tile_height
+        + localPosition.y;
+      if (outputX >= destination.get_width() || outputY >= destination.get_height()) {
+        return;
+      }
+      const uint center = (localPosition.y + metallum_hdr_blur_radius)
+        * metallum_hdr_blur_tile_width + localPosition.x;
+      float4 vertical = float4(horizontalTile[center]) * metallum_hdr_blur_weights[0];
+      for (uint offset = 1u; offset <= metallum_hdr_blur_radius; ++offset) {
+        vertical += float4(horizontalTile[
+          center + offset * metallum_hdr_blur_tile_width
+        ]) * metallum_hdr_blur_weights[offset];
+        vertical += float4(horizontalTile[
+          center - offset * metallum_hdr_blur_tile_width
+        ]) * metallum_hdr_blur_weights[offset];
+      }
+      destination.write(vertical, uint2(outputX, outputY));
     }
 
     fragment float4 metallum_hdr_ui_backdrop_fs(
@@ -2214,7 +2289,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
             let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
             let histogramReduceFunction = library.makeFunction(name: "metallum_hdr_histogram_reduce"),
-            let blurFunction = library.makeFunction(name: "metallum_hdr_blur_fs"),
+            let blurFunction = library.makeFunction(name: "metallum_hdr_blur"),
             let uiBackdropFunction = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs"),
             let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
             let uiDilateFunction = library.makeFunction(name: "metallum_hdr_ui_dilate_fs")
@@ -2238,7 +2313,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         return try MetallumHdrPipelines(
             extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
             histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
-            blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
+            blur: device.makeComputePipelineState(function: blurFunction),
             uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
             uiBackdropVertexFunction: vertexFunction,
             uiBackdropFragmentFunction: uiBackdropFunction,
@@ -2393,7 +2468,8 @@ private func ensureHdrWorkspace(
         format: MTLPixelFormat,
         width: Int,
         height: Int,
-        label: String
+        label: String,
+        usage: MTLTextureUsage = [.renderTarget, .shaderRead]
     ) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: format,
@@ -2402,7 +2478,7 @@ private func ensureHdrWorkspace(
             mipmapped: false
         )
         descriptor.storageMode = .private
-        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.usage = usage
         descriptor.hazardTrackingMode = .tracked
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             return nil
@@ -2413,8 +2489,13 @@ private func ensureHdrWorkspace(
 
     guard
         let emission = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR emission"),
-        let bloomA = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom A"),
-        let bloomB = makeTexture(format: .rgba16Float, width: bloomWidth, height: bloomHeight, label: "Metallum HDR bloom B"),
+        let bloom = makeTexture(
+            format: .rgba16Float,
+            width: bloomWidth,
+            height: bloomHeight,
+            label: "Metallum HDR bloom",
+            usage: [.shaderRead, .shaderWrite]
+        ),
         let histogram = device.makeBuffer(
             length: 64 * MemoryLayout<UInt32>.stride,
             options: .storageModePrivate
@@ -2434,8 +2515,7 @@ private func ensureHdrWorkspace(
         displayWidth: displayWidth,
         displayHeight: displayHeight,
         emission: emission,
-        bloomA: bloomA,
-        bloomB: bloomB,
+        bloom: bloom,
         histogram: histogram,
         adaptiveState: adaptiveState
     )
@@ -2714,12 +2794,10 @@ private func encodeHdrWorldEffects(
             sourceHeight: sceneTexture.height,
             displayWidth: displayWidth,
             displayHeight: displayHeight
-        ),
-        let samplers = presentSamplers(device: commandBuffer.device)
+        )
     else {
         return nil
     }
-    let linearSampler = samplers.linear
 
     let now = ProcessInfo.processInfo.systemUptime
     let previousUptime = workspace.lastHistogramUptime
@@ -2818,49 +2896,44 @@ private func encodeHdrWorldEffects(
         )
     }
 
-    guard let horizontal = makeHdrPassEncoder(
+    let bloomPass = MTLComputePassDescriptor()
+    attachGpuTiming(
+        bloomPass,
         commandBuffer: commandBuffer,
-        target: workspace.bloomA,
-        pipeline: pipelines.blur,
         stage: .bloomHorizontal
-    ) else {
+    )
+    let bloomThreadgroupMemoryLength = (24 * 24 + 16 * 24)
+        * 4 * MemoryLayout<Float16>.stride
+    guard pipelines.blur.maxTotalThreadsPerThreadgroup >= 16 * 16,
+          commandBuffer.device.maxThreadgroupMemoryLength >= bloomThreadgroupMemoryLength,
+          let bloom = commandBuffer.makeComputeCommandEncoder(descriptor: bloomPass) else {
         return nil
     }
-    horizontal.setFragmentTexture(workspace.emission, index: 0)
-    horizontal.setFragmentSamplerState(linearSampler, index: 0)
-    var horizontalUniforms = MetallumHdrBlurUniforms(
-        texelStep: SIMD2<Float>(1.0 / Float(workspace.emission.width), 0.0),
-        _padding0: SIMD2<Float>(repeating: 0.0)
+    bloom.label = "Metallum combined HDR bloom"
+    bloom.setComputePipelineState(pipelines.blur)
+    bloom.setTexture(workspace.emission, index: 0)
+    bloom.setTexture(workspace.bloom, index: 1)
+    bloom.setThreadgroupMemoryLength(
+        24 * 24 * 4 * MemoryLayout<Float16>.stride,
+        index: 0
     )
-    withUnsafeBytes(of: &horizontalUniforms) { bytes in
-        horizontal.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-    }
-    horizontal.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-    horizontal.endEncoding()
-
-    guard let vertical = makeHdrPassEncoder(
-        commandBuffer: commandBuffer,
-        target: workspace.bloomB,
-        pipeline: pipelines.blur,
-        stage: .bloomVertical
-    ) else {
-        return nil
-    }
-    vertical.setFragmentTexture(workspace.bloomA, index: 0)
-    vertical.setFragmentSamplerState(linearSampler, index: 0)
-    var verticalUniforms = MetallumHdrBlurUniforms(
-        texelStep: SIMD2<Float>(0.0, 1.0 / Float(workspace.bloomA.height)),
-        _padding0: SIMD2<Float>(repeating: 0.0)
+    bloom.setThreadgroupMemoryLength(
+        16 * 24 * 4 * MemoryLayout<Float16>.stride,
+        index: 1
     )
-    withUnsafeBytes(of: &verticalUniforms) { bytes in
-        vertical.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-    }
-    vertical.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-    vertical.endEncoding()
+    bloom.dispatchThreadgroups(
+        MTLSize(
+            width: (workspace.bloom.width + 15) / 16,
+            height: (workspace.bloom.height + 15) / 16,
+            depth: 1
+        ),
+        threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
+    )
+    bloom.endEncoding()
 
     return MetallumHdrWorldOutputs(
         emission: workspace.emission,
-        bloom: workspace.bloomB,
+        bloom: workspace.bloom,
         adaptiveState: workspace.adaptiveState
     )
 }

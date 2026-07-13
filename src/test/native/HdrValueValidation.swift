@@ -389,7 +389,7 @@ private final class GpuHarness {
     private let spatialWorldPipeline: MTLRenderPipelineState
     private let spatialPresentPipeline: MTLRenderPipelineState
     private let extractPipeline: MTLRenderPipelineState
-    private let blurPipeline: MTLRenderPipelineState
+    private let blurPipeline: MTLComputePipelineState
     private let legacyBlurPipeline: MTLRenderPipelineState
     private let uiComparePipeline: MTLRenderPipelineState
     private let uiDilatePipeline: MTLRenderPipelineState
@@ -468,7 +468,7 @@ private final class GpuHarness {
             let effectsVertex = effectsLibrary.makeFunction(name: "metallum_hdr_vs"),
             let extractFragment = effectsLibrary.makeFunction(name: "metallum_hdr_extract_fs"),
             let histogramReduce = effectsLibrary.makeFunction(name: "metallum_hdr_histogram_reduce"),
-            let blurFragment = effectsLibrary.makeFunction(name: "metallum_hdr_blur_fs"),
+            let blurFunction = effectsLibrary.makeFunction(name: "metallum_hdr_blur"),
             let uiCompareFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_compare_fs"),
             let uiDilateFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_dilate_fs")
         else {
@@ -483,13 +483,7 @@ private final class GpuHarness {
         self.extractPipeline = try device.makeRenderPipelineState(descriptor: extractDescriptor)
         self.histogramReducePipeline = try device.makeComputePipelineState(function: histogramReduce)
 
-        let blurDescriptor = MTLRenderPipelineDescriptor()
-        blurDescriptor.label = "Metallum HDR value validation blur"
-        blurDescriptor.vertexFunction = effectsVertex
-        blurDescriptor.fragmentFunction = blurFragment
-        blurDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
-        blurDescriptor.colorAttachments[0].isBlendingEnabled = false
-        self.blurPipeline = try device.makeRenderPipelineState(descriptor: blurDescriptor)
+        self.blurPipeline = try device.makeComputePipelineState(function: blurFunction)
 
         let legacyBlurLibrary = try device.makeLibrary(source: legacyBlurMslSource(), options: nil)
         guard
@@ -960,10 +954,9 @@ private final class GpuHarness {
         return output
     }
 
-    func renderBlur(
+    func renderLegacyBlur(
         source: MTLTexture,
-        texelStep: SIMD2<Float>,
-        legacyReference: Bool = false
+        texelStep: SIMD2<Float>
     ) throws -> MTLTexture {
         let output = try makePrivateRgba16FloatTexture(width: source.width, height: source.height)
         guard let commandBuffer = queue.makeCommandBuffer() else {
@@ -984,7 +977,7 @@ private final class GpuHarness {
             znear: 0,
             zfar: 1
         ))
-        encoder.setRenderPipelineState(legacyReference ? legacyBlurPipeline : blurPipeline)
+        encoder.setRenderPipelineState(legacyBlurPipeline)
         encoder.setFragmentTexture(source, index: 0)
         encoder.setFragmentSamplerState(linearSampler, index: 0)
         var uniforms = HdrBlurUniforms(
@@ -995,6 +988,42 @@ private final class GpuHarness {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
         try complete(commandBuffer, label: "HDR Gaussian blur")
+        return output
+    }
+
+    func renderCombinedBlur(source: MTLTexture) throws -> MTLTexture {
+        let output = try makePrivateRgba16FloatTexture(
+            width: source.width,
+            height: source.height,
+            usage: [.shaderRead, .shaderWrite]
+        )
+        guard blurPipeline.maxTotalThreadsPerThreadgroup >= 16 * 16,
+              device.maxThreadgroupMemoryLength >= (24 * 24 + 16 * 24) * 4 * MemoryLayout<Float16>.stride,
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw ValidationFailure.message("Combined HDR blur command buffer creation failed")
+        }
+        encoder.setComputePipelineState(blurPipeline)
+        encoder.setTexture(source, index: 0)
+        encoder.setTexture(output, index: 1)
+        encoder.setThreadgroupMemoryLength(
+            24 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 0
+        )
+        encoder.setThreadgroupMemoryLength(
+            16 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 1
+        )
+        encoder.dispatchThreadgroups(
+            MTLSize(
+                width: (source.width + 15) / 16,
+                height: (source.height + 15) / 16,
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
+        )
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "combined HDR Gaussian blur")
         return output
     }
 
@@ -1705,7 +1734,52 @@ private final class GpuHarness {
         )
     }
 
-    private func makePrivateRgba16FloatTexture(width: Int, height: Int) throws -> MTLTexture {
+    func readRgba16FloatPixels(texture: MTLTexture) throws -> [SIMD4<Float>] {
+        try require(texture.pixelFormat == .rgba16Float, "Readback requires RGBA16Float")
+        let bytesPerRow = ((texture.width * 8 + 255) / 256) * 256
+        let byteCount = bytesPerRow * texture.height
+        guard let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeBlitCommandEncoder() else {
+            throw ValidationFailure.message("Bulk readback resource creation failed")
+        }
+        encoder.copy(
+            from: texture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+            to: buffer,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: byteCount
+        )
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "RGBA16Float bulk readback")
+
+        var pixels = [SIMD4<Float>]()
+        pixels.reserveCapacity(texture.width * texture.height)
+        for y in 0..<texture.height {
+            let row = buffer.contents().advanced(by: y * bytesPerRow)
+                .assumingMemoryBound(to: UInt16.self)
+            for x in 0..<texture.width {
+                let words = row.advanced(by: x * 4)
+                pixels.append(SIMD4<Float>(
+                    Float(Float16(bitPattern: words[0])),
+                    Float(Float16(bitPattern: words[1])),
+                    Float(Float16(bitPattern: words[2])),
+                    Float(Float16(bitPattern: words[3]))
+                ))
+            }
+        }
+        return pixels
+    }
+
+    private func makePrivateRgba16FloatTexture(
+        width: Int,
+        height: Int,
+        usage: MTLTextureUsage = [.renderTarget, .shaderRead]
+    ) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float,
             width: width,
@@ -1713,7 +1787,7 @@ private final class GpuHarness {
             mipmapped: false
         )
         descriptor.storageMode = .private
-        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.usage = usage
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             throw ValidationFailure.message("Private RGBA16Float texture creation failed")
         }
@@ -2262,121 +2336,100 @@ private final class ValueValidation {
     }
 
     private func validateBilinearGaussianEquivalence() throws {
-        let scalarValues: [Float] = [
-            0.0, 0.125, 0.5, 1.0, 0.25, 0.75, 0.375, 0.875, 0.0625
-        ]
-        let pixels = scalarValues.map { SIMD4<Float>(repeating: $0) }
-        let source = try gpu.makeRgba16FloatTexture(
-            width: scalarValues.count,
-            height: 1,
-            pixels: pixels
-        )
-        let output = try gpu.renderBlur(
-            source: source,
-            texelStep: SIMD2<Float>(1.0 / Float(scalarValues.count), 0.0)
-        )
-        let reference = try gpu.renderBlur(
-            source: source,
-            texelStep: SIMD2<Float>(1.0 / Float(scalarValues.count), 0.0),
-            legacyReference: true
-        )
-        var maximumError: Float = 0
-        for x in scalarValues.indices {
-            let actual = try gpu.readRgba16Float(texture: output, x: x).x
-            let expected = try gpu.readRgba16Float(texture: reference, x: x).x
-            maximumError = max(maximumError, abs(actual - expected))
-        }
-
-        let singleton = try gpu.makeRgba16FloatTexture(
-            width: 1,
-            height: 1,
-            value: SIMD4<Float>(repeating: 0.625)
-        )
-        let singletonOutput = try gpu.renderBlur(
-            source: singleton,
-            texelStep: SIMD2<Float>(1.0, 0.0)
-        )
-        let singletonReference = try gpu.renderBlur(
-            source: singleton,
-            texelStep: SIMD2<Float>(1.0, 0.0),
-            legacyReference: true
-        )
-        let singletonValue = try gpu.readRgba16Float(texture: singletonOutput).x
-        let singletonExpected = try gpu.readRgba16Float(texture: singletonReference).x
-
-        let width = 5
-        let height = 4
-        var colorPixels = [SIMD4<Float>]()
-        colorPixels.reserveCapacity(width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                colorPixels.append(SIMD4<Float>(
-                    Float((x * 3 + y * 5) % 11) / 10.0,
-                    Float((x * 7 + y * 2 + 1) % 13) / 12.0,
-                    Float((x + y * 4 + 2) % 9) / 8.0,
-                    Float((x * 5 + y * 3 + 3) % 10) / 9.0
-                ))
-            }
-        }
-        let colorSource = try gpu.makeRgba16FloatTexture(
-            width: width,
-            height: height,
-            pixels: colorPixels
-        )
-        let optimizedHorizontal = try gpu.renderBlur(
-            source: colorSource,
-            texelStep: SIMD2<Float>(1.0 / Float(width), 0)
-        )
-        let optimizedTwoPass = try gpu.renderBlur(
-            source: optimizedHorizontal,
-            texelStep: SIMD2<Float>(0, 1.0 / Float(height))
-        )
-        let legacyHorizontal = try gpu.renderBlur(
-            source: colorSource,
-            texelStep: SIMD2<Float>(1.0 / Float(width), 0),
-            legacyReference: true
-        )
-        let legacyTwoPass = try gpu.renderBlur(
-            source: legacyHorizontal,
-            texelStep: SIMD2<Float>(0, 1.0 / Float(height)),
-            legacyReference: true
-        )
-        var twoPassMaximumError: Float = 0
-        for y in 0..<height {
-            for x in 0..<width {
-                let actual = try gpu.readRgba16Float(texture: optimizedTwoPass, x: x, y: y)
-                let expected = try gpu.readRgba16Float(texture: legacyTwoPass, x: x, y: y)
-                let channelError = abs(actual - expected)
-                twoPassMaximumError = max(
-                    twoPassMaximumError,
-                    max(channelError.x, max(channelError.y, max(channelError.z, channelError.w)))
-                )
-            }
-        }
-        try require(
-            maximumError <= 0.001,
-            String(format: "Five-tap Gaussian diverged from nine-tap GPU reference: max error %.8f", maximumError)
-        )
-        try require(
-            abs(singletonValue - singletonExpected) <= 0.001,
-            String(
-                format: "Single-texel Gaussian edge handling changed: optimized %.8f, reference %.8f",
-                singletonValue,
-                singletonExpected
+        func maximumError(
+            width: Int,
+            height: Int,
+            pixels: [SIMD4<Float>]
+        ) throws -> Float {
+            let source = try gpu.makeRgba16FloatTexture(
+                width: width,
+                height: height,
+                pixels: pixels
             )
+            let actual = try gpu.renderCombinedBlur(source: source)
+            let horizontalReference = try gpu.renderLegacyBlur(
+                source: source,
+                texelStep: SIMD2<Float>(1.0 / Float(width), 0)
+            )
+            let reference = try gpu.renderLegacyBlur(
+                source: horizontalReference,
+                texelStep: SIMD2<Float>(0, 1.0 / Float(height))
+            )
+            let actualPixels = try gpu.readRgba16FloatPixels(texture: actual)
+            let referencePixels = try gpu.readRgba16FloatPixels(texture: reference)
+            return zip(actualPixels, referencePixels).reduce(Float.zero) { result, pair in
+                let error = abs(pair.0 - pair.1)
+                return max(result, max(error.x, max(error.y, max(error.z, error.w))))
+            }
+        }
+
+        typealias BlurCase = (width: Int, height: Int, pixels: [SIMD4<Float>])
+        var horizontalPixels = [SIMD4<Float>]()
+        var verticalPixels = [SIMD4<Float>]()
+        for index in 0..<9 {
+            let horizontalValue = Float((index * 5) % 9) / 8.0
+            horizontalPixels.append(SIMD4<Float>(repeating: horizontalValue))
+            let red = Float(index) / 8.0
+            let green = Float((index * 3) % 9) / 8.0
+            let blue = Float((index * 7) % 9) / 8.0
+            verticalPixels.append(SIMD4<Float>(red, green, blue, 1.0))
+        }
+        var smallColorPixels = [SIMD4<Float>]()
+        for y in 0..<4 {
+            for x in 0..<5 {
+                let red = Float((x * 3 + y * 5) % 11) / 10.0
+                let green = Float((x * 7 + y * 2 + 1) % 13) / 12.0
+                let blue = Float((x + y * 4 + 2) % 9) / 8.0
+                let alpha = Float((x * 5 + y * 3 + 3) % 10) / 9.0
+                smallColorPixels.append(SIMD4<Float>(red, green, blue, alpha))
+            }
+        }
+        var tiledHdrPixels = [SIMD4<Float>]()
+        for y in 0..<19 {
+            for x in 0..<17 {
+                let red = Float((x * 11 + y * 7) % 41) / 10.0
+                let green = Float((x * 3 + y * 13 + 1) % 37) / 12.0
+                let blue = Float((x * 17 + y * 5 + 2) % 43) / 11.0
+                let alpha = Float((x * 7 + y * 19 + 3) % 29) / 9.0
+                tiledHdrPixels.append(SIMD4<Float>(red, green, blue, alpha))
+            }
+        }
+        var impulsePixels = [SIMD4<Float>](
+            repeating: SIMD4<Float>(repeating: 0.0),
+            count: 31 * 18
         )
+        impulsePixels[9 * 31 + 16] = SIMD4<Float>(4.0, 2.0, 1.0, 0.5)
+        let cases: [BlurCase] = [
+            (1, 1, [SIMD4<Float>(repeating: 0.625)]),
+            (9, 1, horizontalPixels),
+            (1, 9, verticalPixels),
+            (5, 4, smallColorPixels),
+            (17, 19, tiledHdrPixels),
+            (31, 18, impulsePixels)
+        ]
+
+        var largestError: Float = 0
+        for testCase in cases {
+            largestError = max(
+                largestError,
+                try maximumError(
+                    width: testCase.width,
+                    height: testCase.height,
+                    pixels: testCase.pixels
+                )
+            )
+        }
         try require(
-            twoPassMaximumError <= 0.002,
+            largestError <= 0.002,
             String(
-                format: "Two-pass color Gaussian diverged from nine-tap GPU reference: max error %.8f",
-                twoPassMaximumError
+                format: "Combined tiled Gaussian diverged from the two-pass FP16 reference: max error %.8f",
+                largestError
             )
         )
         passCount += 1
         print(String(
-            format: "PASS five-tap bilinear Gaussian matches two-pass RGBA FP16 reference: %.6f single, %.6f two-pass",
-            maximumError,
-            twoPassMaximumError
+            format: "PASS combined tiled Gaussian matches two-pass RGBA FP16 reference across edge and tile boundaries: %.6f",
+            largestError
         ))
     }
 
