@@ -250,10 +250,18 @@ java {
 }
 
 jar {
-	inputs.property "projectName", artifactProjectName
+	inputs.property "projectName", project.name
 
 	from("LICENSE") {
-		rename { "${it}_${artifactProjectName}"}
+		rename { "${it}_${project.name}"}
+	}
+
+	doLast {
+		copy {
+			from archiveFile
+			into projectDir
+			rename { "HRDMetal.jar" }
+		}
 	}
 }
 
