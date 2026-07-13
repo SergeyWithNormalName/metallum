@@ -59,6 +59,23 @@ The system properties `metallum.hdr.mode` and `metallum.hdr.diagnosticPattern` c
 
 F2 screenshots remain conventional SDR images. When the seeded GUI target is available, screenshots use its completed full-frame result, including HUD and menus; the display-only HDR expansion is not baked into the PNG.
 
+## GPU timing reports
+
+GPU timing is opt-in and disabled during a normal game launch. It uses Metal timestamp measurements from the running game, so it remains useful on Apple M1 Pro where Xcode's hardware-counter Performance view cannot profile the trace.
+
+```bash
+METALLUM_GPU_TIMING=1 \
+METALLUM_GPU_TIMING_DETAIL=1 \
+METALLUM_GPU_TIMING_REPORT="$PWD/logs/metallum-gpu-timing.jsonl" \
+  ./gradlew runClient --args='--quickPlaySingleplayer <world>'
+```
+
+- `METALLUM_GPU_TIMING=1` writes a rolling 300-presented-frame summary to the game log: FPS, GPU-frame average/p50/p95/p99/max, and CPU waits.
+- `METALLUM_GPU_TIMING_DETAIL=1` additionally measures the native world, HDR, MetalFX, UI, and present stage boundaries. This is diagnostic instrumentation and can modestly perturb frame timing.
+- `METALLUM_GPU_TIMING_REPORT=/absolute/path/report.jsonl` additionally appends the same summaries as one JSON object per line. This is the recommended option for automated analysis: it preserves frame percentiles, per-stage average/max values, CPU waits, dropped timing events, and whether detailed instrumentation was active.
+
+The report path has no effect unless `METALLUM_GPU_TIMING=1` is set. On M1 Pro the available Metal counter is a GPU timestamp; the report can attribute elapsed time between the instrumented boundaries, but cannot provide hardware occupancy, cache, or bandwidth counters.
+
 ## Compatibility
 
 Validated target:

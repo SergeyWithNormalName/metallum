@@ -563,6 +563,56 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
     private var droppedEvents = 0
     private var intervalStart = ProcessInfo.processInfo.systemUptime
 
+    private func writeReport(
+        frameCount: Int,
+        fps: Double,
+        frameAverageMs: Double,
+        frameP50Ms: Double,
+        frameP95Ms: Double,
+        frameP99Ms: Double,
+        frameMaximumMs: Double
+    ) {
+        guard let writer = NativeState.gpuTimingReportWriter else { return }
+
+        var stages: [String: Any] = [:]
+        for stage in MetallumGpuTimingStage.allCases {
+            let count = stageCounts[stage.rawValue]
+            stages[stage.reportName] = count == 0 ? NSNull() : [
+                "frames": count,
+                "average_ms": stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
+                "maximum_ms": stageMaximums[stage.rawValue] / 1_000_000.0
+            ]
+        }
+
+        var waits: [String: Any] = [:]
+        for kind in MetallumCpuWaitKind.allCases {
+            let count = waitCounts[kind.rawValue]
+            waits[kind.reportName] = count == 0 ? NSNull() : [
+                "waits": count,
+                "average_ms_per_frame": waitNanoseconds[kind.rawValue] / Double(frameCount) / 1_000_000.0,
+                "maximum_ms": maximumWaitNanoseconds[kind.rawValue] / 1_000_000.0
+            ]
+        }
+
+        writer.write([
+            "schema_version": 1,
+            "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
+            "detail_enabled": NativeState.gpuTimingDetailEnabled,
+            "presented_frames": frameCount,
+            "fps": fps,
+            "frame_ms": [
+                "average": frameAverageMs,
+                "p50": frameP50Ms,
+                "p95": frameP95Ms,
+                "p99": frameP99Ms,
+                "maximum": frameMaximumMs
+            ],
+            "stages": stages,
+            "cpu_waits": waits,
+            "dropped_timing_events": droppedEvents
+        ])
+    }
+
     func record(
         _ commandBuffer: MTLCommandBuffer,
         presentsDrawable: Bool,
@@ -610,15 +660,20 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 )
                 return sortedGpuSeconds[index]
             }
+            let frameAverageMs = totalGpuSeconds * 1000.0 / Double(sampleCount)
+            let frameP50Ms = percentile(0.50) * 1000.0
+            let frameP95Ms = percentile(0.95) * 1000.0
+            let frameP99Ms = percentile(0.99) * 1000.0
+            let frameMaximumMs = maximumGpuSeconds * 1000.0
             var lines = [String(format:
                 "[metallum] GPU timing (%d presented frames, %.1f FPS): frame %.3f ms avg / %.3f p50 / %.3f p95 / %.3f p99 / %.3f max",
                 sampleCount,
                 completedFps,
-                totalGpuSeconds * 1000.0 / Double(sampleCount),
-                percentile(0.50) * 1000.0,
-                percentile(0.95) * 1000.0,
-                percentile(0.99) * 1000.0,
-                maximumGpuSeconds * 1000.0
+                frameAverageMs,
+                frameP50Ms,
+                frameP95Ms,
+                frameP99Ms,
+                frameMaximumMs
             )]
             if NativeState.gpuTimingDetailEnabled {
                 for stage in MetallumGpuTimingStage.allCases {
@@ -656,6 +711,15 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 lines.append("  dropped timing events: \(droppedEvents)")
             }
             NSLog("%@", lines.joined(separator: "\n"))
+            writeReport(
+                frameCount: sampleCount,
+                fps: completedFps,
+                frameAverageMs: frameAverageMs,
+                frameP50Ms: frameP50Ms,
+                frameP95Ms: frameP95Ms,
+                frameP99Ms: frameP99Ms,
+                frameMaximumMs: frameMaximumMs
+            )
             sampleCount = 0
             totalGpuSeconds = 0.0
             maximumGpuSeconds = 0.0
@@ -682,6 +746,47 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
     }
 }
 
+private final class MetallumGpuTimingReportWriter: @unchecked Sendable {
+    private let url: URL
+    private let lock = NSLock()
+    private var reportedFailure = false
+
+    init?(path: String?) {
+        guard let path, !path.isEmpty else { return nil }
+        self.url = URL(fileURLWithPath: path)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+        } catch {
+            NSLog("[metallum] GPU timing report disabled: %@", String(describing: error))
+            return nil
+        }
+    }
+
+    func write(_ report: [String: Any]) {
+        lock.lock()
+        defer { lock.unlock() }
+        do {
+            var data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+            data.append(0x0A)
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            if !reportedFailure {
+                reportedFailure = true
+                NSLog("[metallum] GPU timing report write failed: %@", String(describing: error))
+            }
+        }
+    }
+}
+
 private enum NativeState {
     static var debugLabelsEnabled = false
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
@@ -701,6 +806,11 @@ private enum NativeState {
     static let gpuTimingEnabled = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
     static let gpuTimingDetailEnabled = gpuTimingEnabled
         && ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING_DETAIL"] == "1"
+    static let gpuTimingReportWriter = MetallumGpuTimingReportWriter(
+        path: gpuTimingEnabled
+            ? ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING_REPORT"]
+            : nil
+    )
     static let gpuTimingStats: MetallumGpuTimingStats? = gpuTimingEnabled
         ? MetallumGpuTimingStats()
         : nil
