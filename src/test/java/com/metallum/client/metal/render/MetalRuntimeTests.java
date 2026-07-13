@@ -75,7 +75,15 @@ public final class MetalRuntimeTests {
         MetalGpuBuffer.TexelViewKey firstKey = new MetalGpuBuffer.TexelViewKey(70L, 0L, 16L, 64L);
         int[] creations = new int[1];
 
+        require(!cache.isInitialized(), "texel view cache allocated storage eagerly");
+        cache.drain();
+        require(!cache.isInitialized(), "draining an unused texel view cache allocated storage");
+        MetalGpuBuffer.TexelViewKey failedKey = new MetalGpuBuffer.TexelViewKey(0L, 0L, 1L, 4L);
+        require(cache.getOrCreate(failedKey, ignored -> null) == null, "failed texel view creation returned a value");
+        require(!cache.isInitialized(), "failed texel view creation initialized cache storage");
+
         String first = cache.getOrCreate(firstKey, ignored -> "view-" + ++creations[0]);
+        require(cache.isInitialized(), "successful texel view creation did not initialize cache storage");
         String reused = cache.getOrCreate(firstKey, ignored -> "view-" + ++creations[0]);
         String differentRange = cache.getOrCreate(
                 new MetalGpuBuffer.TexelViewKey(70L, 64L, 16L, 64L),
@@ -87,6 +95,7 @@ public final class MetalRuntimeTests {
 
         cache.drain();
         require(cache.size() == 0, "texel view cache did not clear after backing invalidation");
+        require(!cache.isInitialized(), "backing invalidation retained texel view cache storage");
         require(released.size() == 2 && released.contains(first) && released.contains(differentRange),
                 "backing invalidation did not release every cached texel view");
 
@@ -94,7 +103,6 @@ public final class MetalRuntimeTests {
         require(!first.equals(afterInvalidation), "backing invalidation reused a stale texel view");
         require(creations[0] == 3, "texel view was not recreated for the new backing");
 
-        MetalGpuBuffer.TexelViewKey failedKey = new MetalGpuBuffer.TexelViewKey(0L, 0L, 1L, 4L);
         require(cache.getOrCreate(failedKey, ignored -> null) == null, "failed texel view creation returned a value");
         require(cache.getOrCreate(failedKey, ignored -> "retry") != null,
                 "failed texel view creation was cached instead of allowing a retry");

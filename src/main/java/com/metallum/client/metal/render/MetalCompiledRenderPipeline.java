@@ -77,7 +77,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final Map<HdrShaderFlavor, ShaderFunctions> shaderFunctions;
 
     private static final java.util.concurrent.atomic.AtomicInteger compilationCounter = new java.util.concurrent.atomic.AtomicInteger(0);
-    private static final Set<String> FLAVOR_SELECTIONS_LOGGED = ConcurrentHashMap.newKeySet();
     private static final Set<String> UNKNOWN_FP16_PIPELINES_LOGGED = ConcurrentHashMap.newKeySet();
 
     private final MemorySegment depthStencilState;
@@ -85,6 +84,9 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final RenderPipeline info;
     private final boolean isValid;
     private boolean closed = false;
+    private long legacyColorFormatsLogged;
+    private long sceneRasterColorFormatsLogged;
+    private long scenePostColorFormatsLogged;
 
     private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
 
@@ -434,13 +436,30 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final HdrShaderFlavor flavor,
             final MTLPixelFormat colorFormat
     ) {
-        String key = this.info.getLocation() + "|" + this.hdrRole + "|" + colorFormat + "|" + flavor;
-        if (FLAVOR_SELECTIONS_LOGGED.add(key)) {
-            com.metallum.Metallum.LOGGER.debug(
-                    "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",
-                    this.info.getLocation(), this.hdrRole, colorFormat, flavor
-            );
+        int colorFormatOrdinal = colorFormat.ordinal();
+        if (colorFormatOrdinal >= Long.SIZE) {
+            throw new IllegalStateException("Too many Metal pixel formats for the flavor selection log mask");
         }
+
+        long colorFormatBit = 1L << colorFormatOrdinal;
+        long loggedColorFormats = switch (flavor) {
+            case LEGACY -> this.legacyColorFormatsLogged;
+            case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged;
+            case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged;
+        };
+        if ((loggedColorFormats & colorFormatBit) != 0L) {
+            return;
+        }
+
+        switch (flavor) {
+            case LEGACY -> this.legacyColorFormatsLogged |= colorFormatBit;
+            case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged |= colorFormatBit;
+            case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged |= colorFormatBit;
+        }
+        com.metallum.Metallum.LOGGER.debug(
+                "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",
+                this.info.getLocation(), this.hdrRole, colorFormat, flavor
+        );
     }
 
     MTLCullMode cullMode() {

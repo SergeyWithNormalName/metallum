@@ -213,7 +213,8 @@ class MetalGpuBuffer extends GpuBuffer {
     static final class TexelViewCache<T> {
         private final int maxEntries;
         private final Consumer<T> release;
-        private final Map<TexelViewKey, T> views = new LinkedHashMap<>(16, 0.75f, true);
+        @Nullable
+        private Map<TexelViewKey, T> views;
 
         TexelViewCache(final int maxEntries, final Consumer<T> release) {
             if (maxEntries <= 0) {
@@ -225,18 +226,26 @@ class MetalGpuBuffer extends GpuBuffer {
 
         @Nullable
         T getOrCreate(final TexelViewKey key, final Function<TexelViewKey, @Nullable T> factory) {
-            T cached = this.views.get(key);
-            if (cached != null) {
-                return cached;
+            Map<TexelViewKey, T> views = this.views;
+            if (views != null) {
+                T cached = views.get(key);
+                if (cached != null) {
+                    return cached;
+                }
             }
 
             T created = factory.apply(key);
             if (created == null) {
                 return null;
             }
-            this.views.put(key, created);
-            if (this.views.size() > this.maxEntries) {
-                var eldest = this.views.entrySet().iterator();
+
+            if (views == null) {
+                views = new LinkedHashMap<>(16, 0.75f, true);
+                this.views = views;
+            }
+            views.put(key, created);
+            if (views.size() > this.maxEntries) {
+                var eldest = views.entrySet().iterator();
                 T evicted = eldest.next().getValue();
                 eldest.remove();
                 this.release.accept(evicted);
@@ -245,12 +254,22 @@ class MetalGpuBuffer extends GpuBuffer {
         }
 
         void drain() {
-            this.views.values().forEach(this.release);
-            this.views.clear();
+            Map<TexelViewKey, T> views = this.views;
+            if (views == null) {
+                return;
+            }
+
+            this.views = null;
+            views.values().forEach(this.release);
+            views.clear();
         }
 
         int size() {
-            return this.views.size();
+            return this.views == null ? 0 : this.views.size();
+        }
+
+        boolean isInitialized() {
+            return this.views != null;
         }
     }
 }
