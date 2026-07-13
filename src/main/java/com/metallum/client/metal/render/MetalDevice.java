@@ -333,6 +333,14 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.waitForPreviouslySubmittedGpuWork();
     }
 
+    public void setGpuTimingStage(final MetalGpuTimingStage stage) {
+        this.commandEncoder.setGpuTimingStage(stage);
+    }
+
+    MetalGpuTimingStage gpuTimingStageForTests() {
+        return this.commandEncoder.gpuTimingStage();
+    }
+
     public HdrConfig hdrConfig() {
         return this.hdrConfig;
     }

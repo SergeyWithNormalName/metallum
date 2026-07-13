@@ -54,6 +54,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment renderSemanticAttachment = MemorySegment.NULL;
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final DynamicBackingPool<MemorySegment> dynamicBackingPool;
+    private MetalGpuTimingStage gpuTimingStage = MetalGpuTimingStage.NONE;
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -131,6 +132,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         InFlight toClose = inFlight[slot];
         inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore);
         commandBuffer = null;
+        gpuTimingStage = MetalGpuTimingStage.NONE;
         currentSubmitIndex++;
 
         if (!awaitSubmitCompletion(currentSubmitIndex - MAX_SUBMITS_IN_FLIGHT, 5000L)) {
@@ -207,7 +209,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 clearColorAlpha,
                 clearSemantic ? 1 : 0,
                 clearDepthEnabled ? 1 : 0,
-                clearDepthValue
+                clearDepthValue,
+                this.gpuTimingStage.nativeId()
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
         currentEncoder = encoder;
@@ -766,6 +769,20 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return this.currentSubmitIndex;
     }
 
+    void setGpuTimingStage(final MetalGpuTimingStage stage) {
+        MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
+        if (this.gpuTimingStage == next) {
+            return;
+        }
+        submitRenderPass();
+        endEncoder();
+        this.gpuTimingStage = next;
+    }
+
+    MetalGpuTimingStage gpuTimingStage() {
+        return this.gpuTimingStage;
+    }
+
     @Override
     public void writeTimestamp(final @NonNull GpuQueryPool pool, final int index) {
         if (pool instanceof MetalGpuQueryPool metalPool && index >= 0 && index < pool.size()) {
@@ -803,7 +820,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 colorClear != null ? colorClear.w() : 0.0F,
                 0,
                 depthClear != null ? 1 : 0,
-                depthClear != null ? depthClear : 1.0
+                depthClear != null ? depthClear : 1.0,
+                this.gpuTimingStage.nativeId()
         );
         encoder.waitForFence(fence, MTLRenderStages.VertexAndFragment);
         currentEncoder = encoder;

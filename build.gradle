@@ -110,6 +110,43 @@ tasks.register("spatialScalingUnitTest", JavaExec) {
 
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
+def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
+
+tasks.register("compileGpuTimingValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native Metal GPU counter validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/GpuTimingValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(gpuTimingValidationBinary)
+
+	doFirst {
+		gpuTimingValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", gpuTimingValidationBinary.get().asFile.absolutePath,
+		"src/test/native/GpuTimingValidation.swift"
+}
+
+tasks.register("gpuTimingValidation", Exec) {
+	group = "verification"
+	description = "Validates hardware timestamp samples at render, compute and blit pass boundaries"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("compileGpuTimingValidation"))
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine gpuTimingValidationBinary.get().asFile.absolutePath
+}
 
 tasks.register("compileSpatialScalingValidation", Exec) {
 	group = "verification"
@@ -202,6 +239,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
+	dependsOn(tasks.named("gpuTimingValidation"))
 }
 
 java {

@@ -119,7 +119,8 @@ public final class MetalNativeBridge {
                             FLOAT,
                             INT,
                             INT,
-                            DOUBLE
+                            DOUBLE,
+                            INT
                     )
             );
             MTLRenderCommandEncoderSetRenderPipelineState = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRenderPipelineState", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
@@ -879,7 +880,8 @@ public final class MetalNativeBridge {
             final float clearColorAlpha,
             final int clearSemanticEnabled,
             final int clearDepthEnabled,
-            final double clearDepth
+            final double clearDepth,
+            final int gpuTimingStage
     ) {
         try {
             return (MemorySegment) MTLCommandBufferMakeRenderCommandEncoder.invokeExact(
@@ -896,7 +898,8 @@ public final class MetalNativeBridge {
                     clearColorAlpha,
                     clearSemanticEnabled,
                     clearDepthEnabled,
-                    clearDepth
+                    clearDepth,
+                    gpuTimingStage
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_makeRenderCommandEncoder", throwable);

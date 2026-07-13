@@ -1,6 +1,8 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrUiRenderTarget;
+import com.metallum.client.metal.render.MetalGpuTiming;
+import com.metallum.client.metal.render.MetalGpuTimingStage;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
@@ -26,7 +28,9 @@ abstract class GuiRendererHdrMixin {
             require = 1
     )
     private RenderTarget metallum$drawGuiIntoSdrTarget(final GameRenderer renderer) {
-        return HdrUiRenderTarget.begin(renderer.mainRenderTarget());
+        RenderTarget target = HdrUiRenderTarget.begin(renderer.mainRenderTarget());
+        MetalGpuTiming.begin(MetalGpuTimingStage.UI);
+        return target;
     }
 
     @Redirect(
@@ -65,6 +69,7 @@ abstract class GuiRendererHdrMixin {
 
     @Inject(method = "draw", at = @At("RETURN"))
     private void metallum$publishSdrUiTarget(final CallbackInfo ci) {
+        MetalGpuTiming.end();
         HdrUiRenderTarget.finish();
     }
 

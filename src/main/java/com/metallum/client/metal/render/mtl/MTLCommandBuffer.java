@@ -49,7 +49,8 @@ public final class MTLCommandBuffer {
             final float clearColorAlpha,
             final int clearSemanticEnabled,
             final int clearDepthEnabled,
-            final double clearDepth
+            final double clearDepth,
+            final int gpuTimingStage
     ) {
         MemorySegment encoder = MetalNativeBridge.MTLCommandBuffer_makeRenderCommandEncoder(
                 handle(),
@@ -65,7 +66,8 @@ public final class MTLCommandBuffer {
                 clearColorAlpha,
                 clearSemanticEnabled,
                 clearDepthEnabled,
-                clearDepth
+                clearDepth,
+                gpuTimingStage
         );
         if (MetalNativeBridge.isNullHandle(encoder)) {
             throw new IllegalStateException("Failed to create MTLRenderCommandEncoder");

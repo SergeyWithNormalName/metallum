@@ -79,6 +79,7 @@ private struct MetallumHdrAdaptiveState {
 
 private final class MetallumHdrPipelines {
     let extract: MTLRenderPipelineState
+    let histogramBuild: MTLComputePipelineState
     let histogramReduce: MTLComputePipelineState
     let blur: MTLRenderPipelineState
     let uiBackdrop: MTLRenderPipelineState
@@ -87,6 +88,7 @@ private final class MetallumHdrPipelines {
 
     init(
         extract: MTLRenderPipelineState,
+        histogramBuild: MTLComputePipelineState,
         histogramReduce: MTLComputePipelineState,
         blur: MTLRenderPipelineState,
         uiBackdrop: MTLRenderPipelineState,
@@ -94,6 +96,7 @@ private final class MetallumHdrPipelines {
         uiDilate: MTLRenderPipelineState
     ) {
         self.extract = extract
+        self.histogramBuild = histogramBuild
         self.histogramReduce = histogramReduce
         self.blur = blur
         self.uiBackdrop = uiBackdrop
@@ -202,14 +205,288 @@ private struct MetallumHdrWorldOutputs {
     let adaptiveState: MTLBuffer
 }
 
+private enum MetallumGpuTimingStage: Int, CaseIterable {
+    case worldOpaque = 0
+    case translucent = 1
+    case entities = 2
+    case hdrExtract = 3
+    case histogramExposure = 4
+    case bloomHorizontal = 5
+    case bloomVertical = 6
+    case hdrReconstruction = 7
+    case metalFx = 8
+    case ui = 9
+    case present = 10
+
+    var reportName: String {
+        switch self {
+        case .worldOpaque: "world opaque"
+        case .translucent: "translucent"
+        case .entities: "entities/features"
+        case .hdrExtract: "HDR extract"
+        case .histogramExposure: "histogram/exposure"
+        case .bloomHorizontal: "bloom horizontal"
+        case .bloomVertical: "bloom vertical"
+        case .hdrReconstruction: "HDR reconstruction"
+        case .metalFx: "MetalFX"
+        case .ui: "UI"
+        case .present: "present"
+        }
+    }
+
+    static func fromJavaId(_ value: Int32) -> MetallumGpuTimingStage? {
+        value >= 0 ? MetallumGpuTimingStage(rawValue: Int(value)) : nil
+    }
+}
+
+private struct MetallumGpuTimingEvent {
+    let stage: MetallumGpuTimingStage
+    let startIndex: Int
+    let endIndex: Int
+}
+
+private struct MetallumGpuTimingSnapshot {
+    let stageNanoseconds: [Double?]
+    let droppedEvents: Int
+}
+
+private final class MetallumGpuCounterFrame: @unchecked Sendable {
+    static let sampleCapacity = 512
+
+    let sampleBuffer: MTLCounterSampleBuffer
+    let markerBuffer: MTLBuffer
+    private let device: MTLDevice
+    private let startCpuTimestamp: UInt64
+    private let startGpuTimestamp: UInt64
+    private var nextSampleIndex = 0
+    private var events: [MetallumGpuTimingEvent] = []
+    private(set) var droppedEvents = 0
+
+    init?(device: MTLDevice, counterSet: MTLCounterSet, markerBuffer: MTLBuffer) {
+        let descriptor = MTLCounterSampleBufferDescriptor()
+        descriptor.counterSet = counterSet
+        descriptor.label = "Metallum per-stage GPU timestamps"
+        descriptor.storageMode = .shared
+        descriptor.sampleCount = Self.sampleCapacity
+        do {
+            self.sampleBuffer = try device.makeCounterSampleBuffer(descriptor: descriptor)
+        } catch {
+            NSLog("[metallum] Failed to create GPU timestamp sample buffer: %@", String(describing: error))
+            return nil
+        }
+        self.device = device
+        self.markerBuffer = markerBuffer
+        let start = device.sampleTimestamps()
+        self.startCpuTimestamp = UInt64(start.cpu)
+        self.startGpuTimestamp = UInt64(start.gpu)
+    }
+
+    func allocateEvent(_ stage: MetallumGpuTimingStage) -> MetallumGpuTimingEvent? {
+        guard nextSampleIndex + 2 <= Self.sampleCapacity else {
+            droppedEvents += 1
+            return nil
+        }
+        let event = MetallumGpuTimingEvent(
+            stage: stage,
+            startIndex: nextSampleIndex,
+            endIndex: nextSampleIndex + 1
+        )
+        nextSampleIndex += 2
+        events.append(event)
+        return event
+    }
+
+    func attachRender(_ descriptor: MTLRenderPassDescriptor, stage: MetallumGpuTimingStage) {
+        guard let event = allocateEvent(stage) else { return }
+        let attachment = descriptor.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sampleBuffer
+        attachment.startOfVertexSampleIndex = event.startIndex
+        attachment.endOfVertexSampleIndex = MTLCounterDontSample
+        attachment.startOfFragmentSampleIndex = MTLCounterDontSample
+        attachment.endOfFragmentSampleIndex = event.endIndex
+    }
+
+    func attachCompute(_ descriptor: MTLComputePassDescriptor, stage: MetallumGpuTimingStage) {
+        guard let event = allocateEvent(stage) else { return }
+        let attachment = descriptor.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sampleBuffer
+        attachment.startOfEncoderSampleIndex = event.startIndex
+        attachment.endOfEncoderSampleIndex = event.endIndex
+    }
+
+    func attachBlit(_ descriptor: MTLBlitPassDescriptor, stage: MetallumGpuTimingStage) {
+        guard let event = allocateEvent(stage) else { return }
+        let attachment = descriptor.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sampleBuffer
+        attachment.startOfEncoderSampleIndex = event.startIndex
+        attachment.endOfEncoderSampleIndex = event.endIndex
+    }
+
+    func allocateExternalEvent(_ stage: MetallumGpuTimingStage) -> MetallumGpuTimingEvent? {
+        allocateEvent(stage)
+    }
+
+    func attachExternalStart(_ descriptor: MTLBlitPassDescriptor, event: MetallumGpuTimingEvent) {
+        let attachment = descriptor.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sampleBuffer
+        attachment.startOfEncoderSampleIndex = MTLCounterDontSample
+        attachment.endOfEncoderSampleIndex = event.startIndex
+    }
+
+    func attachExternalEnd(_ descriptor: MTLBlitPassDescriptor, event: MetallumGpuTimingEvent) {
+        let attachment = descriptor.sampleBufferAttachments[0]!
+        attachment.sampleBuffer = sampleBuffer
+        attachment.startOfEncoderSampleIndex = event.endIndex
+        attachment.endOfEncoderSampleIndex = MTLCounterDontSample
+    }
+
+    func resolve() -> MetallumGpuTimingSnapshot? {
+        guard nextSampleIndex > 0 else {
+            return MetallumGpuTimingSnapshot(
+                stageNanoseconds: Array(repeating: nil, count: MetallumGpuTimingStage.allCases.count),
+                droppedEvents: droppedEvents
+            )
+        }
+        let final = device.sampleTimestamps()
+        let finalCpu = UInt64(final.cpu)
+        let finalGpu = UInt64(final.gpu)
+        guard finalCpu > startCpuTimestamp, finalGpu > startGpuTimestamp else {
+            return nil
+        }
+        guard let data = try? sampleBuffer.resolveCounterRange(0..<nextSampleIndex),
+              data.count >= nextSampleIndex * MemoryLayout<MTLCounterResultTimestamp>.stride else {
+            return nil
+        }
+        let cpuSpan = Double(finalCpu - startCpuTimestamp)
+        let gpuSpan = Double(finalGpu - startGpuTimestamp)
+        guard cpuSpan.isFinite, gpuSpan.isFinite, cpuSpan > 0.0, gpuSpan > 0.0 else {
+            return nil
+        }
+
+        var totals = Array<Double?>(repeating: nil, count: MetallumGpuTimingStage.allCases.count)
+        data.withUnsafeBytes { rawBytes in
+            let timestamps = rawBytes.bindMemory(to: MTLCounterResultTimestamp.self)
+            for event in events where event.startIndex < timestamps.count && event.endIndex < timestamps.count {
+                let start = timestamps[event.startIndex].timestamp
+                let end = timestamps[event.endIndex].timestamp
+                guard start != 0,
+                      end != 0,
+                      start != MTLCounterErrorValue,
+                      end != MTLCounterErrorValue,
+                      end >= start else {
+                    continue
+                }
+                let nanoseconds = Double(end - start) / gpuSpan * cpuSpan
+                guard nanoseconds.isFinite, nanoseconds >= 0.0 else { continue }
+                totals[event.stage.rawValue] = (totals[event.stage.rawValue] ?? 0.0) + nanoseconds
+            }
+        }
+        return MetallumGpuTimingSnapshot(stageNanoseconds: totals, droppedEvents: droppedEvents)
+    }
+}
+
+private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
+    static let shared = MetallumGpuTimingCoordinator()
+
+    private let lock = NSLock()
+    private var frames: [UInt: MetallumGpuCounterFrame] = [:]
+    private var counterSets: [UInt: MTLCounterSet] = [:]
+    private var unsupportedDevices: Set<UInt> = []
+
+    func register(_ commandBuffer: MTLCommandBuffer) {
+        guard NativeState.gpuTimingStats != nil else { return }
+        let device = commandBuffer.device
+        let deviceKey = objectAddress(device)
+
+        lock.lock()
+        if unsupportedDevices.contains(deviceKey) {
+            lock.unlock()
+            return
+        }
+        var counterSet = counterSets[deviceKey]
+        lock.unlock()
+
+        let discoveredNow = counterSet == nil
+        if counterSet == nil {
+            guard device.supportsCounterSampling(.atStageBoundary),
+                  let discovered = device.counterSets?.first(where: { set in
+                      set.name == MTLCommonCounterSet.timestamp.rawValue
+                          && set.counters.contains(where: { $0.name == MTLCommonCounter.timestamp.rawValue })
+                  }) else {
+                markUnsupported(deviceKey, reason: "timestamp counter set or stage-boundary sampling is unavailable")
+                return
+            }
+            counterSet = discovered
+        }
+        guard let markerBuffer = device.makeBuffer(
+                  length: MemoryLayout<UInt32>.stride,
+                  options: .storageModePrivate
+              ), let counterSet,
+              let frame = MetallumGpuCounterFrame(
+                device: device,
+                counterSet: counterSet,
+                markerBuffer: markerBuffer
+              ) else {
+            markUnsupported(deviceKey, reason: "failed to allocate counter resources")
+            return
+        }
+        markerBuffer.label = "Metallum per-frame GPU timing marker"
+
+        lock.lock()
+        counterSets[deviceKey] = counterSet
+        frames[objectAddress(commandBuffer)] = frame
+        lock.unlock()
+        if discoveredNow {
+            NSLog(
+                "[metallum] Per-stage GPU timing enabled: timestamp counter set, %d samples per command buffer",
+                MetallumGpuCounterFrame.sampleCapacity
+            )
+        }
+    }
+
+    func frame(for commandBuffer: MTLCommandBuffer) -> MetallumGpuCounterFrame? {
+        lock.lock()
+        let frame = frames[objectAddress(commandBuffer)]
+        lock.unlock()
+        return frame
+    }
+
+    func take(_ commandBuffer: MTLCommandBuffer) -> MetallumGpuCounterFrame? {
+        lock.lock()
+        let frame = frames.removeValue(forKey: objectAddress(commandBuffer))
+        lock.unlock()
+        return frame
+    }
+
+    func abandon(_ commandBuffer: MTLCommandBuffer) {
+        _ = take(commandBuffer)
+    }
+
+    private func markUnsupported(_ deviceKey: UInt, reason: String) {
+        lock.lock()
+        let inserted = unsupportedDevices.insert(deviceKey).inserted
+        lock.unlock()
+        if inserted {
+            NSLog("[metallum] Per-stage GPU timing disabled: %@", reason)
+        }
+    }
+}
+
 private final class MetallumGpuTimingStats: @unchecked Sendable {
     private let lock = NSLock()
     private var sampleCount = 0
     private var totalGpuSeconds = 0.0
     private var maximumGpuSeconds = 0.0
+    private var stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+    private var stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+    private var stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
+    private var syncWaitNanoseconds = 0.0
+    private var maximumSyncWaitNanoseconds = 0.0
+    private var syncWaitCount = 0
+    private var droppedEvents = 0
     private var intervalStart = ProcessInfo.processInfo.systemUptime
 
-    func record(_ commandBuffer: MTLCommandBuffer) {
+    func record(_ commandBuffer: MTLCommandBuffer, snapshot: MetallumGpuTimingSnapshot?) {
         if commandBuffer.status == .error {
             NSLog(
                 "[metallum] Metal command buffer failed (%@): %@",
@@ -226,21 +503,74 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         sampleCount += 1
         totalGpuSeconds += duration
         maximumGpuSeconds = max(maximumGpuSeconds, duration)
+        if let snapshot {
+            droppedEvents += snapshot.droppedEvents
+            for stage in MetallumGpuTimingStage.allCases {
+                guard let nanoseconds = snapshot.stageNanoseconds[stage.rawValue] else { continue }
+                stageTotals[stage.rawValue] += nanoseconds
+                stageMaximums[stage.rawValue] = max(stageMaximums[stage.rawValue], nanoseconds)
+                stageCounts[stage.rawValue] += 1
+            }
+        }
         if sampleCount >= 300 {
             let now = ProcessInfo.processInfo.systemUptime
             let completedFps = Double(sampleCount) / max(now - intervalStart, 1e-6)
-            NSLog(
-                "[metallum] GPU timing: %.3f ms average, %.3f ms max, %.1f completed FPS (%d frames)",
-                totalGpuSeconds * 1000.0 / Double(sampleCount),
-                maximumGpuSeconds * 1000.0,
+            var lines = [String(format:
+                "[metallum] GPU timing (%d completed frames, %.1f FPS): total %.3f ms avg / %.3f ms max",
+                sampleCount,
                 completedFps,
-                sampleCount
-            )
+                totalGpuSeconds * 1000.0 / Double(sampleCount),
+                maximumGpuSeconds * 1000.0
+            )]
+            for stage in MetallumGpuTimingStage.allCases {
+                let count = stageCounts[stage.rawValue]
+                if count == 0 {
+                    lines.append("  \(stage.reportName): n/a")
+                } else {
+                    lines.append(String(format:
+                        "  %@: %.3f ms avg / %.3f ms max (%d frames)",
+                        stage.reportName,
+                        stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
+                        stageMaximums[stage.rawValue] / 1_000_000.0,
+                        count
+                    ))
+                }
+            }
+            if syncWaitCount == 0 {
+                lines.append("  synchronization wait (CPU): n/a")
+            } else {
+                lines.append(String(format:
+                    "  synchronization wait (CPU): %.3f ms/frame avg, %.3f ms max interval (%d waits)",
+                    syncWaitNanoseconds / Double(sampleCount) / 1_000_000.0,
+                    maximumSyncWaitNanoseconds / 1_000_000.0,
+                    syncWaitCount
+                ))
+            }
+            if droppedEvents > 0 {
+                lines.append("  dropped timing events: \(droppedEvents)")
+            }
+            NSLog("%@", lines.joined(separator: "\n"))
             sampleCount = 0
             totalGpuSeconds = 0.0
             maximumGpuSeconds = 0.0
+            stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+            stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+            stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
+            syncWaitNanoseconds = 0.0
+            maximumSyncWaitNanoseconds = 0.0
+            syncWaitCount = 0
+            droppedEvents = 0
             intervalStart = now
         }
+        lock.unlock()
+    }
+
+    func recordSynchronizationWait(nanoseconds: UInt64) {
+        lock.lock()
+        let value = Double(nanoseconds)
+        syncWaitNanoseconds += value
+        maximumSyncWaitNanoseconds = max(maximumSyncWaitNanoseconds, value)
+        syncWaitCount += 1
         lock.unlock()
     }
 }
@@ -263,6 +593,118 @@ private enum NativeState {
     static let gpuTimingStats: MetallumGpuTimingStats? = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
         ? MetallumGpuTimingStats()
         : nil
+}
+
+private func attachGpuTiming(
+    _ descriptor: MTLRenderPassDescriptor,
+    commandBuffer: MTLCommandBuffer,
+    stage: MetallumGpuTimingStage?
+) {
+    guard let stage,
+          let frame = MetallumGpuTimingCoordinator.shared.frame(for: commandBuffer) else {
+        return
+    }
+    frame.attachRender(descriptor, stage: stage)
+}
+
+private func attachGpuTiming(
+    _ descriptor: MTLComputePassDescriptor,
+    commandBuffer: MTLCommandBuffer,
+    stage: MetallumGpuTimingStage
+) {
+    MetallumGpuTimingCoordinator.shared.frame(for: commandBuffer)?.attachCompute(descriptor, stage: stage)
+}
+
+private func attachGpuTiming(
+    _ descriptor: MTLBlitPassDescriptor,
+    commandBuffer: MTLCommandBuffer,
+    stage: MetallumGpuTimingStage
+) {
+    MetallumGpuTimingCoordinator.shared.frame(for: commandBuffer)?.attachBlit(descriptor, stage: stage)
+}
+
+private func gpuTimingIsEnabled(for commandBuffer: MTLCommandBuffer) -> Bool {
+    MetallumGpuTimingCoordinator.shared.frame(for: commandBuffer) != nil
+}
+
+private struct MetallumGpuExternalTimingToken {
+    let frame: MetallumGpuCounterFrame
+    let event: MetallumGpuTimingEvent
+}
+
+private func beginExternalGpuTiming(
+    commandBuffer: MTLCommandBuffer,
+    stage: MetallumGpuTimingStage,
+    fence: MTLFence?
+) -> MetallumGpuExternalTimingToken? {
+    guard let frame = MetallumGpuTimingCoordinator.shared.frame(for: commandBuffer),
+          let event = frame.allocateExternalEvent(stage) else {
+        return nil
+    }
+    let descriptor = MTLBlitPassDescriptor()
+    frame.attachExternalStart(descriptor, event: event)
+    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
+        return nil
+    }
+    encoder.label = "Metallum \(stage.reportName) timing start"
+    if let fence {
+        encoder.waitForFence(fence)
+    }
+    encoder.fill(buffer: frame.markerBuffer, range: 0..<MemoryLayout<UInt32>.stride, value: 0)
+    if let fence {
+        encoder.updateFence(fence)
+    }
+    encoder.endEncoding()
+    return MetallumGpuExternalTimingToken(frame: frame, event: event)
+}
+
+private func endExternalGpuTiming(
+    _ token: MetallumGpuExternalTimingToken?,
+    commandBuffer: MTLCommandBuffer,
+    fence: MTLFence?
+) {
+    guard let token else { return }
+    let descriptor = MTLBlitPassDescriptor()
+    token.frame.attachExternalEnd(descriptor, event: token.event)
+    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
+        return
+    }
+    encoder.label = "Metallum \(token.event.stage.reportName) timing end"
+    if let fence {
+        encoder.waitForFence(fence)
+    }
+    encoder.fill(buffer: token.frame.markerBuffer, range: 0..<MemoryLayout<UInt32>.stride, value: 1)
+    if let fence {
+        encoder.updateFence(fence)
+    }
+    encoder.endEncoding()
+}
+
+private func completeGpuTiming(
+    commandBuffer: MTLCommandBuffer,
+    frame: MetallumGpuCounterFrame?
+) {
+    NativeState.gpuTimingStats?.record(commandBuffer, snapshot: frame?.resolve())
+}
+
+private func addGpuTimingCompletionHandler(
+    to commandBuffer: MTLCommandBuffer,
+    signal semaphore: DispatchSemaphore? = nil
+) {
+    let frame = MetallumGpuTimingCoordinator.shared.take(commandBuffer)
+    commandBuffer.addCompletedHandler { completed in
+        if completed.status == .error || NativeState.gpuTimingStats != nil {
+            completeGpuTiming(commandBuffer: completed, frame: frame)
+            if completed.status == .error && NativeState.gpuTimingStats == nil {
+                NSLog(
+                    "[metallum] Metal command buffer failed (%@): %@",
+                    completed.label ?? "unlabeled",
+                    String(describing: completed.error)
+                )
+            }
+        }
+        semaphore?.signal()
+    }
 }
 
 private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
@@ -1171,6 +1613,53 @@ private func hdrEffectsMslSource() -> String {
       return float4(0.0, 0.0, 0.0, averageY);
     }
 
+    kernel void metallum_hdr_histogram_build(
+      texture2d<float, access::read> scene [[texture(0)]],
+      texture2d<float, access::read> semantic [[texture(1)]],
+      depth2d<float, access::read> sceneDepth [[texture(2)]],
+      constant HdrExtractUniforms& uniforms [[buffer(0)]],
+      device atomic_uint* histogram [[buffer(1)]],
+      uint2 position [[thread_position_in_grid]]
+    ) {
+      uint2 quarterSize = (max(uniforms.sourceSize, uint2(1u)) + 3u) / 4u;
+      if (any(position >= quarterSize)) {
+        return;
+      }
+      uint2 origin = position * 4u;
+      uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
+      float averageY = 0.0;
+      float semanticStrength = 0.0;
+      for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
+        for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
+          uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
+          float3 color = metallum_hdr_decode(scene.read(coordinate).rgb, uniforms.sourceEncoding);
+          averageY += metallum_hdr_luminance(color);
+          if (uniforms.semanticAvailable != 0u) {
+            uint4 semanticBytes = uint4(round(clamp(semantic.read(coordinate), 0.0, 1.0) * 255.0));
+            uint code = semanticBytes.x;
+            uint strengthCode = code & 127u;
+            if (strengthCode != 0u) {
+              uint markerPackedDepth = semanticBytes.y
+                | (semanticBytes.z << 8u)
+                | (semanticBytes.w << 16u);
+              uint scenePackedDepth = uint(round(
+                clamp(sceneDepth.read(coordinate), 0.0, 1.0) * 16777215.0
+              ));
+              if (markerPackedDepth + 2u >= scenePackedDepth) {
+                semanticStrength = max(semanticStrength, float(strengthCode) / 127.0);
+              }
+            }
+          }
+        }
+      }
+      averageY *= 1.0 / 16.0;
+      if (semanticStrength <= 0.0) {
+        float logY = clamp(log2(max(averageY, exp2(-12.0))), -12.0, 4.0);
+        uint bin = min(uint((logY + 12.0) * 4.0), 63u);
+        atomic_fetch_add_explicit(&histogram[bin], 1u, memory_order_relaxed);
+      }
+    }
+
     float metallum_hdr_temporal_scalar(float current, float target, float deltaTime) {
       float timeConstant = target > current ? 0.75 : 0.12;
       float blend = 1.0 - exp(-max(deltaTime, 0.0) / timeConstant);
@@ -1440,6 +1929,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
         guard
             let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
             let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
+            let histogramBuildFunction = library.makeFunction(name: "metallum_hdr_histogram_build"),
             let histogramReduceFunction = library.makeFunction(name: "metallum_hdr_histogram_reduce"),
             let blurFunction = library.makeFunction(name: "metallum_hdr_blur_fs"),
             let uiBackdropFunction = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs"),
@@ -1464,6 +1954,7 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
 
         return try MetallumHdrPipelines(
             extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
+            histogramBuild: device.makeComputePipelineState(function: histogramBuildFunction),
             histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
             blur: makePipeline(blurFunction, colorFormat: .rgba16Float),
             uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
@@ -1632,12 +2123,14 @@ private func ensureHdrWorkspace(
 private func makeHdrPassEncoder(
     commandBuffer: MTLCommandBuffer,
     target: MTLTexture,
-    pipeline: MTLRenderPipelineState
+    pipeline: MTLRenderPipelineState,
+    stage: MetallumGpuTimingStage
 ) -> MTLRenderCommandEncoder? {
     let descriptor = MTLRenderPassDescriptor()
     descriptor.colorAttachments[0].texture = target
     descriptor.colorAttachments[0].loadAction = .dontCare
     descriptor.colorAttachments[0].storeAction = .store
+    attachGpuTiming(descriptor, commandBuffer: commandBuffer, stage: stage)
     guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
         return nil
     }
@@ -1821,9 +2314,16 @@ private func encodeHdrWorldEffects(
     let deltaTime = previousUptime.map { max(now - $0, 0.0) } ?? 0.0
     let forceReset = previousUptime == nil || deltaTime > 1.0
     workspace.lastHistogramUptime = now
+    let separateHistogramPass = gpuTimingIsEnabled(for: commandBuffer)
 
     if workspace.histogramNeedsInitialization {
-        guard let histogramClear = commandBuffer.makeBlitCommandEncoder() else {
+        let histogramClearPass = MTLBlitPassDescriptor()
+        attachGpuTiming(
+            histogramClearPass,
+            commandBuffer: commandBuffer,
+            stage: .histogramExposure
+        )
+        guard let histogramClear = commandBuffer.makeBlitCommandEncoder(descriptor: histogramClearPass) else {
             return nil
         }
         histogramClear.label = "Metallum HDR histogram initialization"
@@ -1838,7 +2338,8 @@ private func encodeHdrWorldEffects(
     guard let extract = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: workspace.emission,
-        pipeline: pipelines.extract
+        pipeline: pipelines.extract,
+        stage: .hdrExtract
     ) else {
         return nil
     }
@@ -1853,7 +2354,7 @@ private func encodeHdrWorldEffects(
         sourceEncoding: UInt32(clamping: min(max(sourceEncoding, 0), 2)),
         semanticAvailable: semanticTexture == nil ? 0 : 1,
         sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height)),
-        histogramEnabled: 1,
+        histogramEnabled: separateHistogramPass ? 0 : 1,
         _padding0: 0
     )
     withUnsafeBytes(of: &extractUniforms) { bytes in
@@ -1865,9 +2366,40 @@ private func encodeHdrWorldEffects(
     }
     extract.endEncoding()
 
-    guard let histogramReduce = commandBuffer.makeComputeCommandEncoder() else {
-        // Extract may already have populated the histogram. Ensure a later
-        // recovery attempt cannot mix this partial frame into fresh data.
+    if separateHistogramPass {
+        let histogramBuildPass = MTLComputePassDescriptor()
+        attachGpuTiming(
+            histogramBuildPass,
+            commandBuffer: commandBuffer,
+            stage: .histogramExposure
+        )
+        guard let histogramBuild = commandBuffer.makeComputeCommandEncoder(descriptor: histogramBuildPass) else {
+            workspace.histogramNeedsInitialization = true
+            return nil
+        }
+        histogramBuild.label = "Metallum HDR histogram build"
+        histogramBuild.setComputePipelineState(pipelines.histogramBuild)
+        histogramBuild.setTexture(sceneTexture, index: 0)
+        histogramBuild.setTexture(semanticTexture ?? sceneTexture, index: 1)
+        histogramBuild.setTexture(sceneDepthTexture, index: 2)
+        withUnsafeBytes(of: &extractUniforms) { bytes in
+            histogramBuild.setBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        histogramBuild.setBuffer(workspace.histogram, offset: 0, index: 1)
+        histogramBuild.dispatchThreads(
+            MTLSize(width: workspace.emission.width, height: workspace.emission.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+        )
+        histogramBuild.endEncoding()
+    }
+
+    let histogramReducePass = MTLComputePassDescriptor()
+    attachGpuTiming(
+        histogramReducePass,
+        commandBuffer: commandBuffer,
+        stage: .histogramExposure
+    )
+    guard let histogramReduce = commandBuffer.makeComputeCommandEncoder(descriptor: histogramReducePass) else {
         workspace.histogramNeedsInitialization = true
         return nil
     }
@@ -1892,9 +2424,9 @@ private func encodeHdrWorldEffects(
     workspace.histogramNeedsInitialization = false
 
     if semanticTexture == nil {
-        // Extract still builds the luminance histogram, but its RGB is exactly
-        // zero without semantic emission. Reusing that zero texture preserves
-        // the present result and skips two quarter-resolution blur passes.
+        // Histogram construction is a separate compute pass. Extract RGB is
+        // exactly zero without semantic emission, so reuse that zero texture
+        // and skip both quarter-resolution blur passes.
         return MetallumHdrWorldOutputs(
             emission: workspace.emission,
             bloom: workspace.emission,
@@ -1905,7 +2437,8 @@ private func encodeHdrWorldEffects(
     guard let horizontal = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: workspace.bloomA,
-        pipeline: pipelines.blur
+        pipeline: pipelines.blur,
+        stage: .bloomHorizontal
     ) else {
         return nil
     }
@@ -1924,7 +2457,8 @@ private func encodeHdrWorldEffects(
     guard let vertical = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: workspace.bloomB,
-        pipeline: pipelines.blur
+        pipeline: pipelines.blur,
+        stage: .bloomVertical
     ) else {
         return nil
     }
@@ -2003,7 +2537,8 @@ private func encodeHdrUiMask(
     guard let uiCompare = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: uiMaskA,
-        pipeline: pipelines.uiCompare
+        pipeline: pipelines.uiCompare,
+        stage: .hdrReconstruction
     ) else {
         return nil
     }
@@ -2031,7 +2566,8 @@ private func encodeHdrUiMask(
     guard let uiDilate = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: uiMaskB,
-        pipeline: pipelines.uiDilate
+        pipeline: pipelines.uiDilate,
+        stage: .hdrReconstruction
     ) else {
         return nil
     }
@@ -2143,7 +2679,8 @@ private func encodeSpatialHdrWorldComposite(
        let encoder = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
         target: worldComposite,
-        pipeline: pipeline
+        pipeline: pipeline,
+        stage: .hdrReconstruction
     ) else {
         return nil
     }
@@ -2685,12 +3222,14 @@ public func metallum_MTLCommandQueue_makeCommandBuffer(
         if NativeState.debugLabelsEnabled {
             commandBuffer.label = stringFromOptionalCString(labelPtr)
         }
+        MetallumGpuTimingCoordinator.shared.register(commandBuffer)
         return retainedPointer(commandBuffer)
     }
 }
 
 @_cdecl("metallum_MTLCommandBuffer_commit")
 public func metallum_MTLCommandBuffer_commit(_ commandBuffer: MTLCommandBuffer) {
+    addGpuTimingCompletionHandler(to: commandBuffer)
     commandBuffer.commit()
 }
 
@@ -2702,30 +3241,23 @@ public func metallum_create_semaphore() -> UnsafeMutableRawPointer? {
 @_cdecl("metallum_MTLCommandBuffer_commitWithSignal")
 public func metallum_MTLCommandBuffer_commitWithSignal(_ commandBuffer: MTLCommandBuffer, _ semaphore: DispatchSemaphore) {
     while semaphore.wait(timeout: .now()) == .success {}
-    commandBuffer.addCompletedHandler { completed in
-        if completed.status == .error || NativeState.gpuTimingStats != nil {
-            NativeState.gpuTimingStats?.record(completed)
-            if completed.status == .error && NativeState.gpuTimingStats == nil {
-                NSLog(
-                    "[metallum] Metal command buffer failed (%@): %@",
-                    completed.label ?? "unlabeled",
-                    String(describing: completed.error)
-                )
-            }
-        }
-        semaphore.signal()
-    }
+    addGpuTimingCompletionHandler(to: commandBuffer, signal: semaphore)
     commandBuffer.commit()
 }
 
 @_cdecl("metallum_semaphore_wait")
 public func metallum_semaphore_wait(_ semaphore: DispatchSemaphore, _ timeoutMs: UInt64) -> Int32 {
+    let waitStart = DispatchTime.now().uptimeNanoseconds
     let result: DispatchTimeoutResult
     if timeoutMs >= UInt64(Int.max) {
         result = semaphore.wait(timeout: .distantFuture)
     } else {
         result = semaphore.wait(timeout: .now() + .milliseconds(Int(timeoutMs)))
     }
+    let waitEnd = DispatchTime.now().uptimeNanoseconds
+    NativeState.gpuTimingStats?.recordSynchronizationWait(
+        nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0
+    )
     guard result == .success else {
         return 1
     }
@@ -2746,7 +3278,12 @@ public func metallum_MTLCommandBuffer_waitUntilCompleted(_ commandBuffer: MTLCom
     if timeoutMs == 0 {
         return 1
     }
+    let waitStart = DispatchTime.now().uptimeNanoseconds
     commandBuffer.waitUntilCompleted()
+    let waitEnd = DispatchTime.now().uptimeNanoseconds
+    NativeState.gpuTimingStats?.recordSynchronizationWait(
+        nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0
+    )
     return commandBuffer.status == .completed || commandBuffer.status == .error ? 0 : 1
 }
 
@@ -3054,7 +3591,8 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
     _ clearColorAlpha: Float,
     _ clearSemanticEnabled: Int32,
     _ clearDepthEnabled: Int32,
-    _ clearDepth: Double
+    _ clearDepth: Double,
+    _ gpuTimingStageId: Int32
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         guard colorTexture != nil || depthTexture != nil else {
@@ -3093,6 +3631,12 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
                 renderPass.stencilAttachment.storeAction = .dontCare
             }
         }
+
+        attachGpuTiming(
+            renderPass,
+            commandBuffer: commandBuffer,
+            stage: MetallumGpuTimingStage.fromJavaId(gpuTimingStageId)
+        )
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return nil
@@ -3682,7 +4226,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                       let encoder = makeHdrPassEncoder(
                         commandBuffer: commandBuffer,
                         target: perceptualInput,
-                        pipeline: pipelines.uiBackdrop
+                        pipeline: pipelines.uiBackdrop,
+                        stage: .metalFx
                       ) else {
                     return -1
                 }
@@ -3726,7 +4271,17 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             workspace.scaler.inputContentHeight = scalerInput.height
             workspace.scaler.outputTexture = output
             workspace.scaler.fence = globalFence
+            let metalFxTiming = beginExternalGpuTiming(
+                commandBuffer: commandBuffer,
+                stage: .metalFx,
+                fence: globalFence
+            )
             workspace.scaler.encode(commandBuffer: commandBuffer)
+            endExternalGpuTiming(
+                metalFxTiming,
+                commandBuffer: commandBuffer,
+                fence: globalFence
+            )
             if useDirectPerceptualOutput {
                 // The scaler writes the tone-mapped scene directly into the
                 // full-resolution GUI target. GUI rendering follows in the
@@ -3759,7 +4314,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             let encoder = makeHdrPassEncoder(
                 commandBuffer: commandBuffer,
                 target: destinationTexture,
-                pipeline: pipelines.uiBackdrop
+                pipeline: pipelines.uiBackdrop,
+                stage: .ui
             )
         else {
             return -1
@@ -3982,17 +4538,50 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return -1
         }
 
-        guard let drawable: CAMetalDrawable = layer.nextDrawable() else {
+        let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
+        let nextDrawable: CAMetalDrawable? = layer.nextDrawable()
+        let drawableWaitEnd = DispatchTime.now().uptimeNanoseconds
+        NativeState.gpuTimingStats?.recordSynchronizationWait(
+            nanoseconds: drawableWaitEnd >= drawableWaitStart
+                ? drawableWaitEnd - drawableWaitStart
+                : 0
+        )
+        guard let drawable = nextDrawable else {
             return 0
         }
 
-        if hasSpatialHdrPrecompose,
+        var separatedHdrTexture = hasSpatialHdrPrecompose ? candidateSpatialOutput : nil
+        if separatedHdrTexture == nil,
+           gpuTimingIsEnabled(for: commandBuffer),
+           hasCompatibleScene,
+           let sceneTexture,
+           let sceneDepthTexture {
+            separatedHdrTexture = encodeSpatialHdrWorldComposite(
+                commandBuffer: commandBuffer,
+                sceneTexture: sceneTexture,
+                sceneDepthTexture: sceneDepthTexture,
+                semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
+                globalFence: globalFence,
+                sourceEncoding: sourceEncoding,
+                currentHeadroom: effectiveHeadroom,
+                hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+                bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
+                displayWidth: drawable.texture.width,
+                displayHeight: drawable.texture.height
+            )
+        }
+
+        if hasCompatibleUi,
            let uiTexture,
-           let spatialHdrTexture = candidateSpatialOutput {
+           let spatialHdrTexture = separatedHdrTexture {
             guard spatialHdrTexture.width == drawable.texture.width,
                   spatialHdrTexture.height == drawable.texture.height,
                   uiTexture.width == drawable.texture.width,
-                  uiTexture.height == drawable.texture.height else {
+                  uiTexture.height == drawable.texture.height,
+                  let separatedPresentPipeline = ensureSpatialPresentPipeline(
+                    device: commandBuffer.device,
+                    colorFormat: layer.pixelFormat
+                  ) else {
                 return -1
             }
 
@@ -4000,6 +4589,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             renderPass.colorAttachments[0].texture = drawable.texture
             renderPass.colorAttachments[0].loadAction = .dontCare
             renderPass.colorAttachments[0].storeAction = .store
+            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
                 return -1
             }
@@ -4014,7 +4604,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 znear: 0.0,
                 zfar: 1.0
             ))
-            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setRenderPipelineState(separatedPresentPipeline)
             encoder.setFragmentTexture(uiTexture, index: 0)
             encoder.setFragmentTexture(spatialHdrTexture, index: 1)
             var spatialUniforms = MetallumPresentUniforms(
@@ -4084,6 +4674,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].texture = drawable.texture
         renderPass.colorAttachments[0].loadAction = .dontCare
         renderPass.colorAttachments[0].storeAction = .store
+        attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             return -1
@@ -4196,6 +4787,10 @@ public func MTLBlitCommandEncoder_waitForFence(
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
         guard let obj else { return }
+        let object = Unmanaged<AnyObject>.fromOpaque(obj).takeUnretainedValue()
+        if let commandBuffer = object as? MTLCommandBuffer {
+            MetallumGpuTimingCoordinator.shared.abandon(commandBuffer)
+        }
         Unmanaged<AnyObject>.fromOpaque(obj).release()
     }
 }

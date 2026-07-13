@@ -26,6 +26,7 @@ public final class MetalRuntimeTests {
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
+        testGpuTimingStageAbi();
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -167,6 +168,30 @@ public final class MetalRuntimeTests {
                 "EDR capability query did not run at the refresh boundary");
         require(MetalSurface.shouldRefreshEdrCapabilities(10_000L, 9_000L),
                 "EDR capability query did not recover from a backwards clock sample");
+    }
+
+    private static void testGpuTimingStageAbi() {
+        MetalGpuTimingStage[] stages = {
+                MetalGpuTimingStage.WORLD_OPAQUE,
+                MetalGpuTimingStage.TRANSLUCENT,
+                MetalGpuTimingStage.ENTITIES,
+                MetalGpuTimingStage.HDR_EXTRACT,
+                MetalGpuTimingStage.HISTOGRAM_EXPOSURE,
+                MetalGpuTimingStage.BLOOM_HORIZONTAL,
+                MetalGpuTimingStage.BLOOM_VERTICAL,
+                MetalGpuTimingStage.HDR_RECONSTRUCTION,
+                MetalGpuTimingStage.METAL_FX,
+                MetalGpuTimingStage.UI,
+                MetalGpuTimingStage.PRESENT
+        };
+        require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
+                "GPU timing stage count does not match the native ABI");
+        for (int index = 0; index < stages.length; index++) {
+            require(stages[index].nativeId() == index,
+                    "GPU timing stage native ID mismatch at index " + index);
+        }
+        require(MetalGpuTimingStage.NONE.nativeId() == -1,
+                "GPU timing NONE sentinel does not match the native ABI");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {
