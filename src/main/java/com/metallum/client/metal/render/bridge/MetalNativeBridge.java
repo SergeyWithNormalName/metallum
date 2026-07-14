@@ -18,6 +18,12 @@ import java.nio.file.StandardCopyOption;
 @Environment(EnvType.CLIENT)
 public final class MetalNativeBridge {
     private static final String RESOURCE_PATH = "/natives/macos/libmetallum.dylib";
+    private static final String BUILTIN_LIBRARY_RESOURCE_PATH = "/natives/macos/metallum.metallib";
+    private static final String[] BUILTIN_SHADER_RESOURCE_PATHS = {
+            "/natives/macos/shaders/MetallumPresent.metal",
+            "/natives/macos/shaders/MetallumHdrEffects.metal",
+            "/natives/macos/shaders/MetallumClear.metal"
+    };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
     private static final ValueLayout.OfFloat FLOAT = ValueLayout.JAVA_FLOAT;
@@ -26,13 +32,23 @@ public final class MetalNativeBridge {
 
     static {
         try {
-            Path tempLib = Files.createTempFile("metallum-native-", ".dylib");
+            Path tempDirectory = Files.createTempDirectory("metallum-native-");
+            tempDirectory.toFile().deleteOnExit();
+            Path shaderDirectory = Files.createDirectories(tempDirectory.resolve("shaders"));
+            shaderDirectory.toFile().deleteOnExit();
+
+            Path tempLib = tempDirectory.resolve("libmetallum.dylib");
             tempLib.toFile().deleteOnExit();
-            try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(RESOURCE_PATH)) {
-                if (stream == null) {
-                    throw new IllegalStateException("Missing native library resource: " + RESOURCE_PATH);
-                }
-                Files.copy(stream, tempLib, StandardCopyOption.REPLACE_EXISTING);
+            copyRequiredResource(RESOURCE_PATH, tempLib);
+
+            Path tempMetallib = tempDirectory.resolve("metallum.metallib");
+            if (copyOptionalResource(BUILTIN_LIBRARY_RESOURCE_PATH, tempMetallib)) {
+                tempMetallib.toFile().deleteOnExit();
+            }
+            for (String shaderResourcePath : BUILTIN_SHADER_RESOURCE_PATHS) {
+                Path shaderPath = shaderDirectory.resolve(Path.of(shaderResourcePath).getFileName());
+                copyRequiredResource(shaderResourcePath, shaderPath);
+                shaderPath.toFile().deleteOnExit();
             }
 
             SymbolLookup lookup = SymbolLookup.libraryLookup(tempLib, Arena.global());
@@ -77,7 +93,7 @@ public final class MetalNativeBridge {
             initPipelines = downcallWithoutCritical(
                     lookup,
                     "metallum_init_pipelines",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
             );
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
@@ -405,6 +421,22 @@ public final class MetalNativeBridge {
         }
     }
 
+    private static void copyRequiredResource(final String resourcePath, final Path destination) throws IOException {
+        if (!copyOptionalResource(resourcePath, destination)) {
+            throw new IllegalStateException("Missing native resource: " + resourcePath);
+        }
+    }
+
+    private static boolean copyOptionalResource(final String resourcePath, final Path destination) throws IOException {
+        try (InputStream stream = MetalNativeBridge.class.getResourceAsStream(resourcePath)) {
+            if (stream == null) {
+                return false;
+            }
+            Files.copy(stream, destination, StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        }
+    }
+
 
     private static final MethodHandle createSystemDefaultDevice;
     private static final MethodHandle copyDeviceName;
@@ -629,9 +661,9 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static void metallum_init_pipelines(final MemorySegment device) {
+    public static int metallum_init_pipelines(final MemorySegment device) {
         try {
-            initPipelines.invokeExact(segment(device));
+            return (int) initPipelines.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_init_pipelines", throwable);
         }

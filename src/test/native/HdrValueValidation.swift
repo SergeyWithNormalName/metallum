@@ -70,7 +70,7 @@ private struct HeadroomLimiterCase {
     var delta: SIMD4<Float>
 }
 
-private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Void
+private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Int32
 private typealias NativeCreateEdrMonitorFunction = @convention(c) (
     UnsafeRawPointer? // window
 ) -> UnsafeMutableRawPointer?
@@ -160,23 +160,6 @@ private func colorSpacesEqual(_ lhs: CGColorSpace?, _ rhs: CGColorSpace?) -> Boo
     default:
         return false
     }
-}
-
-private func embeddedMsl(functionName: String, sourcePath: String) throws -> String {
-    let nativeSource = try String(contentsOfFile: sourcePath, encoding: .utf8)
-    let declaration = "private func \(functionName)() -> String {"
-    guard let declarationRange = nativeSource.range(of: declaration) else {
-        throw ValidationFailure.message("Missing \(declaration) in \(sourcePath)")
-    }
-    let functionTail = nativeSource[declarationRange.upperBound...]
-    guard let openingQuotes = functionTail.range(of: "\"\"\"") else {
-        throw ValidationFailure.message("Missing opening multiline string for \(functionName)")
-    }
-    let mslTail = functionTail[openingQuotes.upperBound...]
-    guard let closingQuotes = mslTail.range(of: "\"\"\"") else {
-        throw ValidationFailure.message("Missing closing multiline string for \(functionName)")
-    }
-    return String(mslTail[..<closingQuotes.lowerBound])
 }
 
 private func srgbToLinear(_ encoded: Float) -> Float {
@@ -401,17 +384,24 @@ private final class GpuHarness {
     private let nearestSampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
 
-    init(device: MTLDevice, nativeSourcePath: String) throws {
+    init(device: MTLDevice, shaderSourceDirectory: String) throws {
         self.device = device
         guard let queue = device.makeCommandQueue() else {
             throw ValidationFailure.message("Metal command queue creation failed")
         }
         self.queue = queue
 
-        let presentMsl = try embeddedMsl(functionName: "presentMslSource", sourcePath: nativeSourcePath)
-        let effectsMsl = try embeddedMsl(functionName: "hdrEffectsMslSource", sourcePath: nativeSourcePath)
+        let shaderDirectory = URL(fileURLWithPath: shaderSourceDirectory, isDirectory: true)
+        let presentMsl = try String(
+            contentsOf: shaderDirectory.appendingPathComponent("MetallumPresent.metal"),
+            encoding: .utf8
+        )
+        let effectsMsl = try String(
+            contentsOf: shaderDirectory.appendingPathComponent("MetallumHdrEffects.metal"),
+            encoding: .utf8
+        )
         let presentLibrary = try device.makeLibrary(
-            source: presentMsl + headroomLimiterTestMslSuffix(),
+            source: presentMsl + "\n" + headroomLimiterTestMslSuffix(),
             options: nil
         )
         let effectsLibrary = try device.makeLibrary(source: effectsMsl, options: nil)
@@ -3647,7 +3637,11 @@ private final class ValueValidation {
         passCount += 1
         print("PASS native layer contents-headroom ABI changes only the EDR declaration")
 
-        initialize(objectPointer(gpu.device as AnyObject))
+        let initializationStatus = initialize(objectPointer(gpu.device as AnyObject))
+        try require(
+            initializationStatus == 1,
+            "Native built-in shaders did not use the precompiled library (status \(initializationStatus))"
+        )
         guard let backdropQueue = gpu.device.makeCommandQueue() else {
             throw ValidationFailure.message("Native backdrop queue creation failed")
         }
@@ -4319,12 +4313,12 @@ private enum HdrValueValidationMain {
     static func main() {
         do {
             let arguments = CommandLine.arguments
-            try require(arguments.count == 3, "Usage: HdrValueValidation <MetallumNative.swift> <libmetallum.dylib>")
+            try require(arguments.count == 3, "Usage: HdrValueValidation <shader-source-directory> <libmetallum.dylib>")
             guard let device = MTLCreateSystemDefaultDevice() else {
                 throw ValidationFailure.message("No Metal device is available")
             }
             print("Metal device: \(device.name)")
-            let gpu = try GpuHarness(device: device, nativeSourcePath: arguments[1])
+            let gpu = try GpuHarness(device: device, shaderSourceDirectory: arguments[1])
             let validation = ValueValidation(gpu: gpu, nativeLibraryPath: arguments[2])
             try validation.run()
         } catch {

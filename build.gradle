@@ -19,6 +19,15 @@ def isMacOs = System.getProperty("os.name").startsWith("Mac")
 def isAppleSiliconMac = isMacOs && System.getProperty("os.arch") in ["aarch64", "arm64"]
 def macNativeSource = layout.projectDirectory.file("src/main/native/MetallumNative.swift")
 def macNativeLibrary = layout.buildDirectory.file("generated/metallum/natives/macos/libmetallum.dylib")
+def macMetalSources = [
+	Present: layout.projectDirectory.file("src/main/metal/MetallumPresent.metal"),
+	HdrEffects: layout.projectDirectory.file("src/main/metal/MetallumHdrEffects.metal"),
+	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal")
+]
+def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
+	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
+}
+def macBuiltinMetallib = layout.buildDirectory.file("generated/metallum/natives/macos/metallum.metallib")
 def macNativeCompilerArguments = [
 	"-O",
 	"-whole-module-optimization",
@@ -36,6 +45,9 @@ def swiftCompilerVersion = isMacOs ? providers.exec {
 def macOsSdkVersion = isMacOs ? providers.exec {
 	commandLine "xcrun", "--sdk", "macosx", "--show-sdk-version"
 }.standardOutput.asText.map { it.trim() } : providers.provider { "not-macos" }
+def metalCompilerVersion = isMacOs ? providers.exec {
+	commandLine "xcrun", "--sdk", "macosx", "metal", "--version"
+}.standardOutput.asText.map { it.trim() } : providers.provider { "not-macos" }
 
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -48,6 +60,12 @@ processResources {
 	inputs.property "version", project.version
 	from(macNativeLibrary) {
 		into "natives/macos"
+	}
+	from(macBuiltinMetallib) {
+		into "natives/macos"
+	}
+	from(macMetalSources.values()) {
+		into "natives/macos/shaders"
 	}
 
 	filesMatching("fabric.mod.json") {
@@ -75,8 +93,48 @@ tasks.register("buildMacNative", Exec) {
 		macNativeSource.asFile.absolutePath
 }
 
+def macMetalCompileTasks = macMetalSources.collect { name, sourceFile ->
+	tasks.register("compile${name}Metal", Exec) {
+		onlyIf { isMacOs }
+
+		inputs.file(sourceFile)
+		inputs.property("metalCompilerVersion", metalCompilerVersion)
+		inputs.property("macOsSdkVersion", macOsSdkVersion)
+		outputs.file(macMetalAirFiles[name])
+
+		doFirst {
+			macMetalAirFiles[name].get().asFile.parentFile.mkdirs()
+		}
+
+		commandLine "xcrun", "--sdk", "macosx", "metal",
+			"-std=metal3.1",
+			"-mmacosx-version-min=14.0",
+			"-c", sourceFile.asFile.absolutePath,
+			"-o", macMetalAirFiles[name].get().asFile.absolutePath
+	}
+}
+
+tasks.register("linkMacBuiltinMetallib", Exec) {
+	onlyIf { isMacOs }
+	dependsOn(macMetalCompileTasks)
+
+	inputs.files(macMetalAirFiles.values())
+	inputs.property("metalCompilerVersion", metalCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(macBuiltinMetallib)
+
+	doFirst {
+		macBuiltinMetallib.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "xcrun", "--sdk", "macosx", "metallib",
+		*macMetalAirFiles.values().collect { it.get().asFile.absolutePath },
+		"-o", macBuiltinMetallib.get().asFile.absolutePath
+}
+
 tasks.named("processResources") {
 	dependsOn(tasks.named("buildMacNative"))
+	dependsOn(tasks.named("linkMacBuiltinMetallib"))
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -117,6 +175,7 @@ tasks.register("spatialScalingUnitTest", JavaExec) {
 }
 
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
+def builtinShaderLibraryValidationBinary = layout.buildDirectory.file("native-tests/BuiltinShaderLibraryValidation")
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
@@ -339,17 +398,84 @@ tasks.register("hdrValueValidation", Exec) {
 	group = "verification"
 	description = "Runs bounded GPU readback checks for HDR values and the native present ABI"
 	onlyIf { isAppleSiliconMac }
-	dependsOn(tasks.named("buildMacNative"), tasks.named("compileHdrValueValidation"))
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileHdrValueValidation")
+	)
 
-	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.files(macMetalSources.values())
 	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
 
 	environment "MTL_DEBUG_LAYER", "1"
 	environment "MTL_SHADER_VALIDATION", "1"
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 	commandLine hdrValueValidationBinary.get().asFile.absolutePath,
-		file("src/main/native/MetallumNative.swift").absolutePath,
+		file("src/main/metal").absolutePath,
 		macNativeLibrary.get().asFile.absolutePath
+}
+
+tasks.register("compileBuiltinShaderLibraryValidation", Exec) {
+	group = "verification"
+	description = "Compiles the built-in Metal shader library validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/BuiltinShaderLibraryValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(builtinShaderLibraryValidationBinary)
+
+	doFirst {
+		builtinShaderLibraryValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", builtinShaderLibraryValidationBinary.get().asFile.absolutePath,
+		"src/test/native/BuiltinShaderLibraryValidation.swift"
+}
+
+tasks.register("builtinShaderLibraryValidation", Exec) {
+	group = "verification"
+	description = "Validates the packaged precompiled Metal library and mandatory pipelines"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileBuiltinShaderLibraryValidation")
+	)
+
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine builtinShaderLibraryValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath,
+		"1"
+}
+
+tasks.register("builtinShaderFallbackValidation", Exec) {
+	group = "verification"
+	description = "Validates the packaged Metal source fallback"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("compileBuiltinShaderLibraryValidation"))
+
+	inputs.dir(layout.buildDirectory.dir("resources/main/natives/macos"))
+
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine builtinShaderLibraryValidationBinary.get().asFile.absolutePath,
+		layout.buildDirectory.file("resources/main/natives/macos/libmetallum.dylib").get().asFile.absolutePath,
+		"2"
 }
 
 tasks.named("test", Test) {
@@ -366,6 +492,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("staticGeometryHeapValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
+	dependsOn(tasks.named("builtinShaderLibraryValidation"))
+	dependsOn(tasks.named("builtinShaderFallbackValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
 	dependsOn(tasks.named("gpuTimingValidation"))
 }

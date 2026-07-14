@@ -156,7 +156,13 @@ public final class MetalDevice implements GpuDeviceBackend {
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.spatialScalingSupported = MetalNativeBridge.MTLFXSpatialScaler_supportsDevice(metalDeviceHandle);
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle, metalLayer);
-        MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        int nativePipelineStatus = MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
+        if (nativePipelineStatus < 0) {
+            throw new IllegalStateException("Failed to initialize mandatory Metallum native pipelines");
+        }
+        if (nativePipelineStatus == 2) {
+            Metallum.LOGGER.warn("Using the built-in Metal shader source fallback; startup may be slower");
+        }
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
