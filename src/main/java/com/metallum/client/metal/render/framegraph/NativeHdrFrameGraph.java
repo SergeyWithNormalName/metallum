@@ -9,18 +9,24 @@ import java.lang.foreign.MemorySegment;
 import java.util.List;
 
 /**
- * Steady-state native-resolution Enhanced-HDR path with MetalFX disabled.
+ * Steady-state Enhanced-HDR graphs for native rendering and MetalFX Spatial.
  *
  * <p>WORLD_RENDER and UI_RENDER are logical groups because the legacy backend
  * may reuse an encoder across multiple matching Minecraft render passes. Their
  * attachment contract records the first clear/load requirement and final
  * store, while fixed post-processing passes map one-to-one to native encoders.
- * The one-time histogram initialization blit is outside this steady-state
- * graph; an initialized histogram is therefore an imported history value.
- * This route has a semantic mask, so the combined bloom pass is present.</p>
+ * The MetalFX graph models the framework's opaque command sequence explicitly,
+ * then records the fused full-resolution UI seed and normal GUI draws as one
+ * render pass. Quality and Performance use the same topology; only the value
+ * represented by {@code render_extent} changes. The one-time histogram
+ * initialization blit is outside these steady-state graphs. Blur,
+ * screenshot, SDR direct-output and safety fallback routes are intentionally
+ * outside these steady-state descriptions rather than hidden conditional
+ * passes here.</p>
  */
 public final class NativeHdrFrameGraph {
     public static final String GRAPH_ID = "native-hdr-enhanced-metalfx-off-v2";
+    public static final String SPATIAL_GRAPH_ID = "enhanced-hdr-metalfx-spatial-v1";
 
     private static final FrameGraph.PassId WORLD_RENDER = pass(0, "world_render");
     private static final FrameGraph.PassId CAPTURE_SCENE_DEPTH = pass(1, "scene_depth_snapshot");
@@ -30,6 +36,10 @@ public final class NativeHdrFrameGraph {
     private static final FrameGraph.PassId HDR_WORLD_UI_SEED = pass(5, "hdr_world_ui_seed");
     private static final FrameGraph.PassId UI_RENDER = pass(6, "ui_render");
     private static final FrameGraph.PassId PRESENT = pass(7, "present");
+    private static final FrameGraph.PassId HDR_WORLD_RECONSTRUCTION = pass(5, "hdr_world_reconstruction");
+    private static final FrameGraph.PassId METALFX_SPATIAL = pass(6, "metalfx_spatial");
+    private static final FrameGraph.PassId UI_RENDER_WITH_SEED = pass(7, "ui_render_with_seed");
+    private static final FrameGraph.PassId SPATIAL_PRESENT = pass(8, "present");
 
     private static final FrameGraph.ResourceId MAIN_COLOR = resource(0, "main_color");
     private static final FrameGraph.ResourceId MAIN_DEPTH = resource(1, "main_depth");
@@ -43,8 +53,16 @@ public final class NativeHdrFrameGraph {
     private static final FrameGraph.ResourceId SDR_UI_COLOR = resource(9, "sdr_ui_color");
     private static final FrameGraph.ResourceId SDR_UI_DEPTH = resource(10, "sdr_ui_depth");
     private static final FrameGraph.ResourceId DRAWABLE = resource(11, "drawable");
+    private static final FrameGraph.ResourceId METALFX_OUTPUT = resource(9, "metalfx_output");
+    private static final FrameGraph.ResourceId SPATIAL_SDR_UI_COLOR = resource(10, "sdr_ui_color");
+    private static final FrameGraph.ResourceId SPATIAL_SDR_UI_DEPTH = resource(11, "sdr_ui_depth");
+    private static final FrameGraph.ResourceId SPATIAL_DRAWABLE = resource(12, "drawable");
 
+    private static final long NATIVE_CAPABILITIES = FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS;
+    private static final long SPATIAL_CAPABILITIES = FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS
+            | FrameGraphAbi.CAPABILITY_EXTERNAL_METALFX;
     private static final FrameGraph GRAPH = createGraph();
+    private static final FrameGraph SPATIAL_GRAPH = createSpatialGraph();
     private static boolean initialized;
 
     private NativeHdrFrameGraph() {
@@ -54,27 +72,39 @@ public final class NativeHdrFrameGraph {
         return GRAPH;
     }
 
+    public static FrameGraph spatialGraph() {
+        return SPATIAL_GRAPH;
+    }
+
     /** Validates on class initialization and writes optional diagnostics once. */
     public static synchronized void initialize() {
         if (initialized) {
             return;
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment packet = FrameGraphAbi.encode(
-                    GRAPH,
-                    FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS,
-                    arena
-            );
-            int status = MetalNativeBridge.metallum_validate_frame_graph_v1(packet);
-            if (status != 1) {
-                throw new IllegalStateException("Bundled Metal frame graph ABI validation failed with status " + status);
-            }
-        }
+        validateNativeAbi(GRAPH_ID, GRAPH, NATIVE_CAPABILITIES);
+        validateNativeAbi(SPATIAL_GRAPH_ID, SPATIAL_GRAPH, SPATIAL_CAPABILITIES);
         initialized = true;
         try {
             FrameGraphDiagnostics.writeConfigured(GRAPH);
         } catch (IOException | RuntimeException exception) {
             Metallum.LOGGER.warn("Failed to write optional Metal frame graph diagnostics", exception);
+        }
+    }
+
+    private static void validateNativeAbi(
+            final String graphId,
+            final FrameGraph graph,
+            final long capabilities
+    ) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = FrameGraphAbi.encode(graph, capabilities, arena);
+            int status = MetalNativeBridge.metallum_validate_frame_graph_v1(packet);
+            if (status != 1) {
+                throw new IllegalStateException(
+                        "Bundled Metal frame graph " + graphId
+                                + " ABI validation failed with status " + status
+                );
+            }
         }
     }
 
@@ -190,6 +220,138 @@ public final class NativeHdrFrameGraph {
                                 access(SDR_UI_COLOR, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
                                 access(HDR_WORLD_COMPOSITE, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
                                 attachmentWrite(DRAWABLE, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.DONT_CARE, null)
+                        )
+                )
+        );
+    }
+
+    private static FrameGraph createSpatialGraph() {
+        return FrameGraph.validated(
+                List.of(
+                        texture(MAIN_COLOR, "rgba16_float", "render_extent", false,
+                                lifetime(WORLD_RENDER, HDR_WORLD_RECONSTRUCTION)),
+                        texture(MAIN_DEPTH, "depth32_float", "render_extent", false,
+                                lifetime(WORLD_RENDER, CAPTURE_SCENE_DEPTH)),
+                        texture(HDR_SEMANTIC, "rgba8_unorm", "render_extent", false,
+                                lifetime(WORLD_RENDER, HDR_WORLD_RECONSTRUCTION)),
+                        texture(SCENE_DEPTH_SNAPSHOT, "depth32_float", "render_extent", false,
+                                lifetime(CAPTURE_SCENE_DEPTH, HDR_WORLD_RECONSTRUCTION)),
+                        texture(HDR_EMISSION, "rgba16_float", "quarter_render_extent", false,
+                                lifetime(HDR_EXTRACT, HDR_WORLD_RECONSTRUCTION)),
+                        texture(HDR_BLOOM, "rgba16_float", "quarter_render_extent", false,
+                                lifetime(HDR_BLOOM_COMBINED, HDR_WORLD_RECONSTRUCTION)),
+                        buffer(HDR_HISTOGRAM, "atomic_uint_bins", "histogram_bin_count", true,
+                                lifetime(HDR_EXTRACT, HDR_EXPOSURE_REDUCE),
+                                FrameGraph.PersistenceClass.SIZE_GENERATION),
+                        buffer(HDR_ADAPTIVE_STATE, "adaptive_exposure_state", "one_record", true,
+                                FrameGraph.Lifetime.wholeGraph(), FrameGraph.PersistenceClass.HISTORY),
+                        texture(HDR_WORLD_COMPOSITE, "rgba16_float", "render_extent", false,
+                                lifetime(HDR_WORLD_RECONSTRUCTION, METALFX_SPATIAL)),
+                        texture(METALFX_OUTPUT, "rgba16_float", "display_extent", false,
+                                lifetime(METALFX_SPATIAL, SPATIAL_PRESENT)),
+                        texture(SPATIAL_SDR_UI_COLOR, "rgba8_unorm", "display_extent", false,
+                                lifetime(UI_RENDER_WITH_SEED, SPATIAL_PRESENT)),
+                        texture(SPATIAL_SDR_UI_DEPTH, "depth32_float", "display_extent", false,
+                                lifetime(UI_RENDER_WITH_SEED, UI_RENDER_WITH_SEED)),
+                        new FrameGraph.ResourceDesc(
+                                SPATIAL_DRAWABLE,
+                                FrameGraph.PersistenceClass.EXTERNAL_FRAME,
+                                new FrameGraph.ResourceShape(
+                                        FrameGraph.ResourceType.TEXTURE,
+                                        "layer_pixel_format",
+                                        "display_extent"
+                                ),
+                                false,
+                                lifetime(SPATIAL_PRESENT, SPATIAL_PRESENT)
+                        )
+                ),
+                List.of(
+                        pass(
+                                WORLD_RENDER,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(),
+                                attachmentWrite(MAIN_COLOR, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.CLEAR, "scene_clear"),
+                                attachmentWrite(MAIN_DEPTH, FrameGraph.AttachmentRole.DEPTH,
+                                        FrameGraph.LoadAction.CLEAR, "world_depth_clear"),
+                                attachmentWrite(HDR_SEMANTIC, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.CLEAR, "0,0,0,0")
+                        ),
+                        pass(
+                                CAPTURE_SCENE_DEPTH,
+                                FrameGraph.EncoderClass.BLIT,
+                                List.of(WORLD_RENDER),
+                                access(MAIN_DEPTH, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.BLIT),
+                                access(SCENE_DEPTH_SNAPSHOT, FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.BLIT)
+                        ),
+                        pass(
+                                HDR_EXTRACT,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(CAPTURE_SCENE_DEPTH),
+                                access(MAIN_COLOR, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(SCENE_DEPTH_SNAPSHOT, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(HDR_SEMANTIC, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                attachmentWrite(HDR_EMISSION, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.DONT_CARE, null),
+                                access(HDR_HISTOGRAM, FrameGraph.AccessKind.READ_WRITE, FrameGraph.PipelineStage.FRAGMENT)
+                        ),
+                        pass(
+                                HDR_EXPOSURE_REDUCE,
+                                FrameGraph.EncoderClass.COMPUTE,
+                                List.of(HDR_EXTRACT),
+                                access(HDR_HISTOGRAM, FrameGraph.AccessKind.READ_WRITE, FrameGraph.PipelineStage.COMPUTE),
+                                access(HDR_ADAPTIVE_STATE, FrameGraph.AccessKind.READ_WRITE, FrameGraph.PipelineStage.COMPUTE)
+                        ),
+                        pass(
+                                HDR_BLOOM_COMBINED,
+                                FrameGraph.EncoderClass.COMPUTE,
+                                List.of(HDR_EXTRACT),
+                                access(HDR_EMISSION, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                                access(HDR_BLOOM, FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE)
+                        ),
+                        pass(
+                                HDR_WORLD_RECONSTRUCTION,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(HDR_EXPOSURE_REDUCE, HDR_BLOOM_COMBINED),
+                                access(MAIN_COLOR, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(SCENE_DEPTH_SNAPSHOT, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(HDR_SEMANTIC, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(HDR_EMISSION, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(HDR_BLOOM, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                access(HDR_ADAPTIVE_STATE, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
+                                attachmentWrite(HDR_WORLD_COMPOSITE, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.DONT_CARE, null)
+                        ),
+                        pass(
+                                METALFX_SPATIAL,
+                                FrameGraph.EncoderClass.EXTERNAL_METALFX,
+                                List.of(HDR_WORLD_RECONSTRUCTION),
+                                access(HDR_WORLD_COMPOSITE, FrameGraph.AccessKind.READ,
+                                        FrameGraph.PipelineStage.METALFX),
+                                access(METALFX_OUTPUT, FrameGraph.AccessKind.WRITE,
+                                        FrameGraph.PipelineStage.METALFX)
+                        ),
+                        pass(
+                                UI_RENDER_WITH_SEED,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(METALFX_SPATIAL),
+                                access(METALFX_OUTPUT, FrameGraph.AccessKind.READ,
+                                        FrameGraph.PipelineStage.FRAGMENT),
+                                attachmentWrite(SPATIAL_SDR_UI_COLOR, FrameGraph.AttachmentRole.COLOR,
+                                        FrameGraph.LoadAction.DONT_CARE, null),
+                                attachmentWrite(SPATIAL_SDR_UI_DEPTH, FrameGraph.AttachmentRole.DEPTH,
+                                        FrameGraph.LoadAction.CLEAR, "0.0")
+                        ),
+                        pass(
+                                SPATIAL_PRESENT,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(UI_RENDER_WITH_SEED),
+                                access(SPATIAL_SDR_UI_COLOR, FrameGraph.AccessKind.READ,
+                                        FrameGraph.PipelineStage.FRAGMENT),
+                                access(METALFX_OUTPUT, FrameGraph.AccessKind.READ,
+                                        FrameGraph.PipelineStage.FRAGMENT),
+                                attachmentWrite(SPATIAL_DRAWABLE, FrameGraph.AttachmentRole.COLOR,
                                         FrameGraph.LoadAction.DONT_CARE, null)
                         )
                 )

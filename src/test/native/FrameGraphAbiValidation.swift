@@ -77,6 +77,21 @@ private func validPacket() -> [UInt8] {
     return bytes
 }
 
+private func validExternalMetalFxPacket() -> [UInt8] {
+    var bytes = validPacket()
+    let headerBytes = 32
+    let recordBytes = 24
+    let pass = headerBytes + recordBytes
+    let access = pass + recordBytes
+    writeUInt64(3, at: 8, into: &bytes) // typed attachments + external MetalFX
+    writeUInt32(4, at: pass + 4, into: &bytes) // external MetalFX encoder
+    writeUInt32(5, at: access + 8, into: &bytes) // MetalFX stage
+    writeUInt32(0, at: access + 12, into: &bytes) // non-attachment access
+    writeUInt32(0, at: access + 16, into: &bytes)
+    writeUInt32(0, at: access + 20, into: &bytes)
+    return bytes
+}
+
 private func validate(_ function: NativeValidateFunction, _ bytes: [UInt8]) -> Int32 {
     bytes.withUnsafeBytes { raw in
         function(raw.baseAddress, UInt64(raw.count))
@@ -101,6 +116,9 @@ private enum FrameGraphAbiValidationMain {
 
             let valid = validPacket()
             try require(validate(nativeValidate, valid) == 1, "Valid frame graph ABI packet was rejected")
+            let validExternal = validExternalMetalFxPacket()
+            try require(validate(nativeValidate, validExternal) == 1,
+                        "Valid external MetalFX frame graph ABI packet was rejected")
 
             var invalidVersion = valid
             writeUInt32(2, at: 0, into: &invalidVersion)
@@ -111,9 +129,24 @@ private enum FrameGraphAbiValidationMain {
             try require(validate(nativeValidate, invalidSize) == -3, "Byte-size mismatch was not rejected")
 
             var invalidCapability = valid
-            writeUInt64(2, at: 8, into: &invalidCapability)
+            writeUInt64(4, at: 8, into: &invalidCapability)
             try require(validate(nativeValidate, invalidCapability) == -4,
                         "Unsupported capability was not rejected")
+
+            var missingTypedAttachmentCapability = valid
+            writeUInt64(0, at: 8, into: &missingTypedAttachmentCapability)
+            try require(validate(nativeValidate, missingTypedAttachmentCapability) == -8,
+                        "Attachment packet without typed-attachment capability was not rejected")
+
+            var missingExternalCapability = validExternal
+            writeUInt64(1, at: 8, into: &missingExternalCapability)
+            try require(validate(nativeValidate, missingExternalCapability) == -7,
+                        "External encoder without MetalFX capability was not rejected")
+
+            var invalidExternalStage = validExternal
+            writeUInt32(2, at: 32 + 48 + 8, into: &invalidExternalStage)
+            try require(validate(nativeValidate, invalidExternalStage) == -8,
+                        "External MetalFX encoder accepted a fragment-stage access")
 
             var invalidPassCount = valid
             writeUInt32(65, at: 20, into: &invalidPassCount)
@@ -145,7 +178,7 @@ private enum FrameGraphAbiValidationMain {
                 nativeValidate(raw.baseAddress, 16)
             }
             try require(truncated == -1, "Truncated header was not rejected")
-            print("Native frame graph ABI validation passed (9 negative cases)")
+            print("Native frame graph ABI validation passed (12 negative cases)")
         } catch {
             fputs("Native frame graph ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

@@ -4520,7 +4520,9 @@ private enum MetallumFrameGraphAbiV1 {
     static let passBytes = 24
     static let accessBytes = 24
     static let maxPasses = 64
-    static let supportedCapabilities: UInt64 = 1 // Typed attachment contracts.
+    static let typedAttachmentsCapability: UInt64 = 1
+    static let externalMetalFxCapability: UInt64 = 1 << 1
+    static let supportedCapabilities = typedAttachmentsCapability | externalMetalFxCapability
 }
 
 private struct MetallumFrameGraphPacketReader {
@@ -4664,7 +4666,9 @@ public func metallum_validate_frame_graph_v1(
               let passAccessCountValue = reader.uint32(at: offset + 12),
               let dependencyMask = reader.uint64(at: offset + 16),
               passId == UInt32(index),
-              (1...3).contains(encoder) else {
+              (1...4).contains(encoder),
+              encoder != 4
+                || requiredCapabilities & MetallumFrameGraphAbiV1.externalMetalFxCapability != 0 else {
             return -7
         }
         let firstAccess = Int(firstAccessValue)
@@ -4703,7 +4707,7 @@ public func metallum_validate_frame_graph_v1(
                   let storeAction = reader.uint32(at: offset + 20),
                   resourceIdValue < resourceCountValue,
                   (1...3).contains(accessKind),
-                  (1...4).contains(stage),
+                  (1...5).contains(stage),
                   attachmentRole <= 3,
                   loadAction <= 3,
                   storeAction <= 2 else {
@@ -4719,7 +4723,12 @@ public func metallum_validate_frame_graph_v1(
             let compatibleStage = (encoder == 1 && (stage == 1 || stage == 2))
                 || (encoder == 2 && stage == 3)
                 || (encoder == 3 && stage == 4)
+                || (encoder == 4 && stage == 5)
             guard compatibleStage else {
+                return -8
+            }
+            guard stage != 5
+                    || requiredCapabilities & MetallumFrameGraphAbiV1.externalMetalFxCapability != 0 else {
                 return -8
             }
             if attachmentRole == 0 {
@@ -4730,6 +4739,7 @@ public func metallum_validate_frame_graph_v1(
                 let reads = accessKind == 1 || accessKind == 3
                 let writes = accessKind == 2 || accessKind == 3
                 guard resourceTypes[resourceId] == 2,
+                      requiredCapabilities & MetallumFrameGraphAbiV1.typedAttachmentsCapability != 0,
                       encoder == 1,
                       stage == 2,
                       loadAction != 0,

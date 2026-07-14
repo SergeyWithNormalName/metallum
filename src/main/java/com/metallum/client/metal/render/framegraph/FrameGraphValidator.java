@@ -250,6 +250,7 @@ public final class FrameGraphValidator {
                     || access.stage() == FrameGraph.PipelineStage.FRAGMENT;
             case COMPUTE -> access.stage() == FrameGraph.PipelineStage.COMPUTE;
             case BLIT -> access.stage() == FrameGraph.PipelineStage.BLIT;
+            case EXTERNAL_METALFX -> access.stage() == FrameGraph.PipelineStage.METALFX;
         };
         if (!compatible) {
             throw invalid("pass " + pass.id().name() + " uses " + access.stage()

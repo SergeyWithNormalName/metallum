@@ -14,6 +14,7 @@ public final class FrameGraphAbi {
     public static final int ACCESS_BYTES = 24;
     public static final int MAX_PASSES = Long.SIZE;
     public static final long CAPABILITY_TYPED_ATTACHMENTS = 1L;
+    public static final long CAPABILITY_EXTERNAL_METALFX = 1L << 1;
 
     static final long HEADER_VERSION = 0L;
     static final long HEADER_BYTE_SIZE = 4L;
@@ -107,6 +108,13 @@ public final class FrameGraphAbi {
             }
         }
         FrameGraphValidator.validate(graph);
+        long missingCapabilities = graphCapabilities(graph) & ~requiredCapabilities;
+        if (missingCapabilities != 0L) {
+            throw new IllegalArgumentException(
+                    "Frame graph ABI packet omits required graph capabilities 0x"
+                            + Long.toHexString(missingCapabilities)
+            );
+        }
 
         int accessCount = 0;
         try {
@@ -237,6 +245,7 @@ public final class FrameGraphAbi {
             case RENDER -> 1;
             case COMPUTE -> 2;
             case BLIT -> 3;
+            case EXTERNAL_METALFX -> 4;
         };
     }
 
@@ -254,7 +263,26 @@ public final class FrameGraphAbi {
             case FRAGMENT -> 2;
             case COMPUTE -> 3;
             case BLIT -> 4;
+            case METALFX -> 5;
         };
+    }
+
+    private static long graphCapabilities(final FrameGraph graph) {
+        long capabilities = 0L;
+        for (FrameGraph.PassDesc pass : graph.passes()) {
+            if (pass.encoder() == FrameGraph.EncoderClass.EXTERNAL_METALFX) {
+                capabilities |= CAPABILITY_EXTERNAL_METALFX;
+            }
+            for (FrameGraph.ResourceAccess access : pass.accesses()) {
+                if (access.attachment().isAttachment()) {
+                    capabilities |= CAPABILITY_TYPED_ATTACHMENTS;
+                }
+                if (access.stage() == FrameGraph.PipelineStage.METALFX) {
+                    capabilities |= CAPABILITY_EXTERNAL_METALFX;
+                }
+            }
+        }
+        return capabilities;
     }
 
     private static int attachmentRoleCode(final FrameGraph.AttachmentRole value) {

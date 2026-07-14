@@ -31,7 +31,8 @@ public final class FrameGraph {
         VERTEX,
         FRAGMENT,
         COMPUTE,
-        BLIT
+        BLIT,
+        METALFX
     }
 
     public enum PersistenceClass {
@@ -73,7 +74,8 @@ public final class FrameGraph {
     public enum EncoderClass {
         RENDER,
         COMPUTE,
-        BLIT
+        BLIT,
+        EXTERNAL_METALFX
     }
 
     public record PassId(int value, String name) {

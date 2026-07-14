@@ -19,6 +19,7 @@ public final class FrameGraphTests {
         testMissingDependencyAndCycle();
         testAttachmentContracts();
         testNativeHdrGraphTopology();
+        testSpatialHdrGraphTopology();
         testAbiHeader();
         testDeterministicDiagnosticsAndGate();
     }
@@ -202,6 +203,70 @@ public final class FrameGraphTests {
                 "native HDR drawable contract mismatch");
     }
 
+    private static void testSpatialHdrGraphTopology() {
+        FrameGraph graph = NativeHdrFrameGraph.spatialGraph();
+        require(graph.passes().size() == 9, "MetalFX HDR graph pass count mismatch");
+        require(graph.resources().size() == 13, "MetalFX HDR graph resource count mismatch");
+        String passNames = graph.passes().stream()
+                .map(pass -> pass.id().name())
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+        require(passNames.equals(
+                        "world_render,scene_depth_snapshot,hdr_extract,hdr_exposure_reduce,"
+                                + "hdr_bloom_combined,hdr_world_reconstruction,metalfx_spatial,"
+                                + "ui_render_with_seed,present"),
+                "MetalFX HDR graph pass order mismatch: " + passNames);
+
+        FrameGraph.ResourceDesc reconstruction = graph.resources().get(8);
+        FrameGraph.ResourceDesc metalFxOutput = graph.resources().get(9);
+        require(reconstruction.id().name().equals("hdr_world_composite")
+                        && reconstruction.shape().extent().equals("render_extent"),
+                "MetalFX input must remain at render extent");
+        require(metalFxOutput.id().name().equals("metalfx_output")
+                        && metalFxOutput.shape().format().equals("rgba16_float")
+                        && metalFxOutput.shape().extent().equals("display_extent"),
+                "MetalFX output must be full-resolution FP16");
+
+        FrameGraph.PassDesc metalFx = graph.passes().get(6);
+        require(metalFx.encoder() == FrameGraph.EncoderClass.EXTERNAL_METALFX
+                        && metalFx.dependencies().equals(List.of(graph.passes().get(5).id()))
+                        && metalFx.accesses().size() == 2
+                        && metalFx.accesses().stream().allMatch(
+                                access -> access.stage() == FrameGraph.PipelineStage.METALFX
+                        ),
+                "MetalFX opaque pass contract mismatch");
+
+        FrameGraph.PassDesc ui = graph.passes().get(7);
+        FrameGraph.ResourceAccess uiColor = ui.accesses().stream()
+                .filter(access -> access.resource().name().equals("sdr_ui_color"))
+                .findFirst().orElseThrow();
+        FrameGraph.ResourceAccess uiDepth = ui.accesses().stream()
+                .filter(access -> access.resource().name().equals("sdr_ui_depth"))
+                .findFirst().orElseThrow();
+        require(ui.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("metalfx_output")
+                                && access.kind() == FrameGraph.AccessKind.READ),
+                "fused MetalFX UI pass must sample the scaler output");
+        require(uiColor.kind() == FrameGraph.AccessKind.WRITE
+                        && uiColor.attachment().loadAction() == FrameGraph.LoadAction.DONT_CARE
+                        && uiColor.attachment().storeAction() == FrameGraph.StoreAction.STORE,
+                "fused MetalFX UI color contract must be dontCare/store");
+        require(uiDepth.kind() == FrameGraph.AccessKind.WRITE
+                        && uiDepth.attachment().loadAction() == FrameGraph.LoadAction.CLEAR
+                        && uiDepth.attachment().storeAction() == FrameGraph.StoreAction.STORE
+                        && uiDepth.attachment().clearValue().equals("0.0"),
+                "fused MetalFX UI depth contract must clear reversed depth");
+
+        FrameGraph.PassDesc present = graph.passes().get(8);
+        require(present.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("metalfx_output")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && present.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sdr_ui_color")
+                                && access.kind() == FrameGraph.AccessKind.READ),
+                "MetalFX present must read the separated HDR and UI textures");
+    }
+
     private static void testAbiHeader() {
         int bytes = FrameGraphAbi.checkedPacketBytes(3, 24);
         FrameGraphAbi.validate(
@@ -263,6 +328,48 @@ public final class FrameGraphTests {
                             && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_STORE_ACTION) == 1,
                     "frame graph ABI access codes mismatch");
         }
+
+        FrameGraph spatialGraph = NativeHdrFrameGraph.spatialGraph();
+        int spatialAccessCount = spatialGraph.passes().stream()
+                .mapToInt(pass -> pass.accesses().size())
+                .sum();
+        long spatialCapabilities = FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS
+                | FrameGraphAbi.CAPABILITY_EXTERNAL_METALFX;
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = FrameGraphAbi.encode(spatialGraph, spatialCapabilities, arena);
+            require(packet.get(ValueLayout.JAVA_LONG, FrameGraphAbi.HEADER_CAPABILITIES)
+                            == spatialCapabilities
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_RESOURCE_COUNT) == 13
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_PASS_COUNT) == 9
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_ACCESS_COUNT)
+                            == spatialAccessCount,
+                    "MetalFX frame graph ABI header mismatch");
+
+            long passBase = FrameGraphAbi.HEADER_BYTES
+                    + (long) spatialGraph.resources().size() * FrameGraphAbi.RESOURCE_BYTES;
+            long metalFxPass = passBase + 6L * FrameGraphAbi.PASS_BYTES;
+            int firstMetalFxAccess = packet.get(
+                    ValueLayout.JAVA_INT,
+                    metalFxPass + FrameGraphAbi.PASS_FIRST_ACCESS
+            );
+            long accessBase = passBase
+                    + (long) spatialGraph.passes().size() * FrameGraphAbi.PASS_BYTES;
+            long metalFxAccess = accessBase
+                    + (long) firstMetalFxAccess * FrameGraphAbi.ACCESS_BYTES;
+            require(packet.get(ValueLayout.JAVA_INT, metalFxPass + FrameGraphAbi.PASS_ENCODER) == 4
+                            && packet.get(ValueLayout.JAVA_INT,
+                            metalFxAccess + FrameGraphAbi.ACCESS_STAGE) == 5,
+                    "MetalFX frame graph ABI codes mismatch");
+        }
+        expectFailure(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                FrameGraphAbi.encode(
+                        spatialGraph,
+                        FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS,
+                        arena
+                );
+            }
+        }, "capabilities");
 
         FrameGraph.PassId first = passId(0, "first");
         FrameGraph.PassId outsideMask = passId(64, "outside_mask");
