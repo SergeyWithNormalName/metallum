@@ -1,8 +1,11 @@
 package com.metallum.client.metal.render.framegraph;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.util.List;
 
 /**
@@ -55,6 +58,17 @@ public final class NativeHdrFrameGraph {
     public static synchronized void initialize() {
         if (initialized) {
             return;
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = FrameGraphAbi.encode(
+                    GRAPH,
+                    FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS,
+                    arena
+            );
+            int status = MetalNativeBridge.metallum_validate_frame_graph_v1(packet);
+            if (status != 1) {
+                throw new IllegalStateException("Bundled Metal frame graph ABI validation failed with status " + status);
+            }
         }
         initialized = true;
         try {

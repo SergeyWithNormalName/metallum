@@ -4513,6 +4513,237 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
     return pipeline
 }
 
+private enum MetallumFrameGraphAbiV1 {
+    static let version: UInt32 = 1
+    static let headerBytes = 32
+    static let resourceBytes = 24
+    static let passBytes = 24
+    static let accessBytes = 24
+    static let maxPasses = 64
+    static let supportedCapabilities: UInt64 = 1 // Typed attachment contracts.
+}
+
+private struct MetallumFrameGraphPacketReader {
+    let bytes: UnsafeRawBufferPointer
+
+    func uint32(at offset: Int) -> UInt32? {
+        guard offset >= 0, offset <= bytes.count - MemoryLayout<UInt32>.size else {
+            return nil
+        }
+        return UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+    }
+
+    func int32(at offset: Int) -> Int32? {
+        guard let value = uint32(at: offset) else {
+            return nil
+        }
+        return Int32(bitPattern: value)
+    }
+
+    func uint64(at offset: Int) -> UInt64? {
+        guard offset >= 0, offset <= bytes.count - MemoryLayout<UInt64>.size else {
+            return nil
+        }
+        return UInt64(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
+    }
+}
+
+private func checkedFrameGraphSectionEnd(start: Int, count: Int, stride: Int) -> Int? {
+    let (bytes, productOverflow) = count.multipliedReportingOverflow(by: stride)
+    guard !productOverflow else {
+        return nil
+    }
+    let (end, sumOverflow) = start.addingReportingOverflow(bytes)
+    return sumOverflow ? nil : end
+}
+
+/**
+ Synchronously validates the bundled Java graph packet before any GPU encoding.
+
+ Return values are stable diagnostics: 1 accepted; -1 header pointer/length;
+ -2 version; -3 total size/reserved; -4 capabilities; -5 count/overflow;
+ -6 resource record; -7 pass record; -8 access record.
+ */
+@_cdecl("metallum_validate_frame_graph_v1")
+public func metallum_validate_frame_graph_v1(
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let packet,
+          byteSize >= UInt64(MetallumFrameGraphAbiV1.headerBytes),
+          byteSize <= UInt64(Int.max) else {
+        return -1
+    }
+    let packetSize = Int(byteSize)
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: packet, count: packetSize)
+    )
+    guard let version = reader.uint32(at: 0),
+          let declaredByteSize = reader.uint32(at: 4),
+          let requiredCapabilities = reader.uint64(at: 8),
+          let resourceCountValue = reader.uint32(at: 16),
+          let passCountValue = reader.uint32(at: 20),
+          let accessCountValue = reader.uint32(at: 24),
+          let reserved = reader.uint32(at: 28) else {
+        return -1
+    }
+    guard version == MetallumFrameGraphAbiV1.version else {
+        return -2
+    }
+    guard UInt64(declaredByteSize) == byteSize, reserved == 0 else {
+        return -3
+    }
+    guard requiredCapabilities & ~MetallumFrameGraphAbiV1.supportedCapabilities == 0 else {
+        return -4
+    }
+
+    let resourceCount = Int(resourceCountValue)
+    let passCount = Int(passCountValue)
+    let accessCount = Int(accessCountValue)
+    guard passCount <= MetallumFrameGraphAbiV1.maxPasses,
+          let resourceEnd = checkedFrameGraphSectionEnd(
+            start: MetallumFrameGraphAbiV1.headerBytes,
+            count: resourceCount,
+            stride: MetallumFrameGraphAbiV1.resourceBytes
+          ),
+          let passEnd = checkedFrameGraphSectionEnd(
+            start: resourceEnd,
+            count: passCount,
+            stride: MetallumFrameGraphAbiV1.passBytes
+          ),
+          let accessEnd = checkedFrameGraphSectionEnd(
+            start: passEnd,
+            count: accessCount,
+            stride: MetallumFrameGraphAbiV1.accessBytes
+          ) else {
+        return -5
+    }
+    guard accessEnd == packetSize else {
+        return -3
+    }
+
+    var resourceTypes = [UInt32](repeating: 0, count: resourceCount)
+    var resourceFirstPass = [Int32](repeating: -1, count: resourceCount)
+    var resourceLastPass = [Int32](repeating: -1, count: resourceCount)
+    for index in 0..<resourceCount {
+        let offset = MetallumFrameGraphAbiV1.headerBytes
+            + index * MetallumFrameGraphAbiV1.resourceBytes
+        guard let resourceId = reader.uint32(at: offset),
+              let resourceType = reader.uint32(at: offset + 4),
+              let persistence = reader.uint32(at: offset + 8),
+              let flags = reader.uint32(at: offset + 12),
+              let firstPass = reader.int32(at: offset + 16),
+              let lastPass = reader.int32(at: offset + 20),
+              resourceId == UInt32(index),
+              (1...2).contains(resourceType),
+              (1...8).contains(persistence),
+              flags & ~UInt32(1) == 0 else {
+            return -6
+        }
+        let wholeGraph = firstPass == -1 && lastPass == -1
+        let closedLifetime = firstPass >= 0
+            && lastPass >= firstPass
+            && lastPass < Int32(passCount)
+        guard wholeGraph || closedLifetime else {
+            return -6
+        }
+        resourceTypes[index] = resourceType
+        resourceFirstPass[index] = firstPass
+        resourceLastPass[index] = lastPass
+    }
+
+    var passEncoders = [UInt32](repeating: 0, count: passCount)
+    var passFirstAccess = [Int](repeating: 0, count: passCount)
+    var passAccessCount = [Int](repeating: 0, count: passCount)
+    var expectedFirstAccess = 0
+    for index in 0..<passCount {
+        let offset = resourceEnd + index * MetallumFrameGraphAbiV1.passBytes
+        guard let passId = reader.uint32(at: offset),
+              let encoder = reader.uint32(at: offset + 4),
+              let firstAccessValue = reader.uint32(at: offset + 8),
+              let passAccessCountValue = reader.uint32(at: offset + 12),
+              let dependencyMask = reader.uint64(at: offset + 16),
+              passId == UInt32(index),
+              (1...3).contains(encoder) else {
+            return -7
+        }
+        let firstAccess = Int(firstAccessValue)
+        let count = Int(passAccessCountValue)
+        guard firstAccess == expectedFirstAccess,
+              let end = checkedFrameGraphSectionEnd(start: firstAccess, count: count, stride: 1),
+              end <= accessCount else {
+            return -7
+        }
+        let allowedDependencies: UInt64 = index == 0
+            ? 0
+            : (UInt64(1) << UInt64(index)) - 1
+        guard dependencyMask & ~allowedDependencies == 0 else {
+            return -7
+        }
+        passEncoders[index] = encoder
+        passFirstAccess[index] = firstAccess
+        passAccessCount[index] = count
+        expectedFirstAccess = end
+    }
+    guard expectedFirstAccess == accessCount else {
+        return -7
+    }
+
+    for passIndex in 0..<passCount {
+        let encoder = passEncoders[passIndex]
+        let firstAccess = passFirstAccess[passIndex]
+        let endAccess = firstAccess + passAccessCount[passIndex]
+        for accessIndex in firstAccess..<endAccess {
+            let offset = passEnd + accessIndex * MetallumFrameGraphAbiV1.accessBytes
+            guard let resourceIdValue = reader.uint32(at: offset),
+                  let accessKind = reader.uint32(at: offset + 4),
+                  let stage = reader.uint32(at: offset + 8),
+                  let attachmentRole = reader.uint32(at: offset + 12),
+                  let loadAction = reader.uint32(at: offset + 16),
+                  let storeAction = reader.uint32(at: offset + 20),
+                  resourceIdValue < resourceCountValue,
+                  (1...3).contains(accessKind),
+                  (1...4).contains(stage),
+                  attachmentRole <= 3,
+                  loadAction <= 3,
+                  storeAction <= 2 else {
+                return -8
+            }
+            let resourceId = Int(resourceIdValue)
+            if resourceFirstPass[resourceId] >= 0 {
+                guard passIndex >= Int(resourceFirstPass[resourceId]),
+                      passIndex <= Int(resourceLastPass[resourceId]) else {
+                    return -8
+                }
+            }
+            let compatibleStage = (encoder == 1 && (stage == 1 || stage == 2))
+                || (encoder == 2 && stage == 3)
+                || (encoder == 3 && stage == 4)
+            guard compatibleStage else {
+                return -8
+            }
+            if attachmentRole == 0 {
+                guard loadAction == 0, storeAction == 0 else {
+                    return -8
+                }
+            } else {
+                let reads = accessKind == 1 || accessKind == 3
+                let writes = accessKind == 2 || accessKind == 3
+                guard resourceTypes[resourceId] == 2,
+                      encoder == 1,
+                      stage == 2,
+                      loadAction != 0,
+                      storeAction != 0,
+                      writes,
+                      (loadAction == 1) == reads else {
+                    return -8
+                }
+            }
+        }
+    }
+    return 1
+}
+
 @_cdecl("metallum_init_pipelines")
 public func metallum_init_pipelines(_ device: MTLDevice) {
     autoreleasepool {

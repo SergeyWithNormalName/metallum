@@ -119,6 +119,41 @@ tasks.register("spatialScalingUnitTest", JavaExec) {
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
+def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
+
+tasks.register("compileFrameGraphAbiValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native frame graph ABI validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/FrameGraphAbiValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(frameGraphAbiValidationBinary)
+
+	doFirst {
+		frameGraphAbiValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-o", frameGraphAbiValidationBinary.get().asFile.absolutePath,
+		"src/test/native/FrameGraphAbiValidation.swift"
+}
+
+tasks.register("frameGraphAbiNativeValidation", Exec) {
+	group = "verification"
+	description = "Validates native frame graph ABI bounds and references"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("buildMacNative"), tasks.named("compileFrameGraphAbiValidation"))
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file(macNativeLibrary)
+	commandLine frameGraphAbiValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
 
 tasks.register("compileGpuTimingValidation", Exec) {
 	group = "verification"
@@ -245,6 +280,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
+	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))

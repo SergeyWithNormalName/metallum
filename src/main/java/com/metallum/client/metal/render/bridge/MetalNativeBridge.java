@@ -69,6 +69,11 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
+            validateFrameGraphV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_validate_frame_graph_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
             initPipelines = downcallWithoutCritical(
                     lookup,
                     "metallum_init_pipelines",
@@ -397,6 +402,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle setDebugLabelsEnabled;
     private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle recordJavaWorkload;
+    private static final MethodHandle validateFrameGraphV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -591,6 +597,17 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_timing_record_java_workload", throwable);
+        }
+    }
+
+    public static int metallum_validate_frame_graph_v1(final MemorySegment packet) {
+        if (packet == null || packet.byteSize() == 0L) {
+            throw new IllegalArgumentException("Frame graph ABI packet must not be empty");
+        }
+        try {
+            return (int) validateFrameGraphV1.invokeExact(segment(packet), packet.byteSize());
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_validate_frame_graph_v1", throwable);
         }
     }
 

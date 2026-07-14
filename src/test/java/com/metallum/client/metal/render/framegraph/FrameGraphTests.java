@@ -1,6 +1,9 @@
 package com.metallum.client.metal.render.framegraph;
 
 import java.io.IOException;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -213,6 +216,94 @@ public final class FrameGraphTests {
         expectFailure(() -> FrameGraphAbi.validate(
                 new FrameGraphAbi.Header(1, bytes, 0b1000L), bytes, 0b0010L), "capabilities");
         expectFailure(() -> FrameGraphAbi.checkedPacketBytes(Integer.MAX_VALUE, 16), "overflow");
+        expectFailure(() -> FrameGraphAbi.packetBytes(Integer.MAX_VALUE, 1, 1), "overflow");
+
+        FrameGraph graph = NativeHdrFrameGraph.graph();
+        int accessCount = graph.passes().stream().mapToInt(pass -> pass.accesses().size()).sum();
+        int expectedBytes = FrameGraphAbi.packetBytes(
+                graph.resources().size(),
+                graph.passes().size(),
+                accessCount
+        );
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = FrameGraphAbi.encode(
+                    graph,
+                    FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS,
+                    arena
+            );
+            require(packet.byteSize() == expectedBytes, "frame graph ABI packet byte size mismatch");
+            require(packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_VERSION)
+                            == FrameGraphAbi.CURRENT_VERSION
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_BYTE_SIZE)
+                            == expectedBytes
+                            && packet.get(ValueLayout.JAVA_LONG, FrameGraphAbi.HEADER_CAPABILITIES)
+                            == FrameGraphAbi.CAPABILITY_TYPED_ATTACHMENTS,
+                    "frame graph ABI header encoding mismatch");
+            require(packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_RESOURCE_COUNT) == 12
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_PASS_COUNT) == 8
+                            && packet.get(ValueLayout.JAVA_INT, FrameGraphAbi.HEADER_ACCESS_COUNT) == accessCount,
+                    "frame graph ABI counts mismatch");
+
+            long firstResource = FrameGraphAbi.HEADER_BYTES;
+            require(packet.get(ValueLayout.JAVA_INT, firstResource + FrameGraphAbi.RESOURCE_ID) == 0
+                            && packet.get(ValueLayout.JAVA_INT, firstResource + FrameGraphAbi.RESOURCE_TYPE) == 2
+                            && packet.get(ValueLayout.JAVA_INT, firstResource + FrameGraphAbi.RESOURCE_PERSISTENCE) == 3,
+                    "frame graph ABI resource codes mismatch");
+            long firstPass = firstResource + (long) graph.resources().size() * FrameGraphAbi.RESOURCE_BYTES;
+            require(packet.get(ValueLayout.JAVA_INT, firstPass + FrameGraphAbi.PASS_ID) == 0
+                            && packet.get(ValueLayout.JAVA_INT, firstPass + FrameGraphAbi.PASS_ENCODER) == 1
+                            && packet.get(ValueLayout.JAVA_LONG, firstPass + FrameGraphAbi.PASS_DEPENDENCY_MASK) == 0L,
+                    "frame graph ABI pass codes mismatch");
+            long firstAccess = firstPass + (long) graph.passes().size() * FrameGraphAbi.PASS_BYTES;
+            require(packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_RESOURCE_ID) == 0
+                            && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_KIND) == 2
+                            && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_STAGE) == 2
+                            && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_ATTACHMENT_ROLE) == 1
+                            && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_LOAD_ACTION) == 2
+                            && packet.get(ValueLayout.JAVA_INT, firstAccess + FrameGraphAbi.ACCESS_STORE_ACTION) == 1,
+                    "frame graph ABI access codes mismatch");
+        }
+
+        FrameGraph.PassId first = passId(0, "first");
+        FrameGraph.PassId outsideMask = passId(64, "outside_mask");
+        expectFailure(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                FrameGraphAbi.encode(
+                        new FrameGraph(List.of(), List.of(
+                                pass(first, FrameGraph.EncoderClass.BLIT, List.of(outsideMask))
+                        )),
+                        0L,
+                        arena
+                );
+            }
+        }, "outside [0, 63]");
+
+        FrameGraph.PassId wrongPassId = passId(1, "wrong");
+        expectFailure(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                FrameGraphAbi.encode(
+                        new FrameGraph(List.of(), List.of(
+                                pass(wrongPassId, FrameGraph.EncoderClass.BLIT, List.of())
+                        )),
+                        0L,
+                        arena
+                );
+            }
+        }, "dense and ordered");
+
+        FrameGraph.ResourceId wrongResourceId = resourceId(1, "wrong_resource");
+        expectFailure(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                FrameGraphAbi.encode(
+                        new FrameGraph(
+                                List.of(resource(wrongResourceId, true, FrameGraph.Lifetime.wholeGraph())),
+                                List.of()
+                        ),
+                        0L,
+                        arena
+                );
+            }
+        }, "dense and ordered");
     }
 
     private static void testDeterministicDiagnosticsAndGate() throws IOException {
