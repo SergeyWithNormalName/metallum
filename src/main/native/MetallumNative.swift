@@ -273,6 +273,7 @@ private struct MetallumGpuTimingCompletion {
     let frame: MetallumGpuCounterFrame?
     let presentsDrawable: Bool
     let benchmarkContext: MetallumBenchmarkTelemetryContext?
+    let workloadWindowKey: MetallumCpuWaitWindowKey?
     let presentation: MetallumPresentationTelemetry?
     let presentSubmissionUptime: Double?
 }
@@ -554,11 +555,12 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
     private var unsupportedDevices: Set<UInt> = []
 
     func register(_ commandBuffer: MTLCommandBuffer) {
-        guard NativeState.gpuTimingStats != nil else { return }
+        guard let stats = NativeState.gpuTimingStats else { return }
         let device = commandBuffer.device
         let deviceKey = objectAddress(device)
         let commandBufferKey = objectAddress(commandBuffer)
         let benchmarkContext = NativeState.benchmarkTelemetryState.snapshot()
+        stats.recordCommandBuffer(commandBuffer, context: benchmarkContext)
 
         lock.lock()
         presentFlags[commandBufferKey] = false
@@ -683,11 +685,12 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
     }
 
     func take(_ commandBuffer: MTLCommandBuffer) -> MetallumGpuTimingCompletion {
-        guard NativeState.gpuTimingStats != nil else {
+        guard let stats = NativeState.gpuTimingStats else {
             return MetallumGpuTimingCompletion(
                 frame: nil,
                 presentsDrawable: false,
                 benchmarkContext: nil,
+                workloadWindowKey: nil,
                 presentation: nil,
                 presentSubmissionUptime: nil
             )
@@ -702,10 +705,12 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
         }
         let presentSubmissionUptime = presentSubmissionUptimes.removeValue(forKey: key)
         lock.unlock()
+        let workloadWindowKey = stats.finishCommandBuffer(commandBuffer)
         return MetallumGpuTimingCompletion(
             frame: frame,
             presentsDrawable: presentsDrawable,
             benchmarkContext: benchmarkContext,
+            workloadWindowKey: workloadWindowKey,
             presentation: presentation,
             presentSubmissionUptime: presentSubmissionUptime
         )
@@ -747,6 +752,126 @@ private final class MetallumCpuWaitAccumulator {
     }
 }
 
+private enum MetallumWorkloadEncoderKind {
+    case render
+    case compute
+    case blit
+}
+
+private enum MetallumWorkloadCopyKind {
+    case sharedToPrivate
+    case gpuToCpu
+    case gpuInternal
+    case unclassified
+}
+
+private final class MetallumWorkloadAccumulator {
+    var commandBuffers = 0
+    var renderEncoders = 0
+    var computeEncoders = 0
+    var blitEncoders = 0
+    var passBoundaries = 0
+
+    // Direct CPU writes into shared buffers happen outside the four native
+    // blit wrappers, so this slice deliberately reports them as unobserved.
+    // Do not infer them from shared allocations: an allocation is not a write.
+    var cpuToSharedBytes = 0
+    var cpuToSharedCommands = 0
+    var sharedToPrivateBytes = 0
+    var sharedToPrivateCommands = 0
+    var gpuToCpuBytes = 0
+    var gpuToCpuCommands = 0
+    var gpuInternalBytes = 0
+    var gpuInternalCommands = 0
+    var unclassifiedBytes = 0
+    var unclassifiedCommands = 0
+    var byteCountUnknownCommands = 0
+    var directWriteObserved = false
+
+    var bufferAllocationCount = 0
+    var bufferAllocationBytes = 0
+    var textureAllocationCount = 0
+    var textureAllocationBytes = 0
+
+    func recordEncoder(_ kind: MetallumWorkloadEncoderKind) {
+        switch kind {
+        case .render:
+            renderEncoders += 1
+        case .compute:
+            computeEncoders += 1
+        case .blit:
+            blitEncoders += 1
+        }
+        // A workload pass boundary is defined as one successful encoder
+        // start, so it is exactly render + compute + blit for every report.
+        passBoundaries += 1
+    }
+
+    func recordCopy(_ kind: MetallumWorkloadCopyKind, bytes: Int?) {
+        switch kind {
+        case .sharedToPrivate:
+            sharedToPrivateCommands += 1
+            if let bytes {
+                sharedToPrivateBytes += bytes
+            }
+        case .gpuToCpu:
+            gpuToCpuCommands += 1
+            if let bytes {
+                gpuToCpuBytes += bytes
+            }
+        case .gpuInternal:
+            gpuInternalCommands += 1
+            if let bytes {
+                gpuInternalBytes += bytes
+            }
+        case .unclassified:
+            unclassifiedCommands += 1
+            if let bytes {
+                unclassifiedBytes += bytes
+            }
+        }
+        if bytes == nil {
+            byteCountUnknownCommands += 1
+        }
+    }
+
+    var report: [String: Any] {
+        [
+            "command_buffers": commandBuffers,
+            "encoders": [
+                "render": renderEncoders,
+                "compute": computeEncoders,
+                "blit": blitEncoders,
+                "pass_boundaries": passBoundaries
+            ],
+            "copy_bytes": [
+                "cpu_to_shared": cpuToSharedBytes,
+                "shared_to_private": sharedToPrivateBytes,
+                "gpu_to_cpu": gpuToCpuBytes,
+                "gpu_internal": gpuInternalBytes,
+                "unclassified": unclassifiedBytes,
+                "cpu_to_shared_commands": cpuToSharedCommands,
+                "shared_to_private_commands": sharedToPrivateCommands,
+                "gpu_to_cpu_commands": gpuToCpuCommands,
+                "gpu_internal_commands": gpuInternalCommands,
+                "unclassified_commands": unclassifiedCommands,
+                "byte_count_unknown_commands": byteCountUnknownCommands,
+                "direct_write_observed": directWriteObserved
+            ],
+            "resource_allocations": [
+                "buffers": [
+                    "count": bufferAllocationCount,
+                    "bytes": bufferAllocationBytes
+                ],
+                "textures": [
+                    "count": textureAllocationCount,
+                    "bytes": textureAllocationBytes
+                ]
+            ]
+        ]
+    }
+}
+
 private struct MetallumGpuTimingReportWindow {
     let context: MetallumBenchmarkTelemetryContext
     let sampleCount: Int
@@ -762,6 +887,7 @@ private struct MetallumGpuTimingReportWindow {
     let waitNanoseconds: [Double]
     let maximumWaitNanoseconds: [Double]
     let waitCounts: [Int]
+    let workload: MetallumWorkloadAccumulator
     let droppedEvents: Int
     let presentation: MetallumPresentationTelemetry?
 }
@@ -787,7 +913,10 @@ private final class MetallumGpuTimingWindow {
         self.context = context
     }
 
-    func takeReport(cpuWaits: MetallumCpuWaitAccumulator?) -> MetallumGpuTimingReportWindow {
+    func takeReport(
+        cpuWaits: MetallumCpuWaitAccumulator?,
+        workload: MetallumWorkloadAccumulator
+    ) -> MetallumGpuTimingReportWindow {
         let report = MetallumGpuTimingReportWindow(
             context: context,
             sampleCount: sampleCount,
@@ -806,6 +935,7 @@ private final class MetallumGpuTimingWindow {
                 ?? Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count),
             waitCounts: cpuWaits?.counts
                 ?? Array(repeating: 0, count: MetallumCpuWaitKind.allCases.count),
+            workload: workload,
             droppedEvents: droppedEvents,
             presentation: presentation
         )
@@ -834,6 +964,9 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
     private var windows: [UInt64: MetallumGpuTimingWindow] = [:]
     private var presentedCounts: [UInt64: Int] = [:]
     private var cpuWaitWindows: [MetallumCpuWaitWindowKey: MetallumCpuWaitAccumulator] = [:]
+    private var workloadWindows: [MetallumCpuWaitWindowKey: MetallumWorkloadAccumulator] = [:]
+    private var commandBufferWindowKeys: [UInt: MetallumCpuWaitWindowKey] = [:]
+    private var encoderWindowKeys: [UInt: MetallumCpuWaitWindowKey] = [:]
     private var generationOrder: [UInt64] = []
 
     private func ensureGenerationLocked(_ generation: UInt64) {
@@ -847,7 +980,37 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             cpuWaitWindows = cpuWaitWindows.filter {
                 $0.key.generation != staleGeneration
             }
+            workloadWindows = workloadWindows.filter {
+                $0.key.generation != staleGeneration
+            }
+            commandBufferWindowKeys = commandBufferWindowKeys.filter {
+                $0.value.generation != staleGeneration
+            }
+            encoderWindowKeys = encoderWindowKeys.filter {
+                $0.value.generation != staleGeneration
+            }
         }
+    }
+
+    private func currentWindowKeyLocked(
+        for context: MetallumBenchmarkTelemetryContext
+    ) -> MetallumCpuWaitWindowKey {
+        ensureGenerationLocked(context.generation)
+        return MetallumCpuWaitWindowKey(
+            generation: context.generation,
+            reportIndex: presentedCounts[context.generation]! / Self.reportFrameCount
+        )
+    }
+
+    private func workloadLocked(
+        for key: MetallumCpuWaitWindowKey
+    ) -> MetallumWorkloadAccumulator {
+        if let existing = workloadWindows[key] {
+            return existing
+        }
+        let created = MetallumWorkloadAccumulator()
+        workloadWindows[key] = created
+        return created
     }
 
     private func window(for context: MetallumBenchmarkTelemetryContext) -> MetallumGpuTimingWindow {
@@ -882,6 +1045,89 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         presentedCounts[context.generation] = presentedCount
         lock.unlock()
         return presentedCount
+    }
+
+    func recordCommandBuffer(
+        _ commandBuffer: MTLCommandBuffer,
+        context: MetallumBenchmarkTelemetryContext
+    ) {
+        lock.lock()
+        let key = currentWindowKeyLocked(for: context)
+        commandBufferWindowKeys[objectAddress(commandBuffer)] = key
+        workloadLocked(for: key).commandBuffers += 1
+        lock.unlock()
+    }
+
+    func finishCommandBuffer(
+        _ commandBuffer: MTLCommandBuffer
+    ) -> MetallumCpuWaitWindowKey? {
+        lock.lock()
+        let key = commandBufferWindowKeys.removeValue(forKey: objectAddress(commandBuffer))
+        lock.unlock()
+        return key
+    }
+
+    func recordEncoder(
+        _ encoder: MTLCommandEncoder,
+        commandBuffer: MTLCommandBuffer,
+        kind: MetallumWorkloadEncoderKind
+    ) {
+        lock.lock()
+        if let key = commandBufferWindowKeys[objectAddress(commandBuffer)] {
+            encoderWindowKeys[objectAddress(encoder)] = key
+            workloadLocked(for: key).recordEncoder(kind)
+        }
+        lock.unlock()
+    }
+
+    func finishEncoder(_ encoder: MTLCommandEncoder) {
+        lock.lock()
+        encoderWindowKeys.removeValue(forKey: objectAddress(encoder))
+        lock.unlock()
+    }
+
+    func recordCopy(
+        _ encoder: MTLBlitCommandEncoder,
+        sourceStorageMode: MTLStorageMode,
+        destinationStorageMode: MTLStorageMode,
+        bytes: Int?
+    ) {
+        let kind: MetallumWorkloadCopyKind
+        let sourceIsCpuVisible = sourceStorageMode == .shared || sourceStorageMode == .managed
+        let destinationIsCpuVisible = destinationStorageMode == .shared || destinationStorageMode == .managed
+        if sourceIsCpuVisible && destinationStorageMode == .private {
+            kind = .sharedToPrivate
+        } else if sourceStorageMode == .private && destinationIsCpuVisible {
+            kind = .gpuToCpu
+        } else if sourceStorageMode == .private && destinationStorageMode == .private {
+            kind = .gpuInternal
+        } else {
+            kind = .unclassified
+        }
+
+        lock.lock()
+        if let key = encoderWindowKeys[objectAddress(encoder)] {
+            workloadLocked(for: key).recordCopy(kind, bytes: bytes)
+        }
+        lock.unlock()
+    }
+
+    func recordBufferAllocation(_ allocatedSize: Int) {
+        let context = NativeState.benchmarkTelemetryState.snapshot()
+        lock.lock()
+        let accumulator = workloadLocked(for: currentWindowKeyLocked(for: context))
+        accumulator.bufferAllocationCount += 1
+        accumulator.bufferAllocationBytes += allocatedSize
+        lock.unlock()
+    }
+
+    func recordTextureAllocation(_ allocatedSize: Int) {
+        let context = NativeState.benchmarkTelemetryState.snapshot()
+        lock.lock()
+        let accumulator = workloadLocked(for: currentWindowKeyLocked(for: context))
+        accumulator.textureAllocationCount += 1
+        accumulator.textureAllocationBytes += allocatedSize
+        lock.unlock()
     }
 
     private static func thermalStateName() -> String {
@@ -1013,6 +1259,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "metadata": metadata,
             "stages": stages,
             "cpu_waits": waits,
+            "workload": window.workload.report,
             "dropped_timing_events": window.droppedEvents
         ])
     }
@@ -1129,6 +1376,22 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
 
         lock.lock()
         let window = window(for: context)
+        guard let workloadWindowKey = completion.workloadWindowKey,
+              workloadWindowKey.generation == context.generation,
+              workloadWindowKey.reportIndex == window.reportIndex else {
+            let actualGeneration = completion.workloadWindowKey?.generation ?? UInt64.max
+            let actualReportIndex = completion.workloadWindowKey?.reportIndex ?? -1
+            lock.unlock()
+            NSLog(
+                "[metallum] GPU timing workload window mismatch (%@): expected %llu/%d, got %llu/%d",
+                commandBuffer.label ?? "unlabeled",
+                context.generation,
+                window.reportIndex,
+                actualGeneration,
+                actualReportIndex
+            )
+            return
+        }
         if window.sampleCount < Self.reportFrameCount {
             window.gpuSecondSamples[window.sampleCount] = duration
         }
@@ -1166,7 +1429,9 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 reportIndex: window.reportIndex
             )
             completedWindow = window.takeReport(
-                cpuWaits: cpuWaitWindows.removeValue(forKey: waitKey)
+                cpuWaits: cpuWaitWindows.removeValue(forKey: waitKey),
+                workload: workloadWindows.removeValue(forKey: waitKey)
+                    ?? MetallumWorkloadAccumulator()
             )
         } else {
             completedWindow = nil
@@ -1285,6 +1550,103 @@ private enum NativeState {
         : nil
 }
 
+@inline(__always)
+private func trackedMakeRenderCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer,
+    descriptor: MTLRenderPassDescriptor
+) -> MTLRenderCommandEncoder? {
+    guard let stats = NativeState.gpuTimingStats else {
+        return commandBuffer.makeRenderCommandEncoder(descriptor: descriptor)
+    }
+    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+        return nil
+    }
+    stats.recordEncoder(encoder, commandBuffer: commandBuffer, kind: .render)
+    return encoder
+}
+
+@inline(__always)
+private func trackedMakeComputeCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer,
+    descriptor: MTLComputePassDescriptor
+) -> MTLComputeCommandEncoder? {
+    guard let stats = NativeState.gpuTimingStats else {
+        return commandBuffer.makeComputeCommandEncoder(descriptor: descriptor)
+    }
+    guard let encoder = commandBuffer.makeComputeCommandEncoder(descriptor: descriptor) else {
+        return nil
+    }
+    stats.recordEncoder(encoder, commandBuffer: commandBuffer, kind: .compute)
+    return encoder
+}
+
+@inline(__always)
+private func trackedMakeBlitCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer,
+    descriptor: MTLBlitPassDescriptor
+) -> MTLBlitCommandEncoder? {
+    guard let stats = NativeState.gpuTimingStats else {
+        return commandBuffer.makeBlitCommandEncoder(descriptor: descriptor)
+    }
+    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
+        return nil
+    }
+    stats.recordEncoder(encoder, commandBuffer: commandBuffer, kind: .blit)
+    return encoder
+}
+
+@inline(__always)
+private func trackedMakeBlitCommandEncoder(
+    _ commandBuffer: MTLCommandBuffer
+) -> MTLBlitCommandEncoder? {
+    guard let stats = NativeState.gpuTimingStats else {
+        return commandBuffer.makeBlitCommandEncoder()
+    }
+    guard let encoder = commandBuffer.makeBlitCommandEncoder() else {
+        return nil
+    }
+    stats.recordEncoder(encoder, commandBuffer: commandBuffer, kind: .blit)
+    return encoder
+}
+
+@inline(__always)
+private func trackedEndEncoding(_ encoder: MTLCommandEncoder) {
+    guard let stats = NativeState.gpuTimingStats else {
+        encoder.endEncoding()
+        return
+    }
+    stats.finishEncoder(encoder)
+    encoder.endEncoding()
+}
+
+@inline(__always)
+private func trackWorkloadCopy(
+    _ encoder: MTLBlitCommandEncoder,
+    source: MTLResource,
+    destination: MTLResource,
+    bytes: UInt64?
+) {
+    guard let stats = NativeState.gpuTimingStats else { return }
+    stats.recordCopy(
+        encoder,
+        sourceStorageMode: source.storageMode,
+        destinationStorageMode: destination.storageMode,
+        bytes: bytes.map { Int($0) }
+    )
+}
+
+@inline(__always)
+private func trackBufferAllocation(_ buffer: MTLBuffer) {
+    guard let stats = NativeState.gpuTimingStats else { return }
+    stats.recordBufferAllocation(buffer.allocatedSize)
+}
+
+@inline(__always)
+private func trackTextureAllocation(_ texture: MTLTexture) {
+    guard let stats = NativeState.gpuTimingStats else { return }
+    stats.recordTextureAllocation(texture.allocatedSize)
+}
+
 private func attachGpuTiming(
     _ descriptor: MTLRenderPassDescriptor,
     commandBuffer: MTLCommandBuffer,
@@ -1329,7 +1691,7 @@ private func beginExternalGpuTiming(
     }
     let descriptor = MTLBlitPassDescriptor()
     frame.attachExternalStart(descriptor, event: event)
-    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
+    guard let encoder = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: descriptor) else {
         return nil
     }
     encoder.label = "Metallum \(stage.reportName) timing start"
@@ -1340,7 +1702,7 @@ private func beginExternalGpuTiming(
     if let fence {
         encoder.updateFence(fence)
     }
-    encoder.endEncoding()
+    trackedEndEncoding(encoder)
     return MetallumGpuExternalTimingToken(frame: frame, event: event)
 }
 
@@ -1352,7 +1714,7 @@ private func endExternalGpuTiming(
     guard let token else { return }
     let descriptor = MTLBlitPassDescriptor()
     token.frame.attachExternalEnd(descriptor, event: token.event)
-    guard let encoder = commandBuffer.makeBlitCommandEncoder(descriptor: descriptor) else {
+    guard let encoder = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: descriptor) else {
         return
     }
     encoder.label = "Metallum \(token.event.stage.reportName) timing end"
@@ -1363,7 +1725,7 @@ private func endExternalGpuTiming(
     if let fence {
         encoder.updateFence(fence)
     }
-    encoder.endEncoding()
+    trackedEndEncoding(encoder)
 }
 
 private func completeGpuTiming(
@@ -3016,7 +3378,7 @@ private func makeHdrPassEncoder(
     descriptor.colorAttachments[0].loadAction = .dontCare
     descriptor.colorAttachments[0].storeAction = .store
     attachGpuTiming(descriptor, commandBuffer: commandBuffer, stage: stage)
-    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+    guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: descriptor) else {
         return nil
     }
     encoder.setViewport(MTLViewport(
@@ -3293,7 +3655,7 @@ private func encodeHdrWorldEffects(
             commandBuffer: commandBuffer,
             stage: .histogramExposure
         )
-        guard let histogramClear = commandBuffer.makeBlitCommandEncoder(descriptor: histogramClearPass) else {
+        guard let histogramClear = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: histogramClearPass) else {
             return nil
         }
         histogramClear.label = "Metallum HDR histogram initialization"
@@ -3302,7 +3664,7 @@ private func encodeHdrWorldEffects(
             range: 0..<workspace.histogram.length,
             value: 0
         )
-        histogramClear.endEncoding()
+        trackedEndEncoding(histogramClear)
     }
 
     guard let extract = makeHdrPassEncoder(
@@ -3334,7 +3696,7 @@ private func encodeHdrWorldEffects(
     if let globalFence {
         extract.updateFence(globalFence, after: .fragment)
     }
-    extract.endEncoding()
+    trackedEndEncoding(extract)
 
     let histogramReducePass = MTLComputePassDescriptor()
     attachGpuTiming(
@@ -3342,7 +3704,7 @@ private func encodeHdrWorldEffects(
         commandBuffer: commandBuffer,
         stage: .histogramExposure
     )
-    guard let histogramReduce = commandBuffer.makeComputeCommandEncoder(descriptor: histogramReducePass) else {
+    guard let histogramReduce = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: histogramReducePass) else {
         workspace.histogramNeedsInitialization = true
         return nil
     }
@@ -3363,7 +3725,7 @@ private func encodeHdrWorldEffects(
         MTLSize(width: 1, height: 1, depth: 1),
         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
     )
-    histogramReduce.endEncoding()
+    trackedEndEncoding(histogramReduce)
     workspace.histogramNeedsInitialization = false
 
     if semanticTexture == nil {
@@ -3387,7 +3749,7 @@ private func encodeHdrWorldEffects(
         * 4 * MemoryLayout<Float16>.stride
     guard pipelines.blur.maxTotalThreadsPerThreadgroup >= 16 * 16,
           commandBuffer.device.maxThreadgroupMemoryLength >= bloomThreadgroupMemoryLength,
-          let bloom = commandBuffer.makeComputeCommandEncoder(descriptor: bloomPass) else {
+          let bloom = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: bloomPass) else {
         return nil
     }
     bloom.label = "Metallum combined HDR bloom"
@@ -3410,7 +3772,7 @@ private func encodeHdrWorldEffects(
         ),
         threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
     )
-    bloom.endEncoding()
+    trackedEndEncoding(bloom)
 
     return MetallumHdrWorldOutputs(
         emission: workspace.emission,
@@ -3499,7 +3861,7 @@ private func encodeHdrUiMask(
     if let globalFence {
         uiCompare.updateFence(globalFence, after: .fragment)
     }
-    uiCompare.endEncoding()
+    trackedEndEncoding(uiCompare)
 
     guard let uiDilate = makeHdrPassEncoder(
         commandBuffer: commandBuffer,
@@ -3511,7 +3873,7 @@ private func encodeHdrUiMask(
     }
     uiDilate.setFragmentTexture(uiMaskA, index: 0)
     uiDilate.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-    uiDilate.endEncoding()
+    trackedEndEncoding(uiDilate)
 
     return uiMaskB
 }
@@ -3623,7 +3985,7 @@ private func encodeNativeHdrWorldUiComposite(
     renderPass.colorAttachments[1].loadAction = .dontCare
     renderPass.colorAttachments[1].storeAction = .store
     attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .hdrReconstruction)
-    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+    guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
         return nil
     }
     encoder.label = "Metallum fused native HDR world and SDR UI seed"
@@ -3665,7 +4027,7 @@ private func encodeNativeHdrWorldUiComposite(
     if let globalFence {
         encoder.updateFence(globalFence, after: .fragment)
     }
-    encoder.endEncoding()
+    trackedEndEncoding(encoder)
     workspace.worldCompositeCommandBufferAddress = objectAddress(commandBuffer)
     return worldComposite
 }
@@ -3764,7 +4126,7 @@ private func encodeSpatialHdrWorldComposite(
     if let globalFence {
         encoder.updateFence(globalFence, after: .fragment)
     }
-    encoder.endEncoding()
+    trackedEndEncoding(encoder)
     return worldComposite
 }
 
@@ -4414,13 +4776,13 @@ public func metallum_MTLCommandBuffer_makeBlitCommandEncoder(
     _ commandBuffer: MTLCommandBuffer
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(commandBuffer.makeBlitCommandEncoder())
+        retainedPointer(trackedMakeBlitCommandEncoder(commandBuffer))
     }
 }
 
 @_cdecl("metallum_MTLCommandEncoder_endEncoding")
 public func metallum_MTLCommandEncoder_endEncoding(_ encoder: MTLCommandEncoder) {
-    encoder.endEncoding()
+    trackedEndEncoding(encoder)
 }
 
 @_cdecl("metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer")
@@ -4432,6 +4794,12 @@ public func metallum_MTLBlitCommandEncoder_copyFromBufferToBuffer(
     _ destinationOffset: UInt64,
     _ length: UInt64
 ) {
+    trackWorkloadCopy(
+        blit,
+        source: sourceBuffer,
+        destination: destinationBuffer,
+        bytes: length
+    )
     blit.copy(from: sourceBuffer, sourceOffset: Int(sourceOffset), to: destinationBuffer, destinationOffset: Int(destinationOffset), size: Int(length))
 }
 
@@ -4450,6 +4818,12 @@ public func metallum_MTLBlitCommandEncoder_copyFromBufferToTexture(
     _ bytesPerRow: UInt64,
     _ bytesPerImage: UInt64
 ) {
+    trackWorkloadCopy(
+        blit,
+        source: sourceBuffer,
+        destination: texture,
+        bytes: bytesPerImage
+    )
     blit.copy(
         from: sourceBuffer,
         sourceOffset: Int(sourceOffset),
@@ -4476,6 +4850,12 @@ public func metallum_MTLBlitCommandEncoder_copyFromTextureToTexture(
     _ width: UInt64,
     _ height: UInt64
 ) {
+    trackWorkloadCopy(
+        blit,
+        source: sourceTexture,
+        destination: destinationTexture,
+        bytes: nil
+    )
     blit.copy(
         from: sourceTexture,
         sourceSlice: 0,
@@ -4504,6 +4884,12 @@ public func metallum_MTLBlitCommandEncoder_copyFromTextureToBuffer(
     _ bytesPerRow: UInt64,
     _ bytesPerImage: UInt64
 ) {
+    trackWorkloadCopy(
+        blit,
+        source: sourceTexture,
+        destination: destinationBuffer,
+        bytes: bytesPerImage
+    )
     blit.copy(
         from: sourceTexture,
         sourceSlice: Int(slice),
@@ -4524,7 +4910,11 @@ public func metallum_create_buffer(
     _ options: MTLResourceOptions
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
-        retainedPointer(device.makeBuffer(length: length, options: options))
+        guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        trackBufferAllocation(buffer)
+        return retainedPointer(buffer)
     }
 }
 
@@ -4570,6 +4960,7 @@ public func metallum_create_texture_2d(
             return nil
         }
         texture.label = stringFromOptionalCString(labelPtr)
+        trackTextureAllocation(texture)
         return retainedPointer(texture)
     }
 }
@@ -4749,7 +5140,7 @@ public func metallum_MTLCommandBuffer_makeRenderCommandEncoder(
             stage: MetallumGpuTimingStage.fromJavaId(gpuTimingStageId)
         )
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
             return nil
         }
         encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: viewportWidth, height: viewportHeight, znear: 0.0, zfar: 1.0))
@@ -5048,7 +5439,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             renderPass.stencilAttachment.storeAction = .dontCare
         }
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
             return
         }
 
@@ -5061,7 +5452,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
                 let pipeline = ensureClearColorDepthPipeline(commandBuffer.device, colorTexture.pixelFormat, depthTexture.pixelFormat),
                 let depthState = ensureDepthStencilState(device: commandBuffer.device, compareOp: MTLCompareFunction.always, writeDepth: true)
             else {
-                encoder.endEncoding()
+                trackedEndEncoding(encoder)
                 return
             }
             encodeClearDraw(
@@ -5080,7 +5471,7 @@ public func metallum_MTLCommandBuffer_clearColorDepthTexturesRegion(
             encoder.updateFence(globalFence, after: .fragment)
         }
 
-        encoder.endEncoding()
+        trackedEndEncoding(encoder)
     }
 }
 
@@ -5380,7 +5771,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 if let globalFence {
                     encoder.updateFence(globalFence, after: .fragment)
                 }
-                encoder.endEncoding()
+                trackedEndEncoding(encoder)
                 preparedScalerInput = perceptualInput
             } else {
                 preparedScalerInput = scalerInput
@@ -5466,12 +5857,12 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             // complete: otherwise the render-pass counter attributes the
             // scaler wait to UI, and the pass can reserve tile resources while
             // it is still unable to execute.
-            guard let dependencyWait = commandBuffer.makeBlitCommandEncoder() else {
+            guard let dependencyWait = trackedMakeBlitCommandEncoder(commandBuffer) else {
                 return -1
             }
             dependencyWait.label = "Metallum UI backdrop dependency"
             dependencyWait.waitForFence(globalFence)
-            dependencyWait.endEncoding()
+            trackedEndEncoding(dependencyWait)
         }
 
         guard
@@ -5497,7 +5888,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         if let globalFence {
             encoder.updateFence(globalFence, after: .fragment)
         }
-        encoder.endEncoding()
+        trackedEndEncoding(encoder)
         return hdrPrecomposed ? 2 : 1
     }
 }
@@ -5559,12 +5950,12 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
         }
 
         if let globalFence {
-            guard let dependencyWait = commandBuffer.makeBlitCommandEncoder() else {
+            guard let dependencyWait = trackedMakeBlitCommandEncoder(commandBuffer) else {
                 return 0
             }
             dependencyWait.label = "Metallum UI backdrop dependency fallback"
             dependencyWait.waitForFence(globalFence)
-            dependencyWait.endEncoding()
+            trackedEndEncoding(dependencyWait)
         }
 
         guard let encoder = makeHdrPassEncoder(
@@ -5584,7 +5975,7 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
         if let globalFence {
             encoder.updateFence(globalFence, after: .fragment)
         }
-        encoder.endEncoding()
+        trackedEndEncoding(encoder)
         workspace.preparedUiSeed = nil
         return 1
     }
@@ -5640,7 +6031,7 @@ public func metallum_MTLCommandBuffer_encodeSpatialScreenshot(
         renderPass.colorAttachments[0].texture = destinationTexture
         renderPass.colorAttachments[0].loadAction = .dontCare
         renderPass.colorAttachments[0].storeAction = .store
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
             return -1
         }
         if let globalFence {
@@ -5679,7 +6070,7 @@ public func metallum_MTLCommandBuffer_encodeSpatialScreenshot(
         if let globalFence {
             encoder.updateFence(globalFence, after: .fragment)
         }
-        encoder.endEncoding()
+        trackedEndEncoding(encoder)
         return 1
     }
 }
@@ -5841,7 +6232,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             renderPass.colorAttachments[0].loadAction = .dontCare
             renderPass.colorAttachments[0].storeAction = .store
             attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
-            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+            guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
                 return -1
             }
             if let globalFence {
@@ -5876,7 +6267,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             if let globalFence {
                 encoder.updateFence(globalFence, after: .fragment)
             }
-            encoder.endEncoding()
+            trackedEndEncoding(encoder)
             commandBuffer.present(drawable)
             if NativeState.gpuTimingStats != nil {
                 MetallumGpuTimingCoordinator.shared.markPresented(
@@ -5945,7 +6336,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         renderPass.colorAttachments[0].storeAction = .store
         attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
 
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
+        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
             return -1
         }
 
@@ -6005,7 +6396,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             encoder.updateFence(globalFence, after: .fragment)
         }
 
-        encoder.endEncoding()
+        trackedEndEncoding(encoder)
         commandBuffer.present(drawable)
         if NativeState.gpuTimingStats != nil {
             MetallumGpuTimingCoordinator.shared.markPresented(

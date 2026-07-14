@@ -40,6 +40,38 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
 DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+WORKLOAD_KEYS = frozenset({
+    "command_buffers", "encoders", "copy_bytes", "resource_allocations",
+})
+WORKLOAD_ENCODER_KEYS = frozenset({
+    "render", "compute", "blit", "pass_boundaries",
+})
+WORKLOAD_COPY_KEYS = frozenset({
+    "cpu_to_shared",
+    "shared_to_private",
+    "gpu_to_cpu",
+    "gpu_internal",
+    "unclassified",
+    "cpu_to_shared_commands",
+    "shared_to_private_commands",
+    "gpu_to_cpu_commands",
+    "gpu_internal_commands",
+    "unclassified_commands",
+    "byte_count_unknown_commands",
+    "direct_write_observed",
+})
+WORKLOAD_COPY_BYTE_KEYS = (
+    "cpu_to_shared", "shared_to_private", "gpu_to_cpu", "gpu_internal",
+    "unclassified",
+)
+WORKLOAD_COPY_COMMAND_KEYS = (
+    "cpu_to_shared_commands", "shared_to_private_commands",
+    "gpu_to_cpu_commands", "gpu_internal_commands", "unclassified_commands",
+    "byte_count_unknown_commands",
+)
+WORKLOAD_RESOURCE_KINDS = ("buffers", "textures")
+WORKLOAD_RESOURCE_KEYS = frozenset(WORKLOAD_RESOURCE_KINDS)
+WORKLOAD_ALLOCATION_KEYS = frozenset({"count", "bytes"})
 STABLE_METADATA_KEYS = (
     "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
     "settings_id", "settings_spec_sha256", "settings_sha256",
@@ -98,6 +130,7 @@ class TimingWindow:
     low_1: float | None
     low_01: float | None
     present_interval: dict[str, float] | None
+    workload: dict[str, Any] | None
     metadata: dict[str, Any]
 
 
@@ -147,6 +180,111 @@ def _parse_present_interval(value: Any, line: int) -> dict[str, float] | None:
     if not result["p50"] <= result["p95"] <= result["p99"] <= result["maximum"]:
         raise ReportError(f"line {line}: present-interval percentiles are not monotonic")
     return result
+
+
+def _exact_object(
+    value: Any,
+    field: str,
+    line: int,
+    expected_keys: frozenset[str],
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: {field} must be an object")
+    actual_keys = set(value)
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        unknown = sorted(actual_keys - expected_keys)
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unknown:
+            details.append("unknown " + ", ".join(unknown))
+        raise ReportError(
+            f"line {line}: {field} must have exact keys ({'; '.join(details)})"
+        )
+    return value
+
+
+def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    raw = _exact_object(value, "workload", line, WORKLOAD_KEYS)
+    encoders_raw = _exact_object(
+        raw["encoders"], "workload.encoders", line, WORKLOAD_ENCODER_KEYS
+    )
+    encoders = {
+        key: _integer(encoders_raw[key], f"workload.encoders.{key}", line)
+        for key in ("render", "compute", "blit", "pass_boundaries")
+    }
+    expected_boundaries = encoders["render"] + encoders["compute"] + encoders["blit"]
+    if encoders["pass_boundaries"] != expected_boundaries:
+        raise ReportError(
+            f"line {line}: workload.encoders.pass_boundaries must equal "
+            "render + compute + blit"
+        )
+
+    copy_raw = _exact_object(
+        raw["copy_bytes"], "workload.copy_bytes", line, WORKLOAD_COPY_KEYS
+    )
+    copy_bytes: dict[str, Any] = {
+        key: _integer(copy_raw[key], f"workload.copy_bytes.{key}", line)
+        for key in (*WORKLOAD_COPY_BYTE_KEYS, *WORKLOAD_COPY_COMMAND_KEYS)
+    }
+    direct_write = copy_raw["direct_write_observed"]
+    if not isinstance(direct_write, bool):
+        raise ReportError(
+            f"line {line}: workload.copy_bytes.direct_write_observed must be a boolean"
+        )
+    copy_bytes["direct_write_observed"] = direct_write
+    for byte_key in WORKLOAD_COPY_BYTE_KEYS:
+        command_key = f"{byte_key}_commands"
+        if copy_bytes[byte_key] > 0 and copy_bytes[command_key] == 0:
+            raise ReportError(
+                f"line {line}: workload.copy_bytes.{byte_key} is positive but "
+                f"{command_key} is zero"
+            )
+    classified_copy_commands = sum(
+        copy_bytes[key]
+        for key in WORKLOAD_COPY_COMMAND_KEYS
+        if key != "byte_count_unknown_commands"
+    )
+    if copy_bytes["byte_count_unknown_commands"] > classified_copy_commands:
+        raise ReportError(
+            f"line {line}: workload.copy_bytes.byte_count_unknown_commands exceeds "
+            "classified copy commands"
+        )
+
+    allocations_raw = _exact_object(
+        raw["resource_allocations"],
+        "workload.resource_allocations",
+        line,
+        WORKLOAD_RESOURCE_KEYS,
+    )
+    allocations: dict[str, dict[str, int]] = {}
+    for kind in WORKLOAD_RESOURCE_KINDS:
+        allocation_raw = _exact_object(
+            allocations_raw[kind],
+            f"workload.resource_allocations.{kind}",
+            line,
+            WORKLOAD_ALLOCATION_KEYS,
+        )
+        allocations[kind] = {
+            key: _integer(
+                allocation_raw[key],
+                f"workload.resource_allocations.{kind}.{key}",
+                line,
+            )
+            for key in ("count", "bytes")
+        }
+
+    return {
+        "command_buffers": _integer(
+            raw["command_buffers"], "workload.command_buffers", line
+        ),
+        "encoders": encoders,
+        "copy_bytes": copy_bytes,
+        "resource_allocations": allocations,
+    }
 
 
 def _parse_window(payload: Any, line: int) -> TimingWindow:
@@ -207,6 +345,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         low_01=_optional_number(payload.get("fps_0_1_percent_low"), "fps_0_1_percent_low", line),
         present_interval=(
             _parse_present_interval(payload.get("present_interval_ms"), line)
+            if schema == 2 else None
+        ),
+        workload=(
+            _parse_workload(payload.get("workload"), line)
             if schema == 2 else None
         ),
         metadata=metadata,
@@ -313,6 +455,85 @@ def _series(values: Sequence[float], windows: Sequence[TimingWindow]) -> dict[st
     }
 
 
+def _aggregate_workload(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    present = [window.workload is not None for window in windows]
+    if not any(present):
+        return None
+    if not all(present):
+        missing_lines = [str(window.line) for window in windows if window.workload is None]
+        raise ReportError(
+            "selected windows mix workload telemetry presence; missing at line(s) "
+            + ", ".join(missing_lines)
+        )
+
+    workload_windows = [window.workload for window in windows]
+    total_frames = sum(window.frames for window in windows)
+
+    def summed(path: tuple[str, ...]) -> int:
+        result = 0
+        for workload in workload_windows:
+            value: Any = workload
+            for key in path:
+                value = value[key]
+            result += value
+        return result
+
+    totals: dict[str, Any] = {
+        "command_buffers": summed(("command_buffers",)),
+        "encoders": {
+            key: summed(("encoders", key))
+            for key in ("render", "compute", "blit", "pass_boundaries")
+        },
+        "copy_bytes": {
+            key: summed(("copy_bytes", key))
+            for key in (*WORKLOAD_COPY_BYTE_KEYS, *WORKLOAD_COPY_COMMAND_KEYS)
+        },
+        "resource_allocations": {
+            kind: {
+                key: summed(("resource_allocations", kind, key))
+                for key in ("count", "bytes")
+            }
+            for kind in WORKLOAD_RESOURCE_KINDS
+        },
+    }
+
+    def per_frame(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: per_frame(child) for key, child in value.items()}
+        return value / total_frames
+
+    return {
+        "aggregation": (
+            "Counters are per-report-window totals. aggregate_totals sums selected "
+            "windows; per_presented_frame divides those totals by selected frames."
+        ),
+        "observability": (
+            "Copy counters cover instrumented Metal encoder wrappers. CPU direct/"
+            "shared writes outside those wrappers are not observable; zero byte "
+            "counts and a false direct-write flag do not prove absence. Resource "
+            "allocation counters cover successful exported metallum_create_buffer/"
+            "metallum_create_texture_2d calls only; internal workspace, telemetry, "
+            "and view allocations are outside coverage."
+        ),
+        "aggregate_totals": totals,
+        "per_presented_frame": per_frame(totals),
+        "direct_write_observed_any_window": any(
+            workload["copy_bytes"]["direct_write_observed"]
+            for workload in workload_windows
+        ),
+        "selected_window_totals": [
+            {
+                "source_line": window.line,
+                "presented_frames": window.frames,
+                "workload": window.workload,
+            }
+            for window in windows
+        ],
+    }
+
+
 def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> None:
     reference = windows[0].metadata
     for window in windows[1:]:
@@ -330,6 +551,7 @@ def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> N
 def validate_release_contract(
     windows: Sequence[TimingWindow],
     *,
+    require_workload: bool = True,
     scaler: str,
     source_sha256: str,
     artifact_sha256: str,
@@ -403,6 +625,10 @@ def validate_release_contract(
         if window.present_interval is None:
             raise ReportError(
                 f"line {window.line}: release contract requires present-interval timing"
+            )
+        if require_workload and window.workload is None:
+            raise ReportError(
+                f"line {window.line}: release contract requires workload telemetry"
             )
         metadata = window.metadata
         expected = {
@@ -505,6 +731,7 @@ def summarize(
     scaler: str,
     *,
     release_contract: bool = False,
+    require_workload: bool = True,
     source_sha256: str = "unknown",
     artifact_sha256: str = "unknown",
     settings_id: str = "unknown",
@@ -532,6 +759,7 @@ def summarize(
     if release_contract:
         validate_release_contract(
             selected,
+            require_workload=require_workload,
             scaler=scaler,
             source_sha256=source_sha256,
             artifact_sha256=artifact_sha256,
@@ -593,6 +821,9 @@ def summarize(
             key: _series([value[key] for value in intervals], selected)  # type: ignore[index]
             for key in ("average", "p50", "p95", "p99", "maximum")
         }
+    workload = _aggregate_workload(selected)
+    if workload is not None:
+        result["workload"] = workload
     if selected[0].schema == 2:
         result["metadata"] = selected[-1].metadata
     return result
@@ -896,7 +1127,11 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
     return payload
 
 
-def _derive_release_summary(raw_report: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def _derive_release_summary(
+    raw_report: Path,
+    *,
+    require_workload: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
     if any(window.schema != 2 for window in windows):
         raise ReportError("accepted raw report must contain schema-v2 windows only")
@@ -927,6 +1162,7 @@ def _derive_release_summary(raw_report: Path) -> tuple[dict[str, Any], dict[str,
         segment,
         scaler,
         release_contract=True,
+        require_workload=require_workload,
         source_sha256=_metadata_string(metadata, "source_sha256"),
         artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
         settings_id=_metadata_string(metadata, "settings_id"),
@@ -996,7 +1232,8 @@ def _validate_log_evidence(
     if "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" in minecraft_text:
         raise ReportError("Minecraft log contains an unexpected screenshot event")
     if re.search(
-        r"\[metallum\] (?:Metal command buffer failed|GPU timing sample invalid)",
+        r"\[metallum\] (?:Metal command buffer failed|GPU timing sample invalid|"
+        r"GPU timing workload window mismatch)",
         console_text,
     ):
         raise ReportError("console log contains a Metal timing/command-buffer failure")
@@ -1157,9 +1394,14 @@ def _validate_release_bundle(
     summary_path: Path,
     minecraft_log: Path,
     console_log: Path,
+    *,
+    require_workload: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_summary = _load_json_object(summary_path, "benchmark summary")
-    recomputed_summary, measurement = _derive_release_summary(raw_report)
+    recomputed_summary, measurement = _derive_release_summary(
+        raw_report,
+        require_workload=require_workload,
+    )
     report_value = supplied_summary.get("report")
     if not isinstance(report_value, str):
         raise ReportError("benchmark summary has no raw report path")
@@ -1206,9 +1448,10 @@ def create_attestation(
         paths["summary"],
         paths["minecraft_log"],
         paths["console_log"],
+        require_workload=True,
     )
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "accepted": True,
         "raw_report": str(paths["raw_report"]),
         "raw_sha256": _file_sha256(paths["raw_report"]),
@@ -1220,6 +1463,7 @@ def create_attestation(
         "console_log_sha256": _file_sha256(paths["console_log"]),
         "measurement": measurement,
         "presented_frames": summary["presented_frames"],
+        "workload": summary["workload"],
         "metadata": summary["metadata"],
     }
     paths["attestation"].parent.mkdir(parents=True, exist_ok=True)
@@ -1251,7 +1495,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
     path = _attestation_path(raw)
     payload = _load_json_object(path, "benchmark attestation")
     schema_version = payload.get("schema_version")
-    if schema_version != 2 or payload.get("accepted") is not True:
+    if schema_version not in (2, 3) or payload.get("accepted") is not True:
         raise ReportError(f"invalid benchmark attestation: {path}")
     expected = _artifact_paths(raw)
     artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
@@ -1276,11 +1520,19 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         artifacts["summary"],
         artifacts["minecraft_log"],
         artifacts["console_log"],
+        require_workload=schema_version == 3,
     )
+    if schema_version == 2 and ("workload" in summary or "workload" in payload):
+        raise ReportError(
+            f"legacy schema-v2 attestation cannot attest workload telemetry: {path}"
+        )
     if payload.get("measurement") != measurement:
         raise ReportError(f"attestation measurement contract is inconsistent: {path}")
     if payload.get("presented_frames") != summary["presented_frames"]:
         raise ReportError(f"attestation frame count is inconsistent: {path}")
+    if schema_version == 3:
+        if payload.get("workload") != summary["workload"]:
+            raise ReportError(f"attestation workload is inconsistent: {path}")
     if payload.get("metadata") != summary["metadata"]:
         raise ReportError(f"attestation metadata is inconsistent: {path}")
     return payload
@@ -1310,6 +1562,7 @@ def summarize_attested_release(
         segment,
         scaler,
         release_contract=True,
+        require_workload=attestation["schema_version"] == 3,
         source_sha256=_metadata_string(metadata, "source_sha256"),
         artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
         settings_id=_metadata_string(metadata, "settings_id"),
@@ -1355,6 +1608,34 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"{lows['one_percent']['window_frame_weighted_mean']:.3f}/"
             f"{lows['zero_point_one_percent']['window_frame_weighted_mean']:.3f}"
         )
+    if "workload" in summary:
+        workload = summary["workload"]
+        totals = workload["aggregate_totals"]
+        per_frame = workload["per_presented_frame"]
+        encoders = per_frame["encoders"]
+        print(
+            "workload/frame (command buffers; render/compute/blit passes): "
+            f"{per_frame['command_buffers']:.3f}; "
+            f"{encoders['render']:.3f}/{encoders['compute']:.3f}/"
+            f"{encoders['blit']:.3f}"
+        )
+        copies = totals["copy_bytes"]
+        print(
+            "copy bytes total (CPU->shared/shared->private/GPU->CPU/GPU internal/"
+            "unclassified): "
+            f"{copies['cpu_to_shared']}/{copies['shared_to_private']}/"
+            f"{copies['gpu_to_cpu']}/{copies['gpu_internal']}/"
+            f"{copies['unclassified']}; unknown-byte commands "
+            f"{copies['byte_count_unknown_commands']}; direct write "
+            f"{workload['direct_write_observed_any_window']} (wrapper-observed only)"
+        )
+        allocations = totals["resource_allocations"]
+        print(
+            "resource allocations total (count/bytes, buffers; textures): "
+            f"{allocations['buffers']['count']}/{allocations['buffers']['bytes']}; "
+            f"{allocations['textures']['count']}/{allocations['textures']['bytes']}"
+        )
+        print("workload coverage: " + workload["observability"])
     print("note: " + summary["interpretation"])
 
 
@@ -1427,6 +1708,31 @@ def self_test() -> None:
                 "present_interval_ms": {
                     "samples": 300, "average": 7.7, "p50": 7.6,
                     "p95": 9.0, "p99": 11.0, "maximum": 15.0,
+                },
+                "workload": {
+                    "command_buffers": 300,
+                    "encoders": {
+                        "render": 300, "compute": 1, "blit": 2,
+                        "pass_boundaries": 303,
+                    },
+                    "copy_bytes": {
+                        "cpu_to_shared": 0,
+                        "shared_to_private": 1024,
+                        "gpu_to_cpu": 512,
+                        "gpu_internal": 256,
+                        "unclassified": 0,
+                        "cpu_to_shared_commands": 0,
+                        "shared_to_private_commands": 2,
+                        "gpu_to_cpu_commands": 1,
+                        "gpu_internal_commands": 1,
+                        "unclassified_commands": 0,
+                        "byte_count_unknown_commands": 1,
+                        "direct_write_observed": False,
+                    },
+                    "resource_allocations": {
+                        "buffers": {"count": 2, "bytes": 4096},
+                        "textures": {"count": 1, "bytes": 8192},
+                    },
                 },
                 "benchmark": {
                     "enabled": True, "generation": 2, "segment_index": 0,
@@ -1551,9 +1857,77 @@ def self_test() -> None:
             create_attestation(raw, summary_path, minecraft_log, console_log, accepted)
             return raw, release
 
+        def make_legacy_v2_bundle(
+            stem: str,
+            source_sha256: str,
+            artifact_sha256: str = "5" * 64,
+        ) -> tuple[Path, dict[str, Any]]:
+            raw = root / f"{stem}.raw.jsonl"
+            paths = _artifact_paths(raw)
+            payloads = [
+                json.loads(value)
+                for value in report_text(source_sha256, artifact_sha256).splitlines()
+            ]
+            for payload in payloads:
+                payload.pop("workload")
+            raw.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            release, _ = _derive_release_summary(raw, require_workload=False)
+            paths["summary"].write_text(
+                json.dumps(release, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            paths["minecraft_log"].write_text(minecraft_evidence, encoding="utf-8")
+            paths["console_log"].write_text(
+                "Gradle/Minecraft console completed normally\n",
+                encoding="utf-8",
+            )
+            recomputed, measurement = _validate_release_bundle(
+                raw.resolve(),
+                paths["summary"].resolve(),
+                paths["minecraft_log"].resolve(),
+                paths["console_log"].resolve(),
+                require_workload=False,
+            )
+            recomputed["report"] = release["report"]
+            assert recomputed == release
+            accepted_payload = {
+                "schema_version": 2,
+                "accepted": True,
+                "raw_report": str(raw.resolve()),
+                "raw_sha256": _file_sha256(raw),
+                "summary": str(paths["summary"].resolve()),
+                "summary_sha256": _file_sha256(paths["summary"]),
+                "minecraft_log": str(paths["minecraft_log"].resolve()),
+                "minecraft_log_sha256": _file_sha256(paths["minecraft_log"]),
+                "console_log": str(paths["console_log"].resolve()),
+                "console_log_sha256": _file_sha256(paths["console_log"]),
+                "measurement": measurement,
+                "presented_frames": release["presented_frames"],
+                "metadata": release["metadata"],
+            }
+            paths["attestation"].write_text(
+                json.dumps(accepted_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return raw, release
+
         new, new_summary = make_bundle("new", "c" * 64)
         assert old_summary["presented_frames"] == 3000
         assert new_summary["presented_frames"] == 3000
+        workload_summary = new_summary["workload"]
+        assert workload_summary["aggregate_totals"]["command_buffers"] == 3000
+        assert workload_summary["aggregate_totals"]["encoders"]["pass_boundaries"] == 3030
+        assert workload_summary["aggregate_totals"]["copy_bytes"][
+            "shared_to_private"
+        ] == 10240
+        assert workload_summary["per_presented_frame"]["command_buffers"] == 1.0
+        assert len(workload_summary["selected_window_totals"]) == 10
+        assert workload_summary["selected_window_totals"][0]["workload"] == line(
+            2, 1
+        )["workload"]
         assert compare(
             old_summary,
             new_summary,
@@ -1563,11 +1937,63 @@ def self_test() -> None:
 
         verified = verify_attestation(new)
         assert verified["presented_frames"] == 3000
+        assert verified["workload"] == new_summary["workload"]
         new_attested = summarize_attested_release(new, 3000, 0, "OFF")
         assert new_attested["attested_runtime"] == verified["measurement"]["runtime"]
         new_without_runtime = dict(new_attested)
         new_without_runtime.pop("attested_runtime")
         assert new_without_runtime == new_summary
+
+        # Existing accepted schema-v2 bundles predate workload telemetry. They
+        # remain strict, fully revalidated comparison inputs, but only when the
+        # raw report and summary truly contain no workload object.
+        legacy_v2, legacy_v2_summary = make_legacy_v2_bundle(
+            "legacy-v2",
+            "c" * 64,
+        )
+        legacy_verified = verify_attestation(legacy_v2)
+        assert legacy_verified["schema_version"] == 2
+        legacy_attested = summarize_attested_release(legacy_v2, 3000, 0, "OFF")
+        assert "workload" not in legacy_attested
+        assert compare(new_attested, legacy_attested, 0.2)[
+            "verdict"
+        ] == "WITHIN_THRESHOLD"
+        legacy_without_runtime = dict(legacy_attested)
+        legacy_without_runtime.pop("attested_runtime")
+        assert legacy_without_runtime == legacy_v2_summary
+
+        legacy_paths = _artifact_paths(legacy_v2)
+        legacy_attestation_text = legacy_paths["attestation"].read_text(
+            encoding="utf-8"
+        )
+        v3_missing_workload = json.loads(legacy_attestation_text)
+        v3_missing_workload["schema_version"] = 3
+        legacy_paths["attestation"].write_text(
+            json.dumps(v3_missing_workload),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(legacy_v2),
+            "requires workload telemetry",
+        )
+        legacy_paths["attestation"].write_text(
+            legacy_attestation_text,
+            encoding="utf-8",
+        )
+        legacy_payload_with_workload = json.loads(legacy_attestation_text)
+        legacy_payload_with_workload["workload"] = {}
+        legacy_paths["attestation"].write_text(
+            json.dumps(legacy_payload_with_workload),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(legacy_v2),
+            "schema-v2 attestation cannot attest workload telemetry",
+        )
+        legacy_paths["attestation"].write_text(
+            legacy_attestation_text,
+            encoding="utf-8",
+        )
 
         paths = _artifact_paths(new)
         accepted_text = paths["attestation"].read_text(encoding="utf-8")
@@ -1579,6 +2005,23 @@ def self_test() -> None:
         # whose metrics do not match a release-contract recalculation of the raw data.
         forged_summary = json.loads(summary_text)
         forged_summary["fps"]["elapsed_weighted"] += 1.0
+        paths["summary"].write_text(json.dumps(forged_summary), encoding="utf-8")
+        expect_error(
+            lambda: create_attestation(
+                new,
+                paths["summary"],
+                paths["minecraft_log"],
+                paths["console_log"],
+                paths["attestation"],
+            ),
+            "independent release-contract recalculation",
+        )
+        paths["summary"].write_text(summary_text, encoding="utf-8")
+
+        forged_summary = json.loads(summary_text)
+        forged_summary["workload"]["selected_window_totals"][0]["workload"][
+            "command_buffers"
+        ] += 1
         paths["summary"].write_text(json.dumps(forged_summary), encoding="utf-8")
         expect_error(
             lambda: create_attestation(
@@ -1640,6 +2083,22 @@ def self_test() -> None:
             "events are out of order",
         )
         paths["minecraft_log"].write_text(minecraft_text, encoding="utf-8")
+        console_text = paths["console_log"].read_text(encoding="utf-8")
+        paths["console_log"].write_text(
+            console_text + "[metallum] GPU timing workload window mismatch\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: create_attestation(
+                new,
+                paths["summary"],
+                paths["minecraft_log"],
+                paths["console_log"],
+                paths["attestation"],
+            ),
+            "Metal timing/command-buffer failure",
+        )
+        paths["console_log"].write_text(console_text, encoding="utf-8")
         create_attestation(
             new,
             paths["summary"],
@@ -1666,10 +2125,25 @@ def self_test() -> None:
         forged_attestation["metadata"]["source_sha256"] = "e" * 64
         paths["attestation"].write_text(json.dumps(forged_attestation), encoding="utf-8")
         expect_error(lambda: verify_attestation(new), "metadata is inconsistent")
+        forged_attestation = json.loads(accepted_text)
+        forged_attestation["workload"]["aggregate_totals"]["command_buffers"] += 1
+        paths["attestation"].write_text(json.dumps(forged_attestation), encoding="utf-8")
+        expect_error(lambda: verify_attestation(new), "workload is inconsistent")
         paths["attestation"].write_text(accepted_text, encoding="utf-8")
 
-        # Legacy sidecars are never a strict acceptance artifact. Legacy raw
-        # reports remain available only through provisional comparison.
+        # A workload-bearing schema-v3 bundle cannot be downgraded to legacy
+        # schema v2. Pre-attestation schema versions remain invalid.
+        legacy_attestation = json.loads(accepted_text)
+        legacy_attestation["schema_version"] = 2
+        legacy_attestation.pop("workload")
+        paths["attestation"].write_text(
+            json.dumps(legacy_attestation),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(new),
+            "schema-v2 attestation cannot attest workload telemetry",
+        )
         legacy_attestation = json.loads(accepted_text)
         legacy_attestation["schema_version"] = 1
         paths["attestation"].write_text(
@@ -1721,6 +2195,77 @@ def self_test() -> None:
         expect_error(
             lambda: _derive_release_summary(missing_present),
             "requires present-interval timing",
+        )
+        def remove_workload(payloads: list[dict[str, Any]]) -> None:
+            for payload in payloads:
+                payload.pop("workload")
+
+        missing_workload = mutated_raw("missing-workload", remove_workload)
+        expect_error(
+            lambda: _derive_release_summary(missing_workload),
+            "requires workload telemetry",
+        )
+
+        unknown_workload_key = mutated_raw(
+            "unknown-workload-key",
+            lambda payloads: payloads[1]["workload"].__setitem__("total", 1),
+        )
+        expect_error(
+            lambda: _derive_release_summary(unknown_workload_key),
+            "workload must have exact keys",
+        )
+
+        def break_pass_boundary(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["encoders"]["pass_boundaries"] += 1
+
+        mismatched_passes = mutated_raw("mismatched-passes", break_pass_boundary)
+        expect_error(
+            lambda: _derive_release_summary(mismatched_passes),
+            "pass_boundaries must equal render + compute + blit",
+        )
+
+        def make_copy_bytes_negative(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["copy_bytes"]["gpu_internal"] = -1
+
+        negative_workload = mutated_raw("negative-workload", make_copy_bytes_negative)
+        expect_error(
+            lambda: _derive_release_summary(negative_workload),
+            "workload.copy_bytes.gpu_internal must be an integer >= 0",
+        )
+
+        def exceed_copy_command_count(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["copy_bytes"][
+                "byte_count_unknown_commands"
+            ] = 99
+
+        impossible_unknown_count = mutated_raw(
+            "impossible-unknown-count",
+            exceed_copy_command_count,
+        )
+        expect_error(
+            lambda: _derive_release_summary(impossible_unknown_count),
+            "byte_count_unknown_commands exceeds classified copy commands",
+        )
+
+        def make_command_buffers_boolean(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["command_buffers"] = True
+
+        boolean_integer = mutated_raw("boolean-integer", make_command_buffers_boolean)
+        expect_error(
+            lambda: _derive_release_summary(boolean_integer),
+            "workload.command_buffers must be an integer >= 0",
+        )
+
+        def make_direct_write_integer(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["copy_bytes"]["direct_write_observed"] = 0
+
+        non_boolean_direct_write = mutated_raw(
+            "non-boolean-direct-write",
+            make_direct_write_integer,
+        )
+        expect_error(
+            lambda: _derive_release_summary(non_boolean_direct_write),
+            "direct_write_observed must be a boolean",
         )
 
         def remove_headroom(payloads: list[dict[str, Any]]) -> None:
