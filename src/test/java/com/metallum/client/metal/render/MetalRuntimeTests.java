@@ -198,6 +198,12 @@ public final class MetalRuntimeTests {
     }
 
     private static void testGpuTimingDetailGate() {
+        require(!MetalGpuTiming.timingEnabled(null),
+                "GPU timing report was enabled without its primary flag");
+        require(!MetalGpuTiming.timingEnabled("0"),
+                "GPU timing report ignored an explicit disabled value");
+        require(MetalGpuTiming.timingEnabled("1"),
+                "GPU timing report did not accept its primary flag");
         require(!MetalGpuTiming.detailEnabled(null, null),
                 "GPU timing detail was enabled without timing flags");
         require(!MetalGpuTiming.detailEnabled("1", null),

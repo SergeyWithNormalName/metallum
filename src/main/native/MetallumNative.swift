@@ -272,6 +272,116 @@ private struct MetallumGpuTimingSnapshot {
 private struct MetallumGpuTimingCompletion {
     let frame: MetallumGpuCounterFrame?
     let presentsDrawable: Bool
+    let benchmarkContext: MetallumBenchmarkTelemetryContext?
+    let presentation: MetallumPresentationTelemetry?
+    let presentSubmissionUptime: Double?
+}
+
+private enum MetallumBenchmarkPhase: Int32 {
+    case startup = 0
+    case warmup = 1
+    case measure = 2
+    case complete = 3
+
+    var reportName: String {
+        switch self {
+        case .startup: "startup"
+        case .warmup: "warmup"
+        case .measure: "measure"
+        case .complete: "complete"
+        }
+    }
+}
+
+private struct MetallumBenchmarkTelemetryContext: Equatable {
+    let generation: UInt64
+    let enabled: Bool
+    let segmentIndex: Int
+    let phase: MetallumBenchmarkPhase
+    let scalerMode: String
+
+    var report: [String: Any] {
+        [
+            "enabled": enabled,
+            "generation": generation,
+            "segment_index": segmentIndex,
+            "phase": phase.reportName,
+            "scaler_mode": scalerMode
+        ]
+    }
+}
+
+private final class MetallumBenchmarkTelemetryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var context = MetallumBenchmarkTelemetryContext(
+        generation: 0,
+        enabled: ProcessInfo.processInfo.environment["METALLUM_BENCHMARK"] == "1",
+        segmentIndex: -1,
+        phase: .startup,
+        scalerMode: "UNKNOWN"
+    )
+
+    func update(segmentIndex: Int32, phaseValue: Int32, scalerMode: String) {
+        guard let phase = MetallumBenchmarkPhase(rawValue: phaseValue) else { return }
+        lock.lock()
+        context = MetallumBenchmarkTelemetryContext(
+            generation: context.generation &+ 1,
+            enabled: true,
+            segmentIndex: Int(segmentIndex),
+            phase: phase,
+            scalerMode: scalerMode
+        )
+        lock.unlock()
+    }
+
+    func snapshot() -> MetallumBenchmarkTelemetryContext {
+        lock.lock()
+        let value = context
+        lock.unlock()
+        return value
+    }
+}
+
+private struct MetallumPresentationTelemetry {
+    let deviceName: String
+    let registryId: UInt64
+    let renderWidth: Int
+    let renderHeight: Int
+    let displayWidth: Int
+    let displayHeight: Int
+    let outputMode: Int32
+    let sourceEncoding: Int32
+    let currentHeadroom: Float
+    let displaySyncEnabled: Bool
+
+    var report: [String: Any] {
+        let outputModeName = switch outputMode {
+        case 0: "SDR"
+        case 1: "EDR"
+        case 2: "ENHANCED"
+        default: "UNKNOWN"
+        }
+        let sourceEncodingName = switch sourceEncoding {
+        case 0: "SRGB"
+        case 1: "EXTENDED_SRGB"
+        case 2: "LINEAR"
+        default: "UNKNOWN"
+        }
+        return [
+            "device_name": deviceName,
+            "registry_id": String(registryId),
+            "executor": "METAL3",
+            "render_width": renderWidth,
+            "render_height": renderHeight,
+            "display_width": displayWidth,
+            "display_height": displayHeight,
+            "scaler_active": renderWidth != displayWidth || renderHeight != displayHeight,
+            "hdr_output_mode": outputModeName,
+            "source_encoding": sourceEncodingName,
+            "current_edr_headroom": currentHeadroom,
+            "display_sync_enabled": displaySyncEnabled
+        ]
+    }
 }
 
 private enum MetallumCpuWaitKind: Int, CaseIterable {
@@ -425,10 +535,15 @@ private final class MetallumGpuCounterFrame: @unchecked Sendable {
 
 private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
     static let shared = MetallumGpuTimingCoordinator()
+    private static let retainedPresentationGenerations = 8
 
     private let lock = NSLock()
     private var frames: [UInt: MetallumGpuCounterFrame] = [:]
     private var presentFlags: [UInt: Bool] = [:]
+    private var benchmarkContexts: [UInt: MetallumBenchmarkTelemetryContext] = [:]
+    private var presentationsByGeneration: [UInt64: MetallumPresentationTelemetry] = [:]
+    private var presentationGenerationOrder: [UInt64] = []
+    private var presentSubmissionUptimes: [UInt: Double] = [:]
     private var counterSets: [UInt: MTLCounterSet] = [:]
     private var unsupportedDevices: Set<UInt> = []
 
@@ -437,9 +552,11 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
         let device = commandBuffer.device
         let deviceKey = objectAddress(device)
         let commandBufferKey = objectAddress(commandBuffer)
+        let benchmarkContext = NativeState.benchmarkTelemetryState.snapshot()
 
         lock.lock()
         presentFlags[commandBufferKey] = false
+        benchmarkContexts[commandBufferKey] = benchmarkContext
         lock.unlock()
 
         // The default timing mode records only command-buffer GPU time and
@@ -502,26 +619,84 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
         return frame
     }
 
-    func markPresented(_ commandBuffer: MTLCommandBuffer) {
+    func markPresented(
+        _ commandBuffer: MTLCommandBuffer,
+        renderWidth: Int,
+        renderHeight: Int,
+        displayWidth: Int,
+        displayHeight: Int,
+        outputMode: Int32,
+        sourceEncoding: Int32,
+        currentHeadroom: Float,
+        displaySyncEnabled: Bool
+    ) {
         guard NativeState.gpuTimingStats != nil else { return }
         let key = objectAddress(commandBuffer)
+        var presentedContext: MetallumBenchmarkTelemetryContext?
         lock.lock()
-        if presentFlags[key] != nil {
+        if presentFlags[key] == false {
             presentFlags[key] = true
+            presentSubmissionUptimes[key] = ProcessInfo.processInfo.systemUptime
+            presentedContext = benchmarkContexts[key]
         }
         lock.unlock()
+        if let presentedContext,
+           let stats = NativeState.gpuTimingStats {
+            let presentedCount = stats.notePresented(presentedContext)
+            if (presentedCount - 1) % MetallumGpuTimingStats.reportFrameCount == 0 {
+                let presentation = MetallumPresentationTelemetry(
+                    deviceName: commandBuffer.device.name,
+                    registryId: commandBuffer.device.registryID,
+                    renderWidth: renderWidth,
+                    renderHeight: renderHeight,
+                    displayWidth: displayWidth,
+                    displayHeight: displayHeight,
+                    outputMode: outputMode,
+                    sourceEncoding: sourceEncoding,
+                    currentHeadroom: currentHeadroom,
+                    displaySyncEnabled: displaySyncEnabled
+                )
+                lock.lock()
+                if presentationsByGeneration[presentedContext.generation] == nil {
+                    presentationGenerationOrder.append(presentedContext.generation)
+                }
+                presentationsByGeneration[presentedContext.generation] = presentation
+                while presentationGenerationOrder.count > Self.retainedPresentationGenerations {
+                    let staleGeneration = presentationGenerationOrder.removeFirst()
+                    presentationsByGeneration.removeValue(forKey: staleGeneration)
+                }
+                lock.unlock()
+            }
+        }
     }
 
     func take(_ commandBuffer: MTLCommandBuffer) -> MetallumGpuTimingCompletion {
         guard NativeState.gpuTimingStats != nil else {
-            return MetallumGpuTimingCompletion(frame: nil, presentsDrawable: false)
+            return MetallumGpuTimingCompletion(
+                frame: nil,
+                presentsDrawable: false,
+                benchmarkContext: nil,
+                presentation: nil,
+                presentSubmissionUptime: nil
+            )
         }
         let key = objectAddress(commandBuffer)
         lock.lock()
         let frame = frames.removeValue(forKey: key)
         let presentsDrawable = presentFlags.removeValue(forKey: key) ?? false
+        let benchmarkContext = benchmarkContexts.removeValue(forKey: key)
+        let presentation = benchmarkContext.flatMap {
+            presentationsByGeneration[$0.generation]
+        }
+        let presentSubmissionUptime = presentSubmissionUptimes.removeValue(forKey: key)
         lock.unlock()
-        return MetallumGpuTimingCompletion(frame: frame, presentsDrawable: presentsDrawable)
+        return MetallumGpuTimingCompletion(
+            frame: frame,
+            presentsDrawable: presentsDrawable,
+            benchmarkContext: benchmarkContext,
+            presentation: presentation,
+            presentSubmissionUptime: presentSubmissionUptime
+        )
     }
 
     func abandon(_ commandBuffer: MTLCommandBuffer) {
@@ -538,76 +713,349 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
     }
 }
 
+private struct MetallumCpuWaitWindowKey: Hashable {
+    let generation: UInt64
+    let reportIndex: Int
+}
+
+private struct MetallumCpuWaitToken {
+    let windowKey: MetallumCpuWaitWindowKey
+}
+
+private final class MetallumCpuWaitAccumulator {
+    var nanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
+    var maximumNanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
+    var counts = Array(repeating: 0, count: MetallumCpuWaitKind.allCases.count)
+
+    func record(_ kind: MetallumCpuWaitKind, nanoseconds value: UInt64) {
+        let value = Double(value)
+        nanoseconds[kind.rawValue] += value
+        maximumNanoseconds[kind.rawValue] = max(maximumNanoseconds[kind.rawValue], value)
+        counts[kind.rawValue] += 1
+    }
+}
+
+private struct MetallumGpuTimingReportWindow {
+    let context: MetallumBenchmarkTelemetryContext
+    let sampleCount: Int
+    let totalGpuSeconds: Double
+    let maximumGpuSeconds: Double
+    let gpuSecondSamples: [Double]
+    let presentIntervalCount: Int
+    let totalPresentIntervalSeconds: Double
+    let presentIntervalSamples: [Double]
+    let stageTotals: [Double]
+    let stageMaximums: [Double]
+    let stageCounts: [Int]
+    let waitNanoseconds: [Double]
+    let maximumWaitNanoseconds: [Double]
+    let waitCounts: [Int]
+    let droppedEvents: Int
+    let presentation: MetallumPresentationTelemetry?
+}
+
+private final class MetallumGpuTimingWindow {
+    let context: MetallumBenchmarkTelemetryContext
+    var reportIndex = 0
+    var sampleCount = 0
+    var totalGpuSeconds = 0.0
+    var maximumGpuSeconds = 0.0
+    var gpuSecondSamples = Array(repeating: 0.0, count: 300)
+    var presentIntervalCount = 0
+    var totalPresentIntervalSeconds = 0.0
+    var presentIntervalSamples = Array(repeating: 0.0, count: 300)
+    var previousPresentSubmissionUptime: Double?
+    var stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+    var stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
+    var stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
+    var droppedEvents = 0
+    var presentation: MetallumPresentationTelemetry?
+
+    init(context: MetallumBenchmarkTelemetryContext) {
+        self.context = context
+    }
+
+    func takeReport(cpuWaits: MetallumCpuWaitAccumulator?) -> MetallumGpuTimingReportWindow {
+        let report = MetallumGpuTimingReportWindow(
+            context: context,
+            sampleCount: sampleCount,
+            totalGpuSeconds: totalGpuSeconds,
+            maximumGpuSeconds: maximumGpuSeconds,
+            gpuSecondSamples: gpuSecondSamples,
+            presentIntervalCount: presentIntervalCount,
+            totalPresentIntervalSeconds: totalPresentIntervalSeconds,
+            presentIntervalSamples: presentIntervalSamples,
+            stageTotals: stageTotals,
+            stageMaximums: stageMaximums,
+            stageCounts: stageCounts,
+            waitNanoseconds: cpuWaits?.nanoseconds
+                ?? Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count),
+            maximumWaitNanoseconds: cpuWaits?.maximumNanoseconds
+                ?? Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count),
+            waitCounts: cpuWaits?.counts
+                ?? Array(repeating: 0, count: MetallumCpuWaitKind.allCases.count),
+            droppedEvents: droppedEvents,
+            presentation: presentation
+        )
+        sampleCount = 0
+        totalGpuSeconds = 0.0
+        maximumGpuSeconds = 0.0
+        gpuSecondSamples = Array(repeating: 0.0, count: gpuSecondSamples.count)
+        presentIntervalCount = 0
+        totalPresentIntervalSeconds = 0.0
+        presentIntervalSamples = Array(repeating: 0.0, count: presentIntervalSamples.count)
+        stageTotals = Array(repeating: 0.0, count: stageTotals.count)
+        stageMaximums = Array(repeating: 0.0, count: stageMaximums.count)
+        stageCounts = Array(repeating: 0, count: stageCounts.count)
+        droppedEvents = 0
+        reportIndex += 1
+        return report
+    }
+}
+
 private final class MetallumGpuTimingStats: @unchecked Sendable {
-    private static let reportFrameCount = 300
+    static let reportFrameCount = 300
+    private static let retainedBenchmarkGenerations = 8
 
     private let lock = NSLock()
-    private var sampleCount = 0
-    private var totalGpuSeconds = 0.0
-    private var maximumGpuSeconds = 0.0
-    private var gpuSecondSamples = Array(repeating: 0.0, count: reportFrameCount)
-    private var stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
-    private var stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
-    private var stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
-    private var waitNanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
-    private var maximumWaitNanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
-    private var waitCounts = Array(repeating: 0, count: MetallumCpuWaitKind.allCases.count)
-    private var droppedEvents = 0
-    private var intervalStart = ProcessInfo.processInfo.systemUptime
+    private let reportLock = NSLock()
+    private var windows: [UInt64: MetallumGpuTimingWindow] = [:]
+    private var presentedCounts: [UInt64: Int] = [:]
+    private var cpuWaitWindows: [MetallumCpuWaitWindowKey: MetallumCpuWaitAccumulator] = [:]
+    private var generationOrder: [UInt64] = []
+
+    private func ensureGenerationLocked(_ generation: UInt64) {
+        guard presentedCounts[generation] == nil else { return }
+        presentedCounts[generation] = 0
+        generationOrder.append(generation)
+        while generationOrder.count > Self.retainedBenchmarkGenerations {
+            let staleGeneration = generationOrder.removeFirst()
+            presentedCounts.removeValue(forKey: staleGeneration)
+            windows.removeValue(forKey: staleGeneration)
+            cpuWaitWindows = cpuWaitWindows.filter {
+                $0.key.generation != staleGeneration
+            }
+        }
+    }
+
+    private func window(for context: MetallumBenchmarkTelemetryContext) -> MetallumGpuTimingWindow {
+        if let existing = windows[context.generation] {
+            return existing
+        }
+        let created = MetallumGpuTimingWindow(context: context)
+        windows[context.generation] = created
+        return created
+    }
+
+    private static func percentile(_ sortedValues: [Double], fraction: Double) -> Double {
+        guard !sortedValues.isEmpty else { return 0.0 }
+        let index = min(
+            max(Int(ceil(fraction * Double(sortedValues.count))) - 1, 0),
+            sortedValues.count - 1
+        )
+        return sortedValues[index]
+    }
+
+    private static func lowFps(_ sortedIntervals: [Double], fraction: Double) -> Double {
+        guard !sortedIntervals.isEmpty else { return 0.0 }
+        let count = min(max(Int(ceil(Double(sortedIntervals.count) * fraction)), 1), sortedIntervals.count)
+        let total = sortedIntervals.suffix(count).reduce(0.0, +)
+        return total > 0.0 ? Double(count) / total : 0.0
+    }
+
+    func notePresented(_ context: MetallumBenchmarkTelemetryContext) -> Int {
+        lock.lock()
+        ensureGenerationLocked(context.generation)
+        let presentedCount = presentedCounts[context.generation]! + 1
+        presentedCounts[context.generation] = presentedCount
+        lock.unlock()
+        return presentedCount
+    }
+
+    private static func thermalStateName() -> String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: "nominal"
+        case .fair: "fair"
+        case .serious: "serious"
+        case .critical: "critical"
+        @unknown default: "unknown"
+        }
+    }
 
     private func writeReport(
-        frameCount: Int,
+        _ window: MetallumGpuTimingReportWindow,
         fps: Double,
-        frameAverageMs: Double,
-        frameP50Ms: Double,
-        frameP95Ms: Double,
-        frameP99Ms: Double,
-        frameMaximumMs: Double
+        gpuAverageMs: Double,
+        gpuP50Ms: Double,
+        gpuP95Ms: Double,
+        gpuP99Ms: Double,
+        gpuMaximumMs: Double,
+        sortedPresentIntervals: [Double]
     ) {
         guard let writer = NativeState.gpuTimingReportWriter else { return }
 
         var stages: [String: Any] = [:]
         for stage in MetallumGpuTimingStage.allCases {
-            let count = stageCounts[stage.rawValue]
+            let count = window.stageCounts[stage.rawValue]
             stages[stage.reportName] = count == 0 ? NSNull() : [
                 "frames": count,
-                "average_ms": stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
-                "maximum_ms": stageMaximums[stage.rawValue] / 1_000_000.0
+                "average_ms": window.stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
+                "maximum_ms": window.stageMaximums[stage.rawValue] / 1_000_000.0
             ]
         }
 
         var waits: [String: Any] = [:]
         for kind in MetallumCpuWaitKind.allCases {
-            let count = waitCounts[kind.rawValue]
+            let count = window.waitCounts[kind.rawValue]
             waits[kind.reportName] = count == 0 ? NSNull() : [
                 "waits": count,
-                "average_ms_per_frame": waitNanoseconds[kind.rawValue] / Double(frameCount) / 1_000_000.0,
-                "maximum_ms": maximumWaitNanoseconds[kind.rawValue] / 1_000_000.0
+                "average_ms_per_frame": window.waitNanoseconds[kind.rawValue]
+                    / Double(window.sampleCount) / 1_000_000.0,
+                "maximum_ms": window.maximumWaitNanoseconds[kind.rawValue] / 1_000_000.0
             ]
         }
 
+        let presentIntervalReport: Any
+        if sortedPresentIntervals.isEmpty {
+            presentIntervalReport = NSNull()
+        } else {
+            presentIntervalReport = [
+                "samples": sortedPresentIntervals.count,
+                "average": window.totalPresentIntervalSeconds * 1_000.0
+                    / Double(sortedPresentIntervals.count),
+                "p50": Self.percentile(sortedPresentIntervals, fraction: 0.50) * 1_000.0,
+                "p95": Self.percentile(sortedPresentIntervals, fraction: 0.95) * 1_000.0,
+                "p99": Self.percentile(sortedPresentIntervals, fraction: 0.99) * 1_000.0,
+                "maximum": (sortedPresentIntervals.last ?? 0.0) * 1_000.0
+            ]
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        var metadata: [String: Any] = [
+            "commit": environment["METALLUM_BENCHMARK_COMMIT"] ?? "unknown",
+            "dirty_worktree": environment["METALLUM_BENCHMARK_DIRTY"] == "1",
+            "world": environment["METALLUM_BENCHMARK_WORLD"] ?? "unknown",
+            "route": environment["METALLUM_BENCHMARK_ROUTE"] ?? "unknown",
+            "monitor": environment["METALLUM_BENCHMARK_MONITOR"] ?? "unknown",
+            "refresh_hz": Int(environment["METALLUM_BENCHMARK_REFRESH_HZ"] ?? "") ?? -1,
+            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "thermal_state": Self.thermalStateName()
+        ]
+        if let presentation = window.presentation {
+            for (key, value) in presentation.report {
+                metadata[key] = value
+            }
+        }
+
         writer.write([
-            "schema_version": 1,
+            "schema_version": 2,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
             "detail_enabled": NativeState.gpuTimingDetailEnabled,
-            "presented_frames": frameCount,
+            "presented_frames": window.sampleCount,
             "fps": fps,
-            "frame_ms": [
-                "average": frameAverageMs,
-                "p50": frameP50Ms,
-                "p95": frameP95Ms,
-                "p99": frameP99Ms,
-                "maximum": frameMaximumMs
+            "fps_1_percent_low": Self.lowFps(sortedPresentIntervals, fraction: 0.01),
+            "fps_0_1_percent_low": Self.lowFps(sortedPresentIntervals, fraction: 0.001),
+            "present_interval_ms": presentIntervalReport,
+            "presenting_command_buffer_gpu_ms": [
+                "average": gpuAverageMs,
+                "p50": gpuP50Ms,
+                "p95": gpuP95Ms,
+                "p99": gpuP99Ms,
+                "maximum": gpuMaximumMs
             ],
+            "benchmark": window.context.report,
+            "metadata": metadata,
             "stages": stages,
             "cpu_waits": waits,
-            "dropped_timing_events": droppedEvents
+            "dropped_timing_events": window.droppedEvents
         ])
+    }
+
+    private func emitReport(_ window: MetallumGpuTimingReportWindow) {
+        let sortedGpuSeconds = window.gpuSecondSamples.sorted()
+        let sortedPresentIntervals = Array(
+            window.presentIntervalSamples.prefix(window.presentIntervalCount)
+        ).sorted()
+        let completedFps = window.totalPresentIntervalSeconds > 0.0
+            ? Double(window.presentIntervalCount) / window.totalPresentIntervalSeconds
+            : 0.0
+        let gpuAverageMs = window.totalGpuSeconds * 1_000.0 / Double(window.sampleCount)
+        let gpuP50Ms = Self.percentile(sortedGpuSeconds, fraction: 0.50) * 1_000.0
+        let gpuP95Ms = Self.percentile(sortedGpuSeconds, fraction: 0.95) * 1_000.0
+        let gpuP99Ms = Self.percentile(sortedGpuSeconds, fraction: 0.99) * 1_000.0
+        let gpuMaximumMs = window.maximumGpuSeconds * 1_000.0
+        var lines = [String(format:
+            "[metallum] GPU timing (%@ segment %d, %d presented frames, %.1f FPS): presenting command buffer %.3f ms avg / %.3f p50 / %.3f p95 / %.3f p99 / %.3f max",
+            window.context.phase.reportName,
+            window.context.segmentIndex,
+            window.sampleCount,
+            completedFps,
+            gpuAverageMs,
+            gpuP50Ms,
+            gpuP95Ms,
+            gpuP99Ms,
+            gpuMaximumMs
+        )]
+        if !sortedPresentIntervals.isEmpty {
+            lines.append(String(format:
+                "  present pacing: %.3f ms p95 / %.3f ms p99, %.1f FPS 1%% low / %.1f FPS 0.1%% low",
+                Self.percentile(sortedPresentIntervals, fraction: 0.95) * 1_000.0,
+                Self.percentile(sortedPresentIntervals, fraction: 0.99) * 1_000.0,
+                Self.lowFps(sortedPresentIntervals, fraction: 0.01),
+                Self.lowFps(sortedPresentIntervals, fraction: 0.001)
+            ))
+        }
+        if NativeState.gpuTimingDetailEnabled {
+            for stage in MetallumGpuTimingStage.allCases {
+                let count = window.stageCounts[stage.rawValue]
+                if count == 0 {
+                    lines.append("  \(stage.reportName): n/a")
+                } else {
+                    lines.append(String(format:
+                        "  %@: %.3f ms avg / %.3f ms max (%d frames)",
+                        stage.reportName,
+                        window.stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
+                        window.stageMaximums[stage.rawValue] / 1_000_000.0,
+                        count
+                    ))
+                }
+            }
+        } else {
+            lines.append("  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)")
+        }
+        for kind in MetallumCpuWaitKind.allCases {
+            let count = window.waitCounts[kind.rawValue]
+            if count == 0 {
+                lines.append("  \(kind.reportName): n/a")
+            } else {
+                lines.append(String(format:
+                    "  %@: %.3f ms/frame avg, %.3f ms max interval (%d waits)",
+                    kind.reportName,
+                    window.waitNanoseconds[kind.rawValue] / Double(window.sampleCount) / 1_000_000.0,
+                    window.maximumWaitNanoseconds[kind.rawValue] / 1_000_000.0,
+                    count
+                ))
+            }
+        }
+        if window.droppedEvents > 0 {
+            lines.append("  dropped timing events: \(window.droppedEvents)")
+        }
+        NSLog("%@", lines.joined(separator: "\n"))
+        writeReport(
+            window,
+            fps: completedFps,
+            gpuAverageMs: gpuAverageMs,
+            gpuP50Ms: gpuP50Ms,
+            gpuP95Ms: gpuP95Ms,
+            gpuP99Ms: gpuP99Ms,
+            gpuMaximumMs: gpuMaximumMs,
+            sortedPresentIntervals: sortedPresentIntervals
+        )
     }
 
     func record(
         _ commandBuffer: MTLCommandBuffer,
-        presentsDrawable: Bool,
+        completion: MetallumGpuTimingCompletion,
         snapshot: MetallumGpuTimingSnapshot?
     ) {
         if commandBuffer.status == .error {
@@ -618,134 +1066,112 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             )
             return
         }
-        guard presentsDrawable else {
+        guard completion.presentsDrawable,
+              let context = completion.benchmarkContext else {
             return
         }
         let duration = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
         guard duration.isFinite, duration > 0.0 else {
+            NSLog(
+                "[metallum] GPU timing sample invalid (%@): start %.9f, end %.9f",
+                commandBuffer.label ?? "unlabeled",
+                commandBuffer.gpuStartTime,
+                commandBuffer.gpuEndTime
+            )
             return
         }
+
         lock.lock()
-        if sampleCount < Self.reportFrameCount {
-            gpuSecondSamples[sampleCount] = duration
+        let window = window(for: context)
+        if window.sampleCount < Self.reportFrameCount {
+            window.gpuSecondSamples[window.sampleCount] = duration
         }
-        sampleCount += 1
-        totalGpuSeconds += duration
-        maximumGpuSeconds = max(maximumGpuSeconds, duration)
+        window.sampleCount += 1
+        window.totalGpuSeconds += duration
+        window.maximumGpuSeconds = max(window.maximumGpuSeconds, duration)
+        if let presentSubmissionUptime = completion.presentSubmissionUptime {
+            if let previous = window.previousPresentSubmissionUptime,
+               presentSubmissionUptime >= previous,
+               window.presentIntervalCount < Self.reportFrameCount {
+                let interval = presentSubmissionUptime - previous
+                window.presentIntervalSamples[window.presentIntervalCount] = interval
+                window.presentIntervalCount += 1
+                window.totalPresentIntervalSeconds += interval
+            }
+            window.previousPresentSubmissionUptime = presentSubmissionUptime
+        }
+        if let presentation = completion.presentation {
+            window.presentation = presentation
+        }
         if let snapshot {
-            droppedEvents += snapshot.droppedEvents
+            window.droppedEvents += snapshot.droppedEvents
             for stage in MetallumGpuTimingStage.allCases {
                 guard let nanoseconds = snapshot.stageNanoseconds[stage.rawValue] else { continue }
-                stageTotals[stage.rawValue] += nanoseconds
-                stageMaximums[stage.rawValue] = max(stageMaximums[stage.rawValue], nanoseconds)
-                stageCounts[stage.rawValue] += 1
+                window.stageTotals[stage.rawValue] += nanoseconds
+                window.stageMaximums[stage.rawValue] = max(window.stageMaximums[stage.rawValue], nanoseconds)
+                window.stageCounts[stage.rawValue] += 1
             }
         }
-        if sampleCount >= Self.reportFrameCount {
-            let now = ProcessInfo.processInfo.systemUptime
-            let completedFps = Double(sampleCount) / max(now - intervalStart, 1e-6)
-            let sortedGpuSeconds = gpuSecondSamples.sorted()
-            func percentile(_ fraction: Double) -> Double {
-                let index = min(
-                    max(Int(ceil(fraction * Double(sortedGpuSeconds.count))) - 1, 0),
-                    sortedGpuSeconds.count - 1
-                )
-                return sortedGpuSeconds[index]
-            }
-            let frameAverageMs = totalGpuSeconds * 1000.0 / Double(sampleCount)
-            let frameP50Ms = percentile(0.50) * 1000.0
-            let frameP95Ms = percentile(0.95) * 1000.0
-            let frameP99Ms = percentile(0.99) * 1000.0
-            let frameMaximumMs = maximumGpuSeconds * 1000.0
-            var lines = [String(format:
-                "[metallum] GPU timing (%d presented frames, %.1f FPS): frame %.3f ms avg / %.3f p50 / %.3f p95 / %.3f p99 / %.3f max",
-                sampleCount,
-                completedFps,
-                frameAverageMs,
-                frameP50Ms,
-                frameP95Ms,
-                frameP99Ms,
-                frameMaximumMs
-            )]
-            if NativeState.gpuTimingDetailEnabled {
-                for stage in MetallumGpuTimingStage.allCases {
-                    let count = stageCounts[stage.rawValue]
-                    if count == 0 {
-                        lines.append("  \(stage.reportName): n/a")
-                    } else {
-                        lines.append(String(format:
-                            "  %@: %.3f ms avg / %.3f ms max (%d frames)",
-                            stage.reportName,
-                            stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
-                            stageMaximums[stage.rawValue] / 1_000_000.0,
-                            count
-                        ))
-                    }
-                }
-            } else {
-                lines.append("  per-stage counters: disabled (set METALLUM_GPU_TIMING_DETAIL=1 to enable intrusive detail)")
-            }
-            for kind in MetallumCpuWaitKind.allCases {
-                let count = waitCounts[kind.rawValue]
-                if count == 0 {
-                    lines.append("  \(kind.reportName): n/a")
-                } else {
-                    lines.append(String(format:
-                        "  %@: %.3f ms/frame avg, %.3f ms max interval (%d waits)",
-                        kind.reportName,
-                        waitNanoseconds[kind.rawValue] / Double(sampleCount) / 1_000_000.0,
-                        maximumWaitNanoseconds[kind.rawValue] / 1_000_000.0,
-                        count
-                    ))
-                }
-            }
-            if droppedEvents > 0 {
-                lines.append("  dropped timing events: \(droppedEvents)")
-            }
-            NSLog("%@", lines.joined(separator: "\n"))
-            writeReport(
-                frameCount: sampleCount,
-                fps: completedFps,
-                frameAverageMs: frameAverageMs,
-                frameP50Ms: frameP50Ms,
-                frameP95Ms: frameP95Ms,
-                frameP99Ms: frameP99Ms,
-                frameMaximumMs: frameMaximumMs
+
+        let completedWindow: MetallumGpuTimingReportWindow?
+        if window.sampleCount == Self.reportFrameCount {
+            let waitKey = MetallumCpuWaitWindowKey(
+                generation: context.generation,
+                reportIndex: window.reportIndex
             )
-            sampleCount = 0
-            totalGpuSeconds = 0.0
-            maximumGpuSeconds = 0.0
-            gpuSecondSamples = Array(repeating: 0.0, count: Self.reportFrameCount)
-            stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
-            stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
-            stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
-            waitNanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
-            maximumWaitNanoseconds = Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count)
-            waitCounts = Array(repeating: 0, count: MetallumCpuWaitKind.allCases.count)
-            droppedEvents = 0
-            intervalStart = now
+            completedWindow = window.takeReport(
+                cpuWaits: cpuWaitWindows.removeValue(forKey: waitKey)
+            )
+        } else {
+            completedWindow = nil
         }
         lock.unlock()
+        if let completedWindow {
+            reportLock.lock()
+            emitReport(completedWindow)
+            reportLock.unlock()
+        }
     }
 
-    func recordWait(_ kind: MetallumCpuWaitKind, nanoseconds: UInt64) {
+    func beginWait() -> MetallumCpuWaitToken {
+        let context = NativeState.benchmarkTelemetryState.snapshot()
         lock.lock()
-        let value = Double(nanoseconds)
-        waitNanoseconds[kind.rawValue] += value
-        maximumWaitNanoseconds[kind.rawValue] = max(maximumWaitNanoseconds[kind.rawValue], value)
-        waitCounts[kind.rawValue] += 1
+        ensureGenerationLocked(context.generation)
+        let reportIndex = presentedCounts[context.generation]! / Self.reportFrameCount
+        lock.unlock()
+        return MetallumCpuWaitToken(windowKey: MetallumCpuWaitWindowKey(
+            generation: context.generation,
+            reportIndex: reportIndex
+        ))
+    }
+
+    func recordWait(
+        _ kind: MetallumCpuWaitKind,
+        nanoseconds: UInt64,
+        token: MetallumCpuWaitToken
+    ) {
+        lock.lock()
+        let accumulator: MetallumCpuWaitAccumulator
+        if let existing = cpuWaitWindows[token.windowKey] {
+            accumulator = existing
+        } else {
+            let created = MetallumCpuWaitAccumulator()
+            cpuWaitWindows[token.windowKey] = created
+            accumulator = created
+        }
+        accumulator.record(kind, nanoseconds: nanoseconds)
         lock.unlock()
     }
 }
 
 private final class MetallumGpuTimingReportWriter: @unchecked Sendable {
-    private let url: URL
+    private let handle: FileHandle
     private let lock = NSLock()
     private var reportedFailure = false
 
     init?(path: String?) {
         guard let path, !path.isEmpty else { return nil }
-        self.url = URL(fileURLWithPath: path)
+        let url = URL(fileURLWithPath: path)
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
@@ -754,10 +1180,17 @@ private final class MetallumGpuTimingReportWriter: @unchecked Sendable {
             if !FileManager.default.fileExists(atPath: url.path) {
                 FileManager.default.createFile(atPath: url.path, contents: nil)
             }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            self.handle = handle
         } catch {
             NSLog("[metallum] GPU timing report disabled: %@", String(describing: error))
             return nil
         }
+    }
+
+    deinit {
+        try? handle.close()
     }
 
     func write(_ report: [String: Any]) {
@@ -766,9 +1199,6 @@ private final class MetallumGpuTimingReportWriter: @unchecked Sendable {
         do {
             var data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
             data.append(0x0A)
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            try handle.seekToEnd()
             try handle.write(contentsOf: data)
         } catch {
             if !reportedFailure {
@@ -795,6 +1225,7 @@ private enum NativeState {
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
+    static let benchmarkTelemetryState = MetallumBenchmarkTelemetryState()
     static let gpuTimingEnabled = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
     static let gpuTimingDetailEnabled = gpuTimingEnabled
         && ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING_DETAIL"] == "1"
@@ -895,7 +1326,7 @@ private func completeGpuTiming(
 ) {
     NativeState.gpuTimingStats?.record(
         commandBuffer,
-        presentsDrawable: completion.presentsDrawable,
+        completion: completion,
         snapshot: completion.frame?.resolve()
     )
 }
@@ -904,19 +1335,23 @@ private func addGpuTimingCompletionHandler(
     to commandBuffer: MTLCommandBuffer,
     signal semaphore: DispatchSemaphore? = nil
 ) {
-    let completion = MetallumGpuTimingCoordinator.shared.take(commandBuffer)
-    commandBuffer.addCompletedHandler { completed in
-        if completed.status == .error || NativeState.gpuTimingStats != nil {
+    if NativeState.gpuTimingStats != nil {
+        let completion = MetallumGpuTimingCoordinator.shared.take(commandBuffer)
+        commandBuffer.addCompletedHandler { completed in
+            semaphore?.signal()
             completeGpuTiming(commandBuffer: completed, completion: completion)
-            if completed.status == .error && NativeState.gpuTimingStats == nil {
+        }
+    } else {
+        commandBuffer.addCompletedHandler { completed in
+            if completed.status == .error {
                 NSLog(
                     "[metallum] Metal command buffer failed (%@): %@",
                     completed.label ?? "unlabeled",
                     String(describing: completed.error)
                 )
             }
+            semaphore?.signal()
         }
-        semaphore?.signal()
     }
 }
 
@@ -3784,6 +4219,19 @@ public func metallum_set_debug_labels_enabled(_ enabled: Int32) {
     NativeState.debugLabelsEnabled = enabled != 0
 }
 
+@_cdecl("metallum_gpu_timing_set_benchmark_state")
+public func metallum_gpu_timing_set_benchmark_state(
+    _ segmentIndex: Int32,
+    _ phase: Int32,
+    _ scalerModePtr: UnsafePointer<CChar>?
+) {
+    NativeState.benchmarkTelemetryState.update(
+        segmentIndex: segmentIndex,
+        phaseValue: phase,
+        scalerMode: stringFromOptionalCString(scalerModePtr) ?? "UNKNOWN"
+    )
+}
+
 @_cdecl("metallum_MTLDevice_maxMemoryAllocationSize")
 public func metallum_MTLDevice_maxMemoryAllocationSize(_ device: MTLDevice) -> UInt64 {
     min(UInt64(device.maxBufferLength), device.recommendedMaxWorkingSetSize)
@@ -3848,6 +4296,8 @@ public func metallum_MTLCommandBuffer_commitWithSignal(_ commandBuffer: MTLComma
 
 @_cdecl("metallum_semaphore_wait")
 public func metallum_semaphore_wait(_ semaphore: DispatchSemaphore, _ timeoutMs: UInt64) -> Int32 {
+    let timingStats = NativeState.gpuTimingStats
+    let waitToken = timingStats?.beginWait()
     let waitStart = DispatchTime.now().uptimeNanoseconds
     let result: DispatchTimeoutResult
     if timeoutMs >= UInt64(Int.max) {
@@ -3856,10 +4306,13 @@ public func metallum_semaphore_wait(_ semaphore: DispatchSemaphore, _ timeoutMs:
         result = semaphore.wait(timeout: .now() + .milliseconds(Int(timeoutMs)))
     }
     let waitEnd = DispatchTime.now().uptimeNanoseconds
-    NativeState.gpuTimingStats?.recordWait(
-        .frameSemaphore,
-        nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0
-    )
+    if let waitToken {
+        timingStats?.recordWait(
+            .frameSemaphore,
+            nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0,
+            token: waitToken
+        )
+    }
     guard result == .success else {
         return 1
     }
@@ -3880,13 +4333,18 @@ public func metallum_MTLCommandBuffer_waitUntilCompleted(_ commandBuffer: MTLCom
     if timeoutMs == 0 {
         return 1
     }
+    let timingStats = NativeState.gpuTimingStats
+    let waitToken = timingStats?.beginWait()
     let waitStart = DispatchTime.now().uptimeNanoseconds
     commandBuffer.waitUntilCompleted()
     let waitEnd = DispatchTime.now().uptimeNanoseconds
-    NativeState.gpuTimingStats?.recordWait(
-        .commandBufferCompletion,
-        nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0
-    )
+    if let waitToken {
+        timingStats?.recordWait(
+            .commandBufferCompletion,
+            nanoseconds: waitEnd >= waitStart ? waitEnd - waitStart : 0,
+            token: waitToken
+        )
+    }
     return commandBuffer.status == .completed || commandBuffer.status == .error ? 0 : 1
 }
 
@@ -5298,15 +5756,20 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return -1
         }
 
+        let timingStats = NativeState.gpuTimingStats
+        let waitToken = timingStats?.beginWait()
         let drawableWaitStart = DispatchTime.now().uptimeNanoseconds
         let nextDrawable: CAMetalDrawable? = layer.nextDrawable()
         let drawableWaitEnd = DispatchTime.now().uptimeNanoseconds
-        NativeState.gpuTimingStats?.recordWait(
-            .nextDrawable,
-            nanoseconds: drawableWaitEnd >= drawableWaitStart
-                ? drawableWaitEnd - drawableWaitStart
-                : 0
-        )
+        if let waitToken {
+            timingStats?.recordWait(
+                .nextDrawable,
+                nanoseconds: drawableWaitEnd >= drawableWaitStart
+                    ? drawableWaitEnd - drawableWaitStart
+                    : 0,
+                token: waitToken
+            )
+        }
         guard let drawable = nextDrawable else {
             return 0
         }
@@ -5369,7 +5832,19 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }
             encoder.endEncoding()
             commandBuffer.present(drawable)
-            MetallumGpuTimingCoordinator.shared.markPresented(commandBuffer)
+            if NativeState.gpuTimingStats != nil {
+                MetallumGpuTimingCoordinator.shared.markPresented(
+                    commandBuffer,
+                    renderWidth: sourceTexture.width,
+                    renderHeight: sourceTexture.height,
+                    displayWidth: drawable.texture.width,
+                    displayHeight: drawable.texture.height,
+                    outputMode: outputMode,
+                    sourceEncoding: sourceEncoding,
+                    currentHeadroom: effectiveHeadroom,
+                    displaySyncEnabled: layer.displaySyncEnabled
+                )
+            }
             return 1
         }
 
@@ -5481,7 +5956,19 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         encoder.endEncoding()
         commandBuffer.present(drawable)
-        MetallumGpuTimingCoordinator.shared.markPresented(commandBuffer)
+        if NativeState.gpuTimingStats != nil {
+            MetallumGpuTimingCoordinator.shared.markPresented(
+                commandBuffer,
+                renderWidth: sourceTexture.width,
+                renderHeight: sourceTexture.height,
+                displayWidth: drawable.texture.width,
+                displayHeight: drawable.texture.height,
+                outputMode: outputMode,
+                sourceEncoding: sourceEncoding,
+                currentHeadroom: effectiveHeadroom,
+                displaySyncEnabled: layer.displaySyncEnabled
+            )
+        }
         return 1
     }
 }

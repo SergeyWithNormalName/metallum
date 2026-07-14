@@ -1,6 +1,7 @@
 package com.metallum.client.benchmark;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.mojang.blaze3d.platform.Monitor;
@@ -183,6 +184,10 @@ public final class MetalFxBenchmarkController {
 
         this.segmentFrame++;
         if (this.segmentFrame == this.warmupFrames) {
+            MetalGpuTiming.beginBenchmarkMeasurement(
+                    this.segmentIndex,
+                    this.sequence.get(this.segmentIndex)
+            );
             if (this.captureScreenshots) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
@@ -198,6 +203,10 @@ public final class MetalFxBenchmarkController {
         }
 
         logSegmentEvent("MEASURE_END");
+        MetalGpuTiming.completeBenchmark(
+                this.segmentIndex,
+                this.sequence.get(this.segmentIndex)
+        );
         this.segmentIndex++;
         if (this.segmentIndex >= this.sequence.size()) {
             Metallum.LOGGER.info(
@@ -457,6 +466,7 @@ public final class MetalFxBenchmarkController {
     private void startSegment() {
         SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
         MetalFxSpatialScaling.setBenchmarkOverride(mode);
+        MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode);
         this.segmentFrame = 0;
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=SEGMENT_START index={} total={} mode={} warmup={} measure={}",

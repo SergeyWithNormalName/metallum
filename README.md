@@ -65,16 +65,25 @@ GPU timing is opt-in and disabled during a normal game launch. It uses Metal tim
 
 ```bash
 METALLUM_GPU_TIMING=1 \
-METALLUM_GPU_TIMING_DETAIL=1 \
+METALLUM_GPU_TIMING_DETAIL=0 \
 METALLUM_GPU_TIMING_REPORT="$PWD/logs/metallum-gpu-timing.jsonl" \
   ./gradlew runClient --args='--quickPlaySingleplayer <world>'
 ```
 
-- `METALLUM_GPU_TIMING=1` writes a rolling 300-presented-frame summary to the game log: FPS, GPU-frame average/p50/p95/p99/max, and CPU waits.
+- `METALLUM_GPU_TIMING=1` writes a rolling 300-presented-frame summary to the game log: present pacing, presenting-command-buffer GPU average/p50/p95/p99/max, and CPU waits. The GPU duration is not a whole CPU frame-time measurement.
 - `METALLUM_GPU_TIMING_DETAIL=1` additionally measures the native world, HDR, MetalFX, UI, and present stage boundaries. This is diagnostic instrumentation and can modestly perturb frame timing.
-- `METALLUM_GPU_TIMING_REPORT=/absolute/path/report.jsonl` additionally appends the same summaries as one JSON object per line. This is the recommended option for automated analysis: it preserves frame percentiles, per-stage average/max values, CPU waits, dropped timing events, and whether detailed instrumentation was active.
+- `METALLUM_GPU_TIMING_REPORT=/absolute/path/report.jsonl` additionally appends schema-v2 JSON objects. Benchmark reports tag each command buffer with its immutable warmup/measurement generation, so late GPU completions cannot contaminate the measured phase. The report also records present-interval summaries, per-window 1%/0.1% lows, metadata, per-stage average/max values, CPU waits, dropped timing events, and whether detailed instrumentation was active.
 
 The report path has no effect unless `METALLUM_GPU_TIMING=1` is set. On M1 Pro the available Metal counter is a GPU timestamp; the report can attribute elapsed time between the instrumented boundaries, but cannot provide hardware occupancy, cache, or bandwidth counters.
+
+For the reproducible release gate on this MacBook, use the console-only launcher. It refuses the wrong monitor or configuration, targets the built-in Retina display at 3024x1964@120 with VSync off, disables screenshots and intrusive timing detail, and accepts only 3000 phase-aligned measurement frames:
+
+```bash
+scripts/run_metal_benchmark.sh --world HDRTest --metalfx OFF --label baseline
+python3 tools/metal_benchmark_report.py compare BASELINE.jsonl CANDIDATE.jsonl
+```
+
+Reports and copied runtime logs are written below the ignored `run/logs/metallum-benchmarks` directory.
 
 ## Compatibility
 

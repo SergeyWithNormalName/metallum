@@ -51,6 +51,11 @@ public final class MetalNativeBridge {
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
+            setGpuTimingBenchmarkState = downcall(
+                    lookup,
+                    "metallum_gpu_timing_set_benchmark_state",
+                    FunctionDescriptor.ofVoid(INT, INT, ValueLayout.ADDRESS)
+            );
             initPipelines = downcallWithoutCritical(
                     lookup,
                     "metallum_init_pipelines",
@@ -377,6 +382,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
+    private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -535,6 +541,18 @@ public final class MetalNativeBridge {
             setDebugLabelsEnabled.invokeExact(enabled ? 1 : 0);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_debug_labels_enabled", throwable);
+        }
+    }
+
+    public static void metallum_gpu_timing_set_benchmark_state(
+            final int segmentIndex,
+            final int phase,
+            final String scalerMode
+    ) {
+        try (Arena arena = Arena.ofConfined()) {
+            setGpuTimingBenchmarkState.invokeExact(segmentIndex, phase, toCString(arena, scalerMode));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gpu_timing_set_benchmark_state", throwable);
         }
     }
 
