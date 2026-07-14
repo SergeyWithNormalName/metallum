@@ -100,6 +100,14 @@ tasks.register("metalRuntimeUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metal.render.MetalRuntimeTests")
 }
 
+tasks.register("frameGraphValidation", JavaExec) {
+	group = "verification"
+	description = "Validates the typed Metal frame graph and versioned ABI header"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.framegraph.FrameGraphTests")
+}
+
 tasks.register("spatialScalingUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs MetalFX preset and render-resolution policy tests"
@@ -236,6 +244,7 @@ tasks.named("test", Test) {
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
+	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
