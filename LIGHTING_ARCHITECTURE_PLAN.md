@@ -1,6 +1,6 @@
 # Metallum: глобальный план нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура и поэтапный план реализации.
+Статус: целевая архитектура и поэтапный план реализации после базовой оптимизации renderer.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -13,6 +13,21 @@ Iris: намеренно не является целью совместимос
 Этот документ — источник правды для разработки нового освещения. Он описывает не только желаемые эффекты, но и контракты данных, frame graph, порядок миграции, ограничения по памяти и GPU-времени, тестовые сцены, fallback и критерии завершения каждого этапа.
 
 Существующий [`recomendationsForUpscaler.md`](recomendationsForUpscaler.md) остаётся полезной исторической заметкой о spatial scaling, но решения о temporal pipeline, HDR и порядке постобработки определяются этим документом.
+
+Обязательный предшествующий документ: [`METAL_RENDERER_OPTIMIZATION_PLAN.md`](METAL_RENDERER_OPTIMIZATION_PLAN.md). Новое освещение использует созданные там frame graph, resource ABI, upload rings, lifetime/synchronization model, shader packaging и work-budget controller. Оно не создаёт второй параллельный фундамент.
+
+### Условие начала lighting implementation
+
+Полномасштабная реализация света начинается только после `Optimization Foundation Gate`:
+
+- этапы O0–O6 плана оптимизации завершены и прошли свои exit criteria;
+- O7/O8 либо завершены, либо A/B измерением зафиксировано, что Hi-Z/ICB или Metal 4 пока не дают выгоды/недоступны;
+- базовая часть O9 умеет ограничивать очереди обновлений без frame-time spikes;
+- на M1 Pro измерены non-lighting CPU/GPU p95 и реальный остаток frame budget;
+- light-only изменение не требует terrain remesh по новому renderer contract;
+- generated metallib, per-frame rings и resource lifetime validation готовы к использованию lighting subsystems.
+
+До этого разрешены только исследования, тестовые сцены, ABI/математические unit tests и capability scaffolding, не создающие постоянный второй render path.
 
 ---
 
@@ -128,6 +143,8 @@ linear albedo × (direct light × shadow visibility + indirect irradiance)
 - lightmap excess patch больше не участвует в новом lighting path;
 - значения выше `1.0` возникают в освещении и emission до HDR compositor.
 
+Это также оптимизация: после полного coverage gate `METALLUM` mode вообще не выделяет, не очищает, не заполняет и не читает legacy semantic HDR attachment, не запускает highlight reconstruction PSO и не делает дублирующий snapshot сцены ради угадывания яркости. Единственная достоверная информация переходит из lighting/material shaders прямо в FP16 `sceneColor`; отдельные auxiliary buffers остаются только там, где нужны temporal/shadow/material algorithms и доказаны capture-ом.
+
 ### 3.3. Ограничение текущего shader binding
 
 Текущий общий compiler принимает uniform buffers, texel buffers и sampled 2D/cube textures. Для clustered lighting и voxel fields понадобятся storage buffers, дополнительные texture types и custom compute resources.
@@ -189,6 +206,20 @@ linear albedo × (direct light × shadow visibility + indirect irradiance)
 ### 4.7. Каждый дорогой эффект имеет ограничитель работы
 
 GI, shadow updates, voxel uploads и volumetrics получают budget на кадр. Chunk loading или телепортация не должны превращать очередь обновлений в неограниченный GPU spike.
+
+### 4.8. Свет не перестраивает геометрию
+
+Изменение цвета, интенсивности или положения света обновляет `LightRegistry`, dirty voxel/GI/shadow records и GPU batches. Оно не перестраивает terrain vertex/index buffers, если не изменилась фактическая block geometry, material assignment или visibility topology.
+
+Постановка блока-факела может потребовать rebuild только из-за его модели как геометрии. Распространение созданного им света по соседним chunk sections не является причиной remesh.
+
+### 4.9. Освещение получает остаток измеренного frame budget
+
+Stage budgets не складываются поверх текущего кадра как пожелания. После базовой оптимизации измеряется стоимость raster/scaler/HDR/UI; lighting preset получает только оставшийся бюджет с резервом для p95/p99. Если остатка недостаточно, сначала меняется preset/internal resolution, а не допускается постоянный GPU overload.
+
+### 4.10. Один frame graph и один memory/synchronization contract
+
+Lighting passes объявляют reads, writes, stages, lifetime и budget в общем frame graph из плана оптимизации. Они не кодируют собственные broad fences, временные allocators или скрытые копии scene/depth. Metal 3 и условный Metal 4 executor исполняют один логический workload.
 
 ---
 
@@ -787,6 +818,11 @@ sun disc                 заметно выше diffuse white
 - Lightmap excess compression.
 - Финальная sRGB→linear декодировка shaders, которые уже работают linear end-to-end.
 - Материально-зависимое усиление после завершения lighting.
+- Allocation, clear, store/load и sampling legacy semantic HDR attachment.
+- Отдельный reconstruction dispatch/PSO и его промежуточные данные.
+- Повторное копирование `sceneColor`, если scaler/HDR pass может читать исходную FP16 texture по корректному lifetime.
+
+Удаление выполняется только после атомарного shader-role coverage gate. Legacy mode продолжает использовать весь прежний reconstruction contract; смешанный кадр запрещён.
 
 ### 15.4. Bloom
 
@@ -892,7 +928,7 @@ pre-exposed scene-linear FP16
 
 ### 16.5. Dynamic resolution
 
-После Temporal можно добавить controller, использующий GPU p95:
+После Temporal controller из плана оптимизации расширяется управлением input resolution по GPU p95:
 
 - изменяет input content scale плавно;
 - не пересоздаёт scaler при каждом небольшом изменении, если descriptor поддерживает range;
@@ -901,6 +937,8 @@ pre-exposed scene-linear FP16
 - не реагирует на единичный spike;
 - сбрасывает history только когда API/формат действительно требует;
 - сохраняет display-resolution UI.
+
+Lighting work budgets и render scale имеют единый coordinator. Сначала откладываются невидимые GI/shadow/voxel updates, затем с hysteresis снижается volumetric/GI quality, и только затем меняется input scale. Нельзя одновременно резко менять несколько параметров: это создаёт temporal reset, скачок качества и новый frame spike.
 
 ### 16.6. Spatial fallback
 
@@ -922,7 +960,9 @@ Fallback переключается на границе кадра с resize/res
 
 - Основной API: Metal 3/macOS 14.
 - Runtime capability checks обязательны.
-- Metal 4 enhancements изолированы и необязательны.
+- Residency sets на macOS 15+ являются условной resource-management оптимизацией и не заменяют hazards/synchronization.
+- Metal 4 поддерживается M1-series на уровне GPU family, но его API path требует macOS 26+; поэтому enhancements изолированы и необязательны.
+- Metal 3 и Metal 4 используют общий frame/resource graph из плана оптимизации.
 - M1 Pro должен проходить все correctness tests и иметь рабочие presets.
 - M3+ может получить отдельные optional RT/denoised features позже.
 
@@ -949,6 +989,8 @@ src/main/native/
 
 MSL собирается Gradle-задачей в generated `.metallib`, а не записывается в `src/main/resources` во время build. Debug runtime compilation может оставаться диагностическим fallback. Production не должен компилировать весь lighting library в первом игровом кадре.
 
+Обязательные lighting PSO prewarm-ятся после capability/preset gate и до первого `METALLUM` world frame. Feature key остаётся bounded; неизвестный variant не компилируется синхронно внутри draw/dispatch hot path.
+
 Не требуется предварительно дробить весь существующий `MetallumNative.swift`. Код переносится в отдельный файл только когда соответствующая подсистема реально изменяется и покрыта тестами.
 
 ### 17.3. Resource allocation
@@ -956,19 +998,24 @@ MSL собирается Gradle-задачей в generated `.metallib`, а не
 - Persistent clipmaps/shadow caches живут на device lifetime.
 - Resolution-dependent targets живут на renderer-size generation.
 - History resources имеют explicit generation и reset.
-- Per-frame staging использует bounded ring по числу in-flight frames.
+- Constants, light records, dirty bricks и indirect work items используют специализированные bounded rings по числу in-flight frames из плана оптимизации.
 - Основные GPU-only textures/buffers используют `.private`.
 - Shared memory используется только для CPU→GPU staging/readback/telemetry.
-- Временные ресурсы переиспользуются через workspace/heaps после профилирования lifetime.
+- CPU-write-only upload memory тестируется с `.writeCombined`, но принимается только по A/B и никогда не читается CPU.
+- Временные ресурсы переиспользуются/alias-ятся через frame-graph lifetime и heaps после профилирования; scene/depth/motion/history/shadow cache не alias-ятся.
+- Occupancy, irradiance, shadows и froxels имеют отдельные persistent memory classes и high-water telemetry.
 
 ### 17.4. Synchronization
 
 - Никакого `waitUntilCompleted` в обычном кадре.
 - Один command buffer предпочтителен, пока он не создаёт доказанную проблему scheduling.
-- Fences/events используются только для реальной зависимости.
+- Resource access graph генерирует узкие producer/consumer dependencies; lighting code не добавляет глобальный fence самостоятельно.
+- Fences/events/barriers используются только для реальной зависимости и фактических producer/consumer stages.
 - Store/load attachments определяются фактическим последующим чтением.
 - Cross-pass dependencies документируются в frame graph.
 - Compute updates не должны перезаписывать resource, который читает незавершённый in-flight frame.
+- Metal 4 write→read/write dependency получает device visibility; residency не заменяет synchronization.
+- Новая queue добавляется только после доказанного scheduling выигрыша и полного cross-queue event contract.
 
 ### 17.5. Pipeline variants
 
@@ -983,6 +1030,8 @@ MSL собирается Gradle-задачей в generated `.metallib`, а не
 
 Нельзя создавать комбинаторный PSO explosion. Предсказуемые variants prewarm после capability gate; остальные компилируются вне горячего draw path или имеют безопасный fallback.
 
+Внутри kernels при доказанной точности используются packed formats и `half`; world/camera transforms, depth reconstruction и большие координаты остаются `float`. SIMD-group reductions применяются к histogram/cluster/work counters только если capture показывает выигрыш относительно atomics.
+
 ### 17.6. Tile shaders
 
 Tile/imageblock path является оптимизацией, не архитектурной зависимостью. Кандидаты:
@@ -993,6 +1042,8 @@ Tile/imageblock path является оптимизацией, не архит�
 - локальное объединение lighting/composite.
 
 Он добавляется только если GPU capture/timestamps показывают выгоду относительно compute-built clusters на M1 Pro.
+
+Tile path не должен создавать отдельный lighting contract. Это альтернативный executor одного pass/resource description с теми же численными tests и fallback на обычный clustered forward+.
 
 ---
 
@@ -1057,7 +1108,7 @@ dynamicResolution=false
 
 | Параметр | Performance | Balanced | Ultra |
 |---|---|---|---|
-| Цель | высокий 90–120 FPS | качество при 60–90 FPS | максимум при 60 FPS |
+| Цель | стабильные 90 FPS, 120 best effort | основное качество при 60–75 FPS | максимум при 60 FPS в подходящей сцене |
 | Near occupancy | `2×`, optional short `4×` | `4×` ограниченного радиуса | `4×` большего радиуса |
 | Irradiance | грубый, 1 bounce | 1 bounce, больше levels | больше levels/iterations |
 | Sun shadows | 2 cached levels | 3 cached levels | 3–4 levels |
@@ -1074,25 +1125,31 @@ dynamicResolution=false
 
 ### 20.1. Frame targets
 
-- Performance: стремиться к GPU p95 ≤ 8.33 ms с Temporal/dynamic resolution.
-- Balanced: GPU p95 ≤ 11.1–16.67 ms в зависимости от выбранной FPS-цели.
-- Ultra: GPU p95 ≤ 16.67 ms.
+- Performance: основной gate GPU p95 ≤ 10.5 ms для стабильных 90 FPS; повышение к 120 FPS допускается только при GPU p95 примерно ≤ 7.9–8.1 ms.
+- Balanced: GPU p95 ≤ 12.7–16.0 ms в зависимости от выбранной цели 75/60 FPS.
+- Ultra: GPU p95 ≤ 16.0 ms; при превышении preset обязан ограничить expensive update work, а не накапливать spike.
 
 Это цели всего кадра, а не отдельных новых эффектов.
 
+120 FPS с direct lights, shadows, GI, volumetrics, scaler, HDR и UI на M1 Pro является best effort, а не гарантией для любого мира. Продуктовая цель Performance — прежде всего ровные 90 FPS и хорошие `1% low`.
+
 ### 20.2. Первичные stage budgets
 
-После этапа baseline они пересчитываются по реальным captures. Начальные пределы для M1 Pro при сниженном render resolution:
+После Optimization Foundation Gate они пересчитываются по реальным captures. Начальные пределы для M1 Pro при сниженном render resolution:
 
-| Stage | Предварительный p95 budget |
-|---|---:|
-| Cluster build | ≤ 0.25 ms |
-| Voxel dirty upload/update в обычном кадре | ≤ 0.50 ms |
-| Voxel update spike после движения/изменений | ≤ 1.50 ms |
-| Cached sun shadow update | ≤ 1.25 ms |
-| GI propagation | ≤ 1.50 ms |
-| Volumetrics | ≤ 1.25 ms |
-| Scaler + HDR mapping + bloom | ≤ 1.75 ms |
+| Stage | Performance p95 | Balanced p95 | Ultra p95 |
+|---|---:|---:|---:|
+| Cluster build | ≤ 0.20 ms | ≤ 0.25 ms | ≤ 0.35 ms |
+| Дополнительная цена direct fragment lighting | ≤ 0.80 ms | ≤ 1.20 ms | ≤ 1.50 ms |
+| Voxel dirty upload/update в обычном кадре | ≤ 0.25 ms | ≤ 0.40 ms | ≤ 0.50 ms |
+| Cached sun/local shadow update | ≤ 0.55 ms | ≤ 0.85 ms | ≤ 1.15 ms |
+| GI propagation | ≤ 0.65 ms | ≤ 1.00 ms | ≤ 1.50 ms |
+| Volumetrics | ≤ 0.55 ms | ≤ 0.90 ms | ≤ 1.20 ms |
+| Scaler + HDR mapping + bloom | ≤ 1.60 ms | ≤ 1.75 ms | ≤ 1.90 ms |
+
+Обычный дополнительный lighting overhead без scaler/HDR ориентировочно ограничивается примерно `3.0 ms` для Performance, `4.6 ms` для Balanced и `6.2 ms` для Ultra. Это не означает, что budget обязательно надо израсходовать.
+
+Update spike имеет тот же frame cap, что обычный кадр: после teleport/chunk churn лишняя работа остаётся в bounded queue. Допускается временно заменить обычную долю одного эффекта более крупным update, но не сложить все максимумы таблицы и не превысить общий frame target.
 
 Эти значения — engineering gates, а не обещание текущей реализации. Если baseline показывает другую реальность, таблица обновляется до начала соответствующего этапа.
 
@@ -1122,8 +1179,34 @@ dynamicResolution=false
 - Никакого полного world scan на кадр.
 - Никакого создания объектов на каждый visible light/block в render hot path.
 - Chunk voxel encoding выполняется worker-ом или во время уже существующей rebuild работы.
-- Render thread только фиксирует snapshots и batch handles.
+- Worker создаёт конечный packed payload; render thread только фиксирует snapshots/batch handles и делает bounded copy в специализированный staging ring.
+- Никаких FFM crossings на отдельный light/brick/shadow page; один versioned batch на класс обновлений.
+- Light-only updates не входят в geometry rebuild/upload counters.
 - Очереди bounded; overflow приводит к coarse rebuild/fallback, а не unlimited growth.
+
+### 20.5. Порядок динамической деградации
+
+При нехватке GPU budget эффекты упрощаются в следующем порядке:
+
+1. Отложить невидимые/далёкие dirty voxel, GI и shadow jobs.
+2. Снизить GI iterations и update radius.
+3. Снизить froxel XY/Z resolution или update rate с temporal stabilization.
+4. Сократить число shadowed local lights/pages.
+5. С hysteresis снизить temporal input resolution.
+6. Отключить optional reflections/Ultra material attachments.
+
+Direct lighting важных источников, scene-linear HDR, motion/depth/reactive correctness, UI resolution и resource synchronization не деградируют первыми.
+
+### 20.6. Оптимизационные ограничения для каждого lighting stage
+
+- Cluster lists имеют fixed capacity, priority sort и детерминированный overflow.
+- Voxel update/propagation запускается indirect dispatch по реальному числу dirty bricks; пустая очередь не обходит весь clipmap.
+- Occupancy хранится плотнее и детальнее irradiance; full-resolution radiance volume запрещён.
+- Shadow cache обновляет только dirty/exposed pages и переиспользует стабильные результаты.
+- Froxel injection использует cluster data, packed FP16 fields и temporal history; full-resolution volumetric ray march запрещён как базовый path.
+- Histogram/cluster reductions сначала агрегируются в SIMD/threadgroup, если M1 Pro capture подтверждает снижение atomic contention.
+- Hi-Z/ICB из плана оптимизации может отбрасывать geometry до дорогого fragment light loop, но lighting correctness не зависит от его наличия.
+- Pass fusion применяется только при одинаковом ordering/attachments и доказанном выигрыше store/load bandwidth на TBDR.
 
 ---
 
@@ -1144,17 +1227,21 @@ dynamicResolution=false
 JSONL report расширяется полями:
 
 - renderer mode и preset;
+- Metal executor (`metal3`/`metal4`) и frame-graph version;
 - render/display dimensions;
+- command buffer/encoder/pass counts;
+- bytes uploaded/copied/read back и ring high-water/overflow;
 - light count;
 - cluster p50/p95/p99 и overflow;
 - dirty voxel bricks submitted/remaining;
 - oldest dirty-brick age;
 - GI jobs completed/queued;
 - shadow pages updated/reused;
+- chunk rebuild/upload count по причине, отдельно light-only;
 - froxel dimensions;
 - history resets с reason;
 - temporal reactive coverage;
-- persistent/transient memory estimate;
+- persistent/transient/heap memory estimate и alias savings;
 - exposure/preExposure/headroom;
 - scaler type и actual input scale.
 
@@ -1176,22 +1263,39 @@ Diagnostic overlays:
 
 Каждый этап завершается отдельным небольшим коммитом или серией checkpoint-коммитов. Переход к следующему этапу запрещён без exit criteria текущего.
 
-### Этап 0. Baseline, feature gates и эталонные сцены
+### Этап -1. Базовая оптимизация renderer
+
+Выполнить [`METAL_RENDERER_OPTIMIZATION_PLAN.md`](METAL_RENDERER_OPTIMIZATION_PLAN.md) до его Definition of Done либо получить зафиксированное A/B решение для условных O7/O8.
+
+#### Exit criteria
+
+- Optimization Foundation Gate из начала этого документа пройден.
+- Известен non-lighting frame budget M1 Pro для native/Spatial presets.
+- Frame graph, batch ABI, rings, shader packaging и bounded queues готовы.
+- Light-only update не требует terrain remesh по целевому contract.
+- Legacy renderer визуально и численно не регрессировал.
+
+До выполнения этого этапа переход к этапу 0 запрещён.
+
+### Этап 0. Lighting admission gate, feature gates и эталонные сцены
 
 #### Работы
 
-- Зафиксировать native-resolution и MetalFX Spatial timings текущего HEAD.
+- Импортировать итоговые native-resolution и MetalFX Spatial timings из optimization baseline.
+- Рассчитать фактический остаток GPU/CPU frame budget под каждый lighting preset.
 - Добавить `RendererMode.LEGACY/METALLUM` и capability gate без изменения картинки.
-- Определить versioned `FrameState`/native ABI на бумаге и в unit tests.
+- Расширить общий versioned `FrameState`/native ABI lighting полями и unit tests, не создавая второй ABI.
 - Создать набор ручных test worlds/scenes.
 - Зафиксировать screenshots и HDR numeric probes.
-- Добавить renderer/preset поля в timing report.
+- Добавить renderer/preset/light-work поля в существующий timing report.
+- Утвердить stage/memory budgets либо явно скорректировать таблицы раздела 20 по capture.
 
 #### Exit criteria
 
 - Legacy output побитово/визуально не изменился в допустимых пределах.
 - Все существующие Gradle/native validations проходят.
-- Есть p50/p95/p99 baseline минимум для native, Spatial Quality и Spatial Performance.
+- Есть p50/p95/p99 baseline и вычисленный lighting headroom минимум для native, Spatial Quality и Spatial Performance.
+- Performance/Balanced/Ultra не превышают полный frame budget уже на бумаге при сумме утверждённых stage caps.
 - Новый mode безопасно отказывает и возвращается в legacy.
 
 #### Rollback
@@ -1203,12 +1307,14 @@ Diagnostic overlays:
 #### Работы
 
 - Реализовать immutable `FrameState`.
+- Использовать общий frame-graph/resource-generation contract плана оптимизации.
 - Добавить current/previous camera matrices и frame IDs.
 - Добавить jitter sequence, пока с diagnostic/zero-amplitude режимом.
 - Зарезервировать motion/reactive attachments в новом renderer mode.
 - Реализовать history reset reasons.
 - Добавить native capability query для Temporal/reactive mask/formats.
 - Начать выделять MSL shader files и generated metallib только для нового кода.
+- Выделять motion/reactive resources из утверждённых heaps/rings и объявлять lifetime в общем graph.
 
 #### Exit criteria
 
@@ -1229,6 +1335,8 @@ Diagnostic overlays:
 - Перестроить histogram как exposure-only.
 - Извлекать bloom из actual radiance.
 - Отключить inferred reconstruction только в новом mode.
+- После полного shader-role coverage не выделять/очищать/писать legacy semantic attachment и не создавать reconstruction PSO в `METALLUM` generation.
+- Передавать FP16 `sceneColor` scaler/HDR pass без дублирующего scene snapshot, если lifetime graph разрешает прямое чтение.
 - Сохранить текущий semantic HDR целиком в legacy mode.
 
 #### Exit criteria
@@ -1244,12 +1352,13 @@ Diagnostic overlays:
 #### Работы
 
 - Реализовать static/dynamic light extraction.
-- Добавить batch GPU light upload.
+- Добавить один versioned batch GPU light upload через специализированный lighting ring.
 - Расширить native resource ABI.
 - Реализовать cluster count/prefix/fill.
 - Подключить terrain и entities к одному direct-light shader.
 - Добавить цветные block lights.
 - Добавить cluster telemetry/overflow fallback.
+- Подтвердить, что light-only churn не увеличивает geometry rebuild/upload counters.
 
 #### Exit criteria
 
@@ -1286,7 +1395,10 @@ Diagnostic overlays:
 - Реализовать camera-centered toroidal clipmap.
 - Добавить occupancy/transmittance/material classes.
 - Добавить debug visualization.
-- Ограничить upload/update budget.
+- Выделить private brick resources/heaps через общий resource allocator.
+- Передавать coalesced dirty bricks через lighting upload ring.
+- Строить indirect dispatch по фактическому числу dirty bricks.
+- Ограничить upload/update budget и возраст очереди.
 
 #### Exit criteria
 
@@ -1321,6 +1433,8 @@ Diagnostic overlays:
 - Создать coarse irradiance levels.
 - Инжектировать sun/sky/block emission.
 - Реализовать budgeted propagation.
+- Использовать compact/FP16 irradiance formats после numeric validation и не хранить radiance с occupancy resolution.
+- Запускать propagation только по dirty/visible work list с фиксированным числом iterations на кадр.
 - Добавить surface/entity sampling.
 - Добавить temporal validity и leak-reduction.
 - Добавить GI telemetry и diagnostic view.
@@ -1343,6 +1457,8 @@ Diagnostic overlays:
 - Z integration и scene-linear composite.
 - Temporal reprojection и reset.
 - Quality presets и timings.
+- Packed FP16 froxel fields, bounded light injection и пустой-cluster early-out.
+- Проверить fusion/совместное использование cluster data без дополнительной полной копии.
 
 #### Exit criteria
 
@@ -1438,6 +1554,15 @@ Diagnostic overlays:
 - `gpuTimingValidation`;
 - `./gradlew clean check`.
 
+И используют уже пройденные foundation gates:
+
+- `frameGraphValidation`;
+- `resourceLifetimeValidation`;
+- `uploadRingValidation`;
+- `metalSynchronizationValidation`;
+- `chunkLightDecouplingValidation`;
+- `frameBudgetControllerValidation`.
+
 ### 23.2. Обязательные reference scenes
 
 1. Тёмная закрытая комната с одним белым факелом.
@@ -1476,6 +1601,7 @@ Diagnostic overlays:
 - Логи активации нужного mode/path.
 - 300+ кадров timing report после прогрева.
 - p50/p95/p99 и per-stage comparison с предыдущим checkpoint.
+- `1% low`, encoder/pass count, bytes copied/uploaded, ring/queue high-water и chunk rebuild reason comparison.
 - Ручная проверка reference scenes на разблокированном Mac.
 
 ---
@@ -1486,6 +1612,7 @@ Diagnostic overlays:
 |---|---|---|
 | Полное покрытие Minecraft render roles займёт больше времени | Смешение color contracts | Атомарный capability gate и legacy fallback |
 | Chunk updates создают spikes | Неровный FPS | Bounded dirty queues и work budget |
+| Light changes вызывают terrain remesh | Низкие `1% low` при динамическом свете | Обязательный geometry/light decoupling gate и rebuild-reason telemetry |
 | Dense voxel radiance расходует память | Unified-memory pressure | Разделение occupancy/irradiance, clipmaps, coarse levels |
 | GI протекает через стены | Плохая картинка | Conservative occupancy, visibility weighting, validity |
 | Temporal ghosting | Trails entities/water/lights | Motion, reactive mask, reset reasons, reference scenes |
@@ -1493,6 +1620,8 @@ Diagnostic overlays:
 | Слишком много lights в cluster | Длинный fragment loop | Priority, caps, overflow telemetry |
 | Full-resolution MRT bandwidth | Потеря FPS на TBDR | Forward+, compact aux, optional normal buffer |
 | Runtime shader compilation | Первый кадр тормозит | Generated metallib и PSO prewarm |
+| Lighting создаёт второй allocator/sync model | Дублирование и hazards | Общий frame graph, rings, heaps и executor foundation |
+| Сумма допустимых stages превышает frame budget | Постоянный GPU overload | Admission gate по фактическому non-lighting headroom и preset caps |
 | Мод добавляет неизвестный material/render role | Некорректный свет | Deterministic default или legacy rejection |
 | EDR display меняется во время игры | Clamp/скачок | Live headroom, display-only mapping, history policy |
 | Большой Swift refactor ломает bridge | Высокий regression risk | Извлекать модули только вместе с подсистемой и тестами |
@@ -1504,6 +1633,7 @@ Diagnostic overlays:
 
 Новая система считается завершённой, когда одновременно выполнено следующее:
 
+- Базовый optimization Definition of Done остаётся выполнен; lighting не обошёл его rings/lifetime/sync contracts.
 - Все основные vanilla/Sodium world/entity render roles используют единый scene-linear contract.
 - Colored direct lights работают на terrain и entities.
 - Sun и local shadows стабильны и масштабируются preset-ами.
@@ -1511,12 +1641,14 @@ Diagnostic overlays:
 - Один цветной indirect bounce работает без критического leaking.
 - Froxel volumetrics работают в воздухе и специальных средах.
 - HDR получает actual scene radiance; reconstruction отключён в новом mode.
+- Legacy semantic attachment/reconstruction resources полностью отсутствуют в `METALLUM` frame generation после coverage gate.
 - Bloom основан на actual radiance.
 - SDR и EDR являются разным display mapping одной сцены.
 - Motion/depth/reactive/exposure contract проверен.
 - MetalFX Temporal работает с FP16 HDR и имеет Spatial fallback.
 - UI остаётся полноразмерным SDR.
 - Performance/Balanced/Ultra соблюдают утверждённые p95 и memory budgets на M1 Pro.
+- Light/chunk churn соблюдает `1% low`, bounded queue и no-remesh criteria.
 - Все автоматические и runtime validation gates проходят.
 - Legacy mode остаётся безопасным или удаляется только отдельным осознанным решением после стабилизации.
 
@@ -1536,6 +1668,11 @@ Diagnostic overlays:
 10. UI рендерится после upscale в display resolution.
 11. Metal 3/macOS 14 и M1 Pro остаются базой; Metal 4 — optional path.
 12. Новая оптимизация принимается только по runtime/GPU evidence.
+13. Базовая оптимизация renderer предшествует полномасштабной реализации lighting.
+14. Light-only изменения не перестраивают terrain geometry.
+15. Lighting использует общий frame graph, upload rings, heaps и synchronization model.
+16. Performance целится в стабильные 90 FPS; 120 FPS на M1 Pro является best effort.
+17. При нехватке budget сначала деградируют deferred/volumetric effects, а не HDR/temporal correctness.
 
 ---
 
