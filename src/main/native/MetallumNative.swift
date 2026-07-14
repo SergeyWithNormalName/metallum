@@ -4359,11 +4359,22 @@ private func encodeHdrWorldEffects(
         commandBuffer: commandBuffer,
         stage: .histogramExposure
     )
+    let bloomThreadgroupMemoryLength = (24 * 24 + 16 * 24)
+        * 4 * MemoryLayout<Float16>.stride
+    // Detailed timing keeps distinct encoder boundaries so exposure and bloom
+    // remain independently attributable. The production path can encode both
+    // independent dispatches together and avoid one encoder boundary.
+    let fuseBloomWithHistogram = semanticTexture != nil
+        && !NativeState.gpuTimingDetailEnabled
+        && pipelines.blur.maxTotalThreadsPerThreadgroup >= 16 * 16
+        && commandBuffer.device.maxThreadgroupMemoryLength >= bloomThreadgroupMemoryLength
     guard let histogramReduce = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: histogramReducePass) else {
         workspace.histogramNeedsInitialization = true
         return nil
     }
-    histogramReduce.label = "Metallum HDR histogram reduction"
+    histogramReduce.label = fuseBloomWithHistogram
+        ? "Metallum HDR histogram reduction + bloom"
+        : "Metallum HDR histogram reduction"
     histogramReduce.setComputePipelineState(pipelines.histogramReduce)
     histogramReduce.setBuffer(workspace.histogram, offset: 0, index: 0)
     histogramReduce.setBuffer(workspace.adaptiveState, offset: 0, index: 1)
@@ -4380,6 +4391,27 @@ private func encodeHdrWorldEffects(
         MTLSize(width: 1, height: 1, depth: 1),
         threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
     )
+    if fuseBloomWithHistogram {
+        histogramReduce.setComputePipelineState(pipelines.blur)
+        histogramReduce.setTexture(workspace.emission, index: 0)
+        histogramReduce.setTexture(workspace.bloom, index: 1)
+        histogramReduce.setThreadgroupMemoryLength(
+            24 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 0
+        )
+        histogramReduce.setThreadgroupMemoryLength(
+            16 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 1
+        )
+        histogramReduce.dispatchThreadgroups(
+            MTLSize(
+                width: (workspace.bloom.width + 15) / 16,
+                height: (workspace.bloom.height + 15) / 16,
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
+        )
+    }
     trackedEndEncoding(histogramReduce)
     workspace.histogramNeedsInitialization = false
 
@@ -4394,14 +4426,20 @@ private func encodeHdrWorldEffects(
         )
     }
 
+    if fuseBloomWithHistogram {
+        return MetallumHdrWorldOutputs(
+            emission: workspace.emission,
+            bloom: workspace.bloom,
+            adaptiveState: workspace.adaptiveState
+        )
+    }
+
     let bloomPass = MTLComputePassDescriptor()
     attachGpuTiming(
         bloomPass,
         commandBuffer: commandBuffer,
         stage: .bloomHorizontal
     )
-    let bloomThreadgroupMemoryLength = (24 * 24 + 16 * 24)
-        * 4 * MemoryLayout<Float16>.stride
     guard pipelines.blur.maxTotalThreadsPerThreadgroup >= 16 * 16,
           commandBuffer.device.maxThreadgroupMemoryLength >= bloomThreadgroupMemoryLength,
           let bloom = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: bloomPass) else {
