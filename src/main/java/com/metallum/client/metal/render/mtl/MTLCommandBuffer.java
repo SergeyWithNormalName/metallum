@@ -206,6 +206,37 @@ public final class MTLCommandBuffer {
         );
     }
 
+    public void recordJavaWorkload(
+            final long cpuToSharedBytes,
+            final long cpuToSharedOperations,
+            final long cpuTransientRequestedBytes,
+            final long cpuTransientReservedBytes,
+            final long gpuTransientRequestedBytes,
+            final long gpuTransientReservedBytes
+    ) {
+        if (cpuToSharedBytes < 0L
+                || cpuToSharedOperations < 0L
+                || cpuTransientRequestedBytes < 0L
+                || cpuTransientReservedBytes < 0L
+                || gpuTransientRequestedBytes < 0L
+                || gpuTransientReservedBytes < 0L) {
+            throw new IllegalArgumentException("Java workload counters must be non-negative");
+        }
+        if (cpuTransientReservedBytes < cpuTransientRequestedBytes
+                || gpuTransientReservedBytes < gpuTransientRequestedBytes) {
+            throw new IllegalArgumentException("Transient reserved bytes must cover requested bytes");
+        }
+        MetalNativeBridge.metallum_gpu_timing_record_java_workload(
+                handle(),
+                cpuToSharedBytes,
+                cpuToSharedOperations,
+                cpuTransientRequestedBytes,
+                cpuTransientReservedBytes,
+                gpuTransientRequestedBytes,
+                gpuTransientReservedBytes
+        );
+    }
+
     public void commit() {
         MetalNativeBridge.MTLCommandBuffer_commit(handle());
     }

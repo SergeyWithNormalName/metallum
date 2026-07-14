@@ -27,6 +27,8 @@ public final class MetalRuntimeTests {
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
         testGpuTimingDetailGate();
+        testJavaWorkloadTelemetryGateAndReset();
+        testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
         testPendingUiSeedConsumeOnceLifecycle();
     }
@@ -214,6 +216,55 @@ public final class MetalRuntimeTests {
                 "disabled GPU timing unexpectedly enabled stage markers");
         require(MetalGpuTiming.detailEnabled("1", "1"),
                 "explicit GPU timing detail did not enable stage markers");
+    }
+
+    private static void testJavaWorkloadTelemetryGateAndReset() {
+        require(MetalGpuTiming.createJavaWorkloadTelemetry(false) == null,
+                "disabled GPU timing allocated a Java workload accumulator");
+        MetalJavaWorkloadTelemetry telemetry = MetalGpuTiming.createJavaWorkloadTelemetry(true);
+        require(telemetry != null, "enabled GPU timing did not allocate a Java workload accumulator");
+
+        telemetry.recordCpuToShared(9L);
+        telemetry.recordCpuToShared(7L);
+        telemetry.recordCpuTransientRequested(11L);
+        telemetry.recordCpuTransientRequested(5L);
+        telemetry.recordCpuTransientReserved(32L);
+        telemetry.recordGpuTransientRequested(20L);
+        telemetry.recordGpuTransientRequested(12L);
+        telemetry.recordGpuTransientReserved(64L);
+
+        MetalJavaWorkloadTelemetry.Snapshot snapshot = telemetry.snapshot();
+        require(snapshot.cpuToSharedBytes() == 16L && snapshot.cpuToSharedOperations() == 2L,
+                "known CPU-to-shared copies were not counted exactly");
+        require(snapshot.cpuTransientRequestedBytes() == 16L
+                        && snapshot.cpuTransientReservedBytes() == 32L,
+                "CPU transient requested/reserved accounting mismatch");
+        require(snapshot.gpuTransientRequestedBytes() == 32L
+                        && snapshot.gpuTransientReservedBytes() == 64L,
+                "GPU transient requested/reserved accounting mismatch");
+
+        telemetry.reset();
+        MetalJavaWorkloadTelemetry.Snapshot reset = telemetry.snapshot();
+        require(reset.cpuToSharedBytes() == 0L
+                        && reset.cpuToSharedOperations() == 0L
+                        && reset.cpuTransientRequestedBytes() == 0L
+                        && reset.cpuTransientReservedBytes() == 0L
+                        && reset.gpuTransientRequestedBytes() == 0L
+                        && reset.gpuTransientReservedBytes() == 0L,
+                "Java workload accumulator did not reset at the submit boundary");
+    }
+
+    private static void testJavaWorkloadTelemetryDoesNotInferMappedWrites() {
+        MetalJavaWorkloadTelemetry telemetry = new MetalJavaWorkloadTelemetry();
+        telemetry.recordGpuTransientRequested(24L);
+        telemetry.recordGpuTransientReserved(64L);
+
+        MetalJavaWorkloadTelemetry.Snapshot snapshot = telemetry.snapshot();
+        require(snapshot.cpuToSharedBytes() == 0L && snapshot.cpuToSharedOperations() == 0L,
+                "mapped reservation was incorrectly reported as an observed CPU write");
+        require(snapshot.gpuTransientRequestedBytes() == 24L
+                        && snapshot.gpuTransientReservedBytes() == 64L,
+                "mapped reservation was not retained as transient allocator pressure");
     }
 
     private static void testPendingUiSeedConsumeOnceLifecycle() {

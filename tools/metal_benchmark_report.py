@@ -40,9 +40,10 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
 DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
-WORKLOAD_KEYS = frozenset({
+WORKLOAD_BASE_KEYS = frozenset({
     "command_buffers", "encoders", "copy_bytes", "resource_allocations",
 })
+WORKLOAD_EXPANDED_KEYS = WORKLOAD_BASE_KEYS | {"transient_memory"}
 WORKLOAD_ENCODER_KEYS = frozenset({
     "render", "compute", "blit", "pass_boundaries",
 })
@@ -72,6 +73,19 @@ WORKLOAD_COPY_COMMAND_KEYS = (
 WORKLOAD_RESOURCE_KINDS = ("buffers", "textures")
 WORKLOAD_RESOURCE_KEYS = frozenset(WORKLOAD_RESOURCE_KINDS)
 WORKLOAD_ALLOCATION_KEYS = frozenset({"count", "bytes"})
+WORKLOAD_TRANSIENT_KINDS = ("cpu", "gpu_shared")
+WORKLOAD_TRANSIENT_KEYS = frozenset(WORKLOAD_TRANSIENT_KINDS)
+WORKLOAD_TRANSIENT_HIGH_WATER_KEYS = frozenset({
+    "requested_high_water_bytes", "reserved_high_water_bytes",
+})
+WORKLOAD_CONTRACT_NONE = "none"
+WORKLOAD_CONTRACT_BASE = "base"
+WORKLOAD_CONTRACT_EXPANDED = "expanded"
+WORKLOAD_CONTRACTS = frozenset({
+    WORKLOAD_CONTRACT_NONE,
+    WORKLOAD_CONTRACT_BASE,
+    WORKLOAD_CONTRACT_EXPANDED,
+})
 STABLE_METADATA_KEYS = (
     "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
     "settings_id", "settings_spec_sha256", "settings_sha256",
@@ -208,7 +222,20 @@ def _exact_object(
 def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
     if value is None:
         return None
-    raw = _exact_object(value, "workload", line, WORKLOAD_KEYS)
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: workload must be an object")
+    workload_keys = set(value)
+    if workload_keys == WORKLOAD_BASE_KEYS:
+        has_transient_memory = False
+        raw = value
+    elif workload_keys == WORKLOAD_EXPANDED_KEYS:
+        has_transient_memory = True
+        raw = value
+    else:
+        # The expanded shape is the current contract. This also reports any
+        # unknown key while legacy base-shape reports still match exactly.
+        _exact_object(value, "workload", line, WORKLOAD_EXPANDED_KEYS)
+        raise AssertionError("unreachable exact workload validation")
     encoders_raw = _exact_object(
         raw["encoders"], "workload.encoders", line, WORKLOAD_ENCODER_KEYS
     )
@@ -277,7 +304,7 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
             for key in ("count", "bytes")
         }
 
-    return {
+    result = {
         "command_buffers": _integer(
             raw["command_buffers"], "workload.command_buffers", line
         ),
@@ -285,6 +312,42 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
         "copy_bytes": copy_bytes,
         "resource_allocations": allocations,
     }
+    if has_transient_memory:
+        transient_raw = _exact_object(
+            raw["transient_memory"],
+            "workload.transient_memory",
+            line,
+            WORKLOAD_TRANSIENT_KEYS,
+        )
+        transient: dict[str, dict[str, int]] = {}
+        for kind in WORKLOAD_TRANSIENT_KINDS:
+            kind_raw = _exact_object(
+                transient_raw[kind],
+                f"workload.transient_memory.{kind}",
+                line,
+                WORKLOAD_TRANSIENT_HIGH_WATER_KEYS,
+            )
+            requested = _integer(
+                kind_raw["requested_high_water_bytes"],
+                f"workload.transient_memory.{kind}.requested_high_water_bytes",
+                line,
+            )
+            reserved = _integer(
+                kind_raw["reserved_high_water_bytes"],
+                f"workload.transient_memory.{kind}.reserved_high_water_bytes",
+                line,
+            )
+            if reserved < requested:
+                raise ReportError(
+                    f"line {line}: workload.transient_memory.{kind}."
+                    "reserved_high_water_bytes must be >= requested_high_water_bytes"
+                )
+            transient[kind] = {
+                "requested_high_water_bytes": requested,
+                "reserved_high_water_bytes": reserved,
+            }
+        result["transient_memory"] = transient
+    return result
 
 
 def _parse_window(payload: Any, line: int) -> TimingWindow:
@@ -469,6 +532,11 @@ def _aggregate_workload(
         )
 
     workload_windows = [window.workload for window in windows]
+    expanded = ["transient_memory" in workload for workload in workload_windows]
+    if any(expanded) and not all(expanded):
+        raise ReportError(
+            "selected windows mix base and expanded workload telemetry shapes"
+        )
     total_frames = sum(window.frames for window in windows)
 
     def summed(path: tuple[str, ...]) -> int:
@@ -504,19 +572,38 @@ def _aggregate_workload(
             return {key: per_frame(child) for key, child in value.items()}
         return value / total_frames
 
-    return {
-        "aggregation": (
-            "Counters are per-report-window totals. aggregate_totals sums selected "
-            "windows; per_presented_frame divides those totals by selected frames."
-        ),
-        "observability": (
+    expanded_shape = all(expanded)
+    aggregation = (
+        "Counters are per-report-window totals. aggregate_totals sums selected "
+        "windows; per_presented_frame divides those totals by selected frames."
+    )
+    if expanded_shape:
+        aggregation += (
+            " Transient memory values are high-water marks and are aggregated only "
+            "with maxima."
+        )
+        observability = (
+            "GPU copy counters cover instrumented Metal encoder wrappers. CPU-to-"
+            "shared bytes cover known upload/multiUpload paths and dynamic orphan "
+            "writes including preserved ranges; generic externally mapped writes "
+            "are excluded, so zero does not prove absence. Resource allocation "
+            "counters cover successful exported metallum_create_buffer/"
+            "metallum_create_texture_2d calls only; internal workspace, telemetry, "
+            "and view allocations are outside coverage."
+        )
+    else:
+        observability = (
             "Copy counters cover instrumented Metal encoder wrappers. CPU direct/"
             "shared writes outside those wrappers are not observable; zero byte "
             "counts and a false direct-write flag do not prove absence. Resource "
             "allocation counters cover successful exported metallum_create_buffer/"
             "metallum_create_texture_2d calls only; internal workspace, telemetry, "
             "and view allocations are outside coverage."
-        ),
+        )
+
+    result = {
+        "aggregation": aggregation,
+        "observability": observability,
         "aggregate_totals": totals,
         "per_presented_frame": per_frame(totals),
         "direct_write_observed_any_window": any(
@@ -532,6 +619,21 @@ def _aggregate_workload(
             for window in windows
         ],
     }
+    if expanded_shape:
+        result["transient_memory_high_water"] = {
+            kind: {
+                key: max(
+                    workload["transient_memory"][kind][key]
+                    for workload in workload_windows
+                )
+                for key in (
+                    "requested_high_water_bytes",
+                    "reserved_high_water_bytes",
+                )
+            }
+            for kind in WORKLOAD_TRANSIENT_KINDS
+        }
+    return result
 
 
 def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> None:
@@ -551,7 +653,7 @@ def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> N
 def validate_release_contract(
     windows: Sequence[TimingWindow],
     *,
-    require_workload: bool = True,
+    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
     scaler: str,
     source_sha256: str,
     artifact_sha256: str,
@@ -568,6 +670,8 @@ def validate_release_contract(
     dimension: str,
     simulation_frozen: bool,
 ) -> None:
+    if workload_contract not in WORKLOAD_CONTRACTS:
+        raise ReportError(f"unknown release workload contract {workload_contract!r}")
     if not SHA256_RE.fullmatch(source_sha256):
         raise ReportError("release source digest must be lowercase SHA-256")
     if not SHA256_RE.fullmatch(artifact_sha256):
@@ -626,9 +730,26 @@ def validate_release_contract(
             raise ReportError(
                 f"line {window.line}: release contract requires present-interval timing"
             )
-        if require_workload and window.workload is None:
+        if workload_contract == WORKLOAD_CONTRACT_NONE:
+            if window.workload is not None:
+                raise ReportError(
+                    f"line {window.line}: legacy no-workload contract rejects "
+                    "workload telemetry"
+                )
+        elif window.workload is None:
             raise ReportError(
                 f"line {window.line}: release contract requires workload telemetry"
+            )
+        elif workload_contract == WORKLOAD_CONTRACT_BASE:
+            if "transient_memory" in window.workload:
+                raise ReportError(
+                    f"line {window.line}: legacy base workload contract rejects "
+                    "expanded transient-memory telemetry"
+                )
+        elif "transient_memory" not in window.workload:
+            raise ReportError(
+                f"line {window.line}: release contract requires expanded workload "
+                "telemetry with transient_memory"
             )
         metadata = window.metadata
         expected = {
@@ -731,7 +852,7 @@ def summarize(
     scaler: str,
     *,
     release_contract: bool = False,
-    require_workload: bool = True,
+    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
     source_sha256: str = "unknown",
     artifact_sha256: str = "unknown",
     settings_id: str = "unknown",
@@ -759,7 +880,7 @@ def summarize(
     if release_contract:
         validate_release_contract(
             selected,
-            require_workload=require_workload,
+            workload_contract=workload_contract,
             scaler=scaler,
             source_sha256=source_sha256,
             artifact_sha256=artifact_sha256,
@@ -1130,7 +1251,7 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
 def _derive_release_summary(
     raw_report: Path,
     *,
-    require_workload: bool = True,
+    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
     if any(window.schema != 2 for window in windows):
@@ -1162,7 +1283,7 @@ def _derive_release_summary(
         segment,
         scaler,
         release_contract=True,
-        require_workload=require_workload,
+        workload_contract=workload_contract,
         source_sha256=_metadata_string(metadata, "source_sha256"),
         artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
         settings_id=_metadata_string(metadata, "settings_id"),
@@ -1233,7 +1354,7 @@ def _validate_log_evidence(
         raise ReportError("Minecraft log contains an unexpected screenshot event")
     if re.search(
         r"\[metallum\] (?:Metal command buffer failed|GPU timing sample invalid|"
-        r"GPU timing workload window mismatch)",
+        r"GPU timing workload window mismatch|Java workload telemetry invalid)",
         console_text,
     ):
         raise ReportError("console log contains a Metal timing/command-buffer failure")
@@ -1395,12 +1516,12 @@ def _validate_release_bundle(
     minecraft_log: Path,
     console_log: Path,
     *,
-    require_workload: bool,
+    workload_contract: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_summary = _load_json_object(summary_path, "benchmark summary")
     recomputed_summary, measurement = _derive_release_summary(
         raw_report,
-        require_workload=require_workload,
+        workload_contract=workload_contract,
     )
     report_value = supplied_summary.get("report")
     if not isinstance(report_value, str):
@@ -1448,10 +1569,10 @@ def create_attestation(
         paths["summary"],
         paths["minecraft_log"],
         paths["console_log"],
-        require_workload=True,
+        workload_contract=WORKLOAD_CONTRACT_EXPANDED,
     )
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "accepted": True,
         "raw_report": str(paths["raw_report"]),
         "raw_sha256": _file_sha256(paths["raw_report"]),
@@ -1490,12 +1611,20 @@ def _attestation_path(raw_report: Path) -> Path:
     return _artifact_paths(raw_report)["attestation"]
 
 
+def _attestation_workload_contract(schema_version: int) -> str:
+    return {
+        2: WORKLOAD_CONTRACT_NONE,
+        3: WORKLOAD_CONTRACT_BASE,
+        4: WORKLOAD_CONTRACT_EXPANDED,
+    }[schema_version]
+
+
 def verify_attestation(raw_report: Path) -> dict[str, Any]:
     raw = _existing_file(raw_report, "raw report")
     path = _attestation_path(raw)
     payload = _load_json_object(path, "benchmark attestation")
     schema_version = payload.get("schema_version")
-    if schema_version not in (2, 3) or payload.get("accepted") is not True:
+    if schema_version not in (2, 3, 4) or payload.get("accepted") is not True:
         raise ReportError(f"invalid benchmark attestation: {path}")
     expected = _artifact_paths(raw)
     artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
@@ -1520,7 +1649,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         artifacts["summary"],
         artifacts["minecraft_log"],
         artifacts["console_log"],
-        require_workload=schema_version == 3,
+        workload_contract=_attestation_workload_contract(schema_version),
     )
     if schema_version == 2 and ("workload" in summary or "workload" in payload):
         raise ReportError(
@@ -1530,7 +1659,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         raise ReportError(f"attestation measurement contract is inconsistent: {path}")
     if payload.get("presented_frames") != summary["presented_frames"]:
         raise ReportError(f"attestation frame count is inconsistent: {path}")
-    if schema_version == 3:
+    if schema_version in (3, 4):
         if payload.get("workload") != summary["workload"]:
             raise ReportError(f"attestation workload is inconsistent: {path}")
     if payload.get("metadata") != summary["metadata"]:
@@ -1562,7 +1691,9 @@ def summarize_attested_release(
         segment,
         scaler,
         release_contract=True,
-        require_workload=attestation["schema_version"] == 3,
+        workload_contract=_attestation_workload_contract(
+            attestation["schema_version"]
+        ),
         source_sha256=_metadata_string(metadata, "source_sha256"),
         artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
         settings_id=_metadata_string(metadata, "settings_id"),
@@ -1627,7 +1758,8 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"{copies['gpu_to_cpu']}/{copies['gpu_internal']}/"
             f"{copies['unclassified']}; unknown-byte commands "
             f"{copies['byte_count_unknown_commands']}; direct write "
-            f"{workload['direct_write_observed_any_window']} (wrapper-observed only)"
+            f"{workload['direct_write_observed_any_window']} "
+            "(instrumented paths only)"
         )
         allocations = totals["resource_allocations"]
         print(
@@ -1635,6 +1767,15 @@ def _print_summary(summary: dict[str, Any]) -> None:
             f"{allocations['buffers']['count']}/{allocations['buffers']['bytes']}; "
             f"{allocations['textures']['count']}/{allocations['textures']['bytes']}"
         )
+        if "transient_memory_high_water" in workload:
+            transient = workload["transient_memory_high_water"]
+            print(
+                "transient high-water bytes (requested/reserved, CPU; GPU shared): "
+                f"{transient['cpu']['requested_high_water_bytes']}/"
+                f"{transient['cpu']['reserved_high_water_bytes']}; "
+                f"{transient['gpu_shared']['requested_high_water_bytes']}/"
+                f"{transient['gpu_shared']['reserved_high_water_bytes']}"
+            )
         print("workload coverage: " + workload["observability"])
     print("note: " + summary["interpretation"])
 
@@ -1732,6 +1873,16 @@ def self_test() -> None:
                     "resource_allocations": {
                         "buffers": {"count": 2, "bytes": 4096},
                         "textures": {"count": 1, "bytes": 8192},
+                    },
+                    "transient_memory": {
+                        "cpu": {
+                            "requested_high_water_bytes": 1000 + index,
+                            "reserved_high_water_bytes": 2000 + index,
+                        },
+                        "gpu_shared": {
+                            "requested_high_water_bytes": 3000 + index * 2,
+                            "reserved_high_water_bytes": 5000 + index * 3,
+                        },
                     },
                 },
                 "benchmark": {
@@ -1874,7 +2025,10 @@ def self_test() -> None:
                 "\n".join(json.dumps(payload) for payload in payloads) + "\n",
                 encoding="utf-8",
             )
-            release, _ = _derive_release_summary(raw, require_workload=False)
+            release, _ = _derive_release_summary(
+                raw,
+                workload_contract=WORKLOAD_CONTRACT_NONE,
+            )
             paths["summary"].write_text(
                 json.dumps(release, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
@@ -1889,7 +2043,7 @@ def self_test() -> None:
                 paths["summary"].resolve(),
                 paths["minecraft_log"].resolve(),
                 paths["console_log"].resolve(),
-                require_workload=False,
+                workload_contract=WORKLOAD_CONTRACT_NONE,
             )
             recomputed["report"] = release["report"]
             assert recomputed == release
@@ -1914,6 +2068,67 @@ def self_test() -> None:
             )
             return raw, release
 
+        def make_legacy_v3_bundle(
+            stem: str,
+            source_sha256: str,
+            artifact_sha256: str = "5" * 64,
+        ) -> tuple[Path, dict[str, Any]]:
+            raw = root / f"{stem}.raw.jsonl"
+            paths = _artifact_paths(raw)
+            payloads = [
+                json.loads(value)
+                for value in report_text(source_sha256, artifact_sha256).splitlines()
+            ]
+            for payload in payloads:
+                payload["workload"].pop("transient_memory")
+            raw.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            release, _ = _derive_release_summary(
+                raw,
+                workload_contract=WORKLOAD_CONTRACT_BASE,
+            )
+            paths["summary"].write_text(
+                json.dumps(release, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            paths["minecraft_log"].write_text(minecraft_evidence, encoding="utf-8")
+            paths["console_log"].write_text(
+                "Gradle/Minecraft console completed normally\n",
+                encoding="utf-8",
+            )
+            recomputed, measurement = _validate_release_bundle(
+                raw.resolve(),
+                paths["summary"].resolve(),
+                paths["minecraft_log"].resolve(),
+                paths["console_log"].resolve(),
+                workload_contract=WORKLOAD_CONTRACT_BASE,
+            )
+            recomputed["report"] = release["report"]
+            assert recomputed == release
+            accepted_payload = {
+                "schema_version": 3,
+                "accepted": True,
+                "raw_report": str(raw.resolve()),
+                "raw_sha256": _file_sha256(raw),
+                "summary": str(paths["summary"].resolve()),
+                "summary_sha256": _file_sha256(paths["summary"]),
+                "minecraft_log": str(paths["minecraft_log"].resolve()),
+                "minecraft_log_sha256": _file_sha256(paths["minecraft_log"]),
+                "console_log": str(paths["console_log"].resolve()),
+                "console_log_sha256": _file_sha256(paths["console_log"]),
+                "measurement": measurement,
+                "presented_frames": release["presented_frames"],
+                "workload": release["workload"],
+                "metadata": release["metadata"],
+            }
+            paths["attestation"].write_text(
+                json.dumps(accepted_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return raw, release
+
         new, new_summary = make_bundle("new", "c" * 64)
         assert old_summary["presented_frames"] == 3000
         assert new_summary["presented_frames"] == 3000
@@ -1924,6 +2139,19 @@ def self_test() -> None:
             "shared_to_private"
         ] == 10240
         assert workload_summary["per_presented_frame"]["command_buffers"] == 1.0
+        transient_high_water = workload_summary["transient_memory_high_water"]
+        assert transient_high_water == {
+            "cpu": {
+                "requested_high_water_bytes": 1010,
+                "reserved_high_water_bytes": 2010,
+            },
+            "gpu_shared": {
+                "requested_high_water_bytes": 3020,
+                "reserved_high_water_bytes": 5030,
+            },
+        }
+        assert "transient_memory" not in workload_summary["aggregate_totals"]
+        assert "transient_memory" not in workload_summary["per_presented_frame"]
         assert len(workload_summary["selected_window_totals"]) == 10
         assert workload_summary["selected_window_totals"][0]["workload"] == line(
             2, 1
@@ -1936,6 +2164,7 @@ def self_test() -> None:
         )["verdict"] == "WITHIN_THRESHOLD"
 
         verified = verify_attestation(new)
+        assert verified["schema_version"] == 4
         assert verified["presented_frames"] == 3000
         assert verified["workload"] == new_summary["workload"]
         new_attested = summarize_attested_release(new, 3000, 0, "OFF")
@@ -1943,6 +2172,48 @@ def self_test() -> None:
         new_without_runtime = dict(new_attested)
         new_without_runtime.pop("attested_runtime")
         assert new_without_runtime == new_summary
+
+        # Schema v3 remains the strict contract for the exact pre-transient
+        # workload shape and can be compared directly with a schema-v4 bundle.
+        legacy_v3, legacy_v3_summary = make_legacy_v3_bundle(
+            "legacy-v3",
+            "c" * 64,
+        )
+        legacy_v3_verified = verify_attestation(legacy_v3)
+        assert legacy_v3_verified["schema_version"] == 3
+        legacy_v3_attested = summarize_attested_release(
+            legacy_v3,
+            3000,
+            0,
+            "OFF",
+        )
+        assert "workload" in legacy_v3_attested
+        assert "transient_memory_high_water" not in legacy_v3_attested["workload"]
+        assert compare(new_attested, legacy_v3_attested, 0.2)[
+            "verdict"
+        ] == "WITHIN_THRESHOLD"
+        legacy_v3_without_runtime = dict(legacy_v3_attested)
+        legacy_v3_without_runtime.pop("attested_runtime")
+        assert legacy_v3_without_runtime == legacy_v3_summary
+
+        legacy_v3_paths = _artifact_paths(legacy_v3)
+        legacy_v3_attestation_text = legacy_v3_paths["attestation"].read_text(
+            encoding="utf-8"
+        )
+        v4_missing_transient = json.loads(legacy_v3_attestation_text)
+        v4_missing_transient["schema_version"] = 4
+        legacy_v3_paths["attestation"].write_text(
+            json.dumps(v4_missing_transient),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(legacy_v3),
+            "requires expanded workload telemetry with transient_memory",
+        )
+        legacy_v3_paths["attestation"].write_text(
+            legacy_v3_attestation_text,
+            encoding="utf-8",
+        )
 
         # Existing accepted schema-v2 bundles predate workload telemetry. They
         # remain strict, fully revalidated comparison inputs, but only when the
@@ -2099,6 +2370,21 @@ def self_test() -> None:
             "Metal timing/command-buffer failure",
         )
         paths["console_log"].write_text(console_text, encoding="utf-8")
+        paths["console_log"].write_text(
+            console_text + "[metallum] Java workload telemetry invalid\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: create_attestation(
+                new,
+                paths["summary"],
+                paths["minecraft_log"],
+                paths["console_log"],
+                paths["attestation"],
+            ),
+            "Metal timing/command-buffer failure",
+        )
+        paths["console_log"].write_text(console_text, encoding="utf-8")
         create_attestation(
             new,
             paths["summary"],
@@ -2131,8 +2417,18 @@ def self_test() -> None:
         expect_error(lambda: verify_attestation(new), "workload is inconsistent")
         paths["attestation"].write_text(accepted_text, encoding="utf-8")
 
-        # A workload-bearing schema-v3 bundle cannot be downgraded to legacy
-        # schema v2. Pre-attestation schema versions remain invalid.
+        # An expanded schema-v4 bundle cannot be downgraded to either legacy
+        # workload contract. Pre-attestation schema versions remain invalid.
+        legacy_attestation = json.loads(accepted_text)
+        legacy_attestation["schema_version"] = 3
+        paths["attestation"].write_text(
+            json.dumps(legacy_attestation),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(new),
+            "base workload contract rejects expanded transient-memory telemetry",
+        )
         legacy_attestation = json.loads(accepted_text)
         legacy_attestation["schema_version"] = 2
         legacy_attestation.pop("workload")
@@ -2142,7 +2438,7 @@ def self_test() -> None:
         )
         expect_error(
             lambda: verify_attestation(new),
-            "schema-v2 attestation cannot attest workload telemetry",
+            "no-workload contract rejects workload telemetry",
         )
         legacy_attestation = json.loads(accepted_text)
         legacy_attestation["schema_version"] = 1
@@ -2213,6 +2509,58 @@ def self_test() -> None:
         expect_error(
             lambda: _derive_release_summary(unknown_workload_key),
             "workload must have exact keys",
+        )
+
+        def make_transient_negative(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["transient_memory"]["cpu"][
+                "requested_high_water_bytes"
+            ] = -1
+
+        negative_transient = mutated_raw(
+            "negative-transient",
+            make_transient_negative,
+        )
+        expect_error(
+            lambda: _derive_release_summary(negative_transient),
+            "requested_high_water_bytes must be an integer >= 0",
+        )
+
+        def make_transient_boolean(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["transient_memory"]["gpu_shared"][
+                "reserved_high_water_bytes"
+            ] = True
+
+        boolean_transient = mutated_raw(
+            "boolean-transient",
+            make_transient_boolean,
+        )
+        expect_error(
+            lambda: _derive_release_summary(boolean_transient),
+            "reserved_high_water_bytes must be an integer >= 0",
+        )
+
+        def invert_transient_high_water(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["transient_memory"]["cpu"].update({
+                "requested_high_water_bytes": 2048,
+                "reserved_high_water_bytes": 1024,
+            })
+
+        inverted_transient = mutated_raw(
+            "inverted-transient",
+            invert_transient_high_water,
+        )
+        expect_error(
+            lambda: _derive_release_summary(inverted_transient),
+            "reserved_high_water_bytes must be >= requested_high_water_bytes",
+        )
+
+        def add_transient_extra(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["transient_memory"]["cpu"]["peak"] = 1
+
+        extra_transient = mutated_raw("extra-transient", add_transient_extra)
+        expect_error(
+            lambda: _derive_release_summary(extra_transient),
+            "workload.transient_memory.cpu must have exact keys",
         )
 
         def break_pass_boundary(payloads: list[dict[str, Any]]) -> None:

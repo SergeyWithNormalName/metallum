@@ -56,6 +56,19 @@ public final class MetalNativeBridge {
                     "metallum_gpu_timing_set_benchmark_state",
                     FunctionDescriptor.ofVoid(INT, INT, ValueLayout.ADDRESS)
             );
+            recordJavaWorkload = downcall(
+                    lookup,
+                    "metallum_gpu_timing_record_java_workload",
+                    FunctionDescriptor.ofVoid(
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG,
+                            LONG
+                    )
+            );
             initPipelines = downcallWithoutCritical(
                     lookup,
                     "metallum_init_pipelines",
@@ -383,6 +396,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
     private static final MethodHandle setGpuTimingBenchmarkState;
+    private static final MethodHandle recordJavaWorkload;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -553,6 +567,30 @@ public final class MetalNativeBridge {
             setGpuTimingBenchmarkState.invokeExact(segmentIndex, phase, toCString(arena, scalerMode));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_timing_set_benchmark_state", throwable);
+        }
+    }
+
+    public static void metallum_gpu_timing_record_java_workload(
+            final MemorySegment commandBuffer,
+            final long cpuToSharedBytes,
+            final long cpuToSharedOperations,
+            final long cpuTransientRequestedBytes,
+            final long cpuTransientReservedBytes,
+            final long gpuTransientRequestedBytes,
+            final long gpuTransientReservedBytes
+    ) {
+        try {
+            recordJavaWorkload.invokeExact(
+                    segment(commandBuffer),
+                    cpuToSharedBytes,
+                    cpuToSharedOperations,
+                    cpuTransientRequestedBytes,
+                    cpuTransientReservedBytes,
+                    gpuTransientRequestedBytes,
+                    gpuTransientReservedBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gpu_timing_record_java_workload", throwable);
         }
     }
 

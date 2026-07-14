@@ -48,6 +48,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
     private final MemorySegment fence;
     @Nullable
+    private final MetalJavaWorkloadTelemetry workloadTelemetry;
+    @Nullable
     private MetalRenderPass currentRenderPass;
     @Nullable
     private MTLCommandBuffer commandBuffer;
@@ -67,7 +69,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 MAX_DYNAMIC_BACKINGS_PER_SIZE,
                 MetalNativeBridge::metallum_release_object
         );
-        this.transientMemory = new MetalTransientMemory(device, this);
+        this.workloadTelemetry = MetalGpuTiming.createJavaWorkloadTelemetry();
+        this.transientMemory = new MetalTransientMemory(device, this, this.workloadTelemetry);
         fence = MetalNativeBridge.metallum_create_fence(device.metalDeviceHandle());
         if (MetalNativeBridge.isNullHandle(fence)) {
             throw new IllegalStateException("Failed to allocate MTLFence");
@@ -129,6 +132,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         materializePendingUiSeed();
         endEncoder();
+        recordJavaWorkload();
 
         int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
         MemorySegment completedSemaphore = submitSemaphores[slot];
@@ -150,6 +154,22 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         transientMemory.rotate();
         destroyQueue.rotate();
+    }
+
+    private void recordJavaWorkload() {
+        if (this.workloadTelemetry == null) {
+            return;
+        }
+        MetalJavaWorkloadTelemetry.Snapshot snapshot = this.workloadTelemetry.snapshot();
+        this.commandBuffer.recordJavaWorkload(
+                snapshot.cpuToSharedBytes(),
+                snapshot.cpuToSharedOperations(),
+                snapshot.cpuTransientRequestedBytes(),
+                snapshot.cpuTransientReservedBytes(),
+                snapshot.gpuTransientRequestedBytes(),
+                snapshot.gpuTransientReservedBytes()
+        );
+        this.workloadTelemetry.reset();
     }
 
     MTLRenderCommandEncoder renderCommandEncoder(
@@ -639,8 +659,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         ByteBuffer dst = freshStorage.duplicate().order(ByteOrder.nativeOrder());
         dst.position(Math.toIntExact(offset));
         dst.put(data.duplicate());
-
         buffer.swapBacking(fresh, freshStorage);
+        if (this.workloadTelemetry != null) {
+            // Prefix preservation + payload + suffix preservation write every
+            // logical byte exactly once; backing alignment padding is untouched.
+            this.workloadTelemetry.recordCpuToShared(buffer.size());
+        }
         recycleDynamicBacking(old, size);
     }
 

@@ -772,9 +772,9 @@ private final class MetallumWorkloadAccumulator {
     var blitEncoders = 0
     var passBoundaries = 0
 
-    // Direct CPU writes into shared buffers happen outside the four native
-    // blit wrappers, so this slice deliberately reports them as unobserved.
-    // Do not infer them from shared allocations: an allocation is not a write.
+    // Direct CPU writes happen outside the four native blit wrappers. Java
+    // reports only writes it actually performs; never infer them from shared
+    // allocations because an allocation is not itself a write.
     var cpuToSharedBytes = 0
     var cpuToSharedCommands = 0
     var sharedToPrivateBytes = 0
@@ -792,6 +792,11 @@ private final class MetallumWorkloadAccumulator {
     var bufferAllocationBytes = 0
     var textureAllocationCount = 0
     var textureAllocationBytes = 0
+
+    var cpuTransientRequestedHighWaterBytes = 0
+    var cpuTransientReservedHighWaterBytes = 0
+    var gpuSharedTransientRequestedHighWaterBytes = 0
+    var gpuSharedTransientReservedHighWaterBytes = 0
 
     func recordEncoder(_ kind: MetallumWorkloadEncoderKind) {
         switch kind {
@@ -866,6 +871,16 @@ private final class MetallumWorkloadAccumulator {
                 "textures": [
                     "count": textureAllocationCount,
                     "bytes": textureAllocationBytes
+                ]
+            ],
+            "transient_memory": [
+                "cpu": [
+                    "requested_high_water_bytes": cpuTransientRequestedHighWaterBytes,
+                    "reserved_high_water_bytes": cpuTransientReservedHighWaterBytes
+                ],
+                "gpu_shared": [
+                    "requested_high_water_bytes": gpuSharedTransientRequestedHighWaterBytes,
+                    "reserved_high_water_bytes": gpuSharedTransientReservedHighWaterBytes
                 ]
             ]
         ]
@@ -1109,6 +1124,79 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         if let key = encoderWindowKeys[objectAddress(encoder)] {
             workloadLocked(for: key).recordCopy(kind, bytes: bytes)
         }
+        lock.unlock()
+    }
+
+    func recordJavaWorkload(
+        _ commandBuffer: MTLCommandBuffer,
+        cpuBytes: UInt64,
+        cpuOperations: UInt64,
+        cpuRequestedHighWater: UInt64,
+        cpuReservedHighWater: UInt64,
+        gpuRequestedHighWater: UInt64,
+        gpuReservedHighWater: UInt64
+    ) {
+        guard cpuReservedHighWater >= cpuRequestedHighWater,
+              gpuReservedHighWater >= gpuRequestedHighWater else {
+            NSLog(
+                "[metallum] Java workload telemetry invalid: reserved bytes are smaller than requested bytes"
+            )
+            return
+        }
+        guard let cpuByteCount = Int(exactly: cpuBytes),
+              let cpuOperationCount = Int(exactly: cpuOperations),
+              let cpuRequested = Int(exactly: cpuRequestedHighWater),
+              let cpuReserved = Int(exactly: cpuReservedHighWater),
+              let gpuRequested = Int(exactly: gpuRequestedHighWater),
+              let gpuReserved = Int(exactly: gpuReservedHighWater) else {
+            NSLog(
+                "[metallum] Java workload telemetry invalid: UInt64 value exceeds the native counter range"
+            )
+            return
+        }
+
+        lock.lock()
+        guard let key = commandBufferWindowKeys[objectAddress(commandBuffer)] else {
+            lock.unlock()
+            NSLog(
+                "[metallum] Java workload telemetry invalid: command buffer window key is missing"
+            )
+            return
+        }
+        let accumulator = workloadLocked(for: key)
+        let (nextCpuBytes, cpuBytesOverflow) = accumulator.cpuToSharedBytes
+            .addingReportingOverflow(cpuByteCount)
+        let (nextCpuOperations, cpuOperationsOverflow) = accumulator.cpuToSharedCommands
+            .addingReportingOverflow(cpuOperationCount)
+        guard !cpuBytesOverflow, !cpuOperationsOverflow else {
+            lock.unlock()
+            NSLog(
+                "[metallum] Java workload telemetry invalid: accumulated CPU direct-write counter overflow"
+            )
+            return
+        }
+
+        accumulator.cpuToSharedBytes = nextCpuBytes
+        accumulator.cpuToSharedCommands = nextCpuOperations
+        // Reaching this hook means Java observed the submit even when its exact
+        // count is zero; keep zero distinct from legacy/uninstrumented data.
+        accumulator.directWriteObserved = true
+        accumulator.cpuTransientRequestedHighWaterBytes = max(
+            accumulator.cpuTransientRequestedHighWaterBytes,
+            cpuRequested
+        )
+        accumulator.cpuTransientReservedHighWaterBytes = max(
+            accumulator.cpuTransientReservedHighWaterBytes,
+            cpuReserved
+        )
+        accumulator.gpuSharedTransientRequestedHighWaterBytes = max(
+            accumulator.gpuSharedTransientRequestedHighWaterBytes,
+            gpuRequested
+        )
+        accumulator.gpuSharedTransientReservedHighWaterBytes = max(
+            accumulator.gpuSharedTransientReservedHighWaterBytes,
+            gpuReserved
+        )
         lock.unlock()
     }
 
@@ -4637,6 +4725,28 @@ public func metallum_gpu_timing_set_benchmark_state(
         segmentIndex: segmentIndex,
         phaseValue: phase,
         scalerMode: stringFromOptionalCString(scalerModePtr) ?? "UNKNOWN"
+    )
+}
+
+@_cdecl("metallum_gpu_timing_record_java_workload")
+public func metallum_gpu_timing_record_java_workload(
+    _ commandBuffer: MTLCommandBuffer,
+    _ cpuBytes: UInt64,
+    _ cpuOperations: UInt64,
+    _ cpuRequestedHighWater: UInt64,
+    _ cpuReservedHighWater: UInt64,
+    _ gpuRequestedHighWater: UInt64,
+    _ gpuReservedHighWater: UInt64
+) {
+    guard let stats = NativeState.gpuTimingStats else { return }
+    stats.recordJavaWorkload(
+        commandBuffer,
+        cpuBytes: cpuBytes,
+        cpuOperations: cpuOperations,
+        cpuRequestedHighWater: cpuRequestedHighWater,
+        cpuReservedHighWater: cpuReservedHighWater,
+        gpuRequestedHighWater: gpuRequestedHighWater,
+        gpuReservedHighWater: gpuReservedHighWater
     )
 }
 

@@ -30,6 +30,14 @@ public final class MetalGpuTiming {
         return "1".equals(timing) && "1".equals(detail);
     }
 
+    static @Nullable MetalJavaWorkloadTelemetry createJavaWorkloadTelemetry() {
+        return createJavaWorkloadTelemetry(REPORT_ENABLED);
+    }
+
+    static @Nullable MetalJavaWorkloadTelemetry createJavaWorkloadTelemetry(final boolean enabled) {
+        return enabled ? new MetalJavaWorkloadTelemetry() : null;
+    }
+
     public static void begin(final MetalGpuTimingStage stage) {
         if (!DETAIL_ENABLED || stage == null || stage == MetalGpuTimingStage.NONE) {
             return;
