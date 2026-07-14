@@ -26,6 +26,7 @@ final class MetalTransientMemory implements TransientMemory {
     private static final long MAX_CPU_ALIGNMENT = 16L;
     private static final long MAX_GPU_ALIGNMENT = Long.highestOneBit(Long.MAX_VALUE);
     private static final int BLOCK_USAGE = GpuBuffer.USAGE_MAP_READ | GpuBuffer.USAGE_MAP_WRITE;
+    private static final int MAX_RETIRED_GPU_BLOCKS_PER_SIZE = 1;
 
     private final MetalDevice device;
     private final MetalCommandEncoder encoder;
@@ -33,7 +34,15 @@ final class MetalTransientMemory implements TransientMemory {
             BLOCK_SIZE, MAX_CPU_ALIGNMENT, TransientBlockAllocator.Allocator.create(MemoryUtil::nmemAlloc, MemoryUtil::nmemFree)
     );
     private final TransientBlockAllocator<MetalGpuBuffer> gpuBlockAllocator;
+    // freeGpuBlock runs only after the allocator's retirement action reaches
+    // the GPU-safe destruction queue; retain one exact-size block at that point.
+    private final DynamicBackingPool<MetalGpuBuffer> retiredGpuBlocks = new DynamicBackingPool<>(
+            BLOCK_SIZE,
+            MAX_RETIRED_GPU_BLOCKS_PER_SIZE,
+            MetalGpuBuffer::close
+    );
     private long submitIndex = 0L;
+    private boolean closed;
 
     MetalTransientMemory(final MetalDevice device, final MetalCommandEncoder encoder) {
         this.device = device;
@@ -50,16 +59,29 @@ final class MetalTransientMemory implements TransientMemory {
     }
 
     void close() {
+        if (this.closed) {
+            return;
+        }
+        this.closed = true;
         cpuBlockAllocator.close();
         gpuBlockAllocator.close();
+        retiredGpuBlocks.drain();
     }
 
     private MetalGpuBuffer allocateGpuBlock(final long size) {
+        MetalGpuBuffer retired = retiredGpuBlocks.take(size);
+        if (retired != null) {
+            return retired;
+        }
         return new MetalGpuBuffer(device, BLOCK_USAGE, size);
     }
 
     private void freeGpuBlock(final MetalGpuBuffer block) {
-        block.close();
+        if (this.closed) {
+            block.close();
+            return;
+        }
+        retiredGpuBlocks.offer(block, block.size());
     }
 
     @Override
