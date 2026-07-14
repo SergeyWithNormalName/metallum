@@ -35,13 +35,39 @@ public final class FrameGraph {
     }
 
     public enum PersistenceClass {
-        DEVICE,
-        WORLD,
-        SIZE,
+        DEVICE_PERSISTENT,
+        WORLD_PERSISTENT,
+        SIZE_GENERATION,
         HISTORY,
-        IN_FLIGHT,
+        IN_FLIGHT_FRAME,
         PASS_TRANSIENT,
-        READBACK
+        READBACK,
+        EXTERNAL_FRAME
+    }
+
+    public enum ResourceType {
+        BUFFER,
+        TEXTURE
+    }
+
+    public enum AttachmentRole {
+        NONE,
+        COLOR,
+        DEPTH,
+        STENCIL
+    }
+
+    public enum LoadAction {
+        NONE,
+        LOAD,
+        CLEAR,
+        DONT_CARE
+    }
+
+    public enum StoreAction {
+        NONE,
+        STORE,
+        DONT_CARE
     }
 
     public enum EncoderClass {
@@ -93,24 +119,106 @@ public final class FrameGraph {
         }
     }
 
+    public record ResourceShape(ResourceType type, String format, String extent) {
+        public ResourceShape {
+            Objects.requireNonNull(type, "type");
+            format = requireName(format, "resource format");
+            extent = requireName(extent, "resource extent");
+        }
+    }
+
+    public record AttachmentContract(
+            AttachmentRole role,
+            LoadAction loadAction,
+            StoreAction storeAction,
+            String clearValue
+    ) {
+        private static final AttachmentContract NONE = new AttachmentContract(
+                AttachmentRole.NONE,
+                LoadAction.NONE,
+                StoreAction.NONE,
+                null
+        );
+
+        public AttachmentContract {
+            Objects.requireNonNull(role, "role");
+            Objects.requireNonNull(loadAction, "loadAction");
+            Objects.requireNonNull(storeAction, "storeAction");
+            if (role == AttachmentRole.NONE) {
+                if (loadAction != LoadAction.NONE || storeAction != StoreAction.NONE || clearValue != null) {
+                    throw new IllegalArgumentException("A non-attachment access cannot declare load/store state");
+                }
+            } else {
+                if (loadAction == LoadAction.NONE || storeAction == StoreAction.NONE) {
+                    throw new IllegalArgumentException("An attachment access needs load and store actions");
+                }
+                if (loadAction == LoadAction.CLEAR) {
+                    clearValue = requireName(clearValue, "attachment clear value");
+                } else if (clearValue != null) {
+                    throw new IllegalArgumentException("Only a clear attachment may declare a clear value");
+                }
+            }
+        }
+
+        public static AttachmentContract none() {
+            return NONE;
+        }
+
+        public static AttachmentContract attachment(
+                final AttachmentRole role,
+                final LoadAction loadAction,
+                final StoreAction storeAction
+        ) {
+            return new AttachmentContract(role, loadAction, storeAction, null);
+        }
+
+        public static AttachmentContract clear(
+                final AttachmentRole role,
+                final StoreAction storeAction,
+                final String clearValue
+        ) {
+            return new AttachmentContract(role, LoadAction.CLEAR, storeAction, clearValue);
+        }
+
+        public boolean isAttachment() {
+            return this.role != AttachmentRole.NONE;
+        }
+    }
+
     public record ResourceDesc(
             ResourceId id,
             PersistenceClass persistence,
+            ResourceShape shape,
             boolean initiallyDefined,
             Lifetime lifetime
     ) {
         public ResourceDesc {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(persistence, "persistence");
+            Objects.requireNonNull(shape, "shape");
             Objects.requireNonNull(lifetime, "lifetime");
         }
     }
 
-    public record ResourceAccess(ResourceId resource, AccessKind kind, PipelineStage stage) {
+    public record ResourceAccess(
+            ResourceId resource,
+            AccessKind kind,
+            PipelineStage stage,
+            AttachmentContract attachment
+    ) {
         public ResourceAccess {
             Objects.requireNonNull(resource, "resource");
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(stage, "stage");
+            Objects.requireNonNull(attachment, "attachment");
+        }
+
+        public ResourceAccess(
+                final ResourceId resource,
+                final AccessKind kind,
+                final PipelineStage stage
+        ) {
+            this(resource, kind, stage, AttachmentContract.none());
         }
     }
 

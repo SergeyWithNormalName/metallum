@@ -10,6 +10,7 @@ import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.mojang.blaze3d.GpuFormat;
@@ -117,6 +118,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MemorySegment cocoaWindow,
             final MemorySegment cocoaView
     ) {
+        NativeHdrFrameGraph.initialize();
         INSTANCE = this;
         this.activeShaderSource = defaultShaderSource;
         this.debugOptions = debugOptions;

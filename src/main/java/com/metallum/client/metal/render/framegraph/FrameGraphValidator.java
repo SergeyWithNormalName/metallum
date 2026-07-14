@@ -190,8 +190,13 @@ public final class FrameGraphValidator {
                             + access.resource().name() + " more than once; use READ_WRITE");
                 }
                 validateStage(pass, access);
+                validateAttachment(pass, access, resource);
                 byResource.computeIfAbsent(access.resource().value(), ignored -> new ArrayList<>())
-                        .add(new PassAccess(pass.id().value(), access.kind()));
+                        .add(new PassAccess(
+                                pass.id().value(),
+                                access.kind(),
+                                definesResourceAfterPass(access)
+                        ));
             }
         }
 
@@ -227,7 +232,7 @@ public final class FrameGraphValidator {
             final Map<Integer, Set<Integer>> reachable
     ) {
         for (PassAccess candidate : accesses) {
-            if (candidate.kind().writes()
+            if (candidate.definesAfterPass()
                     && candidate.pass() != reader
                     && reachable.get(candidate.pass()).contains(reader)) {
                 return true;
@@ -250,6 +255,39 @@ public final class FrameGraphValidator {
             throw invalid("pass " + pass.id().name() + " uses " + access.stage()
                     + " access with a " + pass.encoder() + " encoder");
         }
+    }
+
+    private static void validateAttachment(
+            final FrameGraph.PassDesc pass,
+            final FrameGraph.ResourceAccess access,
+            final FrameGraph.ResourceDesc resource
+    ) {
+        FrameGraph.AttachmentContract attachment = access.attachment();
+        if (!attachment.isAttachment()) {
+            return;
+        }
+        if (pass.encoder() != FrameGraph.EncoderClass.RENDER
+                || access.stage() != FrameGraph.PipelineStage.FRAGMENT) {
+            throw invalid("attachment " + resource.id().name()
+                    + " must use a render encoder fragment-stage access");
+        }
+        if (resource.shape().type() != FrameGraph.ResourceType.TEXTURE) {
+            throw invalid("attachment " + resource.id().name() + " must be a texture");
+        }
+        boolean loadsPreviousContents = attachment.loadAction() == FrameGraph.LoadAction.LOAD;
+        if (loadsPreviousContents != access.kind().reads()) {
+            throw invalid("attachment " + resource.id().name()
+                    + " load action does not match its read access");
+        }
+        if (!access.kind().writes()) {
+            throw invalid("attachment " + resource.id().name() + " must declare a write access");
+        }
+    }
+
+    private static boolean definesResourceAfterPass(final FrameGraph.ResourceAccess access) {
+        return access.kind().writes()
+                && (!access.attachment().isAttachment()
+                    || access.attachment().storeAction() == FrameGraph.StoreAction.STORE);
     }
 
     private static boolean orderedOrSame(
@@ -284,6 +322,10 @@ public final class FrameGraphValidator {
         }
     }
 
-    private record PassAccess(int pass, FrameGraph.AccessKind kind) {
+    private record PassAccess(
+            int pass,
+            FrameGraph.AccessKind kind,
+            boolean definesAfterPass
+    ) {
     }
 }

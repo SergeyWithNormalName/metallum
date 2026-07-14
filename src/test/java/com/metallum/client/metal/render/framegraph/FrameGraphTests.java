@@ -14,6 +14,8 @@ public final class FrameGraphTests {
         testUnorderedWriteConflict();
         testLifetimeViolation();
         testMissingDependencyAndCycle();
+        testAttachmentContracts();
+        testNativeHdrGraphTopology();
         testAbiHeader();
         testDeterministicDiagnosticsAndGate();
     }
@@ -87,6 +89,106 @@ public final class FrameGraphTests {
                 )),
                 "cycle"
         );
+    }
+
+    private static void testAttachmentContracts() {
+        FrameGraph.PassId render = passId(0, "render");
+        FrameGraph.ResourceId buffer = resourceId(0, "buffer");
+        FrameGraph.ResourceDesc bufferResource = new FrameGraph.ResourceDesc(
+                buffer,
+                FrameGraph.PersistenceClass.SIZE_GENERATION,
+                new FrameGraph.ResourceShape(FrameGraph.ResourceType.BUFFER, "uint", "one_record"),
+                false,
+                FrameGraph.Lifetime.closed(render, render)
+        );
+        FrameGraph.AttachmentContract clearColor = FrameGraph.AttachmentContract.clear(
+                FrameGraph.AttachmentRole.COLOR,
+                FrameGraph.StoreAction.STORE,
+                "0,0,0,0"
+        );
+        expectInvalid(
+                new FrameGraph(
+                        List.of(bufferResource),
+                        List.of(pass(render, FrameGraph.EncoderClass.RENDER, List.of(),
+                                new FrameGraph.ResourceAccess(
+                                        buffer,
+                                        FrameGraph.AccessKind.WRITE,
+                                        FrameGraph.PipelineStage.FRAGMENT,
+                                        clearColor
+                                )))
+                ),
+                "must be a texture"
+        );
+
+        FrameGraph.ResourceId texture = resourceId(1, "texture");
+        expectInvalid(
+                new FrameGraph(
+                        List.of(resource(texture, false, FrameGraph.Lifetime.closed(render, render))),
+                        List.of(pass(render, FrameGraph.EncoderClass.RENDER, List.of(),
+                                new FrameGraph.ResourceAccess(
+                                        texture,
+                                        FrameGraph.AccessKind.WRITE,
+                                        FrameGraph.PipelineStage.FRAGMENT,
+                                        FrameGraph.AttachmentContract.attachment(
+                                                FrameGraph.AttachmentRole.COLOR,
+                                                FrameGraph.LoadAction.LOAD,
+                                                FrameGraph.StoreAction.STORE
+                                        )
+                                )))
+                ),
+                "load action"
+        );
+    }
+
+    private static void testNativeHdrGraphTopology() {
+        FrameGraph graph = NativeHdrFrameGraph.graph();
+        require(graph.passes().size() == 8, "native HDR graph pass count mismatch");
+        require(graph.resources().size() == 13, "native HDR graph resource count mismatch");
+        String passNames = graph.passes().stream()
+                .map(pass -> pass.id().name())
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+        require(passNames.equals(
+                        "world_render,scene_snapshot,hdr_extract,hdr_exposure_reduce,"
+                                + "hdr_bloom_combined,hdr_world_ui_seed,ui_render,present"),
+                "native HDR graph pass order mismatch: " + passNames);
+
+        FrameGraph.PassDesc composite = graph.passes().get(5);
+        require(composite.encoder() == FrameGraph.EncoderClass.RENDER
+                        && composite.dependencies().size() == 2,
+                "native HDR composite dependency contract mismatch");
+        long compositeAttachments = composite.accesses().stream()
+                .filter(access -> access.attachment().isAttachment())
+                .filter(access -> access.attachment().loadAction() == FrameGraph.LoadAction.DONT_CARE)
+                .filter(access -> access.attachment().storeAction() == FrameGraph.StoreAction.STORE)
+                .count();
+        require(compositeAttachments == 2L,
+                "native HDR MRT output contract must be two dontCare/store attachments");
+        require(composite.accesses().stream()
+                        .anyMatch(access -> access.resource().name().equals("main_color")
+                                && access.kind() == FrameGraph.AccessKind.READ),
+                "native HDR result=4 composite must sample the live main color");
+        require(graph.passes().stream().flatMap(pass -> pass.accesses().stream())
+                        .noneMatch(access -> access.resource().name().equals("scene_color_snapshot")
+                                && access.kind().reads()),
+                "native HDR result=4 graph incorrectly reads the legacy color snapshot");
+
+        FrameGraph.PassDesc ui = graph.passes().get(6);
+        FrameGraph.ResourceAccess uiColor = ui.accesses().stream()
+                .filter(access -> access.resource().name().equals("sdr_ui_color"))
+                .findFirst().orElseThrow();
+        require(uiColor.kind() == FrameGraph.AccessKind.READ_WRITE
+                        && uiColor.attachment().loadAction() == FrameGraph.LoadAction.LOAD
+                        && uiColor.attachment().storeAction() == FrameGraph.StoreAction.STORE,
+                "native HDR GUI must load and store the seeded SDR target");
+
+        FrameGraph.PassDesc present = graph.passes().get(7);
+        FrameGraph.ResourceAccess drawable = present.accesses().stream()
+                .filter(access -> access.resource().name().equals("drawable"))
+                .findFirst().orElseThrow();
+        require(drawable.attachment().loadAction() == FrameGraph.LoadAction.DONT_CARE
+                        && drawable.attachment().storeAction() == FrameGraph.StoreAction.STORE,
+                "native HDR drawable contract mismatch");
     }
 
     private static void testAbiHeader() {
@@ -175,7 +277,12 @@ public final class FrameGraphTests {
     ) {
         return new FrameGraph.ResourceDesc(
                 id,
-                FrameGraph.PersistenceClass.SIZE,
+                FrameGraph.PersistenceClass.SIZE_GENERATION,
+                new FrameGraph.ResourceShape(
+                        FrameGraph.ResourceType.TEXTURE,
+                        "test_format",
+                        "test_extent"
+                ),
                 initiallyDefined,
                 lifetime
         );

@@ -49,7 +49,11 @@ public final class FrameGraphDiagnostics {
             result.append("  r").append(resource.id().value())
                     .append(" [shape=box,label=\"")
                     .append(escapeDot(resource.id().name())).append("\\n")
-                    .append(resource.persistence()).append("\"];\n");
+                    .append(resource.persistence()).append("\\n")
+                    .append(resource.shape().type()).append(":")
+                    .append(escapeDot(resource.shape().format())).append("@").append(
+                            escapeDot(resource.shape().extent())
+                    ).append("\"];\n");
         }
         for (FrameGraph.PassDesc pass : sortedPasses(graph)) {
             result.append("  p").append(pass.id().value())
@@ -63,6 +67,11 @@ public final class FrameGraphDiagnostics {
                     .sorted(Comparator.comparingInt(access -> access.resource().value()))
                     .forEach(access -> {
                         String label = access.kind() + "@" + access.stage();
+                        if (access.attachment().isAttachment()) {
+                            label += ":" + access.attachment().role()
+                                    + ":" + access.attachment().loadAction()
+                                    + "/" + access.attachment().storeAction();
+                        }
                         if (access.kind().reads()) {
                             result.append("  r").append(access.resource().value())
                                     .append(" -> p").append(pass.id().value());
@@ -87,6 +96,9 @@ public final class FrameGraphDiagnostics {
                     .append("    {\"id\": ").append(resource.id().value())
                     .append(", \"name\": \"").append(escapeJson(resource.id().name()))
                     .append("\", \"persistence\": \"").append(resource.persistence())
+                    .append("\", \"type\": \"").append(resource.shape().type())
+                    .append("\", \"format\": \"").append(escapeJson(resource.shape().format()))
+                    .append("\", \"extent\": \"").append(escapeJson(resource.shape().extent()))
                     .append("\", \"initially_defined\": ").append(resource.initiallyDefined());
             if (resource.lifetime().isWholeGraph()) {
                 result.append(", \"lifetime\": \"whole_graph\"}");
@@ -124,7 +136,20 @@ public final class FrameGraphDiagnostics {
                 }
                 result.append("{\"resource\": ").append(access.resource().value())
                         .append(", \"kind\": \"").append(access.kind())
-                        .append("\", \"stage\": \"").append(access.stage()).append("\"}");
+                        .append("\", \"stage\": \"").append(access.stage()).append("\"");
+                if (access.attachment().isAttachment()) {
+                    result.append(", \"attachment\": {\"role\": \"")
+                            .append(access.attachment().role())
+                            .append("\", \"load\": \"").append(access.attachment().loadAction())
+                            .append("\", \"store\": \"").append(access.attachment().storeAction())
+                            .append("\"");
+                    if (access.attachment().clearValue() != null) {
+                        result.append(", \"clear\": \"")
+                                .append(escapeJson(access.attachment().clearValue())).append("\"");
+                    }
+                    result.append("}");
+                }
+                result.append("}");
             }
             result.append("]}");
         }
