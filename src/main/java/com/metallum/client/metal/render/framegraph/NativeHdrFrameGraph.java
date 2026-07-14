@@ -17,10 +17,10 @@ import java.util.List;
  * This route has a semantic mask, so the combined bloom pass is present.</p>
  */
 public final class NativeHdrFrameGraph {
-    public static final String GRAPH_ID = "native-hdr-enhanced-metalfx-off-v1";
+    public static final String GRAPH_ID = "native-hdr-enhanced-metalfx-off-v2";
 
     private static final FrameGraph.PassId WORLD_RENDER = pass(0, "world_render");
-    private static final FrameGraph.PassId SCENE_SNAPSHOT = pass(1, "scene_snapshot");
+    private static final FrameGraph.PassId CAPTURE_SCENE_DEPTH = pass(1, "scene_depth_snapshot");
     private static final FrameGraph.PassId HDR_EXTRACT = pass(2, "hdr_extract");
     private static final FrameGraph.PassId HDR_EXPOSURE_REDUCE = pass(3, "hdr_exposure_reduce");
     private static final FrameGraph.PassId HDR_BLOOM_COMBINED = pass(4, "hdr_bloom_combined");
@@ -31,16 +31,15 @@ public final class NativeHdrFrameGraph {
     private static final FrameGraph.ResourceId MAIN_COLOR = resource(0, "main_color");
     private static final FrameGraph.ResourceId MAIN_DEPTH = resource(1, "main_depth");
     private static final FrameGraph.ResourceId HDR_SEMANTIC = resource(2, "hdr_semantic");
-    private static final FrameGraph.ResourceId SCENE_COLOR_SNAPSHOT = resource(3, "scene_color_snapshot");
-    private static final FrameGraph.ResourceId SCENE_DEPTH_SNAPSHOT = resource(4, "scene_depth_snapshot");
-    private static final FrameGraph.ResourceId HDR_EMISSION = resource(5, "hdr_emission");
-    private static final FrameGraph.ResourceId HDR_BLOOM = resource(6, "hdr_bloom");
-    private static final FrameGraph.ResourceId HDR_HISTOGRAM = resource(7, "hdr_histogram");
-    private static final FrameGraph.ResourceId HDR_ADAPTIVE_STATE = resource(8, "hdr_adaptive_state");
-    private static final FrameGraph.ResourceId HDR_WORLD_COMPOSITE = resource(9, "hdr_world_composite");
-    private static final FrameGraph.ResourceId SDR_UI_COLOR = resource(10, "sdr_ui_color");
-    private static final FrameGraph.ResourceId SDR_UI_DEPTH = resource(11, "sdr_ui_depth");
-    private static final FrameGraph.ResourceId DRAWABLE = resource(12, "drawable");
+    private static final FrameGraph.ResourceId SCENE_DEPTH_SNAPSHOT = resource(3, "scene_depth_snapshot");
+    private static final FrameGraph.ResourceId HDR_EMISSION = resource(4, "hdr_emission");
+    private static final FrameGraph.ResourceId HDR_BLOOM = resource(5, "hdr_bloom");
+    private static final FrameGraph.ResourceId HDR_HISTOGRAM = resource(6, "hdr_histogram");
+    private static final FrameGraph.ResourceId HDR_ADAPTIVE_STATE = resource(7, "hdr_adaptive_state");
+    private static final FrameGraph.ResourceId HDR_WORLD_COMPOSITE = resource(8, "hdr_world_composite");
+    private static final FrameGraph.ResourceId SDR_UI_COLOR = resource(9, "sdr_ui_color");
+    private static final FrameGraph.ResourceId SDR_UI_DEPTH = resource(10, "sdr_ui_depth");
+    private static final FrameGraph.ResourceId DRAWABLE = resource(11, "drawable");
 
     private static final FrameGraph GRAPH = createGraph();
     private static boolean initialized;
@@ -71,17 +70,11 @@ public final class NativeHdrFrameGraph {
                         texture(MAIN_COLOR, "rgba16_float", "render_extent", false,
                                 lifetime(WORLD_RENDER, HDR_WORLD_UI_SEED)),
                         texture(MAIN_DEPTH, "depth32_float", "render_extent", false,
-                                lifetime(WORLD_RENDER, SCENE_SNAPSHOT)),
+                                lifetime(WORLD_RENDER, CAPTURE_SCENE_DEPTH)),
                         texture(HDR_SEMANTIC, "rgba8_unorm", "render_extent", false,
                                 lifetime(WORLD_RENDER, HDR_WORLD_UI_SEED)),
-                        // The legacy capture still writes this snapshot, but
-                        // successful result=4 encoding samples MAIN_COLOR
-                        // directly. Keeping the write-only node exposes that
-                        // redundant full-frame copy to later optimization.
-                        texture(SCENE_COLOR_SNAPSHOT, "rgba16_float", "render_extent", false,
-                                lifetime(SCENE_SNAPSHOT, SCENE_SNAPSHOT)),
                         texture(SCENE_DEPTH_SNAPSHOT, "depth32_float", "render_extent", false,
-                                lifetime(SCENE_SNAPSHOT, HDR_WORLD_UI_SEED)),
+                                lifetime(CAPTURE_SCENE_DEPTH, HDR_WORLD_UI_SEED)),
                         texture(HDR_EMISSION, "rgba16_float", "quarter_render_extent", false,
                                 lifetime(HDR_EXTRACT, HDR_WORLD_UI_SEED)),
                         texture(HDR_BLOOM, "rgba16_float", "quarter_render_extent", false,
@@ -122,18 +115,16 @@ public final class NativeHdrFrameGraph {
                                         FrameGraph.LoadAction.CLEAR, "0,0,0,0")
                         ),
                         pass(
-                                SCENE_SNAPSHOT,
+                                CAPTURE_SCENE_DEPTH,
                                 FrameGraph.EncoderClass.BLIT,
                                 List.of(WORLD_RENDER),
-                                access(MAIN_COLOR, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.BLIT),
                                 access(MAIN_DEPTH, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.BLIT),
-                                access(SCENE_COLOR_SNAPSHOT, FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.BLIT),
                                 access(SCENE_DEPTH_SNAPSHOT, FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.BLIT)
                         ),
                         pass(
                                 HDR_EXTRACT,
                                 FrameGraph.EncoderClass.RENDER,
-                                List.of(SCENE_SNAPSHOT),
+                                List.of(CAPTURE_SCENE_DEPTH),
                                 access(MAIN_COLOR, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
                                 access(SCENE_DEPTH_SNAPSHOT, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),
                                 access(HDR_SEMANTIC, FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.FRAGMENT),

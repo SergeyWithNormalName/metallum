@@ -143,13 +143,13 @@ public final class FrameGraphTests {
     private static void testNativeHdrGraphTopology() {
         FrameGraph graph = NativeHdrFrameGraph.graph();
         require(graph.passes().size() == 8, "native HDR graph pass count mismatch");
-        require(graph.resources().size() == 13, "native HDR graph resource count mismatch");
+        require(graph.resources().size() == 12, "native HDR graph resource count mismatch");
         String passNames = graph.passes().stream()
                 .map(pass -> pass.id().name())
                 .reduce((left, right) -> left + "," + right)
                 .orElse("");
         require(passNames.equals(
-                        "world_render,scene_snapshot,hdr_extract,hdr_exposure_reduce,"
+                        "world_render,scene_depth_snapshot,hdr_extract,hdr_exposure_reduce,"
                                 + "hdr_bloom_combined,hdr_world_ui_seed,ui_render,present"),
                 "native HDR graph pass order mismatch: " + passNames);
 
@@ -168,10 +168,18 @@ public final class FrameGraphTests {
                         .anyMatch(access -> access.resource().name().equals("main_color")
                                 && access.kind() == FrameGraph.AccessKind.READ),
                 "native HDR result=4 composite must sample the live main color");
-        require(graph.passes().stream().flatMap(pass -> pass.accesses().stream())
-                        .noneMatch(access -> access.resource().name().equals("scene_color_snapshot")
-                                && access.kind().reads()),
-                "native HDR result=4 graph incorrectly reads the legacy color snapshot");
+        require(graph.resources().stream()
+                        .noneMatch(resource -> resource.id().name().equals("scene_color_snapshot")),
+                "native HDR result=4 graph retained the removed color snapshot");
+        FrameGraph.PassDesc depthSnapshot = graph.passes().get(1);
+        require(depthSnapshot.accesses().size() == 2
+                        && depthSnapshot.accesses().stream().anyMatch(access ->
+                                access.resource().name().equals("main_depth")
+                                        && access.kind() == FrameGraph.AccessKind.READ)
+                        && depthSnapshot.accesses().stream().anyMatch(access ->
+                                access.resource().name().equals("scene_depth_snapshot")
+                                        && access.kind() == FrameGraph.AccessKind.WRITE),
+                "native HDR snapshot pass must copy depth only");
 
         FrameGraph.PassDesc ui = graph.passes().get(6);
         FrameGraph.ResourceAccess uiColor = ui.accesses().stream()

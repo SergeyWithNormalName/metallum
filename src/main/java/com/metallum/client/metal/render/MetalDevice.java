@@ -41,6 +41,13 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 public final class MetalDevice implements GpuDeviceBackend {
+    enum HdrSceneColorState {
+        NONE,
+        PENDING_REDIRECT,
+        SNAPSHOT,
+        DIRECT_SAFE
+    }
+
     record SemanticAttachment(MemorySegment texture, boolean clear) {
     }
 
@@ -83,6 +90,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private MetalGpuTexture hdrSceneDepthSnapshot;
     @Nullable
     private MetalGpuTexture hdrDirectSceneSource;
+    private HdrSceneColorState hdrSceneColorState = HdrSceneColorState.NONE;
+    private boolean hdrDirectSceneRequiresSpatialScaling;
     @Nullable
     private MetalGpuTexture hdrSemanticMask;
     private MemorySegment hdrSceneColorHandle = MemorySegment.NULL;
@@ -286,8 +295,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneDepthSnapshot.close();
             this.hdrSceneDepthSnapshot = null;
         }
-        this.hdrDirectSceneSource = null;
-        this.hdrSceneColorHandle = MemorySegment.NULL;
+        this.resetHdrSceneColor();
         this.hdrSceneDepthHandle = MemorySegment.NULL;
         if (this.hdrSemanticMask != null) {
             this.hdrSemanticMask.close();
@@ -387,8 +395,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (!this.hdrEnhancedActive) {
             this.hdrSceneAvailable = false;
             this.hdrSemanticSceneAvailable = false;
-            this.hdrDirectSceneSource = null;
-            this.hdrSceneColorHandle = MemorySegment.NULL;
+            this.resetHdrSceneColor();
         }
         MetalFxSpatialScaling.onHdrOutputModeChanged(previousOutputMode, outputMode);
     }
@@ -404,8 +411,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrEnhancedActive = false;
         this.hdrSceneAvailable = false;
         this.hdrSemanticSceneAvailable = false;
-        this.hdrDirectSceneSource = null;
-        this.hdrSceneColorHandle = MemorySegment.NULL;
+        this.resetHdrSceneColor();
         this.hdrUiSuppressSceneEnhancement = false;
     }
 
@@ -447,53 +453,19 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.spatialSceneSubmitIndex = this.spatialSceneAvailable
                 ? this.commandEncoder.currentSubmitIndex()
                 : Long.MIN_VALUE;
+        this.hdrSceneAvailable = false;
+        this.hdrSemanticSceneAvailable = false;
+        this.resetHdrSceneColor();
         if (!this.hdrEnhancedActive || source.isClosed() || depth == null || depth.isClosed()) {
-            this.hdrSceneAvailable = false;
-            this.hdrSemanticSceneAvailable = false;
-            this.hdrDirectSceneSource = null;
-            this.hdrSceneColorHandle = MemorySegment.NULL;
             return;
         }
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
         if (depth.getWidth(0) != width || depth.getHeight(0) != height) {
-            this.hdrSceneAvailable = false;
-            this.hdrSemanticSceneAvailable = false;
-            this.hdrDirectSceneSource = null;
-            this.hdrSceneColorHandle = MemorySegment.NULL;
             return;
         }
         boolean directSpatialScene = MetalFxSpatialScaling.isActive();
-        if (!directSpatialScene) {
-            if (this.hdrSceneSnapshot == null
-                    || this.hdrSceneSnapshot.isClosed()
-                    || this.hdrSceneSnapshot.getWidth(0) != width
-                    || this.hdrSceneSnapshot.getHeight(0) != height
-                    || this.hdrSceneSnapshot.getFormat() != source.getFormat()) {
-                if (this.hdrSceneSnapshot != null) {
-                    this.hdrSceneSnapshot.close();
-                }
-                try {
-                    this.hdrSceneSnapshot = new MetalGpuTexture(
-                            this,
-                            GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                            "Metallum HDR scene snapshot",
-                            source.getFormat(),
-                            width,
-                            height,
-                            1,
-                            1
-                    );
-                    com.metallum.Metallum.LOGGER.info("Pre-GUI scene capture format: " + source.getFormat());
-                } catch (RuntimeException exception) {
-                    this.disableHdrEnhancement();
-                    Metallum.LOGGER.error("Failed to allocate the HDR scene snapshot; continuing with EDR output", exception);
-                    return;
-                }
-            }
-        }
-
         if (this.hdrSceneDepthSnapshot == null
                 || this.hdrSceneDepthSnapshot.isClosed()
                 || this.hdrSceneDepthSnapshot.getWidth(0) != width
@@ -527,10 +499,15 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
             this.hdrDirectSceneSource = source;
             this.hdrSceneColorHandle = source.nativeHandle();
+            this.hdrSceneColorState = HdrSceneColorState.DIRECT_SAFE;
+            this.hdrDirectSceneRequiresSpatialScaling = true;
         } else {
-            this.hdrDirectSceneSource = null;
-            this.commandEncoder.copyTextureToTexture(source, this.hdrSceneSnapshot, 0, 0, 0, 0, 0, width, height);
-            this.hdrSceneColorHandle = this.hdrSceneSnapshot.nativeHandle();
+            // Keep the live scene untouched while GUI redirection is being
+            // prepared. The common native-HDR path samples it directly; a
+            // snapshot is created lazily only if GUI must fall back to the
+            // MainTarget and would otherwise overwrite the scene.
+            this.hdrDirectSceneSource = source;
+            this.hdrSceneColorState = HdrSceneColorState.PENDING_REDIRECT;
         }
         this.commandEncoder.copyTextureToTexture(depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height);
         this.hdrSceneAvailable = true;
@@ -546,6 +523,94 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSemanticMask.getWidth(0) == width
                 && this.hdrSemanticMask.getHeight(0) == height
                 && this.hdrSemanticMaskTouchedSubmitIndex == this.hdrSceneSubmitIndex;
+    }
+
+    boolean materializeHdrSceneFallback(final MetalGpuTexture source) {
+        if (this.hdrSceneColorState != HdrSceneColorState.PENDING_REDIRECT) {
+            return true;
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        if (!this.hdrEnhancedActive
+                || !this.hdrSceneAvailable
+                || this.hdrSceneSubmitIndex != submitIndex
+                || this.hdrDirectSceneSource != source
+                || source.isClosed()
+                || source.getWidth(0) != this.hdrSceneWidth
+                || source.getHeight(0) != this.hdrSceneHeight) {
+            this.hdrSceneAvailable = false;
+            this.hdrSemanticSceneAvailable = false;
+            this.resetHdrSceneColor();
+            return false;
+        }
+
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        try {
+            if (this.hdrSceneSnapshot == null
+                    || this.hdrSceneSnapshot.isClosed()
+                    || this.hdrSceneSnapshot.getWidth(0) != width
+                    || this.hdrSceneSnapshot.getHeight(0) != height
+                    || this.hdrSceneSnapshot.getFormat() != source.getFormat()) {
+                if (this.hdrSceneSnapshot != null) {
+                    this.hdrSceneSnapshot.close();
+                }
+                this.hdrSceneSnapshot = new MetalGpuTexture(
+                        this,
+                        GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
+                        "Metallum HDR scene snapshot",
+                        source.getFormat(),
+                        width,
+                        height,
+                        1,
+                        1
+                );
+                Metallum.LOGGER.info("Pre-GUI fallback scene capture format: {}", source.getFormat());
+            }
+            this.commandEncoder.copyTextureToTexture(
+                    source,
+                    this.hdrSceneSnapshot,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    width,
+                    height
+            );
+            this.hdrDirectSceneSource = null;
+            this.hdrSceneColorHandle = this.hdrSceneSnapshot.nativeHandle();
+            this.hdrSceneColorState = HdrSceneColorState.SNAPSHOT;
+            return true;
+        } catch (RuntimeException exception) {
+            this.disableHdrEnhancement();
+            Metallum.LOGGER.error(
+                    "Failed to preserve the HDR scene before GUI fallback; continuing with EDR output",
+                    exception
+            );
+            return false;
+        }
+    }
+
+    boolean confirmHdrUiRedirect(final MetalGpuTexture source) {
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        if (this.hdrSceneColorState == HdrSceneColorState.NONE) {
+            return MetalFxSpatialScaling.isActive()
+                    && this.spatialSceneAvailable
+                    && this.spatialSceneSubmitIndex == submitIndex
+                    && !source.isClosed();
+        }
+        if (!this.hdrEnhancedActive
+                || !this.hdrSceneAvailable
+                || this.hdrSceneSubmitIndex != submitIndex
+                || this.hdrDirectSceneSource != source
+                || source.isClosed()) {
+            return false;
+        }
+        if (this.hdrSceneColorState == HdrSceneColorState.PENDING_REDIRECT) {
+            this.hdrSceneColorHandle = source.nativeHandle();
+            this.hdrSceneColorState = HdrSceneColorState.DIRECT_SAFE;
+        }
+        return this.hdrSceneColorState == HdrSceneColorState.DIRECT_SAFE;
     }
 
     void captureHdrUi(final MetalGpuTexture ui, final boolean suppressSceneEnhancement) {
@@ -676,25 +741,34 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean hdrReady = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
-                && !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle)
-                && (this.hdrDirectSceneSource == null || !this.hdrDirectSceneSource.isClosed())
+                && this.hdrSceneColorState != HdrSceneColorState.NONE
+                && (this.hdrDirectSceneSource == null
+                    || (this.hdrDirectSceneSource == source && !this.hdrDirectSceneSource.isClosed()))
                 && !source.isClosed()
                 && source.getWidth(0) == this.hdrSceneWidth
                 && source.getHeight(0) == this.hdrSceneHeight;
         return spatialReady || hdrReady;
     }
 
-    HdrSceneInputs consumeHdrSceneInputs() {
+    HdrSceneInputs consumeHdrSceneInputs(final MetalGpuTexture presentedSource) {
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         MemorySegment uiHandle = this.hdrUiSubmitIndex == submitIndex
                 ? this.hdrUiHandle
                 : MemorySegment.NULL;
+        boolean directSourcePresent = this.hdrDirectSceneSource != null;
+        boolean directRouteActive = !this.hdrDirectSceneRequiresSpatialScaling
+                || MetalFxSpatialScaling.isActive();
         boolean sceneValid = this.hdrEnhancedActive
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
-                && !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle)
-                && (this.hdrDirectSceneSource == null
-                    || (!this.hdrDirectSceneSource.isClosed() && MetalFxSpatialScaling.isActive()))
+                && isHdrSceneColorConsumable(
+                        this.hdrSceneColorState,
+                        !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle),
+                        directSourcePresent,
+                        this.hdrDirectSceneSource == presentedSource,
+                        directSourcePresent && this.hdrDirectSceneSource.isClosed(),
+                        directRouteActive
+                )
                 && !(this.hdrUiSubmitIndex == submitIndex && this.hdrUiSuppressSceneEnhancement);
         if (!sceneValid) {
             return MetalNativeBridge.isNullHandle(uiHandle)
@@ -719,6 +793,34 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.spatialHdrPrecomposedSubmitIndex == submitIndex
                         && !MetalNativeBridge.isNullHandle(uiHandle)
         );
+    }
+
+    private void resetHdrSceneColor() {
+        this.hdrDirectSceneSource = null;
+        this.hdrSceneColorHandle = MemorySegment.NULL;
+        this.hdrSceneColorState = HdrSceneColorState.NONE;
+        this.hdrDirectSceneRequiresSpatialScaling = false;
+    }
+
+    static boolean isHdrSceneColorConsumable(
+            final HdrSceneColorState state,
+            final boolean handlePresent,
+            final boolean directSourcePresent,
+            final boolean directSourceMatchesPresented,
+            final boolean directSourceClosed,
+            final boolean directRouteActive
+    ) {
+        if (!handlePresent) {
+            return false;
+        }
+        return switch (state) {
+            case SNAPSHOT -> !directSourcePresent;
+            case DIRECT_SAFE -> directSourcePresent
+                    && directSourceMatchesPresented
+                    && !directSourceClosed
+                    && directRouteActive;
+            case NONE, PENDING_REDIRECT -> false;
+        };
     }
 
     void queueResourceRelease(final MemorySegment handle) {

@@ -77,6 +77,24 @@ public final class MetalHdrFrame {
         }
     }
 
+    /** Preserves the pre-GUI scene before GUI rendering falls back to MainTarget. */
+    public static boolean materializeSceneFallback(final GpuTextureView mainColorView) {
+        if (mainColorView == null || mainColorView.isClosed()) {
+            return false;
+        }
+        return mainColorView.texture() instanceof MetalGpuTexture color
+                && color.device().materializeHdrSceneFallback(color);
+    }
+
+    /** Marks the live scene safe only after GUI redirection is fully established. */
+    public static boolean confirmUiRedirect(final GpuTextureView mainColorView) {
+        if (mainColorView == null || mainColorView.isClosed()) {
+            return false;
+        }
+        return mainColorView.texture() instanceof MetalGpuTexture color
+                && color.device().confirmHdrUiRedirect(color);
+    }
+
     public static boolean isSceneReadyForUi(final GpuTextureView mainColorView) {
         if (mainColorView == null || mainColorView.isClosed()) {
             return false;

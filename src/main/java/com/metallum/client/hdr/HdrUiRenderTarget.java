@@ -44,12 +44,12 @@ public final class HdrUiRenderTarget {
         spatialHdrPrecomposedThisFrame = false;
         if ((!HdrSceneState.isRequested() && !spatialActiveThisFrame)
                 || (unavailable && !spatialActiveThisFrame)) {
-            return mainTarget;
+            return fallbackToMainTarget(mainTarget);
         }
 
         try {
             if (!MetalHdrFrame.isSceneReadyForUi(mainTarget.getColorTextureView())) {
-                return mainTarget;
+                return fallbackToMainTarget(mainTarget);
             }
             int targetWidth = spatialActiveThisFrame
                     ? Minecraft.getInstance().getWindow().getWidth()
@@ -87,11 +87,19 @@ public final class HdrUiRenderTarget {
                 activationLogged = true;
                 Metallum.LOGGER.info("Seeded SDR GUI target is active (RGBA8_UNORM)");
             }
+            if (!MetalHdrFrame.confirmUiRedirect(mainTarget.getColorTextureView())) {
+                throw new IllegalStateException("HDR scene changed before GUI redirection completed");
+            }
             activeThisFrame = true;
             activeSource = mainTarget;
             unavailable = false;
             return target;
         } catch (Throwable throwable) {
+            try {
+                MetalHdrFrame.materializeSceneFallback(mainTarget.getColorTextureView());
+            } catch (Throwable fallbackFailure) {
+                throwable.addSuppressed(fallbackFailure);
+            }
             if (spatialActiveThisFrame) {
                 disableScalingAfterFailure(throwable);
             } else {
@@ -236,6 +244,18 @@ public final class HdrUiRenderTarget {
                 "Failed to prepare the seeded SDR UI target; rendering GUI into MainTarget for safety",
                 throwable
         );
+    }
+
+    private static RenderTarget fallbackToMainTarget(final RenderTarget mainTarget) {
+        try {
+            MetalHdrFrame.materializeSceneFallback(mainTarget.getColorTextureView());
+        } catch (Throwable throwable) {
+            Metallum.LOGGER.error(
+                    "Failed to preserve the HDR scene before rendering GUI into MainTarget; using EDR output",
+                    throwable
+            );
+        }
+        return mainTarget;
     }
 
     private static void disableScalingAfterFailure(final Throwable throwable) {

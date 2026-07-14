@@ -31,6 +31,7 @@ public final class MetalRuntimeTests {
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
         testPendingUiSeedConsumeOnceLifecycle();
+        testHdrSceneColorRouting();
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -315,6 +316,37 @@ public final class MetalRuntimeTests {
                         true, true, 3024, 1964, 3024, 1964,
                         false, true, 7L, 7L
                 ), "semantic MRT pass was incorrectly fused with the UI seed");
+    }
+
+    private static void testHdrSceneColorRouting() {
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.PENDING_REDIRECT,
+                        true, true, true, false, true
+                ), "pending GUI redirect exposed the live HDR scene to presentation");
+        require(MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.DIRECT_SAFE,
+                        true, true, true, false, true
+                ), "confirmed GUI redirect did not expose the untouched live HDR scene");
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.DIRECT_SAFE,
+                        true, true, false, false, true
+                ), "a different presented texture consumed the live HDR scene");
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.DIRECT_SAFE,
+                        true, true, true, true, true
+                ), "a closed live HDR scene remained consumable");
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.DIRECT_SAFE,
+                        true, true, true, false, false
+                ), "disabled spatial scaling retained a spatial direct scene");
+        require(MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.SNAPSHOT,
+                        true, false, false, false, true
+                ), "materialized HDR snapshot was not consumable");
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.SNAPSHOT,
+                        false, false, false, false, true
+                ), "missing HDR snapshot handle was accepted");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

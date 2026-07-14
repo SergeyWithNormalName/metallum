@@ -382,7 +382,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         materializePendingUiSeed();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
-        MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs();
+        MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs(source);
         return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
                 source.nativeHandle(),
