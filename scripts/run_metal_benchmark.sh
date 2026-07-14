@@ -439,6 +439,8 @@ unset METAL_DEVICE_WRAPPER_TYPE
 
 start_epoch=$(date +%s)
 cd "$ROOT"
+echo "Running Minecraft benchmark quietly (live output would perturb frame pacing)"
+echo "  console log: $CONSOLE_LOG"
 set +e
 METALLUM_BENCHMARK=1 \
 METALLUM_BENCHMARK_MONITOR="$MONITOR_NAME" \
@@ -505,8 +507,8 @@ METALLUM_GPU_TIMING_DETAIL=0 \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
     ./gradlew --no-daemon runClient --console=plain \
         "--args=--username $PLAYER_NAME --uuid $PLAYER_UUID --quickPlaySingleplayer $RUN_WORLD_NAME" \
-        2>&1 | tee "$CONSOLE_LOG"
-gradle_status=${PIPESTATUS[0]}
+        > "$CONSOLE_LOG" 2>&1
+gradle_status=$?
 set -e
 
 LATEST_LOG="$RUN_DIR/logs/latest.log"

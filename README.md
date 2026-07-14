@@ -76,7 +76,7 @@ METALLUM_GPU_TIMING_REPORT="$PWD/logs/metallum-gpu-timing.jsonl" \
 
 The report path has no effect unless `METALLUM_GPU_TIMING=1` is set. On M1 Pro the available Metal counter is a GPU timestamp; the report can attribute elapsed time between the instrumented boundaries, but cannot provide hardware occupancy, cache, or bandwidth counters.
 
-For the reproducible release gate on this MacBook, use the console-only launcher. It refuses the wrong monitor or configuration, targets the built-in Retina display at 3024x1964@120 with VSync off, disables screenshots and intrusive timing detail, and accepts only 3000 phase-aligned measurement frames:
+For the reproducible release gate on this MacBook, use the console-only launcher. It refuses the wrong monitor or configuration, targets the built-in Retina display at 3024x1964@120 with VSync off, disables screenshots and intrusive timing detail, suppresses live Minecraft log rendering so the terminal UI cannot perturb frame pacing, and accepts only 3000 phase-aligned measurement frames:
 
 ```bash
 scripts/run_metal_benchmark.sh --preflight-only
