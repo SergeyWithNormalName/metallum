@@ -221,6 +221,19 @@ Stage budgets не складываются поверх текущего кад
 
 Lighting passes объявляют reads, writes, stages, lifetime и budget в общем frame graph из плана оптимизации. Они не кодируют собственные broad fences, временные allocators или скрытые копии scene/depth. Metal 3 и условный Metal 4 executor исполняют один логический workload.
 
+### 4.11. Capability меняет исполнение, но не световой результат
+
+Каждый lighting pass объявляет `requiredCapabilities`, `optionalOptimizations` и fallback. Metal 4 может изменить binding, command allocation, barriers, pass grouping или pipeline specialization, но не формулу direct light, radiance scale, voxel validity, motion convention или HDR output.
+
+```text
+ClusterBuildPass
+  required: storageBuffers, indirectDispatch
+  optional: argumentTables, metal4UnifiedCompute, explicitBarriers, simdReduction
+  fallback: Metal3Compute
+```
+
+Pass не проверяет macOS/GPU family самостоятельно. Общий graph compiler получает immutable capability snapshot и заранее строит execution plan для всей renderer generation.
+
 ---
 
 ## 5. Целевой frame graph
@@ -966,6 +979,23 @@ Fallback переключается на границе кадра с resize/res
 - M1 Pro должен проходить все correctness tests и иметь рабочие presets.
 - M3+ может получить отдельные optional RT/denoised features позже.
 
+Capability levels фиксируются отдельно:
+
+| Level | Lighting contract | Optional execution |
+|---|---|---|
+| Metal 3/macOS 14 | Полный direct light, voxels, shadows, GI, volume, HDR | Обычные bindings/encoders/fences |
+| Metal 3 + residency | Тот же результат | Stable residency sets на macOS 15+ |
+| Metal 4 Core | Тот же результат | Compiler, allocators, argument tables, explicit barriers, unified compute, attachment mapping |
+| Metal 4 Extended | Тот же результат | Sparse/новые indirect/RT возможности только при отдельном GPU-family gate |
+
+M1 Pro является обязательным Metal 4 Core test device, но extended features более новых GPU не становятся зависимостью Performance/Balanced/Ultra.
+
+### 17.1.1. Atomic renderer generation
+
+Executor, capability snapshot, compiler policy, argument tables, residency sets и resource layouts выбираются до начала кадра и неизменны до смены generation. Resize/world reload/device change создаёт новую generation. При Metal 4 failure готовится Metal 3 generation, а старая освобождается только после завершения in-flight submit.
+
+Частично Metal 3/частично Metal 4 command lifecycle внутри одного кадра запрещён, хотя shaders/metallib/PSO и logical passes могут быть общими.
+
 ### 17.2. Native shaders
 
 Большой lighting renderer не должен бесконечно расширять embedded MSL string.
@@ -1017,6 +1047,8 @@ MSL собирается Gradle-задачей в generated `.metallib`, а не
 - Metal 4 write→read/write dependency получает device visibility; residency не заменяет synchronization.
 - Новая queue добавляется только после доказанного scheduling выигрыша и полного cross-queue event contract.
 
+Metal 3 executor переводит graph edges в точные fences/memory barriers. Metal 4 executor переводит те же edges в producer/consumer/intra-pass barriers. Whole-resource correctness реализуется раньше subresource/range narrowing.
+
 ### 17.5. Pipeline variants
 
 Варианты создаются по небольшому feature key:
@@ -1029,6 +1061,8 @@ MSL собирается Gradle-задачей в generated `.metallib`, а не
 - quality specialization constants.
 
 Нельзя создавать комбинаторный PSO explosion. Предсказуемые variants prewarm после capability gate; остальные компилируются вне горячего draw path или имеют безопасный fallback.
+
+На macOS 26+ dedicated Metal 4 compiler может независимо использоваться раньше полного Metal 4 command executor: async compilation, harvesting/archive, flexible PSO и color-attachment mapping включаются отдельными gates. Совместимость PSO не должна заставлять дублировать lighting shader source.
 
 Внутри kernels при доказанной точности используются packed formats и `half`; world/camera transforms, depth reconstruction и большие координаты остаются `float`. SIMD-group reductions применяются к histogram/cluster/work counters только если capture показывает выигрыш относительно atomics.
 
@@ -1045,6 +1079,30 @@ Tile/imageblock path является оптимизацией, не архит�
 
 Tile path не должен создавать отдельный lighting contract. Это альтернативный executor одного pass/resource description с теми же численными tests и fallback на обычный clustered forward+.
 
+### 17.7. Metal 4 argument-table layout
+
+Metal 4 path использует несколько bounded tables, а не одну глобальную максимального размера:
+
+- frame/global: matrices, exposure, dimensions, jitter;
+- world/lighting: lights, clipmaps, shadow/GI resources;
+- materials: textures, samplers, descriptor tables;
+- pass-local: transient inputs/outputs.
+
+Bindings генерируются из versioned resource ABI. Обновляются только dirty slots. Все косвенно доступные allocations входят в committed residency sets до encoding. Metal 3 получает эквивалентные bindings через обычный/argument-buffer path.
+
+### 17.8. Кандидаты Metal 4 pass consolidation
+
+Первый обязательный A/B slice:
+
+```text
+light/voxel upload
+→ cluster build
+→ opaque forward+ render
+→ HDR histogram/compute
+```
+
+Unified compute применяется к совместимым copy/fill/dispatch operations. Color-attachment mapping исследуется для motion/reactive/compact auxiliary outputs. Fusion принимается только при одинаковом ordering/numeric output и снижении encoder/store-load или GPU p95.
+
 ---
 
 ## 18. Java/Fabric структура нового кода
@@ -1053,7 +1111,8 @@ Tile path не должен создавать отдельный lighting contr
 
 ```text
 com.metallum.client.renderer
-  RendererMode / RendererCapabilityGate / FrameState
+  RendererMode / RendererCapabilityGate / MetalCapabilities
+  RendererGeneration / MetalExecutorKind / FrameState
 
 com.metallum.client.lighting
   LightRegistry / LightSnapshot / LightExtractor / LightingConfig
@@ -1228,9 +1287,11 @@ JSONL report расширяется полями:
 
 - renderer mode и preset;
 - Metal executor (`metal3`/`metal4`) и frame-graph version;
+- immutable capability snapshot/level и active compiler/binding/synchronization slices;
 - render/display dimensions;
 - command buffer/encoder/pass counts;
 - bytes uploaded/copied/read back и ring high-water/overflow;
+- command allocator high-water/reset generation, argument-table dirty updates, residency-set churn и barrier stage/count;
 - light count;
 - cluster p50/p95/p99 и overflow;
 - dirty voxel bricks submitted/remaining;
@@ -1272,6 +1333,7 @@ Diagnostic overlays:
 - Optimization Foundation Gate из начала этого документа пройден.
 - Известен non-lighting frame budget M1 Pro для native/Spatial presets.
 - Frame graph, batch ABI, rings, shader packaging и bounded queues готовы.
+- Capability matrix и atomic Metal 3/4 generation fallback проверены; optional O8 slices имеют отдельные A/B решения.
 - Light-only update не требует terrain remesh по целевому contract.
 - Legacy renderer визуально и численно не регрессировал.
 
@@ -1562,6 +1624,11 @@ Diagnostic overlays:
 - `metalSynchronizationValidation`;
 - `chunkLightDecouplingValidation`;
 - `frameBudgetControllerValidation`.
+- `metalCapabilityValidation`;
+- `metal4AllocatorLifecycleValidation`;
+- `metal4ArgumentTableValidation`;
+- `metal4BarrierValidation`;
+- `metal4GenerationFallbackValidation`;
 
 ### 23.2. Обязательные reference scenes
 
@@ -1621,6 +1688,11 @@ Diagnostic overlays:
 | Full-resolution MRT bandwidth | Потеря FPS на TBDR | Forward+, compact aux, optional normal buffer |
 | Runtime shader compilation | Первый кадр тормозит | Generated metallib и PSO prewarm |
 | Lighting создаёт второй allocator/sync model | Дублирование и hazards | Общий frame graph, rings, heaps и executor foundation |
+| Один `supportsMetal4` включает неподдерживаемую extended feature | Crash/validation failure на M1 | Capability matrix по OS и GPU family |
+| Metal 4 argument table не соответствует residency set | GPU fault | Generated binding/residency plan и validation |
+| Metal 4 barrier расходится с Metal 3 dependency | Разная картинка/мерцание | Один graph edge source и parity scenes |
+| Metal 4 allocator/generation освобождён рано | Редкая corruption | In-flight ownership и deferred retirement |
+| Metal 4 optimization меняет lighting math | Разные presets/HDR | Optional execution policy и единые numeric tests |
 | Сумма допустимых stages превышает frame budget | Постоянный GPU overload | Admission gate по фактическому non-lighting headroom и preset caps |
 | Мод добавляет неизвестный material/render role | Некорректный свет | Deterministic default или legacy rejection |
 | EDR display меняется во время игры | Clamp/скачок | Live headroom, display-only mapping, history policy |
@@ -1649,6 +1721,8 @@ Diagnostic overlays:
 - UI остаётся полноразмерным SDR.
 - Performance/Balanced/Ultra соблюдают утверждённые p95 и memory budgets на M1 Pro.
 - Light/chunk churn соблюдает `1% low`, bounded queue и no-remesh criteria.
+- Metal 3 и Metal 4 Core дают эквивалентную radiance/HDR картинку; различается только измеренно более эффективное исполнение.
+- Metal 4 capabilities включаются независимо; отсутствие extended функции не отключает основной Metal 4 Core path.
 - Все автоматические и runtime validation gates проходят.
 - Legacy mode остаётся безопасным или удаляется только отдельным осознанным решением после стабилизации.
 
@@ -1673,6 +1747,10 @@ Diagnostic overlays:
 15. Lighting использует общий frame graph, upload rings, heaps и synchronization model.
 16. Performance целится в стабильные 90 FPS; 120 FPS на M1 Pro является best effort.
 17. При нехватке budget сначала деградируют deferred/volumetric effects, а не HDR/temporal correctness.
+18. Metal 4 capability matrix заменяет единый boolean; OS и GPU family проверяются раздельно.
+19. Metal 4 compiler, allocators, argument tables, barriers и pass consolidation внедряются независимыми slices.
+20. Executor/capabilities неизменны внутри renderer generation; fallback происходит атомарно между кадрами.
+21. Optional Metal 4 path не меняет lighting, temporal или HDR semantics.
 
 ---
 
@@ -1684,5 +1762,7 @@ Diagnostic overlays:
 - Apple: [MetalFX](https://developer.apple.com/documentation/metalfx)
 - Apple: [MTLFXTemporalScalerBase](https://developer.apple.com/documentation/metalfx/mtlfxtemporalscalerbase)
 - Apple: [Metal feature set tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf)
+- Apple: [Understanding the Metal 4 core API](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api)
+- Apple: [Using the Metal 4 compilation API](https://developer.apple.com/documentation/metal/using-the-metal-4-compilation-api)
 - NVIDIA Research: [Interactive Indirect Illumination Using Voxel Cone Tracing](https://research.nvidia.com/index.php/publication/2011-09_interactive-indirect-illumination-using-voxel-cone-tracing)
 - NVIDIA Research: [Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields](https://research.nvidia.com/index.php/publication/2019-05_dynamic-diffuse-global-illumination-ray-traced-irradiance-fields)

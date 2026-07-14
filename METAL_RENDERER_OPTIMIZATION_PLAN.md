@@ -215,14 +215,46 @@ Frame graph не должен быть сложной универсальной
 | Pass transient | interval in graph | scratch, histogram, temporary blur | heap aliasing after proof |
 | Readback | delayed CPU | timings, counters, screenshots | separate shared ring |
 
-### 5.2. Два executor-а, один workload
+### 5.2. Capability matrix вместо одного `supportsMetal4`
+
+Renderer не принимает архитектурные решения по одному boolean. При создании device-generation формируется immutable `MetalCapabilities`:
+
+```text
+programmingModel: METAL_3 | METAL_4
+residencySets
+commandAllocators
+argumentTables
+explicitCommandBarriers
+dedicatedCompiler
+flexiblePipelines
+colorAttachmentMapping
+textureViewPools
+placementSparseResources
+meshIndirectCommands
+temporalScaling
+```
+
+Минимальная матрица:
+
+| Capability level | Требования | Разрешённые ускорения |
+|---|---|---|
+| `BASE_METAL3` | macOS 14, Apple Silicon | Полный renderer/lighting, обычные encoders/fences/resource declarations |
+| `METAL3_RESOURCE_PLUS` | macOS 15+ и точечный runtime support | Residency sets и другие cross-model resource features при положительном A/B |
+| `METAL4_CORE` | macOS 26+, Metal 4 family, включая M1/Apple7 | Command allocators, argument tables, explicit barriers, dedicated compiler, flexible PSO, attachment mapping |
+| `METAL4_EXTENDED` | Дополнительные GPU-family checks | Placement sparse, новые indirect/mesh/RT возможности только по отдельным gates |
+
+Нельзя выводить поддержку конкретной функции только из `programmingModel`. Cross-model возможности вроде residency sets/texture-view pools также запрашиваются отдельно. Основные Metal 4 механизмы доступны M1, но placement sparse resources требуют более новой GPU family и не входят в M1 Pro release gate. Каждый optional feature имеет собственный fallback.
+
+Capability snapshot входит в timing JSONL, pipeline/resource cache keys и diagnostic report. Он не меняется посреди generation.
+
+### 5.3. Два executor-а, один workload
 
 Metal 3 path остаётся эталоном корректности:
 
 - обычные command buffers/encoders;
 - текущий deferred destruction;
 - fences и resource usage, суженные frame graph-ом;
-- argument buffers только там, где это окупается.
+- argument buffers только там, где это окупается;
 - на macOS 15+ residency sets могут заменить повторяющиеся `useResource/useHeap` для стабильных групп ресурсов, если A/B показывает снижение overhead; residency не отслеживает hazards.
 
 Metal 4 path включается только при одновременном выполнении:
@@ -244,6 +276,22 @@ Metal 4 path включается только при одновременном
 
 Если любой gate не пройден, весь кадр использует Metal 3 executor. Смешивать два synchronization model внутри одного frame plan без отдельного доказанного этапа нельзя.
 
+### 5.4. Atomic renderer generation
+
+Executor выбирается при создании device/world/size generation до выделения зависимых ресурсов:
+
+```text
+capability snapshot
+→ выбрать executor и compiler policy
+→ создать allocators/tables/residency/resources
+→ prewarm mandatory PSO
+→ опубликовать готовую generation на границе кадра
+```
+
+Runtime failure Metal 4 не переключает отдельный pass на Metal 3 внутри активного кадра. Новая Metal 3 generation создаётся отдельно, старая продолжает жить до завершения всех in-flight submit, затем освобождается deferred queue.
+
+Общими между executor-ами остаются logical frame graph, pass IDs, shader/metallib functions, PSO там, где API допускает совместимость, packed data ABI, lighting/HDR semantics, quality presets и telemetry IDs.
+
 ---
 
 ## 6. Этап O0 — зафиксировать baseline и расширить телеметрию
@@ -255,6 +303,7 @@ Metal 4 path включается только при одновременном
 - Добавить счётчики encoder/pass count, bytes copied, transient high-water, PSO compilation и resource allocation.
 - Отдельно считать время Java snapshot, native batch encode, command commit, in-flight wait и drawable wait.
 - Пометить существующие логи commit hash, OS, GPU family, thermal state и render/display size.
+- Записывать capability snapshot, executor/compiler kind, allocator high-water, argument-table updates, residency membership changes, barrier count/stages и pipeline archive hit/miss.
 - Добавить счётчик chunk rebuild reason: geometry/material/light/unknown.
 - Зафиксировать screenshot и HDR numeric probes до изменений.
 
@@ -584,17 +633,73 @@ Instancing не объединяет разные material/blend/depth semantics
 
 Metal 4 поддерживается M1-series на уровне GPU family, но API требует macOS 26+. Поэтому он может ускорить современную конфигурацию M1 Pro, не становясь минимальной платформой.
 
-### Работы
+O8 реализуется независимыми slices. Не требуется переносить command encoding, binding и compiler одновременно.
 
-- Capability query и atomic executor selection до создания frame resources.
-- Три command allocators — по одному на in-flight slot.
-- Reusable command buffers и явный begin/end lifecycle.
-- Argument tables, адреса buffers и resource IDs вместо per-encoder bindings.
-- Residency sets по стабильным классам ресурсов; изменения batch-ятся и commit-ятся до GPU use.
-- Explicit barriers генерируются из access graph.
-- Compute-class copies/dispatches группируются без лишних encoder switches.
-- Commit feedback/counter heaps интегрируются в существующий timing schema.
-- Metal 3 и Metal 4 проходят одинаковые reference scenes и numeric HDR tests.
+### 14.1. O8a — capability discovery и generation scaffold
+
+- Сформировать typed `MetalCapabilities` из OS availability, `supportsFamily` и точечных runtime queries.
+- Добавить `MetalExecutorKind.METAL3/METAL4` в immutable renderer generation и timing report.
+- Создать пустой Metal 4 executor/capability rejection path без изменения production rendering.
+- Проверить atomic fallback при искусственной ошибке device/compiler/resource creation.
+
+### 14.2. O8b — dedicated compiler и pipeline harvesting
+
+- Создать `MTL4Compiler` с контролируемой queue/QoS вне render hot path.
+- Сначала перенести ограниченный набор собственных predictable PSO, не динамические внешние shader roles.
+- Использовать precompiled metallib как основной source.
+- Добавить async compilation, pipeline dataset harvesting и versioned archive invalidation.
+- Исследовать flexible PSO только для реально различающихся formats/blend states.
+- Использовать color-attachment mapping там, где один shader действительно обслуживает несколько output layouts и это позволяет объединить passes/сократить PSO variants.
+- Использовать совместимость PSO между Metal 3/4 для постепенного внедрения; compiler migration не блокирует command executor.
+
+### 14.3. O8c — command allocators и reusable command buffers
+
+- Создать минимум три allocators — по одному на in-flight frame slot.
+- Reset разрешён только после completion соответствующего submit.
+- Reusable command buffer имеет явный begin/end lifecycle и не владеет resource lifetime.
+- Batch commit нескольких command buffers включается только при измеримом scheduling/parallel-encoding выигрыше.
+- Commit feedback/counter heaps отображаются в существующие стабильные timing IDs.
+
+### 14.4. O8d — argument tables
+
+Вместо одной таблицы максимального размера используются bounded tables по классу работы:
+
+- frame/global constants;
+- world/lighting: lights, clipmaps, shadows, GI;
+- material textures/samplers;
+- pass-local/transient resources.
+
+Каждая таблица имеет generated numeric binding schema, version, maximum indices и validation. Обновляются только изменившиеся bindings. Все косвенно доступные resources заранее включены в подходящий residency set.
+
+### 14.5. O8e — explicit barrier compiler
+
+- Frame graph превращает access edges в producer, consumer или intra-pass barriers.
+- Write→read/write использует device visibility; read→read не получает лишний cache flush.
+- Stage masks соответствуют фактическим Dispatch/Vertex/Fragment/Blit accesses, а не `All` в production.
+- Broad diagnostic mode остаётся для локализации missing barrier.
+- Resource range/subresource tracking вводится только после корректной whole-resource версии.
+- Render pass attachment transitions учитывают TBDR fragment visibility; недопустимый intra-render fragment wait заменяется корректной pass boundary.
+
+### 14.6. O8f — unified compute и attachment mapping
+
+- Группировать совместимые copy/fill/dispatch operations в Metal 4 compute encoder.
+- Первый representative slice: light/voxel upload → cluster build → opaque forward+ → HDR compute.
+- Не объединять операции через скрытую read-after-write dependency без barrier.
+- Color-attachment mapping применяется для motion/reactive/compact aux variants только при полном совпадении ordering и численных outputs.
+- Texture-view pools исследуются для clipmap/shadow/mip views после сравнения с текущим bounded cache.
+
+### 14.7. Per-pass capability policy
+
+Каждый graph pass объявляет обязательный функциональный минимум и необязательные ускорения:
+
+```text
+ClusterBuildPass
+  required: storageBuffers, indirectDispatch
+  optional: argumentTables, metal4UnifiedCompute, explicitBarriers, simdReduction
+  fallback: Metal3Compute
+```
+
+Optional capability меняет способ исполнения, но не format/lighting/HDR semantics. Pass не проверяет OS/GPU самостоятельно: он получает утверждённый execution plan от graph compiler.
 
 ### Чего не делать
 
@@ -603,13 +708,17 @@ Metal 4 поддерживается M1-series на уровне GPU family, н�
 - Не делать один гигантский residency set, если churn мира заставляет часто его пересобирать.
 - Не переносить все passes одним commit только ради «полного Metal 4».
 - Не удалять Metal 3 после успешного запуска Metal 4.
+- Не считать все Metal 4 функции доступными только из-за M1+/macOS 26: проверять feature/GPU family отдельно.
+- Не смешивать Metal 3 и Metal 4 synchronization lifecycle в одном активном frame generation.
 
 ### Exit criteria
 
 - Metal 4 output эквивалентен Metal 3 в утверждённых пределах.
 - Нет validation/hazard/residency/lifetime ошибок.
-- Metal 4 p95 не хуже; иначе он остаётся experimental/off.
+- Metal 4 принимается как default только если CPU render-thread p95 лучше примерно на `8–10%`, либо полный GPU p95/`1% low` лучше минимум примерно на `5%`, либо доказанно устраняются существенные pipeline hitches/расход памяти.
+- Если порог не пройден, конкретный slice остаётся experimental/off; это не блокирует другие Metal 4 capabilities.
 - Runtime fallback выбирается до кадра и не смешивает ресурсы разных executor generation.
+- M1 Pro Metal 4 Core и Metal 3 проходят одинаковую benchmark/reference matrix; extended features не могут быть обязательны для M1.
 
 ---
 
@@ -770,8 +879,13 @@ Controller не меняет качество каждую миллисекун�
 6. O5 один native shader module → metallib, затем PSO warmup/cache.
 7. O6 event/rebuild reason telemetry, затем light/geometry separation.
 8. O7 Hi-Z experiment за config flag; ICB только после положительного результата.
-9. O8 Metal 4 capability + empty executor scaffold, затем passes по одному.
-10. O9 bounded controller и temporal-ready scale hooks.
+9. O8a capability + empty executor scaffold.
+10. O8b dedicated compiler/harvesting на predictable PSO.
+11. O8c allocators/reusable command buffer без смены pass semantics.
+12. O8d argument tables по одному классу bindings.
+13. O8e explicit barriers по одной dependency; broad diagnostic mode удаляется последним.
+14. O8f representative unified-compute/attachment-mapping slice.
+15. O9 bounded controller и temporal-ready scale hooks.
 
 Каждый этап имеет runtime flag или поколенческую границу, позволяющую вернуться на предыдущий path без использования полусозданных ресурсов. Нельзя держать два постоянно расходящихся shader/color contract ради rollback; fallback переключает renderer атомарно на границе кадра.
 
@@ -801,7 +915,12 @@ Controller не меняет качество каждую миллисекун�
 - `chunkLightDecouplingValidation`;
 - `indirectVisibilityValidation`;
 - `frameBudgetControllerValidation`;
-- `metal4ParityValidation` при доступности.
+- `metal4ParityValidation` при доступности;
+- `metalCapabilityValidation` для OS/GPU-family combinations;
+- `metal4AllocatorLifecycleValidation`;
+- `metal4ArgumentTableValidation`;
+- `metal4BarrierValidation`;
+- `metal4GenerationFallbackValidation`.
 
 Stress cases:
 
@@ -830,6 +949,13 @@ Stress cases:
 | Light separation ломает vanilla semantics | неверный вид блоков | geometry/material/light причины и reference scenes |
 | Hi-Z даёт false occlusion | popping | conservative bounds, reset bypass, fallback |
 | Metal 4 удваивает поддержку | медленная разработка | общий graph/ABI, Metal 3 остаётся эталоном |
+| Capability выводится только из `supportsMetal4` | включение неподдерживаемой функции | typed matrix по OS и GPU family |
+| Metal 4 allocator сброшен до completion | command/resource corruption | allocator жёстко принадлежит in-flight slot |
+| Resource отсутствует в argument-table residency | GPU fault | generated residency plan и validation |
+| Argument table слишком велика/часто переписывается | CPU/memory регрессия | bounded tables по классам работы и dirty updates |
+| Metal 4 barrier пропущен | случайное мерцание/GPU fault | broad diagnostic mode, parity scenes, постепенное сужение |
+| Metal 4 barriers слишком широки | GPU хуже Metal 3 | фактические stage/access masks и A/B counters |
+| Executor переключён внутри кадра | несовместимые lifetime/sync contracts | atomic renderer generation и deferred retirement |
 | Dynamic controller колеблется | нестабильная картинка | hysteresis, bounded steps, fixed mode |
 | Средний FPS растёт, p99 хуже | субъективно хуже | p95/p99/1% low как release gates |
 
@@ -851,7 +977,8 @@ Stress cases:
 - Chunk/light churn не создаёт unbounded work или allocation.
 - M1 Pro имеет измеренный non-lighting headroom для утверждённых lighting presets.
 - Metal 3/macOS 14 fallback полностью рабочий.
-- Metal 4 либо доказанно быстрее/не хуже и включён по capability, либо честно остаётся experimental.
+- Capability matrix различает Metal 3 base, residency layer, Metal 4 Core и extended GPU-family features.
+- Metal 4 slices либо проходят утверждённый performance/quality threshold и включены по capability, либо честно остаются experimental.
 - Все Gradle/native/runtime gates проходят.
 
 ---
@@ -873,6 +1000,10 @@ Stress cases:
 13. Настоящий HDR создаётся освещением/emission; heuristic reconstruction остаётся legacy.
 14. Качество не понижается скрыто под видом оптимизации.
 15. Каждый этап имеет A/B evidence и rollback.
+16. Metal 4 внедряется независимыми compiler/allocator/binding/synchronization slices, не одним большим портом.
+17. Наличие Metal 4 не подразумевает наличие всех extended GPU features.
+18. Executor и capability snapshot неизменны внутри renderer generation.
+19. Optional Metal 4 acceleration не меняет lighting/HDR semantics.
 
 ---
 
@@ -883,6 +1014,8 @@ Stress cases:
 - Apple: [`MTLCPUCacheMode.writeCombined`](https://developer.apple.com/documentation/metal/mtlcpucachemode/writecombined)
 - Apple: [`MTLResource.makeAliasable()`](https://developer.apple.com/documentation/metal/mtlresource/makealiasable)
 - Apple: [`MTLResidencySet`](https://developer.apple.com/documentation/metal/mtlresidencyset)
+- Apple: [Understanding the Metal 4 core API](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api)
+- Apple: [Using the Metal 4 compilation API](https://developer.apple.com/documentation/metal/using-the-metal-4-compilation-api)
 - Apple: [Building a shader library by precompiling source files](https://developer.apple.com/documentation/metal/building-a-shader-library-by-precompiling-source-files)
 - Apple: [Metal libraries and binary archives](https://developer.apple.com/documentation/metal/metal-libraries)
 - Apple: [Encoding indirect command buffers on the GPU](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-gpu)
