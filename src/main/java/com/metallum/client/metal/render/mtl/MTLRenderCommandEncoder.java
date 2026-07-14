@@ -70,6 +70,14 @@ public final class MTLRenderCommandEncoder extends MTLCommandEncoder {
         MetalNativeBridge.MTLRenderCommandEncoder_setTextureAndSampler(handle(), texture, sampler, index, stageMask);
     }
 
+    public int applyResourceBindings(final MemorySegment packet, final long packetCapacityBytes) {
+        return MetalNativeBridge.MTLRenderCommandEncoder_applyResourceBindings(
+                handle(),
+                packet,
+                packetCapacityBytes
+        );
+    }
+
     public void setScissorRect(final long x, final long y, final long width, final long height) {
         MetalNativeBridge.MTLRenderCommandEncoder_setScissorRect(handle(), x, y, width, height);
     }

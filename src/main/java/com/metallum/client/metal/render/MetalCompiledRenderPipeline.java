@@ -64,6 +64,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     private final List<ResourceBinding> resources;
     private final Map<String, ResourceBinding> resourcesByName;
+    private final ResourceBinding[] resourcesByBindingIndex;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
     private final MTLCullMode cullMode;
@@ -123,14 +124,21 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 java.util.stream.Collectors.toUnmodifiableMap(ResourceBinding::name, binding -> binding)
         );
 
-        int maxBindingIndex = -1;
         long resourceMask = 0L;
         for (ResourceBinding binding : this.resources) {
-            maxBindingIndex = Math.max(maxBindingIndex, binding.bindingIndex());
+            if (binding.bindingIndex() < 0 || binding.bindingIndex() >= Long.SIZE) {
+                throw new IllegalStateException("Pipeline " + info.getLocation() + " has binding index "
+                        + binding.bindingIndex() + ", limit is " + (Long.SIZE - 1));
+            }
             resourceMask |= 1L << binding.bindingIndex();
         }
-        if (maxBindingIndex >= Long.SIZE) {
-            throw new IllegalStateException("Pipeline " + info.getLocation() + " has binding index " + maxBindingIndex + ", limit is " + (Long.SIZE - 1));
+        this.resourcesByBindingIndex = new ResourceBinding[Long.SIZE];
+        for (ResourceBinding binding : this.resources) {
+            if (this.resourcesByBindingIndex[binding.bindingIndex()] != null) {
+                throw new IllegalStateException("Pipeline " + info.getLocation()
+                        + " repeats binding index " + binding.bindingIndex());
+            }
+            this.resourcesByBindingIndex[binding.bindingIndex()] = binding;
         }
         this.allResourceMask = resourceMask;
 
@@ -358,6 +366,14 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     @Nullable
     ResourceBinding resource(final String name) {
         return this.resourcesByName.get(name);
+    }
+
+    @Nullable
+    ResourceBinding resource(final int bindingIndex) {
+        if (bindingIndex < 0 || bindingIndex >= this.resourcesByBindingIndex.length) {
+            return null;
+        }
+        return this.resourcesByBindingIndex[bindingIndex];
     }
 
     int firstAvailableVertexBufferSlot() {

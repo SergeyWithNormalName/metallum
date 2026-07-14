@@ -156,6 +156,11 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetBufferOffset = downcall(lookup, "metallum_MTLRenderCommandEncoder_setBufferOffset", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, INT));
             MTLRenderCommandEncoderSetTexture = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTexture", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
             MTLRenderCommandEncoderSetTextureAndSampler = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTextureAndSampler", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
+            MTLRenderCommandEncoderApplyResourceBindings = downcall(
+                    lookup,
+                    "metallum_MTLRenderCommandEncoder_applyResourceBindings_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
             MTLRenderCommandEncoderSetScissorRect = downcall(lookup, "metallum_MTLRenderCommandEncoder_setScissorRect", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, LONG, LONG));
             MTLRenderCommandEncoderClearDraw = downcall(
                     lookup,
@@ -433,6 +438,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderSetBufferOffset;
     private static final MethodHandle MTLRenderCommandEncoderSetTexture;
     private static final MethodHandle MTLRenderCommandEncoderSetTextureAndSampler;
+    private static final MethodHandle MTLRenderCommandEncoderApplyResourceBindings;
     private static final MethodHandle MTLRenderCommandEncoderSetScissorRect;
     private static final MethodHandle MTLRenderCommandEncoderClearDraw;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitives;
@@ -1117,6 +1123,22 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetTextureAndSampler.invokeExact(segment(encoder), segment(texture), segment(sampler), index, stageMask);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_setTextureAndSampler", throwable);
+        }
+    }
+
+    public static int MTLRenderCommandEncoder_applyResourceBindings(
+            final MemorySegment encoder,
+            final MemorySegment packet,
+            final long packetCapacityBytes
+    ) {
+        try {
+            return (int) MTLRenderCommandEncoderApplyResourceBindings.invokeExact(
+                    segment(encoder),
+                    segment(packet),
+                    packetCapacityBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_applyResourceBindings_v1", throwable);
         }
     }
 

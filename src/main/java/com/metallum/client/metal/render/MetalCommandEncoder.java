@@ -44,6 +44,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
     private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT);
     private final MetalTransientMemory transientMemory;
+    private final MetalResourceBindingPacket resourceBindingPacket = new MetalResourceBindingPacket();
     private final Map<MetalGpuTexture, Vector4fc> pendingColorClears = new IdentityHashMap<>();
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
     private final MemorySegment fence;
@@ -121,6 +122,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Override
     public @NonNull TransientMemory transientMemory() {
         return transientMemory;
+    }
+
+    MetalResourceBindingPacket resourceBindingPacket() {
+        return this.resourceBindingPacket;
     }
 
     @Override
@@ -920,6 +925,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             commandBuffer = null;
         }
         transientMemory.close();
+        resourceBindingPacket.close();
         device.queueResourceRelease(fence);
         destroyQueue.close();
         dynamicBackingPool.drain();

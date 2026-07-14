@@ -50,6 +50,7 @@ final class MetalRenderPass implements RenderPassBackend {
     private final GpuBufferSlice[] vertexBuffers = new GpuBufferSlice[MAX_VERTEX_BUFFERS];
     private final HashMap<String, GpuBufferSlice> uniforms = new HashMap<>();
     private final HashMap<String, TextureViewAndSampler> samplers = new HashMap<>();
+    private final Object[] resourcesByBindingIndex = new Object[Long.SIZE];
     private long dirtyDescriptorMask;
     @Nullable
     private MetalCompiledRenderPipeline compiledPipeline;
@@ -108,6 +109,12 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         if (this.compiledPipeline != compiled) {
             this.compiledPipeline = compiled;
+            remapNamedBindings(
+                    this.uniforms,
+                    this.samplers,
+                    compiled.resources(),
+                    this.resourcesByBindingIndex
+            );
             vertexBuffersDirty = true;
             pipelineDirty = true;
         }
@@ -116,13 +123,23 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void bindTexture(final @NonNull String name, @Nullable final GpuTextureView textureView, @Nullable final GpuSampler sampler) {
         if (textureView != null && sampler != null) {
-            updateTextureBinding(this.samplers, name, textureView, sampler);
+            TextureViewAndSampler value = updateTextureBinding(this.samplers, name, textureView, sampler);
             if (commandEncoder.prepareTextureForRead((MetalGpuTexture) textureView.texture())) {
                 invalidateNativeEncoderState();
             }
-            markDescriptorDirty(name);
+            MetalCompiledRenderPipeline.ResourceBinding binding = currentBinding(name);
+            if (binding != null
+                    && binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+                this.resourcesByBindingIndex[binding.bindingIndex()] = value;
+            }
+            markDescriptorDirty(binding);
         } else if (textureView == null && sampler == null) {
             samplers.remove(name);
+            MetalCompiledRenderPipeline.ResourceBinding binding = currentBinding(name);
+            if (binding != null
+                    && binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+                this.resourcesByBindingIndex[binding.bindingIndex()] = null;
+            }
         } else {
             throw new IllegalArgumentException();
         }
@@ -136,7 +153,12 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void setUniform(final @NonNull String name, final @NonNull GpuBufferSlice value) {
         uniforms.put(name, value);
-        markDescriptorDirty(name);
+        MetalCompiledRenderPipeline.ResourceBinding binding = currentBinding(name);
+        if (binding != null
+                && binding.kind() != MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+            this.resourcesByBindingIndex[binding.bindingIndex()] = value;
+        }
+        markDescriptorDirty(binding);
     }
 
     @Override
@@ -518,7 +540,9 @@ final class MetalRenderPass implements RenderPassBackend {
             enc.setCullMode(compiledPipeline.cullMode());
             enc.setTriangleFillMode(compiledPipeline.fillMode());
 
-            dirtyDescriptorMask |= compiledPipeline.allResourceMask();
+            // A pipeline switch can leave dirty bits from the previous numeric layout.
+            // Rebinding the complete current layout supersedes that stale state.
+            dirtyDescriptorMask = compiledPipeline.allResourceMask();
         }
 
         if (scissorDirty) {
@@ -532,11 +556,23 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         if (dirtyDescriptorMask != 0) {
-            List<MetalCompiledRenderPipeline.ResourceBinding> resources = compiledPipeline.resources();
-            for (int resourceIndex = 0; resourceIndex < resources.size(); resourceIndex++) {
-                MetalCompiledRenderPipeline.ResourceBinding binding = resources.get(resourceIndex);
-                if ((dirtyDescriptorMask & (1L << binding.bindingIndex())) != 0L) {
-                    pushDescriptor(enc, binding);
+            if (!shouldBatchResourceBindings(dirtyDescriptorMask)) {
+                int bindingIndex = Long.numberOfTrailingZeros(dirtyDescriptorMask);
+                MetalCompiledRenderPipeline.ResourceBinding binding = requireBinding(bindingIndex);
+                pushDescriptorDirect(enc, binding);
+            } else {
+                MetalResourceBindingPacket packet = this.commandEncoder.resourceBindingPacket();
+                packet.reset();
+                long remaining = dirtyDescriptorMask;
+                while (remaining != 0L) {
+                    int bindingIndex = Long.numberOfTrailingZeros(remaining);
+                    appendDescriptor(packet, requireBinding(bindingIndex));
+                    remaining &= ~(1L << bindingIndex);
+                }
+                int status = enc.applyResourceBindings(packet.finish(), packet.capacityBytes());
+                if (status != MetalResourceBindingPacket.STATUS_OK) {
+                    throw new IllegalStateException("Native Metal resource binding batch failed: "
+                            + MetalResourceBindingPacket.statusName(status));
                 }
             }
         }
@@ -576,13 +612,20 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
-    private void markDescriptorDirty(final String name) {
-        if (compiledPipeline != null) {
-            MetalCompiledRenderPipeline.ResourceBinding binding = compiledPipeline.resource(name);
-            if (binding != null) {
-                dirtyDescriptorMask |= 1L << binding.bindingIndex();
-            }
+    private MetalCompiledRenderPipeline.@Nullable ResourceBinding currentBinding(final String name) {
+        return this.compiledPipeline == null ? null : this.compiledPipeline.resource(name);
+    }
+
+    private void markDescriptorDirty(
+            final MetalCompiledRenderPipeline.@Nullable ResourceBinding binding
+    ) {
+        if (binding != null) {
+            dirtyDescriptorMask |= 1L << binding.bindingIndex();
         }
+    }
+
+    static boolean shouldBatchResourceBindings(final long dirtyDescriptorMask) {
+        return Long.bitCount(dirtyDescriptorMask) >= 2;
     }
 
     private void invalidateNativeEncoderState() {
@@ -594,12 +637,13 @@ final class MetalRenderPass implements RenderPassBackend {
         }
     }
 
-    private void pushDescriptor(
-            final MTLRenderCommandEncoder enc,
+    private void appendDescriptor(
+            final MetalResourceBindingPacket packet,
             final MetalCompiledRenderPipeline.ResourceBinding binding
     ) {
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
-            TextureViewAndSampler textureBinding = samplers.get(binding.name());
+            TextureViewAndSampler textureBinding =
+                    (TextureViewAndSampler) this.resourcesByBindingIndex[binding.bindingIndex()];
             if (textureBinding == null) {
                 throw new IllegalStateException("Missing sampler " + binding.name());
             }
@@ -610,16 +654,21 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
             MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
-            enc.setTextureAndSampler(textureView.nativeHandle(), sampler.nativeHandle(), binding.bindingIndex(), binding.stageMask());
+            packet.addTextureSampler(
+                    textureView.nativeHandle(),
+                    sampler.nativeHandle(),
+                    binding.bindingIndex(),
+                    binding.stageMask()
+            );
             return;
         }
 
         if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER) {
-            pushTexelBufferDescriptor(enc, binding);
+            appendTexelBufferDescriptor(packet, binding);
             return;
         }
 
-        GpuBufferSlice uniformSlice = uniforms.get(binding.name());
+        GpuBufferSlice uniformSlice = (GpuBufferSlice) this.resourcesByBindingIndex[binding.bindingIndex()];
         if (uniformSlice == null) {
             throw new IllegalStateException("Missing uniform " + binding.name());
         }
@@ -628,18 +677,92 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
-        enc.setBuffer(uniformBuffer.nativeHandle(), uniformSlice.offset(), binding.bindingIndex(), binding.stageMask());
+        packet.addUniformBuffer(
+                uniformBuffer.nativeHandle(),
+                uniformSlice.offset(),
+                uniformSlice.length(),
+                uniformBuffer.size(),
+                binding.bindingIndex(),
+                binding.stageMask()
+        );
     }
 
-    private void pushTexelBufferDescriptor(final MTLRenderCommandEncoder enc, final MetalCompiledRenderPipeline.ResourceBinding binding) {
-        GpuBufferSlice texelSlice = uniforms.get(binding.name());
-        if (texelSlice == null) {
-            throw new IllegalStateException("Missing texel buffer " + binding.name());
+    private void pushDescriptorDirect(
+            final MTLRenderCommandEncoder enc,
+            final MetalCompiledRenderPipeline.ResourceBinding binding
+    ) {
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE) {
+            TextureViewAndSampler textureBinding =
+                    (TextureViewAndSampler) this.resourcesByBindingIndex[binding.bindingIndex()];
+            if (textureBinding == null) {
+                throw new IllegalStateException("Missing sampler " + binding.name());
+            }
+            if (VALIDATION && textureBinding.textureView().isClosed()) {
+                throw new IllegalStateException("Sampler " + binding.name() + " texture view has been closed");
+            }
+            MetalGpuTextureView textureView = (MetalGpuTextureView) textureBinding.textureView();
+            MetalGpuSampler sampler = (MetalGpuSampler) textureBinding.sampler();
+            enc.setTextureAndSampler(
+                    textureView.nativeHandle(),
+                    sampler.nativeHandle(),
+                    binding.bindingIndex(),
+                    binding.stageMask()
+            );
+            return;
         }
-        if (VALIDATION && texelSlice.buffer().isClosed()) {
-            throw new IllegalStateException("Texel buffer " + binding.name() + " has been closed");
+        if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER) {
+            enc.setTexture(
+                    resolveTexelTexture(binding),
+                    binding.bindingIndex(),
+                    binding.stageMask()
+            );
+            return;
         }
 
+        GpuBufferSlice uniformSlice = requireBufferSlice(binding, "Uniform");
+        MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
+        enc.setBuffer(
+                uniformBuffer.nativeHandle(),
+                uniformSlice.offset(),
+                binding.bindingIndex(),
+                binding.stageMask()
+        );
+    }
+
+    private void appendTexelBufferDescriptor(
+            final MetalResourceBindingPacket packet,
+            final MetalCompiledRenderPipeline.ResourceBinding binding
+    ) {
+        packet.addTexelTexture(resolveTexelTexture(binding), binding.bindingIndex(), binding.stageMask());
+    }
+
+    private MetalCompiledRenderPipeline.ResourceBinding requireBinding(final int bindingIndex) {
+        MetalCompiledRenderPipeline.ResourceBinding binding = this.compiledPipeline.resource(bindingIndex);
+        if (binding == null) {
+            throw new IllegalStateException("Pipeline resource mask references missing binding " + bindingIndex);
+        }
+        return binding;
+    }
+
+    private GpuBufferSlice requireBufferSlice(
+            final MetalCompiledRenderPipeline.ResourceBinding binding,
+            final String label
+    ) {
+        GpuBufferSlice slice = (GpuBufferSlice) this.resourcesByBindingIndex[binding.bindingIndex()];
+        if (slice == null) {
+            throw new IllegalStateException("Missing " + label.toLowerCase(java.util.Locale.ROOT)
+                    + " " + binding.name());
+        }
+        if (VALIDATION && slice.buffer().isClosed()) {
+            throw new IllegalStateException(label + " " + binding.name() + " buffer has been closed");
+        }
+        return slice;
+    }
+
+    private MemorySegment resolveTexelTexture(
+            final MetalCompiledRenderPipeline.ResourceBinding binding
+    ) {
+        GpuBufferSlice texelSlice = requireBufferSlice(binding, "Texel");
         GpuFormat texelFormat = binding.texelBufferFormat();
         if (texelFormat == null) {
             throw new IllegalStateException("Texel buffer " + binding.name() + " is missing a format");
@@ -650,22 +773,35 @@ final class MetalRenderPass implements RenderPassBackend {
         int pixelSize = texelFormat.blockSize();
         long texelByteLength = texelSlice.length();
         if (texelByteLength <= 0L || texelByteLength % pixelSize != 0L) {
-            throw new IllegalStateException("Texel buffer " + binding.name() + " length " + texelByteLength + " is not a valid " + texelFormat + " range");
+            throw new IllegalStateException("Texel buffer " + binding.name() + " length "
+                    + texelByteLength + " is not a valid " + texelFormat + " range");
         }
         long texelCount = texelByteLength / pixelSize;
-        MemorySegment texelTexture;
         try {
-            texelTexture = texelBuffer.texelTextureView(
+            return texelBuffer.texelTextureView(
                     pixelFormat,
                     texelSlice.offset(),
                     texelCount,
                     texelByteLength
             );
         } catch (IllegalStateException exception) {
-            throw new IllegalStateException("Failed to create Metal texel buffer texture for " + binding.name(), exception);
+            throw new IllegalStateException("Failed to create Metal texel buffer texture for "
+                    + binding.name(), exception);
         }
+    }
 
-        enc.setTexture(texelTexture, binding.bindingIndex(), binding.stageMask());
+    static void remapNamedBindings(
+            final Map<String, ?> uniformBindings,
+            final Map<String, ?> samplerBindings,
+            final List<MetalCompiledRenderPipeline.ResourceBinding> pipelineBindings,
+            final Object[] bindingsByIndex
+    ) {
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : pipelineBindings) {
+            Map<String, ?> source = binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE
+                    ? samplerBindings
+                    : uniformBindings;
+            bindingsByIndex[binding.bindingIndex()] = source.get(binding.name());
+        }
     }
 
     static TextureViewAndSampler updateTextureBinding(

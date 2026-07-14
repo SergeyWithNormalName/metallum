@@ -120,6 +120,46 @@ def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValue
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
+def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
+
+tasks.register("compileResourceBindingAbiValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native resource binding ABI validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/ResourceBindingAbiValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(resourceBindingAbiValidationBinary)
+
+	doFirst {
+		resourceBindingAbiValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", resourceBindingAbiValidationBinary.get().asFile.absolutePath,
+		"src/test/native/ResourceBindingAbiValidation.swift"
+}
+
+tasks.register("resourceBindingAbiNativeValidation", Exec) {
+	group = "verification"
+	description = "Validates the native batched resource binding ABI before encoder state is applied"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("buildMacNative"), tasks.named("compileResourceBindingAbiValidation"))
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file(macNativeLibrary)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine resourceBindingAbiValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
 
 tasks.register("compileFrameGraphAbiValidation", Exec) {
 	group = "verification"
@@ -281,6 +321,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
+	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))

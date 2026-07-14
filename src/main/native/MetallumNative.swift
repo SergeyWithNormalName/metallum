@@ -5566,6 +5566,248 @@ public func metallum_MTLRenderCommandEncoder_setTextureAndSampler(_ encoder: MTL
     }
 }
 
+private enum MetallumResourceBindingAbi {
+    static let version: UInt32 = 1
+    static let headerBytes = 32
+    static let recordBytes = 48
+    static let maxRecords: UInt32 = 64
+
+    static let capabilityUniformBuffer: UInt64 = 1
+    static let capabilityTextureSampler: UInt64 = 1 << 1
+    static let capabilityTexelTexture: UInt64 = 1 << 2
+    static let supportedCapabilities = capabilityUniformBuffer
+        | capabilityTextureSampler
+        | capabilityTexelTexture
+
+    static let typeUniformBuffer: UInt32 = 1
+    static let typeTextureSampler: UInt32 = 2
+    static let typeTexelTexture: UInt32 = 3
+
+    static let stageVertex: UInt32 = 1
+    static let stageFragment: UInt32 = 2
+    static let stageAll = stageVertex | stageFragment
+
+    static let maxBufferBindings: UInt32 = 31
+    static let maxTextureBindings: UInt32 = 128
+    static let maxSamplerBindings: UInt32 = 16
+
+    static let ok: Int32 = 1
+    static let errorNullArgument: Int32 = -1
+    static let errorPacketCapacity: Int32 = -2
+    static let errorVersion: Int32 = -3
+    static let errorByteSize: Int32 = -4
+    static let errorCapabilities: Int32 = -5
+    static let errorCount: Int32 = -6
+    static let errorLayout: Int32 = -7
+    static let errorType: Int32 = -8
+    static let errorStage: Int32 = -9
+    static let errorIndex: Int32 = -10
+    static let errorHandle: Int32 = -11
+    static let errorRange: Int32 = -12
+    static let errorDuplicateIndex: Int32 = -13
+    static let errorObjectType: Int32 = -14
+    static let errorNativeBufferRange: Int32 = -15
+}
+
+@inline(__always)
+private func bindingPacketUInt32(_ packet: UnsafeRawPointer, _ offset: Int) -> UInt32 {
+    UInt32(littleEndian: packet.loadUnaligned(fromByteOffset: offset, as: UInt32.self))
+}
+
+@inline(__always)
+private func bindingPacketUInt64(_ packet: UnsafeRawPointer, _ offset: Int) -> UInt64 {
+    UInt64(littleEndian: packet.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
+}
+
+@inline(__always)
+private func bindingPacketObject(_ address: UInt64) -> AnyObject? {
+    guard address != 0,
+          let pointer = UnsafeMutableRawPointer(bitPattern: UInt(address)) else {
+        return nil
+    }
+    return Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+}
+
+@_cdecl("metallum_MTLRenderCommandEncoder_applyResourceBindings_v1")
+public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
+    _ encoder: MTLRenderCommandEncoder?,
+    _ packetPointer: UnsafeRawPointer?,
+    _ packetCapacityBytes: UInt64
+) -> Int32 {
+    guard let encoder, let packet = packetPointer else {
+        return MetallumResourceBindingAbi.errorNullArgument
+    }
+    guard packetCapacityBytes >= UInt64(MetallumResourceBindingAbi.headerBytes),
+          packetCapacityBytes <= UInt64(Int.max) else {
+        return MetallumResourceBindingAbi.errorPacketCapacity
+    }
+
+    let version = bindingPacketUInt32(packet, 0)
+    guard version == MetallumResourceBindingAbi.version else {
+        return MetallumResourceBindingAbi.errorVersion
+    }
+    let byteSize = UInt64(bindingPacketUInt32(packet, 4))
+    let capabilities = bindingPacketUInt64(packet, 8)
+    let count = bindingPacketUInt32(packet, 16)
+    let recordBytes = bindingPacketUInt32(packet, 20)
+    let recordCapacity = bindingPacketUInt32(packet, 24)
+    let reserved = bindingPacketUInt32(packet, 28)
+
+    guard capabilities & ~MetallumResourceBindingAbi.supportedCapabilities == 0 else {
+        return MetallumResourceBindingAbi.errorCapabilities
+    }
+    guard count <= MetallumResourceBindingAbi.maxRecords,
+          count <= recordCapacity else {
+        return MetallumResourceBindingAbi.errorCount
+    }
+    guard recordBytes == UInt32(MetallumResourceBindingAbi.recordBytes),
+          recordCapacity == MetallumResourceBindingAbi.maxRecords,
+          reserved == 0 else {
+        return MetallumResourceBindingAbi.errorLayout
+    }
+    let expectedByteSize = UInt64(MetallumResourceBindingAbi.headerBytes)
+        + UInt64(count) * UInt64(MetallumResourceBindingAbi.recordBytes)
+    guard byteSize == expectedByteSize,
+          byteSize <= packetCapacityBytes else {
+        return MetallumResourceBindingAbi.errorByteSize
+    }
+
+    // Validate the entire packet before making the first encoder state change.
+    var occupiedBindingMask: UInt64 = 0
+    for recordIndex in 0..<Int(count) {
+        let record = MetallumResourceBindingAbi.headerBytes
+            + recordIndex * MetallumResourceBindingAbi.recordBytes
+        let type = bindingPacketUInt32(packet, record)
+        let stage = bindingPacketUInt32(packet, record + 4)
+        let bindingIndex = bindingPacketUInt32(packet, record + 8)
+        let recordReserved = bindingPacketUInt32(packet, record + 12)
+        let primaryAddress = bindingPacketUInt64(packet, record + 16)
+        let secondaryAddress = bindingPacketUInt64(packet, record + 24)
+        let offset = bindingPacketUInt64(packet, record + 32)
+        let length = bindingPacketUInt64(packet, record + 40)
+
+        guard recordReserved == 0 else {
+            return MetallumResourceBindingAbi.errorLayout
+        }
+        guard stage != 0, stage & ~MetallumResourceBindingAbi.stageAll == 0 else {
+            return MetallumResourceBindingAbi.errorStage
+        }
+        guard bindingIndex < MetallumResourceBindingAbi.maxRecords else {
+            return MetallumResourceBindingAbi.errorIndex
+        }
+        let bindingBit = UInt64(1) << bindingIndex
+        guard occupiedBindingMask & bindingBit == 0 else {
+            return MetallumResourceBindingAbi.errorDuplicateIndex
+        }
+        occupiedBindingMask |= bindingBit
+        guard primaryAddress != 0,
+              let primaryObject = bindingPacketObject(primaryAddress) else {
+            return MetallumResourceBindingAbi.errorHandle
+        }
+
+        switch type {
+        case MetallumResourceBindingAbi.typeUniformBuffer:
+            guard capabilities & MetallumResourceBindingAbi.capabilityUniformBuffer != 0 else {
+                return MetallumResourceBindingAbi.errorCapabilities
+            }
+            guard bindingIndex < MetallumResourceBindingAbi.maxBufferBindings else {
+                return MetallumResourceBindingAbi.errorIndex
+            }
+            guard secondaryAddress == 0, length > 0 else {
+                return MetallumResourceBindingAbi.errorRange
+            }
+            guard offset <= UInt64(Int.max) else {
+                return MetallumResourceBindingAbi.errorRange
+            }
+            guard let buffer = primaryObject as? MTLBuffer else {
+                return MetallumResourceBindingAbi.errorObjectType
+            }
+            let nativeLength = UInt64(buffer.length)
+            guard offset <= nativeLength, length <= nativeLength - offset else {
+                return MetallumResourceBindingAbi.errorNativeBufferRange
+            }
+        case MetallumResourceBindingAbi.typeTextureSampler:
+            guard capabilities & MetallumResourceBindingAbi.capabilityTextureSampler != 0 else {
+                return MetallumResourceBindingAbi.errorCapabilities
+            }
+            guard bindingIndex < MetallumResourceBindingAbi.maxSamplerBindings else {
+                return MetallumResourceBindingAbi.errorIndex
+            }
+            guard offset == 0, length == 0 else {
+                return MetallumResourceBindingAbi.errorRange
+            }
+            guard secondaryAddress != 0,
+                  let secondaryObject = bindingPacketObject(secondaryAddress) else {
+                return MetallumResourceBindingAbi.errorHandle
+            }
+            guard primaryObject is MTLTexture, secondaryObject is MTLSamplerState else {
+                return MetallumResourceBindingAbi.errorObjectType
+            }
+        case MetallumResourceBindingAbi.typeTexelTexture:
+            guard capabilities & MetallumResourceBindingAbi.capabilityTexelTexture != 0 else {
+                return MetallumResourceBindingAbi.errorCapabilities
+            }
+            guard bindingIndex < MetallumResourceBindingAbi.maxTextureBindings else {
+                return MetallumResourceBindingAbi.errorIndex
+            }
+            guard secondaryAddress == 0, offset == 0, length == 0 else {
+                return MetallumResourceBindingAbi.errorRange
+            }
+            guard primaryObject is MTLTexture else {
+                return MetallumResourceBindingAbi.errorObjectType
+            }
+        default:
+            return MetallumResourceBindingAbi.errorType
+        }
+    }
+
+    for recordIndex in 0..<Int(count) {
+        let record = MetallumResourceBindingAbi.headerBytes
+            + recordIndex * MetallumResourceBindingAbi.recordBytes
+        let type = bindingPacketUInt32(packet, record)
+        let stage = bindingPacketUInt32(packet, record + 4)
+        let bindingIndex = Int(bindingPacketUInt32(packet, record + 8))
+        let primaryAddress = bindingPacketUInt64(packet, record + 16)
+        let secondaryAddress = bindingPacketUInt64(packet, record + 24)
+        let offset = Int(bindingPacketUInt64(packet, record + 32))
+        let primaryObject = bindingPacketObject(primaryAddress)!
+
+        switch type {
+        case MetallumResourceBindingAbi.typeUniformBuffer:
+            let buffer = primaryObject as! MTLBuffer
+            if stage & MetallumResourceBindingAbi.stageVertex != 0 {
+                encoder.setVertexBuffer(buffer, offset: offset, index: bindingIndex)
+            }
+            if stage & MetallumResourceBindingAbi.stageFragment != 0 {
+                encoder.setFragmentBuffer(buffer, offset: offset, index: bindingIndex)
+            }
+        case MetallumResourceBindingAbi.typeTextureSampler:
+            let texture = primaryObject as! MTLTexture
+            let sampler = bindingPacketObject(secondaryAddress)! as! MTLSamplerState
+            if stage & MetallumResourceBindingAbi.stageVertex != 0 {
+                encoder.setVertexTexture(texture, index: bindingIndex)
+                encoder.setVertexSamplerState(sampler, index: bindingIndex)
+            }
+            if stage & MetallumResourceBindingAbi.stageFragment != 0 {
+                encoder.setFragmentTexture(texture, index: bindingIndex)
+                encoder.setFragmentSamplerState(sampler, index: bindingIndex)
+            }
+        case MetallumResourceBindingAbi.typeTexelTexture:
+            let texture = primaryObject as! MTLTexture
+            if stage & MetallumResourceBindingAbi.stageVertex != 0 {
+                encoder.setVertexTexture(texture, index: bindingIndex)
+            }
+            if stage & MetallumResourceBindingAbi.stageFragment != 0 {
+                encoder.setFragmentTexture(texture, index: bindingIndex)
+            }
+        default:
+            // The validation pass guarantees this branch is unreachable.
+            return MetallumResourceBindingAbi.errorType
+        }
+    }
+    return MetallumResourceBindingAbi.ok
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setScissorRect")
 public func metallum_MTLRenderCommandEncoder_setScissorRect(
     _ encoder: MTLRenderCommandEncoder,

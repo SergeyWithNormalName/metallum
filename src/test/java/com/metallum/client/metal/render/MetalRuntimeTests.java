@@ -5,6 +5,8 @@ import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -30,6 +32,9 @@ public final class MetalRuntimeTests {
         testJavaWorkloadTelemetryGateAndReset();
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
+        testResourceBindingPacketReuseAndValidation();
+        testResourceBindingBatchSelector();
+        testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testHdrSceneColorRouting();
     }
@@ -217,6 +222,166 @@ public final class MetalRuntimeTests {
                 "disabled GPU timing unexpectedly enabled stage markers");
         require(MetalGpuTiming.detailEnabled("1", "1"),
                 "explicit GPU timing detail did not enable stage markers");
+    }
+
+    private static void testResourceBindingPacketReuseAndValidation() {
+        MetalResourceBindingPacket packet = new MetalResourceBindingPacket();
+        MemorySegment storage = packet.storage();
+        long storageAddress = storage.address();
+
+        packet.addUniformBuffer(
+                MemorySegment.ofAddress(0x1000L),
+                16L,
+                32L,
+                128L,
+                2,
+                MetalResourceBindingPacket.STAGE_VERTEX
+        );
+        packet.addTextureSampler(
+                MemorySegment.ofAddress(0x2000L),
+                MemorySegment.ofAddress(0x3000L),
+                4,
+                MetalResourceBindingPacket.STAGE_FRAGMENT
+        );
+        packet.addTexelTexture(
+                MemorySegment.ofAddress(0x4000L),
+                7,
+                MetalResourceBindingPacket.STAGE_ALL
+        );
+        MemorySegment encoded = packet.finish();
+        require(encoded.address() == storageAddress,
+                "resource binding packet replaced its fixed native storage");
+        require(encoded.get(ValueLayout.JAVA_INT, MetalResourceBindingPacket.HEADER_VERSION)
+                        == MetalResourceBindingPacket.CURRENT_VERSION,
+                "resource binding packet version mismatch");
+        require(encoded.get(ValueLayout.JAVA_INT, MetalResourceBindingPacket.HEADER_BYTE_SIZE)
+                        == MetalResourceBindingPacket.HEADER_BYTES + 3 * MetalResourceBindingPacket.RECORD_BYTES,
+                "resource binding packet byte size mismatch");
+        require(encoded.get(ValueLayout.JAVA_LONG, MetalResourceBindingPacket.HEADER_CAPABILITIES)
+                        == MetalResourceBindingPacket.SUPPORTED_CAPABILITIES,
+                "resource binding packet capability mask mismatch");
+        require(encoded.get(ValueLayout.JAVA_INT, MetalResourceBindingPacket.HEADER_COUNT) == 3,
+                "resource binding packet record count mismatch");
+        long firstRecord = MetalResourceBindingPacket.HEADER_BYTES;
+        require(encoded.get(ValueLayout.JAVA_INT, firstRecord + MetalResourceBindingPacket.RECORD_TYPE)
+                        == MetalResourceBindingPacket.TYPE_UNIFORM_BUFFER,
+                "resource binding packet encoded the wrong first record type");
+        require(encoded.get(ValueLayout.JAVA_LONG, firstRecord + MetalResourceBindingPacket.RECORD_OFFSET) == 16L
+                        && encoded.get(ValueLayout.JAVA_LONG,
+                        firstRecord + MetalResourceBindingPacket.RECORD_LENGTH) == 32L,
+                "resource binding packet encoded the wrong uniform range");
+
+        packet.reset();
+        packet.addTexelTexture(
+                MemorySegment.ofAddress(0x5000L),
+                1,
+                MetalResourceBindingPacket.STAGE_FRAGMENT
+        );
+        require(packet.finish().address() == storageAddress && packet.count() == 1,
+                "resource binding packet did not reuse storage after reset");
+        require(packet.requiredCapabilities() == MetalResourceBindingPacket.CAPABILITY_TEXEL_TEXTURE,
+                "resource binding packet retained capabilities across reset");
+
+        packet.reset();
+        packet.addTexelTexture(
+                MemorySegment.ofAddress(0x6000L),
+                3,
+                MetalResourceBindingPacket.STAGE_VERTEX
+        );
+        boolean duplicateRejected = false;
+        try {
+            packet.addUniformBuffer(
+                    MemorySegment.ofAddress(0x7000L), 0L, 16L, 16L, 3,
+                    MetalResourceBindingPacket.STAGE_VERTEX
+            );
+        } catch (IllegalArgumentException expected) {
+            duplicateRejected = true;
+        }
+        require(duplicateRejected, "resource binding packet accepted a duplicate numeric binding");
+
+        packet.reset();
+        boolean rangeRejected = false;
+        try {
+            packet.addUniformBuffer(
+                    MemorySegment.ofAddress(0x8000L), 12L, 8L, 16L, 0,
+                    MetalResourceBindingPacket.STAGE_FRAGMENT
+            );
+        } catch (IllegalArgumentException expected) {
+            rangeRejected = true;
+        }
+        require(rangeRejected, "resource binding packet accepted an out-of-bounds uniform range");
+
+        packet.close();
+        boolean closedRejected = false;
+        try {
+            packet.reset();
+        } catch (IllegalStateException expected) {
+            closedRejected = true;
+        }
+        require(closedRejected, "closed resource binding packet remained writable");
+    }
+
+    private static void testPipelineLocalBindingRemap() {
+        Map<String, String> uniformValues = Map.of(
+                "Projection", "projection-buffer",
+                "Fog", "fog-buffer"
+        );
+        Map<String, String> samplerValues = Map.of("Sampler0", "texture-sampler");
+        Object[] resourceSlots = new Object[Long.SIZE];
+
+        List<MetalCompiledRenderPipeline.ResourceBinding> firstLayout = List.of(
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
+                        "Projection", 4, MetalCompiledRenderPipeline.STAGE_VERTEX, null
+                ),
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE,
+                        "Sampler0", 1, MetalCompiledRenderPipeline.STAGE_FRAGMENT, null
+                ),
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.TEXEL_BUFFER,
+                        "Fog", 6, MetalCompiledRenderPipeline.STAGE_FRAGMENT, null
+                )
+        );
+        MetalRenderPass.remapNamedBindings(uniformValues, samplerValues, firstLayout, resourceSlots);
+        require("projection-buffer".equals(resourceSlots[4])
+                        && "fog-buffer".equals(resourceSlots[6])
+                        && "texture-sampler".equals(resourceSlots[1]),
+                "initial pipeline-local resource remap failed");
+
+        List<MetalCompiledRenderPipeline.ResourceBinding> secondLayout = List.of(
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
+                        "Projection", 2, MetalCompiledRenderPipeline.STAGE_FRAGMENT, null
+                ),
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE,
+                        "Sampler0", 7, MetalCompiledRenderPipeline.STAGE_VERTEX, null
+                ),
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,
+                        "Unbound", 4, MetalCompiledRenderPipeline.STAGE_VERTEX, null
+                ),
+                new MetalCompiledRenderPipeline.ResourceBinding(
+                        MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE,
+                        "SamplerMissing", 1, MetalCompiledRenderPipeline.STAGE_FRAGMENT, null
+                )
+        );
+        MetalRenderPass.remapNamedBindings(uniformValues, samplerValues, secondLayout, resourceSlots);
+        require("projection-buffer".equals(resourceSlots[2])
+                        && "texture-sampler".equals(resourceSlots[7]),
+                "pipeline switch did not remap canonical named bindings");
+        require(resourceSlots[4] == null && resourceSlots[1] == null,
+                "pipeline switch retained stale values in reused binding IDs");
+    }
+
+    private static void testResourceBindingBatchSelector() {
+        require(!MetalRenderPass.shouldBatchResourceBindings(0L),
+                "empty resource state unexpectedly selected the batch path");
+        require(!MetalRenderPass.shouldBatchResourceBindings(1L << 17),
+                "single dirty resource did not preserve the direct FFM path");
+        require(MetalRenderPass.shouldBatchResourceBindings((1L << 2) | (1L << 61)),
+                "multiple dirty resources did not select the packet batch path");
     }
 
     private static void testJavaWorkloadTelemetryGateAndReset() {
