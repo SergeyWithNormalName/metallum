@@ -79,11 +79,32 @@ The report path has no effect unless `METALLUM_GPU_TIMING=1` is set. On M1 Pro t
 For the reproducible release gate on this MacBook, use the console-only launcher. It refuses the wrong monitor or configuration, targets the built-in Retina display at 3024x1964@120 with VSync off, disables screenshots and intrusive timing detail, and accepts only 3000 phase-aligned measurement frames:
 
 ```bash
-scripts/run_metal_benchmark.sh --world HDRTest --metalfx OFF --label baseline
+scripts/run_metal_benchmark.sh --preflight-only
+scripts/run_metal_benchmark.sh \
+  --route benchmark/routes/hdrtest-static-v1.json \
+  --settings benchmark/settings/native-hdr-fancy-v1.json \
+  --metalfx OFF \
+  --label baseline
 python3 tools/metal_benchmark_report.py compare BASELINE.jsonl CANDIDATE.jsonl
 ```
 
-Reports and copied runtime logs are written below the ignored `run/logs/metallum-benchmarks` directory.
+The tracked route specification fixes the fixture digest, offline player identity, dimension, camera pose, paused clock, frozen clear weather, and the complete integrated-server simulation. This benchmark-only freeze preserves the rendered scene, including existing entities, but prevents a mob or another world tick from moving the camera between runs. It does not change normal gameplay. The source world lives at the ignored, read-only path `run/benchmark-fixtures/<fixture-id>/world`; the launcher never opens `HDRTest` directly. Each real run uses `clonefile(2)` to create a unique APFS copy-on-write world below `run/saves`, verifies that its content matches the fixture, and removes only that owner-token-protected clone on exit.
+
+The separate tracked settings specification fixes the selected performance and image-quality state without hashing private or machine-specific data from the whole `run` directory. It covers the relevant Minecraft options, complete Sodium quality/performance/debug state, active resource-pack IDs and external-pack contents, HDR properties, persistent MetalFX state, and the resolved M1 Pro Sodium worker count. During the run the controller also rejects an inactive or iconified window, AFK throttling, a framerate limit other than 260, changed live render options, or a different active pack set. The timing JSON records the settings/spec/content digests plus the important decoded values and actual HDR presentation values.
+
+Every real run first builds the exact Java classes, resources, and packaged native dylib that `runClient` will load, records their combined content digest, and verifies that digest again after Minecraft exits. The launcher also recomputes the source, settings, fixture, and resource-pack fingerprints. It creates a sibling `*.accepted.json` only after independently re-reading the raw report and proving the ordered server-freeze, `ARMED`, built-in-display `WINDOW_READY`, route, 1800-frame warmup, 3000-frame measurement, and completion markers; the Sodium worker count; the absence of benchmark/Metal failures; and SHA-256 bindings for the raw report, summary, Minecraft log, and console log.
+
+Strict `compare` accepts only schema-v2 attested bundles and requires the same source and built-artifact digests by default. Its verdict is a composite stability gate: GPU p95/p99/worst, weighted and worst-window FPS, 1%/0.1% lows, and present-interval p95/p99/worst can each reject a candidate. For an intentional before/after optimization comparison between two fully attested source revisions, use `--allow-source-change`; `--provisional` is reserved for legacy or exploratory reports and is not a release gate. The sidecar is a local consistency receipt, not a cryptographic signature or an external trust root.
+
+To create a new fixture version explicitly while Minecraft is stopped, clone an existing world once and copy the printed digest into the new tracked route specification. Never refresh an existing fixture ID in place:
+
+```bash
+python3 tools/metal_benchmark_fixture.py prepare \
+  run/saves/HDRTest \
+  run/benchmark-fixtures/hdrtest-static-v1/world
+```
+
+`--preflight-only` validates the route, immutable fixture digest, read-only permissions, normalized settings contract, HDR/VSync/fullscreen settings, and the built-in-laptop-display contract without building artifacts or creating a temporary world. Reports and copied runtime logs are written below the ignored `run/logs/metallum-benchmarks` directory.
 
 ## Compatibility
 
@@ -92,7 +113,7 @@ Validated target:
 - Minecraft Java 26.2;
 - Fabric Loader 0.19.3;
 - Java 25;
-- Sodium 0.9.0;
+- Sodium 0.9.1;
 - Apple Silicon and macOS with Metal support.
 
 Sodium is supported and is the primary terrain path. Iris is not supported by the HDR implementation.

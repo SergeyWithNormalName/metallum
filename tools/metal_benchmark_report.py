@@ -9,25 +9,72 @@ never presents them as an exact percentile over the whole run.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import re
 import statistics
 import sys
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 
 DEFAULT_MEASURE_FRAMES = 3000
+DEFAULT_WARMUP_FRAMES = 1800
 DEFAULT_P95_GATE_MS = 0.2
+DEFAULT_P99_GATE_MS = 1.5
+DEFAULT_GPU_WORST_GATE_MS = 5.0
+DEFAULT_FPS_REGRESSION_FRACTION = 0.03
+DEFAULT_ONE_PERCENT_LOW_REGRESSION_FRACTION = 0.07
+DEFAULT_ZERO_POINT_ONE_LOW_REGRESSION_FRACTION = 0.12
+DEFAULT_PRESENT_P95_REGRESSION_FRACTION = 0.10
+DEFAULT_PRESENT_P99_REGRESSION_FRACTION = 0.15
+DEFAULT_PRESENT_WORST_GATE_MS = 5.0
 BUILT_IN_MONITOR = "Built-in Retina Display"
 BUILT_IN_WIDTH = 3024
 BUILT_IN_HEIGHT = 1964
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
+DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
+SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+STABLE_METADATA_KEYS = (
+    "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
+    "settings_id", "settings_spec_sha256", "settings_sha256",
+    "render_distance", "simulation_distance", "graphics_preset",
+    "entity_distance_scaling", "particles", "mipmap_levels",
+    "biome_blend_radius", "max_fps", "ambient_occlusion", "clouds_mode",
+    "cloud_range", "texture_filtering", "max_anisotropy_bit",
+    "improved_transparency", "resource_packs_sha256",
+    "sodium_settings_sha256", "configured_gui_scale",
+    "active_resource_pack_ids", "sodium_chunk_builder_threads",
+    "hdr_bloom_strength", "hdr_strength", "persistent_metalfx_mode",
+    "world", "fixture", "fixture_sha256", "route", "route_sha256",
+    "benchmark_player_name", "benchmark_player_uuid", "benchmark_dimension",
+    "benchmark_simulation_frozen", "monitor", "os_version", "thermal_state",
+    "device_name", "registry_id", "executor", "refresh_hz", "render_width",
+    "render_height", "display_width", "display_height", "scaler_active",
+    "hdr_output_mode", "source_encoding", "diagnostic_pattern",
+    "bloom_strength", "current_edr_headroom",
+    "display_sync_enabled",
+)
+COMPARISON_METADATA_KEYS = tuple(
+    key for key in STABLE_METADATA_KEYS
+    if key not in {"commit", "dirty_worktree"}
+)
 
 
 class ReportError(ValueError):
     """The input cannot support an honest comparison."""
+
+
+def _offline_player_uuid(name: str) -> str:
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode("utf-8")).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30
+    digest[8] = (digest[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(digest)))
 
 
 @dataclass(frozen=True)
@@ -123,6 +170,19 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         benchmark = payload["benchmark"]
         metadata = payload["metadata"]
 
+    phase = benchmark.get("phase") if schema == 2 else None
+    segment: int | None = None
+    if schema == 2:
+        raw_segment = benchmark.get("segment_index")
+        if phase == "startup":
+            if isinstance(raw_segment, bool) or raw_segment != -1:
+                raise ReportError(
+                    f"line {line}: startup benchmark.segment_index must be -1"
+                )
+            segment = -1
+        else:
+            segment = _integer(raw_segment, "benchmark.segment_index", line)
+
     window = TimingWindow(
         line=line,
         schema=schema,
@@ -136,15 +196,12 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         p99_ms=_number(metric.get("p99"), "gpu.p99", line),
         maximum_ms=_number(metric.get("maximum"), "gpu.maximum", line),
         dropped=_integer(payload.get("dropped_timing_events"), "dropped_timing_events", line),
-        phase=benchmark.get("phase") if schema == 2 else None,
+        phase=phase,
         generation=(
             _integer(benchmark.get("generation"), "benchmark.generation", line)
             if schema == 2 else None
         ),
-        segment=(
-            _integer(benchmark.get("segment_index"), "benchmark.segment_index", line)
-            if schema == 2 else None
-        ),
+        segment=segment,
         scaler=benchmark.get("scaler_mode") if schema == 2 else None,
         low_1=_optional_number(payload.get("fps_1_percent_low"), "fps_1_percent_low", line),
         low_01=_optional_number(payload.get("fps_0_1_percent_low"), "fps_0_1_percent_low", line),
@@ -256,19 +313,97 @@ def _series(values: Sequence[float], windows: Sequence[TimingWindow]) -> dict[st
     }
 
 
+def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> None:
+    reference = windows[0].metadata
+    for window in windows[1:]:
+        mismatches = [
+            key for key in STABLE_METADATA_KEYS
+            if window.metadata.get(key) != reference.get(key)
+        ]
+        if mismatches:
+            raise ReportError(
+                f"line {window.line}: selected-window metadata changed: "
+                + ", ".join(mismatches)
+            )
+
+
 def validate_release_contract(
     windows: Sequence[TimingWindow],
     *,
     scaler: str,
+    source_sha256: str,
+    artifact_sha256: str,
+    settings_id: str,
+    settings_spec_sha256: str,
+    settings_sha256: str,
     world: str,
+    fixture: str,
+    fixture_sha256: str,
     route: str,
+    route_sha256: str,
+    player_name: str,
+    player_uuid: str,
+    dimension: str,
+    simulation_frozen: bool,
 ) -> None:
+    if not SHA256_RE.fullmatch(source_sha256):
+        raise ReportError("release source digest must be lowercase SHA-256")
+    if not SHA256_RE.fullmatch(artifact_sha256):
+        raise ReportError("release build-artifact digest must be lowercase SHA-256")
+    if not SAFE_ID_RE.fullmatch(settings_id):
+        raise ReportError("release settings ID is invalid")
+    if not SHA256_RE.fullmatch(settings_spec_sha256):
+        raise ReportError("release settings spec digest must be lowercase SHA-256")
+    if not SHA256_RE.fullmatch(settings_sha256):
+        raise ReportError("release settings digest must be lowercase SHA-256")
+    if fixture != world:
+        raise ReportError("release benchmark world and fixture identifiers must match")
+    if not SHA256_RE.fullmatch(fixture_sha256):
+        raise ReportError("release fixture digest must be lowercase SHA-256")
+    if not SHA256_RE.fullmatch(route_sha256):
+        raise ReportError("release route digest must be lowercase SHA-256")
+    if not PLAYER_RE.fullmatch(player_name):
+        raise ReportError("release player name must be a valid offline profile name")
+    try:
+        normalized_player_uuid = str(uuid.UUID(player_uuid))
+    except ValueError as error:
+        raise ReportError("release player UUID is invalid") from error
+    if normalized_player_uuid != player_uuid:
+        raise ReportError("release player UUID must use canonical lowercase form")
+    expected_player_uuid = _offline_player_uuid(player_name)
+    if player_uuid != expected_player_uuid:
+        raise ReportError(
+            f"release player UUID must be offline UUID {expected_player_uuid} for {player_name}"
+        )
+    if not DIMENSION_RE.fullmatch(dimension):
+        raise ReportError("release benchmark dimension is invalid")
+    if not simulation_frozen:
+        raise ReportError("release benchmark simulation must be frozen")
+    presented_frames = sum(window.frames for window in windows)
+    if presented_frames != DEFAULT_MEASURE_FRAMES:
+        raise ReportError(
+            f"release benchmark requires exactly {DEFAULT_MEASURE_FRAMES} measured "
+            f"frames (found {presented_frames})"
+        )
+    if len(windows) != 10 or any(window.frames != 300 for window in windows):
+        raise ReportError(
+            "release benchmark requires exactly ten complete 300-frame timing windows"
+        )
+
     expected_scaling = scaler != "OFF"
     for window in windows:
         if window.schema != 2:
             raise ReportError(f"line {window.line}: release contract requires schema v2")
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
+        if window.low_1 is None or window.low_01 is None:
+            raise ReportError(
+                f"line {window.line}: release contract requires 1% and 0.1% FPS lows"
+            )
+        if window.present_interval is None:
+            raise ReportError(
+                f"line {window.line}: release contract requires present-interval timing"
+            )
         metadata = window.metadata
         expected = {
             "monitor": BUILT_IN_MONITOR,
@@ -281,14 +416,67 @@ def validate_release_contract(
             "source_encoding": "LINEAR",
             "executor": "METAL3",
             "scaler_active": expected_scaling,
+            "source_sha256": source_sha256,
+            "artifact_sha256": artifact_sha256,
+            "settings_id": settings_id,
+            "settings_spec_sha256": settings_spec_sha256,
+            "settings_sha256": settings_sha256,
             "world": world,
+            "fixture": fixture,
+            "fixture_sha256": fixture_sha256,
             "route": route,
+            "route_sha256": route_sha256,
+            "benchmark_player_name": player_name,
+            "benchmark_player_uuid": player_uuid,
+            "benchmark_dimension": dimension,
+            "benchmark_simulation_frozen": True,
         }
         for key, value in expected.items():
             if metadata.get(key) != value:
                 raise ReportError(
                     f"line {window.line}: metadata.{key} must be {value!r} "
                     f"(found {metadata.get(key)!r})"
+                )
+        for key in (
+            "resource_packs_sha256",
+            "sodium_settings_sha256",
+        ):
+            value = metadata.get(key)
+            if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+                raise ReportError(
+                    f"line {window.line}: metadata.{key} must be lowercase SHA-256"
+                )
+        numeric_expectations = {
+            "max_fps": 260,
+            "configured_gui_scale": 0,
+            "sodium_chunk_builder_threads": 4,
+        }
+        for key, value in numeric_expectations.items():
+            if metadata.get(key) != value:
+                raise ReportError(
+                    f"line {window.line}: metadata.{key} must be {value!r} "
+                    f"(found {metadata.get(key)!r})"
+                )
+        if metadata.get("diagnostic_pattern") is not False:
+            raise ReportError(
+                f"line {window.line}: HDR diagnostic pattern must be disabled"
+            )
+        if metadata.get("persistent_metalfx_mode") != "off":
+            raise ReportError(
+                f"line {window.line}: persistent MetalFX mode must remain off"
+            )
+        for key, expected_value in (
+            ("hdr_strength", 1.0),
+            ("bloom_strength", 0.18),
+            ("hdr_bloom_strength", 0.18),
+        ):
+            actual = metadata.get(key)
+            if isinstance(actual, bool) or not isinstance(actual, (int, float)) \
+                    or not math.isfinite(float(actual)) \
+                    or abs(float(actual) - expected_value) > 1e-6:
+                raise ReportError(
+                    f"line {window.line}: metadata.{key} must be {expected_value} "
+                    f"(found {actual!r})"
                 )
         if scaler == "OFF" and (
             metadata.get("render_width") != BUILT_IN_WIDTH
@@ -301,6 +489,13 @@ def validate_release_contract(
                 f"line {window.line}: release benchmark requires nominal thermal state "
                 f"(found {thermal!r})"
             )
+        headroom = metadata.get("current_edr_headroom")
+        if isinstance(headroom, bool) or not isinstance(headroom, (int, float)) \
+                or not math.isfinite(float(headroom)) or float(headroom) <= 1.0:
+            raise ReportError(
+                f"line {window.line}: release HDR requires current EDR headroom > 1.0 "
+                f"(found {headroom!r})"
+            )
 
 
 def summarize(
@@ -310,18 +505,49 @@ def summarize(
     scaler: str,
     *,
     release_contract: bool = False,
+    source_sha256: str = "unknown",
+    artifact_sha256: str = "unknown",
+    settings_id: str = "unknown",
+    settings_spec_sha256: str = "unknown",
+    settings_sha256: str = "unknown",
     world: str = "HDRTest",
+    fixture: str = "unknown",
+    fixture_sha256: str = "unknown",
     route: str = "static-heavy",
+    route_sha256: str = "unknown",
+    player_name: str = "unknown",
+    player_uuid: str = "unknown",
+    dimension: str = "unknown",
+    simulation_frozen: bool = False,
 ) -> dict[str, Any]:
     all_windows = load_report(path)
     selected, selection = select_measurement(all_windows, frames, segment, scaler)
     if len({window.detail for window in selected}) != 1:
         raise ReportError("selected windows mix detailed and basic instrumentation")
+    if selected[0].schema == 2:
+        validate_selected_metadata_consistency(selected)
     dropped = sum(window.dropped for window in selected)
     if dropped:
         raise ReportError(f"selected windows contain {dropped} dropped timing events")
     if release_contract:
-        validate_release_contract(selected, scaler=scaler, world=world, route=route)
+        validate_release_contract(
+            selected,
+            scaler=scaler,
+            source_sha256=source_sha256,
+            artifact_sha256=artifact_sha256,
+            settings_id=settings_id,
+            settings_spec_sha256=settings_spec_sha256,
+            settings_sha256=settings_sha256,
+            world=world,
+            fixture=fixture,
+            fixture_sha256=fixture_sha256,
+            route=route,
+            route_sha256=route_sha256,
+            player_name=player_name,
+            player_uuid=player_uuid,
+            dimension=dimension,
+            simulation_frozen=simulation_frozen,
+        )
 
     elapsed = sum(window.frames / window.fps for window in selected)
     gpu_percentiles = {
@@ -372,39 +598,203 @@ def summarize(
     return result
 
 
-def compare(baseline: dict[str, Any], candidate: dict[str, Any], gate_ms: float) -> dict[str, Any]:
+def compare(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    gate_ms: float,
+    *,
+    allow_source_change: bool = False,
+    require_stability: bool = True,
+) -> dict[str, Any]:
     if not math.isfinite(gate_ms) or gate_ms < 0.0:
         raise ReportError("p95 gate must be finite and >= 0")
-    if baseline["presented_frames"] != candidate["presented_frames"]:
+
+    def required_field(summary: dict[str, Any], key: str, label: str) -> Any:
+        if key not in summary:
+            raise ReportError(f"{label} lacks {key} required by compare")
+        return summary[key]
+
+    baseline_frames = required_field(baseline, "presented_frames", "baseline")
+    candidate_frames = required_field(candidate, "presented_frames", "candidate")
+    if baseline_frames != candidate_frames:
         raise ReportError("baseline and candidate cover different frame counts")
-    if baseline["detail_enabled"] != candidate["detail_enabled"]:
+    baseline_windows = required_field(baseline, "window_count", "baseline")
+    candidate_windows = required_field(candidate, "window_count", "candidate")
+    if baseline_windows != candidate_windows:
+        raise ReportError("baseline and candidate use different timing-window counts")
+    baseline_detail = required_field(baseline, "detail_enabled", "baseline")
+    candidate_detail = required_field(candidate, "detail_enabled", "candidate")
+    if baseline_detail != candidate_detail:
         raise ReportError("baseline and candidate use different detail instrumentation")
-    if "metadata" in baseline and "metadata" in candidate:
-        stable_metadata = (
-            "world", "route", "monitor", "os_version", "thermal_state",
-            "device_name", "executor", "refresh_hz", "render_width", "render_height",
-            "display_width", "display_height", "scaler_active",
-            "hdr_output_mode", "source_encoding", "current_edr_headroom",
-            "display_sync_enabled",
+    if require_stability and (
+        not isinstance(baseline.get("metadata"), dict)
+        or not isinstance(candidate.get("metadata"), dict)
+    ):
+        raise ReportError("strict compare requires release metadata for both reports")
+    if isinstance(baseline.get("metadata"), dict) \
+            and isinstance(candidate.get("metadata"), dict):
+        comparison_keys = tuple(
+            key for key in COMPARISON_METADATA_KEYS
+            if not (
+                allow_source_change
+                and key in {"source_sha256", "artifact_sha256"}
+            )
         )
         mismatches = [
-            key for key in stable_metadata
+            key for key in comparison_keys
             if baseline["metadata"].get(key) != candidate["metadata"].get(key)
         ]
         if mismatches:
             raise ReportError(
                 "baseline and candidate metadata differ: " + ", ".join(mismatches)
             )
+    baseline_runtime = baseline.get("attested_runtime")
+    candidate_runtime = candidate.get("attested_runtime")
+    if require_stability and (
+        not isinstance(baseline_runtime, dict)
+        or not isinstance(candidate_runtime, dict)
+    ):
+        raise ReportError("strict compare requires attested runtime contracts")
+    if baseline_runtime != candidate_runtime:
+        raise ReportError("baseline and candidate attested runtime contracts differ")
 
     def metric(summary: dict[str, Any], key: str) -> float:
-        return summary["presenting_command_buffer_gpu_ms"][
-            "percentile_window_summaries"
-        ][key]["window_frame_weighted_mean"]
+        try:
+            value = summary["presenting_command_buffer_gpu_ms"][
+                "percentile_window_summaries"
+            ][key]["window_frame_weighted_mean"]
+        except (KeyError, TypeError) as error:
+            raise ReportError(f"compare input lacks GPU {key} summary") from error
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(float(value)):
+            raise ReportError(f"compare input has invalid GPU {key} summary")
+        return float(value)
 
     base_p95 = metric(baseline, "p95")
     candidate_p95 = metric(candidate, "p95")
     delta = candidate_p95 - base_p95
-    if delta > gate_ms + 1e-12:
+    regressions: list[dict[str, Any]] = []
+
+    def absolute_upper_gate(
+        name: str,
+        baseline_value: float,
+        candidate_value: float,
+        threshold: float,
+    ) -> None:
+        if candidate_value - baseline_value > threshold + 1e-12:
+            regressions.append({
+                "metric": name,
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "delta": candidate_value - baseline_value,
+                "limit": threshold,
+                "limit_kind": "absolute increase",
+            })
+
+    def fractional_upper_gate(
+        name: str,
+        baseline_value: float,
+        candidate_value: float,
+        fraction: float,
+    ) -> None:
+        if candidate_value > baseline_value * (1.0 + fraction) + 1e-12:
+            regressions.append({
+                "metric": name,
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "delta_fraction": (
+                    candidate_value / baseline_value - 1.0
+                    if baseline_value != 0.0 else None
+                ),
+                "limit": fraction,
+                "limit_kind": "fractional increase",
+            })
+
+    def fractional_lower_gate(
+        name: str,
+        baseline_value: float,
+        candidate_value: float,
+        fraction: float,
+    ) -> None:
+        if candidate_value < baseline_value * (1.0 - fraction) - 1e-12:
+            regressions.append({
+                "metric": name,
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "delta_fraction": (
+                    candidate_value / baseline_value - 1.0
+                    if baseline_value != 0.0 else None
+                ),
+                "limit": fraction,
+                "limit_kind": "fractional decrease",
+            })
+
+    absolute_upper_gate("GPU p95", base_p95, candidate_p95, gate_ms)
+    if require_stability:
+        for summary, label in ((baseline, "baseline"), (candidate, "candidate")):
+            if "fps_low_window_summaries" not in summary:
+                raise ReportError(f"{label} lacks FPS low summaries required by strict compare")
+            if "present_interval_ms" not in summary:
+                raise ReportError(
+                    f"{label} lacks present-interval summaries required by strict compare"
+                )
+
+        absolute_upper_gate(
+            "GPU p99",
+            metric(baseline, "p99"),
+            metric(candidate, "p99"),
+            DEFAULT_P99_GATE_MS,
+        )
+        absolute_upper_gate(
+            "GPU worst window maximum",
+            baseline["presenting_command_buffer_gpu_ms"]["maximum_observed_in_any_window"],
+            candidate["presenting_command_buffer_gpu_ms"]["maximum_observed_in_any_window"],
+            DEFAULT_GPU_WORST_GATE_MS,
+        )
+        fractional_lower_gate(
+            "FPS elapsed-weighted",
+            baseline["fps"]["elapsed_weighted"],
+            candidate["fps"]["elapsed_weighted"],
+            DEFAULT_FPS_REGRESSION_FRACTION,
+        )
+        fractional_lower_gate(
+            "FPS minimum window",
+            baseline["fps"]["window_minimum"],
+            candidate["fps"]["window_minimum"],
+            DEFAULT_FPS_REGRESSION_FRACTION,
+        )
+        for key, name, fraction in (
+            ("one_percent", "FPS 1% low", DEFAULT_ONE_PERCENT_LOW_REGRESSION_FRACTION),
+            (
+                "zero_point_one_percent",
+                "FPS 0.1% low",
+                DEFAULT_ZERO_POINT_ONE_LOW_REGRESSION_FRACTION,
+            ),
+        ):
+            fractional_lower_gate(
+                name,
+                baseline["fps_low_window_summaries"][key]["window_frame_weighted_mean"],
+                candidate["fps_low_window_summaries"][key]["window_frame_weighted_mean"],
+                fraction,
+            )
+        for key, name, fraction in (
+            ("p95", "present interval p95", DEFAULT_PRESENT_P95_REGRESSION_FRACTION),
+            ("p99", "present interval p99", DEFAULT_PRESENT_P99_REGRESSION_FRACTION),
+        ):
+            fractional_upper_gate(
+                name,
+                baseline["present_interval_ms"][key]["window_frame_weighted_mean"],
+                candidate["present_interval_ms"][key]["window_frame_weighted_mean"],
+                fraction,
+            )
+        absolute_upper_gate(
+            "present interval worst window maximum",
+            baseline["present_interval_ms"]["maximum"]["window_maximum"],
+            candidate["present_interval_ms"]["maximum"]["window_maximum"],
+            DEFAULT_PRESENT_WORST_GATE_MS,
+        )
+
+    if regressions:
         verdict = "REGRESSION"
     elif delta < -gate_ms - 1e-12:
         verdict = "IMPROVEMENT"
@@ -418,6 +808,7 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any], gate_ms: float)
             "baseline_ms": base_p95,
             "candidate_ms": candidate_p95,
             "delta_ms": delta,
+            "regressions": regressions,
         },
         "metrics": {
             key: {
@@ -430,6 +821,514 @@ def compare(baseline: dict[str, Any], candidate: dict[str, Any], gate_ms: float)
         "baseline": baseline,
         "candidate": candidate,
     }
+
+
+def _file_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                hasher.update(chunk)
+    except OSError as error:
+        raise ReportError(f"cannot hash {path}: {error}") from error
+    return hasher.hexdigest()
+
+
+def _existing_file(path: Path, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise ReportError(f"{label} does not exist: {path}: {error}") from error
+    if not resolved.is_file():
+        raise ReportError(f"{label} is not a regular file: {resolved}")
+    return resolved
+
+
+def _artifact_paths(raw_report: Path) -> dict[str, Path]:
+    suffix = ".raw.jsonl"
+    if not raw_report.name.endswith(suffix):
+        raise ReportError("benchmark acceptance requires a *.raw.jsonl report")
+    stem = raw_report.name[:-len(suffix)]
+    return {
+        "raw_report": raw_report,
+        "summary": raw_report.with_name(stem + ".summary.json"),
+        "minecraft_log": raw_report.with_name(stem + ".minecraft.log"),
+        "console_log": raw_report.with_name(stem + ".console.log"),
+        "attestation": raw_report.with_name(stem + ".accepted.json"),
+    }
+
+
+def _validated_bundle_paths(
+    raw_report: Path,
+    summary_path: Path,
+    minecraft_log: Path,
+    console_log: Path,
+    output: Path | None = None,
+) -> dict[str, Path]:
+    raw = _existing_file(raw_report, "raw report")
+    expected = _artifact_paths(raw)
+    supplied = {
+        "summary": _existing_file(summary_path, "benchmark summary"),
+        "minecraft_log": _existing_file(minecraft_log, "Minecraft log"),
+        "console_log": _existing_file(console_log, "console log"),
+    }
+    for key, value in supplied.items():
+        if value != expected[key]:
+            raise ReportError(
+                f"{key.replace('_', ' ')} path is inconsistent with raw report: "
+                f"expected {expected[key]}, found {value}"
+            )
+    if output is not None and output.resolve() != expected["attestation"]:
+        raise ReportError(
+            "attestation path is inconsistent with raw report: "
+            f"expected {expected['attestation']}, found {output.resolve()}"
+        )
+    return {"raw_report": raw, **supplied, "attestation": expected["attestation"]}
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReportError(f"cannot read {label} {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ReportError(f"{label} must contain a JSON object: {path}")
+    return payload
+
+
+def _derive_release_summary(raw_report: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    windows = load_report(raw_report)
+    if any(window.schema != 2 for window in windows):
+        raise ReportError("accepted raw report must contain schema-v2 windows only")
+    measure_windows = [window for window in windows if window.phase == "measure"]
+    if not measure_windows:
+        raise ReportError("accepted raw report contains no measurement windows")
+    selections = {
+        (window.segment, window.scaler, window.generation)
+        for window in measure_windows
+    }
+    if len(selections) != 1:
+        raise ReportError(
+            "accepted raw report must contain exactly one measurement selection"
+        )
+    segment, scaler, generation = next(iter(selections))
+    if not isinstance(segment, int) or segment < 0:
+        raise ReportError("accepted raw report has an invalid measurement segment")
+    if scaler not in {"OFF", "QUALITY", "PERFORMANCE"}:
+        raise ReportError("accepted raw report has an invalid scaler mode")
+    frames = sum(window.frames for window in measure_windows)
+    preliminary = summarize(raw_report, frames, segment, scaler)
+    metadata = preliminary.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ReportError("accepted raw report has no stable release metadata")
+    release = summarize(
+        raw_report,
+        frames,
+        segment,
+        scaler,
+        release_contract=True,
+        source_sha256=_metadata_string(metadata, "source_sha256"),
+        artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
+        settings_id=_metadata_string(metadata, "settings_id"),
+        settings_spec_sha256=_metadata_string(metadata, "settings_spec_sha256"),
+        settings_sha256=_metadata_string(metadata, "settings_sha256"),
+        world=_metadata_string(metadata, "world"),
+        fixture=_metadata_string(metadata, "fixture"),
+        fixture_sha256=_metadata_string(metadata, "fixture_sha256"),
+        route=_metadata_string(metadata, "route"),
+        route_sha256=_metadata_string(metadata, "route_sha256"),
+        player_name=_metadata_string(metadata, "benchmark_player_name"),
+        player_uuid=_metadata_string(metadata, "benchmark_player_uuid"),
+        dimension=_metadata_string(metadata, "benchmark_dimension"),
+        simulation_frozen=metadata.get("benchmark_simulation_frozen") is True,
+    )
+    return release, {
+        "measure_frames": frames,
+        "segment": segment,
+        "scaler_mode": scaler,
+        "generation": generation,
+    }
+
+
+def _event_records(text: str, event: str) -> list[tuple[int, str]]:
+    token = f"METALLUM_BENCHMARK EVENT={event}"
+    records: list[tuple[int, str]] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        position = line.find(token)
+        if position >= 0:
+            records.append((line_number, line[position:].strip()))
+    return records
+
+
+def _single_event(
+    text: str,
+    event: str,
+    pattern: str,
+) -> tuple[int, re.Match[str]]:
+    records = _event_records(text, event)
+    if len(records) != 1:
+        raise ReportError(
+            f"Minecraft log must contain exactly one {event} event (found {len(records)})"
+        )
+    line_number, record = records[0]
+    match = re.fullmatch(pattern, record)
+    if match is None:
+        raise ReportError(f"Minecraft log line {line_number}: malformed {event} event")
+    return line_number, match
+
+
+def _validate_log_evidence(
+    minecraft_log: Path,
+    console_log: Path,
+    summary: dict[str, Any],
+    measurement: dict[str, Any],
+) -> None:
+    try:
+        minecraft_text = minecraft_log.read_text(encoding="utf-8")
+        console_text = console_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ReportError(f"cannot read benchmark evidence logs: {error}") from error
+    if not minecraft_text.strip() or not console_text.strip():
+        raise ReportError("benchmark evidence logs must not be empty")
+    for text, label in ((minecraft_text, "Minecraft log"), (console_text, "console log")):
+        if "METALLUM_BENCHMARK EVENT=FAIL" in text:
+            raise ReportError(f"{label} contains a benchmark FAIL event")
+    if "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" in minecraft_text:
+        raise ReportError("Minecraft log contains an unexpected screenshot event")
+    if re.search(
+        r"\[metallum\] (?:Metal command buffer failed|GPU timing sample invalid)",
+        console_text,
+    ):
+        raise ReportError("console log contains a Metal timing/command-buffer failure")
+
+    metadata = summary["metadata"]
+    route = re.escape(_metadata_string(metadata, "route"))
+    fixture = re.escape(_metadata_string(metadata, "fixture"))
+    player_name = re.escape(_metadata_string(metadata, "benchmark_player_name"))
+    player_uuid = re.escape(_metadata_string(metadata, "benchmark_player_uuid"))
+    dimension = re.escape(_metadata_string(metadata, "benchmark_dimension"))
+    scaler = re.escape(str(measurement["scaler_mode"]))
+    frames = measurement["measure_frames"]
+    width = metadata.get("display_width")
+    height = metadata.get("display_height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ReportError("release metadata lacks integer display dimensions")
+    if frames != DEFAULT_MEASURE_FRAMES:
+        raise ReportError(
+            f"strict benchmark evidence requires {DEFAULT_MEASURE_FRAMES} measured frames"
+        )
+
+    frozen_line, _ = _single_event(
+        minecraft_text,
+        "SERVER_TICKS_FROZEN",
+        r"METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
+    )
+    armed_line, _ = _single_event(
+        minecraft_text,
+        "ARMED",
+        rf"METALLUM_BENCHMARK EVENT=ARMED scope={re.escape(BUILT_IN_MONITOR)} "
+        rf"target={BUILT_IN_WIDTH}x{BUILT_IN_HEIGHT} "
+        rf"warmup={DEFAULT_WARMUP_FRAMES} measure={DEFAULT_MEASURE_FRAMES} "
+        rf"sequence=\[{scaler}\] route={route}",
+    )
+    window_ready_line, _ = _single_event(
+        minecraft_text,
+        "WINDOW_READY",
+        rf"METALLUM_BENCHMARK EVENT=WINDOW_READY "
+        rf"monitor={re.escape(BUILT_IN_MONITOR)} "
+        rf"video_mode={BUILT_IN_WIDTH}x{BUILT_IN_HEIGHT}@120 \(24bit\) "
+        rf"framebuffer={BUILT_IN_WIDTH}x{BUILT_IN_HEIGHT} "
+        rf"window={BUILT_IN_WIDTH}x{BUILT_IN_HEIGHT} "
+        rf"screen={BUILT_IN_WIDTH}x{BUILT_IN_HEIGHT}",
+    )
+    apply_line, _ = _single_event(
+        minecraft_text,
+        "ROUTE_APPLY",
+        rf"METALLUM_BENCHMARK EVENT=ROUTE_APPLY route={route} fixture={fixture} "
+        rf"player={player_name}/{player_uuid} dimension={dimension}",
+    )
+    ready_line, ready = _single_event(
+        minecraft_text,
+        "ROUTE_READY",
+        rf"METALLUM_BENCHMARK EVENT=ROUTE_READY route={route} "
+        r"stable_frames=[1-9][0-9]* pose=\[[^\]\r\n]+\] "
+        r"max_fps=([1-9][0-9]*) resolved_gui_scale=([1-9][0-9]*) "
+        r"resource_packs=([A-Za-z0-9_.:/,-]+)",
+    )
+    expected_max_fps = metadata.get("max_fps")
+    expected_resource_packs = metadata.get("active_resource_pack_ids")
+    if int(ready.group(1)) != expected_max_fps:
+        raise ReportError("ROUTE_READY effective max FPS differs from timing metadata")
+    if ready.group(3) != expected_resource_packs:
+        raise ReportError("ROUTE_READY active resource packs differ from timing metadata")
+    resolved_gui_scale = int(ready.group(2))
+    if resolved_gui_scale != 8:
+        raise ReportError(
+            "ROUTE_READY resolved GUI scale must be 8 for the strict built-in-display route"
+        )
+
+    worker_counts = [
+        int(value)
+        for value in re.findall(
+            r"\(ChunkBuilder\) Started ([1-9][0-9]*) worker threads",
+            minecraft_text,
+        )
+    ]
+    expected_worker_count = metadata.get("sodium_chunk_builder_threads")
+    if not worker_counts or any(value != expected_worker_count for value in worker_counts):
+        raise ReportError(
+            "Minecraft log Sodium worker count differs from timing metadata"
+        )
+
+    route_checks = _event_records(minecraft_text, "ROUTE_CHECK")
+    if len(route_checks) != 2:
+        raise ReportError(
+            "Minecraft log must contain exactly two ROUTE_CHECK events "
+            f"(found {len(route_checks)})"
+        )
+    route_check_lines: dict[str, int] = {}
+    route_check_pattern = re.compile(
+        rf"METALLUM_BENCHMARK EVENT=ROUTE_CHECK "
+        rf"event=(MEASURE_START|MEASURE_END) route={route} status=ready"
+    )
+    for line_number, record in route_checks:
+        match = route_check_pattern.fullmatch(record)
+        if match is None or match.group(1) in route_check_lines:
+            raise ReportError(
+                f"Minecraft log line {line_number}: invalid or duplicate ROUTE_CHECK event"
+            )
+        route_check_lines[match.group(1)] = line_number
+    if set(route_check_lines) != {"MEASURE_START", "MEASURE_END"}:
+        raise ReportError("Minecraft log lacks ready route checks at both boundaries")
+
+    measure_start_line, measure_start = _single_event(
+        minecraft_text,
+        "MEASURE_START",
+        rf"METALLUM_BENCHMARK EVENT=MEASURE_START index=1 mode={scaler} "
+        r"presented_frame=([0-9]+)",
+    )
+    measure_end_line, measure_end = _single_event(
+        minecraft_text,
+        "MEASURE_END",
+        rf"METALLUM_BENCHMARK EVENT=MEASURE_END index=1 mode={scaler} "
+        r"presented_frame=([0-9]+)",
+    )
+    start_frame = int(measure_start.group(1))
+    end_frame = int(measure_end.group(1))
+    if (
+        start_frame != DEFAULT_WARMUP_FRAMES
+        or end_frame != DEFAULT_WARMUP_FRAMES + DEFAULT_MEASURE_FRAMES
+        or end_frame - start_frame != frames
+    ):
+        raise ReportError(
+            "Minecraft log measurement boundary must be exactly "
+            f"{DEFAULT_WARMUP_FRAMES}->{DEFAULT_WARMUP_FRAMES + DEFAULT_MEASURE_FRAMES} "
+            f"and cover the raw report's {frames} frames"
+        )
+    complete_line, _ = _single_event(
+        minecraft_text,
+        "COMPLETE",
+        rf"METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames={frames} "
+        rf"framebuffer={width}x{height}",
+    )
+    ordered_lines = (
+        frozen_line,
+        armed_line,
+        window_ready_line,
+        apply_line,
+        ready_line,
+        route_check_lines["MEASURE_START"],
+        measure_start_line,
+        measure_end_line,
+        route_check_lines["MEASURE_END"],
+        complete_line,
+    )
+    if any(current >= following for current, following in zip(ordered_lines, ordered_lines[1:])):
+        raise ReportError("benchmark evidence events are out of order")
+    measurement["runtime"] = {
+        "resolved_gui_scale": resolved_gui_scale,
+        "sodium_chunk_builder_threads": expected_worker_count,
+        "active_resource_pack_ids": expected_resource_packs,
+    }
+
+
+def _validate_release_bundle(
+    raw_report: Path,
+    summary_path: Path,
+    minecraft_log: Path,
+    console_log: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    supplied_summary = _load_json_object(summary_path, "benchmark summary")
+    recomputed_summary, measurement = _derive_release_summary(raw_report)
+    report_value = supplied_summary.get("report")
+    if not isinstance(report_value, str):
+        raise ReportError("benchmark summary has no raw report path")
+    try:
+        supplied_report = Path(report_value).resolve(strict=True)
+    except OSError as error:
+        raise ReportError(f"benchmark summary raw report path is invalid: {error}") from error
+    if supplied_report != raw_report:
+        raise ReportError("benchmark summary is bound to a different raw report")
+    normalized_summary = dict(supplied_summary)
+    normalized_summary["report"] = str(supplied_report)
+    expected_summary = dict(recomputed_summary)
+    expected_summary["report"] = str(raw_report)
+    if normalized_summary != expected_summary:
+        raise ReportError(
+            "benchmark summary does not match an independent release-contract "
+            "recalculation of the raw report"
+        )
+    _validate_log_evidence(
+        minecraft_log,
+        console_log,
+        recomputed_summary,
+        measurement,
+    )
+    return recomputed_summary, measurement
+
+
+def create_attestation(
+    raw_report: Path,
+    summary_path: Path,
+    minecraft_log: Path,
+    console_log: Path,
+    output: Path,
+) -> None:
+    paths = _validated_bundle_paths(
+        raw_report,
+        summary_path,
+        minecraft_log,
+        console_log,
+        output,
+    )
+    summary, measurement = _validate_release_bundle(
+        paths["raw_report"],
+        paths["summary"],
+        paths["minecraft_log"],
+        paths["console_log"],
+    )
+    payload = {
+        "schema_version": 2,
+        "accepted": True,
+        "raw_report": str(paths["raw_report"]),
+        "raw_sha256": _file_sha256(paths["raw_report"]),
+        "summary": str(paths["summary"]),
+        "summary_sha256": _file_sha256(paths["summary"]),
+        "minecraft_log": str(paths["minecraft_log"]),
+        "minecraft_log_sha256": _file_sha256(paths["minecraft_log"]),
+        "console_log": str(paths["console_log"]),
+        "console_log_sha256": _file_sha256(paths["console_log"]),
+        "measurement": measurement,
+        "presented_frames": summary["presented_frames"],
+        "metadata": summary["metadata"],
+    }
+    paths["attestation"].parent.mkdir(parents=True, exist_ok=True)
+    temporary = paths["attestation"].with_name(
+        f".{paths['attestation'].name}.tmp-{uuid.uuid4()}"
+    )
+    try:
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(paths["attestation"])
+    except OSError as error:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ReportError(
+            f"cannot write benchmark attestation {paths['attestation']}: {error}"
+        ) from error
+
+
+def _attestation_path(raw_report: Path) -> Path:
+    return _artifact_paths(raw_report)["attestation"]
+
+
+def verify_attestation(raw_report: Path) -> dict[str, Any]:
+    raw = _existing_file(raw_report, "raw report")
+    path = _attestation_path(raw)
+    payload = _load_json_object(path, "benchmark attestation")
+    schema_version = payload.get("schema_version")
+    if schema_version != 2 or payload.get("accepted") is not True:
+        raise ReportError(f"invalid benchmark attestation: {path}")
+    expected = _artifact_paths(raw)
+    artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
+    artifacts: dict[str, Path] = {}
+    for key in artifact_keys:
+        value = payload.get(key)
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise ReportError(f"attestation {key} path is invalid: {path}")
+        artifact = _existing_file(Path(value), key.replace("_", " "))
+        if artifact != expected[key] or value != str(artifact):
+            raise ReportError(f"attestation {key} path is inconsistent: {path}")
+        digest_key = "raw_sha256" if key == "raw_report" else f"{key}_sha256"
+        recorded_digest = payload.get(digest_key)
+        if not isinstance(recorded_digest, str) or not SHA256_RE.fullmatch(recorded_digest):
+            raise ReportError(f"attestation {digest_key} is invalid: {path}")
+        if _file_sha256(artifact) != recorded_digest:
+            raise ReportError(f"attested {key.replace('_', ' ')} changed: {artifact}")
+        artifacts[key] = artifact
+
+    summary, measurement = _validate_release_bundle(
+        artifacts["raw_report"],
+        artifacts["summary"],
+        artifacts["minecraft_log"],
+        artifacts["console_log"],
+    )
+    if payload.get("measurement") != measurement:
+        raise ReportError(f"attestation measurement contract is inconsistent: {path}")
+    if payload.get("presented_frames") != summary["presented_frames"]:
+        raise ReportError(f"attestation frame count is inconsistent: {path}")
+    if payload.get("metadata") != summary["metadata"]:
+        raise ReportError(f"attestation metadata is inconsistent: {path}")
+    return payload
+
+
+def _metadata_string(metadata: dict[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    if not isinstance(value, str) or not value:
+        raise ReportError(f"strict compare requires metadata.{key}")
+    return value
+
+
+def summarize_attested_release(
+    path: Path,
+    frames: int,
+    segment: int,
+    scaler: str,
+) -> dict[str, Any]:
+    attestation = verify_attestation(path)
+    preliminary = summarize(path, frames, segment, scaler)
+    metadata = preliminary.get("metadata")
+    if not isinstance(metadata, dict) or metadata != attestation["metadata"]:
+        raise ReportError("attestation metadata differs from the selected timing windows")
+    result = summarize(
+        path,
+        frames,
+        segment,
+        scaler,
+        release_contract=True,
+        source_sha256=_metadata_string(metadata, "source_sha256"),
+        artifact_sha256=_metadata_string(metadata, "artifact_sha256"),
+        settings_id=_metadata_string(metadata, "settings_id"),
+        settings_spec_sha256=_metadata_string(metadata, "settings_spec_sha256"),
+        settings_sha256=_metadata_string(metadata, "settings_sha256"),
+        world=_metadata_string(metadata, "world"),
+        fixture=_metadata_string(metadata, "fixture"),
+        fixture_sha256=_metadata_string(metadata, "fixture_sha256"),
+        route=_metadata_string(metadata, "route"),
+        route_sha256=_metadata_string(metadata, "route_sha256"),
+        player_name=_metadata_string(metadata, "benchmark_player_name"),
+        player_uuid=_metadata_string(metadata, "benchmark_player_uuid"),
+        dimension=_metadata_string(metadata, "benchmark_dimension"),
+        simulation_frozen=metadata.get("benchmark_simulation_frozen") is True,
+    )
+    measurement = attestation.get("measurement")
+    if isinstance(measurement, dict) and isinstance(measurement.get("runtime"), dict):
+        result["attested_runtime"] = measurement["runtime"]
+    return result
 
 
 def _print_summary(summary: dict[str, Any]) -> None:
@@ -471,10 +1370,44 @@ def _print_comparison(result: dict[str, Any]) -> None:
             f"  {key}: {values['baseline']:.4f} -> {values['candidate']:.4f} ms "
             f"({values['delta']:+.4f})"
         )
+    for regression in gate["regressions"]:
+        if regression["limit_kind"] == "absolute increase":
+            detail = (
+                f"increase {regression['delta']:+.4f}, "
+                f"limit +{regression['limit']:.4f}"
+            )
+        else:
+            delta_fraction = regression["delta_fraction"]
+            delta_text = (
+                "undefined from zero baseline"
+                if delta_fraction is None
+                else f"{delta_fraction:+.1%}"
+            )
+            direction = "increase" if regression["limit_kind"] == "fractional increase" \
+                else "decrease"
+            detail = f"change {delta_text}, {direction} limit {regression['limit']:.1%}"
+        print(
+            f"  REGRESSION {regression['metric']}: "
+            f"{regression['baseline']:.4f} -> {regression['candidate']:.4f} "
+            f"({detail})"
+        )
 
 
 def self_test() -> None:
-    def line(schema: int, index: int) -> dict[str, Any]:
+    def expect_error(action: Any, expected_text: str) -> None:
+        try:
+            action()
+        except ReportError as error:
+            assert expected_text in str(error), (expected_text, str(error))
+        else:
+            raise AssertionError(f"expected ReportError containing {expected_text!r}")
+
+    def line(
+        schema: int,
+        index: int,
+        source_sha256: str = "c" * 64,
+        artifact_sha256: str = "5" * 64,
+    ) -> dict[str, Any]:
         metric = {"average": 7.0, "p50": 7.1, "p95": 7.8, "p99": 8.1, "maximum": 9.0}
         payload: dict[str, Any] = {
             "schema_version": schema,
@@ -506,25 +1439,371 @@ def self_test() -> None:
                     "render_height": BUILT_IN_HEIGHT, "display_sync_enabled": False,
                     "hdr_output_mode": "ENHANCED", "source_encoding": "LINEAR",
                     "executor": "METAL3", "scaler_active": False,
-                    "world": "HDRTest", "route": "static-heavy",
+                    "source_sha256": source_sha256,
+                    "artifact_sha256": artifact_sha256,
+                    "settings_id": "native-hdr-fancy-v1",
+                    "settings_spec_sha256": "1" * 64,
+                    "settings_sha256": "2" * 64,
+                    "render_distance": 16, "simulation_distance": 12,
+                    "graphics_preset": "fancy", "entity_distance_scaling": 1.0,
+                    "particles": 0, "mipmap_levels": 4,
+                    "biome_blend_radius": 2, "max_fps": 260,
+                    "ambient_occlusion": True, "clouds_mode": "true",
+                    "cloud_range": 64, "texture_filtering": 1,
+                    "max_anisotropy_bit": 1, "improved_transparency": False,
+                    "resource_packs_sha256": "3" * 64,
+                    "sodium_settings_sha256": "4" * 64,
+                    "configured_gui_scale": 0,
+                    "active_resource_pack_ids": "vanilla,metallum,sodium",
+                    "sodium_chunk_builder_threads": 4,
+                    "hdr_bloom_strength": 0.18, "hdr_strength": 1.0,
+                    "persistent_metalfx_mode": "off",
+                    "diagnostic_pattern": False, "bloom_strength": 0.18,
+                    "current_edr_headroom": 1.2,
+                    "world": "hdrtest-static-v1", "fixture": "hdrtest-static-v1",
+                    "fixture_sha256": "a" * 64,
+                    "route": "hdrtest-static-v1", "route_sha256": "b" * 64,
+                    "benchmark_player_name": "MetallumBench",
+                    "benchmark_player_uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9",
+                    "benchmark_dimension": "minecraft:overworld",
+                    "benchmark_simulation_frozen": True,
                     "thermal_state": "nominal", "device_name": "Apple M1 Pro",
                 },
             })
         return payload
 
+    def report_text(source_sha256: str, artifact_sha256: str = "5" * 64) -> str:
+        startup = line(2, 0, source_sha256, artifact_sha256)
+        startup["benchmark"].update({
+            "generation": 0,
+            "segment_index": -1,
+            "phase": "startup",
+            "scaler_mode": "UNKNOWN",
+        })
+        return (
+            json.dumps(startup) + "\n"
+            + "\n".join(
+                json.dumps(line(2, index + 1, source_sha256, artifact_sha256))
+                for index in range(10)
+            )
+            + "\n"
+        )
+
+    minecraft_evidence = "\n".join((
+        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=ARMED "
+        "scope=Built-in Retina Display target=3024x1964 warmup=1800 "
+        "measure=3000 sequence=[OFF] route=hdrtest-static-v1",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=WINDOW_READY "
+        "monitor=Built-in Retina Display video_mode=3024x1964@120 (24bit) "
+        "framebuffer=3024x1964 window=3024x1964 screen=3024x1964",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_APPLY "
+        "route=hdrtest-static-v1 fixture=hdrtest-static-v1 "
+        "player=MetallumBench/b07a402a-d8ea-354f-9398-aaf208a798b9 "
+        "dimension=minecraft:overworld",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_READY "
+        "route=hdrtest-static-v1 stable_frames=120 "
+        "pose=[86.1,74.0,-95.5;155.4,13.2] max_fps=260 "
+        "resolved_gui_scale=8 resource_packs=vanilla,metallum,sodium",
+        "[render/INFO] (ChunkBuilder) Started 4 worker threads",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_CHECK "
+        "event=MEASURE_START route=hdrtest-static-v1 status=ready",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=MEASURE_START "
+        "index=1 mode=OFF presented_frame=1800",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=MEASURE_END "
+        "index=1 mode=OFF presented_frame=4800",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_CHECK "
+        "event=MEASURE_END route=hdrtest-static-v1 status=ready",
+        "[render/INFO] METALLUM_BENCHMARK EVENT=COMPLETE "
+        "segments=1 measured_frames=3000 framebuffer=3024x1964",
+    )) + "\n"
+
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         old = root / "old.jsonl"
-        new = root / "new.jsonl"
         old.write_text("\n".join(json.dumps(line(1, i)) for i in range(10)) + "\n")
-        new.write_text("\n".join(json.dumps(line(2, i)) for i in range(10)) + "\n")
         old_summary = summarize(old, 3000, 0, "OFF")
-        new_summary = summarize(
-            new, 3000, 0, "OFF", release_contract=True,
-        )
+
+        def make_bundle(
+            stem: str,
+            source_sha256: str,
+            artifact_sha256: str = "5" * 64,
+        ) -> tuple[Path, dict[str, Any]]:
+            raw = root / f"{stem}.raw.jsonl"
+            summary_path = root / f"{stem}.summary.json"
+            minecraft_log = root / f"{stem}.minecraft.log"
+            console_log = root / f"{stem}.console.log"
+            accepted = root / f"{stem}.accepted.json"
+            raw.write_text(
+                report_text(source_sha256, artifact_sha256),
+                encoding="utf-8",
+            )
+            release, _ = _derive_release_summary(raw)
+            summary_path.write_text(
+                json.dumps(release, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            minecraft_log.write_text(minecraft_evidence, encoding="utf-8")
+            console_log.write_text(
+                "Gradle/Minecraft console completed normally\n",
+                encoding="utf-8",
+            )
+            create_attestation(raw, summary_path, minecraft_log, console_log, accepted)
+            return raw, release
+
+        new, new_summary = make_bundle("new", "c" * 64)
         assert old_summary["presented_frames"] == 3000
         assert new_summary["presented_frames"] == 3000
-        assert compare(old_summary, new_summary, 0.2)["verdict"] == "WITHIN_THRESHOLD"
+        assert compare(
+            old_summary,
+            new_summary,
+            0.2,
+            require_stability=False,
+        )["verdict"] == "WITHIN_THRESHOLD"
+
+        verified = verify_attestation(new)
+        assert verified["presented_frames"] == 3000
+        new_attested = summarize_attested_release(new, 3000, 0, "OFF")
+        assert new_attested["attested_runtime"] == verified["measurement"]["runtime"]
+        new_without_runtime = dict(new_attested)
+        new_without_runtime.pop("attested_runtime")
+        assert new_without_runtime == new_summary
+
+        paths = _artifact_paths(new)
+        accepted_text = paths["attestation"].read_text(encoding="utf-8")
+        summary_text = paths["summary"].read_text(encoding="utf-8")
+        raw_text = new.read_text(encoding="utf-8")
+        minecraft_text = paths["minecraft_log"].read_text(encoding="utf-8")
+
+        # create_attestation must independently reject a caller-supplied summary
+        # whose metrics do not match a release-contract recalculation of the raw data.
+        forged_summary = json.loads(summary_text)
+        forged_summary["fps"]["elapsed_weighted"] += 1.0
+        paths["summary"].write_text(json.dumps(forged_summary), encoding="utf-8")
+        expect_error(
+            lambda: create_attestation(
+                new,
+                paths["summary"],
+                paths["minecraft_log"],
+                paths["console_log"],
+                paths["attestation"],
+            ),
+            "independent release-contract recalculation",
+        )
+        paths["summary"].write_text(summary_text, encoding="utf-8")
+
+        # Log evidence is part of acceptance: route, display, frame boundaries,
+        # and event order must all match the strict fixture contract exactly.
+        def expect_log_error(log_text: str, expected_text: str) -> None:
+            paths["minecraft_log"].write_text(log_text, encoding="utf-8")
+            expect_error(
+                lambda: create_attestation(
+                    new,
+                    paths["summary"],
+                    paths["minecraft_log"],
+                    paths["console_log"],
+                    paths["attestation"],
+                ),
+                expected_text,
+            )
+
+        expect_log_error(
+            minecraft_text.replace("presented_frame=4800", "presented_frame=4799"),
+            "measurement boundary",
+        )
+        expect_log_error(
+            minecraft_text.replace("warmup=1800", "warmup=1799"),
+            "malformed ARMED event",
+        )
+        expect_log_error(
+            minecraft_text.replace(
+                "video_mode=3024x1964@120 (24bit)",
+                "video_mode=3024x1964@60 (24bit)",
+            ),
+            "malformed WINDOW_READY event",
+        )
+        reordered_lines = minecraft_text.splitlines()
+        armed_index = next(
+            index for index, value in enumerate(reordered_lines)
+            if "EVENT=ARMED" in value
+        )
+        window_index = next(
+            index for index, value in enumerate(reordered_lines)
+            if "EVENT=WINDOW_READY" in value
+        )
+        reordered_lines[armed_index], reordered_lines[window_index] = (
+            reordered_lines[window_index],
+            reordered_lines[armed_index],
+        )
+        expect_log_error(
+            "\n".join(reordered_lines) + "\n",
+            "events are out of order",
+        )
+        paths["minecraft_log"].write_text(minecraft_text, encoding="utf-8")
+        create_attestation(
+            new,
+            paths["summary"],
+            paths["minecraft_log"],
+            paths["console_log"],
+            paths["attestation"],
+        )
+        accepted_text = paths["attestation"].read_text(encoding="utf-8")
+
+        # Every attested artifact is re-hashed during verification.
+        new.write_text(raw_text + "\n", encoding="utf-8")
+        expect_error(lambda: verify_attestation(new), "raw report changed")
+        new.write_text(raw_text, encoding="utf-8")
+        paths["summary"].write_text(summary_text + " ", encoding="utf-8")
+        expect_error(lambda: verify_attestation(new), "attested summary changed")
+        paths["summary"].write_text(summary_text, encoding="utf-8")
+
+        # Sidecar paths and copied metadata cannot be redirected or rewritten.
+        forged_attestation = json.loads(accepted_text)
+        forged_attestation["summary"] = str(paths["console_log"])
+        paths["attestation"].write_text(json.dumps(forged_attestation), encoding="utf-8")
+        expect_error(lambda: verify_attestation(new), "summary path is inconsistent")
+        forged_attestation = json.loads(accepted_text)
+        forged_attestation["metadata"]["source_sha256"] = "e" * 64
+        paths["attestation"].write_text(json.dumps(forged_attestation), encoding="utf-8")
+        expect_error(lambda: verify_attestation(new), "metadata is inconsistent")
+        paths["attestation"].write_text(accepted_text, encoding="utf-8")
+
+        # Legacy sidecars are never a strict acceptance artifact. Legacy raw
+        # reports remain available only through provisional comparison.
+        legacy_attestation = json.loads(accepted_text)
+        legacy_attestation["schema_version"] = 1
+        paths["attestation"].write_text(
+            json.dumps(legacy_attestation),
+            encoding="utf-8",
+        )
+        expect_error(lambda: verify_attestation(new), "invalid benchmark attestation")
+        paths["attestation"].write_text(accepted_text, encoding="utf-8")
+
+        paths["attestation"].unlink()
+        expect_error(lambda: verify_attestation(new), "cannot read benchmark attestation")
+        paths["attestation"].write_text(accepted_text, encoding="utf-8")
+
+        # A selected-window metadata change invalidates the raw report itself.
+        mismatch = root / "mismatch.raw.jsonl"
+        mismatch_payloads = [line(2, index + 1) for index in range(10)]
+        mismatch_payloads[-1]["metadata"]["monitor"] = "External Display"
+        mismatch.write_text(
+            "\n".join(json.dumps(payload) for payload in mismatch_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(mismatch, 3000, 0, "OFF"),
+            "selected-window metadata changed",
+        )
+
+        def mutated_raw(stem: str, mutate: Any) -> Path:
+            payloads = [json.loads(value) for value in report_text("c" * 64).splitlines()]
+            mutate(payloads)
+            path = root / f"{stem}.raw.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            return path
+
+        missing_low = mutated_raw(
+            "missing-low",
+            lambda payloads: payloads[1].pop("fps_1_percent_low"),
+        )
+        expect_error(
+            lambda: _derive_release_summary(missing_low),
+            "requires 1% and 0.1% FPS lows",
+        )
+        missing_present = mutated_raw(
+            "missing-present",
+            lambda payloads: payloads[1].pop("present_interval_ms"),
+        )
+        expect_error(
+            lambda: _derive_release_summary(missing_present),
+            "requires present-interval timing",
+        )
+
+        def remove_headroom(payloads: list[dict[str, Any]]) -> None:
+            for payload in payloads:
+                payload["metadata"]["current_edr_headroom"] = 1.0
+
+        no_headroom = mutated_raw("no-headroom", remove_headroom)
+        expect_error(
+            lambda: _derive_release_summary(no_headroom),
+            "current EDR headroom > 1.0",
+        )
+        short_report = mutated_raw("short", lambda payloads: payloads.pop())
+        expect_error(
+            lambda: _derive_release_summary(short_report),
+            "requires exactly 3000 measured frames",
+        )
+
+        def collapse_window_count(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["presented_frames"] = 600
+            payloads.pop()
+
+        wrong_window_count = mutated_raw("wrong-window-count", collapse_window_count)
+        expect_error(
+            lambda: _derive_release_summary(wrong_window_count),
+            "ten complete 300-frame timing windows",
+        )
+
+        for missing_key, expected_text in (
+            ("window_count", "lacks window_count"),
+            ("fps_low_window_summaries", "lacks FPS low summaries"),
+            ("present_interval_ms", "lacks present-interval summaries"),
+        ):
+            incomplete = json.loads(json.dumps(new_attested))
+            incomplete.pop(missing_key)
+            expect_error(
+                lambda incomplete=incomplete: compare(new_attested, incomplete, 0.2),
+                expected_text,
+            )
+
+        unstable = json.loads(json.dumps(new_attested))
+        unstable["fps_low_window_summaries"]["one_percent"][
+            "window_frame_weighted_mean"
+        ] *= 0.5
+        unstable_result = compare(new_attested, unstable, 0.2)
+        assert unstable_result["verdict"] == "REGRESSION"
+        assert any(
+            item["metric"] == "FPS 1% low"
+            for item in unstable_result["gate"]["regressions"]
+        )
+
+        # Same source and build artifact are the strict default. The explicit
+        # attested-only override permits both to change for an optimization.
+        changed_source, changed_summary = make_bundle(
+            "changed",
+            "d" * 64,
+            "6" * 64,
+        )
+        changed_attested = summarize_attested_release(changed_source, 3000, 0, "OFF")
+        expect_error(
+            lambda: compare(new_attested, changed_attested, 0.2),
+            "source_sha256",
+        )
+        assert compare(
+            new_attested,
+            changed_attested,
+            0.2,
+            allow_source_change=True,
+        )["verdict"] == "WITHIN_THRESHOLD"
+        changed_without_runtime = dict(changed_attested)
+        changed_without_runtime.pop("attested_runtime")
+        assert changed_summary == changed_without_runtime
+
+        artifact_change, _ = make_bundle("artifact-change", "c" * 64, "7" * 64)
+        artifact_changed_attested = summarize_attested_release(
+            artifact_change,
+            3000,
+            0,
+            "OFF",
+        )
+        expect_error(
+            lambda: compare(new_attested, artifact_changed_attested, 0.2),
+            "artifact_sha256",
+        )
     print("metal benchmark report self-test passed")
 
 
@@ -537,8 +1816,20 @@ def parser() -> argparse.ArgumentParser:
     summary.add_argument("--segment", type=int, default=0)
     summary.add_argument("--scaler-mode", choices=("OFF", "QUALITY", "PERFORMANCE"), default="OFF")
     summary.add_argument("--release-contract", action="store_true")
+    summary.add_argument("--source-sha256", default="unknown")
+    summary.add_argument("--artifact-sha256", default="unknown")
+    summary.add_argument("--settings-id", default="unknown")
+    summary.add_argument("--settings-spec-sha256", default="unknown")
+    summary.add_argument("--settings-sha256", default="unknown")
     summary.add_argument("--world", default="HDRTest")
+    summary.add_argument("--fixture", default="unknown")
+    summary.add_argument("--fixture-sha256", default="unknown")
     summary.add_argument("--route", default="static-heavy")
+    summary.add_argument("--route-sha256", default="unknown")
+    summary.add_argument("--player-name", default="unknown")
+    summary.add_argument("--player-uuid", default="unknown")
+    summary.add_argument("--dimension", default="unknown")
+    summary.add_argument("--simulation-frozen", action="store_true")
     summary.add_argument("--json", action="store_true")
 
     comparison = sub.add_parser("compare")
@@ -548,7 +1839,26 @@ def parser() -> argparse.ArgumentParser:
     comparison.add_argument("--segment", type=int, default=0)
     comparison.add_argument("--scaler-mode", choices=("OFF", "QUALITY", "PERFORMANCE"), default="OFF")
     comparison.add_argument("--p95-regression-ms", type=float, default=DEFAULT_P95_GATE_MS)
+    comparison.add_argument(
+        "--provisional",
+        action="store_true",
+        help="allow unattested or legacy reports; never use for a release gate",
+    )
+    comparison.add_argument(
+        "--allow-source-change",
+        action="store_true",
+        help=(
+            "allow different attested source and build-artifact digests for an "
+            "intentional optimization comparison; incompatible with --provisional"
+        ),
+    )
     comparison.add_argument("--json", action="store_true")
+    attest = sub.add_parser("attest")
+    attest.add_argument("raw_report", type=Path)
+    attest.add_argument("summary", type=Path)
+    attest.add_argument("minecraft_log", type=Path)
+    attest.add_argument("console_log", type=Path)
+    attest.add_argument("output", type=Path)
     sub.add_parser("self-test")
     return result
 
@@ -559,6 +1869,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "self-test":
             self_test()
             return 0
+        if args.command == "attest":
+            create_attestation(
+                args.raw_report,
+                args.summary,
+                args.minecraft_log,
+                args.console_log,
+                args.output,
+            )
+            return 0
         if args.command == "summarize":
             summary = summarize(
                 args.report,
@@ -566,8 +1885,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.segment,
                 args.scaler_mode,
                 release_contract=args.release_contract,
+                source_sha256=args.source_sha256,
+                artifact_sha256=args.artifact_sha256,
+                settings_id=args.settings_id,
+                settings_spec_sha256=args.settings_spec_sha256,
+                settings_sha256=args.settings_sha256,
                 world=args.world,
+                fixture=args.fixture,
+                fixture_sha256=args.fixture_sha256,
                 route=args.route,
+                route_sha256=args.route_sha256,
+                player_name=args.player_name,
+                player_uuid=args.player_uuid,
+                dimension=args.dimension,
+                simulation_frozen=args.simulation_frozen,
             )
             if args.json:
                 json.dump(summary, sys.stdout, indent=2, sort_keys=True)
@@ -575,13 +1906,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 _print_summary(summary)
             return 0
-        baseline = summarize(
+        if args.provisional and args.allow_source_change:
+            raise ReportError(
+                "--allow-source-change requires attested reports and cannot be used "
+                "with --provisional"
+            )
+        summary_loader = summarize if args.provisional else summarize_attested_release
+        baseline = summary_loader(
             args.baseline, args.measure_frames, args.segment, args.scaler_mode
         )
-        candidate = summarize(
+        candidate = summary_loader(
             args.candidate, args.measure_frames, args.segment, args.scaler_mode
         )
-        result = compare(baseline, candidate, args.p95_regression_ms)
+        result = compare(
+            baseline,
+            candidate,
+            args.p95_regression_ms,
+            allow_source_change=args.allow_source_change,
+            require_stability=not args.provisional,
+        )
         if args.json:
             json.dump(result, sys.stdout, indent=2, sort_keys=True)
             print()

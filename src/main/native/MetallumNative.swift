@@ -351,6 +351,9 @@ private struct MetallumPresentationTelemetry {
     let displayHeight: Int
     let outputMode: Int32
     let sourceEncoding: Int32
+    let diagnosticPattern: Bool
+    let hdrStrength: Float
+    let bloomStrength: Float
     let currentHeadroom: Float
     let displaySyncEnabled: Bool
 
@@ -378,6 +381,9 @@ private struct MetallumPresentationTelemetry {
             "scaler_active": renderWidth != displayWidth || renderHeight != displayHeight,
             "hdr_output_mode": outputModeName,
             "source_encoding": sourceEncodingName,
+            "diagnostic_pattern": diagnosticPattern,
+            "hdr_strength": hdrStrength,
+            "bloom_strength": bloomStrength,
             "current_edr_headroom": currentHeadroom,
             "display_sync_enabled": displaySyncEnabled
         ]
@@ -627,6 +633,9 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
         displayHeight: Int,
         outputMode: Int32,
         sourceEncoding: Int32,
+        diagnosticPattern: Bool,
+        hdrStrength: Float,
+        bloomStrength: Float,
         currentHeadroom: Float,
         displaySyncEnabled: Bool
     ) {
@@ -653,6 +662,9 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
                     displayHeight: displayHeight,
                     outputMode: outputMode,
                     sourceEncoding: sourceEncoding,
+                    diagnosticPattern: diagnosticPattern,
+                    hdrStrength: hdrStrength,
+                    bloomStrength: bloomStrength,
                     currentHeadroom: currentHeadroom,
                     displaySyncEnabled: displaySyncEnabled
                 )
@@ -934,8 +946,42 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         var metadata: [String: Any] = [
             "commit": environment["METALLUM_BENCHMARK_COMMIT"] ?? "unknown",
             "dirty_worktree": environment["METALLUM_BENCHMARK_DIRTY"] == "1",
+            "source_sha256": environment["METALLUM_BENCHMARK_SOURCE_SHA256"] ?? "unknown",
+            "artifact_sha256": environment["METALLUM_BENCHMARK_ARTIFACT_SHA256"] ?? "unknown",
+            "settings_id": environment["METALLUM_BENCHMARK_SETTINGS_ID"] ?? "unknown",
+            "settings_spec_sha256": environment["METALLUM_BENCHMARK_SETTINGS_SPEC_SHA256"] ?? "unknown",
+            "settings_sha256": environment["METALLUM_BENCHMARK_SETTINGS_SHA256"] ?? "unknown",
+            "render_distance": Int(environment["METALLUM_BENCHMARK_RENDER_DISTANCE"] ?? "") ?? -1,
+            "simulation_distance": Int(environment["METALLUM_BENCHMARK_SIMULATION_DISTANCE"] ?? "") ?? -1,
+            "graphics_preset": environment["METALLUM_BENCHMARK_GRAPHICS_PRESET"] ?? "unknown",
+            "entity_distance_scaling": Double(environment["METALLUM_BENCHMARK_ENTITY_DISTANCE_SCALING"] ?? "") ?? -1.0,
+            "particles": Int(environment["METALLUM_BENCHMARK_PARTICLES"] ?? "") ?? -1,
+            "mipmap_levels": Int(environment["METALLUM_BENCHMARK_MIPMAP_LEVELS"] ?? "") ?? -1,
+            "biome_blend_radius": Int(environment["METALLUM_BENCHMARK_BIOME_BLEND_RADIUS"] ?? "") ?? -1,
+            "max_fps": Int(environment["METALLUM_BENCHMARK_MAX_FPS"] ?? "") ?? -1,
+            "ambient_occlusion": environment["METALLUM_BENCHMARK_AO"] == "true",
+            "clouds_mode": environment["METALLUM_BENCHMARK_CLOUDS_MODE"] ?? "unknown",
+            "cloud_range": Int(environment["METALLUM_BENCHMARK_CLOUD_RANGE"] ?? "") ?? -1,
+            "texture_filtering": Int(environment["METALLUM_BENCHMARK_TEXTURE_FILTERING"] ?? "") ?? -1,
+            "max_anisotropy_bit": Int(environment["METALLUM_BENCHMARK_MAX_ANISOTROPY_BIT"] ?? "") ?? -1,
+            "improved_transparency": environment["METALLUM_BENCHMARK_IMPROVED_TRANSPARENCY"] == "true",
+            "resource_packs_sha256": environment["METALLUM_BENCHMARK_RESOURCE_PACKS_SHA256"] ?? "unknown",
+            "sodium_settings_sha256": environment["METALLUM_BENCHMARK_SODIUM_SETTINGS_SHA256"] ?? "unknown",
+            "configured_gui_scale": Int(environment["METALLUM_BENCHMARK_CONFIGURED_GUI_SCALE"] ?? "") ?? -1,
+            "active_resource_pack_ids": environment["METALLUM_BENCHMARK_ACTIVE_RESOURCE_PACKS"] ?? "unknown",
+            "sodium_chunk_builder_threads": Int(environment["METALLUM_BENCHMARK_SODIUM_WORKER_THREADS"] ?? "") ?? -1,
+            "hdr_bloom_strength": Double(environment["METALLUM_BENCHMARK_HDR_BLOOM_STRENGTH"] ?? "") ?? -1.0,
+            "hdr_strength": Double(environment["METALLUM_BENCHMARK_HDR_STRENGTH"] ?? "") ?? -1.0,
+            "persistent_metalfx_mode": environment["METALLUM_BENCHMARK_PERSISTENT_METALFX_MODE"] ?? "unknown",
             "world": environment["METALLUM_BENCHMARK_WORLD"] ?? "unknown",
-            "route": environment["METALLUM_BENCHMARK_ROUTE"] ?? "unknown",
+            "fixture": environment["METALLUM_BENCHMARK_FIXTURE_ID"] ?? "unknown",
+            "fixture_sha256": environment["METALLUM_BENCHMARK_FIXTURE_SHA256"] ?? "unknown",
+            "route": environment["METALLUM_BENCHMARK_ROUTE_ID"] ?? "unknown",
+            "route_sha256": environment["METALLUM_BENCHMARK_ROUTE_SHA256"] ?? "unknown",
+            "benchmark_player_name": environment["METALLUM_BENCHMARK_PLAYER_NAME"] ?? "unknown",
+            "benchmark_player_uuid": environment["METALLUM_BENCHMARK_PLAYER_UUID"] ?? "unknown",
+            "benchmark_dimension": environment["METALLUM_BENCHMARK_DIMENSION"] ?? "unknown",
+            "benchmark_simulation_frozen": environment["METALLUM_BENCHMARK_SIMULATION_FROZEN"] == "1",
             "monitor": environment["METALLUM_BENCHMARK_MONITOR"] ?? "unknown",
             "refresh_hz": Int(environment["METALLUM_BENCHMARK_REFRESH_HZ"] ?? "") ?? -1,
             "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
@@ -5841,6 +5887,11 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     displayHeight: drawable.texture.height,
                     outputMode: outputMode,
                     sourceEncoding: sourceEncoding,
+                    diagnosticPattern: diagnosticPattern != 0,
+                    hdrStrength: hdrStrength.isFinite
+                        ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+                    bloomStrength: bloomStrength.isFinite
+                        ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
                     currentHeadroom: effectiveHeadroom,
                     displaySyncEnabled: layer.displaySyncEnabled
                 )
@@ -5965,6 +6016,11 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 displayHeight: drawable.texture.height,
                 outputMode: outputMode,
                 sourceEncoding: sourceEncoding,
+                diagnosticPattern: diagnosticPattern != 0,
+                hdrStrength: hdrStrength.isFinite
+                    ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+                bloomStrength: bloomStrength.isFinite
+                    ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
                 currentHeadroom: effectiveHeadroom,
                 displaySyncEnabled: layer.displaySyncEnabled
             )

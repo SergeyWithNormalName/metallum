@@ -7,10 +7,25 @@ import com.metallum.client.metalfx.SpatialScalingMode;
 import com.mojang.blaze3d.platform.Monitor;
 import com.mojang.blaze3d.platform.VideoMode;
 import com.mojang.blaze3d.platform.Window;
+import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.Mth;
+import net.minecraft.world.clock.ClockState;
+import net.minecraft.world.clock.WorldClock;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Relative;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
+import net.minecraft.world.level.gamerules.GameRules;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.glfw.GLFW;
 import org.lwjgl.glfw.GLFWVidMode;
@@ -19,8 +34,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 /**
  * Environment-gated, deterministic 5K benchmark driver.
@@ -30,9 +47,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class MetalFxBenchmarkController {
     private static final int WINDOW_TRANSITION_TIMEOUT_FRAMES = 240;
-    private static final int SURVIVAL_GUARD_REFRESH_FRAMES = 120;
+    private static final int ROUTE_SERVER_CHECK_INTERVAL_FRAMES = 30;
     private static final int WINDOWED_WIDTH = 1280;
     private static final int WINDOWED_HEIGHT = 720;
+    private static final String BENCHMARK_PLAYER_NAME = "MetallumBench";
+    private static final UUID BENCHMARK_PLAYER_UUID = UUID.fromString("b07a402a-d8ea-354f-9398-aaf208a798b9");
+    private static final Pattern SAFE_ID = Pattern.compile("[a-z0-9][a-z0-9._-]*");
+    private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
 
     private enum Stage {
         IDLE,
@@ -42,8 +63,106 @@ public final class MetalFxBenchmarkController {
         WAIT_MOVED,
         ENTER_FULLSCREEN,
         WAIT_FRAMEBUFFER,
+        WAIT_ROUTE,
         RUNNING,
         STOPPING
+    }
+
+    private enum SegmentPhase {
+        WARMUP,
+        WAIT_MEASURE_START_CHECK,
+        MEASURE,
+        WAIT_MEASURE_END_CHECK
+    }
+
+    private enum RouteCheckEvent {
+        MEASURE_START,
+        MEASURE_END
+    }
+
+    private record RouteConfig(
+            String routeId,
+            String routeSha256,
+            String fixtureId,
+            String fixtureSha256,
+            String playerName,
+            UUID playerUuid,
+            ResourceKey<Level> dimension,
+            String dimensionName,
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            long clockTicks,
+            int clearWeatherTicks,
+            boolean simulationFrozen,
+            int stableFrames,
+            int timeoutFrames,
+            double positionEpsilon,
+            float angleEpsilon
+    ) {
+        private static RouteConfig fromEnvironment() {
+            String routeId = requiredMatching("METALLUM_BENCHMARK_ROUTE_ID", SAFE_ID);
+            String routeSha256 = requiredMatching("METALLUM_BENCHMARK_ROUTE_SHA256", SHA_256);
+            String fixtureId = requiredMatching("METALLUM_BENCHMARK_FIXTURE_ID", SAFE_ID);
+            String fixtureSha256 = requiredMatching("METALLUM_BENCHMARK_FIXTURE_SHA256", SHA_256);
+            String playerName = requiredEnv("METALLUM_BENCHMARK_PLAYER_NAME");
+            UUID playerUuid = UUID.fromString(requiredEnv("METALLUM_BENCHMARK_PLAYER_UUID"));
+            if (!BENCHMARK_PLAYER_NAME.equals(playerName) || !BENCHMARK_PLAYER_UUID.equals(playerUuid)) {
+                throw new IllegalArgumentException("benchmark route player identity is not the fixed MetallumBench identity");
+            }
+
+            String dimensionName = requiredEnv("METALLUM_BENCHMARK_DIMENSION");
+            ResourceKey<Level> dimension = ResourceKey.create(
+                    Registries.DIMENSION,
+                    Identifier.parse(dimensionName)
+            );
+            double x = finiteDouble("METALLUM_BENCHMARK_POSITION_X");
+            double y = finiteDouble("METALLUM_BENCHMARK_POSITION_Y");
+            double z = finiteDouble("METALLUM_BENCHMARK_POSITION_Z");
+            float yaw = finiteFloat("METALLUM_BENCHMARK_YAW");
+            float pitch = finiteFloat("METALLUM_BENCHMARK_PITCH");
+            if (pitch < -90.0f || pitch > 90.0f) {
+                throw new IllegalArgumentException("METALLUM_BENCHMARK_PITCH must be between -90 and 90");
+            }
+
+            long clockTicks = nonNegativeLong("METALLUM_BENCHMARK_CLOCK_TICKS");
+            int clearWeatherTicks = positiveIntStrict("METALLUM_BENCHMARK_CLEAR_WEATHER_TICKS");
+            boolean simulationFrozen = "1".equals(requiredEnv("METALLUM_BENCHMARK_SIMULATION_FROZEN"));
+            if (!simulationFrozen) {
+                throw new IllegalArgumentException("benchmark route requires frozen simulation ticks");
+            }
+            int stableFrames = positiveIntStrict("METALLUM_BENCHMARK_ROUTE_STABLE_FRAMES");
+            int timeoutFrames = positiveIntStrict("METALLUM_BENCHMARK_ROUTE_TIMEOUT_FRAMES");
+            if (timeoutFrames <= stableFrames) {
+                throw new IllegalArgumentException("route timeout must exceed stable frame count");
+            }
+            double positionEpsilon = positiveFiniteDouble("METALLUM_BENCHMARK_POSITION_EPSILON");
+            float angleEpsilon = positiveFiniteFloat("METALLUM_BENCHMARK_ANGLE_EPSILON");
+            return new RouteConfig(
+                    routeId,
+                    routeSha256,
+                    fixtureId,
+                    fixtureSha256,
+                    playerName,
+                    playerUuid,
+                    dimension,
+                    dimensionName,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                    clockTicks,
+                    clearWeatherTicks,
+                    simulationFrozen,
+                    stableFrames,
+                    timeoutFrames,
+                    positionEpsilon,
+                    angleEpsilon
+            );
+        }
     }
 
     private final String monitorName;
@@ -51,39 +170,119 @@ public final class MetalFxBenchmarkController {
     private final int targetHeight;
     private final int warmupFrames;
     private final int measureFrames;
+    private final int expectedMaxFps;
+    private final int expectedRenderDistance;
+    private final int expectedSimulationDistance;
+    private final int expectedParticles;
+    private final int expectedMipmapLevels;
+    private final int expectedBiomeBlendRadius;
+    private final int expectedCloudRange;
+    private final int expectedConfiguredGuiScale;
+    private final double expectedEntityDistanceScaling;
+    private final String expectedGraphicsPreset;
+    private final String expectedCloudsMode;
+    private final boolean expectedAmbientOcclusion;
+    private final List<String> expectedResourcePackIds;
     private final boolean useCurrentWindow;
     private final boolean captureScreenshots;
     private final List<SpatialScalingMode> sequence;
+    private final RouteConfig route;
     private final String configurationError;
 
     private Stage stage = Stage.IDLE;
     private int stageFrames;
     private int segmentIndex;
     private int segmentFrame;
+    private int measuredFrames;
+    private SegmentPhase segmentPhase = SegmentPhase.WARMUP;
+    private RouteCheckEvent boundaryCheckEvent;
+    private int boundaryCheckFrames;
+    private long boundaryCheckToken;
     private int expectedFramebufferWidth;
     private int expectedFramebufferHeight;
     private long targetMonitor;
     private VideoMode targetVideoMode;
     private Optional<VideoMode> originalFullscreenMode = Optional.empty();
+    private CameraType originalCameraType;
+    private Entity originalCameraEntity;
+    private boolean routeClientStateApplied;
+    private final AtomicBoolean routeServerTaskPending = new AtomicBoolean();
+    private boolean routeApplyRequested;
+    private boolean routeApplyLogged;
+    private long routeApplyToken;
+    private long nextRouteServerToken;
+    private volatile long completedRouteServerToken;
+    private volatile String routeServerMismatch;
+    private volatile String routeServerFailure;
+    private int routeServerCheckCountdown;
+    private int routeStableFrames;
     private final AtomicBoolean survivalGuardTaskPending = new AtomicBoolean();
     private UUID guardedPlayerId;
     private volatile boolean survivalGuardApplied;
     private volatile String survivalGuardFailure;
-    private int survivalGuardRefreshCountdown;
     private boolean originalInvulnerable;
     private float originalHealth;
     private int originalFoodLevel;
     private float originalSaturation;
     private boolean originalClientStateCaptured;
     private boolean armed;
+    private final int[] framebufferWidthScratch = new int[1];
+    private final int[] framebufferHeightScratch = new int[1];
 
     public MetalFxBenchmarkController() {
         String error = null;
+        RouteConfig parsedRoute = null;
+        int parsedMaxFps = -1;
+        int parsedRenderDistance = -1;
+        int parsedSimulationDistance = -1;
+        int parsedParticles = -1;
+        int parsedMipmapLevels = -1;
+        int parsedBiomeBlendRadius = -1;
+        int parsedCloudRange = -1;
+        int parsedConfiguredGuiScale = -1;
+        double parsedEntityDistanceScaling = -1.0;
+        String parsedGraphicsPreset = "";
+        String parsedCloudsMode = "";
+        boolean parsedAmbientOcclusion = false;
+        List<String> parsedResourcePackIds = List.of();
+        try {
+            parsedRoute = RouteConfig.fromEnvironment();
+            parsedMaxFps = positiveIntStrict("METALLUM_BENCHMARK_MAX_FPS");
+            parsedRenderDistance = positiveIntStrict("METALLUM_BENCHMARK_RENDER_DISTANCE");
+            parsedSimulationDistance = positiveIntStrict("METALLUM_BENCHMARK_SIMULATION_DISTANCE");
+            parsedParticles = nonNegativeIntStrict("METALLUM_BENCHMARK_PARTICLES");
+            parsedMipmapLevels = nonNegativeIntStrict("METALLUM_BENCHMARK_MIPMAP_LEVELS");
+            parsedBiomeBlendRadius = nonNegativeIntStrict("METALLUM_BENCHMARK_BIOME_BLEND_RADIUS");
+            parsedCloudRange = nonNegativeIntStrict("METALLUM_BENCHMARK_CLOUD_RANGE");
+            parsedConfiguredGuiScale = nonNegativeIntStrict("METALLUM_BENCHMARK_CONFIGURED_GUI_SCALE");
+            parsedEntityDistanceScaling = positiveFiniteDouble(
+                    "METALLUM_BENCHMARK_ENTITY_DISTANCE_SCALING"
+            );
+            parsedGraphicsPreset = requiredEnv("METALLUM_BENCHMARK_GRAPHICS_PRESET");
+            parsedCloudsMode = requiredEnv("METALLUM_BENCHMARK_CLOUDS_MODE");
+            parsedAmbientOcclusion = requiredBoolean("METALLUM_BENCHMARK_AO");
+            parsedResourcePackIds = requiredCsv("METALLUM_BENCHMARK_ACTIVE_RESOURCE_PACKS");
+        } catch (RuntimeException exception) {
+            error = "invalid deterministic benchmark configuration: " + exception.getMessage();
+        }
         this.monitorName = env("METALLUM_BENCHMARK_MONITOR", "PHL");
         this.targetWidth = positiveInt("METALLUM_BENCHMARK_WIDTH", 5120);
         this.targetHeight = positiveInt("METALLUM_BENCHMARK_HEIGHT", 2880);
         this.warmupFrames = positiveInt("METALLUM_BENCHMARK_WARMUP_FRAMES", 1800);
         this.measureFrames = positiveInt("METALLUM_BENCHMARK_MEASURE_FRAMES", 3000);
+        this.expectedMaxFps = parsedMaxFps;
+        this.expectedRenderDistance = parsedRenderDistance;
+        this.expectedSimulationDistance = parsedSimulationDistance;
+        this.expectedParticles = parsedParticles;
+        this.expectedMipmapLevels = parsedMipmapLevels;
+        this.expectedBiomeBlendRadius = parsedBiomeBlendRadius;
+        this.expectedCloudRange = parsedCloudRange;
+        this.expectedConfiguredGuiScale = parsedConfiguredGuiScale;
+        this.expectedEntityDistanceScaling = parsedEntityDistanceScaling;
+        this.expectedGraphicsPreset = parsedGraphicsPreset;
+        this.expectedCloudsMode = parsedCloudsMode;
+        this.expectedAmbientOcclusion = parsedAmbientOcclusion;
+        this.expectedResourcePackIds = parsedResourcePackIds;
         this.useCurrentWindow = "1".equals(System.getenv("METALLUM_BENCHMARK_CURRENT_WINDOW"));
         this.captureScreenshots = "1".equals(System.getenv("METALLUM_BENCHMARK_SCREENSHOTS"));
         this.expectedFramebufferWidth = this.targetWidth;
@@ -102,9 +301,12 @@ public final class MetalFxBenchmarkController {
                 error = "benchmark sequence is empty";
             }
         } catch (IllegalArgumentException exception) {
-            error = "invalid METALLUM_BENCHMARK_SEQUENCE";
+            if (error == null) {
+                error = "invalid METALLUM_BENCHMARK_SEQUENCE";
+            }
         }
         this.sequence = List.copyOf(parsed);
+        this.route = parsedRoute;
         this.configurationError = error;
     }
 
@@ -115,13 +317,14 @@ public final class MetalFxBenchmarkController {
         this.armed = true;
         this.stage = Stage.SELECT_MONITOR;
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=ARMED scope={} target={}x{} warmup={} measure={} sequence={}",
+                "METALLUM_BENCHMARK EVENT=ARMED scope={} target={}x{} warmup={} measure={} sequence={} route={}",
                 this.useCurrentWindow ? "current-window" : this.monitorName,
                 this.targetWidth,
                 this.targetHeight,
                 this.warmupFrames,
                 this.measureFrames,
-                this.sequence
+                this.sequence,
+                this.route == null ? "invalid" : this.route.routeId()
         );
     }
 
@@ -135,6 +338,8 @@ public final class MetalFxBenchmarkController {
         if (!this.originalClientStateCaptured) {
             Window window = minecraft.getWindow();
             this.originalFullscreenMode = window.getPreferredFullscreenVideoMode();
+            this.originalCameraType = minecraft.options.getCameraType();
+            this.originalCameraEntity = minecraft.getCameraEntity();
             this.originalClientStateCaptured = true;
         }
         // Automated runs intentionally have no input. Keep Minecraft's AFK
@@ -143,6 +348,10 @@ public final class MetalFxBenchmarkController {
         maintainSurvivalGuard(minecraft);
         if (this.survivalGuardFailure != null) {
             fail(minecraft, this.survivalGuardFailure);
+            return;
+        }
+        if (this.routeServerFailure != null) {
+            fail(minecraft, this.routeServerFailure);
             return;
         }
         if (this.stage == Stage.RUNNING) {
@@ -168,6 +377,7 @@ public final class MetalFxBenchmarkController {
             case WAIT_MOVED -> waitForMove(minecraft, window);
             case ENTER_FULLSCREEN -> enterFullscreen(minecraft, window);
             case WAIT_FRAMEBUFFER -> waitForFramebuffer(minecraft, window);
+            case WAIT_ROUTE -> waitForRoute(minecraft);
             default -> {
             }
         }
@@ -177,49 +387,37 @@ public final class MetalFxBenchmarkController {
         if (this.stage != Stage.RUNNING) {
             return;
         }
+        String runtimeMismatch = runtimePacingMismatch(minecraft);
+        if (runtimeMismatch != null) {
+            fail(minecraft, runtimeMismatch);
+            return;
+        }
         if (!isTargetFramebuffer(minecraft.getWindow())) {
             fail(minecraft, "benchmark framebuffer changed during measurement");
             return;
         }
 
-        this.segmentFrame++;
-        if (this.segmentFrame == this.warmupFrames) {
-            MetalGpuTiming.beginBenchmarkMeasurement(
-                    this.segmentIndex,
-                    this.sequence.get(this.segmentIndex)
-            );
-            if (this.captureScreenshots) {
-                Screenshot.grab(minecraft, false);
-                Metallum.LOGGER.info(
-                        "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={}",
-                        this.segmentIndex + 1,
-                        this.sequence.get(this.segmentIndex)
-                );
+        switch (this.segmentPhase) {
+            case WARMUP -> {
+                this.segmentFrame++;
+                if (this.segmentFrame >= this.warmupFrames) {
+                    beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_START);
+                }
             }
-            logSegmentEvent("MEASURE_START");
+            case WAIT_MEASURE_START_CHECK, WAIT_MEASURE_END_CHECK -> pollBoundaryCheck(minecraft);
+            case MEASURE -> {
+                this.segmentFrame++;
+                this.measuredFrames++;
+                if (this.measuredFrames >= this.measureFrames) {
+                    logSegmentEvent("MEASURE_END");
+                    MetalGpuTiming.completeBenchmark(
+                            this.segmentIndex,
+                            this.sequence.get(this.segmentIndex)
+                    );
+                    beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_END);
+                }
+            }
         }
-        if (this.segmentFrame < this.warmupFrames + this.measureFrames) {
-            return;
-        }
-
-        logSegmentEvent("MEASURE_END");
-        MetalGpuTiming.completeBenchmark(
-                this.segmentIndex,
-                this.sequence.get(this.segmentIndex)
-        );
-        this.segmentIndex++;
-        if (this.segmentIndex >= this.sequence.size()) {
-            Metallum.LOGGER.info(
-                    "METALLUM_BENCHMARK EVENT=COMPLETE segments={} measured_frames={} framebuffer={}x{}",
-                    this.sequence.size(),
-                    this.sequence.size() * this.measureFrames,
-                    this.expectedFramebufferWidth,
-                    this.expectedFramebufferHeight
-            );
-            finish(minecraft);
-            return;
-        }
-        startSegment();
     }
 
     private void selectMonitor(final Minecraft minecraft, final Window window) {
@@ -299,9 +497,7 @@ public final class MetalFxBenchmarkController {
                 window.getScreenWidth(),
                 window.getScreenHeight()
         );
-        this.stage = Stage.RUNNING;
-        this.segmentIndex = 0;
-        startSegment();
+        transition(Stage.WAIT_ROUTE);
     }
 
     private VideoMode bestExactMode(final long monitor, final GLFWVidMode.Buffer modes) {
@@ -440,9 +636,7 @@ public final class MetalFxBenchmarkController {
                     window.getScreenWidth(),
                     window.getScreenHeight()
             );
-            this.stage = Stage.RUNNING;
-            this.segmentIndex = 0;
-            startSegment();
+            transition(Stage.WAIT_ROUTE);
             return;
         }
         if (this.stageFrames >= WINDOW_TRANSITION_TIMEOUT_FRAMES) {
@@ -450,15 +644,447 @@ public final class MetalFxBenchmarkController {
         }
     }
 
+    private void waitForRoute(final Minecraft minecraft) {
+        if (this.route == null) {
+            fail(minecraft, "deterministic route configuration is unavailable");
+            return;
+        }
+        String identityMismatch = clientIdentityMismatch(minecraft);
+        if (identityMismatch != null) {
+            fail(minecraft, identityMismatch);
+            return;
+        }
+        if (!this.routeClientStateApplied) {
+            minecraft.options.setCameraType(CameraType.FIRST_PERSON);
+            minecraft.setCameraEntity(minecraft.player);
+            this.routeClientStateApplied = true;
+        }
+        if (!this.routeApplyRequested) {
+            long token = submitRouteServerCheck(minecraft, true);
+            if (token != 0L) {
+                this.routeApplyToken = token;
+                this.routeApplyRequested = true;
+            }
+        }
+        if (this.routeApplyRequested
+                && !this.routeApplyLogged
+                && this.completedRouteServerToken >= this.routeApplyToken) {
+            this.routeApplyLogged = true;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=ROUTE_APPLY route={} fixture={} player={}/{} dimension={}",
+                    this.route.routeId(),
+                    this.route.fixtureId(),
+                    this.route.playerName(),
+                    this.route.playerUuid(),
+                    this.route.dimensionName()
+            );
+        }
+
+        if (this.routeApplyLogged && this.routeServerCheckCountdown-- <= 0) {
+            if (!this.routeServerTaskPending.get()) {
+                submitRouteServerCheck(minecraft, false);
+                this.routeServerCheckCountdown = ROUTE_SERVER_CHECK_INTERVAL_FRAMES;
+            }
+        }
+
+        String clientMismatch = clientRouteMismatch(minecraft, true);
+        if (this.routeApplyLogged
+                && this.routeServerMismatch == null
+                && clientMismatch == null) {
+            this.routeStableFrames++;
+        } else {
+            this.routeStableFrames = 0;
+        }
+        if (this.routeStableFrames >= this.route.stableFrames()
+                && !this.routeServerTaskPending.get()) {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=ROUTE_READY route={} stable_frames={} pose=[{},{},{};{},{}] max_fps={} resolved_gui_scale={} resource_packs={}",
+                    this.route.routeId(),
+                    this.route.stableFrames(),
+                    this.route.x(),
+                    this.route.y(),
+                    this.route.z(),
+                    this.route.yaw(),
+                    this.route.pitch(),
+                    this.expectedMaxFps,
+                    minecraft.getWindow().getGuiScale(),
+                    String.join(",", this.expectedResourcePackIds)
+            );
+            this.stage = Stage.RUNNING;
+            this.segmentIndex = 0;
+            startSegment();
+            return;
+        }
+        if (this.stageFrames >= this.route.timeoutFrames()) {
+            String reason = clientMismatch != null ? clientMismatch : this.routeServerMismatch;
+            fail(
+                    minecraft,
+                    "deterministic route did not stabilize before timeout"
+                            + (reason == null ? "" : ": " + reason)
+            );
+        }
+    }
+
+    private void beginBoundaryCheck(
+            final Minecraft minecraft,
+            final RouteCheckEvent event
+    ) {
+        this.boundaryCheckEvent = event;
+        this.boundaryCheckFrames = 0;
+        this.boundaryCheckToken = submitRouteServerCheck(minecraft, false);
+        this.segmentPhase = event == RouteCheckEvent.MEASURE_START
+                ? SegmentPhase.WAIT_MEASURE_START_CHECK
+                : SegmentPhase.WAIT_MEASURE_END_CHECK;
+    }
+
+    private void pollBoundaryCheck(final Minecraft minecraft) {
+        this.boundaryCheckFrames++;
+        if (this.boundaryCheckToken == 0L && !this.routeServerTaskPending.get()) {
+            this.boundaryCheckToken = submitRouteServerCheck(minecraft, false);
+        }
+        if (this.routeServerFailure != null) {
+            fail(minecraft, this.routeServerFailure);
+            return;
+        }
+        if (this.boundaryCheckToken == 0L
+                || this.completedRouteServerToken < this.boundaryCheckToken
+                || this.routeServerTaskPending.get()) {
+            if (this.boundaryCheckFrames >= this.route.timeoutFrames()) {
+                fail(minecraft, "timed out waiting for the route boundary check");
+            }
+            return;
+        }
+        if (this.routeServerMismatch != null) {
+            fail(minecraft, "server route boundary mismatch: " + this.routeServerMismatch);
+            return;
+        }
+        String clientMismatch = clientRouteMismatch(minecraft, false);
+        if (clientMismatch != null) {
+            fail(minecraft, "client route boundary mismatch: " + clientMismatch);
+            return;
+        }
+
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=ROUTE_CHECK event={} route={} status=ready",
+                this.boundaryCheckEvent,
+                this.route.routeId()
+        );
+        if (this.boundaryCheckEvent == RouteCheckEvent.MEASURE_START) {
+            MetalGpuTiming.beginBenchmarkMeasurement(
+                    this.segmentIndex,
+                    this.sequence.get(this.segmentIndex)
+            );
+            if (this.captureScreenshots) {
+                Screenshot.grab(minecraft, false);
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={}",
+                        this.segmentIndex + 1,
+                        this.sequence.get(this.segmentIndex)
+                );
+            }
+            this.measuredFrames = 0;
+            this.segmentPhase = SegmentPhase.MEASURE;
+            logSegmentEvent("MEASURE_START");
+            return;
+        }
+
+        this.segmentIndex++;
+        if (this.segmentIndex >= this.sequence.size()) {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=COMPLETE segments={} measured_frames={} framebuffer={}x{}",
+                    this.sequence.size(),
+                    this.sequence.size() * this.measureFrames,
+                    this.expectedFramebufferWidth,
+                    this.expectedFramebufferHeight
+            );
+            finish(minecraft);
+            return;
+        }
+        startSegment();
+    }
+
+    private long submitRouteServerCheck(final Minecraft minecraft, final boolean apply) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null) {
+            this.routeServerFailure = "benchmark route requires an integrated singleplayer server";
+            return 0L;
+        }
+        if (!this.routeServerTaskPending.compareAndSet(false, true)) {
+            return 0L;
+        }
+        long token = ++this.nextRouteServerToken;
+        try {
+            server.executeIfPossible(() -> {
+                try {
+                    this.routeServerMismatch = applyAndVerifyServerRoute(server, apply);
+                } catch (RuntimeException exception) {
+                    this.routeServerFailure = "benchmark route server task failed: "
+                            + exception.getClass().getSimpleName();
+                    Metallum.LOGGER.error("METALLUM_BENCHMARK route server task failed", exception);
+                } finally {
+                    this.completedRouteServerToken = token;
+                    this.routeServerTaskPending.set(false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.routeServerTaskPending.set(false);
+            this.routeServerFailure = "could not submit benchmark route server task: "
+                    + exception.getClass().getSimpleName();
+            Metallum.LOGGER.error("METALLUM_BENCHMARK route task submission failed", exception);
+            return 0L;
+        }
+        return token;
+    }
+
+    private String applyAndVerifyServerRoute(
+            final IntegratedServer server,
+            final boolean apply
+    ) {
+        ServerLevel level = server.getLevel(this.route.dimension());
+        if (level == null) {
+            return "benchmark dimension is unavailable";
+        }
+        ServerPlayer player = server.getPlayerList().getPlayer(this.route.playerUuid());
+        if (player == null) {
+            return "benchmark server player is unavailable";
+        }
+        if (!this.route.playerName().equals(player.getGameProfile().name())
+                || !this.route.playerUuid().equals(player.getGameProfile().id())) {
+            return "benchmark server player identity differs from the route";
+        }
+
+        Holder<WorldClock> clock = level.dimensionType().defaultClock().orElse(null);
+        if (clock == null) {
+            return "benchmark dimension has no default clock";
+        }
+        int chunkX = Mth.floor(this.route.x()) >> 4;
+        int chunkZ = Mth.floor(this.route.z()) >> 4;
+        if (apply) {
+            server.tickRateManager().setFrozen(true);
+            level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+            level.getGameRules().set(GameRules.ADVANCE_TIME, false, server);
+            level.getGameRules().set(GameRules.ADVANCE_WEATHER, false, server);
+            server.clockManager().setTotalTicks(clock, this.route.clockTicks());
+            server.clockManager().setPaused(clock, true);
+            server.setWeatherParameters(this.route.clearWeatherTicks(), 0, false, false);
+            boolean teleported = player.teleportTo(
+                    level,
+                    this.route.x(),
+                    this.route.y(),
+                    this.route.z(),
+                    Set.<Relative>of(),
+                    this.route.yaw(),
+                    this.route.pitch(),
+                    true
+            );
+            if (!teleported) {
+                return "server rejected the benchmark teleport";
+            }
+            player.setDeltaMovement(0.0, 0.0, 0.0);
+        }
+        return serverRouteMismatch(server, level, player, clock, chunkX, chunkZ);
+    }
+
+    private String serverRouteMismatch(
+            final IntegratedServer server,
+            final ServerLevel level,
+            final ServerPlayer player,
+            final Holder<WorldClock> clock,
+            final int chunkX,
+            final int chunkZ
+    ) {
+        if (!player.level().dimension().equals(this.route.dimension())) {
+            return "server player is in a different dimension";
+        }
+        if (!samePose(player)) {
+            return "server player pose differs from the route (expected "
+                    + routePose() + ", found " + entityPose(player) + ")";
+        }
+        if (!server.tickRateManager().isFrozen()) {
+            return "server simulation ticks are not frozen";
+        }
+        if (level.getGameRules().get(GameRules.ADVANCE_TIME)
+                || level.getGameRules().get(GameRules.ADVANCE_WEATHER)) {
+            return "benchmark time or weather gamerule is advancing";
+        }
+        ClockState clockState = server.clockManager().packState().clocks().get(clock);
+        if (clockState == null
+                || !clockState.paused()
+                || clockState.totalTicks() != this.route.clockTicks()) {
+            return "server clock differs from the paused route clock";
+        }
+        if (level.getWeatherData().isRaining()
+                || level.getWeatherData().isThundering()
+                || level.getWeatherData().getClearWeatherTime() != this.route.clearWeatherTicks()
+                || level.getRainLevel(1.0f) != 0.0f
+                || level.getThunderLevel(1.0f) != 0.0f) {
+            return "server weather is not frozen and clear";
+        }
+        ChunkPos center = new ChunkPos(chunkX, chunkZ);
+        if (level.getChunkSource().getChunkNow(chunkX, chunkZ) == null
+                || !level.areEntitiesActuallyLoadedAndTicking(center)) {
+            return "server route chunk is not fully ticking";
+        }
+        return null;
+    }
+
+    private String clientRouteMismatch(
+            final Minecraft minecraft,
+            final boolean requireTerrainReady
+    ) {
+        String identityMismatch = clientIdentityMismatch(minecraft);
+        if (identityMismatch != null) {
+            return identityMismatch;
+        }
+        String runtimeMismatch = runtimeSettingsMismatch(minecraft);
+        if (runtimeMismatch != null) {
+            return runtimeMismatch;
+        }
+        if (minecraft.options.getCameraType() != CameraType.FIRST_PERSON
+                || minecraft.getCameraEntity() != minecraft.player) {
+            return "client camera is not fixed to first person";
+        }
+        if (!minecraft.player.level().dimension().equals(this.route.dimension())) {
+            return "client player is in a different dimension";
+        }
+        if (!samePose(minecraft.player)) {
+            return "client player pose differs from the route (expected "
+                    + routePose() + ", found " + entityPose(minecraft.player) + ")";
+        }
+        if (minecraft.level.getDefaultClockTime() != this.route.clockTicks()) {
+            return "client clock differs from the route";
+        }
+        if (!minecraft.level.tickRateManager().isFrozen()) {
+            return "client simulation ticks are not frozen";
+        }
+        if (minecraft.level.getRainLevel(1.0f) != 0.0f
+                || minecraft.level.getThunderLevel(1.0f) != 0.0f) {
+            return "client weather is not clear";
+        }
+        if (requireTerrainReady) {
+            int chunkX = Mth.floor(this.route.x()) >> 4;
+            int chunkZ = Mth.floor(this.route.z()) >> 4;
+            if (minecraft.level.getChunkSource().getChunk(
+                    chunkX,
+                    chunkZ,
+                    ChunkStatus.FULL,
+                    false
+            ) == null) {
+                return "client route chunk is not full";
+            }
+            if (!minecraft.levelRenderer.hasRenderedAllSections()) {
+                return "client terrain is not fully rendered";
+            }
+        }
+        return null;
+    }
+
+    private String runtimeSettingsMismatch(final Minecraft minecraft) {
+        String pacingMismatch = runtimePacingMismatch(minecraft);
+        if (pacingMismatch != null) {
+            return pacingMismatch;
+        }
+        Window window = minecraft.getWindow();
+        if (minecraft.options.framerateLimit().get() != this.expectedMaxFps
+                || minecraft.options.renderDistance().get() != this.expectedRenderDistance
+                || minecraft.options.simulationDistance().get() != this.expectedSimulationDistance
+                || minecraft.options.particles().get().ordinal() != this.expectedParticles
+                || minecraft.options.mipmapLevels().get() != this.expectedMipmapLevels
+                || minecraft.options.biomeBlendRadius().get() != this.expectedBiomeBlendRadius
+                || minecraft.options.cloudRange().get() != this.expectedCloudRange
+                || minecraft.options.guiScale().get() != this.expectedConfiguredGuiScale
+                || minecraft.options.enableVsync().get()
+                || minecraft.options.ambientOcclusion().get() != this.expectedAmbientOcclusion
+                || Double.compare(
+                        minecraft.options.entityDistanceScaling().get(),
+                        this.expectedEntityDistanceScaling
+                ) != 0
+                || !minecraft.options.graphicsPreset().get().getSerializedName().equals(
+                        this.expectedGraphicsPreset
+                )
+                || !minecraft.options.cloudStatus().get().getSerializedName().equals(
+                        this.expectedCloudsMode
+                )) {
+            return "live Minecraft rendering options differ from the tracked settings";
+        }
+        if (window.getGuiScale() <= 0) {
+            return "resolved GUI scale is invalid";
+        }
+        List<String> selectedPacks = List.copyOf(
+                minecraft.getResourcePackRepository().getSelectedIds()
+        );
+        if (!selectedPacks.equals(this.expectedResourcePackIds)) {
+            return "active resource packs differ from settings (expected "
+                    + this.expectedResourcePackIds + ", found " + selectedPacks + ")";
+        }
+        return null;
+    }
+
+    private String runtimePacingMismatch(final Minecraft minecraft) {
+        Window window = minecraft.getWindow();
+        minecraft.getFramerateLimitTracker().onInputReceived();
+        if (!minecraft.isWindowActive()) {
+            return "benchmark window is not active";
+        }
+        if (window.isIconified()) {
+            return "benchmark window is iconified";
+        }
+        if (!window.isFullscreen()) {
+            return "benchmark window is not fullscreen";
+        }
+        if (!"NONE".equals(minecraft.getFramerateLimitTracker().getThrottleReason().name())) {
+            return "benchmark framerate is throttled by "
+                    + minecraft.getFramerateLimitTracker().getThrottleReason();
+        }
+        if (minecraft.getFramerateLimitTracker().getFramerateLimit() != this.expectedMaxFps) {
+            return "effective framerate limit differs from settings (expected "
+                    + this.expectedMaxFps + ", found "
+                    + minecraft.getFramerateLimitTracker().getFramerateLimit() + ")";
+        }
+        return null;
+    }
+
+    private String clientIdentityMismatch(final Minecraft minecraft) {
+        if (!this.route.playerName().equals(minecraft.getUser().getName())
+                || !this.route.playerUuid().equals(minecraft.getUser().getProfileId())
+                || !this.route.playerName().equals(minecraft.player.getGameProfile().name())
+                || !this.route.playerUuid().equals(minecraft.player.getGameProfile().id())) {
+            return "benchmark client player identity differs from the route";
+        }
+        return null;
+    }
+
+    private boolean samePose(final Entity entity) {
+        return Math.abs(entity.getX() - this.route.x()) <= this.route.positionEpsilon()
+                && Math.abs(entity.getY() - this.route.y()) <= this.route.positionEpsilon()
+                && Math.abs(entity.getZ() - this.route.z()) <= this.route.positionEpsilon()
+                && Math.abs(Mth.wrapDegrees(entity.getYRot() - this.route.yaw()))
+                <= this.route.angleEpsilon()
+                && Math.abs(Mth.wrapDegrees(entity.getXRot() - this.route.pitch()))
+                <= this.route.angleEpsilon();
+    }
+
+    private String routePose() {
+        return this.route.x() + "," + this.route.y() + "," + this.route.z()
+                + ";" + this.route.yaw() + "," + this.route.pitch();
+    }
+
+    private static String entityPose(final Entity entity) {
+        return entity.getX() + "," + entity.getY() + "," + entity.getZ()
+                + ";" + entity.getYRot() + "," + entity.getXRot();
+    }
+
     private boolean isTargetFramebuffer(final Window window) {
         if (!this.useCurrentWindow && GLFW.glfwGetWindowMonitor(window.handle()) != this.targetMonitor) {
             return false;
         }
-        int[] width = new int[1];
-        int[] height = new int[1];
-        GLFW.glfwGetFramebufferSize(window.handle(), width, height);
-        return width[0] == this.expectedFramebufferWidth
-                && height[0] == this.expectedFramebufferHeight
+        GLFW.glfwGetFramebufferSize(
+                window.handle(),
+                this.framebufferWidthScratch,
+                this.framebufferHeightScratch
+        );
+        return this.framebufferWidthScratch[0] == this.expectedFramebufferWidth
+                && this.framebufferHeightScratch[0] == this.expectedFramebufferHeight
                 && window.getWidth() == this.expectedFramebufferWidth
                 && window.getHeight() == this.expectedFramebufferHeight;
     }
@@ -468,6 +1094,11 @@ public final class MetalFxBenchmarkController {
         MetalFxSpatialScaling.setBenchmarkOverride(mode);
         MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode);
         this.segmentFrame = 0;
+        this.measuredFrames = 0;
+        this.segmentPhase = SegmentPhase.WARMUP;
+        this.boundaryCheckEvent = null;
+        this.boundaryCheckFrames = 0;
+        this.boundaryCheckToken = 0L;
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=SEGMENT_START index={} total={} mode={} warmup={} measure={}",
                 this.segmentIndex + 1,
@@ -499,12 +1130,21 @@ public final class MetalFxBenchmarkController {
         }
         this.stage = Stage.STOPPING;
         restoreSurvivalGuard(minecraft);
+        if (this.originalClientStateCaptured && this.originalCameraType != null) {
+            minecraft.options.setCameraType(this.originalCameraType);
+            if (this.originalCameraEntity != null) {
+                minecraft.setCameraEntity(this.originalCameraEntity);
+            }
+        }
         minecraft.getWindow().setPreferredFullscreenVideoMode(this.originalFullscreenMode);
         MetalFxSpatialScaling.clearBenchmarkOverride();
         minecraft.stop();
     }
 
     private void maintainSurvivalGuard(final Minecraft minecraft) {
+        if (this.survivalGuardApplied) {
+            return;
+        }
         IntegratedServer server = minecraft.getSingleplayerServer();
         if (server == null || minecraft.player == null) {
             this.survivalGuardFailure = "benchmark requires an integrated singleplayer server";
@@ -516,13 +1156,9 @@ public final class MetalFxBenchmarkController {
             return;
         }
         this.guardedPlayerId = playerId;
-        if (this.survivalGuardApplied && this.survivalGuardRefreshCountdown-- > 0) {
-            return;
-        }
         if (!this.survivalGuardTaskPending.compareAndSet(false, true)) {
             return;
         }
-        this.survivalGuardRefreshCountdown = SURVIVAL_GUARD_REFRESH_FRAMES;
         server.executeIfPossible(() -> {
             try {
                 ServerPlayer player = server.getPlayerList().getPlayer(playerId);
@@ -602,6 +1238,119 @@ public final class MetalFxBenchmarkController {
         } catch (NumberFormatException ignored) {
             return defaultValue;
         }
+    }
+
+    private static String requiredEnv(final String name) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " is required");
+        }
+        return value;
+    }
+
+    private static String requiredMatching(final String name, final Pattern pattern) {
+        String value = requiredEnv(name);
+        if (!pattern.matcher(value).matches()) {
+            throw new IllegalArgumentException(name + " has an invalid value");
+        }
+        return value;
+    }
+
+    private static double finiteDouble(final String name) {
+        try {
+            double value = Double.parseDouble(requiredEnv(name));
+            if (!Double.isFinite(value)) {
+                throw new IllegalArgumentException(name + " must be finite");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be a number", exception);
+        }
+    }
+
+    private static float finiteFloat(final String name) {
+        try {
+            float value = Float.parseFloat(requiredEnv(name));
+            if (!Float.isFinite(value)) {
+                throw new IllegalArgumentException(name + " must be finite");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be a number", exception);
+        }
+    }
+
+    private static double positiveFiniteDouble(final String name) {
+        double value = finiteDouble(name);
+        if (value <= 0.0) {
+            throw new IllegalArgumentException(name + " must be > 0");
+        }
+        return value;
+    }
+
+    private static float positiveFiniteFloat(final String name) {
+        float value = finiteFloat(name);
+        if (value <= 0.0f) {
+            throw new IllegalArgumentException(name + " must be > 0");
+        }
+        return value;
+    }
+
+    private static long nonNegativeLong(final String name) {
+        try {
+            long value = Long.parseLong(requiredEnv(name));
+            if (value < 0L) {
+                throw new IllegalArgumentException(name + " must be >= 0");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be an integer", exception);
+        }
+    }
+
+    private static int positiveIntStrict(final String name) {
+        try {
+            int value = Integer.parseInt(requiredEnv(name));
+            if (value <= 0) {
+                throw new IllegalArgumentException(name + " must be > 0");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be an integer", exception);
+        }
+    }
+
+    private static int nonNegativeIntStrict(final String name) {
+        try {
+            int value = Integer.parseInt(requiredEnv(name));
+            if (value < 0) {
+                throw new IllegalArgumentException(name + " must be >= 0");
+            }
+            return value;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be an integer", exception);
+        }
+    }
+
+    private static boolean requiredBoolean(final String name) {
+        String value = requiredEnv(name);
+        if ("true".equals(value)) {
+            return true;
+        }
+        if ("false".equals(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(name + " must be true or false");
+    }
+
+    private static List<String> requiredCsv(final String name) {
+        String value = requiredEnv(name);
+        List<String> result = List.of(value.split(",", -1));
+        if (result.stream().anyMatch(String::isBlank)
+                || Set.copyOf(result).size() != result.size()) {
+            throw new IllegalArgumentException(name + " must contain unique non-empty values");
+        }
+        return result;
     }
 
     private static String env(final String name, final String defaultValue) {

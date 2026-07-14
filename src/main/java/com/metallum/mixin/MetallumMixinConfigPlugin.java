@@ -14,7 +14,7 @@ import java.util.Set;
 
 public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
-    private static final String BENCHMARK_MIXIN = "com.metallum.mixin.benchmark.MinecraftBenchmarkMixin";
+    private static final String BENCHMARK_MIXIN_PREFIX = "com.metallum.mixin.benchmark.";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -40,7 +40,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         if (!this.isMacOs) {
             return false;
         }
-        if (BENCHMARK_MIXIN.equals(mixinClassName)) {
+        if (mixinClassName.startsWith(BENCHMARK_MIXIN_PREFIX)) {
             return this.benchmarkEnabled && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
