@@ -121,6 +121,47 @@ def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/Sp
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
 def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
+def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
+
+tasks.register("compileStaticGeometryHeapValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native static geometry heap validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/StaticGeometryHeapValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(staticGeometryHeapValidationBinary)
+
+	doFirst {
+		staticGeometryHeapValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", staticGeometryHeapValidationBinary.get().asFile.absolutePath,
+		"src/test/native/StaticGeometryHeapValidation.swift"
+}
+
+tasks.register("staticGeometryHeapValidation", Exec) {
+	group = "verification"
+	description = "Validates native private heaps for static geometry buffers"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("buildMacNative"), tasks.named("compileStaticGeometryHeapValidation"))
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file(macNativeLibrary)
+	environment "METALLUM_STATIC_GEOMETRY_HEAPS", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine staticGeometryHeapValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
 
 tasks.register("compileResourceBindingAbiValidation", Exec) {
 	group = "verification"
@@ -322,6 +363,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
+	dependsOn(tasks.named("staticGeometryHeapValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))

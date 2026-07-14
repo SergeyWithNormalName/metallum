@@ -235,14 +235,33 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final long size) {
-        return new MetalGpuBuffer(this, usage, size);
+        return this.allocateBuffer(usage, usage, size, false);
     }
 
     @Override
     public @NonNull GpuBuffer createBuffer(@Nullable final Supplier<String> label, @GpuBuffer.Usage final int usage, final ByteBuffer data) {
-        MetalGpuBuffer buffer = (MetalGpuBuffer) this.createBuffer(label, usage | GpuBuffer.USAGE_COPY_DST, data.remaining());
+        MetalGpuBuffer buffer = this.allocateBuffer(
+                usage | GpuBuffer.USAGE_COPY_DST,
+                usage,
+                data.remaining(),
+                true
+        );
         this.commandEncoder.writeToBuffer(buffer.slice(), data.duplicate());
         return buffer;
+    }
+
+    private MetalGpuBuffer allocateBuffer(
+            @GpuBuffer.Usage final int effectiveUsage,
+            @GpuBuffer.Usage final int originalUsage,
+            final long size,
+            final boolean initialData
+    ) {
+        return new MetalGpuBuffer(
+                this,
+                effectiveUsage,
+                size,
+                MetalGpuBuffer.shouldUsePrivateGeometryHeap(originalUsage, initialData)
+        );
     }
 
     @Override
@@ -825,6 +844,12 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     void queueResourceRelease(final MemorySegment handle) {
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
+    }
+
+    void queueStaticGeometryBufferRelease(final MemorySegment handle) {
+        this.commandEncoder.queueForDestroy(
+                () -> MetalNativeBridge.metallum_release_static_geometry_buffer(handle)
+        );
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {

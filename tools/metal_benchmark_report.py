@@ -44,6 +44,9 @@ WORKLOAD_BASE_KEYS = frozenset({
     "command_buffers", "encoders", "copy_bytes", "resource_allocations",
 })
 WORKLOAD_EXPANDED_KEYS = WORKLOAD_BASE_KEYS | {"transient_memory"}
+WORKLOAD_PRIVATE_GEOMETRY_HEAP_KEYS = WORKLOAD_EXPANDED_KEYS | {
+    "private_geometry_heap",
+}
 WORKLOAD_ENCODER_KEYS = frozenset({
     "render", "compute", "blit", "pass_boundaries",
 })
@@ -78,13 +81,60 @@ WORKLOAD_TRANSIENT_KEYS = frozenset(WORKLOAD_TRANSIENT_KINDS)
 WORKLOAD_TRANSIENT_HIGH_WATER_KEYS = frozenset({
     "requested_high_water_bytes", "reserved_high_water_bytes",
 })
+WORKLOAD_HEAP_TOTAL_KEYS = (
+    "pages_created_total",
+    "pages_retired_total",
+    "requests_total",
+    "requested_bytes_total",
+    "heap_allocations_total",
+    "heap_query_bytes_total",
+    "page_reuse_hits_total",
+    "fallback_allocations_total",
+    "fallback_requested_bytes_total",
+    "fallback_disabled_total",
+    "fallback_oversize_total",
+    "fallback_invalid_query_total",
+    "fallback_capacity_total",
+    "fallback_heap_create_total",
+    "fallback_heap_allocate_total",
+    "allocation_failures_total",
+    "backing_allocations_total",
+    "device_teardown_with_live_allocations_total",
+)
+WORKLOAD_HEAP_GAUGE_KEYS = (
+    "pools_current",
+    "pages_current",
+    "pages_peak",
+    "retire_pending_pages",
+    "heap_size_bytes_current",
+    "heap_current_allocated_bytes",
+    "heap_used_bytes_current",
+    "fragmentation_probe_alignment",
+    "heap_largest_available_bytes",
+    "heap_fragmentation_estimate_bytes",
+    "live_allocations",
+    "live_requested_bytes",
+    "live_query_bytes",
+)
+WORKLOAD_HEAP_CONFIGURATION_KEYS = (
+    "page_size_bytes",
+    "page_limit_per_device",
+)
+WORKLOAD_HEAP_KEYS = frozenset({
+    "enabled",
+    *WORKLOAD_HEAP_CONFIGURATION_KEYS,
+    *WORKLOAD_HEAP_GAUGE_KEYS,
+    *WORKLOAD_HEAP_TOTAL_KEYS,
+})
 WORKLOAD_CONTRACT_NONE = "none"
 WORKLOAD_CONTRACT_BASE = "base"
 WORKLOAD_CONTRACT_EXPANDED = "expanded"
+WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP = "private_geometry_heap"
 WORKLOAD_CONTRACTS = frozenset({
     WORKLOAD_CONTRACT_NONE,
     WORKLOAD_CONTRACT_BASE,
     WORKLOAD_CONTRACT_EXPANDED,
+    WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 })
 STABLE_METADATA_KEYS = (
     "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
@@ -104,7 +154,7 @@ STABLE_METADATA_KEYS = (
     "render_height", "display_width", "display_height", "scaler_active",
     "hdr_output_mode", "source_encoding", "diagnostic_pattern",
     "bloom_strength", "current_edr_headroom",
-    "display_sync_enabled",
+    "display_sync_enabled", "static_geometry_heaps_enabled",
 )
 COMPARISON_METADATA_KEYS = tuple(
     key for key in STABLE_METADATA_KEYS
@@ -219,6 +269,173 @@ def _exact_object(
     return value
 
 
+def _parse_private_geometry_heap(value: Any, line: int) -> dict[str, Any]:
+    field = "workload.private_geometry_heap"
+    raw = _exact_object(value, field, line, WORKLOAD_HEAP_KEYS)
+    enabled = raw["enabled"]
+    if not isinstance(enabled, bool):
+        raise ReportError(f"line {line}: {field}.enabled must be a boolean")
+
+    result: dict[str, Any] = {"enabled": enabled}
+    for key in (*WORKLOAD_HEAP_CONFIGURATION_KEYS, *WORKLOAD_HEAP_GAUGE_KEYS,
+                *WORKLOAD_HEAP_TOTAL_KEYS):
+        minimum = 1 if key in {
+            "page_size_bytes", "page_limit_per_device",
+            "fragmentation_probe_alignment",
+        } else 0
+        result[key] = _integer(raw[key], f"{field}.{key}", line, minimum)
+
+    for key in ("page_size_bytes", "fragmentation_probe_alignment"):
+        if result[key] & (result[key] - 1) != 0:
+            raise ReportError(f"line {line}: {field}.{key} must be a power of two")
+
+    def require_equal(left: str, expected: int, expression: str) -> None:
+        if result[left] != expected:
+            raise ReportError(
+                f"line {line}: {field}.{left} must equal {expression}"
+            )
+
+    require_equal(
+        "backing_allocations_total",
+        result["pages_created_total"] + result["fallback_allocations_total"],
+        "pages_created_total + fallback_allocations_total",
+    )
+    require_equal(
+        "heap_allocations_total",
+        result["pages_created_total"] + result["page_reuse_hits_total"],
+        "pages_created_total + page_reuse_hits_total",
+    )
+    require_equal(
+        "requests_total",
+        result["heap_allocations_total"]
+        + result["fallback_allocations_total"]
+        + result["allocation_failures_total"],
+        "heap_allocations_total + fallback_allocations_total + "
+        "allocation_failures_total",
+    )
+    fallback_reasons = sum(
+        result[key]
+        for key in (
+            "fallback_disabled_total",
+            "fallback_oversize_total",
+            "fallback_invalid_query_total",
+            "fallback_capacity_total",
+            "fallback_heap_create_total",
+            "fallback_heap_allocate_total",
+        )
+    )
+    if fallback_reasons != (
+        result["fallback_allocations_total"] + result["allocation_failures_total"]
+    ):
+        raise ReportError(
+            f"line {line}: {field} fallback reason totals must equal "
+            "fallback_allocations_total + allocation_failures_total"
+        )
+    require_equal(
+        "pages_current",
+        result["pages_created_total"] - result["pages_retired_total"],
+        "pages_created_total - pages_retired_total",
+    )
+
+    if result["pages_peak"] < result["pages_current"]:
+        raise ReportError(f"line {line}: {field}.pages_peak is below pages_current")
+    if result["pages_peak"] > result["pages_created_total"]:
+        raise ReportError(
+            f"line {line}: {field}.pages_peak exceeds pages_created_total"
+        )
+    if result["retire_pending_pages"] > result["pages_current"]:
+        raise ReportError(
+            f"line {line}: {field}.retire_pending_pages exceeds pages_current"
+        )
+    if result["pages_current"] > (
+        result["pools_current"] * result["page_limit_per_device"]
+    ):
+        raise ReportError(
+            f"line {line}: {field}.pages_current exceeds the per-device page limit"
+        )
+    if result["pages_current"] > 0 and result["pools_current"] == 0:
+        raise ReportError(f"line {line}: {field} has heap pages but no device pool")
+    if result["requests_total"] > 0 and result["pools_current"] == 0:
+        raise ReportError(f"line {line}: {field} has requests but no device pool")
+    if result["live_allocations"] > (
+        result["heap_allocations_total"] + result["fallback_allocations_total"]
+    ):
+        raise ReportError(
+            f"line {line}: {field}.live_allocations exceeds successful allocations"
+        )
+    if result["live_requested_bytes"] > result["requested_bytes_total"]:
+        raise ReportError(
+            f"line {line}: {field}.live_requested_bytes exceeds requested_bytes_total"
+        )
+    if result["fallback_requested_bytes_total"] > result["requested_bytes_total"]:
+        raise ReportError(
+            f"line {line}: {field}.fallback_requested_bytes_total exceeds "
+            "requested_bytes_total"
+        )
+
+    heap_size = result["heap_size_bytes_current"]
+    heap_used = result["heap_used_bytes_current"]
+    if heap_size < result["pages_current"] * result["page_size_bytes"]:
+        raise ReportError(
+            f"line {line}: {field}.heap_size_bytes_current is too small for pages_current"
+        )
+    for key in (
+        "heap_current_allocated_bytes",
+        "heap_used_bytes_current",
+        "heap_largest_available_bytes",
+        "heap_fragmentation_estimate_bytes",
+    ):
+        if result[key] > heap_size:
+            raise ReportError(f"line {line}: {field}.{key} exceeds heap_size_bytes_current")
+    if result["heap_largest_available_bytes"] > heap_size - heap_used:
+        raise ReportError(
+            f"line {line}: {field}.heap_largest_available_bytes exceeds free heap bytes"
+        )
+    if result["heap_fragmentation_estimate_bytes"] > heap_size - heap_used:
+        raise ReportError(
+            f"line {line}: {field}.heap_fragmentation_estimate_bytes exceeds free "
+            "heap bytes"
+        )
+    if result["pages_current"] == 0 and any(
+        result[key] != 0
+        for key in (
+            "retire_pending_pages",
+            "heap_size_bytes_current",
+            "heap_current_allocated_bytes",
+            "heap_used_bytes_current",
+            "heap_largest_available_bytes",
+            "heap_fragmentation_estimate_bytes",
+        )
+    ):
+        raise ReportError(f"line {line}: {field} has heap gauges without current pages")
+
+    if enabled:
+        if result["fallback_disabled_total"] != 0:
+            raise ReportError(
+                f"line {line}: {field}.fallback_disabled_total must be zero when enabled"
+            )
+    else:
+        forbidden = (
+            "pages_current",
+            "pages_peak",
+            "pages_created_total",
+            "pages_retired_total",
+            "heap_allocations_total",
+            "heap_query_bytes_total",
+            "page_reuse_hits_total",
+            "fallback_oversize_total",
+            "fallback_invalid_query_total",
+            "fallback_capacity_total",
+            "fallback_heap_create_total",
+            "fallback_heap_allocate_total",
+        )
+        if any(result[key] != 0 for key in forbidden):
+            raise ReportError(
+                f"line {line}: {field} contains heap activity while disabled"
+            )
+    return result
+
+
 def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -227,14 +444,20 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
     workload_keys = set(value)
     if workload_keys == WORKLOAD_BASE_KEYS:
         has_transient_memory = False
+        has_private_geometry_heap = False
         raw = value
     elif workload_keys == WORKLOAD_EXPANDED_KEYS:
         has_transient_memory = True
+        has_private_geometry_heap = False
+        raw = value
+    elif workload_keys == WORKLOAD_PRIVATE_GEOMETRY_HEAP_KEYS:
+        has_transient_memory = True
+        has_private_geometry_heap = True
         raw = value
     else:
-        # The expanded shape is the current contract. This also reports any
-        # unknown key while legacy base-shape reports still match exactly.
-        _exact_object(value, "workload", line, WORKLOAD_EXPANDED_KEYS)
+        # The heap-extended shape is the current contract. This also reports
+        # unknown keys while both legacy shapes still match exactly.
+        _exact_object(value, "workload", line, WORKLOAD_PRIVATE_GEOMETRY_HEAP_KEYS)
         raise AssertionError("unreachable exact workload validation")
     encoders_raw = _exact_object(
         raw["encoders"], "workload.encoders", line, WORKLOAD_ENCODER_KEYS
@@ -347,6 +570,11 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
                 "reserved_high_water_bytes": reserved,
             }
         result["transient_memory"] = transient
+    if has_private_geometry_heap:
+        result["private_geometry_heap"] = _parse_private_geometry_heap(
+            raw["private_geometry_heap"],
+            line,
+        )
     return result
 
 
@@ -424,6 +652,18 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         for field, value in (("phase", window.phase), ("scaler_mode", window.scaler)):
             if not isinstance(value, str) or not value:
                 raise ReportError(f"line {line}: benchmark.{field} must be a string")
+        if window.workload is not None and "private_geometry_heap" in window.workload:
+            metadata_mode = window.metadata.get("static_geometry_heaps_enabled")
+            if not isinstance(metadata_mode, bool):
+                raise ReportError(
+                    f"line {line}: metadata.static_geometry_heaps_enabled must be "
+                    "a boolean for private geometry heap telemetry"
+                )
+            if metadata_mode != window.workload["private_geometry_heap"]["enabled"]:
+                raise ReportError(
+                    f"line {line}: metadata.static_geometry_heaps_enabled differs "
+                    "from workload.private_geometry_heap.enabled"
+                )
     return window
 
 
@@ -537,6 +777,13 @@ def _aggregate_workload(
         raise ReportError(
             "selected windows mix base and expanded workload telemetry shapes"
         )
+    heap_extended = [
+        "private_geometry_heap" in workload for workload in workload_windows
+    ]
+    if any(heap_extended) and not all(heap_extended):
+        raise ReportError(
+            "selected windows mix legacy and private-geometry-heap workload shapes"
+        )
     total_frames = sum(window.frames for window in windows)
 
     def summed(path: tuple[str, ...]) -> int:
@@ -633,6 +880,50 @@ def _aggregate_workload(
             }
             for kind in WORKLOAD_TRANSIENT_KINDS
         }
+    if all(heap_extended):
+        heaps = [workload["private_geometry_heap"] for workload in workload_windows]
+        configuration_keys = ("enabled", *WORKLOAD_HEAP_CONFIGURATION_KEYS)
+        for key in configuration_keys:
+            values = [heap[key] for heap in heaps]
+            if len(set(values)) != 1:
+                raise ReportError(
+                    "selected windows change private geometry heap configuration: "
+                    + key
+                )
+        for key in WORKLOAD_HEAP_TOTAL_KEYS:
+            values = [heap[key] for heap in heaps]
+            if any(current < previous for previous, current in zip(values, values[1:])):
+                raise ReportError(
+                    "selected windows decrease private geometry heap cumulative total: "
+                    + key
+                )
+        first_heap = heaps[0]
+        last_heap = heaps[-1]
+        result["private_geometry_heap"] = {
+            "aggregation": (
+                "Heap telemetry is a process snapshot, never a per-window total. "
+                "Cumulative totals use the last snapshot for process-lifetime proof "
+                "and an explicitly named last-minus-first delta; current gauges use "
+                "the last snapshot and maxima across selected snapshots."
+            ),
+            "configuration": {
+                key: last_heap[key] for key in configuration_keys
+            },
+            "process_lifetime_totals_at_last_window": {
+                key: last_heap[key] for key in WORKLOAD_HEAP_TOTAL_KEYS
+            },
+            "deltas_between_first_and_last_snapshot": {
+                key: last_heap[key] - first_heap[key]
+                for key in WORKLOAD_HEAP_TOTAL_KEYS
+            },
+            "gauges_at_last_window": {
+                key: last_heap[key] for key in WORKLOAD_HEAP_GAUGE_KEYS
+            },
+            "gauge_maxima_across_selected_windows": {
+                key: max(heap[key] for heap in heaps)
+                for key in WORKLOAD_HEAP_GAUGE_KEYS
+            },
+        }
     return result
 
 
@@ -653,7 +944,7 @@ def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> N
 def validate_release_contract(
     windows: Sequence[TimingWindow],
     *,
-    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
+    workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     scaler: str,
     source_sha256: str,
     artifact_sha256: str,
@@ -746,11 +1037,28 @@ def validate_release_contract(
                     f"line {window.line}: legacy base workload contract rejects "
                     "expanded transient-memory telemetry"
                 )
-        elif "transient_memory" not in window.workload:
-            raise ReportError(
-                f"line {window.line}: release contract requires expanded workload "
-                "telemetry with transient_memory"
-            )
+        elif workload_contract == WORKLOAD_CONTRACT_EXPANDED:
+            if "transient_memory" not in window.workload:
+                raise ReportError(
+                    f"line {window.line}: release contract requires expanded workload "
+                    "telemetry with transient_memory"
+                )
+            if "private_geometry_heap" in window.workload:
+                raise ReportError(
+                    f"line {window.line}: legacy expanded workload contract rejects "
+                    "private geometry heap telemetry"
+                )
+        else:
+            if "transient_memory" not in window.workload:
+                raise ReportError(
+                    f"line {window.line}: release contract requires expanded workload "
+                    "telemetry with transient_memory"
+                )
+            if "private_geometry_heap" not in window.workload:
+                raise ReportError(
+                    f"line {window.line}: release contract requires exact "
+                    "workload.private_geometry_heap telemetry"
+                )
         metadata = window.metadata
         expected = {
             "monitor": BUILT_IN_MONITOR,
@@ -778,6 +1086,10 @@ def validate_release_contract(
             "benchmark_dimension": dimension,
             "benchmark_simulation_frozen": True,
         }
+        if workload_contract == WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP:
+            expected["static_geometry_heaps_enabled"] = window.workload[
+                "private_geometry_heap"
+            ]["enabled"]
         for key, value in expected.items():
             if metadata.get(key) != value:
                 raise ReportError(
@@ -852,7 +1164,7 @@ def summarize(
     scaler: str,
     *,
     release_contract: bool = False,
-    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
+    workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     source_sha256: str = "unknown",
     artifact_sha256: str = "unknown",
     settings_id: str = "unknown",
@@ -956,6 +1268,7 @@ def compare(
     gate_ms: float,
     *,
     allow_source_change: bool = False,
+    allow_static_geometry_heap_mode_change: bool = False,
     require_stability: bool = True,
 ) -> dict[str, Any]:
     if not math.isfinite(gate_ms) or gate_ms < 0.0:
@@ -983,6 +1296,34 @@ def compare(
         or not isinstance(candidate.get("metadata"), dict)
     ):
         raise ReportError("strict compare requires release metadata for both reports")
+    if allow_static_geometry_heap_mode_change:
+        if not require_stability:
+            raise ReportError(
+                "static geometry heap mode override requires attested reports"
+            )
+        baseline_mode = baseline["metadata"].get("static_geometry_heaps_enabled")
+        candidate_mode = candidate["metadata"].get("static_geometry_heaps_enabled")
+        if not isinstance(baseline_mode, bool) or not isinstance(candidate_mode, bool) \
+                or baseline_mode == candidate_mode:
+            raise ReportError(
+                "static geometry heap mode override requires an explicit OFF-vs-ON pair"
+            )
+        for summary, label, mode in (
+            (baseline, "baseline", baseline_mode),
+            (candidate, "candidate", candidate_mode),
+        ):
+            try:
+                workload_mode = summary["workload"]["private_geometry_heap"][
+                    "configuration"
+                ]["enabled"]
+            except (KeyError, TypeError) as error:
+                raise ReportError(
+                    f"{label} lacks private geometry heap workload proof"
+                ) from error
+            if workload_mode != mode:
+                raise ReportError(
+                    f"{label} static geometry heap metadata/workload modes differ"
+                )
     if isinstance(baseline.get("metadata"), dict) \
             and isinstance(candidate.get("metadata"), dict):
         comparison_keys = tuple(
@@ -990,6 +1331,10 @@ def compare(
             if not (
                 allow_source_change
                 and key in {"source_sha256", "artifact_sha256"}
+            )
+            and not (
+                allow_static_geometry_heap_mode_change
+                and key == "static_geometry_heaps_enabled"
             )
         )
         mismatches = [
@@ -1251,7 +1596,7 @@ def _load_json_object(path: Path, label: str) -> dict[str, Any]:
 def _derive_release_summary(
     raw_report: Path,
     *,
-    workload_contract: str = WORKLOAD_CONTRACT_EXPANDED,
+    workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
     if any(window.schema != 2 for window in windows):
@@ -1354,10 +1699,15 @@ def _validate_log_evidence(
         raise ReportError("Minecraft log contains an unexpected screenshot event")
     if re.search(
         r"\[metallum\] (?:Metal command buffer failed|GPU timing sample invalid|"
-        r"GPU timing workload window mismatch|Java workload telemetry invalid)",
+        r"GPU timing workload window mismatch|Java workload telemetry invalid|"
+        r"Static geometry heap teardown exceeded Sodium cache bound|"
+        r"Static geometry buffer release was not registered)",
         console_text,
     ):
-        raise ReportError("console log contains a Metal timing/command-buffer failure")
+        raise ReportError(
+            "console log contains a Metal timing/command-buffer failure or "
+            "resource-lifecycle failure"
+        )
 
     metadata = summary["metadata"]
     route = re.escape(_metadata_string(metadata, "route"))
@@ -1569,10 +1919,10 @@ def create_attestation(
         paths["summary"],
         paths["minecraft_log"],
         paths["console_log"],
-        workload_contract=WORKLOAD_CONTRACT_EXPANDED,
+        workload_contract=WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     )
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "accepted": True,
         "raw_report": str(paths["raw_report"]),
         "raw_sha256": _file_sha256(paths["raw_report"]),
@@ -1616,6 +1966,7 @@ def _attestation_workload_contract(schema_version: int) -> str:
         2: WORKLOAD_CONTRACT_NONE,
         3: WORKLOAD_CONTRACT_BASE,
         4: WORKLOAD_CONTRACT_EXPANDED,
+        5: WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     }[schema_version]
 
 
@@ -1624,7 +1975,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
     path = _attestation_path(raw)
     payload = _load_json_object(path, "benchmark attestation")
     schema_version = payload.get("schema_version")
-    if schema_version not in (2, 3, 4) or payload.get("accepted") is not True:
+    if schema_version not in (2, 3, 4, 5) or payload.get("accepted") is not True:
         raise ReportError(f"invalid benchmark attestation: {path}")
     expected = _artifact_paths(raw)
     artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
@@ -1659,7 +2010,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         raise ReportError(f"attestation measurement contract is inconsistent: {path}")
     if payload.get("presented_frames") != summary["presented_frames"]:
         raise ReportError(f"attestation frame count is inconsistent: {path}")
-    if schema_version in (3, 4):
+    if schema_version in (3, 4, 5):
         if payload.get("workload") != summary["workload"]:
             raise ReportError(f"attestation workload is inconsistent: {path}")
     if payload.get("metadata") != summary["metadata"]:
@@ -1776,6 +2127,17 @@ def _print_summary(summary: dict[str, Any]) -> None:
                 f"{transient['gpu_shared']['requested_high_water_bytes']}/"
                 f"{transient['gpu_shared']['reserved_high_water_bytes']}"
             )
+        if "private_geometry_heap" in workload:
+            heap = workload["private_geometry_heap"]
+            configuration = heap["configuration"]
+            gauges = heap["gauges_at_last_window"]
+            totals = heap["process_lifetime_totals_at_last_window"]
+            print(
+                "private geometry heap (enabled; current/peak pages; backing "
+                "allocations at last window): "
+                f"{configuration['enabled']}; {gauges['pages_current']}/"
+                f"{gauges['pages_peak']}; {totals['backing_allocations_total']}"
+            )
         print("workload coverage: " + workload["observability"])
     print("note: " + summary["interpretation"])
 
@@ -1824,11 +2186,93 @@ def self_test() -> None:
         else:
             raise AssertionError(f"expected ReportError containing {expected_text!r}")
 
+    def heap_snapshot(index: int, enabled: bool) -> dict[str, Any]:
+        page_size = 64 * 1024 * 1024
+        requests = 10 + index
+        if enabled:
+            heap_allocations = 8 + index
+            fallback_allocations = 2
+            pages_created = 1
+            page_reuse_hits = heap_allocations - pages_created
+            return {
+                "enabled": True,
+                "pools_current": 1,
+                "page_size_bytes": page_size,
+                "page_limit_per_device": 8,
+                "pages_current": 1,
+                "pages_peak": 1,
+                "pages_created_total": pages_created,
+                "pages_retired_total": 0,
+                "retire_pending_pages": 0,
+                "heap_size_bytes_current": page_size,
+                "heap_current_allocated_bytes": 4096,
+                "heap_used_bytes_current": 4096,
+                "fragmentation_probe_alignment": 256,
+                "heap_largest_available_bytes": page_size - 4096,
+                "heap_fragmentation_estimate_bytes": 0,
+                "live_allocations": 1,
+                "live_requested_bytes": 1024,
+                "live_query_bytes": 1024,
+                "requests_total": requests,
+                "requested_bytes_total": requests * 1024,
+                "heap_allocations_total": heap_allocations,
+                "heap_query_bytes_total": heap_allocations * 1024,
+                "page_reuse_hits_total": page_reuse_hits,
+                "fallback_allocations_total": fallback_allocations,
+                "fallback_requested_bytes_total": fallback_allocations * 1024,
+                "fallback_disabled_total": 0,
+                "fallback_oversize_total": fallback_allocations,
+                "fallback_invalid_query_total": 0,
+                "fallback_capacity_total": 0,
+                "fallback_heap_create_total": 0,
+                "fallback_heap_allocate_total": 0,
+                "allocation_failures_total": 0,
+                "backing_allocations_total": pages_created + fallback_allocations,
+                "device_teardown_with_live_allocations_total": 0,
+            }
+        return {
+            "enabled": False,
+            "pools_current": 1,
+            "page_size_bytes": page_size,
+            "page_limit_per_device": 8,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_created_total": 0,
+            "pages_retired_total": 0,
+            "retire_pending_pages": 0,
+            "heap_size_bytes_current": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_used_bytes_current": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_largest_available_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "live_allocations": 0,
+            "live_requested_bytes": 0,
+            "live_query_bytes": 0,
+            "requests_total": requests,
+            "requested_bytes_total": requests * 1024,
+            "heap_allocations_total": 0,
+            "heap_query_bytes_total": 0,
+            "page_reuse_hits_total": 0,
+            "fallback_allocations_total": requests,
+            "fallback_requested_bytes_total": requests * 1024,
+            "fallback_disabled_total": requests,
+            "fallback_oversize_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "allocation_failures_total": 0,
+            "backing_allocations_total": requests,
+            "device_teardown_with_live_allocations_total": 0,
+        }
+
     def line(
         schema: int,
         index: int,
         source_sha256: str = "c" * 64,
         artifact_sha256: str = "5" * 64,
+        heap_enabled: bool = True,
     ) -> dict[str, Any]:
         metric = {"average": 7.0, "p50": 7.1, "p95": 7.8, "p99": 8.1, "maximum": 9.0}
         payload: dict[str, Any] = {
@@ -1884,6 +2328,7 @@ def self_test() -> None:
                             "reserved_high_water_bytes": 5000 + index * 3,
                         },
                     },
+                    "private_geometry_heap": heap_snapshot(index, heap_enabled),
                 },
                 "benchmark": {
                     "enabled": True, "generation": 2, "segment_index": 0,
@@ -1925,12 +2370,17 @@ def self_test() -> None:
                     "benchmark_dimension": "minecraft:overworld",
                     "benchmark_simulation_frozen": True,
                     "thermal_state": "nominal", "device_name": "Apple M1 Pro",
+                    "static_geometry_heaps_enabled": heap_enabled,
                 },
             })
         return payload
 
-    def report_text(source_sha256: str, artifact_sha256: str = "5" * 64) -> str:
-        startup = line(2, 0, source_sha256, artifact_sha256)
+    def report_text(
+        source_sha256: str,
+        artifact_sha256: str = "5" * 64,
+        heap_enabled: bool = True,
+    ) -> str:
+        startup = line(2, 0, source_sha256, artifact_sha256, heap_enabled)
         startup["benchmark"].update({
             "generation": 0,
             "segment_index": -1,
@@ -1940,7 +2390,9 @@ def self_test() -> None:
         return (
             json.dumps(startup) + "\n"
             + "\n".join(
-                json.dumps(line(2, index + 1, source_sha256, artifact_sha256))
+                json.dumps(
+                    line(2, index + 1, source_sha256, artifact_sha256, heap_enabled)
+                )
                 for index in range(10)
             )
             + "\n"
@@ -1985,6 +2437,7 @@ def self_test() -> None:
             stem: str,
             source_sha256: str,
             artifact_sha256: str = "5" * 64,
+            heap_enabled: bool = True,
         ) -> tuple[Path, dict[str, Any]]:
             raw = root / f"{stem}.raw.jsonl"
             summary_path = root / f"{stem}.summary.json"
@@ -1992,7 +2445,7 @@ def self_test() -> None:
             console_log = root / f"{stem}.console.log"
             accepted = root / f"{stem}.accepted.json"
             raw.write_text(
-                report_text(source_sha256, artifact_sha256),
+                report_text(source_sha256, artifact_sha256, heap_enabled),
                 encoding="utf-8",
             )
             release, _ = _derive_release_summary(raw)
@@ -2021,6 +2474,7 @@ def self_test() -> None:
             ]
             for payload in payloads:
                 payload.pop("workload")
+                payload["metadata"].pop("static_geometry_heaps_enabled")
             raw.write_text(
                 "\n".join(json.dumps(payload) for payload in payloads) + "\n",
                 encoding="utf-8",
@@ -2081,6 +2535,8 @@ def self_test() -> None:
             ]
             for payload in payloads:
                 payload["workload"].pop("transient_memory")
+                payload["workload"].pop("private_geometry_heap")
+                payload["metadata"].pop("static_geometry_heaps_enabled")
             raw.write_text(
                 "\n".join(json.dumps(payload) for payload in payloads) + "\n",
                 encoding="utf-8",
@@ -2129,6 +2585,68 @@ def self_test() -> None:
             )
             return raw, release
 
+        def make_legacy_v4_bundle(
+            stem: str,
+            source_sha256: str,
+            artifact_sha256: str = "5" * 64,
+        ) -> tuple[Path, dict[str, Any]]:
+            raw = root / f"{stem}.raw.jsonl"
+            paths = _artifact_paths(raw)
+            payloads = [
+                json.loads(value)
+                for value in report_text(source_sha256, artifact_sha256).splitlines()
+            ]
+            for payload in payloads:
+                payload["workload"].pop("private_geometry_heap")
+                payload["metadata"].pop("static_geometry_heaps_enabled")
+            raw.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            release, _ = _derive_release_summary(
+                raw,
+                workload_contract=WORKLOAD_CONTRACT_EXPANDED,
+            )
+            paths["summary"].write_text(
+                json.dumps(release, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            paths["minecraft_log"].write_text(minecraft_evidence, encoding="utf-8")
+            paths["console_log"].write_text(
+                "Gradle/Minecraft console completed normally\n",
+                encoding="utf-8",
+            )
+            recomputed, measurement = _validate_release_bundle(
+                raw.resolve(),
+                paths["summary"].resolve(),
+                paths["minecraft_log"].resolve(),
+                paths["console_log"].resolve(),
+                workload_contract=WORKLOAD_CONTRACT_EXPANDED,
+            )
+            recomputed["report"] = release["report"]
+            assert recomputed == release
+            accepted_payload = {
+                "schema_version": 4,
+                "accepted": True,
+                "raw_report": str(raw.resolve()),
+                "raw_sha256": _file_sha256(raw),
+                "summary": str(paths["summary"].resolve()),
+                "summary_sha256": _file_sha256(paths["summary"]),
+                "minecraft_log": str(paths["minecraft_log"].resolve()),
+                "minecraft_log_sha256": _file_sha256(paths["minecraft_log"]),
+                "console_log": str(paths["console_log"].resolve()),
+                "console_log_sha256": _file_sha256(paths["console_log"]),
+                "measurement": measurement,
+                "presented_frames": release["presented_frames"],
+                "workload": release["workload"],
+                "metadata": release["metadata"],
+            }
+            paths["attestation"].write_text(
+                json.dumps(accepted_payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return raw, release
+
         new, new_summary = make_bundle("new", "c" * 64)
         assert old_summary["presented_frames"] == 3000
         assert new_summary["presented_frames"] == 3000
@@ -2152,6 +2670,30 @@ def self_test() -> None:
         }
         assert "transient_memory" not in workload_summary["aggregate_totals"]
         assert "transient_memory" not in workload_summary["per_presented_frame"]
+        assert "private_geometry_heap" not in workload_summary["aggregate_totals"]
+        assert "private_geometry_heap" not in workload_summary["per_presented_frame"]
+        heap_summary = workload_summary["private_geometry_heap"]
+        assert heap_summary["configuration"] == {
+            "enabled": True,
+            "page_size_bytes": 64 * 1024 * 1024,
+            "page_limit_per_device": 8,
+        }
+        assert heap_summary["process_lifetime_totals_at_last_window"][
+            "requests_total"
+        ] == 20
+        assert heap_summary["process_lifetime_totals_at_last_window"][
+            "backing_allocations_total"
+        ] == 3
+        assert heap_summary["deltas_between_first_and_last_snapshot"][
+            "requests_total"
+        ] == 9
+        assert heap_summary["deltas_between_first_and_last_snapshot"][
+            "backing_allocations_total"
+        ] == 0
+        assert heap_summary["gauges_at_last_window"]["pages_current"] == 1
+        assert heap_summary["gauge_maxima_across_selected_windows"][
+            "live_allocations"
+        ] == 1
         assert len(workload_summary["selected_window_totals"]) == 10
         assert workload_summary["selected_window_totals"][0]["workload"] == line(
             2, 1
@@ -2164,7 +2706,7 @@ def self_test() -> None:
         )["verdict"] == "WITHIN_THRESHOLD"
 
         verified = verify_attestation(new)
-        assert verified["schema_version"] == 4
+        assert verified["schema_version"] == 5
         assert verified["presented_frames"] == 3000
         assert verified["workload"] == new_summary["workload"]
         new_attested = summarize_attested_release(new, 3000, 0, "OFF")
@@ -2173,8 +2715,32 @@ def self_test() -> None:
         new_without_runtime.pop("attested_runtime")
         assert new_without_runtime == new_summary
 
+        # Schema v4 remains valid for the exact pre-heap expanded workload.
+        # Its heap mode is unknown, so it cannot be silently mixed with v5.
+        legacy_v4, legacy_v4_summary = make_legacy_v4_bundle(
+            "legacy-v4",
+            "c" * 64,
+        )
+        legacy_v4_verified = verify_attestation(legacy_v4)
+        assert legacy_v4_verified["schema_version"] == 4
+        legacy_v4_attested = summarize_attested_release(
+            legacy_v4,
+            3000,
+            0,
+            "OFF",
+        )
+        assert "transient_memory_high_water" in legacy_v4_attested["workload"]
+        assert "private_geometry_heap" not in legacy_v4_attested["workload"]
+        expect_error(
+            lambda: compare(new_attested, legacy_v4_attested, 0.2),
+            "static_geometry_heaps_enabled",
+        )
+        legacy_v4_without_runtime = dict(legacy_v4_attested)
+        legacy_v4_without_runtime.pop("attested_runtime")
+        assert legacy_v4_without_runtime == legacy_v4_summary
+
         # Schema v3 remains the strict contract for the exact pre-transient
-        # workload shape and can be compared directly with a schema-v4 bundle.
+        # workload shape and can still be compared with schema v4.
         legacy_v3, legacy_v3_summary = make_legacy_v3_bundle(
             "legacy-v3",
             "c" * 64,
@@ -2189,7 +2755,7 @@ def self_test() -> None:
         )
         assert "workload" in legacy_v3_attested
         assert "transient_memory_high_water" not in legacy_v3_attested["workload"]
-        assert compare(new_attested, legacy_v3_attested, 0.2)[
+        assert compare(legacy_v4_attested, legacy_v3_attested, 0.2)[
             "verdict"
         ] == "WITHIN_THRESHOLD"
         legacy_v3_without_runtime = dict(legacy_v3_attested)
@@ -2226,7 +2792,7 @@ def self_test() -> None:
         assert legacy_verified["schema_version"] == 2
         legacy_attested = summarize_attested_release(legacy_v2, 3000, 0, "OFF")
         assert "workload" not in legacy_attested
-        assert compare(new_attested, legacy_attested, 0.2)[
+        assert compare(legacy_v3_attested, legacy_attested, 0.2)[
             "verdict"
         ] == "WITHIN_THRESHOLD"
         legacy_without_runtime = dict(legacy_attested)
@@ -2417,8 +2983,18 @@ def self_test() -> None:
         expect_error(lambda: verify_attestation(new), "workload is inconsistent")
         paths["attestation"].write_text(accepted_text, encoding="utf-8")
 
-        # An expanded schema-v4 bundle cannot be downgraded to either legacy
+        # A heap-aware schema-v5 bundle cannot be downgraded to a legacy
         # workload contract. Pre-attestation schema versions remain invalid.
+        legacy_attestation = json.loads(accepted_text)
+        legacy_attestation["schema_version"] = 4
+        paths["attestation"].write_text(
+            json.dumps(legacy_attestation),
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: verify_attestation(new),
+            "expanded workload contract rejects private geometry heap telemetry",
+        )
         legacy_attestation = json.loads(accepted_text)
         legacy_attestation["schema_version"] = 3
         paths["attestation"].write_text(
@@ -2509,6 +3085,70 @@ def self_test() -> None:
         expect_error(
             lambda: _derive_release_summary(unknown_workload_key),
             "workload must have exact keys",
+        )
+
+        def remove_private_geometry_heap(payloads: list[dict[str, Any]]) -> None:
+            for payload in payloads:
+                payload["workload"].pop("private_geometry_heap")
+
+        missing_heap = mutated_raw(
+            "missing-private-geometry-heap",
+            remove_private_geometry_heap,
+        )
+        expect_error(
+            lambda: _derive_release_summary(missing_heap),
+            "requires exact workload.private_geometry_heap telemetry",
+        )
+
+        extra_heap_key = mutated_raw(
+            "extra-private-geometry-heap-key",
+            lambda payloads: payloads[1]["workload"][
+                "private_geometry_heap"
+            ].__setitem__("unknown", 1),
+        )
+        expect_error(
+            lambda: _derive_release_summary(extra_heap_key),
+            "workload.private_geometry_heap must have exact keys",
+        )
+
+        def break_heap_backing_algebra(payloads: list[dict[str, Any]]) -> None:
+            payloads[1]["workload"]["private_geometry_heap"][
+                "backing_allocations_total"
+            ] = 4
+
+        invalid_backing_algebra = mutated_raw(
+            "invalid-heap-backing-algebra",
+            break_heap_backing_algebra,
+        )
+        expect_error(
+            lambda: _derive_release_summary(invalid_backing_algebra),
+            "backing_allocations_total must equal pages_created_total + "
+            "fallback_allocations_total",
+        )
+
+        decreasing_heap_total = mutated_raw(
+            "decreasing-heap-total",
+            lambda payloads: payloads[1]["workload"].__setitem__(
+                "private_geometry_heap",
+                heap_snapshot(100, True),
+            ),
+        )
+        expect_error(
+            lambda: _derive_release_summary(decreasing_heap_total),
+            "decrease private geometry heap cumulative total",
+        )
+
+        mismatched_heap_mode = mutated_raw(
+            "mismatched-heap-mode",
+            lambda payloads: payloads[1]["metadata"].__setitem__(
+                "static_geometry_heaps_enabled",
+                False,
+            ),
+        )
+        expect_error(
+            lambda: _derive_release_summary(mismatched_heap_mode),
+            "static_geometry_heaps_enabled differs from "
+            "workload.private_geometry_heap.enabled",
         )
 
         def make_transient_negative(payloads: list[dict[str, Any]]) -> None:
@@ -2664,6 +3304,45 @@ def self_test() -> None:
             for item in unstable_result["gate"]["regressions"]
         )
 
+        # Heap mode is part of the strict comparison contract. Only the narrow,
+        # attested OFF-vs-ON override may exclude that single metadata key.
+        heap_off, _ = make_bundle(
+            "heap-off",
+            "c" * 64,
+            "5" * 64,
+            heap_enabled=False,
+        )
+        heap_off_attested = summarize_attested_release(heap_off, 3000, 0, "OFF")
+        expect_error(
+            lambda: compare(heap_off_attested, new_attested, 0.2),
+            "static_geometry_heaps_enabled",
+        )
+        assert compare(
+            heap_off_attested,
+            new_attested,
+            0.2,
+            allow_static_geometry_heap_mode_change=True,
+        )["verdict"] == "WITHIN_THRESHOLD"
+        expect_error(
+            lambda: compare(
+                new_attested,
+                new_attested,
+                0.2,
+                allow_static_geometry_heap_mode_change=True,
+            ),
+            "requires an explicit OFF-vs-ON pair",
+        )
+        expect_error(
+            lambda: compare(
+                new_summary,
+                heap_off_attested,
+                0.2,
+                allow_static_geometry_heap_mode_change=True,
+                require_stability=False,
+            ),
+            "requires attested reports",
+        )
+
         # Same source and build artifact are the strict default. The explicit
         # attested-only override permits both to change for an optimization.
         changed_source, changed_summary = make_bundle(
@@ -2745,6 +3424,14 @@ def parser() -> argparse.ArgumentParser:
             "intentional optimization comparison; incompatible with --provisional"
         ),
     )
+    comparison.add_argument(
+        "--allow-static-geometry-heap-mode-change",
+        action="store_true",
+        help=(
+            "allow one intentional attested OFF-vs-ON static geometry heap "
+            "comparison; incompatible with --provisional"
+        ),
+    )
     comparison.add_argument("--json", action="store_true")
     attest = sub.add_parser("attest")
     attest.add_argument("raw_report", type=Path)
@@ -2799,9 +3486,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 _print_summary(summary)
             return 0
-        if args.provisional and args.allow_source_change:
+        if args.provisional and (
+            args.allow_source_change
+            or args.allow_static_geometry_heap_mode_change
+        ):
             raise ReportError(
-                "--allow-source-change requires attested reports and cannot be used "
+                "comparison overrides require attested reports and cannot be used "
                 "with --provisional"
             )
         summary_loader = summarize if args.provisional else summarize_attested_release
@@ -2816,6 +3506,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidate,
             args.p95_regression_ms,
             allow_source_change=args.allow_source_change,
+            allow_static_geometry_heap_mode_change=(
+                args.allow_static_geometry_heap_mode_change
+            ),
             require_stability=not args.provisional,
         )
         if args.json:

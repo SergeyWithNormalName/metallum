@@ -209,6 +209,560 @@ private struct MetallumPreparedSpatialUiSeed {
     let output: MTLTexture
 }
 
+private final class MetallumStaticGeometryHeapPage {
+    let heap: MTLHeap
+    var liveAllocations = 0
+    var releasesInProgress = 0
+    var liveRequestedBytes = 0
+    var liveQueryBytes = 0
+    var retirePending = false
+
+    init(heap: MTLHeap) {
+        self.heap = heap
+    }
+}
+
+private final class MetallumStaticGeometryHeapPool {
+    let device: MTLDevice
+    var pages: [MetallumStaticGeometryHeapPage] = []
+    var maxQueryAlignment = 256
+
+    var liveAllocations = 0
+    var liveRequestedBytes = 0
+    var liveQueryBytes = 0
+    var requestsTotal = 0
+    var requestedBytesTotal = 0
+    var heapAllocationsTotal = 0
+    var heapQueryBytesTotal = 0
+    var pageReuseHitsTotal = 0
+    var fallbackAllocationsTotal = 0
+    var fallbackRequestedBytesTotal = 0
+    var fallbackDisabledTotal = 0
+    var fallbackOversizeTotal = 0
+    var fallbackInvalidQueryTotal = 0
+    var fallbackCapacityTotal = 0
+    var fallbackHeapCreateTotal = 0
+    var fallbackHeapAllocateTotal = 0
+    var allocationFailuresTotal = 0
+    var pagesCreatedTotal = 0
+    var pagesRetiredTotal = 0
+    var pagesPeak = 0
+
+    init(device: MTLDevice) {
+        self.device = device
+    }
+}
+
+private struct MetallumStaticGeometryAllocationRecord {
+    let pool: MetallumStaticGeometryHeapPool
+    let page: MetallumStaticGeometryHeapPage?
+    let requestedBytes: Int
+    let queryBytes: Int
+}
+
+private struct MetallumStaticGeometryReleaseToken {
+    let record: MetallumStaticGeometryAllocationRecord
+}
+
+private struct MetallumStaticGeometryHeapSnapshot {
+    let enabled: Bool
+    let poolsCurrent: Int
+    let pageSizeBytes: Int
+    let pageLimitPerDevice: Int
+    let pagesCurrent: Int
+    let pagesPeak: Int
+    let pagesCreatedTotal: Int
+    let pagesRetiredTotal: Int
+    let retirePendingPages: Int
+    let heapSizeBytesCurrent: Int
+    let heapCurrentAllocatedBytes: Int
+    let heapUsedBytesCurrent: Int
+    let fragmentationProbeAlignment: Int
+    let heapLargestAvailableBytes: Int
+    let heapFragmentationEstimateBytes: Int
+    let liveAllocations: Int
+    let liveRequestedBytes: Int
+    let liveQueryBytes: Int
+    let requestsTotal: Int
+    let requestedBytesTotal: Int
+    let heapAllocationsTotal: Int
+    let heapQueryBytesTotal: Int
+    let pageReuseHitsTotal: Int
+    let fallbackAllocationsTotal: Int
+    let fallbackRequestedBytesTotal: Int
+    let fallbackDisabledTotal: Int
+    let fallbackOversizeTotal: Int
+    let fallbackInvalidQueryTotal: Int
+    let fallbackCapacityTotal: Int
+    let fallbackHeapCreateTotal: Int
+    let fallbackHeapAllocateTotal: Int
+    let allocationFailuresTotal: Int
+    let deviceTeardownWithLiveAllocationsTotal: Int
+
+    var report: [String: Any] {
+        [
+            "enabled": enabled,
+            "pools_current": poolsCurrent,
+            "page_size_bytes": pageSizeBytes,
+            "page_limit_per_device": pageLimitPerDevice,
+            "pages_current": pagesCurrent,
+            "pages_peak": pagesPeak,
+            "pages_created_total": pagesCreatedTotal,
+            "pages_retired_total": pagesRetiredTotal,
+            "retire_pending_pages": retirePendingPages,
+            "heap_size_bytes_current": heapSizeBytesCurrent,
+            "heap_current_allocated_bytes": heapCurrentAllocatedBytes,
+            "heap_used_bytes_current": heapUsedBytesCurrent,
+            "fragmentation_probe_alignment": fragmentationProbeAlignment,
+            "heap_largest_available_bytes": heapLargestAvailableBytes,
+            "heap_fragmentation_estimate_bytes": heapFragmentationEstimateBytes,
+            "live_allocations": liveAllocations,
+            "live_requested_bytes": liveRequestedBytes,
+            "live_query_bytes": liveQueryBytes,
+            "requests_total": requestsTotal,
+            "requested_bytes_total": requestedBytesTotal,
+            "heap_allocations_total": heapAllocationsTotal,
+            "heap_query_bytes_total": heapQueryBytesTotal,
+            "page_reuse_hits_total": pageReuseHitsTotal,
+            "fallback_allocations_total": fallbackAllocationsTotal,
+            "fallback_requested_bytes_total": fallbackRequestedBytesTotal,
+            "fallback_disabled_total": fallbackDisabledTotal,
+            "fallback_oversize_total": fallbackOversizeTotal,
+            "fallback_invalid_query_total": fallbackInvalidQueryTotal,
+            "fallback_capacity_total": fallbackCapacityTotal,
+            "fallback_heap_create_total": fallbackHeapCreateTotal,
+            "fallback_heap_allocate_total": fallbackHeapAllocateTotal,
+            "allocation_failures_total": allocationFailuresTotal,
+            "backing_allocations_total": pagesCreatedTotal + fallbackAllocationsTotal,
+            "device_teardown_with_live_allocations_total": deviceTeardownWithLiveAllocationsTotal
+        ]
+    }
+}
+
+private final class MetallumStaticGeometryHeapRegistry: @unchecked Sendable {
+    static let shared = MetallumStaticGeometryHeapRegistry()
+    // Sodium keeps up to eight replaced arena buffers in a process-wide
+    // reuse cache. Smaller pages cap the memory a lone cached buffer can pin,
+    // while the page-count limit preserves the same 512 MiB hard budget.
+    static let pageSize = 16 * 1024 * 1024
+    static let pageLimitPerDevice = 32
+    static let sodiumArenaCacheLimit = 8
+    private static let resourceOptions: MTLResourceOptions = [
+        .storageModePrivate,
+        .hazardTrackingModeUntracked
+    ]
+
+    private enum FallbackReason {
+        case disabled
+        case oversize
+        case invalidQuery
+        case capacity
+        case heapCreate
+        case heapAllocate
+    }
+
+    private let lock = NSLock()
+    private var poolsByDevice: [UInt: MetallumStaticGeometryHeapPool] = [:]
+    private var recordsByBuffer: [UInt: MetallumStaticGeometryAllocationRecord] = [:]
+    private var deviceTeardownWithLiveAllocationsTotal = 0
+
+    private init() {
+    }
+
+    func makeBuffer(device: MTLDevice, length: Int) -> MTLBuffer? {
+        guard length > 0 else { return nil }
+        let deviceAddress = objectAddress(device)
+
+        lock.lock()
+        let pool: MetallumStaticGeometryHeapPool
+        if let existing = poolsByDevice[deviceAddress] {
+            pool = existing
+        } else {
+            pool = MetallumStaticGeometryHeapPool(device: device)
+            poolsByDevice[deviceAddress] = pool
+        }
+        pool.requestsTotal += 1
+        pool.requestedBytesTotal += length
+
+        guard NativeState.staticGeometryHeapsEnabled else {
+            let buffer = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: 0,
+                reason: .disabled
+            )
+            lock.unlock()
+            return buffer
+        }
+
+        let sizeAndAlign = device.heapBufferSizeAndAlign(
+            length: length,
+            options: Self.resourceOptions
+        )
+        let queryIsValid = sizeAndAlign.size > 0
+            && sizeAndAlign.align > 0
+            && sizeAndAlign.align.nonzeroBitCount == 1
+        guard queryIsValid else {
+            let buffer = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: 0,
+                reason: .invalidQuery
+            )
+            lock.unlock()
+            return buffer
+        }
+        pool.maxQueryAlignment = max(pool.maxQueryAlignment, sizeAndAlign.align)
+        guard sizeAndAlign.size <= Self.pageSize else {
+            let buffer = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: sizeAndAlign.size,
+                reason: .oversize
+            )
+            lock.unlock()
+            return buffer
+        }
+
+        sweepRetiredPagesLocked(pool)
+        for page in pool.pages.reversed() {
+            guard page.heap.maxAvailableSize(alignment: sizeAndAlign.align) >= sizeAndAlign.size,
+                  let buffer = page.heap.makeBuffer(
+                    length: length,
+                    options: Self.resourceOptions
+                  ) else {
+                continue
+            }
+            pool.pageReuseHitsTotal += 1
+            registerLocked(
+                buffer: buffer,
+                pool: pool,
+                page: page,
+                requestedBytes: length,
+                queryBytes: sizeAndAlign.size
+            )
+            lock.unlock()
+            return buffer
+        }
+
+        guard pool.pages.count < Self.pageLimitPerDevice else {
+            let buffer = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: sizeAndAlign.size,
+                reason: .capacity
+            )
+            lock.unlock()
+            return buffer
+        }
+
+        let descriptor = MTLHeapDescriptor()
+        descriptor.size = Self.pageSize
+        descriptor.storageMode = .private
+        descriptor.cpuCacheMode = .defaultCache
+        descriptor.hazardTrackingMode = .untracked
+        descriptor.type = .automatic
+        guard let heap = device.makeHeap(descriptor: descriptor) else {
+            let buffer = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: sizeAndAlign.size,
+                reason: .heapCreate
+            )
+            lock.unlock()
+            return buffer
+        }
+        heap.label = "Metallum static geometry heap page \(pool.pagesCreatedTotal + 1)"
+        guard let buffer = heap.makeBuffer(
+            length: length,
+            options: Self.resourceOptions
+        ) else {
+            let fallback = makeStandaloneLocked(
+                pool: pool,
+                length: length,
+                queryBytes: sizeAndAlign.size,
+                reason: .heapAllocate
+            )
+            lock.unlock()
+            return fallback
+        }
+
+        let page = MetallumStaticGeometryHeapPage(heap: heap)
+        pool.pages.append(page)
+        pool.pagesCreatedTotal += 1
+        pool.pagesPeak = max(pool.pagesPeak, pool.pages.count)
+        registerLocked(
+            buffer: buffer,
+            pool: pool,
+            page: page,
+            requestedBytes: length,
+            queryBytes: sizeAndAlign.size
+        )
+        lock.unlock()
+        return buffer
+    }
+
+    func beginRelease(bufferAddress: UInt) -> MetallumStaticGeometryReleaseToken? {
+        lock.lock()
+        guard let record = recordsByBuffer.removeValue(forKey: bufferAddress) else {
+            lock.unlock()
+            return nil
+        }
+        record.page?.releasesInProgress += 1
+        lock.unlock()
+        return MetallumStaticGeometryReleaseToken(record: record)
+    }
+
+    func finishRelease(_ token: MetallumStaticGeometryReleaseToken) {
+        lock.lock()
+        let record = token.record
+        let pool = record.pool
+        pool.liveAllocations -= 1
+        pool.liveRequestedBytes -= record.requestedBytes
+        pool.liveQueryBytes -= record.queryBytes
+        if let page = record.page {
+            page.releasesInProgress -= 1
+            page.liveAllocations -= 1
+            page.liveRequestedBytes -= record.requestedBytes
+            page.liveQueryBytes -= record.queryBytes
+            if page.liveAllocations == 0 && page.releasesInProgress == 0 {
+                page.retirePending = true
+            }
+        }
+        sweepRetiredPagesLocked(pool)
+        lock.unlock()
+    }
+
+    func releaseDevice(_ device: MTLDevice) {
+        let deviceAddress = objectAddress(device)
+        var liveAllocationCount = 0
+        lock.lock()
+        if let pool = poolsByDevice.removeValue(forKey: deviceAddress) {
+            sweepRetiredPagesLocked(pool)
+            liveAllocationCount = pool.liveAllocations
+            if liveAllocationCount > Self.sodiumArenaCacheLimit {
+                deviceTeardownWithLiveAllocationsTotal += 1
+            }
+        }
+        lock.unlock()
+        if liveAllocationCount > Self.sodiumArenaCacheLimit {
+            NSLog(
+                "[metallum] Static geometry heap teardown exceeded Sodium cache bound: %d live allocations",
+                liveAllocationCount
+            )
+        } else if liveAllocationCount > 0 {
+            NSLog(
+                "[metallum] Static geometry arena cache retained %d buffers at device teardown",
+                liveAllocationCount
+            )
+        }
+    }
+
+    func snapshot() -> MetallumStaticGeometryHeapSnapshot {
+        lock.lock()
+        var pagesCurrent = 0
+        var pagesPeak = 0
+        var pagesCreatedTotal = 0
+        var pagesRetiredTotal = 0
+        var retirePendingPages = 0
+        var heapSizeBytesCurrent = 0
+        var heapCurrentAllocatedBytes = 0
+        var heapUsedBytesCurrent = 0
+        var fragmentationProbeAlignment = 256
+        var heapLargestAvailableBytes = 0
+        var heapFragmentationEstimateBytes = 0
+        var liveAllocations = 0
+        var liveRequestedBytes = 0
+        var liveQueryBytes = 0
+        var requestsTotal = 0
+        var requestedBytesTotal = 0
+        var heapAllocationsTotal = 0
+        var heapQueryBytesTotal = 0
+        var pageReuseHitsTotal = 0
+        var fallbackAllocationsTotal = 0
+        var fallbackRequestedBytesTotal = 0
+        var fallbackDisabledTotal = 0
+        var fallbackOversizeTotal = 0
+        var fallbackInvalidQueryTotal = 0
+        var fallbackCapacityTotal = 0
+        var fallbackHeapCreateTotal = 0
+        var fallbackHeapAllocateTotal = 0
+        var allocationFailuresTotal = 0
+        let teardownWithLiveAllocationsTotal = deviceTeardownWithLiveAllocationsTotal
+
+        for pool in poolsByDevice.values {
+            pagesCurrent += pool.pages.count
+            pagesPeak += pool.pagesPeak
+            pagesCreatedTotal += pool.pagesCreatedTotal
+            pagesRetiredTotal += pool.pagesRetiredTotal
+            fragmentationProbeAlignment = max(
+                fragmentationProbeAlignment,
+                pool.maxQueryAlignment
+            )
+            liveAllocations += pool.liveAllocations
+            liveRequestedBytes += pool.liveRequestedBytes
+            liveQueryBytes += pool.liveQueryBytes
+            requestsTotal += pool.requestsTotal
+            requestedBytesTotal += pool.requestedBytesTotal
+            heapAllocationsTotal += pool.heapAllocationsTotal
+            heapQueryBytesTotal += pool.heapQueryBytesTotal
+            pageReuseHitsTotal += pool.pageReuseHitsTotal
+            fallbackAllocationsTotal += pool.fallbackAllocationsTotal
+            fallbackRequestedBytesTotal += pool.fallbackRequestedBytesTotal
+            fallbackDisabledTotal += pool.fallbackDisabledTotal
+            fallbackOversizeTotal += pool.fallbackOversizeTotal
+            fallbackInvalidQueryTotal += pool.fallbackInvalidQueryTotal
+            fallbackCapacityTotal += pool.fallbackCapacityTotal
+            fallbackHeapCreateTotal += pool.fallbackHeapCreateTotal
+            fallbackHeapAllocateTotal += pool.fallbackHeapAllocateTotal
+            allocationFailuresTotal += pool.allocationFailuresTotal
+        }
+
+        for pool in poolsByDevice.values {
+            for page in pool.pages {
+                if page.retirePending {
+                    retirePendingPages += 1
+                }
+                let heapSize = page.heap.size
+                let usedSize = page.heap.usedSize
+                let currentAllocated = page.heap.currentAllocatedSize
+                let largestAvailable = page.heap.maxAvailableSize(
+                    alignment: fragmentationProbeAlignment
+                )
+                heapSizeBytesCurrent += heapSize
+                heapCurrentAllocatedBytes += currentAllocated
+                heapUsedBytesCurrent += usedSize
+                heapLargestAvailableBytes = max(
+                    heapLargestAvailableBytes,
+                    largestAvailable
+                )
+                heapFragmentationEstimateBytes += max(
+                    heapSize - usedSize - largestAvailable,
+                    0
+                )
+            }
+        }
+        let snapshot = MetallumStaticGeometryHeapSnapshot(
+            enabled: NativeState.staticGeometryHeapsEnabled,
+            poolsCurrent: poolsByDevice.count,
+            pageSizeBytes: Self.pageSize,
+            pageLimitPerDevice: Self.pageLimitPerDevice,
+            pagesCurrent: pagesCurrent,
+            pagesPeak: pagesPeak,
+            pagesCreatedTotal: pagesCreatedTotal,
+            pagesRetiredTotal: pagesRetiredTotal,
+            retirePendingPages: retirePendingPages,
+            heapSizeBytesCurrent: heapSizeBytesCurrent,
+            heapCurrentAllocatedBytes: heapCurrentAllocatedBytes,
+            heapUsedBytesCurrent: heapUsedBytesCurrent,
+            fragmentationProbeAlignment: fragmentationProbeAlignment,
+            heapLargestAvailableBytes: heapLargestAvailableBytes,
+            heapFragmentationEstimateBytes: heapFragmentationEstimateBytes,
+            liveAllocations: liveAllocations,
+            liveRequestedBytes: liveRequestedBytes,
+            liveQueryBytes: liveQueryBytes,
+            requestsTotal: requestsTotal,
+            requestedBytesTotal: requestedBytesTotal,
+            heapAllocationsTotal: heapAllocationsTotal,
+            heapQueryBytesTotal: heapQueryBytesTotal,
+            pageReuseHitsTotal: pageReuseHitsTotal,
+            fallbackAllocationsTotal: fallbackAllocationsTotal,
+            fallbackRequestedBytesTotal: fallbackRequestedBytesTotal,
+            fallbackDisabledTotal: fallbackDisabledTotal,
+            fallbackOversizeTotal: fallbackOversizeTotal,
+            fallbackInvalidQueryTotal: fallbackInvalidQueryTotal,
+            fallbackCapacityTotal: fallbackCapacityTotal,
+            fallbackHeapCreateTotal: fallbackHeapCreateTotal,
+            fallbackHeapAllocateTotal: fallbackHeapAllocateTotal,
+            allocationFailuresTotal: allocationFailuresTotal,
+            deviceTeardownWithLiveAllocationsTotal: teardownWithLiveAllocationsTotal
+        )
+        lock.unlock()
+        return snapshot
+    }
+
+    private func registerLocked(
+        buffer: MTLBuffer,
+        pool: MetallumStaticGeometryHeapPool,
+        page: MetallumStaticGeometryHeapPage?,
+        requestedBytes: Int,
+        queryBytes: Int
+    ) {
+        let address = objectAddress(buffer)
+        precondition(recordsByBuffer[address] == nil)
+        recordsByBuffer[address] = MetallumStaticGeometryAllocationRecord(
+            pool: pool,
+            page: page,
+            requestedBytes: requestedBytes,
+            queryBytes: queryBytes
+        )
+        pool.liveAllocations += 1
+        pool.liveRequestedBytes += requestedBytes
+        pool.liveQueryBytes += queryBytes
+        if let page {
+            page.liveAllocations += 1
+            page.liveRequestedBytes += requestedBytes
+            page.liveQueryBytes += queryBytes
+            page.retirePending = false
+            pool.heapAllocationsTotal += 1
+            pool.heapQueryBytesTotal += queryBytes
+        }
+    }
+
+    private func makeStandaloneLocked(
+        pool: MetallumStaticGeometryHeapPool,
+        length: Int,
+        queryBytes: Int,
+        reason: FallbackReason
+    ) -> MTLBuffer? {
+        switch reason {
+        case .disabled:
+            pool.fallbackDisabledTotal += 1
+        case .oversize:
+            pool.fallbackOversizeTotal += 1
+        case .invalidQuery:
+            pool.fallbackInvalidQueryTotal += 1
+        case .capacity:
+            pool.fallbackCapacityTotal += 1
+        case .heapCreate:
+            pool.fallbackHeapCreateTotal += 1
+        case .heapAllocate:
+            pool.fallbackHeapAllocateTotal += 1
+        }
+        guard let buffer = pool.device.makeBuffer(
+            length: length,
+            options: Self.resourceOptions
+        ) else {
+            pool.allocationFailuresTotal += 1
+            return nil
+        }
+        pool.fallbackAllocationsTotal += 1
+        pool.fallbackRequestedBytesTotal += length
+        registerLocked(
+            buffer: buffer,
+            pool: pool,
+            page: nil,
+            requestedBytes: length,
+            queryBytes: queryBytes
+        )
+        return buffer
+    }
+
+    private func sweepRetiredPagesLocked(_ pool: MetallumStaticGeometryHeapPool) {
+        for index in pool.pages.indices.reversed() {
+            let page = pool.pages[index]
+            guard page.retirePending,
+                  page.liveAllocations == 0,
+                  page.releasesInProgress == 0,
+                  page.heap.usedSize == 0 else {
+                continue
+            }
+            pool.pages.remove(at: index)
+            pool.pagesRetiredTotal += 1
+        }
+    }
+}
+
 private struct MetallumHdrOutputs {
     let emission: MTLTexture
     let bloom: MTLTexture
@@ -344,6 +898,7 @@ private final class MetallumBenchmarkTelemetryState: @unchecked Sendable {
 }
 
 private struct MetallumPresentationTelemetry {
+    let device: MTLDevice
     let deviceName: String
     let registryId: UInt64
     let renderWidth: Int
@@ -374,6 +929,10 @@ private struct MetallumPresentationTelemetry {
         return [
             "device_name": deviceName,
             "registry_id": String(registryId),
+            // Read dynamic memory gauges when the report is emitted so they
+            // describe the same report-end state as the heap snapshot.
+            "device_current_allocated_bytes": device.currentAllocatedSize,
+            "device_recommended_max_working_set_bytes": device.recommendedMaxWorkingSetSize,
             "executor": "METAL3",
             "render_width": renderWidth,
             "render_height": renderHeight,
@@ -656,6 +1215,7 @@ private final class MetallumGpuTimingCoordinator: @unchecked Sendable {
             let presentedCount = stats.notePresented(presentedContext)
             if (presentedCount - 1) % MetallumGpuTimingStats.reportFrameCount == 0 {
                 let presentation = MetallumPresentationTelemetry(
+                    device: commandBuffer.device,
                     deviceName: commandBuffer.device.name,
                     registryId: commandBuffer.device.registryID,
                     renderWidth: renderWidth,
@@ -1326,6 +1886,10 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 metadata[key] = value
             }
         }
+        metadata["static_geometry_heaps_enabled"] = NativeState.staticGeometryHeapsEnabled
+        var workloadReport = window.workload.report
+        workloadReport["private_geometry_heap"] = MetallumStaticGeometryHeapRegistry.shared
+            .snapshot().report
 
         writer.write([
             "schema_version": 2,
@@ -1347,7 +1911,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "metadata": metadata,
             "stages": stages,
             "cpu_waits": waits,
-            "workload": window.workload.report,
+            "workload": workloadReport,
             "dropped_timing_events": window.droppedEvents
         ])
     }
@@ -1625,6 +2189,9 @@ private enum NativeState {
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
     static let benchmarkTelemetryState = MetallumBenchmarkTelemetryState()
+    static let staticGeometryHeapsEnabled = ProcessInfo.processInfo.environment[
+        "METALLUM_STATIC_GEOMETRY_HEAPS"
+    ] != "0"
     static let gpuTimingEnabled = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
     static let gpuTimingDetailEnabled = gpuTimingEnabled
         && ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING_DETAIL"] == "1"
@@ -4779,6 +5346,7 @@ public func metallum_init_pipelines(_ device: MTLDevice) {
 public func metallum_release_device_caches(_ device: MTLDevice) {
     autoreleasepool {
         let deviceAddress = objectAddress(device)
+        MetallumStaticGeometryHeapRegistry.shared.releaseDevice(device)
         NativeState.depthStencilStates = NativeState.depthStencilStates.filter {
             $0.key.deviceAddress != deviceAddress
         }
@@ -5262,6 +5830,23 @@ public func metallum_create_buffer(
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        trackBufferAllocation(buffer)
+        return retainedPointer(buffer)
+    }
+}
+
+@_cdecl("metallum_create_static_geometry_buffer")
+public func metallum_create_static_geometry_buffer(
+    _ device: MTLDevice,
+    _ length: Int
+) -> UnsafeMutableRawPointer? {
+    return autoreleasepool {
+        guard let buffer = MetallumStaticGeometryHeapRegistry.shared.makeBuffer(
+            device: device,
+            length: length
+        ) else {
             return nil
         }
         trackBufferAllocation(buffer)
@@ -7063,6 +7648,22 @@ public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
             MetallumGpuTimingCoordinator.shared.abandon(commandBuffer)
         }
         Unmanaged<AnyObject>.fromOpaque(obj).release()
+    }
+}
+
+@_cdecl("metallum_release_static_geometry_buffer")
+public func metallum_release_static_geometry_buffer(_ obj: UnsafeMutableRawPointer?) {
+    autoreleasepool {
+        guard let obj else { return }
+        let release = MetallumStaticGeometryHeapRegistry.shared.beginRelease(
+            bufferAddress: UInt(bitPattern: obj)
+        )
+        Unmanaged<AnyObject>.fromOpaque(obj).release()
+        if let release {
+            MetallumStaticGeometryHeapRegistry.shared.finishRelease(release)
+        } else {
+            NSLog("[metallum] Static geometry buffer release was not registered")
+        }
     }
 }
 

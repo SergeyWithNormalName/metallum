@@ -24,11 +24,16 @@ class MetalGpuBuffer extends GpuBuffer {
     // Keep hot descriptor ranges without retaining an unbounded number of
     // native views when callers bind many transient slices of one buffer.
     private static final int MAX_CACHED_TEXEL_VIEWS = 64;
+    private static final int PRIVATE_GEOMETRY_HEAP_USAGE = GpuBuffer.USAGE_COPY_DST
+            | GpuBuffer.USAGE_COPY_SRC
+            | GpuBuffer.USAGE_VERTEX
+            | GpuBuffer.USAGE_INDEX;
     private final MetalDevice device;
     private final boolean cpuAccessible;
     private final boolean dynamic;
     private final long resourceOptions;
     private final long allocationSize;
+    private final boolean staticGeometryAllocation;
     @Nullable
     private MemorySegment nativeHandle;
     @Nullable
@@ -37,6 +42,15 @@ class MetalGpuBuffer extends GpuBuffer {
     private boolean closed;
 
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
+        this(device, usage, size, false);
+    }
+
+    MetalGpuBuffer(
+            final MetalDevice device,
+            @GpuBuffer.Usage final int usage,
+            final long size,
+            final boolean usePrivateGeometryHeap
+    ) {
         super(usage, size);
         this.device = device;
         this.texelViews = new TexelViewCache<>(MAX_CACHED_TEXEL_VIEWS, device::queueResourceRelease);
@@ -45,7 +59,17 @@ class MetalGpuBuffer extends GpuBuffer {
         this.cpuAccessible = isCpuAccessible(usage) || this.dynamic;
         this.resourceOptions = toMtlResourceOptions(usage);
         this.allocationSize = (size + 15L) & ~15L;
-        this.nativeHandle = MetalNativeBridge.metallum_create_buffer(device.metalDeviceHandle(), this.allocationSize, this.resourceOptions);
+        this.staticGeometryAllocation = usePrivateGeometryHeap;
+        this.nativeHandle = usePrivateGeometryHeap
+                ? MetalNativeBridge.metallum_create_static_geometry_buffer(
+                        device.metalDeviceHandle(),
+                        this.allocationSize
+                )
+                : MetalNativeBridge.metallum_create_buffer(
+                        device.metalDeviceHandle(),
+                        this.allocationSize,
+                        this.resourceOptions
+                );
         if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
             throw new IllegalStateException("Failed to create Metal buffer");
         }
@@ -72,6 +96,7 @@ class MetalGpuBuffer extends GpuBuffer {
         this.dynamic = false;
         this.resourceOptions = 0L;
         this.allocationSize = size;
+        this.staticGeometryAllocation = false;
         this.nativeHandle = wrappedHandle;
         this.storage = null;
     }
@@ -161,7 +186,11 @@ class MetalGpuBuffer extends GpuBuffer {
         if (this.nativeHandle != null) {
             MemorySegment handle = this.nativeHandle;
             this.nativeHandle = null;
-            this.device.queueResourceRelease(handle);
+            if (this.staticGeometryAllocation) {
+                this.device.queueStaticGeometryBufferRelease(handle);
+            } else {
+                this.device.queueResourceRelease(handle);
+            }
         }
     }
 
@@ -196,6 +225,13 @@ class MetalGpuBuffer extends GpuBuffer {
 
     private static boolean isDynamic(@GpuBuffer.Usage final int usage) {
         return (usage & GpuBuffer.USAGE_UNIFORM) != 0 && (usage & GpuBuffer.USAGE_COPY_DST) != 0;
+    }
+
+    static boolean shouldUsePrivateGeometryHeap(
+            @GpuBuffer.Usage final int originalUsage,
+            final boolean initialData
+    ) {
+        return !initialData && originalUsage == PRIVATE_GEOMETRY_HEAP_USAGE;
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {

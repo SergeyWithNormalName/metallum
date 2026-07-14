@@ -527,9 +527,9 @@ fi
 if grep -Fq "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" "$MINECRAFT_LOG"; then
     die "benchmark unexpectedly requested a screenshot"
 fi
-if grep -Eq '\[metallum\] (Metal command buffer failed|GPU timing sample invalid)' "$CONSOLE_LOG"; then
-    grep -E '\[metallum\] (Metal command buffer failed|GPU timing sample invalid)' "$CONSOLE_LOG" >&2 || true
-    die "Metal reported an invalid command buffer or GPU timing sample"
+if grep -Eq '\[metallum\] (Metal command buffer failed|GPU timing sample invalid|Static geometry heap teardown exceeded Sodium cache bound|Static geometry buffer release was not registered)' "$CONSOLE_LOG"; then
+    grep -E '\[metallum\] (Metal command buffer failed|GPU timing sample invalid|Static geometry heap teardown exceeded Sodium cache bound|Static geometry buffer release was not registered)' "$CONSOLE_LOG" >&2 || true
+    die "Metal reported a command-buffer, timing, or static-geometry lifecycle failure"
 fi
 sodium_worker_markers=$(grep -E '\(ChunkBuilder\) Started [1-9][0-9]* worker threads$' \
     "$MINECRAFT_LOG" || true)

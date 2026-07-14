@@ -25,6 +25,7 @@ public final class MetalRuntimeTests {
         testTexelViewCacheReuseAndInvalidation();
         testTextureBindingHolderUpdatesInPlace();
         testDynamicBackingPoolBoundsAndReuse();
+        testPrivateGeometryHeapRouting();
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
@@ -166,6 +167,27 @@ public final class MetalRuntimeTests {
                 MetalFence.timeoutMillis(Long.MAX_VALUE) == 9_223_372_036_855L,
                 "maximum timeout overflowed"
         );
+    }
+
+    private static void testPrivateGeometryHeapRouting() {
+        int geometryUsage = com.mojang.blaze3d.buffers.GpuBuffer.USAGE_COPY_DST
+                | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_COPY_SRC
+                | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_VERTEX
+                | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_INDEX;
+        require(MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, false),
+                "static geometry usage did not select the private heap");
+        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, true),
+                "initial-data allocation unexpectedly selected the private geometry heap");
+        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(
+                        geometryUsage | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_MAP_WRITE,
+                        false
+                ),
+                "broader buffer usage unexpectedly selected the private geometry heap");
+        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(
+                        geometryUsage & ~com.mojang.blaze3d.buffers.GpuBuffer.USAGE_INDEX,
+                        false
+                ),
+                "non-geometry buffer usage unexpectedly selected the private heap");
     }
 
     private static void testEdrRefreshThrottle() {

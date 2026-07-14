@@ -307,6 +307,11 @@ public final class MetalNativeBridge {
                     )
             );
             createBuffer = downcall(lookup, "metallum_create_buffer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
+            createStaticGeometryBuffer = downcall(
+                    lookup,
+                    "metallum_create_static_geometry_buffer",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
             createTexture2d = downcall(
                     lookup,
                     "metallum_create_texture_2d",
@@ -384,6 +389,11 @@ public final class MetalNativeBridge {
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, FLOAT)
             );
             releaseObject = downcall(lookup, "metallum_release_object", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            releaseStaticGeometryBuffer = downcall(
+                    lookup,
+                    "metallum_release_static_geometry_buffer",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
             getBufferContents = downcall(lookup, "metallum_get_buffer_contents", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             createFence = downcall(lookup, "metallum_create_fence", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLRenderCommandEncoderUpdateFence = downcall(lookup, "MTLRenderCommandEncoder_updateFence", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG));
@@ -454,6 +464,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferMaterializePreparedHdrUiBackdrop;
     private static final MethodHandle MTLCommandBufferEncodeSpatialScreenshot;
     private static final MethodHandle createBuffer;
+    private static final MethodHandle createStaticGeometryBuffer;
     private static final MethodHandle createTexture2d;
     private static final MethodHandle createTextureView;
     private static final MethodHandle createBufferTextureView;
@@ -471,6 +482,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle configureLayer;
     private static final MethodHandle updateLayerContentsHeadroom;
     private static final MethodHandle releaseObject;
+    private static final MethodHandle releaseStaticGeometryBuffer;
     private static final MethodHandle getBufferContents;
     private static final MethodHandle createFence;
     private static final MethodHandle MTLRenderCommandEncoderUpdateFence;
@@ -882,6 +894,17 @@ public final class MetalNativeBridge {
             return (MemorySegment) createBuffer.invokeExact(segment(device), length, options);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_buffer", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_create_static_geometry_buffer(
+            final MemorySegment device,
+            final long length
+    ) {
+        try {
+            return (MemorySegment) createStaticGeometryBuffer.invokeExact(segment(device), length);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_create_static_geometry_buffer", throwable);
         }
     }
 
@@ -1665,6 +1688,14 @@ public final class MetalNativeBridge {
             releaseObject.invokeExact(segment(object));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_release_object", throwable);
+        }
+    }
+
+    public static void metallum_release_static_geometry_buffer(final MemorySegment buffer) {
+        try {
+            releaseStaticGeometryBuffer.invokeExact(segment(buffer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_release_static_geometry_buffer", throwable);
         }
     }
 
