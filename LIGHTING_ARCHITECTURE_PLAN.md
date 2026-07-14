@@ -234,6 +234,14 @@ ClusterBuildPass
 
 Pass не проверяет macOS/GPU family самостоятельно. Общий graph compiler получает immutable capability snapshot и заранее строит execution plan для всей renderer generation.
 
+### 4.12. Lighting hot loops не знают о Metal version
+
+Terrain/entity draw, light iteration, cluster fill, voxel traversal, GI propagation и froxel injection не выполняют `if Metal4`/GPU-family checks. Они получают заранее выбранный PSO, bindings и pass implementation.
+
+Shader branches по capability устраняются function constants/PSO specialization. Runtime branches разрешены только для фактических данных сцены и bounded fast paths, например пустого cluster или нулевого dirty count.
+
+Поддержка Metal 3/4 не принимается, если один только executor/capability dispatch добавляет около `0.1 ms` или больше к CPU render-thread/frame p95 относительно fixed-executor baseline.
+
 ---
 
 ## 5. Целевой frame graph
@@ -1240,6 +1248,7 @@ Update spike имеет тот же frame cap, что обычный кадр: �
 - Chunk voxel encoding выполняется worker-ом или во время уже существующей rebuild работы.
 - Worker создаёт конечный packed payload; render thread только фиксирует snapshots/batch handles и делает bounded copy в специализированный staging ring.
 - Никаких FFM crossings на отдельный light/brick/shadow page; один versioned batch на класс обновлений.
+- Никаких Metal-version/capability checks в draw/light/voxel loops; только заранее скомпилированный execution plan.
 - Light-only updates не входят в geometry rebuild/upload counters.
 - Очереди bounded; overflow приводит к coarse rebuild/fallback, а не unlimited growth.
 
@@ -1751,6 +1760,8 @@ Diagnostic overlays:
 19. Metal 4 compiler, allocators, argument tables, barriers и pass consolidation внедряются независимыми slices.
 20. Executor/capabilities неизменны внутри renderer generation; fallback происходит атомарно между кадрами.
 21. Optional Metal 4 path не меняет lighting, temporal или HDR semantics.
+22. Lighting hot loops не проверяют Metal version/GPU family; specialization выполняется на generation/PSO boundary.
+23. Capability dispatch не может добавлять измеримую CPU p95 регрессию около `0.1 ms` и выше.
 
 ---
 

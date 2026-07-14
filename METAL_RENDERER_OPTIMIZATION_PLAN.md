@@ -292,6 +292,22 @@ Runtime failure Metal 4 не переключает отдельный pass на
 
 Общими между executor-ами остаются logical frame graph, pass IDs, shader/metallib functions, PSO там, где API допускает совместимость, packed data ABI, lighting/HDR semantics, quality presets и telemetry IDs.
 
+### 5.5. Никаких capability branches в горячих циклах
+
+Capability discovery, executor selection, pass specialization, binding layout и PSO selection выполняются только при создании renderer generation. Graph compiler заранее превращает optional capabilities в готовый linear execution plan.
+
+Запрещены runtime-проверки Metal 3/4 или GPU family:
+
+- на каждый draw;
+- на каждый light/entity/block/brick;
+- внутри material/texture binding loop;
+- внутри indirect command encoding loop;
+- в shader на каждый vertex/fragment/thread, если ветвь можно устранить function constant/PSO specialization.
+
+Hot path вызывает уже выбранный executor/pass implementation. Допустимы только функциональные fast-path проверки вроде `dirtyCount == 0`, которые пропускают реальную работу и не повторяют capability discovery.
+
+Сам dispatch dual-path поддержки должен быть статистически неразличим с фиксированным single-path baseline. Регрессия CPU frame/render-thread p95 около `0.1 ms` или больше считается провалом архитектуры и требует устранения per-frame allocations, virtual/FFM churn или повторной graph compilation. Значения ниже измерительного шума не объявляются доказанным «нулём».
+
 ---
 
 ## 6. Этап O0 — зафиксировать baseline и расширить телеметрию
@@ -716,6 +732,7 @@ Optional capability меняет способ исполнения, но не fo
 - Metal 4 output эквивалентен Metal 3 в утверждённых пределах.
 - Нет validation/hazard/residency/lifetime ошибок.
 - Metal 4 принимается как default только если CPU render-thread p95 лучше примерно на `8–10%`, либо полный GPU p95/`1% low` лучше минимум примерно на `5%`, либо доказанно устраняются существенные pipeline hitches/расход памяти.
+- Общий overhead capability/executor dispatch относительно эквивалентного fixed executor должен быть меньше измеримого порога; регрессия CPU p95 около `0.1 ms` запрещена даже при корректной картинке.
 - Если порог не пройден, конкретный slice остаётся experimental/off; это не блокирует другие Metal 4 capabilities.
 - Runtime fallback выбирается до кадра и не смешивает ресурсы разных executor generation.
 - M1 Pro Metal 4 Core и Metal 3 проходят одинаковую benchmark/reference matrix; extended features не могут быть обязательны для M1.
@@ -921,6 +938,7 @@ Controller не меняет качество каждую миллисекун�
 - `metal4ArgumentTableValidation`;
 - `metal4BarrierValidation`;
 - `metal4GenerationFallbackValidation`.
+- `executorDispatchOverheadValidation` с fixed-executor A/B и проверкой отсутствия per-draw capability queries.
 
 Stress cases:
 
@@ -1004,6 +1022,8 @@ Stress cases:
 17. Наличие Metal 4 не подразумевает наличие всех extended GPU features.
 18. Executor и capability snapshot неизменны внутри renderer generation.
 19. Optional Metal 4 acceleration не меняет lighting/HDR semantics.
+20. Capability checks и graph specialization не выполняются в draw/light/voxel/shader hot loops.
+21. Dual-executor dispatch не принимается при измеримой регрессии CPU p95 около `0.1 ms` и выше.
 
 ---
 
