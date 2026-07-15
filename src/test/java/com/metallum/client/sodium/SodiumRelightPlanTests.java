@@ -7,11 +7,13 @@ import net.caffeinemc.mods.sodium.client.model.light.data.LightDataAccess;
 import net.caffeinemc.mods.sodium.client.model.light.data.QuadLightData;
 import net.caffeinemc.mods.sodium.client.model.quad.ModelQuadView;
 import net.caffeinemc.mods.sodium.client.model.quad.properties.ModelQuadFacing;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 
 /** Dependency-free executable tests for immutable Sodium relight recipes. */
 public final class SodiumRelightPlanTests {
@@ -25,7 +27,10 @@ public final class SodiumRelightPlanTests {
         testCompactLightEncodingBoundaries();
         testNormalizedBucketsReplayInCurrentSegmentOrder();
         testStrictLayoutRejection();
+        testTopologySnapshotUsesExactHaloIdentities();
+        testPlanOptionallyRetainsTopologySnapshot();
         testBoundedPinSafeCache();
+        testResidentStateLeasePinsPlanAndMetadata();
         System.out.println("Sodium relight plan tests passed");
     }
 
@@ -180,6 +185,141 @@ public final class SodiumRelightPlanTests {
         require(!extraRecipe.accepted(), "recipe without a mesh entered a relight plan");
     }
 
+    private static void testTopologySnapshotUsesExactHaloIdentities() {
+        int originX = 32;
+        int originY = -16;
+        int originZ = 48;
+        Object[] identities = identityVolume();
+        int[] calls = {0};
+        int[] minimum = {Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE};
+        int[] maximum = {Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE};
+        SodiumRelightTopologySnapshot snapshot = SodiumRelightTopologySnapshot.captureIdentities(
+                originX,
+                originY,
+                originZ,
+                (blockX, blockY, blockZ) -> {
+                    calls[0]++;
+                    minimum[0] = Math.min(minimum[0], blockX);
+                    minimum[1] = Math.min(minimum[1], blockY);
+                    minimum[2] = Math.min(minimum[2], blockZ);
+                    maximum[0] = Math.max(maximum[0], blockX);
+                    maximum[1] = Math.max(maximum[1], blockY);
+                    maximum[2] = Math.max(maximum[2], blockZ);
+                    return identityAt(identities, originX, originY, originZ, blockX, blockY, blockZ);
+                }
+        );
+
+        require(calls[0] == SodiumRelightTopologySnapshot.STATE_COUNT,
+                "topology snapshot did not capture every halo block");
+        for (int axis = 0; axis < 3; axis++) {
+            int origin = axis == 0 ? originX : axis == 1 ? originY : originZ;
+            require(minimum[axis] == origin - SodiumRelightTopologySnapshot.HALO_RADIUS,
+                    "topology snapshot missed the negative halo on axis " + axis);
+            require(maximum[axis] == origin + SodiumRelightTopologySnapshot.SECTION_EDGE_LENGTH,
+                    "topology snapshot missed the positive halo on axis " + axis);
+        }
+        int[] matchCalls = {0};
+        require(snapshot.matchesIdentities(
+                        originX,
+                        originY,
+                        originZ,
+                        (blockX, blockY, blockZ) -> {
+                            matchCalls[0]++;
+                            return identityAt(
+                                    identities,
+                                    originX,
+                                    originY,
+                                    originZ,
+                                    blockX,
+                                    blockY,
+                                    blockZ
+                            );
+                        }
+                ),
+                "unchanged exact topology identities did not match");
+        require(matchCalls[0] == SodiumRelightTopologySnapshot.STATE_COUNT,
+                "topology match did not compare every halo block");
+
+        Object[] changedIdentities = identities.clone();
+        int lastState = SodiumRelightTopologySnapshot.STATE_COUNT - 1;
+        EqualToken equalReplacement = new EqualToken(lastState);
+        require(equalReplacement.equals(changedIdentities[lastState]),
+                "identity test fixture is not value-equal");
+        changedIdentities[lastState] = equalReplacement;
+        require(!snapshot.matchesIdentities(
+                        originX,
+                        originY,
+                        originZ,
+                        (blockX, blockY, blockZ) -> identityAt(
+                                changedIdentities,
+                                originX,
+                                originY,
+                                originZ,
+                                blockX,
+                                blockY,
+                                blockZ
+                        )
+                ),
+                "topology snapshot accepted an equal but non-identical state");
+
+        int[] readsAfterOriginMismatch = {0};
+        require(!snapshot.matchesIdentities(
+                        originX + SodiumRelightTopologySnapshot.SECTION_EDGE_LENGTH,
+                        originY,
+                        originZ,
+                        (blockX, blockY, blockZ) -> {
+                            readsAfterOriginMismatch[0]++;
+                            return identities[0];
+                        }
+                ),
+                "topology snapshot matched a different render section origin");
+        require(readsAfterOriginMismatch[0] == 0,
+                "topology snapshot read states after the section origin mismatched");
+        require(snapshot.estimatedRetainedBytes()
+                        >= (long) SodiumRelightTopologySnapshot.STATE_COUNT * Long.BYTES,
+                "topology snapshot under-reported its retained identity array");
+    }
+
+    private static void testPlanOptionallyRetainsTopologySnapshot() {
+        SodiumRelightPlan legacyPlan = oneQuadPlan();
+        require(legacyPlan.topologySnapshot() == null,
+                "legacy builder unexpectedly attached a topology snapshot");
+
+        int originX = 0;
+        int originY = 16;
+        int originZ = -32;
+        Object[] identities = identityVolume();
+        SodiumRelightTopologySnapshot snapshot = SodiumRelightTopologySnapshot.captureIdentities(
+                originX,
+                originY,
+                originZ,
+                (blockX, blockY, blockZ) -> identityAt(
+                        identities,
+                        originX,
+                        originY,
+                        originZ,
+                        blockX,
+                        blockY,
+                        blockZ
+                )
+        );
+        SodiumRelightPlan.BuildResult result = new SodiumRelightPlan.Builder()
+                .add(SodiumRelightPlan.Pass.SOLID, ModelQuadFacing.POS_X, recipe(1.0f, false))
+                .build(
+                        snapshot,
+                        layout(new int[][]{{4, ModelQuadFacing.POS_X.ordinal()}}),
+                        null,
+                        null
+                );
+        require(result.accepted(), "topology-backed relight plan was rejected");
+        SodiumRelightPlan topologyPlan = requirePlan(result);
+        require(topologyPlan.topologySnapshot() == snapshot,
+                "relight plan did not retain its immutable topology snapshot");
+        require(topologyPlan.estimatedRetainedBytes()
+                        == legacyPlan.estimatedRetainedBytes() + snapshot.estimatedRetainedBytes(),
+                "relight plan byte estimate omitted or double-counted topology storage");
+    }
+
     private static void testBoundedPinSafeCache() {
         SodiumRelightPlan plan = oneQuadPlan();
         long bytes = plan.estimatedRetainedBytes();
@@ -223,12 +363,88 @@ public final class SodiumRelightPlanTests {
         cache.clear();
     }
 
+    private static void testResidentStateLeasePinsPlanAndMetadata() {
+        SodiumRelightPlan plan = oneQuadPlan();
+        SodiumRelightPlanCache cache = new SodiumRelightPlanCache(plan.estimatedRetainedBytes());
+        SodiumRelightPlanCache.Owner owner = cache.capture(plan);
+        SodiumRelightResidentState state = new SodiumRelightResidentState(
+                owner,
+                BuiltSectionInfo.EMPTY,
+                73
+        );
+        require(state.info() == BuiltSectionInfo.EMPTY,
+                "resident state changed the exact BuiltSectionInfo identity");
+        require(state.generation() == 73, "resident state changed its generation");
+        require(state.isResident(), "new resident state did not own a resident plan");
+
+        SodiumRelightResidentState.Lease lease = state.acquire();
+        require(lease != null, "resident state did not issue a complete lease");
+        require(lease.plan() == plan, "resident state lease changed the relight plan identity");
+        require(lease.info() == BuiltSectionInfo.EMPTY,
+                "resident state lease changed the BuiltSectionInfo identity");
+        require(lease.generation() == 73, "resident state lease changed its generation");
+
+        state.close();
+        require(state.acquire() == null, "closed resident state issued a new lease");
+        require(state.isResident(), "closing a pinned state released its active lease storage");
+        require(lease.plan() == plan && lease.info() == BuiltSectionInfo.EMPTY,
+                "state replacement invalidated pinned lease data");
+
+        lease.close();
+        require(!state.isResident(), "last resident-state lease did not release its owner");
+        expectIllegalState(lease::plan);
+        expectIllegalState(lease::info);
+        expectIllegalState(lease::generation);
+        lease.close();
+
+        SodiumRelightPlanCache legacyCache = new SodiumRelightPlanCache(plan.estimatedRetainedBytes());
+        SodiumRelightResidentState legacyState = new SodiumRelightResidentState(
+                legacyCache.capture(plan),
+                BuiltSectionInfo.EMPTY,
+                SodiumRelightResidentState.LEGACY_GENERATION
+        );
+        require(legacyState.acquire() == null,
+                "legacy plan-only generation issued an exact resident-state lease");
+        SodiumRelightPlanCache.Lease legacyPlanLease = legacyState.acquirePlan();
+        require(legacyPlanLease != null && legacyPlanLease.plan() == plan,
+                "legacy generation broke the backward-compatible oracle lease");
+        legacyPlanLease.close();
+        legacyState.close();
+    }
+
     private static SodiumRelightPlan oneQuadPlan() {
         SodiumRelightPlan.BuildResult result = new SodiumRelightPlan.Builder()
                 .add(SodiumRelightPlan.Pass.SOLID, ModelQuadFacing.POS_X, recipe(1.0f, false))
                 .build(layout(new int[][]{{4, ModelQuadFacing.POS_X.ordinal()}}), null, null);
         require(result.accepted(), "cache fixture plan was rejected");
         return requirePlan(result);
+    }
+
+    private static Object[] identityVolume() {
+        Object[] identities = new Object[SodiumRelightTopologySnapshot.STATE_COUNT];
+        Arrays.setAll(identities, EqualToken::new);
+        return identities;
+    }
+
+    private static Object identityAt(
+            final Object[] identities,
+            final int originX,
+            final int originY,
+            final int originZ,
+            final int blockX,
+            final int blockY,
+            final int blockZ
+    ) {
+        int localX = blockX - (originX - SodiumRelightTopologySnapshot.HALO_RADIUS);
+        int localY = blockY - (originY - SodiumRelightTopologySnapshot.HALO_RADIUS);
+        int localZ = blockZ - (originZ - SodiumRelightTopologySnapshot.HALO_RADIUS);
+        int edge = SodiumRelightTopologySnapshot.EDGE_LENGTH;
+        if (localX < 0 || localX >= edge
+                || localY < 0 || localY >= edge
+                || localZ < 0 || localZ >= edge) {
+            throw new AssertionError("topology reader escaped its 18-cubed halo");
+        }
+        return identities[(localY * edge + localZ) * edge + localX];
     }
 
     private static SodiumRelightQuadRecipe recipe(final float x, final boolean emissive) {
@@ -311,6 +527,15 @@ public final class SodiumRelightPlanTests {
         }
     }
 
+    private static void expectIllegalState(final Runnable action) {
+        try {
+            action.run();
+        } catch (IllegalStateException expected) {
+            return;
+        }
+        throw new AssertionError("expected IllegalStateException");
+    }
+
     private static final class SyntheticProvider extends LightPipelineProvider {
         private final LightPipeline pipeline;
 
@@ -328,6 +553,9 @@ public final class SodiumRelightPlanTests {
         public LightPipeline getLighter(final LightMode type) {
             return this.pipeline;
         }
+    }
+
+    private record EqualToken(int value) {
     }
 
     private static final class MutableQuad implements ModelQuadView {

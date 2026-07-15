@@ -32,22 +32,58 @@ public final class SodiumRelightPlan {
     private static final int ESTIMATED_RECIPE_BYTES = 256;
 
     private final SodiumRelightQuadRecipe[][] buckets;
+    @Nullable
+    private final SodiumRelightTopologySnapshot topologySnapshot;
     private final long estimatedRetainedBytes;
 
-    private SodiumRelightPlan(final SodiumRelightQuadRecipe[][] buckets) {
-        this.buckets = deepCopy(buckets);
+    private SodiumRelightPlan(
+            final SodiumRelightQuadRecipe[][] buckets,
+            @Nullable final SodiumRelightTopologySnapshot topologySnapshot
+    ) {
+        this(buckets, topologySnapshot, false);
+    }
+
+    private SodiumRelightPlan(
+            final SodiumRelightQuadRecipe[][] buckets,
+            @Nullable final SodiumRelightTopologySnapshot topologySnapshot,
+            final boolean trustedImmutableBuckets
+    ) {
+        this.buckets = trustedImmutableBuckets ? buckets : deepCopy(buckets);
+        this.topologySnapshot = topologySnapshot;
         long recipeCount = 0L;
         for (SodiumRelightQuadRecipe[] bucket : this.buckets) {
             recipeCount = Math.addExact(recipeCount, bucket.length);
         }
         this.estimatedRetainedBytes = Math.addExact(
-                ESTIMATED_BASE_BYTES,
+                Math.addExact(
+                        ESTIMATED_BASE_BYTES,
+                        topologySnapshot == null ? 0L : topologySnapshot.estimatedRetainedBytes()
+                ),
                 Math.multiplyExact(recipeCount, ESTIMATED_RECIPE_BYTES)
         );
     }
 
     public long estimatedRetainedBytes() {
         return this.estimatedRetainedBytes;
+    }
+
+    @Nullable
+    public SodiumRelightTopologySnapshot topologySnapshot() {
+        return this.topologySnapshot;
+    }
+
+    /** Adds the exact topology without copying the already immutable recipe buckets. */
+    public SodiumRelightPlan withTopologySnapshot(
+            final SodiumRelightTopologySnapshot topologySnapshot
+    ) {
+        if (this.topologySnapshot != null) {
+            throw new IllegalStateException("relight plan already has a topology snapshot");
+        }
+        return new SodiumRelightPlan(
+                this.buckets,
+                Objects.requireNonNull(topologySnapshot, "topologySnapshot"),
+                true
+        );
     }
 
     public int quadCount() {
@@ -465,6 +501,30 @@ public final class SodiumRelightPlan {
                 @Nullable final MeshLayout cutout,
                 @Nullable final MeshLayout translucent
         ) {
+            return this.buildInternal(null, solid, cutout, translucent);
+        }
+
+        /** Production overload that binds the captured topology to the immutable plan. */
+        public BuildResult build(
+                final SodiumRelightTopologySnapshot topologySnapshot,
+                @Nullable final MeshLayout solid,
+                @Nullable final MeshLayout cutout,
+                @Nullable final MeshLayout translucent
+        ) {
+            return this.buildInternal(
+                    Objects.requireNonNull(topologySnapshot, "topologySnapshot"),
+                    solid,
+                    cutout,
+                    translucent
+            );
+        }
+
+        private BuildResult buildInternal(
+                @Nullable final SodiumRelightTopologySnapshot topologySnapshot,
+                @Nullable final MeshLayout solid,
+                @Nullable final MeshLayout cutout,
+                @Nullable final MeshLayout translucent
+        ) {
             if (this.rejectionReason != null) {
                 return BuildResult.rejected(this.rejectionReason);
             }
@@ -478,7 +538,7 @@ public final class SodiumRelightPlan {
                 return BuildResult.rejected("empty relight plan");
             }
 
-            SodiumRelightPlan plan = new SodiumRelightPlan(normalized);
+            SodiumRelightPlan plan = new SodiumRelightPlan(normalized, topologySnapshot);
             Validation validation = plan.validateLayouts(solid, cutout, translucent);
             return validation.accepted()
                     ? BuildResult.accepted(plan)
@@ -491,6 +551,21 @@ public final class SodiumRelightPlan {
                 @Nullable final BuiltSectionMeshParts translucent
         ) {
             return this.build(
+                    MeshLayout.captureNullable(solid),
+                    MeshLayout.captureNullable(cutout),
+                    MeshLayout.captureNullable(translucent)
+            );
+        }
+
+        /** Production bridge that captures layouts while retaining the topology snapshot. */
+        public BuildResult buildFromMeshes(
+                final SodiumRelightTopologySnapshot topologySnapshot,
+                @Nullable final BuiltSectionMeshParts solid,
+                @Nullable final BuiltSectionMeshParts cutout,
+                @Nullable final BuiltSectionMeshParts translucent
+        ) {
+            return this.build(
+                    Objects.requireNonNull(topologySnapshot, "topologySnapshot"),
                     MeshLayout.captureNullable(solid),
                     MeshLayout.captureNullable(cutout),
                     MeshLayout.captureNullable(translucent)

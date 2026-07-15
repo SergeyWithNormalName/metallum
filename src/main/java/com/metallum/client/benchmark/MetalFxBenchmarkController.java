@@ -6,6 +6,7 @@ import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
+import com.metallum.client.sodium.SodiumRelightFastPath;
 import com.metallum.client.sodium.SodiumRelightOracle;
 import com.metallum.client.sodium.SodiumRelightPlanCache;
 import com.metallum.client.sodium.SodiumTerrainLightPatch;
@@ -592,6 +593,7 @@ public final class MetalFxBenchmarkController {
         this.torchEpochToken = ++this.nextTorchEpochToken;
         TorchEpochTelemetry.begin(this.torchEpochToken);
         SodiumRelightOracle.beginObservation(this.torchEpochToken);
+        SodiumRelightFastPath.beginObservation(this.torchEpochToken);
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_BEGIN route={} position={},{},{} measured_frame={} observation_frames={}",
                 this.route.routeId(),
@@ -838,6 +840,7 @@ public final class MetalFxBenchmarkController {
 
         TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
         SodiumRelightOracle.Snapshot relightOracle = SodiumRelightOracle.endObservation();
+        SodiumRelightFastPath.Snapshot relightFast = SodiumRelightFastPath.endObservation();
         long targetSectionKey = SectionPos.asLong(
                 SectionPos.blockToSectionCoord(config.x()),
                 SectionPos.blockToSectionCoord(config.y()),
@@ -959,6 +962,28 @@ public final class MetalFxBenchmarkController {
                 relightCache.oversizedRejectionCount(),
                 relightCache.pinnedPressureRejectionCount()
         );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_RELIGHT_FAST epoch={} configured={} active={} decisions={} created_outputs={} fallback_to_original={} cancelled={} original_calls={} accepted_outputs={} stale_or_disposed={} compact_commits={} full_upload_commits={} forced_rebuilds={} generation_mismatches={} topology_fallbacks={} replay_fallbacks={} reconstruction_fallbacks={} created_geometry_bytes={} errors={}",
+                relightFast.epochId(),
+                relightFast.configured(),
+                relightFast.active(),
+                relightFast.taskDecisions(),
+                relightFast.fastOutputsCreated(),
+                relightFast.fallbackToOriginal(),
+                relightFast.cancelledTasks(),
+                relightFast.originalCalls(),
+                relightFast.acceptedOutputs(),
+                relightFast.staleOrDisposedOutputs(),
+                relightFast.compactCommits(),
+                relightFast.fullUploadCommits(),
+                relightFast.forcedRebuilds(),
+                relightFast.generationMismatches(),
+                relightFast.topologyFallbacks(),
+                relightFast.replayFallbacks(),
+                relightFast.reconstructionFallbacks(),
+                relightFast.createdGeometryBytes(),
+                relightFast.errors()
+        );
         if (snapshot.epochId() != this.torchEpochToken) {
             fail(minecraft, "TORCH_EPOCH telemetry epoch identity changed");
             return;
@@ -989,6 +1014,35 @@ public final class MetalFxBenchmarkController {
                     || relightCache.liveBytes() > relightCache.capacityBytes()
                     || relightCache.pinnedLeases() != 0L) {
                 fail(minecraft, "TORCH_EPOCH exact relight oracle did not prove a zero-mismatch full-remesh comparison");
+                return;
+            }
+        }
+        if (relightFast.configured()) {
+            if (!relightFast.active()
+                    || relightFast.epochId() != this.torchEpochToken
+                    || relightFast.taskDecisions() <= 0L
+                    || relightFast.fastOutputsCreated() <= 0L
+                    || relightFast.acceptedOutputs() <= 0L
+                    || relightFast.compactCommits() <= 0L
+                    || relightFast.createdGeometryBytes() <= 0L
+                    || relightFast.taskDecisions()
+                    != relightFast.fastOutputsCreated()
+                    + relightFast.fallbackToOriginal()
+                    + relightFast.cancelledTasks()
+                    || relightFast.originalCalls() != relightFast.fallbackToOriginal()
+                    || relightFast.fastOutputsCreated()
+                    != relightFast.acceptedOutputs() + relightFast.staleOrDisposedOutputs()
+                    || relightFast.acceptedOutputs()
+                    != relightFast.compactCommits() + relightFast.fullUploadCommits()
+                    || relightFast.fullUploadCommits() != 0L
+                    || relightFast.forcedRebuilds() != 0L
+                    || relightFast.generationMismatches() != 0L
+                    || relightFast.topologyFallbacks() != 0L
+                    || relightFast.replayFallbacks() != 0L
+                    || relightFast.reconstructionFallbacks() != 0L
+                    || relightFast.errors() != 0L
+                    || targetSectionCompactLightPatched) {
+                fail(minecraft, "TORCH_EPOCH relight fast path violated its exact lifecycle contract");
                 return;
             }
         }
@@ -1893,6 +1947,7 @@ public final class MetalFxBenchmarkController {
         SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
         TorchEpochTelemetry.abort();
         SodiumRelightOracle.abortObservation();
+        SodiumRelightFastPath.abortObservation();
         this.torchEpochServerTaskPending.set(false);
         this.torchEpochRequested = false;
         this.torchEpochAppliedLogged = false;
@@ -1947,6 +2002,7 @@ public final class MetalFxBenchmarkController {
             TorchEpochTelemetry.abort();
         }
         SodiumRelightOracle.abortObservation();
+        SodiumRelightFastPath.abortObservation();
         restoreSurvivalGuard(minecraft);
         if (this.originalClientStateCaptured && this.originalCameraType != null) {
             minecraft.options.setCameraType(this.originalCameraType);

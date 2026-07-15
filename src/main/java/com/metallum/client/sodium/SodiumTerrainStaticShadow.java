@@ -73,6 +73,86 @@ public final class SodiumTerrainStaticShadow implements AutoCloseable {
         return true;
     }
 
+    /**
+     * Reconstructs complete compact terrain vertices from this exact static shadow and a
+     * two-byte-per-vertex light payload.
+     *
+     * <p>The method is fail-closed: invalid, evicted, or insufficient inputs return
+     * {@code false} before changing either buffer. On success the light source position is
+     * unchanged and the destination advances by the complete reconstructed geometry size.</p>
+     */
+    public boolean reconstruct(
+            @Nullable final ByteBuffer lightBytes,
+            @Nullable final ByteBuffer destination
+    ) {
+        byte[] resident = this.owner.touch(this);
+        if (resident == null
+                || lightBytes == null
+                || destination == null
+                || destination.isReadOnly()
+                || resident.length % STATIC_VERTEX_BYTES != 0) {
+            return false;
+        }
+
+        int vertexCount = resident.length / STATIC_VERTEX_BYTES;
+        int requiredLightBytes;
+        int requiredGeometryBytes;
+        try {
+            requiredLightBytes = Math.multiplyExact(
+                    vertexCount,
+                    SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+            );
+            requiredGeometryBytes = Math.multiplyExact(
+                    vertexCount,
+                    SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+            );
+        } catch (ArithmeticException ignored) {
+            return false;
+        }
+        if (lightBytes.remaining() != requiredLightBytes
+                || destination.remaining() < requiredGeometryBytes) {
+            return false;
+        }
+
+        // Snapshot the compact light payload before any writes so overlapping views of one
+        // backing buffer are reconstructed exactly and cannot observe our destination writes.
+        byte[] lightSnapshot = new byte[requiredLightBytes];
+        ByteBuffer lightSource = lightBytes.duplicate();
+        lightSource.get(lightSnapshot);
+
+        ByteBuffer staticSource = ByteBuffer.wrap(resident).order(ByteOrder.BIG_ENDIAN);
+        ByteBuffer target = destination.duplicate().order(ByteOrder.BIG_ENDIAN);
+        int destinationStart = target.position();
+        for (int vertex = 0; vertex < vertexCount; vertex++) {
+            int staticOffset = vertex * STATIC_VERTEX_BYTES;
+            int lightOffset = vertex * SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE;
+            int geometryOffset = destinationStart
+                    + vertex * SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE;
+
+            target.putLong(geometryOffset, staticSource.getLong(staticOffset));
+            target.putLong(
+                    geometryOffset + Long.BYTES,
+                    staticSource.getLong(staticOffset + Long.BYTES)
+            );
+            target.put(
+                    geometryOffset + SodiumLightSidecarPacking.BLOCK_LIGHT_OFFSET,
+                    lightSnapshot[lightOffset]
+            );
+            target.put(
+                    geometryOffset + SodiumLightSidecarPacking.SKY_LIGHT_OFFSET,
+                    lightSnapshot[lightOffset + 1]
+            );
+            target.putShort(
+                    geometryOffset + SodiumLightSidecarPacking.SKY_LIGHT_OFFSET + 1,
+                    staticSource.getShort(
+                            staticOffset + SodiumLightSidecarPacking.BLOCK_LIGHT_OFFSET
+                    )
+            );
+        }
+        destination.position(destinationStart + requiredGeometryBytes);
+        return true;
+    }
+
     public boolean isResident() {
         return this.owner.isResident(this);
     }

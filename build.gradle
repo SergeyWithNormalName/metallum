@@ -191,6 +191,9 @@ tasks.register("sodiumRelightOracleUnitTest", JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.sodium.SodiumRelightOracleTests")
 	environment "METALLUM_SODIUM_RELIGHT_ORACLE", "0"
+	environment "METALLUM_SODIUM_RELIGHT_FAST_PATH", "0"
+	environment "METALLUM_SODIUM_LIGHT_SIDECAR", "0"
+	environment "METALLUM_SODIUM_LIGHT_PATCH", "0"
 }
 
 tasks.register("frameGraphValidation", JavaExec) {

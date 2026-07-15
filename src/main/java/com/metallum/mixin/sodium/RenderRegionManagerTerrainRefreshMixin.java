@@ -7,6 +7,8 @@ import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarArena;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumSectionRenderDataAccess;
+import com.metallum.client.sodium.SodiumRelightFastOutputSlot;
+import com.metallum.client.sodium.SodiumRelightFastPath;
 import com.metallum.client.sodium.SodiumTerrainInPlaceRefresh;
 import com.metallum.client.sodium.SodiumTerrainLightPatch;
 import com.metallum.client.sodium.SodiumTerrainMeshLayout;
@@ -70,6 +72,13 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
     ) {
         this.metallum$pendingBaselines = null;
         this.metallum$successfulRefreshes = null;
+        for (BuilderTaskOutput result : results) {
+            if (result instanceof ChunkBuildOutput output
+                    && output instanceof SodiumRelightFastOutputSlot marker
+                    && marker.metallum$isFastRelightOutput()) {
+                SodiumRelightFastPath.recordAcceptedOutput(output);
+            }
+        }
     }
 
     @Inject(method = "createMeshUploadQueues", at = @At("RETURN"))
@@ -248,9 +257,29 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
             RenderSection section = entry.getKey().section;
             SodiumTerrainUploadBaseline baseline = entry.getValue();
             SodiumTerrainInPlaceRefresh refresh = successful == null ? null : successful.get(entry.getKey());
+            boolean fastOutput = entry.getKey() instanceof SodiumRelightFastOutputSlot marker
+                    && marker.metallum$isFastRelightOutput();
             if (refresh != null) {
                 if (refresh.lightOnly()) {
-                    baseline = refresh.residentBaseline();
+                    if (fastOutput) {
+                        // A synthetic relight output deliberately keeps the exact resident
+                        // plan/baseline generation from which it was reconstructed.
+                        baseline = refresh.residentBaseline();
+                        SodiumRelightFastPath.recordCompactCommit();
+                    } else if (SodiumTerrainLightPatch.isRuntimeActive()) {
+                        // An ordinary Sodium remesh publishes a new recipe state at this
+                        // output's info/generation. Re-capture the already verified static
+                        // geometry so its baseline advances atomically with that state;
+                        // retaining the old baseline here would permanently disable O6f.
+                        try {
+                            baseline = refresh.captureStaticGeometry(baseline);
+                        } catch (Throwable throwable) {
+                            SodiumTerrainLightPatch.fail(
+                                    "could not advance exact resident terrain geometry",
+                                    throwable
+                            );
+                        }
+                    }
                 } else if (SodiumTerrainLightPatch.isRuntimeActive()) {
                     try {
                         baseline = refresh.captureStaticGeometry(baseline);
@@ -258,6 +287,9 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
                         SodiumTerrainLightPatch.fail("could not retain exact resident terrain geometry", throwable);
                     }
                 }
+            }
+            if (fastOutput && (refresh == null || !refresh.lightOnly())) {
+                SodiumRelightFastPath.recordFullUploadCommit();
             }
             if (!section.isDisposed()) {
                 ((SodiumTerrainUploadBaselineAccess) section).metallum$setTerrainUploadBaseline(baseline);
@@ -280,11 +312,7 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
                 );
             }
         }
-        return new SodiumTerrainUploadBaseline(
-                output.info.flags,
-                output.info.visibilityData,
-                layouts
-        );
+        return new SodiumTerrainUploadBaseline(output.info, layouts, output.submitTime);
     }
 
     @Unique

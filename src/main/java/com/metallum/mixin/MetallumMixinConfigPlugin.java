@@ -17,6 +17,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String BENCHMARK_MIXIN_PREFIX = "com.metallum.mixin.benchmark.";
     private static final String BENCHMARK_SODIUM_MIXIN_PREFIX = "com.metallum.mixin.benchmark.sodium.";
     private static final String SODIUM_RELIGHT_ORACLE_ENV = "METALLUM_SODIUM_RELIGHT_ORACLE";
+    private static final String SODIUM_RELIGHT_FAST_PATH_ENV = "METALLUM_SODIUM_RELIGHT_FAST_PATH";
+    private static final String SODIUM_LIGHT_PATCH_ENV = "METALLUM_SODIUM_LIGHT_PATCH";
     private static final String MINECRAFT_MOD_ID = "minecraft";
     private static final String MINECRAFT_EXACT_VERSION = "26.2";
     private static final String SODIUM_MOD_ID = "sodium";
@@ -28,11 +30,20 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final Set<String> SODIUM_RELIGHT_ORACLE_MIXINS = Set.of(
             "com.metallum.mixin.sodium.BlockRendererRelightOracleMixin",
             "com.metallum.mixin.sodium.ChunkBuildOutputRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.ChunkBuilderMeshingTaskRelightAccessMixin",
             "com.metallum.mixin.sodium.ChunkBuilderMeshingTaskRelightOracleMixin",
+            "com.metallum.mixin.sodium.ClientChunkCacheRelightCauseMixin",
+            "com.metallum.mixin.sodium.ClientPacketListenerRelightCauseMixin",
             "com.metallum.mixin.sodium.RenderRegionManagerRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.RenderSectionManagerRelightCauseMixin",
             "com.metallum.mixin.sodium.RenderSectionRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.RenderSectionRelightTrackerMixin",
             "com.metallum.mixin.sodium.SodiumRelightBlockContextAccess",
             "com.metallum.mixin.sodium.VanillaBlockModelPartEncoderRelightOracleMixin"
+    );
+    private static final Set<String> SODIUM_RELIGHT_FAST_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.ChunkBuildOutputRelightFastMixin",
+            "com.metallum.mixin.sodium.RenderSectionManagerRelightOutputGuardMixin"
     );
     private static final Set<String> SODIUM_LIGHT_SIDECAR_MIXINS = Set.of(
             "com.metallum.mixin.sodium.GlBufferArenaLightSidecarMixin",
@@ -51,6 +62,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean benchmarkEnabled;
     private boolean sodiumLightSidecarEnabled;
     private boolean sodiumRelightOracleEnabled;
+    private boolean sodiumRelightFastPathEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -59,8 +71,16 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
-        this.sodiumRelightOracleEnabled = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV))
-                && hasExactRelightOracleVersions();
+        boolean exactRelightVersions = hasExactRelightOracleVersions();
+        boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
+        this.sodiumRelightFastPathEnabled = !relightOracleRequested
+                && "1".equals(System.getenv(SODIUM_RELIGHT_FAST_PATH_ENV))
+                && this.sodiumLightSidecarEnabled
+                && isEnabled(System.getenv(SODIUM_LIGHT_PATCH_ENV))
+                && exactRelightVersions;
+        this.sodiumRelightOracleEnabled = (relightOracleRequested
+                || this.sodiumRelightFastPathEnabled)
+                && exactRelightVersions;
     }
 
     @Override
@@ -75,6 +95,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (SODIUM_RELIGHT_ORACLE_MIXINS.contains(mixinClassName)) {
             return this.sodiumRelightOracleEnabled && this.isDefaultGraphicsApi;
+        }
+        if (SODIUM_RELIGHT_FAST_MIXINS.contains(mixinClassName)) {
+            return this.sodiumRelightFastPathEnabled && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.startsWith(BENCHMARK_SODIUM_MIXIN_PREFIX)) {
             return this.benchmarkEnabled

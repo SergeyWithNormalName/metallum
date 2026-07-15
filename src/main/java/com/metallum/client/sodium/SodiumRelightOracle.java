@@ -1,7 +1,6 @@
 package com.metallum.client.sodium;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
-import com.metallum.client.benchmark.TorchEpochTelemetry;
 import com.metallum.mixin.sodium.SodiumRelightBlockContextAccess;
 import net.caffeinemc.mods.sodium.client.model.light.LightMode;
 import net.caffeinemc.mods.sodium.client.model.light.LightPipelineProvider;
@@ -29,16 +28,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Exact-version, diagnostic oracle for a future Sodium light-only rebuild.
  *
- * <p>The oracle always invokes Sodium's original meshing task exactly once. It
- * captures an immutable recipe candidate, replays the previously published
- * candidate, and compares that replay with the mandatory full-remesh output.
- * It never exposes an API capable of skipping the full remesh.</p>
+ * <p>Diagnostic-oracle mode always invokes Sodium's original meshing task once,
+ * captures an immutable recipe candidate, and compares a previous replay with
+ * that full output. The separately gated fast mode reuses the same exact capture
+ * lifecycle but may return a self-contained synthetic full mesh.</p>
  */
 public final class SodiumRelightOracle {
     public static final String ENVIRONMENT_VARIABLE = "METALLUM_SODIUM_RELIGHT_ORACLE";
 
-    private static final boolean CONFIGURED = parseEnabled(System.getenv(ENVIRONMENT_VARIABLE));
-    private static final AtomicBoolean RUNTIME_ACTIVE = new AtomicBoolean(CONFIGURED);
+    private static final boolean ORACLE_CONFIGURED = parseEnabled(System.getenv(ENVIRONMENT_VARIABLE));
+    private static final boolean CAPTURE_CONFIGURED =
+            ORACLE_CONFIGURED || SodiumRelightFastPath.isConfigured();
+    private static final AtomicBoolean RUNTIME_ACTIVE = new AtomicBoolean(CAPTURE_CONFIGURED);
     private static final SodiumRelightPlanCache PLAN_CACHE = new SodiumRelightPlanCache(
             SodiumRelightPlanCache.DEFAULT_CAPACITY_BYTES
     );
@@ -50,11 +51,11 @@ public final class SodiumRelightOracle {
     }
 
     public static boolean isConfigured() {
-        return CONFIGURED;
+        return ORACLE_CONFIGURED;
     }
 
     public static boolean isRuntimeActive() {
-        return CONFIGURED && RUNTIME_ACTIVE.get();
+        return CAPTURE_CONFIGURED && RUNTIME_ACTIVE.get();
     }
 
     /** Starts a counter window without clearing cached or resident plans. */
@@ -136,6 +137,20 @@ public final class SodiumRelightOracle {
             final CancellationToken cancellationToken,
             final Operation<ChunkBuildOutput> original
     ) {
+        SodiumRelightFastPath.Attempt fastAttempt = SodiumRelightFastPath.tryCreateOutput(
+                task,
+                context,
+                cancellationToken
+        );
+        if (fastAttempt.status() == SodiumRelightFastPath.AttemptStatus.CREATED) {
+            return Objects.requireNonNull(fastAttempt.output(), "created fast relight output");
+        }
+        if (fastAttempt.status() == SodiumRelightFastPath.AttemptStatus.CANCELLED) {
+            return null;
+        }
+        if (fastAttempt.status() == SodiumRelightFastPath.AttemptStatus.FALLBACK) {
+            SodiumRelightFastPath.recordOriginalCall();
+        }
         if (!isRuntimeActive()) {
             return original.call(context, cancellationToken);
         }
@@ -169,7 +184,7 @@ public final class SodiumRelightOracle {
 
         try {
             if (call.output != null) {
-                session.finish(call.output);
+                session.finish(call.output, context);
             }
         } catch (Throwable throwable) {
             session.reject("task finalization failed", true);
@@ -256,22 +271,21 @@ public final class SodiumRelightOracle {
                 section.getChunkY(),
                 section.getChunkZ()
         );
-        TorchEpochTelemetry.RebuildCause cause = TorchEpochTelemetry.isActive()
-                ? TorchEpochTelemetry.rebuildCause(sectionKey)
-                : TorchEpochTelemetry.RebuildCause.NONE;
-        if (cause == null) {
-            cause = TorchEpochTelemetry.RebuildCause.NONE;
-        }
+        SodiumRelightTaskStamp stamp = ((SodiumRelightTaskAccess) task)
+                .metallum$getRelightTaskStamp();
+        SodiumRelightRebuildCause cause = stamp == null
+                ? SodiumRelightRebuildCause.GEOMETRY_OR_UNKNOWN
+                : stamp.cause();
 
         SodiumRelightPlanCache.Lease previous = null;
         try {
-            if (cause == TorchEpochTelemetry.RebuildCause.LIGHT_ONLY) {
+            if (cause == SodiumRelightRebuildCause.LIGHT_ONLY) {
                 previous = residentSlot.metallum$acquireRelightPlan();
             }
             SodiumTerrainUploadBaseline baseline = baselineAccess.metallum$getTerrainUploadBaseline();
             TaskSession session = new TaskSession(section, cause, previous, baseline);
             previous = null;
-            OBSERVATION.recordTask(cause == TorchEpochTelemetry.RebuildCause.LIGHT_ONLY);
+            OBSERVATION.recordTask(cause == SodiumRelightRebuildCause.LIGHT_ONLY);
             return session;
         } finally {
             if (previous != null) {
@@ -315,7 +329,7 @@ public final class SodiumRelightOracle {
 
     private static Snapshot fallbackSnapshot() {
         return new Snapshot(
-                CONFIGURED,
+                ORACLE_CONFIGURED,
                 false,
                 0L,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 1L,
@@ -374,7 +388,7 @@ public final class SodiumRelightOracle {
     private static final class TaskSession implements AutoCloseable {
         private final Thread ownerThread = Thread.currentThread();
         private final RenderSection section;
-        private final TorchEpochTelemetry.RebuildCause cause;
+        private final SodiumRelightRebuildCause cause;
         private SodiumRelightPlanCache.@Nullable Lease previousPlan;
         @Nullable
         private final SodiumTerrainUploadBaseline residentBaseline;
@@ -393,7 +407,7 @@ public final class SodiumRelightOracle {
 
         private TaskSession(
                 final RenderSection section,
-                final TorchEpochTelemetry.RebuildCause cause,
+                final SodiumRelightRebuildCause cause,
                 final SodiumRelightPlanCache.@Nullable Lease previousPlan,
                 @Nullable final SodiumTerrainUploadBaseline residentBaseline
         ) {
@@ -525,7 +539,7 @@ public final class SodiumRelightOracle {
             }
         }
 
-        private void finish(final ChunkBuildOutput output) {
+        private void finish(final ChunkBuildOutput output, final ChunkBuildContext context) {
             if (!this.checkThread() || this.closed || output.section != this.section) {
                 this.scopeFailure("task output did not match its capture session");
                 return;
@@ -542,7 +556,11 @@ public final class SodiumRelightOracle {
             BuiltSectionMeshParts solid = output.getMesh(DefaultTerrainRenderPasses.SOLID);
             BuiltSectionMeshParts cutout = output.getMesh(DefaultTerrainRenderPasses.CUTOUT);
             BuiltSectionMeshParts translucent = output.getMesh(DefaultTerrainRenderPasses.TRANSLUCENT);
-            SodiumRelightPlan.BuildResult build = this.builder.buildFromMeshes(solid, cutout, translucent);
+            SodiumRelightPlan.BuildResult build = this.builder.buildFromMeshes(
+                    solid,
+                    cutout,
+                    translucent
+            );
             if (this.rejectionReason != null || !build.accepted()) {
                 this.reject(
                         this.rejectionReason == null ? build.rejectionReason() : this.rejectionReason,
@@ -551,7 +569,11 @@ public final class SodiumRelightOracle {
                 return;
             }
 
-            SodiumRelightPlan plan = Objects.requireNonNull(build.plan(), "accepted relight plan");
+            SodiumRelightPlan plan = Objects.requireNonNull(build.plan(), "accepted relight plan")
+                    .withTopologySnapshot(SodiumRelightTopologySnapshot.capture(
+                            context.cache.getWorldSlice(),
+                            this.section
+                    ));
             SodiumRelightPlanCache.Owner candidate = PLAN_CACHE.capture(plan);
             if (!candidate.isResident()) {
                 candidate.close();
@@ -571,7 +593,7 @@ public final class SodiumRelightOracle {
                 }
             }
 
-            if (this.cause == TorchEpochTelemetry.RebuildCause.LIGHT_ONLY) {
+            if (this.cause == SodiumRelightRebuildCause.LIGHT_ONLY) {
                 this.comparePreviousPlan(output, solid, cutout, translucent);
             }
         }
@@ -795,7 +817,7 @@ public final class SodiumRelightOracle {
 
         synchronized Snapshot snapshot() {
             return new Snapshot(
-                    CONFIGURED,
+                    ORACLE_CONFIGURED,
                     isRuntimeActive(),
                     this.epochId,
                     this.tasks,

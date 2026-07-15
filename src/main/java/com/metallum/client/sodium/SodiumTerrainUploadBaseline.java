@@ -1,5 +1,8 @@
 package com.metallum.client.sodium;
 
+import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
+import org.jspecify.annotations.Nullable;
+
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
@@ -9,20 +12,66 @@ public final class SodiumTerrainUploadBaseline implements AutoCloseable {
     private final long[] visibilityData;
     private final SodiumTerrainMeshLayout[] meshes;
     private final SodiumTerrainStaticShadow[] staticShadows;
+    private final int generation;
+    @Nullable
+    private final BuiltSectionInfo residentInfo;
 
     public SodiumTerrainUploadBaseline(
             final int sectionFlags,
             final long[] visibilityData,
             final SodiumTerrainMeshLayout[] meshes
     ) {
-        this(sectionFlags, visibilityData, meshes, new SodiumTerrainStaticShadow[meshes.length]);
+        this(sectionFlags, visibilityData, meshes, 0, null);
+    }
+
+    public SodiumTerrainUploadBaseline(
+            final int sectionFlags,
+            final long[] visibilityData,
+            final SodiumTerrainMeshLayout[] meshes,
+            final int generation
+    ) {
+        this(sectionFlags, visibilityData, meshes, generation, null);
+    }
+
+    /** Production constructor binding metadata identity and generation to one output. */
+    public SodiumTerrainUploadBaseline(
+            final BuiltSectionInfo residentInfo,
+            final SodiumTerrainMeshLayout[] meshes,
+            final int generation
+    ) {
+        this(
+                residentInfo.flags,
+                residentInfo.visibilityData,
+                meshes,
+                generation,
+                residentInfo
+        );
     }
 
     private SodiumTerrainUploadBaseline(
             final int sectionFlags,
             final long[] visibilityData,
             final SodiumTerrainMeshLayout[] meshes,
-            final SodiumTerrainStaticShadow[] staticShadows
+            final int generation,
+            @Nullable final BuiltSectionInfo residentInfo
+    ) {
+        this(
+                sectionFlags,
+                visibilityData,
+                meshes,
+                new SodiumTerrainStaticShadow[meshes.length],
+                generation,
+                residentInfo
+        );
+    }
+
+    private SodiumTerrainUploadBaseline(
+            final int sectionFlags,
+            final long[] visibilityData,
+            final SodiumTerrainMeshLayout[] meshes,
+            final SodiumTerrainStaticShadow[] staticShadows,
+            final int generation,
+            @Nullable final BuiltSectionInfo residentInfo
     ) {
         if (meshes.length != staticShadows.length) {
             throw new IllegalArgumentException("terrain layout/static shadow count mismatch");
@@ -31,6 +80,8 @@ public final class SodiumTerrainUploadBaseline implements AutoCloseable {
         this.visibilityData = visibilityData.clone();
         this.meshes = meshes.clone();
         this.staticShadows = staticShadows.clone();
+        this.generation = generation;
+        this.residentInfo = residentInfo;
     }
 
     public boolean matchesUploadLayout(final SodiumTerrainUploadBaseline other) {
@@ -56,6 +107,23 @@ public final class SodiumTerrainUploadBaseline implements AutoCloseable {
 
     public int meshCount() {
         return this.meshes.length;
+    }
+
+    public int generation() {
+        return this.generation;
+    }
+
+    /** Exact resident metadata guard paired with the explicit upload generation. */
+    public boolean matchesResidentMetadata(
+            final int generation,
+            final BuiltSectionInfo info
+    ) {
+        return info != null
+                && this.generation != SodiumRelightResidentState.LEGACY_GENERATION
+                && this.generation == generation
+                && this.residentInfo == info
+                && this.sectionFlags == info.flags
+                && Arrays.equals(this.visibilityData, info.visibilityData);
     }
 
     /**
@@ -87,7 +155,9 @@ public final class SodiumTerrainUploadBaseline implements AutoCloseable {
                     this.sectionFlags,
                     this.visibilityData,
                     this.meshes,
-                    captured
+                    captured,
+                    this.generation,
+                    this.residentInfo
             );
         } catch (RuntimeException | Error throwable) {
             for (SodiumTerrainStaticShadow shadow : captured) {
@@ -131,6 +201,31 @@ public final class SodiumTerrainUploadBaseline implements AutoCloseable {
             }
         }
         return true;
+    }
+
+    /** Reconstructs one full pass geometry, or fails closed when its shadow is unavailable. */
+    public boolean reconstructGeometry(
+            final int meshIndex,
+            final ByteBuffer lightBytes,
+            final ByteBuffer destination
+    ) {
+        if (meshIndex < 0 || meshIndex >= this.meshes.length) {
+            return false;
+        }
+        SodiumTerrainMeshLayout layout = this.meshes[meshIndex];
+        SodiumTerrainStaticShadow shadow = this.staticShadows[meshIndex];
+        if (layout == null
+                || shadow == null
+                || lightBytes == null
+                || destination == null
+                || lightBytes.remaining() != Math.multiplyExact(
+                        layout.vertexCount(),
+                        SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+                )
+                || destination.remaining() < layout.geometryBytes()) {
+            return false;
+        }
+        return shadow.reconstruct(lightBytes, destination);
     }
 
     @Override

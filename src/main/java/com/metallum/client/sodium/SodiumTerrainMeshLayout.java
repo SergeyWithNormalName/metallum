@@ -45,4 +45,9 @@ public final class SodiumTerrainMeshLayout {
     public int vertexCount() {
         return this.geometryBytes / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE;
     }
+
+    /** Defensive copy of Sodium's exact per-facing vertex segment metadata. */
+    public int[] vertexSegments() {
+        return this.vertexSegments.clone();
+    }
 }

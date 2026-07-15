@@ -5,6 +5,7 @@ import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumTerrainMeshLayout;
 import com.metallum.client.sodium.SodiumTerrainStaticShadow;
 import com.metallum.client.sodium.SodiumTerrainUploadBaseline;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionInfo;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -49,6 +50,7 @@ public final class SodiumLightSidecarTests {
         testTerrainMeshLayoutUsesOnlyUploadMetadata();
         testTerrainUploadBaselineMatchesOnlyUploadLayout();
         testTerrainStaticShadowIgnoresOnlyLightBytes();
+        testTerrainStaticShadowReconstructsExactGeometry();
         testTerrainStaticShadowCacheIsBoundedAndLru();
         testTerrainUploadBaselineRequiresExactStaticGeometry();
         testMslPatchAndIdempotence();
@@ -155,6 +157,10 @@ public final class SodiumLightSidecarTests {
 
         require(layout.geometryBytes() == geometryBytes, "mesh layout changed geometry bytes");
         require(layout.vertexCount() == 5, "mesh layout changed vertex count");
+        int[] exportedSegments = layout.vertexSegments();
+        exportedSegments[0] = 77;
+        require(Arrays.equals(layout.vertexSegments(), new int[]{4, 1}),
+                "mesh layout exposed mutable vertex segments");
         require(layout.matches(SodiumTerrainMeshLayout.capture(geometryBytes, new int[]{4, 1})),
                 "mesh layout retained mutable vertex segments");
         require(!layout.matches(SodiumTerrainMeshLayout.capture(geometryBytes, new int[]{4, 2})),
@@ -182,6 +188,7 @@ public final class SodiumLightSidecarTests {
         long[] visibility = {11L, 22L};
         SodiumTerrainMeshLayout[] meshes = {residentLayout, null};
         SodiumTerrainUploadBaseline baseline = new SodiumTerrainUploadBaseline(7, visibility, meshes);
+        require(baseline.generation() == 0, "legacy baseline generation changed");
 
         visibility[0] = 99L;
         meshes[0] = changedSegments;
@@ -262,6 +269,94 @@ public final class SodiumLightSidecarTests {
         require(cache.snapshot().liveBytes() == 0L, "closed static shadow retained cache bytes");
     }
 
+    private static void testTerrainStaticShadowReconstructsExactGeometry() {
+        SodiumTerrainStaticShadow.Cache cache = new SodiumTerrainStaticShadow.Cache(36L);
+        ByteBuffer resident = patternedGeometry(2, 12);
+        byte[] residentBytes = resident.array().clone();
+        SodiumTerrainStaticShadow shadow = cache.capture(resident);
+
+        ByteBuffer lightStorage = ByteBuffer.allocate(9);
+        Arrays.fill(lightStorage.array(), (byte) 0x26);
+        lightStorage.put(3, (byte) 11);
+        lightStorage.put(4, (byte) 22);
+        lightStorage.put(5, (byte) 33);
+        lightStorage.put(6, (byte) 44);
+        lightStorage.position(3);
+        lightStorage.limit(7);
+
+        ByteBuffer destination = ByteBuffer.allocate(51);
+        Arrays.fill(destination.array(), (byte) 0x5c);
+        destination.position(4);
+        destination.limit(49);
+        require(shadow.reconstruct(lightStorage, destination),
+                "resident static shadow did not reconstruct full geometry");
+        require(lightStorage.position() == 3, "reconstruction changed the light source position");
+        require(destination.position() == 44, "reconstruction advanced by the wrong geometry size");
+        for (int vertex = 0; vertex < 2; vertex++) {
+            int sourceOffset = vertex * SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE;
+            int destinationOffset = 4 + sourceOffset;
+            for (int offset = 0; offset < SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE; offset++) {
+                int expected = residentBytes[sourceOffset + offset];
+                if (offset == SodiumLightSidecarPacking.BLOCK_LIGHT_OFFSET) {
+                    expected = lightStorage.get(3 + vertex * 2);
+                } else if (offset == SodiumLightSidecarPacking.SKY_LIGHT_OFFSET) {
+                    expected = lightStorage.get(4 + vertex * 2);
+                }
+                require(destination.get(destinationOffset + offset) == (byte) expected,
+                        "reconstruction changed compact vertex byte " + offset);
+            }
+        }
+        require(destination.get(3) == (byte) 0x5c && destination.get(44) == (byte) 0x5c,
+                "reconstruction overwrote destination bounds");
+
+        byte[] overlappingStorage = new byte[48];
+        Arrays.fill(overlappingStorage, (byte) 0x71);
+        overlappingStorage[20] = 51;
+        overlappingStorage[21] = 52;
+        overlappingStorage[22] = 53;
+        overlappingStorage[23] = 54;
+        ByteBuffer overlappingLight = ByteBuffer.wrap(overlappingStorage);
+        overlappingLight.position(20);
+        overlappingLight.limit(24);
+        ByteBuffer overlappingDestination = ByteBuffer.wrap(overlappingStorage);
+        overlappingDestination.position(2);
+        require(shadow.reconstruct(overlappingLight, overlappingDestination),
+                "overlapping light/destination views were rejected");
+        require(overlappingStorage[18] == 51
+                        && overlappingStorage[19] == 52
+                        && overlappingStorage[38] == 53
+                        && overlappingStorage[39] == 54,
+                "overlapping reconstruction did not snapshot all light bytes");
+
+        assertReconstructionFailureLeavesDestinationUnchanged(
+                shadow,
+                ByteBuffer.allocate(3),
+                ByteBuffer.allocate(40),
+                "mis-sized light payload"
+        );
+        assertReconstructionFailureLeavesDestinationUnchanged(
+                shadow,
+                ByteBuffer.allocate(4),
+                ByteBuffer.allocate(39),
+                "short geometry destination"
+        );
+        ByteBuffer readOnlyBacking = ByteBuffer.allocate(40);
+        assertReconstructionFailureLeavesDestinationUnchanged(
+                shadow,
+                ByteBuffer.allocate(4),
+                readOnlyBacking.asReadOnlyBuffer(),
+                "read-only geometry destination"
+        );
+
+        shadow.close();
+        assertReconstructionFailureLeavesDestinationUnchanged(
+                shadow,
+                ByteBuffer.allocate(4),
+                ByteBuffer.allocate(40),
+                "evicted static shadow"
+        );
+    }
+
     private static void testTerrainStaticShadowCacheIsBoundedAndLru() {
         SodiumTerrainStaticShadow.Cache cache = new SodiumTerrainStaticShadow.Cache(36L);
         SodiumTerrainStaticShadow first = cache.capture(patternedGeometry(1, 1));
@@ -290,11 +385,55 @@ public final class SodiumLightSidecarTests {
         SodiumTerrainUploadBaseline metadata = new SodiumTerrainUploadBaseline(
                 3,
                 new long[]{7L},
-                new SodiumTerrainMeshLayout[]{layout, null}
+                new SodiumTerrainMeshLayout[]{layout, null},
+                42
         );
+        require(metadata.generation() == 42, "explicit baseline generation changed");
         ByteBuffer resident = patternedGeometry(2, 9);
         SodiumTerrainUploadBaseline exact = metadata.withStaticGeometry(new ByteBuffer[]{resident, null});
         require(exact.hasResidentStaticGeometry(), "captured baseline did not retain exact static geometry");
+        require(exact.generation() == 42, "static capture discarded the baseline generation");
+
+        byte[] replacementLights = {31, 47, 63, 79};
+        ByteBuffer reconstructed = ByteBuffer.allocate(geometryBytes);
+        require(exact.reconstructGeometry(0, ByteBuffer.wrap(replacementLights), reconstructed),
+                "baseline did not reconstruct its resident pass geometry");
+        require(reconstructed.position() == geometryBytes,
+                "baseline reconstruction advanced by the wrong geometry size");
+        for (int vertex = 0; vertex < 2; vertex++) {
+            int vertexOffset = vertex * SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE;
+            for (int offset = 0; offset < SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE; offset++) {
+                byte expected = resident.get(vertexOffset + offset);
+                if (offset == SodiumLightSidecarPacking.BLOCK_LIGHT_OFFSET
+                        || offset == SodiumLightSidecarPacking.SKY_LIGHT_OFFSET) {
+                    expected = replacementLights[vertex * 2
+                            + offset - SodiumLightSidecarPacking.BLOCK_LIGHT_OFFSET];
+                }
+                require(reconstructed.get(vertexOffset + offset) == expected,
+                        "baseline reconstruction changed compact vertex byte " + offset);
+            }
+        }
+        require(!exact.reconstructGeometry(1, ByteBuffer.allocate(0), ByteBuffer.allocate(0)),
+                "baseline reconstructed an absent render-pass mesh");
+
+        SodiumTerrainUploadBaseline emptyMetadata = new SodiumTerrainUploadBaseline(
+                BuiltSectionInfo.EMPTY,
+                new SodiumTerrainMeshLayout[0],
+                42
+        );
+        require(emptyMetadata.matchesResidentMetadata(42, BuiltSectionInfo.EMPTY),
+                "baseline rejected exact resident metadata and generation");
+        require(!emptyMetadata.matchesResidentMetadata(41, BuiltSectionInfo.EMPTY),
+                "baseline ignored resident generation mismatch");
+        emptyMetadata.close();
+        SodiumTerrainUploadBaseline legacyMetadata = new SodiumTerrainUploadBaseline(
+                BuiltSectionInfo.EMPTY.flags,
+                BuiltSectionInfo.EMPTY.visibilityData,
+                new SodiumTerrainMeshLayout[0]
+        );
+        require(!legacyMetadata.matchesResidentMetadata(0, BuiltSectionInfo.EMPTY),
+                "legacy generation admitted exact-output fast-path metadata");
+        legacyMetadata.close();
 
         ByteBuffer relit = resident.duplicate();
         relit.put(16, (byte) 31);
@@ -324,6 +463,33 @@ public final class SodiumLightSidecarTests {
         );
         exact.close();
         metadata.close();
+    }
+
+    private static void assertReconstructionFailureLeavesDestinationUnchanged(
+            final SodiumTerrainStaticShadow shadow,
+            final ByteBuffer light,
+            final ByteBuffer destination,
+            final String scenario
+    ) {
+        ByteBuffer originalLight = light.duplicate();
+        byte[] lightBytes = new byte[originalLight.remaining()];
+        originalLight.get(lightBytes);
+        int lightPosition = light.position();
+        ByteBuffer original = destination.duplicate();
+        byte[] bytes = new byte[original.remaining()];
+        original.get(bytes);
+        int position = destination.position();
+        require(!shadow.reconstruct(light, destination), scenario + " unexpectedly reconstructed");
+        require(light.position() == lightPosition, scenario + " changed light source position");
+        ByteBuffer afterLight = light.duplicate();
+        byte[] afterLightBytes = new byte[afterLight.remaining()];
+        afterLight.get(afterLightBytes);
+        require(Arrays.equals(lightBytes, afterLightBytes), scenario + " changed light source contents");
+        require(destination.position() == position, scenario + " changed destination position");
+        ByteBuffer after = destination.duplicate();
+        byte[] afterBytes = new byte[after.remaining()];
+        after.get(afterBytes);
+        require(Arrays.equals(bytes, afterBytes), scenario + " changed destination contents");
     }
 
     private static void testMslPatchAndIdempotence() {

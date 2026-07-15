@@ -1,9 +1,11 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.sodium.SodiumRelightCandidateSlot;
+import com.metallum.client.sodium.SodiumRelightFastOutputSlot;
 import com.metallum.client.sodium.SodiumRelightOracle;
 import com.metallum.client.sodium.SodiumRelightPlanCache;
 import com.metallum.client.sodium.SodiumRelightResidentPlanSlot;
+import com.metallum.client.sodium.SodiumRelightResidentState;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.UniformBufferManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.BuilderTaskOutput;
@@ -40,6 +42,8 @@ abstract class RenderRegionManagerRelightLifecycleMixin {
                     candidate = ((SodiumRelightCandidateSlot) output).metallum$takeRelightCandidate();
                     RenderSection section = output.section;
                     resident = (SodiumRelightResidentPlanSlot) section;
+                    boolean fastOutput = output instanceof SodiumRelightFastOutputSlot marker
+                            && marker.metallum$isFastRelightOutput();
                     if (section.isDisposed()) {
                         try {
                             resident.metallum$clearRelightPlan();
@@ -49,11 +53,30 @@ abstract class RenderRegionManagerRelightLifecycleMixin {
                         metallum$closeDiscardedCandidate(candidate);
                         continue;
                     }
+                    if (fastOutput) {
+                        if (candidate != null) {
+                            metallum$closeDiscardedCandidate(candidate);
+                            candidate = null;
+                            metallum$recordOracleError();
+                        }
+                        // The synthetic output is derived from the exact resident state.
+                        // A compact commit keeps that state; a full-upload fallback makes
+                        // the new baseline generation mismatch and the next task remeshes.
+                        continue;
+                    }
                     // A full accepted mesh without an exact recipe invalidates the
                     // previous resident plan just as decisively as a new candidate.
-                    resident.metallum$replaceRelightPlan(candidate);
+                    SodiumRelightResidentState next = candidate == null
+                            ? null
+                            : new SodiumRelightResidentState(
+                                    candidate,
+                                    output.info,
+                                    output.submitTime
+                            );
+                    resident.metallum$replaceRelightState(next);
                     if (candidate != null) {
                         SodiumRelightOracle.recordPublishedCandidate();
+                        candidate = null;
                     }
                 } catch (Throwable ignored) {
                     metallum$recordOracleError();
