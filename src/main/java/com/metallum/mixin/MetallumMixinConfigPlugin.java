@@ -15,6 +15,7 @@ import java.util.Set;
 public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
     private static final String BENCHMARK_MIXIN_PREFIX = "com.metallum.mixin.benchmark.";
+    private static final String BENCHMARK_SODIUM_MIXIN_PREFIX = "com.metallum.mixin.benchmark.sodium.";
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -39,6 +40,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (!this.isMacOs) {
             return false;
+        }
+        if (mixinClassName.startsWith(BENCHMARK_SODIUM_MIXIN_PREFIX)) {
+            return this.benchmarkEnabled
+                    && this.isDefaultGraphicsApi
+                    && FabricLoader.getInstance().isModLoaded("sodium");
         }
         if (mixinClassName.startsWith(BENCHMARK_MIXIN_PREFIX)) {
             return this.benchmarkEnabled && this.isDefaultGraphicsApi;

@@ -158,6 +158,14 @@ tasks.register("metalRuntimeUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metal.render.MetalRuntimeTests")
 }
 
+tasks.register("torchEpochTelemetryUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free bounded torch epoch telemetry tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.benchmark.TorchEpochTelemetryTests")
+}
+
 tasks.register("frameGraphValidation", JavaExec) {
 	group = "verification"
 	description = "Validates the typed Metal frame graph and versioned ABI header"
@@ -486,6 +494,7 @@ tasks.named("test", Test) {
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
+	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))

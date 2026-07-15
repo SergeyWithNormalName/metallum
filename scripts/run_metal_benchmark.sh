@@ -153,19 +153,67 @@ esac
 route_values=$(python3 "$FIXTURE_HELPER" route-values "$ROUTE_SPEC") \
     || die "route specification failed validation: $ROUTE_SPEC"
 route_field_count=$(printf '%s\n' "$route_values" | awk -F '\t' '{ print NF; exit }')
-[ "$route_field_count" -eq 19 ] \
-    || die "route helper returned $route_field_count fields instead of 19"
-IFS=$'\t' read -r \
-    ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
-    PLAYER_NAME PLAYER_UUID DIMENSION \
-    POSITION_X POSITION_Y POSITION_Z YAW PITCH \
-    CLOCK_TICKS CLEAR_WEATHER_TICKS SIMULATION_FROZEN \
-    ROUTE_STABLE_FRAMES ROUTE_TIMEOUT_FRAMES \
-    POSITION_EPSILON ANGLE_EPSILON <<< "$route_values"
+ROUTE_KIND="STATIC"
+TORCH_POSITION_X=0
+TORCH_POSITION_Y=0
+TORCH_POSITION_Z=0
+TORCH_INITIAL_BLOCK="minecraft:air"
+TORCH_SUPPORT_BLOCK="minecraft:air"
+TORCH_APPLY_AFTER_MEASURED_FRAMES=0
+TORCH_OBSERVATION_FRAMES=0
+case "$route_field_count" in
+    19)
+        IFS=$'\t' read -r \
+            ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
+            PLAYER_NAME PLAYER_UUID DIMENSION \
+            POSITION_X POSITION_Y POSITION_Z YAW PITCH \
+            CLOCK_TICKS CLEAR_WEATHER_TICKS SIMULATION_FROZEN \
+            ROUTE_STABLE_FRAMES ROUTE_TIMEOUT_FRAMES \
+            POSITION_EPSILON ANGLE_EPSILON <<< "$route_values"
+        ;;
+    27)
+        IFS=$'\t' read -r \
+            ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
+            PLAYER_NAME PLAYER_UUID DIMENSION \
+            POSITION_X POSITION_Y POSITION_Z YAW PITCH \
+            CLOCK_TICKS CLEAR_WEATHER_TICKS SIMULATION_FROZEN \
+            ROUTE_STABLE_FRAMES ROUTE_TIMEOUT_FRAMES \
+            POSITION_EPSILON ANGLE_EPSILON \
+            ROUTE_KIND TORCH_POSITION_X TORCH_POSITION_Y TORCH_POSITION_Z \
+            TORCH_INITIAL_BLOCK TORCH_SUPPORT_BLOCK \
+            TORCH_APPLY_AFTER_MEASURED_FRAMES TORCH_OBSERVATION_FRAMES \
+            <<< "$route_values"
+        ;;
+    *)
+        die "route helper returned $route_field_count fields instead of 19 or 27"
+        ;;
+esac
 
 require_value "$PLAYER_NAME" "MetallumBench" "benchmark player name"
 require_value "$PLAYER_UUID" "b07a402a-d8ea-354f-9398-aaf208a798b9" "benchmark player UUID"
 require_value "$SIMULATION_FROZEN" "1" "benchmark simulation freeze"
+case "$ROUTE_KIND" in
+    STATIC)
+        [ "$route_field_count" -eq 19 ] \
+            || die "static route must use the schema-1 19-field contract"
+        ;;
+    TORCH_EPOCH)
+        [ "$route_field_count" -eq 27 ] \
+            || die "torch route must use the schema-2 27-field contract"
+        require_value "$TORCH_INITIAL_BLOCK" "minecraft:air" "torch initial block"
+        require_value "$TORCH_SUPPORT_BLOCK" "minecraft:grass_block" "torch support block"
+        [ "$TORCH_APPLY_AFTER_MEASURED_FRAMES" -eq 300 ] \
+            || die "torch epoch must start after exactly 300 measured frames"
+        [ "$TORCH_OBSERVATION_FRAMES" -eq 300 ] \
+            || die "torch epoch must observe exactly 300 frames"
+        [ "$((TORCH_APPLY_AFTER_MEASURED_FRAMES + TORCH_OBSERVATION_FRAMES))" \
+            -le "$MEASURE_FRAMES" ] \
+            || die "torch epoch exceeds the measurement frame budget"
+        ;;
+    *)
+        die "unsupported route workload kind: $ROUTE_KIND"
+        ;;
+esac
 
 FIXTURE_WORLD="$RUN_DIR/benchmark-fixtures/$FIXTURE_ID/world"
 [ -f "$FIXTURE_WORLD/level.dat" ] \
@@ -261,6 +309,9 @@ echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
 echo "  MetalFX: $METALFX_MODE (persistent config remains off)"
 echo "  route: $ROUTE_ID ($ROUTE_SHA256)"
+if [ "$ROUTE_KIND" = "TORCH_EPOCH" ]; then
+    echo "  torch epoch: position=[$TORCH_POSITION_X,$TORCH_POSITION_Y,$TORCH_POSITION_Z], initial=$TORCH_INITIAL_BLOCK, support=$TORCH_SUPPORT_BLOCK, apply=$TORCH_APPLY_AFTER_MEASURED_FRAMES, observe=$TORCH_OBSERVATION_FRAMES"
+fi
 echo "  fixture: $FIXTURE_ID ($FIXTURE_SHA256, read-only)"
 echo "  player: $PLAYER_NAME / $PLAYER_UUID"
 echo "  pose: $DIMENSION [$POSITION_X, $POSITION_Y, $POSITION_Z] yaw=$YAW pitch=$PITCH"
@@ -502,6 +553,14 @@ METALLUM_BENCHMARK_ROUTE_STABLE_FRAMES="$ROUTE_STABLE_FRAMES" \
 METALLUM_BENCHMARK_ROUTE_TIMEOUT_FRAMES="$ROUTE_TIMEOUT_FRAMES" \
 METALLUM_BENCHMARK_POSITION_EPSILON="$POSITION_EPSILON" \
 METALLUM_BENCHMARK_ANGLE_EPSILON="$ANGLE_EPSILON" \
+METALLUM_BENCHMARK_ROUTE_KIND="$ROUTE_KIND" \
+METALLUM_BENCHMARK_TORCH_POSITION_X="$TORCH_POSITION_X" \
+METALLUM_BENCHMARK_TORCH_POSITION_Y="$TORCH_POSITION_Y" \
+METALLUM_BENCHMARK_TORCH_POSITION_Z="$TORCH_POSITION_Z" \
+METALLUM_BENCHMARK_TORCH_INITIAL_BLOCK="$TORCH_INITIAL_BLOCK" \
+METALLUM_BENCHMARK_TORCH_SUPPORT_BLOCK="$TORCH_SUPPORT_BLOCK" \
+METALLUM_BENCHMARK_TORCH_APPLY_AFTER_MEASURED_FRAMES="$TORCH_APPLY_AFTER_MEASURED_FRAMES" \
+METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES="$TORCH_OBSERVATION_FRAMES" \
 METALLUM_GPU_TIMING=1 \
 METALLUM_GPU_TIMING_DETAIL=0 \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
@@ -585,6 +644,33 @@ measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
     && [ "$measure_start_line" -lt "$measure_end_line" ] \
     && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
     || die "deterministic route markers are out of order"
+
+if [ "$ROUTE_KIND" = "TORCH_EPOCH" ]; then
+    torch_end_frame=$((TORCH_APPLY_AFTER_MEASURED_FRAMES + TORCH_OBSERVATION_FRAMES))
+    torch_position="$TORCH_POSITION_X,$TORCH_POSITION_Y,$TORCH_POSITION_Z"
+    torch_begin="METALLUM_BENCHMARK EVENT=TORCH_EPOCH_BEGIN route=$ROUTE_ID position=$torch_position measured_frame=$TORCH_APPLY_AFTER_MEASURED_FRAMES observation_frames=$TORCH_OBSERVATION_FRAMES"
+    torch_applied="METALLUM_BENCHMARK EVENT=TORCH_EPOCH_APPLIED route=$ROUTE_ID position=$torch_position measured_frame="
+    torch_end="METALLUM_BENCHMARK EVENT=TORCH_EPOCH_END route=$ROUTE_ID position=$torch_position measured_frame=$torch_end_frame"
+
+    torch_begin_count=$(grep -Fc "$torch_begin" "$MINECRAFT_LOG" || true)
+    torch_applied_count=$(grep -Fc "$torch_applied" "$MINECRAFT_LOG" || true)
+    torch_end_count=$(grep -Fc "$torch_end" "$MINECRAFT_LOG" || true)
+    [ "$torch_begin_count" -eq 1 ] \
+        || die "expected exactly one matching TORCH_EPOCH_BEGIN marker (found $torch_begin_count)"
+    [ "$torch_applied_count" -eq 1 ] \
+        || die "expected exactly one matching TORCH_EPOCH_APPLIED marker (found $torch_applied_count)"
+    [ "$torch_end_count" -eq 1 ] \
+        || die "expected exactly one matching TORCH_EPOCH_END marker (found $torch_end_count)"
+
+    torch_begin_line=$(grep -nF "$torch_begin" "$MINECRAFT_LOG" | cut -d: -f1)
+    torch_applied_line=$(grep -nF "$torch_applied" "$MINECRAFT_LOG" | cut -d: -f1)
+    torch_end_line=$(grep -nF "$torch_end" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$measure_start_line" -lt "$torch_begin_line" ] \
+        && [ "$torch_begin_line" -lt "$torch_applied_line" ] \
+        && [ "$torch_applied_line" -lt "$torch_end_line" ] \
+        && [ "$torch_end_line" -lt "$measure_end_line" ] \
+        || die "deterministic torch epoch markers are out of order"
+fi
 
 armed="METALLUM_BENCHMARK EVENT=ARMED scope=$MONITOR_NAME target=${WIDTH}x${HEIGHT} warmup=$WARMUP_FRAMES measure=$MEASURE_FRAMES sequence=[$METALFX_MODE]"
 grep -Fq "$armed" "$MINECRAFT_LOG" || die "benchmark ARMED marker does not match the requested contract"

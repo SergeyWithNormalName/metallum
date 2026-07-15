@@ -35,6 +35,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
 PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
 DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
+BLOCK_ID_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 OPTION_BARE_RE = re.compile(r"[A-Za-z0-9_.+/-]+")
 PROPERTY_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
 
@@ -876,6 +877,12 @@ def _integer(value: object, field: str, minimum: int = 0) -> int:
     return value
 
 
+def _signed_integer(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FixtureError(f"route {field} must be an integer")
+    return value
+
+
 def route_values(path: Path) -> list[str]:
     try:
         raw = path.read_bytes()
@@ -883,17 +890,17 @@ def route_values(path: Path) -> list[str]:
     except (OSError, json.JSONDecodeError) as error:
         raise FixtureError(f"cannot read route {path}: {error}") from error
     route = _object(payload, "root")
-    _exact_keys(
-        route,
-        "root",
-        {
-            "schema_version", "id", "fixture", "player", "dimension",
-            "position", "rotation", "camera", "clock", "weather", "simulation",
-            "readiness",
-        },
-    )
-    if _integer(route.get("schema_version"), "schema_version", 1) != 1:
+    schema_version = _integer(route.get("schema_version"), "schema_version", 1)
+    if schema_version not in (1, 2):
         raise FixtureError("unsupported route schema_version")
+    root_keys = {
+        "schema_version", "id", "fixture", "player", "dimension",
+        "position", "rotation", "camera", "clock", "weather", "simulation",
+        "readiness",
+    }
+    if schema_version == 2:
+        root_keys.add("torch_epoch")
+    _exact_keys(route, "root", root_keys)
     route_id = _string(route.get("id"), "id", SAFE_ID_RE)
     fixture = _object(route.get("fixture"), "fixture")
     _exact_keys(fixture, "fixture", {"id", "sha256"})
@@ -963,7 +970,7 @@ def route_values(path: Path) -> list[str]:
     if position_epsilon <= 0.0 or angle_epsilon <= 0.0:
         raise FixtureError("route readiness epsilons must be > 0")
 
-    return [
+    values = [
         route_id,
         hashlib.sha256(raw).hexdigest(),
         fixture_id,
@@ -983,6 +990,67 @@ def route_values(path: Path) -> list[str]:
         str(timeout_frames),
         repr(position_epsilon),
         repr(angle_epsilon),
+    ]
+    if schema_version == 1:
+        return values
+
+    torch_epoch = _object(route.get("torch_epoch"), "torch_epoch")
+    _exact_keys(
+        torch_epoch,
+        "torch_epoch",
+        {
+            "position", "initial_block", "support_block",
+            "apply_after_measured_frames", "observation_frames",
+        },
+    )
+    torch_position = torch_epoch.get("position")
+    if not isinstance(torch_position, list) or len(torch_position) != 3:
+        raise FixtureError("route torch_epoch.position must contain exactly three integers")
+    torch_x, torch_y, torch_z = (
+        _signed_integer(value, f"torch_epoch.position[{index}]")
+        for index, value in enumerate(torch_position)
+    )
+    if torch_x % 16 != 0 or torch_z % 16 != 0:
+        raise FixtureError(
+            "route torch_epoch.position x and z must lie on 16-block section boundaries"
+        )
+    initial_block = _string(
+        torch_epoch.get("initial_block"),
+        "torch_epoch.initial_block",
+        BLOCK_ID_RE,
+    )
+    support_block = _string(
+        torch_epoch.get("support_block"),
+        "torch_epoch.support_block",
+        BLOCK_ID_RE,
+    )
+    if initial_block != "minecraft:air":
+        raise FixtureError("route torch_epoch.initial_block must be minecraft:air")
+    if support_block != "minecraft:grass_block":
+        raise FixtureError("route torch_epoch.support_block must be minecraft:grass_block")
+    apply_after_measured_frames = _integer(
+        torch_epoch.get("apply_after_measured_frames"),
+        "torch_epoch.apply_after_measured_frames",
+        1,
+    )
+    observation_frames = _integer(
+        torch_epoch.get("observation_frames"),
+        "torch_epoch.observation_frames",
+        1,
+    )
+    if apply_after_measured_frames != 300 or observation_frames != 300:
+        raise FixtureError(
+            "route torch epoch must use a 300-frame baseline and 300-frame observation window"
+        )
+    return values + [
+        "TORCH_EPOCH",
+        str(torch_x),
+        str(torch_y),
+        str(torch_z),
+        initial_block,
+        support_block,
+        str(apply_after_measured_frames),
+        str(observation_frames),
     ]
 
 
@@ -1070,6 +1138,48 @@ def self_test() -> None:
         values = route_values(route)
         assert values[0] == "test-static-v1" and values[2] == "test-v1"
         assert values[3] == first and values[14] == "1" and len(values) == 19
+
+        torch_route_payload = json.loads(route.read_text(encoding="utf-8"))
+        torch_route_payload["schema_version"] = 2
+        torch_route_payload["id"] = "test-torch-v1"
+        torch_route_payload["torch_epoch"] = {
+            "position": [80, 75, -112],
+            "initial_block": "minecraft:air",
+            "support_block": "minecraft:grass_block",
+            "apply_after_measured_frames": 300,
+            "observation_frames": 300,
+        }
+        torch_route = root / "torch-route.json"
+        torch_route.write_text(json.dumps(torch_route_payload), encoding="utf-8")
+        torch_values = route_values(torch_route)
+        assert torch_values[0] == "test-torch-v1" and len(torch_values) == 27
+        assert torch_values[19:] == [
+            "TORCH_EPOCH", "80", "75", "-112", "minecraft:air",
+            "minecraft:grass_block", "300", "300",
+        ]
+
+        invalid_route = root / "invalid-route.json"
+
+        def expect_route_error(payload: dict[str, object], expected: str) -> None:
+            invalid_route.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                route_values(invalid_route)
+            except FixtureError as error:
+                assert expected in str(error)
+            else:
+                raise AssertionError(f"invalid route was accepted: {expected}")
+
+        invalid_torch_route = json.loads(json.dumps(torch_route_payload))
+        invalid_torch_route["torch_epoch"]["unexpected"] = True
+        expect_route_error(invalid_torch_route, "torch_epoch fields are invalid")
+
+        invalid_torch_route = json.loads(json.dumps(torch_route_payload))
+        invalid_torch_route["torch_epoch"]["position"][0] = 81
+        expect_route_error(invalid_torch_route, "16-block section boundaries")
+
+        invalid_torch_route = json.loads(json.dumps(torch_route_payload))
+        invalid_torch_route["torch_epoch"]["observation_frames"] = 600
+        expect_route_error(invalid_torch_route, "300-frame baseline")
 
         options = root / "options.txt"
         options.write_text(
