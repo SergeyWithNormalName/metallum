@@ -285,13 +285,15 @@ public final class MetallumMaterialContractTests {
     }
 
     private static void testLoadingUiContinuity() {
-        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, false, false),
-                "blurred SDR UI lost its output-only presentation route");
-        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, true, false),
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, false, false, false),
+                "non-precomposed blurred UI lost its safe output-only fallback");
+        require(!HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, true, false, false),
+                "precomposed in-world UI still forces an HDR-to-SDR presentation flash");
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, true, true, false),
                 "level-loading UI inherited world HDR exposure");
-        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, false, true),
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, true, false, true),
                 "resource-loading overlay inherited world HDR exposure");
-        require(!HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, false, false),
+        require(!HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, false, false, false),
                 "ordinary in-world UI disabled HDR scene presentation");
     }
 

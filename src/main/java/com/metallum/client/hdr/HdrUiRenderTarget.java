@@ -121,6 +121,7 @@ public final class HdrUiRenderTarget {
                 Minecraft minecraft = Minecraft.getInstance();
                 boolean suppressSceneEnhancement = shouldSuppressSceneEnhancement(
                         backdropBlurredThisFrame,
+                        spatialHdrPrecomposedThisFrame,
                         minecraft.gui.screen() instanceof LevelLoadingScreen,
                         minecraft.gui.overlay() instanceof LoadingOverlay
                 );
@@ -267,6 +268,7 @@ public final class HdrUiRenderTarget {
 
     static boolean shouldSuppressSceneEnhancement(
             final boolean backdropBlurred,
+            final boolean hdrWorldPrecomposed,
             final boolean levelLoadingScreenActive,
             final boolean loadingOverlayActive
     ) {
@@ -274,7 +276,15 @@ public final class HdrUiRenderTarget {
         // RGBA8 composite while GameRenderer transitions from output-only to
         // its first scene-linear world frame; otherwise the same loading UI
         // abruptly inherits world exposure/headroom during its final frames.
-        return backdropBlurred || levelLoadingScreenActive || loadingOverlayActive;
+        // Native-resolution and MetalFX HDR precompose already provide an
+        // exact HDR world plus its quantized SDR seed. Their lightweight
+        // present shader classifies the blurred seed itself, so discarding
+        // that HDR world here would create a visible HDR -> SDR -> HDR flash
+        // whenever an in-world screen opens or closes. Retain the older
+        // output-only fallback only when no matching HDR world exists.
+        return levelLoadingScreenActive
+                || loadingOverlayActive
+                || (backdropBlurred && !hdrWorldPrecomposed);
     }
 
     private static void rejectMaterialGenerationAfterSeedFailure() {
