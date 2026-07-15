@@ -1,5 +1,6 @@
 package com.metallum.client.renderer;
 
+import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.Matrix4;
@@ -17,13 +18,14 @@ public final class RendererArchitectureTests {
         testProductionMetallumRejection();
         testFailClosedSelection();
         testImmutableCapabilitySnapshot();
+        testNativeCapabilitySnapshot();
         testInvalidConfigsAreRejected();
         testTemporalPreparationContract();
         testFrameStateGenerationTransitions();
         testAllHistoryResetReasonsAreRepresentable();
         testFrameStateNumericContracts();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -110,6 +112,91 @@ public final class RendererArchitectureTests {
         require(!snapshot.supports(MetalCapabilities.Feature.METAL4_CORE),
                 "capability snapshot retained a mutable source");
         expectUnsupported(() -> snapshot.features().add(MetalCapabilities.Feature.HDR_OUTPUT));
+    }
+
+    private static void testNativeCapabilitySnapshot() {
+        long nativeSnapshot = MetalCapabilities.NATIVE_METAL3_BASE
+                | MetalCapabilities.NATIVE_METAL4_OS_API
+                | MetalCapabilities.NATIVE_METAL4_GPU_FAMILY
+                | MetalCapabilities.NATIVE_METAL4_CORE
+                | MetalCapabilities.NATIVE_METAL4_COMPILER
+                | MetalCapabilities.NATIVE_METAL4_COMMAND_LIFECYCLE
+                | MetalCapabilities.NATIVE_METAL4_ARGUMENT_TABLES
+                | MetalCapabilities.NATIVE_METAL4_EXPLICIT_BARRIERS
+                | MetalCapabilities.NATIVE_METALFX_SPATIAL
+                | MetalCapabilities.NATIVE_METALFX_TEMPORAL
+                | MetalCapabilities.NATIVE_METALFX_FRAME_INTERPOLATION
+                | MetalCapabilities.NATIVE_METALFX_TEMPORAL_METAL4
+                | MetalCapabilities.NATIVE_METALFX_FRAME_INTERPOLATION_METAL4
+                | MetalCapabilities.NATIVE_REQUIRED_TEXTURE_FORMATS_USAGES
+                | MetalCapabilities.NATIVE_DISPLAY_REFRESH
+                | MetalCapabilities.NATIVE_DISPLAY_HEADROOM
+                | (120L << MetalCapabilities.NATIVE_REFRESH_SHIFT);
+        MetalCapabilities capabilities = MetalCapabilities.fromNativeSnapshot(
+                nativeSnapshot,
+                new EdrCapabilities(1.25f, 2.0f)
+        );
+        require(capabilities.supports(MetalCapabilities.Feature.METAL4_OS_API)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_GPU_FAMILY)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_CORE)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_COMPILER)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_COMMAND_LIFECYCLE)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_ARGUMENT_TABLES)
+                        && capabilities.supports(MetalCapabilities.Feature.METAL4_EXPLICIT_BARRIERS),
+                "Metal 4 sub-capabilities collapsed or decoded incorrectly");
+        require(capabilities.supports(MetalCapabilities.Feature.METALFX_SPATIAL)
+                        && capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)
+                        && capabilities.supports(MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION)
+                        && capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL_METAL4)
+                        && capabilities.supports(
+                        MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION_METAL4),
+                "MetalFX capabilities were not decoded independently");
+        require(capabilities.formatUsageProfile().requiredEngineFormatsAndUsages()
+                        && !capabilities.formatUsageProfile().effectSpecificUsagesValidated(),
+                "format probe was confused with effect-specific usage validation");
+        require(capabilities.displayCapabilities().maximumFramesPerSecond() == 120
+                        && capabilities.displayCapabilities().currentHeadroom() == 1.25f
+                        && capabilities.displayCapabilities().potentialHeadroom() == 2.0f
+                        && capabilities.supports(MetalCapabilities.Feature.HDR_OUTPUT),
+                "display refresh/headroom snapshot mismatch");
+        require(capabilities.evidenceFor(MetalCapabilities.Feature.METAL4_COMPILER)
+                        == MetalCapabilities.Evidence.RUNTIME_PROBE
+                        && capabilities.evidenceFor(MetalCapabilities.Feature.METALFX_TEMPORAL)
+                        == MetalCapabilities.Evidence.FRAMEWORK_DEVICE_QUERY
+                        && capabilities.evidenceFor(
+                        MetalCapabilities.Feature.REQUIRED_TEXTURE_FORMATS_USAGES)
+                        == MetalCapabilities.Evidence.FORMAT_USAGE_PROBE,
+                "capability evidence sources were lost");
+        require(!capabilities.supports(MetalCapabilities.Feature.METALLUM_LIGHTING),
+                "native discovery accidentally enabled unimplemented lighting");
+        expectUnsupported(() -> capabilities.evidence().put(
+                MetalCapabilities.Feature.METALLUM_LIGHTING,
+                MetalCapabilities.Evidence.DECLARED
+        ));
+
+        RendererGenerationConfig metal3WithTemporalAvailable = new RendererGenerationConfig(
+                LightingMode.LEGACY,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                capabilities,
+                1
+        );
+        require(metal3WithTemporalAvailable.executorKind() == MetalExecutorKind.METAL3
+                        && metal3WithTemporalAvailable.capabilities().supports(
+                        MetalCapabilities.Feature.METALFX_TEMPORAL)
+                        && metal3WithTemporalAvailable.capabilities().supports(
+                        MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION),
+                "MetalFX support incorrectly forced a Metal 4 executor");
+
+        MetalCapabilities osOnly = MetalCapabilities.fromNativeSnapshot(
+                MetalCapabilities.NATIVE_METAL3_BASE | MetalCapabilities.NATIVE_METAL4_OS_API,
+                EdrCapabilities.SDR
+        );
+        require(osOnly.supports(MetalCapabilities.Feature.METAL4_OS_API)
+                        && !osOnly.supports(MetalCapabilities.Feature.METAL4_GPU_FAMILY)
+                        && !osOnly.supports(MetalCapabilities.Feature.METAL4_CORE)
+                        && !osOnly.supports(MetalCapabilities.Feature.METAL4_COMPILER),
+                "OS/API availability was treated as GPU/compiler support");
     }
 
     private static void testInvalidConfigsAreRejected() {

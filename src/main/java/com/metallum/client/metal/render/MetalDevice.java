@@ -13,6 +13,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -87,6 +88,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final MemorySegment edrMonitor;
     private volatile HdrConfig hdrConfig;
     private final GpuDebugOptions debugOptions;
+    private final MetalCapabilities rendererCapabilities;
     private final boolean spatialScalingSupported;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
@@ -166,8 +168,30 @@ public final class MetalDevice implements GpuDeviceBackend {
                 Metallum.LOGGER.warn("Failed to query initial EDR capabilities; semantic HDR shaders will remain disabled", exception);
             }
         }
+        MetalCapabilities discoveredCapabilities;
+        try {
+            long nativeCapabilities = MetalNativeBridge.metallum_renderer_capabilities_v1(
+                    metalDeviceHandle,
+                    this.edrMonitor
+            );
+            discoveredCapabilities = MetalCapabilities.fromNativeSnapshot(
+                    nativeCapabilities,
+                    initialEdrCapabilities
+            );
+        } catch (RuntimeException exception) {
+            Metallum.LOGGER.warn(
+                    "Renderer capability discovery failed; future Metal 4/MetalFX paths remain unavailable",
+                    exception
+            );
+            discoveredCapabilities = MetalCapabilities.productionMetal3(
+                    initialEdrCapabilities.isHdrDisplay()
+            );
+        }
+        this.rendererCapabilities = discoveredCapabilities;
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
-        this.spatialScalingSupported = MetalNativeBridge.MTLFXSpatialScaler_supportsDevice(metalDeviceHandle);
+        this.spatialScalingSupported = this.rendererCapabilities.supports(
+                MetalCapabilities.Feature.METALFX_SPATIAL
+        );
         this.commandQueue = MTLCommandQueue.create(metalDeviceHandle, metalLayer);
         int nativePipelineStatus = MetalNativeBridge.metallum_init_pipelines(metalDeviceHandle);
         if (nativePipelineStatus < 0) {
@@ -192,6 +216,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested() ? "enabled" : "disabled"
         );
         Metallum.LOGGER.info("MetalFX spatial scaling support: {}", this.spatialScalingSupported ? "available" : "unavailable");
+    }
+
+    MetalCapabilities rendererCapabilities() {
+        return this.rendererCapabilities;
     }
 
     @Override

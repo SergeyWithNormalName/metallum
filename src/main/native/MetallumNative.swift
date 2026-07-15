@@ -2011,6 +2011,16 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             }
         }
         metadata["static_geometry_heaps_enabled"] = NativeState.staticGeometryHeapsEnabled
+        metadata["renderer_capability_mask_v1"] = String(
+            format: "0x%016llx",
+            NativeState.rendererCapabilitySnapshotV1
+        )
+        metadata["renderer_capabilities_v1"] = rendererCapabilityReport(
+            NativeState.rendererCapabilitySnapshotV1
+        )
+        metadata["display_maximum_fps"] = NativeState.rendererDisplayMaximumFramesPerSecond
+        metadata["display_initial_current_headroom"] = NativeState.rendererDisplayCurrentHeadroom
+        metadata["display_initial_potential_headroom"] = NativeState.rendererDisplayPotentialHeadroom
         var workloadReport = window.workload.report
         workloadReport["private_geometry_heap"] = MetallumStaticGeometryHeapRegistry.shared
             .snapshot().report
@@ -2322,6 +2332,10 @@ private enum NativeState {
     static let forceBuiltinShaderSource = ProcessInfo.processInfo.environment[
         "METALLUM_NATIVE_SHADER_FORCE_SOURCE"
     ] == "1"
+    static var rendererCapabilitySnapshotV1: UInt64 = 0
+    static var rendererDisplayMaximumFramesPerSecond = 0
+    static var rendererDisplayCurrentHeadroom: Float = 1.0
+    static var rendererDisplayPotentialHeadroom: Float = 1.0
     static let gpuTimingEnabled = ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING"] == "1"
     static let gpuTimingDetailEnabled = gpuTimingEnabled
         && ProcessInfo.processInfo.environment["METALLUM_GPU_TIMING_DETAIL"] == "1"
@@ -2553,6 +2567,7 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
     private let lock = NSLock()
     private var currentHeadroom: Float = 1.0
     private var potentialHeadroom: Float = 1.0
+    private var maximumFramesPerSecond = 0
     private var refreshScheduled = false
     private var lastRefreshUptime: TimeInterval = 0.0
     private var observers: [NSObjectProtocol] = []
@@ -2586,11 +2601,11 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
         }
     }
 
-    func snapshot() -> (current: Float, potential: Float) {
+    func snapshot() -> (current: Float, potential: Float, maximumFramesPerSecond: Int) {
         requestRefresh()
         lock.lock()
         defer { lock.unlock() }
-        return (currentHeadroom, potentialHeadroom)
+        return (currentHeadroom, potentialHeadroom, maximumFramesPerSecond)
     }
 
     private func requestRefresh() {
@@ -2623,10 +2638,12 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
             1.0,
             screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1.0
         ))
+        let refresh = max(0, screen?.maximumFramesPerSecond ?? 0)
 
         lock.lock()
         currentHeadroom = current.isFinite ? current : 1.0
         potentialHeadroom = potential.isFinite ? potential : 1.0
+        maximumFramesPerSecond = refresh
         refreshScheduled = false
         lastRefreshUptime = ProcessInfo.processInfo.systemUptime
         lock.unlock()
@@ -4678,6 +4695,139 @@ public func metallum_EDRMonitor_query(
     let snapshot = monitor.snapshot()
     return UInt64(snapshot.current.bitPattern)
         | (UInt64(snapshot.potential.bitPattern) << 32)
+}
+
+private let rendererCapabilityMetal3Base: UInt64 = 1 << 0
+private let rendererCapabilityMetal4OsApi: UInt64 = 1 << 1
+private let rendererCapabilityMetal4GpuFamily: UInt64 = 1 << 2
+private let rendererCapabilityMetal4Core: UInt64 = 1 << 3
+private let rendererCapabilityMetal4Compiler: UInt64 = 1 << 4
+private let rendererCapabilityMetal4CommandLifecycle: UInt64 = 1 << 5
+private let rendererCapabilityMetal4ArgumentTables: UInt64 = 1 << 6
+private let rendererCapabilityMetal4ExplicitBarriers: UInt64 = 1 << 7
+private let rendererCapabilityMetalFxSpatial: UInt64 = 1 << 8
+private let rendererCapabilityMetalFxTemporal: UInt64 = 1 << 9
+private let rendererCapabilityMetalFxFrameInterpolation: UInt64 = 1 << 10
+private let rendererCapabilityMetalFxTemporalMetal4: UInt64 = 1 << 11
+private let rendererCapabilityMetalFxFrameInterpolationMetal4: UInt64 = 1 << 12
+private let rendererCapabilityRequiredTextureFormatsUsages: UInt64 = 1 << 13
+private let rendererCapabilityDisplayRefresh: UInt64 = 1 << 14
+private let rendererCapabilityDisplayHeadroom: UInt64 = 1 << 15
+private let rendererCapabilityRefreshShift: UInt64 = 48
+
+private func rendererCapabilityReport(_ snapshot: UInt64) -> [String: Bool] {
+    [
+        "metal3_base": snapshot & rendererCapabilityMetal3Base != 0,
+        "metal4_os_api": snapshot & rendererCapabilityMetal4OsApi != 0,
+        "metal4_gpu_family": snapshot & rendererCapabilityMetal4GpuFamily != 0,
+        "metal4_core": snapshot & rendererCapabilityMetal4Core != 0,
+        "metal4_compiler": snapshot & rendererCapabilityMetal4Compiler != 0,
+        "metal4_command_lifecycle": snapshot & rendererCapabilityMetal4CommandLifecycle != 0,
+        "metal4_argument_tables": snapshot & rendererCapabilityMetal4ArgumentTables != 0,
+        "metal4_explicit_barriers": snapshot & rendererCapabilityMetal4ExplicitBarriers != 0,
+        "metalfx_spatial": snapshot & rendererCapabilityMetalFxSpatial != 0,
+        "metalfx_temporal": snapshot & rendererCapabilityMetalFxTemporal != 0,
+        "metalfx_frame_interpolation": snapshot & rendererCapabilityMetalFxFrameInterpolation != 0,
+        "metalfx_temporal_metal4": snapshot & rendererCapabilityMetalFxTemporalMetal4 != 0,
+        "metalfx_frame_interpolation_metal4": snapshot
+            & rendererCapabilityMetalFxFrameInterpolationMetal4 != 0,
+        "required_texture_formats_usages": snapshot
+            & rendererCapabilityRequiredTextureFormatsUsages != 0,
+        "display_refresh": snapshot & rendererCapabilityDisplayRefresh != 0,
+        "display_headroom": snapshot & rendererCapabilityDisplayHeadroom != 0
+    ]
+}
+
+private func supportsRendererTextureFormatUsageProfile(_ device: MTLDevice) -> Bool {
+    func supports(_ format: MTLPixelFormat, _ usage: MTLTextureUsage) -> Bool {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = usage
+        return device.makeTexture(descriptor: descriptor) != nil
+    }
+
+    let colorUsage: MTLTextureUsage = [.shaderRead, .shaderWrite, .renderTarget]
+    return supports(.rgba16Float, colorUsage)
+        && supports(.rg16Float, colorUsage)
+        && supports(.r8Unorm, colorUsage)
+        && supports(.depth32Float, [.shaderRead, .renderTarget])
+}
+
+@_cdecl("metallum_renderer_capabilities_v1")
+public func metallum_renderer_capabilities_v1(
+    _ device: MTLDevice,
+    _ rawMonitor: UnsafeMutableRawPointer?
+) -> UInt64 {
+    autoreleasepool {
+        var snapshot = rendererCapabilityMetal3Base
+
+        if MTLFXSpatialScalerDescriptor.supportsDevice(device) {
+            snapshot |= rendererCapabilityMetalFxSpatial
+        }
+        if MTLFXTemporalScalerDescriptor.supportsDevice(device) {
+            snapshot |= rendererCapabilityMetalFxTemporal
+        }
+        if supportsRendererTextureFormatUsageProfile(device) {
+            snapshot |= rendererCapabilityRequiredTextureFormatsUsages
+        }
+
+        if #available(macOS 26.0, *) {
+            snapshot |= rendererCapabilityMetal4OsApi
+            if device.supportsFamily(.metal4) {
+                snapshot |= rendererCapabilityMetal4GpuFamily
+                    | rendererCapabilityMetal4Core
+                    | rendererCapabilityMetal4CommandLifecycle
+                    | rendererCapabilityMetal4ArgumentTables
+                    | rendererCapabilityMetal4ExplicitBarriers
+                do {
+                    _ = try device.makeCompiler(descriptor: MTL4CompilerDescriptor())
+                    snapshot |= rendererCapabilityMetal4Compiler
+                } catch {
+                    // Compiler support stays independently unavailable.
+                }
+            }
+            if MTLFXFrameInterpolatorDescriptor.supportsDevice(device) {
+                snapshot |= rendererCapabilityMetalFxFrameInterpolation
+            }
+            if MTLFXTemporalScalerDescriptor.supportsMetal4FX(device) {
+                snapshot |= rendererCapabilityMetalFxTemporalMetal4
+            }
+            if MTLFXFrameInterpolatorDescriptor.supportsMetal4FX(device) {
+                snapshot |= rendererCapabilityMetalFxFrameInterpolationMetal4
+            }
+        }
+
+        var refresh = 0
+        var currentHeadroom: Float = 1.0
+        var potentialHeadroom: Float = 1.0
+        if let rawMonitor {
+            let monitor = Unmanaged<MetallumEdrMonitor>
+                .fromOpaque(rawMonitor)
+                .takeUnretainedValue()
+            let display = monitor.snapshot()
+            refresh = max(0, min(1_000, display.maximumFramesPerSecond))
+            currentHeadroom = display.current
+            potentialHeadroom = display.potential
+            snapshot |= rendererCapabilityDisplayHeadroom
+            if refresh > 0 {
+                snapshot |= rendererCapabilityDisplayRefresh
+            }
+        }
+        if refresh > 0 {
+            snapshot |= UInt64(refresh) << rendererCapabilityRefreshShift
+        }
+
+        NativeState.rendererCapabilitySnapshotV1 = snapshot
+        NativeState.rendererDisplayMaximumFramesPerSecond = refresh
+        NativeState.rendererDisplayCurrentHeadroom = currentHeadroom
+        NativeState.rendererDisplayPotentialHeadroom = potentialHeadroom
+        return snapshot
+    }
 }
 
 @_cdecl("metallum_create_metal_layer")

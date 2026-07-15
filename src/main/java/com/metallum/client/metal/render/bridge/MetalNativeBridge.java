@@ -64,6 +64,11 @@ public final class MetalNativeBridge {
                     "metallum_EDRMonitor_query",
                     FunctionDescriptor.of(LONG, ValueLayout.ADDRESS)
             );
+            rendererCapabilitiesV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_renderer_capabilities_v1",
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
@@ -456,6 +461,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSWindowBackingScaleFactor;
     private static final MethodHandle createEdrMonitor;
     private static final MethodHandle EDRMonitorQuery;
+    private static final MethodHandle rendererCapabilitiesV1;
     private static final MethodHandle createMetalLayer;
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
@@ -593,6 +599,17 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_EDRMonitor_query", throwable);
+        }
+    }
+
+    public static long metallum_renderer_capabilities_v1(
+            final MemorySegment device,
+            final MemorySegment monitor
+    ) {
+        try {
+            return (long) rendererCapabilitiesV1.invokeExact(segment(device), segment(monitor));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_renderer_capabilities_v1", throwable);
         }
     }
 
