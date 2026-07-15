@@ -204,6 +204,14 @@ tasks.register("frameGraphValidation", JavaExec) {
 	mainClass.set("com.metallum.client.metal.render.framegraph.FrameGraphTests")
 }
 
+tasks.register("rendererArchitectureUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free renderer generation and temporal contract tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.RendererArchitectureTests")
+}
+
 tasks.register("spatialScalingUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs MetalFX preset and render-resolution policy tests"
@@ -574,6 +582,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumRelightPlanUnitTest"))
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
+	dependsOn(tasks.named("rendererArchitectureUnitTest"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
 	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))
