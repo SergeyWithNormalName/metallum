@@ -268,10 +268,17 @@ public final class FrameSynthesisContract {
         }
         if (previous.state().rendererGenerationId() != current.state().rendererGenerationId()
                 || previous.state().historyGeneration() != current.state().historyGeneration()
+                || previous.state().lightingGenerationId() != current.state().lightingGenerationId()
+                || previous.state().outputGenerationId() != current.state().outputGenerationId()
+                || previous.state().lightingMode() != current.state().lightingMode()
+                || previous.state().outputMode() != current.state().outputMode()
                 || previous.inFlightGeneration() != current.inFlightGeneration()
                 || !resourceGenerationsMatch(previous)
                 || !resourceGenerationsMatch(current)) {
             reasons.add(RejectionReason.GENERATION_MISMATCH);
+        }
+        if (!FrameState.transitionResetReasons(previous.state(), current.state(), Set.of()).isEmpty()) {
+            reasons.add(RejectionReason.HISTORY_DISCONTINUITY);
         }
         if (!previous.discontinuities().isEmpty() || !previous.state().historyResetReasons().isEmpty()) {
             reasons.add(RejectionReason.HISTORY_DISCONTINUITY);

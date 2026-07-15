@@ -21,6 +21,7 @@ public final class FrameSynthesisTests {
         testMissingTemporalInputsFailClosed();
         testUiMustRemainSeparate();
         testDiscontinuitiesInvalidateHistory();
+        testGenerationTransitionsFailClosed();
         testPresentationAndOwnershipFailures();
         testCadenceAndImmutableOwnership();
         System.out.println("Frame synthesis P6 contract tests passed");
@@ -112,6 +113,56 @@ public final class FrameSynthesisTests {
             require(FrameSynthesisContract.evaluate(invalid).rejectionReasons().contains(
                             FrameSynthesisContract.RejectionReason.HISTORY_DISCONTINUITY),
                     discontinuity + " did not invalidate synthesis history");
+        }
+    }
+
+    private static void testGenerationTransitionsFailClosed() {
+        FrameSynthesisContract.Request valid = validRequest(MetalExecutorKind.METAL3);
+        FrameState source = valid.current().state();
+        for (FrameState changed : Set.of(
+                stateWithGenerationAndModes(
+                        source,
+                        source.lightingGenerationId() + 1L,
+                        source.outputGenerationId(),
+                        source.lightingMode(),
+                        source.outputMode()
+                ),
+                stateWithGenerationAndModes(
+                        source,
+                        source.lightingGenerationId(),
+                        source.outputGenerationId() + 1L,
+                        source.lightingMode(),
+                        source.outputMode()
+                ),
+                stateWithGenerationAndModes(
+                        source,
+                        source.lightingGenerationId(),
+                        source.outputGenerationId(),
+                        LightingMode.METALLUM,
+                        source.outputMode()
+                ),
+                stateWithGenerationAndModes(
+                        source,
+                        source.lightingGenerationId(),
+                        source.outputGenerationId(),
+                        source.lightingMode(),
+                        DisplayOutputMode.SDR
+                )
+        )) {
+            FrameSynthesisContract.RenderedFrame changedFrame = frameWithState(valid.current(), changed);
+            FrameSynthesisContract.Request invalid = copy(
+                    valid,
+                    changedFrame,
+                    valid.previous(),
+                    valid.generatedPresentation(),
+                    valid.drawableOwnership(),
+                    valid.inFlightOwnership()
+            );
+            Set<FrameSynthesisContract.RejectionReason> reasons =
+                    FrameSynthesisContract.evaluate(invalid).rejectionReasons();
+            require(reasons.contains(FrameSynthesisContract.RejectionReason.GENERATION_MISMATCH)
+                            && reasons.contains(FrameSynthesisContract.RejectionReason.HISTORY_DISCONTINUITY),
+                    "lighting/output generation transition did not fail closed: " + reasons);
         }
     }
 
@@ -266,6 +317,50 @@ public final class FrameSynthesisTests {
                 ui,
                 worldContainsUi,
                 discontinuities
+        );
+    }
+
+    private static FrameState stateWithGenerationAndModes(
+            final FrameState source,
+            final long lightingGeneration,
+            final long outputGeneration,
+            final LightingMode lightingMode,
+            final DisplayOutputMode outputMode
+    ) {
+        return new FrameState(
+                source.contract(),
+                source.frameId(),
+                source.rendererGenerationId(),
+                source.historyGeneration(),
+                lightingGeneration,
+                outputGeneration,
+                lightingMode,
+                outputMode,
+                source.currentTransforms(),
+                source.previousTransforms(),
+                source.renderExtent(),
+                source.displayExtent(),
+                source.exposure(),
+                source.preExposure(),
+                source.jitterOffset(),
+                Set.of()
+        );
+    }
+
+    private static FrameSynthesisContract.RenderedFrame frameWithState(
+            final FrameSynthesisContract.RenderedFrame source,
+            final FrameState state
+    ) {
+        return new FrameSynthesisContract.RenderedFrame(
+                state,
+                source.inFlightGeneration(),
+                source.worldColor(),
+                source.depth(),
+                source.motion(),
+                source.reactiveMask(),
+                source.sdrUi(),
+                source.worldColorContainsUi(),
+                source.discontinuities()
         );
     }
 

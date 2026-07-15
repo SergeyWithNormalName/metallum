@@ -34,12 +34,12 @@ Iris: намеренно не является целью совместимос
 Этот checklist фиксирует только фактически готовые контракты. Он не означает, что новое освещение, temporal processing или production Metal 4 renderer уже реализованы.
 
 - [x] O0–O6 подтверждены кодом, targeted validation, full `clean check` и имеющимся runtime evidence.
-- [x] `LightingMode` и `DisplayOutputMode` независимы; renderer generation устойчиво отказывает в Legacy/SDR/Metal 3 при отсутствии capability.
+- [x] `LightingMode` и `DisplayOutputMode` независимы; renderer generation при failure возвращает Legacy/Metal 3 и сохраняет безопасный current output, если он поддержан, иначе SDR.
 - [x] Immutable versioned `FrameState`/`FrameContract` готовы; production jitter остаётся нулевым, motion/reactive inputs обозначены как unavailable.
 - [x] History-reset contract покрывает first frame, resize, world/dimension transitions, teleport/camera cut, projection/FOV, renderer/lighting/output generation, internal scale и reload.
 - [x] Один immutable capability snapshot собирается при создании `MetalDevice`; MetalFX capabilities не привязаны к выбору Metal 3/Metal 4 executor.
 - [x] Изолированный native Metal 4 lifecycle harness проходит на M1 Pro/macOS 26+ и корректно skipped на неподходящей OS/architecture/SDK.
-- [x] Pure `FrameSynthesisContract` описывает admission, cadence, presentation order, drawable ownership и in-flight lifetime, но не включает Frame Interpolation.
+- [x] Pure `FrameSynthesisContract` описывает admission для Frame Interpolation, cadence, presentation order, drawable ownership и in-flight lifetime, но не создаёт и не включает production FI.
 - [x] `BoundedWorkQueue` задаёт capacity/item/time budgets, coalescing, priority, starvation bound, deterministic order, overflow fallback и telemetry; к production lighting queues он пока не подключён.
 - [x] Production output и видимая картинка не изменены; HDR/SDR routing остался прежним.
 - [x] Production executor остаётся Metal 3; Metal 4 command allocators, argument tables, residency sets и barriers есть только в test harness.
