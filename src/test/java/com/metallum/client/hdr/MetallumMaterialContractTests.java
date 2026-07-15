@@ -20,6 +20,7 @@ public final class MetallumMaterialContractTests {
         testSodiumLinearMaterialAdapter(sources);
         testPostProcessingContracts(sources);
         testNumericMaterialContracts();
+        testLoadingUiContinuity();
         testFailClosedBehavior(sources);
         System.out.println(
                 "PASS L2 material adapters cover Minecraft 26.2 and Sodium 0.9.1 actual shader resources"
@@ -209,10 +210,14 @@ public final class MetallumMaterialContractTests {
                 "Sodium emission strength bits are absent");
         require(fragment.contains("((metallumMaterial >> 7u) & 1u) != 0u"),
                 "Sodium exact-emission bit is absent");
-        require(fragment.contains("? max(color.rgb, metallumAuthoredRadiance)"),
-                "Sodium exact emission is not a maximum");
-        require(fragment.contains(": color.rgb + metallumAuthoredRadiance"),
-                "Sodium non-exact emission is not additive");
+        require(fragment.contains("? 4.0 * metallumEmissionStrength"),
+                "Sodium exact emission lost its full radiance range");
+        require(fragment.contains(": 1.0 + 0.75 * metallumEmissionStrength"),
+                "Sodium block emission is not bounded near reference white");
+        require(fragment.contains("color.rgb = max(color.rgb, metallumAuthoredRadiance)"),
+                "Sodium emission no longer preserves the lit surface as a floor");
+        require(!fragment.contains("color.rgb + metallumAuthoredRadiance"),
+                "Sodium block emission still adds a duplicate albedo copy");
         require(fragment.contains("metallumMaterialDecodeColor(u_FogColor)"),
                 "Sodium fog color is not decoded");
     }
@@ -264,10 +269,30 @@ public final class MetallumMaterialContractTests {
                 "maximum emission radiance");
         require(close(MetallumMaterialShaderPatcher.emissionRadiance(99), 4.0f),
                 "emission clamp");
+        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(0), 0.0f),
+                "zero block emission radiance");
+        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(14), 1.7f),
+                "glow-berry block emission radiance");
+        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(15), 1.75f),
+                "maximum block emission radiance");
+        require(MetallumMaterialShaderPatcher.blockEmissionRadiance(15)
+                        < MetallumMaterialShaderPatcher.emissionRadiance(15),
+                "block-state emission retained the exact-emissive 4x peak");
         require(close(MetallumMaterialShaderPatcher.linearBlend(1.0f, 0.0f, 0.5f), 0.5f),
                 "linear alpha blend");
         require(close(MetallumMaterialShaderPatcher.linearBlend(2.0f, 0.25f, 0.0f), 0.25f),
                 "zero-alpha blend");
+    }
+
+    private static void testLoadingUiContinuity() {
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, false, false),
+                "blurred SDR UI lost its output-only presentation route");
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, true, false),
+                "level-loading UI inherited world HDR exposure");
+        require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, false, true),
+                "resource-loading overlay inherited world HDR exposure");
+        require(!HdrUiRenderTarget.shouldSuppressSceneEnhancement(false, false, false),
+                "ordinary in-world UI disabled HDR scene presentation");
     }
 
     private static void testFailClosedBehavior(

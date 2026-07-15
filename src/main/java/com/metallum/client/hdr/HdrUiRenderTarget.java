@@ -8,6 +8,8 @@ import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.LevelLoadingScreen;
+import net.minecraft.client.gui.screens.LoadingOverlay;
 import org.jspecify.annotations.Nullable;
 
 /** Owns the scene-seeded SDR target used by GuiRenderer in the FP16 scene mode. */
@@ -116,7 +118,13 @@ public final class HdrUiRenderTarget {
     public static void finish() {
         if (activeThisFrame && target != null) {
             try {
-                MetalHdrFrame.captureUi(target.getColorTextureView(), backdropBlurredThisFrame);
+                Minecraft minecraft = Minecraft.getInstance();
+                boolean suppressSceneEnhancement = shouldSuppressSceneEnhancement(
+                        backdropBlurredThisFrame,
+                        minecraft.gui.screen() instanceof LevelLoadingScreen,
+                        minecraft.gui.overlay() instanceof LoadingOverlay
+                );
+                MetalHdrFrame.captureUi(target.getColorTextureView(), suppressSceneEnhancement);
                 lastUiFinished = true;
                 lastUiSource = activeSource;
             } catch (Throwable throwable) {
@@ -255,6 +263,18 @@ public final class HdrUiRenderTarget {
             final boolean materialGenerationActive
     ) {
         return materialGenerationActive;
+    }
+
+    static boolean shouldSuppressSceneEnhancement(
+            final boolean backdropBlurred,
+            final boolean levelLoadingScreenActive,
+            final boolean loadingOverlayActive
+    ) {
+        // Loading surfaces are SDR UI. Keep presenting the complete seeded
+        // RGBA8 composite while GameRenderer transitions from output-only to
+        // its first scene-linear world frame; otherwise the same loading UI
+        // abruptly inherits world exposure/headroom during its final frames.
+        return backdropBlurred || levelLoadingScreenActive || loadingOverlayActive;
     }
 
     private static void rejectMaterialGenerationAfterSeedFailure() {

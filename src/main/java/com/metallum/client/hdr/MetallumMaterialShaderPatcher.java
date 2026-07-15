@@ -24,6 +24,7 @@ public final class MetallumMaterialShaderPatcher {
 
     public static final float REFERENCE_WHITE = 1.0f;
     public static final float MAX_EMISSION_RADIANCE = 4.0f;
+    public static final float MAX_BLOCK_EMISSION_RADIANCE = 1.75f;
     private static final String MARKER = "METALLUM_MATERIAL_LINEAR_V1";
     private static final String COLOR_OUTPUT = "out vec4 fragColor;";
     private static final String TEXT_MASK_SAMPLE = "texture(Sampler0, texCoord0).rrrr";
@@ -110,6 +111,15 @@ public final class MetallumMaterialShaderPatcher {
 
     static float emissionRadiance(final int emission) {
         return MAX_EMISSION_RADIANCE * Math.clamp(emission, 0, 15) / 15.0f;
+    }
+
+    static float blockEmissionRadiance(final int emission) {
+        int boundedEmission = Math.clamp(emission, 0, 15);
+        return boundedEmission == 0
+                ? 0.0f
+                : REFERENCE_WHITE
+                        + (MAX_BLOCK_EMISSION_RADIANCE - REFERENCE_WHITE)
+                        * boundedEmission / 15.0f;
     }
 
     static float linearBlend(final float source, final float destination, final float sourceAlpha) {
@@ -234,12 +244,17 @@ public final class MetallumMaterialShaderPatcher {
         String fogAnchor = "    fragColor = _linearFog(color, v_FragDistance, u_FogColor, u_EnvironmentFog, u_RenderFog, fadeFactor);";
         String fogReplacement = "    uint metallumEmissionCode = (metallumMaterial >> 3u) & 15u;\n"
                 + "    if (metallumEmissionCode != 0u) {\n"
-                + "        float metallumEmission = 4.0 * float(metallumEmissionCode) / 15.0;\n"
                 + "        bool metallumExactEmission = ((metallumMaterial >> 7u) & 1u) != 0u;\n"
+                + "        float metallumEmissionStrength = float(metallumEmissionCode) / 15.0;\n"
+                + "        float metallumEmission = metallumExactEmission\n"
+                + "                ? 4.0 * metallumEmissionStrength\n"
+                + "                : 1.0 + 0.75 * metallumEmissionStrength;\n"
                 + "        vec3 metallumAuthoredRadiance = metallumUnlitBase * metallumEmission;\n"
-                + "        color.rgb = metallumExactEmission\n"
-                + "                ? max(color.rgb, metallumAuthoredRadiance)\n"
-                + "                : color.rgb + metallumAuthoredRadiance;\n"
+                + "        // Block-state emission is an authored surface floor, not an\n"
+                + "        // additive copy of the complete albedo. Keeping it bounded\n"
+                + "        // prevents ripe cave-vine quads from separating violently\n"
+                + "        // from adjacent non-emitting vine states after lightmap decode.\n"
+                + "        color.rgb = max(color.rgb, metallumAuthoredRadiance);\n"
                 + "    }\n"
                 + "    fragColor = _linearFog(color, v_FragDistance, metallumMaterialDecodeColor(u_FogColor), u_EnvironmentFog, u_RenderFog, fadeFactor);";
         patched = replaceExactlyOnce(patched, fogAnchor, fogReplacement);
