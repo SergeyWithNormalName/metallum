@@ -8,6 +8,7 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.HdrSemanticState;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.hdr.LightmapHdrShaderPatcher;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.hdr.MetallumMaterialState;
@@ -158,10 +159,12 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean hdrEnhancementUnavailable;
     private boolean hdrEnhancementActivationLogged;
     private boolean hdrSceneAvailable;
+    private boolean hdrWorldSceneAvailable;
     private long hdrSceneSubmitIndex = Long.MIN_VALUE;
     private MemorySegment hdrUiHandle = MemorySegment.NULL;
     private long hdrUiSubmitIndex = Long.MIN_VALUE;
     private boolean hdrUiSuppressSceneEnhancement;
+    private boolean materialWorldPassActive;
     private boolean spatialSceneAvailable;
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
     private long spatialHdrPrecomposedSubmitIndex = Long.MIN_VALUE;
@@ -918,6 +921,33 @@ public final class MetalDevice implements GpuDeviceBackend {
         return generation != null && generation.lightingMode() == LightingMode.METALLUM;
     }
 
+    boolean isMaterialWorldPassActive() {
+        return this.materialWorldPassActive && this.isMaterialGenerationActive();
+    }
+
+    void setMaterialWorldPassActive(final boolean active) {
+        this.materialWorldPassActive = active;
+    }
+
+    int capturedFrameSourceEncoding(final MetalGpuTexture source) {
+        return capturedFrameSourceEncoding(
+                this.hdrWorldSceneAvailable
+                        && this.hdrSceneAvailable
+                        && this.hdrSceneSubmitIndex == this.commandEncoder.currentSubmitIndex(),
+                HdrSceneState.sourceEncoding(),
+                source.getFormat() == GpuFormat.RGBA16_FLOAT
+        );
+    }
+
+    static int capturedFrameSourceEncoding(
+            final boolean worldSceneRendered,
+            final HdrSourceEncoding materialEncoding,
+            final boolean fp16Source
+    ) {
+        return (worldSceneRendered ? materialEncoding : HdrSourceEncoding.SRGB)
+                .nativeValue(fp16Source);
+    }
+
     boolean isMaterialHdrGenerationActive() {
         RendererGenerationConfig generation = this.activeRendererGeneration;
         return generation != null
@@ -957,7 +987,22 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     private boolean isSceneRoutingActive() {
-        return this.hdrEnhancedActive || this.isMaterialGenerationActive();
+        return shouldRouteScene(
+                this.hdrEnhancedActive,
+                this.isMaterialGenerationActive(),
+                this.hdrWorldSceneAvailable,
+                this.hdrOutputMode != HdrOutputMode.SDR
+        );
+    }
+
+    static boolean shouldRouteScene(
+            final boolean hdrEnhancedActive,
+            final boolean materialGenerationActive,
+            final boolean worldSceneAvailable,
+            final boolean hdrOutputActive
+    ) {
+        return hdrEnhancedActive
+                || (materialGenerationActive && (worldSceneAvailable || hdrOutputActive));
     }
 
     private void releaseLegacyHdrGenerationResources() {
@@ -1021,7 +1066,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         return new SemanticAttachment(this.hdrSemanticMask.nativeHandle(), clear);
     }
 
-    void captureHdrScene(final MetalGpuTexture source, @Nullable final MetalGpuTexture depth) {
+    void captureHdrScene(
+            final MetalGpuTexture source,
+            @Nullable final MetalGpuTexture depth,
+            final boolean worldSceneRendered
+    ) {
         this.spatialSceneAvailable = MetalFxSpatialScaling.isActive() && !source.isClosed();
         this.spatialSceneSubmitIndex = this.spatialSceneAvailable
                 ? this.commandEncoder.currentSubmitIndex()
@@ -1037,6 +1086,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         if ((!materialScene && !legacyHdrScene) || source.isClosed()) {
             return;
         }
+        this.hdrWorldSceneAvailable = worldSceneRendered;
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
@@ -1244,6 +1294,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         boolean materialHdr = this.isMaterialHdrGenerationActive();
         boolean precomposeHdr = (materialHdr || this.hdrEnhancedActive)
+                && this.hdrWorldSceneAvailable
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
                 && (this.hdrDirectSceneSource == null || this.hdrDirectSceneSource == source)
@@ -1261,6 +1312,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         int result = this.commandEncoder.encodeHdrUiBackdrop(
                 source,
                 destination,
+                this.capturedFrameSourceEncoding(source),
                 precomposeHdr ? this.hdrSceneDepthHandle : MemorySegment.NULL,
                 semanticHandle,
                 precomposeHdr,
@@ -1359,6 +1411,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSceneSubmitIndex == submitIndex
                 && isHdrSceneColorConsumable(
                         this.hdrSceneColorState,
+                        this.hdrWorldSceneAvailable,
                         !MetalNativeBridge.isNullHandle(this.hdrSceneColorHandle),
                         directSourcePresent,
                         this.hdrDirectSceneSource == presentedSource,
@@ -1398,17 +1451,19 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrSceneColorHandle = MemorySegment.NULL;
         this.hdrSceneColorState = HdrSceneColorState.NONE;
         this.hdrDirectSceneRequiresSpatialScaling = false;
+        this.hdrWorldSceneAvailable = false;
     }
 
     static boolean isHdrSceneColorConsumable(
             final HdrSceneColorState state,
+            final boolean worldSceneAvailable,
             final boolean handlePresent,
             final boolean directSourcePresent,
             final boolean directSourceMatchesPresented,
             final boolean directSourceClosed,
             final boolean directRouteActive
     ) {
-        if (!handlePresent) {
+        if (!worldSceneAvailable || !handlePresent) {
             return false;
         }
         return switch (state) {

@@ -1,6 +1,6 @@
 # Metallum: глобальный план независимого нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура; preparation gate и Lighting Stages 0–1 пройдены 15 июля 2026 года, следующая работа — Lighting Stage 2.
+Статус: целевая архитектура; preparation gate и Lighting Stages 0–2 пройдены 16 июля 2026 года, следующая работа — Lighting Stage 3.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -1497,7 +1497,7 @@ Diagnostic overlays:
 - При выключенной диагностике Native и оба Spatial режима сохраняют `0` diagnostic bytes/passes/encoders/PSO и 17 обычных PSO. Live diagnostic smoke: `89,087,040` bytes, один pass/encoder/PSO, без Metal errors и видимого изменения world/UI.
 - M1 Pro stable A/B, CPU p95 / GPU p95 / 1% low, L0 → L1: Native `10.856→10.823 ms / 7.707→7.834 ms / 56.715→57.928`; Quality `10.797→9.765 / 7.580→7.215 / 60.339→65.098`; Performance `10.905→10.458 / 8.193→8.074 / 59.621→60.576`. Нестабильные control-выбросы исключены немедленным A–B–A повтором.
 
-### Этап 2. Scene-linear material contract и независимые SDR/HDR output paths — ✅ ВЫПОЛНЕН 15 июля 2026
+### Этап 2. Scene-linear material contract и независимые SDR/HDR output paths — ✅ ВЫПОЛНЕН 16 июля 2026
 
 #### Работы
 
@@ -1530,11 +1530,12 @@ Diagnostic overlays:
 - Реализованы четыре изолированных generation-контракта: Legacy+SDR `RGBA8`, Legacy+HDR semantic с фактическим startup storage, Metallum+SDR scene-linear `RGBA8`, Metallum+HDR actual-radiance `RGBA16F`. Для атомарной смены output добавлены только необходимые compatibility generations.
 - `METALLUM` покрывает реальные shader roles Minecraft 26.2 и Sodium; texture/albedo/tint/fog/blending и emission линейны. Неизвестный role инвалидирует текущий кадр и на следующей generation оставляет тот же SDR/HDR output с Legacy lighting.
 - В Metallum+HDR histogram управляет только exposure, bloom берётся из actual radiance; semantic/depth/reconstruction отсутствуют. Оба SDR generation имеют `0` HDR bytes/passes/PSO. SDR UI остаётся отдельным `RGBA8` target; title/loading UI обрабатывается без запуска HDR effects.
-- GPU numeric validation: radiance `1.640` сохраняется до display mapping и даёт `2.828`; `hdrStrength` и Legacy reconstruction на неё не влияют; sRGB `0.5 → 0.214`, UI-only `0.5 → 0.216`, 50% alpha white → `0.5` linear.
+- GPU numeric validation: radiance `1.640` сохраняется до display mapping и даёт `2.799`; `hdrStrength` и Legacy reconstruction на неё не влияют; sRGB `0.5 → 0.214`, UI-only `0.5 → 0.216`, 50% alpha white → `0.5` linear.
 - M1 Pro, Native 3024×1964, EDR headroom `8`, 3000 кадров: Legacy+HDR `137.316 FPS / 7.402 ms GPU p95`, Metallum+HDR `158.362 FPS / 6.454 ms`; verdict `IMPROVEMENT`. HDR resources уменьшены с `148,478,688` до `100,965,600` bytes за счёт удаления semantic/depth/reconstruction.
 - Legacy+EDR остаётся display-only режимом с SDR/RGBA8 generation; semantic `ENHANCED` поддерживает исходный RGBA8 MainTarget, а scene-wide Legacy HDR и Metallum actual-radiance используют startup FP16. Переходы EDR → Enhanced и startup EDR закрыты отдельными регрессионными проверками.
 - Переключатель `Улучшенное освещение` добавлен на страницу Metallum в Sodium и сохраняет только ось `improvedLighting`; изменение применяется после перезапуска.
 - Live output generation публикуется только после успешной перенастройки `CAMetalLayer`, поэтому отклонённая native-смена не меняет активный Java generation.
+- Финальная L2-регрессия ограничила material flavor реальным world pass, восстановила fence-цепочку SDR UI seed, откалибровала legacy lightmap для linear multiplication и ограничила Actual bloom доступным headroom. FP16 loading overlay сохраняет белый логотип Mojang. На встроенном дисплее подтверждены нормальная ночь, HDR-пики и отсутствие menu/world артефактов.
 
 ### Этап 3. Light registry и clustered forward+
 

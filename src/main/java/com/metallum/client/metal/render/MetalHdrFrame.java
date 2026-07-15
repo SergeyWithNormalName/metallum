@@ -10,6 +10,24 @@ public final class MetalHdrFrame {
     private MetalHdrFrame() {
     }
 
+    /** Mirrors GameRenderer's world-render predicate so title/loading frames stay output-only. */
+    public static boolean shouldCaptureWorldScene(
+            final boolean resourcesLoaded,
+            final boolean advanceGameTime,
+            final boolean hasLevel
+    ) {
+        return resourcesLoaded && advanceGameTime && hasLevel;
+    }
+
+    /** Limits the material shader flavor to GameRenderer's real world pass. */
+    public static void setWorldScenePass(final GpuTextureView colorView, final boolean active) {
+        if (colorView != null
+                && !colorView.isClosed()
+                && colorView.texture() instanceof MetalGpuTexture color) {
+            color.device().setMaterialWorldPassActive(active);
+        }
+    }
+
     /**
      * Declares that a Java render target stores scene color rather than
      * numerical FP16 data. The declaration lives on the physical texture so
@@ -29,18 +47,27 @@ public final class MetalHdrFrame {
         }
     }
 
-    public static void captureScene(final GpuTextureView colorView, final GpuTextureView depthView) {
-        if (colorView == null || colorView.isClosed() || depthView == null || depthView.isClosed()) {
+    public static void captureScene(
+            final GpuTextureView colorView,
+            final GpuTextureView depthView,
+            final boolean worldSceneRendered
+    ) {
+        if (colorView == null || colorView.isClosed()) {
             return;
         }
-        if (colorView.texture() instanceof MetalGpuTexture color
-                && depthView.texture() instanceof MetalGpuTexture depth
-                && color.device() == depth.device()) {
+        if (colorView.texture() instanceof MetalGpuTexture color) {
+            MetalGpuTexture depth = null;
+            if (depthView != null
+                    && !depthView.isClosed()
+                    && depthView.texture() instanceof MetalGpuTexture metalDepth
+                    && color.device() == metalDepth.device()) {
+                depth = metalDepth;
+            }
             // captureScene is an explicit scene-color contract. Record it
             // before captureHdrScene flushes a pending clear, including the
             // first empty/loading frame that has not bound a pipeline yet.
             markSceneColor(color);
-            color.device().captureHdrScene(color, depth);
+            color.device().captureHdrScene(color, depth, worldSceneRendered);
         }
     }
 

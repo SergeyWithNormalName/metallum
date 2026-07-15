@@ -100,10 +100,9 @@ public final class MetallumMaterialContractTests {
     ) {
         String blockVertex = patched(sources, "minecraft", "core/block",
                 MetallumMaterialShaderPatcher.Stage.VERTEX);
-        require(blockVertex.contains("metallumMaterialDecodeColor(Color) * sample_lightmap"),
-                "block tint is not decoded before linear lightmap multiplication");
-        require(!blockVertex.contains("metallumMaterialDecodeColor(sample_lightmap"),
-                "block lightmap data was decoded as display color");
+        require(blockVertex.contains(
+                        "metallumMaterialDecodeColor(Color) * metallumMaterialDecodeLegacyLightmap(sample_lightmap"),
+                "block tint/lightmap are not calibrated before linear multiplication");
 
         String entityVertex = patched(sources, "minecraft", "core/entity",
                 MetallumMaterialShaderPatcher.Stage.VERTEX);
@@ -112,8 +111,9 @@ public final class MetallumMaterialContractTests {
         require(entityVertex.contains(
                         "overlayColor = metallumMaterialDecodeColor(texelFetch(Sampler1, UV1, 0));"),
                 "entity overlay RGB is not decoded");
-        require(entityVertex.contains("lightMapColor = sample_lightmap(Sampler2, UV2);"),
-                "entity lightmap data was altered");
+        require(entityVertex.contains(
+                        "lightMapColor = metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2));"),
+                "entity lightmap attenuation was not calibrated for the linear material domain");
 
         String entityFragment = patched(sources, "minecraft", "core/entity",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
@@ -189,10 +189,9 @@ public final class MetallumMaterialContractTests {
                 MetallumMaterialShaderPatcher.Stage.VERTEX);
         require(vertex.contains("metallumTintColor = metallumMaterialDecodeColor(_vert_color);"),
                 "Sodium vertex tint is not decoded");
-        require(vertex.contains("vec4 metallumLightmap = texture(u_LightTex, _vert_tex_light_coord);"),
-                "Sodium lightmap should stay linear data");
-        require(!vertex.contains("metallumMaterialDecodeColor(texture(u_LightTex"),
-                "Sodium lightmap was decoded as display color");
+        require(vertex.contains(
+                        "vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap(texture(u_LightTex, _vert_tex_light_coord));"),
+                "Sodium lightmap attenuation was not calibrated for the linear material domain");
         require(vertex.contains("metallumMaterial = _material_params;"),
                 "Sodium material/emission bits are not forwarded");
 
@@ -255,6 +254,8 @@ public final class MetallumMaterialContractTests {
                 "sRGB midpoint decode");
         require(close(MetallumMaterialShaderPatcher.srgbToLinear(-0.5f), -0.21404114f),
                 "extended negative sRGB decode");
+        require(MetallumMaterialShaderPatcher.srgbToLinear(0.5f) < 0.22f,
+                "legacy half-light attenuation remained an over-bright linear 0.5");
         require(close(MetallumMaterialShaderPatcher.emissionRadiance(0), 0.0f),
                 "zero emission radiance");
         require(close(MetallumMaterialShaderPatcher.emissionRadiance(7), 28.0f / 15.0f),

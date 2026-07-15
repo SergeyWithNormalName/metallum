@@ -7812,6 +7812,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
     _ semanticTexture: MTLTexture?,
     _ globalFence: MTLFence?,
     _ sourceEncoding: Int32,
+    _ materialGenerationActive: Int32,
     _ spatialScalingEnabled: Int32,
     _ hdrPrecomposeEnabled: Int32,
     _ perceptualScalingEnabled: Int32,
@@ -7827,6 +7828,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)]?.preparedUiSeed = nil
         guard
             (0...2).contains(sourceEncoding),
+            (0...1).contains(materialGenerationActive),
             sourceTexture.width > 0,
             sourceTexture.height > 0,
             destinationTexture.pixelFormat == .rgba8Unorm,
@@ -7873,9 +7875,9 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 && semanticTexture!.width == sourceTexture.width
                 && semanticTexture!.height == sourceTexture.height
                 && semanticTexture!.pixelFormat == .rgba8Unorm)
-        let frameState = NativeState.rendererFrameState.snapshot()
-        let actualLighting = frameState?.lightingMode == 1
-        let actualHdrGeneration = actualLighting && frameState?.outputMode == 1
+        let actualLighting = materialGenerationActive != 0
+        let actualHdrGeneration = actualLighting
+            && sourceEncoding == 2
         let canPrecomposeActualHdr = hdrPrecomposeEnabled != 0
             && actualHdrGeneration
             && sourceTexture.pixelFormat == .rgba16Float
@@ -8095,20 +8097,6 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             backdropSource = sourceTexture
         }
 
-        if let globalFence {
-            // MetalFX signals this fence from its opaque encoder sequence. Do
-            // not begin the timed/tiled UI seed pass until that dependency is
-            // complete: otherwise the render-pass counter attributes the
-            // scaler wait to UI, and the pass can reserve tile resources while
-            // it is still unable to execute.
-            guard let dependencyWait = trackedMakeBlitCommandEncoder(commandBuffer) else {
-                return -1
-            }
-            dependencyWait.label = "Metallum UI backdrop dependency"
-            dependencyWait.waitForFence(globalFence)
-            trackedEndEncoding(dependencyWait)
-        }
-
         guard
             let pipelines = ensureUiBackdropPipelines(device: commandBuffer.device),
             let encoder = makeHdrPassEncoder(
@@ -8121,6 +8109,13 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             return -1
         }
 
+        if let globalFence {
+            // The wait must belong to the encoder that consumes the previous
+            // producer. A wait-only encoder does not carry the dependency into
+            // this pass; updating the shared fence here would then let the GUI
+            // overtake uploads made before the seed pass.
+            encoder.waitForFence(globalFence, before: .fragment)
+        }
         encoder.setFragmentTexture(backdropSource, index: 0)
         var uniforms = MetallumHdrUiBackdropUniforms(
             sourceEncoding: UInt32(backdropEncoding)
@@ -8193,15 +8188,6 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
             return 0
         }
 
-        if let globalFence {
-            guard let dependencyWait = trackedMakeBlitCommandEncoder(commandBuffer) else {
-                return 0
-            }
-            dependencyWait.label = "Metallum UI backdrop dependency fallback"
-            dependencyWait.waitForFence(globalFence)
-            trackedEndEncoding(dependencyWait)
-        }
-
         guard let encoder = makeHdrPassEncoder(
             commandBuffer: commandBuffer,
             target: destinationTexture,
@@ -8209,6 +8195,9 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
             stage: .uiSeed
         ) else {
             return 0
+        }
+        if let globalFence {
+            encoder.waitForFence(globalFence, before: .fragment)
         }
         encodePreparedSpatialUiSeedDraw(
             encoder: encoder,
@@ -8332,13 +8321,15 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ spatialHdrPrecomposed: Int32,
     _ outputMode: Int32,
     _ sourceEncoding: Int32,
+    _ materialGenerationActive: Int32,
     _ diagnosticPattern: Int32,
     _ currentHeadroom: Float,
     _ hdrStrength: Float,
     _ bloomStrength: Float
 ) -> Int32 {
     return autoreleasepool {
-        guard (0...2).contains(outputMode) else {
+        guard (0...2).contains(outputMode),
+              (0...1).contains(materialGenerationActive) else {
             return -1
         }
 
@@ -8346,10 +8337,8 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
             8.0
         )
-        let frameState = NativeState.rendererFrameState.snapshot()
-        let actualLighting = frameState?.lightingMode == 1
+        let actualLighting = materialGenerationActive != 0
         let actualHdrGeneration = actualLighting
-            && frameState?.outputMode == 1
             && outputMode != 0
         let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
         let hasCompatibleDepth = sceneTexture != nil

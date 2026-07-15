@@ -40,7 +40,28 @@ struct ActualHdrExposureState {
   uint valid;
 };
 
+float3 metallum_finite_or_zero(float3 value) {
+  return select(float3(0.0), value, isfinite(value));
+}
+
+float3 metallum_finite_nonnegative(float3 value) {
+  return max(metallum_finite_or_zero(value), 0.0);
+}
+
+float metallum_safe_headroom(float value) {
+  return isfinite(value) ? clamp(value, 1.0, 8.0) : 1.0;
+}
+
+float3 metallum_sanitize_output(float3 value, float headroom) {
+  return clamp(
+    metallum_finite_or_zero(value),
+    0.0,
+    metallum_safe_headroom(headroom)
+  );
+}
+
 float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
+  encoded = metallum_finite_or_zero(encoded);
   float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
   float3 low = magnitude / 12.92;
   float3 high = pow((magnitude + 0.055) / 1.055, float3(2.4));
@@ -49,6 +70,7 @@ float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
 }
 
 float3 metallum_decode(float3 value, uint sourceEncoding) {
+  value = metallum_finite_or_zero(value);
   if (sourceEncoding == 0u) {
     return metallum_srgb_to_linear(value, false);
   }
@@ -59,6 +81,7 @@ float3 metallum_decode(float3 value, uint sourceEncoding) {
 }
 
 float3 metallum_linear_to_srgb(float3 linearValue) {
+  linearValue = metallum_finite_or_zero(linearValue);
   float3 bounded = clamp(linearValue, 0.0, 1.0);
   float3 low = bounded * 12.92;
   float3 high = 1.055 * pow(bounded, float3(1.0 / 2.4)) - 0.055;
@@ -76,7 +99,7 @@ float3 metallum_encode_sdr(float3 value, uint sourceEncoding) {
 }
 
 float metallum_luminance(float3 color) {
-  return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+  return dot(metallum_finite_nonnegative(color), float3(0.2126, 0.7152, 0.0722));
 }
 
 float metallum_spatial_scene_visibility(float4 uiValue, float3 expectedBackdrop) {
@@ -111,7 +134,8 @@ float metallum_peak_metric(float3 color) {
 }
 
 float3 metallum_map_to_headroom(float3 color, float headroom) {
-  color = max(color, 0.0);
+  color = metallum_finite_nonnegative(color);
+  headroom = metallum_safe_headroom(headroom);
   if (headroom <= 1.0001) {
     return min(color, 1.0);
   }
@@ -140,6 +164,9 @@ float metallum_visible_delta_scale(
   float3 visibleDelta,
   float currentHeadroom
 ) {
+  mappedBaseColor = metallum_sanitize_output(mappedBaseColor, currentHeadroom);
+  visibleDelta = metallum_finite_or_zero(visibleDelta);
+  currentHeadroom = metallum_safe_headroom(currentHeadroom);
   if (metallum_peak_metric(mappedBaseColor + visibleDelta) <= currentHeadroom) {
     return 1.0;
   }
@@ -443,15 +470,30 @@ float3 metallum_actual_hdr_world(
   constant PresentUniforms& uniforms,
   constant ActualHdrExposureState& exposureState
 ) {
-  float exposure = exposureState.valid != 0u
-    ? clamp(exposureState.exposure, 0.25, 1.0)
+  float exposureCandidate = exposureState.valid != 0u
+    ? exposureState.exposure
     : 1.0;
-  float3 sceneRadiance = max(sceneFrame.sample(smp, uv).rgb, 0.0);
-  float3 bloomRadiance = max(bloomFrame.sample(auxiliarySmp, uv).rgb, 0.0);
+  float exposure = isfinite(exposureCandidate)
+    ? clamp(exposureCandidate, 0.25, 1.0)
+    : 1.0;
+  float3 sceneRadiance = metallum_finite_nonnegative(sceneFrame.sample(smp, uv).rgb);
+  float3 bloomRadiance = metallum_finite_nonnegative(
+    bloomFrame.sample(auxiliarySmp, uv).rgb
+  );
   // hdrStrength belongs exclusively to Legacy inferred reconstruction.
   // METALLUM actual radiance is invariant to that compatibility control.
-  float bloomScale = clamp(uniforms.bloomStrength, 0.0, 1.0);
-  float3 exposed = sceneRadiance * exposure + bloomRadiance * bloomScale;
+  float availableBloomRange = clamp(uniforms.currentHeadroom - 1.0, 0.0, 2.0);
+  float headroomActivation = smoothstep(1.0, 1.15, uniforms.currentHeadroom);
+  float bloomScale = clamp(uniforms.bloomStrength, 0.0, 1.0)
+    * headroomActivation
+    * availableBloomRange;
+  float3 bloomContribution = bloomRadiance * bloomScale;
+  float maximumBloomPeak = 0.15 * availableBloomRange;
+  float bloomPeak = metallum_peak_metric(bloomContribution);
+  if (bloomPeak > maximumBloomPeak && maximumBloomPeak > 0.0) {
+    bloomContribution *= maximumBloomPeak / bloomPeak;
+  }
+  float3 exposed = sceneRadiance * exposure + bloomContribution;
   return metallum_map_to_headroom(exposed, uniforms.currentHeadroom);
 }
 
@@ -473,7 +515,9 @@ fragment float4 metallum_actual_hdr_present_fs(
     return float4(float3(level * grid), 1.0);
   }
 
-  float3 sceneRadiance = max(sceneFrame.sample(smp, in.uv).rgb, 0.0);
+  float3 sceneRadiance = metallum_finite_nonnegative(
+    sceneFrame.sample(smp, in.uv).rgb
+  );
   float3 mappedScene = metallum_actual_hdr_world(
     in.uv,
     sceneFrame,
@@ -502,7 +546,10 @@ fragment float4 metallum_actual_hdr_present_fs(
     visibleDelta,
     uniforms.currentHeadroom
   );
-  return float4(clamp(uiLinear + visibleDelta, 0.0, uniforms.currentHeadroom), 1.0);
+  return float4(
+    metallum_sanitize_output(uiLinear + visibleDelta, uniforms.currentHeadroom),
+    1.0
+  );
 }
 
 // Menu/loading frames can have a complete RGBA8 UI composite before a world
@@ -525,7 +572,10 @@ fragment float4 metallum_actual_hdr_linear_ui_only_fs(
   texture2d<float> linearUiFrame [[texture(0)]],
   sampler smp [[sampler(0)]]
 ) {
-  return float4(clamp(linearUiFrame.sample(smp, in.uv).rgb, 0.0, 1.0), 1.0);
+  return float4(
+    metallum_sanitize_output(linearUiFrame.sample(smp, in.uv).rgb, 1.0),
+    1.0
+  );
 }
 
 float3 metallum_reconstruct_world(
@@ -732,12 +782,10 @@ fragment NativeWorldUiOutput metallum_actual_native_world_ui_fs(
     uniforms,
     exposureState
   );
-  // Seed from unexposed material radiance so SDR UI remains independent of
-  // the live exposure/headroom state used only at the display boundary.
-  float3 seedEncoded = metallum_encode_sdr(
-    max(sceneFrame.sample(smp, in.uv).rgb, 0.0),
-    2u
-  );
+  // The lightweight separated present classifies alpha-zero UI changes by
+  // comparing against this exact world output. Keep both attachments on one
+  // exposure/bloom basis so untouched pixels cannot become false UI masks.
+  float3 seedEncoded = metallum_encode_sdr(sceneHdr, 2u);
   seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
   NativeWorldUiOutput out;
   out.hdr = float4(sceneHdr, 1.0);
@@ -760,7 +808,9 @@ fragment float4 metallum_spatial_present_fs(
   float4 uiValue = uiFrame.read(coordinate);
   float3 uiEncoded = clamp(uiValue.rgb, 0.0, 1.0);
 
-  float3 spatialHdr = max(spatialHdrFrame.read(coordinate).rgb, 0.0);
+  float3 spatialHdr = metallum_finite_nonnegative(
+    spatialHdrFrame.read(coordinate).rgb
+  );
   float3 seedEncoded = metallum_encode_sdr(spatialHdr, 2u);
   seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
   float visibility = metallum_spatial_scene_visibility(uiValue, seedEncoded);
@@ -779,7 +829,10 @@ fragment float4 metallum_spatial_present_fs(
     visibleDelta,
     uniforms.currentHeadroom
   );
-  return float4(clamp(uiLinear + visibleDelta, 0.0, uniforms.currentHeadroom), 1.0);
+  return float4(
+    metallum_sanitize_output(uiLinear + visibleDelta, uniforms.currentHeadroom),
+    1.0
+  );
 }
 
 fragment float4 metallum_spatial_screenshot_fs(
@@ -797,7 +850,7 @@ fragment float4 metallum_spatial_screenshot_fs(
   float4 uiValue = uiFrame.read(coordinate);
   float3 uiEncoded = clamp(uiValue.rgb, 0.0, 1.0);
 
-  float3 spatialHdr = max(spatialHdrFrame.read(coordinate).rgb, 0.0);
+  float3 spatialHdr = metallum_finite_nonnegative(spatialHdrFrame.read(coordinate).rgb);
   float3 seedEncoded = metallum_encode_sdr(spatialHdr, 2u);
   seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
   float visibility = metallum_spatial_scene_visibility(uiValue, seedEncoded);

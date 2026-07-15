@@ -105,6 +105,7 @@ private typealias NativeBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // semanticTexture
     UnsafeRawPointer?, // globalFence
     Int32,             // sourceEncoding
+    Int32,             // materialGenerationActive
     Int32,             // spatialScalingEnabled
     Int32,             // hdrPrecomposeEnabled
     Int32,             // perceptualScalingEnabled
@@ -121,6 +122,12 @@ private typealias NativeFusedBackdropFunction = @convention(c) (
     UInt,              // depthFormat
     UInt               // stencilFormat
 ) -> Int32
+private typealias NativeMaterializePreparedBackdropFunction = @convention(c) (
+    UnsafeRawPointer?, // commandBuffer
+    UnsafeRawPointer?, // sourceTexture
+    UnsafeRawPointer?, // destinationTexture
+    UnsafeRawPointer?  // globalFence
+) -> Int32
 private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
     UnsafeRawPointer?, // layer
@@ -133,6 +140,7 @@ private typealias NativePresentFunction = @convention(c) (
     Int32,             // spatialHdrPrecomposed
     Int32,             // outputMode
     Int32,             // sourceEncoding
+    Int32,             // materialGenerationActive
     Int32,             // diagnosticPattern
     Float,             // currentHeadroom
     Float,             // hdrStrength
@@ -445,6 +453,7 @@ private final class GpuHarness {
     private let queue: MTLCommandQueue
     private let presentPipeline: MTLRenderPipelineState
     private let actualWorldPipeline: MTLRenderPipelineState
+    private let actualNativeWorldUiPipeline: MTLRenderPipelineState
     private let actualUiOnlyPipeline: MTLRenderPipelineState
     private let actualLinearUiOnlyPipeline: MTLRenderPipelineState
     private let worldPresentPipeline: MTLRenderPipelineState
@@ -492,6 +501,9 @@ private final class GpuHarness {
             let offscreenVertex = presentLibrary.makeFunction(name: "metallum_offscreen_vs"),
             let presentFragment = presentLibrary.makeFunction(name: "metallum_present_fs"),
             let actualWorldFragment = presentLibrary.makeFunction(name: "metallum_actual_spatial_world_fs"),
+            let actualNativeWorldUiFragment = presentLibrary.makeFunction(
+                name: "metallum_actual_native_world_ui_fs"
+            ),
             let actualUiOnlyFragment = presentLibrary.makeFunction(name: "metallum_actual_hdr_ui_only_fs"),
             let actualLinearUiOnlyFragment = presentLibrary.makeFunction(name: "metallum_actual_hdr_linear_ui_only_fs"),
             let spatialWorldFragment = presentLibrary.makeFunction(name: "metallum_spatial_world_fs"),
@@ -515,6 +527,17 @@ private final class GpuHarness {
         actualWorldDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.actualWorldPipeline = try device.makeRenderPipelineState(
             descriptor: actualWorldDescriptor
+        )
+        let actualNativeWorldUiDescriptor = MTLRenderPipelineDescriptor()
+        actualNativeWorldUiDescriptor.label = "Metallum actual HDR/UI seed validation"
+        actualNativeWorldUiDescriptor.vertexFunction = offscreenVertex
+        actualNativeWorldUiDescriptor.fragmentFunction = actualNativeWorldUiFragment
+        actualNativeWorldUiDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        actualNativeWorldUiDescriptor.colorAttachments[0].isBlendingEnabled = false
+        actualNativeWorldUiDescriptor.colorAttachments[1].pixelFormat = .rgba8Unorm
+        actualNativeWorldUiDescriptor.colorAttachments[1].isBlendingEnabled = false
+        self.actualNativeWorldUiPipeline = try device.makeRenderPipelineState(
+            descriptor: actualNativeWorldUiDescriptor
         )
         let actualUiOnlyDescriptor = MTLRenderPipelineDescriptor()
         actualUiOnlyDescriptor.label = "Metallum actual-HDR UI-only validation"
@@ -1310,6 +1333,74 @@ private final class GpuHarness {
         encoder.endEncoding()
         try complete(commandBuffer, label: "actual HDR UI-only mapping")
         return output
+    }
+
+    func renderActualNativeWorldUi(
+        scene: MTLTexture,
+        bloom: MTLTexture,
+        state: HdrAdaptiveState,
+        headroom: Float
+    ) throws -> (world: MTLTexture, uiSeed: MTLTexture) {
+        let world = try makePrivateRgba16FloatTexture(width: scene.width, height: scene.height)
+        let uiSeed = try makeRgba8Texture(
+            width: scene.width,
+            height: scene.height,
+            bytes: SIMD4<UInt8>(255, 0, 255, 255)
+        )
+        var mutableState = state
+        guard let stateBuffer = withUnsafeBytes(of: &mutableState, { bytes in
+                device.makeBuffer(
+                    bytes: bytes.baseAddress!,
+                    length: bytes.count,
+                    options: .storageModeShared
+                )
+              }), let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Actual HDR/UI seed resources are unavailable")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = world
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[1].texture = uiSeed
+        pass.colorAttachments[1].loadAction = .dontCare
+        pass.colorAttachments[1].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Actual HDR/UI seed encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(scene.width),
+            height: Double(scene.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(actualNativeWorldUiPipeline)
+        encoder.setFragmentTexture(scene, index: 0)
+        encoder.setFragmentTexture(bloom, index: 1)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.setFragmentSamplerState(linearSampler, index: 1)
+        var uniforms = PresentUniforms(
+            mode: 2,
+            sourceEncoding: 2,
+            diagnosticPattern: 0,
+            currentHeadroom: headroom,
+            hdrStrength: 0,
+            bloomStrength: 0.22,
+            sceneAvailable: 1,
+            uiAvailable: 0,
+            semanticAvailable: 0
+        )
+        encoder.setFragmentBytes(
+            &uniforms,
+            length: MemoryLayout<PresentUniforms>.stride,
+            index: 0
+        )
+        encoder.setFragmentBuffer(stateBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "actual HDR world and UI seed")
+        return (world, uiSeed)
     }
 
     func renderActualHdrLinearUiOnly(source: MTLTexture) throws -> MTLTexture {
@@ -2159,7 +2250,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 44, "HDR validation check count changed unexpectedly: \(passCount), expected 44")
+        try require(passCount == 46, "HDR validation check count changed unexpectedly: \(passCount), expected 46")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -2276,6 +2367,147 @@ private final class ValueValidation {
         try require(
             max(referenceExtract.x, max(referenceExtract.y, referenceExtract.z)) < 0.001,
             "Reference white incorrectly generated actual HDR bloom: \(rgbaDescription(referenceExtract))"
+        )
+
+        let boundedBase = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(0.2, 0.2, 0.2, 1.0)
+        )
+        let boundedBloom = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(1.0, 1.0, 1.0, 0.0)
+        )
+        let unitExposureState = HdrAdaptiveState(
+            breakpoint: 1.0,
+            inferredPeak: 1.0,
+            medianLog2: -2.0,
+            p90Log2: -2.0,
+            p99Log2: -2.0,
+            brightCoverage: 0.0,
+            currentHeadroom: 1.2,
+            valid: 1
+        )
+        let boundedWorld = try gpu.renderActualWorld(
+            scene: boundedBase,
+            bloom: boundedBloom,
+            state: unitExposureState,
+            headroom: 1.2,
+            legacyReconstructionStrength: 2.0
+        )
+        let boundedPixel = try gpu.readRgba16Float(texture: boundedWorld)
+        let boundedDelta = boundedPixel.x - 0.2
+        try require(
+            boundedDelta >= 0.029 && boundedDelta <= 0.031,
+            "Actual low-headroom bloom escaped its 15%-of-range cap: delta=\(boundedDelta)"
+        )
+
+        var invalidPixels = Array(
+            repeating: SIMD4<Float>(0.2, 0.2, 0.2, 1.0),
+            count: 17 * 17
+        )
+        invalidPixels[8 * 17 + 8] = SIMD4<Float>(.nan, .infinity, -.infinity, 1.0)
+        let invalidScene = try gpu.makeRgba16FloatTexture(
+            width: 17,
+            height: 17,
+            pixels: invalidPixels
+        )
+        let invalidAnalysis = try gpu.analyzeActualRadiance(
+            scene: invalidScene,
+            currentHeadroom: 4.0
+        )
+        let invalidExtractPixels = try gpu.readRgba16FloatPixels(
+            texture: invalidAnalysis.extract
+        )
+        try require(
+            invalidExtractPixels.allSatisfy {
+                $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite
+            },
+            "Non-finite actual radiance escaped extract/histogram sanitization"
+        )
+        try require(
+            invalidAnalysis.state.breakpoint.isFinite
+                && invalidAnalysis.state.inferredPeak.isFinite
+                && invalidAnalysis.state.medianLog2.isFinite
+                && invalidAnalysis.state.p90Log2.isFinite
+                && invalidAnalysis.state.p99Log2.isFinite
+                && invalidAnalysis.state.brightCoverage.isFinite
+                && invalidAnalysis.state.currentHeadroom.isFinite,
+            "Non-finite actual radiance corrupted exposure state"
+        )
+        let invalidBloom = try gpu.renderCombinedBlur(source: invalidAnalysis.extract)
+        let invalidWorld = try gpu.renderActualWorld(
+            scene: invalidScene,
+            bloom: invalidBloom,
+            state: invalidAnalysis.state,
+            headroom: 4.0,
+            legacyReconstructionStrength: 2.0
+        )
+        let invalidWorldPixels = try gpu.readRgba16FloatPixels(texture: invalidWorld)
+        try require(
+            invalidWorldPixels.allSatisfy {
+                $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite
+                    && $0.x >= 0 && $0.y >= 0 && $0.z >= 0
+                    && $0.x <= 4.001 && $0.y <= 4.001 && $0.z <= 4.001
+            },
+            "Non-finite actual radiance reached the FP16 display boundary"
+        )
+
+        let invalidLinearUi = try gpu.renderActualHdrLinearUiOnly(source: invalidScene)
+        let invalidLinearUiPixels = try gpu.readRgba16FloatPixels(texture: invalidLinearUi)
+        try require(
+            invalidLinearUiPixels.allSatisfy {
+                $0.x.isFinite && $0.y.isFinite && $0.z.isFinite
+                    && $0.x >= 0 && $0.y >= 0 && $0.z >= 0
+                    && $0.x <= 1.001 && $0.y <= 1.001 && $0.z <= 1.001
+            },
+            "Title/loading linear UI-only output retained NaN/Inf"
+        )
+
+        let seedScene = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(0.4, 0.2, 0.1, 1.0)
+        )
+        let seedBloom = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(2.0, 0.5, 0.0, 1.0)
+        )
+        let exposureState = HdrAdaptiveState(
+            breakpoint: 0.5,
+            inferredPeak: 2.0,
+            medianLog2: -1.0,
+            p90Log2: 0.0,
+            p99Log2: 1.0,
+            brightCoverage: 0.1,
+            currentHeadroom: 4.0,
+            valid: 1
+        )
+        let separated = try gpu.renderActualNativeWorldUi(
+            scene: seedScene,
+            bloom: seedBloom,
+            state: exposureState,
+            headroom: 4.0
+        )
+        let separatedWorld = try gpu.readRgba16Float(texture: separated.world)
+        let separatedSeed = gpu.readRgba8(texture: separated.uiSeed)
+        let separatedSeedLinear = SIMD3<Float>(
+            srgbToLinear(Float(separatedSeed.x) / 255.0),
+            srgbToLinear(Float(separatedSeed.y) / 255.0),
+            srgbToLinear(Float(separatedSeed.z) / 255.0)
+        )
+        try require(
+            abs(separatedWorld.x - separatedSeedLinear.x) < 0.008
+                && abs(separatedWorld.y - separatedSeedLinear.y) < 0.008
+                && abs(separatedWorld.z - separatedSeedLinear.z) < 0.008
+                && separatedSeed.w == 0,
+            "Actual precompose seed diverged from exposed/bloomed world: world \(rgbaDescription(separatedWorld)), seed \(separatedSeed)"
+        )
+        let separatedPresent = try gpu.renderSpatialPresent(
+            uiFrame: separated.uiSeed,
+            spatialHdrFrame: separated.world,
+            sourceEncoding: 2,
+            currentHeadroom: 4.0
+        )
+        try require(
+            abs(separatedPresent.x - separatedWorld.x) < 0.008
+                && abs(separatedPresent.y - separatedWorld.y) < 0.008
+                && abs(separatedPresent.z - separatedWorld.z) < 0.008,
+            "Untouched actual HDR precompose was misclassified as alpha-zero UI: present \(rgbaDescription(separatedPresent)), world \(rgbaDescription(separatedWorld))"
         )
         passCount += 1
         print(String(
@@ -3914,6 +4146,10 @@ private final class ValueValidation {
                 handle,
                 "metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop"
             ),
+            let materializePreparedBackdropSymbol = dlsym(
+                handle,
+                "metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop"
+            ),
             let spatialScreenshotSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeSpatialScreenshot"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
         else {
@@ -3946,6 +4182,10 @@ private final class ValueValidation {
         let fusedBackdrop = unsafeBitCast(
             fusedBackdropSymbol,
             to: NativeFusedBackdropFunction.self
+        )
+        let materializePreparedBackdrop = unsafeBitCast(
+            materializePreparedBackdropSymbol,
+            to: NativeMaterializePreparedBackdropFunction.self
         )
         let spatialScreenshot = unsafeBitCast(
             spatialScreenshotSymbol,
@@ -4078,6 +4318,7 @@ private final class ValueValidation {
             0,
             0,
             0,
+            0,
             1,
             1,
             0
@@ -4116,6 +4357,7 @@ private final class ValueValidation {
             0,
             0,
             0,
+            0,
             1,
             1,
             0
@@ -4129,6 +4371,149 @@ private final class ValueValidation {
                     "Linear backdrop mismatch: \(linearPixel)")
         passCount += 1
         print("PASS native seeded UI backdrop encodes linear RGB to SDR sRGB")
+
+        let fenceProducerValues = [
+            SIMD4<Float>(0.0625, 0.25, 0.75, 1),
+            SIMD4<Float>(0.8125, 0.125, 0.375, 1)
+        ]
+        let fenceStagingSources = try fenceProducerValues.map {
+            try gpu.makeRgba16FloatTexture(width: 8, height: 8, value: $0)
+        }
+        let untrackedSourceDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: 8,
+            height: 8,
+            mipmapped: false
+        )
+        untrackedSourceDescriptor.storageMode = .private
+        untrackedSourceDescriptor.hazardTrackingMode = .untracked
+        untrackedSourceDescriptor.usage = [.shaderRead]
+        let untrackedDestinationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: 8,
+            height: 8,
+            mipmapped: false
+        )
+        untrackedDestinationDescriptor.storageMode = .private
+        untrackedDestinationDescriptor.hazardTrackingMode = .untracked
+        untrackedDestinationDescriptor.usage = [.shaderRead, .renderTarget]
+        guard
+            let fenceSource = gpu.device.makeTexture(descriptor: untrackedSourceDescriptor),
+            let fenceDestination = gpu.device.makeTexture(descriptor: untrackedDestinationDescriptor),
+            let backdropFence = gpu.device.makeFence()
+        else {
+            throw ValidationFailure.message("Untracked UI backdrop fence resources are unavailable")
+        }
+        func encodedByte(_ linear: Float) -> UInt8 {
+            UInt8(clamping: Int((min(max(linearToSrgb(linear), 0), 1) * 255).rounded()))
+        }
+        for iteration in 0..<6 {
+            let valueIndex = iteration % fenceProducerValues.count
+            let sourceValue = fenceProducerValues[valueIndex]
+            guard
+                let fenceCommandBuffer = backdropQueue.makeCommandBuffer(),
+                let producer = fenceCommandBuffer.makeBlitCommandEncoder()
+            else {
+                throw ValidationFailure.message("UI backdrop fence command resources are unavailable")
+            }
+            producer.label = "Metallum test untracked UI seed producer"
+            producer.copy(
+                from: fenceStagingSources[valueIndex],
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: 8, height: 8, depth: 1),
+                to: fenceSource,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
+            producer.updateFence(backdropFence)
+            producer.endEncoding()
+
+            let fenceBackdropStatus = backdrop(
+                objectPointer(fenceCommandBuffer as AnyObject),
+                objectPointer(fenceSource as AnyObject),
+                objectPointer(fenceDestination as AnyObject),
+                nil,
+                nil,
+                objectPointer(backdropFence as AnyObject),
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                0
+            )
+            try require(
+                fenceBackdropStatus == 1,
+                "Untracked UI backdrop fence chain returned \(fenceBackdropStatus) at iteration \(iteration)"
+            )
+
+            let downstreamPass = MTLRenderPassDescriptor()
+            downstreamPass.colorAttachments[0].texture = fenceDestination
+            downstreamPass.colorAttachments[0].loadAction = .load
+            downstreamPass.colorAttachments[0].storeAction = .store
+            guard let downstream = fenceCommandBuffer.makeRenderCommandEncoder(
+                descriptor: downstreamPass
+            ) else {
+                throw ValidationFailure.message("Downstream UI fence encoder creation failed")
+            }
+            downstream.label = "Metallum test downstream UI fence consumer"
+            downstream.waitForFence(backdropFence, before: .fragment)
+            downstream.setViewport(MTLViewport(
+                originX: 0,
+                originY: 0,
+                width: 8,
+                height: 8,
+                znear: 0,
+                zfar: 1
+            ))
+            downstream.setScissorRect(MTLScissorRect(x: 4, y: 0, width: 4, height: 8))
+            gpu.encodeUiAlphaOverlay(
+                encoder: downstream,
+                encodedSource: SIMD4<Float>(0, 0, 0, 0.5)
+            )
+            downstream.endEncoding()
+            fenceCommandBuffer.commit()
+            fenceCommandBuffer.waitUntilCompleted()
+            try require(
+                fenceCommandBuffer.status == .completed,
+                "Untracked UI backdrop fence chain failed at iteration \(iteration): \(String(describing: fenceCommandBuffer.error))"
+            )
+
+            let expectedSeed = SIMD4<UInt8>(
+                encodedByte(sourceValue.x),
+                encodedByte(sourceValue.y),
+                encodedByte(sourceValue.z),
+                0
+            )
+            let seedPixel = try gpu.readPrivateRgba8(texture: fenceDestination, x: 1, y: 4)
+            try require(
+                abs(Int(seedPixel.x) - Int(expectedSeed.x)) <= 2
+                    && abs(Int(seedPixel.y) - Int(expectedSeed.y)) <= 2
+                    && abs(Int(seedPixel.z) - Int(expectedSeed.z)) <= 2
+                    && seedPixel.w == 0,
+                "UI backdrop consumed a stale untracked producer at iteration \(iteration): \(seedPixel), expected \(expectedSeed)"
+            )
+            let downstreamPixel = try gpu.readPrivateRgba8(
+                texture: fenceDestination,
+                x: 6,
+                y: 4
+            )
+            try require(
+                abs(Int(downstreamPixel.x) - Int(expectedSeed.x) / 2) <= 2
+                    && abs(Int(downstreamPixel.y) - Int(expectedSeed.y) / 2) <= 2
+                    && abs(Int(downstreamPixel.z) - Int(expectedSeed.z) / 2) <= 2
+                    && abs(Int(downstreamPixel.w) - 128) <= 1,
+                "Downstream UI pass did not observe the fenced seed at iteration \(iteration): \(downstreamPixel), seed \(expectedSeed)"
+            )
+        }
+        passCount += 1
+        print("PASS native UI backdrop preserves the untracked producer -> seed -> downstream fence chain")
 
         let scaledSource = try gpu.makeRgba16FloatTexture(
             width: 8,
@@ -4151,6 +4536,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             1,
             0,
             0,
@@ -4183,6 +4569,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             1,
             0,
             1,
@@ -4244,6 +4631,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             1,
             0,
             1,
@@ -4301,6 +4689,7 @@ private final class ValueValidation {
             nil,
             2,
             0,
+            0,
             1,
             0,
             0,
@@ -4324,6 +4713,7 @@ private final class ValueValidation {
             1,
             2,
             2,
+            0,
             0,
             4,
             1,
@@ -4385,6 +4775,7 @@ private final class ValueValidation {
             nil,
             nil,
             2,
+            0,
             1,
             1,
             0,
@@ -4409,6 +4800,7 @@ private final class ValueValidation {
             1,
             2,
             2,
+            0,
             0,
             4,
             1,
@@ -4517,6 +4909,7 @@ private final class ValueValidation {
             nil,
             objectPointer(fusedFence as AnyObject),
             2,
+            0,
             1,
             1,
             0,
@@ -4586,6 +4979,7 @@ private final class ValueValidation {
             nil,
             objectPointer(fusedDepthFence as AnyObject),
             2,
+            0,
             1,
             1,
             0,
@@ -4644,6 +5038,82 @@ private final class ValueValidation {
         passCount += 1
         print("PASS deferred spatial HDR seed is byte-exact in color-only and Depth32Float GUI passes")
 
+        let materializedUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(255, 0, 255, 255)
+        )
+        guard
+            let materializedCommandBuffer = backdropQueue.makeCommandBuffer(),
+            let materializedFence = gpu.device.makeFence()
+        else {
+            throw ValidationFailure.message("Materialized UI seed fence resources are unavailable")
+        }
+        let deferredMaterializedStatus = backdrop(
+            objectPointer(materializedCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(materializedUi as AnyObject),
+            objectPointer(precomposedDepth as AnyObject),
+            nil,
+            objectPointer(materializedFence as AnyObject),
+            2,
+            0,
+            1,
+            1,
+            0,
+            1,
+            4,
+            1,
+            0
+        )
+        try require(
+            deferredMaterializedStatus == 2,
+            "Deferred materialized UI seed returned \(deferredMaterializedStatus)"
+        )
+        let materializedStatus = materializePreparedBackdrop(
+            objectPointer(materializedCommandBuffer as AnyObject),
+            objectPointer(precomposedSource as AnyObject),
+            objectPointer(materializedUi as AnyObject),
+            objectPointer(materializedFence as AnyObject)
+        )
+        try require(materializedStatus == 1, "Prepared UI seed materialization returned \(materializedStatus)")
+        let materializedGuiPass = MTLRenderPassDescriptor()
+        materializedGuiPass.colorAttachments[0].texture = materializedUi
+        materializedGuiPass.colorAttachments[0].loadAction = .load
+        materializedGuiPass.colorAttachments[0].storeAction = .store
+        guard let materializedGuiEncoder = materializedCommandBuffer.makeRenderCommandEncoder(
+            descriptor: materializedGuiPass
+        ) else {
+            throw ValidationFailure.message("Materialized UI downstream encoder creation failed")
+        }
+        materializedGuiEncoder.waitForFence(materializedFence, before: .fragment)
+        materializedGuiEncoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: 16,
+            height: 16,
+            znear: 0,
+            zfar: 1
+        ))
+        gpu.encodeUiAlphaOverlay(
+            encoder: materializedGuiEncoder,
+            encodedSource: guiOverlay
+        )
+        materializedGuiEncoder.endEncoding()
+        materializedCommandBuffer.commit()
+        materializedCommandBuffer.waitUntilCompleted()
+        try require(
+            materializedCommandBuffer.status == .completed,
+            "Materialized UI seed fence command failed: \(String(describing: materializedCommandBuffer.error))"
+        )
+        let materializedGuiBytes = try gpu.readRgba8Bytes(texture: materializedUi)
+        try require(
+            materializedGuiBytes == referenceGuiBytes,
+            "Materialized seed + downstream GUI differs from the standalone output"
+        )
+        passCount += 1
+        print("PASS prepared spatial UI seed materializes and signals the downstream fence chain")
+
         guard
             let queue = gpu.device.makeCommandQueue(),
             let commandBuffer = queue.makeCommandBuffer()
@@ -4667,6 +5137,7 @@ private final class ValueValidation {
             nil,
             0,
             2,
+            0,
             0,
             0,
             4,
@@ -4695,6 +5166,7 @@ private final class ValueValidation {
             1,
             0,
             0,
+            0,
             4,
             1,
             0
@@ -4705,8 +5177,85 @@ private final class ValueValidation {
         let noSceneDetail = noSceneCommandBuffer.error.map(String.init(describing:)) ?? "unknown GPU error"
         try require(noSceneCommandBuffer.status == .completed,
                     "No-scene present command failed: \(noSceneDetail)")
+
+        guard let menuCommandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("METALLUM menu ABI command buffer creation failed")
+        }
+        let menuContractBefore = generationContract(objectPointer(gpu.device as AnyObject))
+        let menuStatus = present(
+            objectPointer(menuCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(source as AnyObject),
+            nil,
+            nil,
+            nil,
+            objectPointer(ui as AnyObject),
+            nil,
+            0,
+            2,
+            0,
+            1,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            menuStatus == 1,
+            "METALLUM menu present without world FrameState returned \(menuStatus)"
+        )
+        menuCommandBuffer.commit()
+        menuCommandBuffer.waitUntilCompleted()
+        let menuDetail = menuCommandBuffer.error.map(String.init(describing:))
+            ?? "unknown GPU error"
+        try require(
+            menuCommandBuffer.status == .completed,
+            "METALLUM menu present without world FrameState failed: \(menuDetail)"
+        )
+
+        let edrMenuSource = try gpu.makeRgba16FloatTexture(
+            width: 16,
+            height: 16,
+            value: SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        )
+        guard let edrMenuCommandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("METALLUM EDR menu command buffer creation failed")
+        }
+        let edrMenuStatus = present(
+            objectPointer(edrMenuCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(edrMenuSource as AnyObject),
+            nil,
+            nil,
+            nil,
+            objectPointer(ui as AnyObject),
+            nil,
+            0,
+            1,
+            1,
+            1,
+            0,
+            1,
+            1,
+            0
+        )
+        try require(
+            edrMenuStatus == 1,
+            "METALLUM EDR menu lost its seeded SDR UI target: \(edrMenuStatus)"
+        )
+        edrMenuCommandBuffer.commit()
+        edrMenuCommandBuffer.waitUntilCompleted()
+        try require(
+            edrMenuCommandBuffer.status == .completed,
+            "METALLUM EDR menu GPU command failed: \(String(describing: edrMenuCommandBuffer.error))"
+        )
+        let menuContractAfter = generationContract(objectPointer(gpu.device as AnyObject))
+        try require(
+            menuContractBefore & (1 << 9) == 0 && menuContractAfter & (1 << 9) != 0,
+            "METALLUM menu present did not select the actual-HDR RGBA8 UI-only PSO"
+        )
         passCount += 1
-        print("PASS native present ABI accepts uiTexture and binds adaptive fallback without a scene")
+        print("PASS native present ABI selects Legacy, EDR and METALLUM RGBA8 UI-only paths without a world FrameState")
 
         let actualHdrPacket = rendererGenerationPacket(
             generation: 200,
@@ -4755,6 +5304,7 @@ private final class ValueValidation {
             0,
             2,
             0,
+            1,
             0,
             4,
             1,
@@ -4816,6 +5366,7 @@ private final class ValueValidation {
             0,
             2,
             2,
+            1,
             0,
             4,
             1,
@@ -4839,6 +5390,7 @@ private final class ValueValidation {
                 && linearPostPresentContract & (1 << 6) == 0,
             "METALLUM HDR linear UI-only present allocated HDR workspace/effects state: \(linearPostPresentContract)"
         )
+
         passCount += 1
         print(
             String(

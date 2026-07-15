@@ -57,6 +57,14 @@ struct ActualHdrExposureState {
   uint valid;
 };
 
+float3 metallum_hdr_finite_or_zero(float3 value) {
+  return select(float3(0.0), value, isfinite(value));
+}
+
+float3 metallum_hdr_finite_nonnegative(float3 value) {
+  return max(metallum_hdr_finite_or_zero(value), 0.0);
+}
+
 vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
   const float2 positions[3] = {
     float2(-1.0,  1.0),
@@ -75,6 +83,7 @@ vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
 }
 
 float3 metallum_hdr_srgb_to_linear(float3 encoded, bool extendedRange) {
+  encoded = metallum_hdr_finite_or_zero(encoded);
   float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
   float3 low = magnitude / 12.92;
   float3 high = pow((magnitude + 0.055) / 1.055, float3(2.4));
@@ -83,6 +92,7 @@ float3 metallum_hdr_srgb_to_linear(float3 encoded, bool extendedRange) {
 }
 
 float3 metallum_hdr_decode(float3 value, uint sourceEncoding) {
+  value = metallum_hdr_finite_or_zero(value);
   if (sourceEncoding == 0u) {
     return metallum_hdr_srgb_to_linear(value, false);
   }
@@ -93,6 +103,7 @@ float3 metallum_hdr_decode(float3 value, uint sourceEncoding) {
 }
 
 float3 metallum_hdr_linear_to_srgb(float3 linearValue) {
+  linearValue = metallum_hdr_finite_or_zero(linearValue);
   float3 bounded = clamp(linearValue, 0.0, 1.0);
   float3 low = bounded * 12.92;
   float3 high = 1.055 * pow(bounded, float3(1.0 / 2.4)) - 0.055;
@@ -113,7 +124,7 @@ float3 metallum_hdr_quantize_unorm8(float3 value) {
 }
 
 float metallum_hdr_luminance(float3 color) {
-  return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+  return dot(metallum_hdr_finite_nonnegative(color), float3(0.2126, 0.7152, 0.0722));
 }
 
 fragment float4 metallum_hdr_extract_fs(

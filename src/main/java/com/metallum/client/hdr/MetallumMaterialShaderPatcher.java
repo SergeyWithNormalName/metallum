@@ -47,6 +47,11 @@ public final class MetallumMaterialShaderPatcher {
             + "}\n\n"
             + "vec4 metallumMaterialDecodeColor(vec4 value) {\n"
             + "    return vec4(metallumMaterialSrgbToLinear(value.rgb), value.a);\n"
+            + "}\n\n"
+            + "vec4 metallumMaterialDecodeLegacyLightmap(vec4 value) {\n"
+            + "    // Vanilla tuned this attenuation for encoded-domain multiplication.\n"
+            + "    // Remap it at the L2 boundary until clustered lighting replaces it.\n"
+            + "    return vec4(metallumMaterialSrgbToLinear(value.rgb), value.a);\n"
             + "}\n";
 
     private MetallumMaterialShaderPatcher() {
@@ -128,6 +133,10 @@ public final class MetallumMaterialShaderPatcher {
                 "overlayColor = texelFetch(Sampler1, UV1, 0);",
                 "overlayColor = metallumMaterialDecodeColor(texelFetch(Sampler1, UV1, 0));"
         );
+        patched = patched.replace(
+                "sample_lightmap(Sampler2, UV2)",
+                "metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2))"
+        );
         return validateVanillaVertexTransform(path, source, patched);
     }
 
@@ -195,7 +204,7 @@ public final class MetallumMaterialShaderPatcher {
                     patched,
                     "    v_Color = _vert_color * texture(u_LightTex, _vert_tex_light_coord);",
                     "    metallumTintColor = metallumMaterialDecodeColor(_vert_color);\n"
-                            + "    vec4 metallumLightmap = texture(u_LightTex, _vert_tex_light_coord);\n"
+                            + "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap(texture(u_LightTex, _vert_tex_light_coord));\n"
                             + "    v_Color = metallumTintColor * metallumLightmap;"
             );
             if (!patched.contains("metallumMaterial = _material_params;")
@@ -382,10 +391,16 @@ public final class MetallumMaterialShaderPatcher {
                 && !patched.contains("overlayColor = metallumMaterialDecodeColor(texelFetch(Sampler1, UV1, 0));")) {
             return Result.failure(original, "vanilla vertex " + path + " did not decode its overlay color");
         }
-        if (patched.contains("metallumMaterialDecodeColor(sample_lightmap")
-                || patched.contains("metallumMaterialDecodeColor(lightMapColor")
-                || patched.contains("metallumMaterialDecodeColor(texture(u_LightTex")) {
-            return Result.failure(original, "vanilla vertex " + path + " decoded linear lightmap data");
+        int originalLightmapSamples = countOccurrences(original, "sample_lightmap(Sampler2, UV2)");
+        int remappedLightmapSamples = countOccurrences(
+                patched,
+                "metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2))"
+        );
+        if (remappedLightmapSamples != originalLightmapSamples) {
+            return Result.failure(
+                    original,
+                    "vanilla vertex " + path + " did not remap every legacy lightmap attenuation"
+            );
         }
         return Result.success(patched);
     }
@@ -568,6 +583,7 @@ public final class MetallumMaterialShaderPatcher {
         return source.contains("metallumMaterialSrgbChannelToLinear")
                 || source.contains("metallumMaterialSrgbToLinear")
                 || source.contains("metallumMaterialDecodeColor")
+                || source.contains("metallumMaterialDecodeLegacyLightmap")
                 || source.contains("metallumMaterialTextCoverage");
     }
 

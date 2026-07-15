@@ -6,14 +6,19 @@ import com.metallum.client.renderer.RendererGenerationPlanner;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.blaze3d.pipeline.BlendFunction;
+import com.mojang.blaze3d.platform.BlendFactor;
 import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import net.minecraft.client.renderer.RenderPipelines;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -50,6 +55,9 @@ public final class MetalRuntimeTests {
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
+        testWorldSceneCaptureGate();
+        testMaterialWorldPassGate();
+        testMojangLogoFp16BlendCompatibility();
         testHdrSceneColorRouting();
         testL2GenerationResourceRouting();
         testL2AtomicMaterialFallback();
@@ -599,32 +607,100 @@ public final class MetalRuntimeTests {
     private static void testHdrSceneColorRouting() {
         require(!MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.PENDING_REDIRECT,
-                        true, true, true, false, true
+                        true, true, true, true, false, true
                 ), "pending GUI redirect exposed the live HDR scene to presentation");
+        require(!MetalDevice.isHdrSceneColorConsumable(
+                        MetalDevice.HdrSceneColorState.DIRECT_SAFE,
+                        false, true, true, true, false, true
+                ), "title/loading backdrop was exposed as an HDR world scene");
         require(MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.DIRECT_SAFE,
-                        true, true, true, false, true
+                        true, true, true, true, false, true
                 ), "confirmed GUI redirect did not expose the untouched live HDR scene");
         require(!MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.DIRECT_SAFE,
-                        true, true, false, false, true
+                        true, true, true, false, false, true
                 ), "a different presented texture consumed the live HDR scene");
         require(!MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.DIRECT_SAFE,
-                        true, true, true, true, true
+                        true, true, true, true, true, true
                 ), "a closed live HDR scene remained consumable");
         require(!MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.DIRECT_SAFE,
-                        true, true, true, false, false
+                        true, true, true, true, false, false
                 ), "disabled spatial scaling retained a spatial direct scene");
         require(MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.SNAPSHOT,
-                        true, false, false, false, true
+                        true, true, false, false, false, true
                 ), "materialized HDR snapshot was not consumable");
         require(!MetalDevice.isHdrSceneColorConsumable(
                         MetalDevice.HdrSceneColorState.SNAPSHOT,
-                        false, false, false, false, true
+                        true, false, false, false, false, true
                 ), "missing HDR snapshot handle was accepted");
+    }
+
+    private static void testWorldSceneCaptureGate() {
+        require(MetalHdrFrame.shouldCaptureWorldScene(true, true, true),
+                "a rendered world frame was excluded from HDR scene capture");
+        require(!MetalHdrFrame.shouldCaptureWorldScene(false, true, true),
+                "loading frame was published as an HDR world scene");
+        require(!MetalHdrFrame.shouldCaptureWorldScene(true, false, true),
+                "non-advancing frame was published as an HDR world scene");
+        require(!MetalHdrFrame.shouldCaptureWorldScene(true, true, false),
+                "title frame was published as an HDR world scene");
+        require(MetalDevice.shouldRouteScene(true, false, false, true),
+                "Enhanced output lost its explicit scene-routing path");
+        require(MetalDevice.shouldRouteScene(false, true, true, false),
+                "Actual lighting lost scene routing for a rendered world");
+        require(!MetalDevice.shouldRouteScene(false, true, false, false),
+                "Actual SDR routed a title/loading frame through the world scene path");
+        require(MetalDevice.shouldRouteScene(false, true, false, true),
+                "Actual EDR title/loading frame lost its required SDR UI target");
+        require(!MetalDevice.shouldRouteScene(false, false, true, false),
+                "Legacy SDR unexpectedly enabled scene routing");
+    }
+
+    private static void testMaterialWorldPassGate() {
+        require(MetalDevice.capturedFrameSourceEncoding(
+                        true, HdrSourceEncoding.LINEAR, true
+                ) == HdrSourceEncoding.LINEAR.nativeValue(),
+                "world material frame lost its linear FP16 source contract");
+        require(MetalDevice.capturedFrameSourceEncoding(
+                        false, HdrSourceEncoding.LINEAR, true
+                ) == HdrSourceEncoding.EXTENDED_SRGB.nativeValue(),
+                "FP16 title panorama retained the material linear contract");
+        require(MetalDevice.capturedFrameSourceEncoding(
+                        false, HdrSourceEncoding.LINEAR, false
+                ) == HdrSourceEncoding.SRGB.nativeValue(),
+                "RGBA8 title panorama retained the material linear contract");
+    }
+
+    private static void testMojangLogoFp16BlendCompatibility() {
+        var mojangLogo = RenderPipelines.MOJANG_LOGO;
+        var vanillaBlend = mojangLogo.getColorTargetState().blendFunction().orElseThrow();
+        require(vanillaBlend.color().sourceFactor() == BlendFactor.SRC_ALPHA
+                        && vanillaBlend.color().destFactor() == BlendFactor.ONE
+                        && vanillaBlend.alpha().sourceFactor() == BlendFactor.SRC_ALPHA
+                        && vanillaBlend.alpha().destFactor() == BlendFactor.ONE,
+                "vanilla Mojang logo blend contract changed");
+        var fp16Blend = MetalCompiledRenderPipeline.resolveBlendFunctionForAttachment(
+                        mojangLogo.getLocation(), MTLPixelFormat.RGBA16Float, vanillaBlend
+                );
+        require(fp16Blend.equals(BlendFunction.TRANSLUCENT),
+                "FP16 Mojang logo retained clamp-dependent additive blending");
+        require(fp16Blend.alpha().sourceFactor() == BlendFactor.ONE
+                        && fp16Blend.alpha().destFactor() == BlendFactor.ONE_MINUS_SRC_ALPHA,
+                "FP16 Mojang logo retained over-range additive alpha");
+        require(MetalCompiledRenderPipeline.resolveBlendFunctionForAttachment(
+                        mojangLogo.getLocation(), MTLPixelFormat.RGBA8Unorm, vanillaBlend
+                ).equals(BlendFunction.LIGHTNING),
+                "RGBA8 Mojang logo lost its vanilla blend function");
+        require(MetalCompiledRenderPipeline.resolveBlendFunctionForAttachment(
+                        RenderPipelines.LIGHTNING.getLocation(),
+                        MTLPixelFormat.RGBA16Float,
+                        BlendFunction.LIGHTNING
+                ).equals(BlendFunction.LIGHTNING),
+                "unrelated FP16 additive pipeline was rewritten");
     }
 
     private static void testL2GenerationResourceRouting() {

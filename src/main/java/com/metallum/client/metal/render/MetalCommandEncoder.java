@@ -447,7 +447,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 fence,
                 sceneInputs.spatialHdrPrecomposed(),
                 outputMode.nativeValue(),
-                HdrSceneState.sourceEncoding().nativeValue(source.getFormat() == GpuFormat.RGBA16_FLOAT),
+                this.device.capturedFrameSourceEncoding(source),
+                this.device.isMaterialGenerationActive(),
                 hdrConfig.diagnosticPattern(),
                 Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
                 hdrConfig.hdrStrength(),
@@ -472,6 +473,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     int encodeHdrUiBackdrop(
             final MetalGpuTexture source,
             final MetalGpuTexture destination,
+            final int sourceEncoding,
             final MemorySegment sceneDepthTexture,
             final MemorySegment semanticTexture,
             final boolean hdrPrecomposeEnabled,
@@ -490,10 +492,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         pendingDepthClears.remove(destination);
         destination.markContentsDirty();
         endEncoder();
-        int sourceEncoding = HdrSceneState.sourceEncoding().nativeValue(
-                source.getFormat() == GpuFormat.RGBA16_FLOAT
-        );
         boolean deferSpatialHdrUiSeed = MetalFxSpatialScaling.isActive() && hdrPrecomposeEnabled;
+        boolean materialGenerationActive = this.device.isMaterialGenerationActive();
         int result = commandBuffer().encodeHdrUiBackdrop(
                 source.nativeHandle(),
                 destination.nativeHandle(),
@@ -501,6 +501,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 semanticTexture,
                 fence,
                 sourceEncoding,
+                materialGenerationActive,
                 MetalFxSpatialScaling.isActive(),
                 hdrPrecomposeEnabled,
                 perceptualScalingEnabled,
@@ -516,6 +517,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     sceneDepthTexture,
                     semanticTexture,
                     sourceEncoding,
+                    materialGenerationActive,
                     perceptualScalingEnabled,
                     currentHeadroom,
                     hdrConfig.hdrStrength(),
@@ -573,6 +575,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                     seed.semanticTexture,
                     fence,
                     seed.sourceEncoding,
+                    seed.materialGenerationActive,
                     true,
                     true,
                     seed.perceptualScalingEnabled,
@@ -1134,7 +1137,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (clearColor == null || !SceneLinearClearColor.shouldDecode(
                 texture.getFormat() == GpuFormat.RGBA16_FLOAT,
                 texture.hasSceneColorClearRole(),
-                this.device.isMaterialGenerationActive(),
+                this.device.isMaterialWorldPassActive(),
                 this.device.isLegacyHdrSceneLinearGenerationActive()
         )) {
             return null;
@@ -1224,6 +1227,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             MemorySegment sceneDepthTexture,
             MemorySegment semanticTexture,
             int sourceEncoding,
+            boolean materialGenerationActive,
             boolean perceptualScalingEnabled,
             float currentHeadroom,
             float hdrStrength,

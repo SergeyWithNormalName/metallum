@@ -16,6 +16,7 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
@@ -81,6 +82,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     private static final java.util.concurrent.atomic.AtomicInteger compilationCounter = new java.util.concurrent.atomic.AtomicInteger(0);
     private static final Set<String> UNKNOWN_FP16_PIPELINES_LOGGED = ConcurrentHashMap.newKeySet();
+    private static final Identifier MOJANG_LOGO_PIPELINE = Identifier.withDefaultNamespace("pipeline/mojang_logo");
 
     private final MemorySegment depthStencilState;
     private final MetalDevice device;
@@ -380,7 +382,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         }
 
         ColorTargetState colorTarget = info.getColorTargetState();
-        Optional<BlendFunction> blendFunction = colorTarget == null ? Optional.empty() : colorTarget.blendFunction();
+        Optional<BlendFunction> blendFunction = colorTarget == null
+                ? Optional.empty()
+                : colorTarget.blendFunction().map(function -> resolveBlendFunctionForAttachment(
+                        info.getLocation(),
+                        colorFormat,
+                        function
+                ));
         long writeMask = colorTarget == null ? MTLColorWriteMask.All.value : MTLColorWriteMask.from(colorTarget.writeMask());
 
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
@@ -417,6 +425,26 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     pipelineDesc.handle()
             );
         }
+    }
+
+    static BlendFunction resolveBlendFunctionForAttachment(
+            final Identifier pipelineLocation,
+            final MTLPixelFormat colorFormat,
+            final BlendFunction function
+    ) {
+        // Mojang's loading logo intentionally uses additive blending into the
+        // vanilla RGBA8 target. UNORM saturation turns the opaque white texels
+        // white; an FP16 target preserves the over-range red background and
+        // visibly tints the logo pink. Use ordinary straight-alpha blending
+        // only for this pipeline on FP16 attachments so the loading overlay
+        // retains its white logo and smooth fade without affecting other
+        // additive effects.
+        if (colorFormat == MTLPixelFormat.RGBA16Float
+                && MOJANG_LOGO_PIPELINE.equals(pipelineLocation)
+                && BlendFunction.LIGHTNING.equals(function)) {
+            return BlendFunction.TRANSLUCENT;
+        }
+        return function;
     }
 
     @Override
@@ -514,7 +542,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat colorFormat,
             final boolean materialSceneAttachment
     ) {
-        if (materialSceneAttachment && this.device.isMaterialGenerationActive()) {
+        if (materialSceneAttachment && this.device.isMaterialWorldPassActive()) {
             if (this.hdrRole.supportsSceneLinearFlavor()) {
                 return HdrShaderFlavor.METALLUM;
             }

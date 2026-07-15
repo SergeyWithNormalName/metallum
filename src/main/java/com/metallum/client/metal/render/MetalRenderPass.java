@@ -410,7 +410,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
         MetalGpuTexture colorAttachment = (MetalGpuTexture) this.colorTexture.texture();
         boolean suppress = pipeline.shouldSuppressUnsupportedMaterialDraw(
-                this.device.isMaterialGenerationActive(),
+                this.device.isMaterialWorldPassActive(),
                 colorAttachment.hasSceneColorClearRole(),
                 colorAttachment.hasDisplaySdrColorRole()
         );
@@ -454,7 +454,7 @@ final class MetalRenderPass implements RenderPassBackend {
         boolean decodeClearColor = clearColorNow && SceneLinearClearColor.shouldDecode(
                 colorAttachment.getFormat() == GpuFormat.RGBA16_FLOAT,
                 colorAttachment.hasSceneColorClearRole(),
-                this.device.isMaterialGenerationActive(),
+                this.device.isMaterialWorldPassActive(),
                 this.device.isLegacyHdrSceneLinearGenerationActive()
         );
         boolean materialSceneAttachment = colorAttachment.hasSceneColorClearRole()
