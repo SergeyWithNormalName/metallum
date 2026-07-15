@@ -30,6 +30,9 @@
     "render.PreferredGraphicsApiMixin",
     "render.RenderTargetHdrMixin",
     "sodium.BlockRendererHdrMixin",
+    "sodium.BlockRendererRelightOracleMixin",
+    "sodium.ChunkBuildOutputRelightLifecycleMixin",
+    "sodium.ChunkBuilderMeshingTaskRelightOracleMixin",
     "sodium.ChunkMeshBufferBuilderHdrMixin",
     "sodium.ChunkVertexEncoderVertexHdrMixin",
     "sodium.DefaultFluidRendererHdrMixin",
@@ -39,10 +42,14 @@
     "sodium.GlBufferSegmentTerrainAccessMixin",
     "sodium.PendingBufferCopyCommandAccessor",
     "sodium.RenderRegionDeviceResourcesLightSidecarMixin",
+    "sodium.RenderRegionManagerRelightLifecycleMixin",
     "sodium.RenderRegionManagerTerrainRefreshMixin",
+    "sodium.RenderSectionRelightLifecycleMixin",
     "sodium.RenderSectionTerrainBaselineMixin",
     "sodium.SectionRenderDataStorageTerrainAccessMixin",
-    "sodium.SodiumPreferredGraphicsApiMixin"
+    "sodium.SodiumRelightBlockContextAccess",
+    "sodium.SodiumPreferredGraphicsApiMixin",
+    "sodium.VanillaBlockModelPartEncoderRelightOracleMixin"
   ],
   "injectors": {
     "defaultRequire": 1

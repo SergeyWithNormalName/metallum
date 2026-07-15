@@ -184,6 +184,15 @@ tasks.register("sodiumRelightPlanUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.sodium.SodiumRelightPlanTests")
 }
 
+tasks.register("sodiumRelightOracleUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free Sodium relight oracle lifecycle and counter tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.sodium.SodiumRelightOracleTests")
+	environment "METALLUM_SODIUM_RELIGHT_ORACLE", "0"
+}
+
 tasks.register("frameGraphValidation", JavaExec) {
 	group = "verification"
 	description = "Validates the typed Metal frame graph and versioned ABI header"
@@ -560,6 +569,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
 	dependsOn(tasks.named("sodiumRelightPlanUnitTest"))
+	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))

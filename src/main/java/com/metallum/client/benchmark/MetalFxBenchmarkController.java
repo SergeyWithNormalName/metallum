@@ -6,6 +6,8 @@ import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
+import com.metallum.client.sodium.SodiumRelightOracle;
+import com.metallum.client.sodium.SodiumRelightPlanCache;
 import com.metallum.client.sodium.SodiumTerrainLightPatch;
 import com.metallum.client.sodium.SodiumTerrainStaticShadow;
 import com.mojang.blaze3d.platform.Monitor;
@@ -589,6 +591,7 @@ public final class MetalFxBenchmarkController {
         this.torchEpochRequested = true;
         this.torchEpochToken = ++this.nextTorchEpochToken;
         TorchEpochTelemetry.begin(this.torchEpochToken);
+        SodiumRelightOracle.beginObservation(this.torchEpochToken);
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_BEGIN route={} position={},{},{} measured_frame={} observation_frames={}",
                 this.route.routeId(),
@@ -834,6 +837,7 @@ public final class MetalFxBenchmarkController {
         }
 
         TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
+        SodiumRelightOracle.Snapshot relightOracle = SodiumRelightOracle.endObservation();
         long targetSectionKey = SectionPos.asLong(
                 SectionPos.blockToSectionCoord(config.x()),
                 SectionPos.blockToSectionCoord(config.y()),
@@ -923,6 +927,38 @@ public final class MetalFxBenchmarkController {
                 shadow.evictionCount(),
                 shadow.rejectedCaptureCount()
         );
+        SodiumRelightPlanCache.Snapshot relightCache = relightOracle.planCache();
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_RELIGHT_ORACLE epoch={} configured={} active={} tasks={} light_only_tasks={} captured_plans={} captured_quads={} replay_attempts={} replay_matches={} mismatched_tasks={} byte_mismatches={} static_shadow_mismatches={} static_shadow_rejections={} rejected_tasks={} scope_failures={} stale_candidates={} discarded_candidates={} published_candidates={} errors={} skipped_full_remeshes={} cache_capacity_bytes={} cache_live_bytes={} cache_peak_bytes={} resident_plans={} pinned_leases={} cache_evictions={} oversized_rejections={} pinned_pressure_rejections={}",
+                relightOracle.epochId(),
+                relightOracle.configured(),
+                relightOracle.active(),
+                relightOracle.tasks(),
+                relightOracle.lightOnlyTasks(),
+                relightOracle.capturedPlans(),
+                relightOracle.capturedQuads(),
+                relightOracle.replayAttempts(),
+                relightOracle.replayMatches(),
+                relightOracle.mismatchedTasks(),
+                relightOracle.byteMismatches(),
+                relightOracle.staticShadowMismatches(),
+                relightOracle.staticShadowRejections(),
+                relightOracle.rejectedTasks(),
+                relightOracle.scopeFailures(),
+                relightOracle.staleCandidates(),
+                relightOracle.discardedCandidates(),
+                relightOracle.publishedCandidates(),
+                relightOracle.errors(),
+                relightOracle.skippedFullRemeshes(),
+                relightCache.capacityBytes(),
+                relightCache.liveBytes(),
+                relightCache.peakBytes(),
+                relightCache.residentPlans(),
+                relightCache.pinnedLeases(),
+                relightCache.evictionCount(),
+                relightCache.oversizedRejectionCount(),
+                relightCache.pinnedPressureRejectionCount()
+        );
         if (snapshot.epochId() != this.torchEpochToken) {
             fail(minecraft, "TORCH_EPOCH telemetry epoch identity changed");
             return;
@@ -930,6 +966,31 @@ public final class MetalFxBenchmarkController {
         if (snapshot.errorCount() != 0L || snapshot.overflowCount() != 0L) {
             fail(minecraft, "TORCH_EPOCH telemetry reported an error or overflow");
             return;
+        }
+        if (relightOracle.configured()) {
+            if (!relightOracle.active()
+                    || relightOracle.epochId() != this.torchEpochToken
+                    || relightOracle.tasks() <= 0L
+                    || relightOracle.lightOnlyTasks() <= 0L
+                    || relightOracle.capturedPlans() <= 0L
+                    || relightOracle.capturedQuads() <= 0L
+                    || relightOracle.replayAttempts() <= 0L
+                    || relightOracle.replayMatches() <= 0L
+                    || relightOracle.replayMatches() != relightOracle.replayAttempts()
+                    || relightOracle.publishedCandidates() <= 0L
+                    || relightOracle.mismatchedTasks() != 0L
+                    || relightOracle.byteMismatches() != 0L
+                    || relightOracle.staticShadowMismatches() != 0L
+                    || relightOracle.scopeFailures() != 0L
+                    || relightOracle.staleCandidates() != 0L
+                    || relightOracle.discardedCandidates() != 0L
+                    || relightOracle.errors() != 0L
+                    || relightOracle.skippedFullRemeshes() != 0L
+                    || relightCache.liveBytes() > relightCache.capacityBytes()
+                    || relightCache.pinnedLeases() != 0L) {
+                fail(minecraft, "TORCH_EPOCH exact relight oracle did not prove a zero-mismatch full-remesh comparison");
+                return;
+            }
         }
         if (snapshot.finalBuilderQueueDepth() != 0
                 || snapshot.finalBusyWorkerCount() != 0
@@ -1831,6 +1892,7 @@ public final class MetalFxBenchmarkController {
     private void startSegment() {
         SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
         TorchEpochTelemetry.abort();
+        SodiumRelightOracle.abortObservation();
         this.torchEpochServerTaskPending.set(false);
         this.torchEpochRequested = false;
         this.torchEpochAppliedLogged = false;
@@ -1884,6 +1946,7 @@ public final class MetalFxBenchmarkController {
         if (TorchEpochTelemetry.snapshot().active()) {
             TorchEpochTelemetry.abort();
         }
+        SodiumRelightOracle.abortObservation();
         restoreSurvivalGuard(minecraft);
         if (this.originalClientStateCaptured && this.originalCameraType != null) {
             minecraft.options.setCameraType(this.originalCameraType);

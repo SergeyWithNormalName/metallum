@@ -14,7 +14,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 abstract class RenderSectionTerrainBaselineMixin implements SodiumTerrainUploadBaselineAccess {
     @Unique
     @Nullable
-    private SodiumTerrainUploadBaseline metallum$terrainUploadBaseline;
+    private volatile SodiumTerrainUploadBaseline metallum$terrainUploadBaseline;
 
     @Override
     @Nullable

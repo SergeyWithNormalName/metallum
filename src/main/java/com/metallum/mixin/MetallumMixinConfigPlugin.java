@@ -16,6 +16,24 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
     private static final String BENCHMARK_MIXIN_PREFIX = "com.metallum.mixin.benchmark.";
     private static final String BENCHMARK_SODIUM_MIXIN_PREFIX = "com.metallum.mixin.benchmark.sodium.";
+    private static final String SODIUM_RELIGHT_ORACLE_ENV = "METALLUM_SODIUM_RELIGHT_ORACLE";
+    private static final String MINECRAFT_MOD_ID = "minecraft";
+    private static final String MINECRAFT_EXACT_VERSION = "26.2";
+    private static final String SODIUM_MOD_ID = "sodium";
+    private static final String SODIUM_EXACT_VERSION = "0.9.1+mc26.2";
+    private static final String FABRIC_RENDERER_API_MOD_ID = "fabric-renderer-api-v1";
+    private static final String FABRIC_RENDERER_API_EXACT_VERSION = "14.0.1+eec4cc519c";
+    private static final String MIXIN_EXTRAS_MOD_ID = "mixinextras";
+    private static final String MIXIN_EXTRAS_EXACT_VERSION = "0.5.4";
+    private static final Set<String> SODIUM_RELIGHT_ORACLE_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.BlockRendererRelightOracleMixin",
+            "com.metallum.mixin.sodium.ChunkBuildOutputRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.ChunkBuilderMeshingTaskRelightOracleMixin",
+            "com.metallum.mixin.sodium.RenderRegionManagerRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.RenderSectionRelightLifecycleMixin",
+            "com.metallum.mixin.sodium.SodiumRelightBlockContextAccess",
+            "com.metallum.mixin.sodium.VanillaBlockModelPartEncoderRelightOracleMixin"
+    );
     private static final Set<String> SODIUM_LIGHT_SIDECAR_MIXINS = Set.of(
             "com.metallum.mixin.sodium.GlBufferArenaLightSidecarMixin",
             "com.metallum.mixin.sodium.GlBufferSegmentTerrainAccessMixin",
@@ -32,6 +50,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean isDefaultGraphicsApi;
     private boolean benchmarkEnabled;
     private boolean sodiumLightSidecarEnabled;
+    private boolean sodiumRelightOracleEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -40,6 +59,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
+        this.sodiumRelightOracleEnabled = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV))
+                && hasExactRelightOracleVersions();
     }
 
     @Override
@@ -51,6 +72,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (!this.isMacOs) {
             return false;
+        }
+        if (SODIUM_RELIGHT_ORACLE_MIXINS.contains(mixinClassName)) {
+            return this.sodiumRelightOracleEnabled && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.startsWith(BENCHMARK_SODIUM_MIXIN_PREFIX)) {
             return this.benchmarkEnabled
@@ -115,5 +139,36 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             case "1", "true", "yes", "on" -> true;
             default -> false;
         };
+    }
+
+    /**
+     * The diagnostic oracle targets exact third-party bytecode and therefore
+     * deliberately refuses compatible-looking or newer versions.
+     */
+    private static boolean hasExactRelightOracleVersions() {
+        FabricLoader loader = FabricLoader.getInstance();
+        return hasExactVersion(loader, MINECRAFT_MOD_ID, MINECRAFT_EXACT_VERSION)
+                && hasExactVersion(loader, SODIUM_MOD_ID, SODIUM_EXACT_VERSION)
+                && hasExactVersion(
+                        loader,
+                        FABRIC_RENDERER_API_MOD_ID,
+                        FABRIC_RENDERER_API_EXACT_VERSION
+                )
+                && hasExactVersion(loader, MIXIN_EXTRAS_MOD_ID, MIXIN_EXTRAS_EXACT_VERSION);
+    }
+
+    private static boolean hasExactVersion(
+            final FabricLoader loader,
+            final String modId,
+            final String expectedVersion
+    ) {
+        try {
+            return loader.getModContainer(modId)
+                    .map(container -> container.getMetadata().getVersion().getFriendlyString())
+                    .filter(expectedVersion::equals)
+                    .isPresent();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 }
