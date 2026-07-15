@@ -228,6 +228,46 @@ def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/Fra
 def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
 def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
 def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-tests/SodiumLightLegacyPatchValidation")
+def metal4LifecycleValidationBinary = layout.buildDirectory.file("native-tests/Metal4LifecycleValidation")
+def metal4ValidationSupported = {
+	isAppleSiliconMac && (macOsSdkVersion.get().tokenize('.')[0] as int) >= 26
+}
+
+tasks.register("compileMetal4LifecycleValidation", Exec) {
+	group = "verification"
+	description = "Compiles the isolated Metal 4 compiler and command lifecycle harness"
+	onlyIf { metal4ValidationSupported() }
+
+	inputs.file("src/test/native/Metal4LifecycleValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(metal4LifecycleValidationBinary)
+
+	doFirst {
+		metal4LifecycleValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", metal4LifecycleValidationBinary.get().asFile.absolutePath,
+		"src/test/native/Metal4LifecycleValidation.swift"
+}
+
+tasks.register("metal4LifecycleValidation", Exec) {
+	group = "verification"
+	description = "Validates isolated Metal 4 compiler, synchronization and allocator reuse lifecycle"
+	onlyIf { metal4ValidationSupported() }
+	dependsOn(tasks.named("compileMetal4LifecycleValidation"))
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine metal4LifecycleValidationBinary.get().asFile.absolutePath
+}
 
 tasks.register("compileSodiumLightLegacyPatchValidation", Exec) {
 	group = "verification"
@@ -593,6 +633,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("builtinShaderFallbackValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
 	dependsOn(tasks.named("gpuTimingValidation"))
+	dependsOn(tasks.named("metal4LifecycleValidation"))
 }
 
 java {
