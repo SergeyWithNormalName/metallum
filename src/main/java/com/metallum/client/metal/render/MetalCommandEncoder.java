@@ -591,6 +591,36 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         this.pendingUiSeeds.consume(seed);
     }
 
+    boolean encodeCoherentMenuBlur(
+            final MetalGpuTexture rawScene,
+            final MetalGpuTexture ui,
+            final float radius,
+            final float currentHeadroom
+    ) {
+        materializePendingUiSeed();
+        if (rawScene == ui
+                || rawScene.isClosed()
+                || ui.isClosed()
+                || !Float.isFinite(radius)
+                || radius < 1.0f) {
+            return false;
+        }
+        submitRenderPass();
+        prepareTextureForRead(rawScene);
+        prepareTextureForRead(ui);
+        pendingColorClears.remove(ui);
+        pendingDepthClears.remove(ui);
+        ui.markContentsDirty();
+        endEncoder();
+        return commandBuffer().encodeCoherentMenuBlur(
+                rawScene.nativeHandle(),
+                ui.nativeHandle(),
+                fence,
+                radius,
+                currentHeadroom
+        ) == 1;
+    }
+
     boolean encodeSpatialScreenshot(
             final MetalGpuTexture rawScene,
             final MetalGpuTexture ui,

@@ -110,7 +110,8 @@ public final class MetalHdrFrame {
 
     public static boolean prepareUiBackdrop(
             final GpuTextureView mainColorView,
-            final GpuTextureView uiColorView
+            final GpuTextureView uiColorView,
+            final boolean hdrPrecomposeAllowed
     ) {
         if (mainColorView == null
                 || mainColorView.isClosed()
@@ -123,7 +124,11 @@ public final class MetalHdrFrame {
                 && uiColorView.texture() instanceof MetalGpuTexture destination
                 && source != destination
                 && source.device() == destination.device()) {
-            return source.device().prepareHdrUiBackdrop(source, destination);
+            return source.device().prepareHdrUiBackdrop(
+                    source,
+                    destination,
+                    hdrPrecomposeAllowed
+            );
         }
         return false;
     }
@@ -167,6 +172,25 @@ public final class MetalHdrFrame {
                 && !mainColorView.isClosed()
                 && mainColorView.texture() instanceof MetalGpuTexture color
                 && color.device().isSpatialHdrPrecomposedForCurrentSubmit();
+    }
+
+    public static boolean blurUiBackdrop(
+            final GpuTextureView mainColorView,
+            final GpuTextureView uiColorView,
+            final float radius
+    ) {
+        if (mainColorView == null
+                || mainColorView.isClosed()
+                || uiColorView == null
+                || uiColorView.isClosed()
+                || mainColorView == uiColorView) {
+            return false;
+        }
+        return mainColorView.texture() instanceof MetalGpuTexture source
+                && uiColorView.texture() instanceof MetalGpuTexture ui
+                && source != ui
+                && source.device() == ui.device()
+                && source.device().blurHdrUiBackdrop(source, ui, radius);
     }
 
     public static boolean prepareSpatialScreenshot(

@@ -7,6 +7,7 @@ import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.render.GuiRenderer;
+import net.minecraft.client.renderer.CubeMap;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.PostChain;
@@ -18,6 +19,19 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(GuiRenderer.class)
 abstract class GuiRendererHdrMixin {
+    @Inject(
+            method = "render",
+            at = @At(
+                    value = "INVOKE",
+                    target = "Lnet/minecraft/client/renderer/CubeMap;render(FF)V"
+            ),
+            require = 1
+    )
+    private void metallum$prepareSdrPanoramaTarget(final CallbackInfo ci) {
+        GameRenderer renderer = Minecraft.getInstance().gameRenderer;
+        HdrUiRenderTarget.begin(renderer.mainRenderTarget());
+    }
+
     @Redirect(
             method = "draw",
             at = @At(
@@ -48,13 +62,13 @@ abstract class GuiRendererHdrMixin {
             return;
         }
 
-        // The native HDR fast path keeps a sharp FP16 world and an exact
-        // quantized SDR seed. Vanilla's blur filters only that SDR seed, so
-        // its pixels no longer correspond to the HDR world sampled by the
-        // separated present shader. The resulting sharp/blurred mixture is a
-        // spatial distortion, not a valid HDR blur. Keep the stable sharp
-        // backdrop here; ordinary screen shading and GUI draws still render.
         if (!HdrUiRenderTarget.shouldProcessSdrBackdropBlur()) {
+            // Match vanilla's menu radius and six-pass sequence, but keep the
+            // intermediate image in FP16. Native code first composes the HDR
+            // world with every GUI draw before the blur marker, then resolves
+            // one blurred result back into matching HDR and SDR-seed targets.
+            float radius = Minecraft.getInstance().options.menuBackgroundBlurriness().get();
+            HdrUiRenderTarget.processCoherentBackdropBlur(radius);
             return;
         }
 

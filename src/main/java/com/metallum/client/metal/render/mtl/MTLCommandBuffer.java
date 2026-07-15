@@ -192,6 +192,23 @@ public final class MTLCommandBuffer {
         );
     }
 
+    public int encodeCoherentMenuBlur(
+            final MemorySegment sourceTexture,
+            final MemorySegment uiTexture,
+            final MemorySegment globalFence,
+            final float radius,
+            final float currentHeadroom
+    ) {
+        return MetalNativeBridge.MTLCommandBuffer_encodeCoherentMenuBlur(
+                handle(),
+                sourceTexture,
+                uiTexture,
+                globalFence,
+                radius,
+                currentHeadroom
+        );
+    }
+
     public int encodeSpatialScreenshot(
             final MemorySegment rawSceneTexture,
             final MemorySegment uiTexture,

@@ -57,7 +57,10 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
                 "metallum_native_world_ui_fs",
                 "metallum_actual_native_world_ui_fs",
                 "metallum_spatial_present_fs",
-                "metallum_spatial_screenshot_fs"
+                "metallum_spatial_screenshot_fs",
+                "metallum_menu_blur_compose_fs",
+                "metallum_menu_blur_fs",
+                "metallum_menu_blur_resolve_fs"
             ]
         case .hdrEffects:
             [
@@ -175,6 +178,12 @@ private struct MetallumHdrUiBackdropUniforms {
     var sourceEncoding: UInt32
 }
 
+private struct MetallumMenuBlurUniforms {
+    var blurDirection: SIMD2<Float>
+    var radius: Float
+    var currentHeadroom: Float
+}
+
 private struct MetallumHdrUiBackdropPipelineKey: Hashable {
     let depthFormat: UInt
     let stencilFormat: UInt
@@ -266,6 +275,22 @@ private final class MetallumUiBackdropPipelines {
     }
 }
 
+private final class MetallumMenuBlurPipelines {
+    let compose: MTLRenderPipelineState
+    let blur: MTLRenderPipelineState
+    let resolve: MTLRenderPipelineState
+
+    init(
+        compose: MTLRenderPipelineState,
+        blur: MTLRenderPipelineState,
+        resolve: MTLRenderPipelineState
+    ) {
+        self.compose = compose
+        self.blur = blur
+        self.resolve = resolve
+    }
+}
+
 private final class MetallumHdrWorkspace {
     let lightingMode: UInt32
     let sourceWidth: Int
@@ -278,6 +303,8 @@ private final class MetallumHdrWorkspace {
     var worldCompositeCommandBufferAddress: UInt?
     var uiMaskA: MTLTexture?
     var uiMaskB: MTLTexture?
+    var menuBlurA: MTLTexture?
+    var menuBlurB: MTLTexture?
     let histogram: MTLBuffer
     let adaptiveState: MTLBuffer
     var lastHistogramUptime: TimeInterval?
@@ -305,6 +332,8 @@ private final class MetallumHdrWorkspace {
         self.worldCompositeCommandBufferAddress = nil
         self.uiMaskA = nil
         self.uiMaskB = nil
+        self.menuBlurA = nil
+        self.menuBlurB = nil
         self.histogram = histogram
         self.adaptiveState = adaptiveState
         self.lastHistogramUptime = nil
@@ -325,6 +354,7 @@ private final class MetallumSpatialWorkspace {
     let scaler: MTLFXSpatialScaler
     let perceptualInput: MTLTexture?
     var output: MTLTexture?
+    var outputCommandBufferAddress: UInt?
     let usesDirectOutput: Bool
     var preparedUiSeed: MetallumPreparedSpatialUiSeed?
 
@@ -355,6 +385,7 @@ private final class MetallumSpatialWorkspace {
         self.scaler = scaler
         self.perceptualInput = perceptualInput
         self.output = output
+        self.outputCommandBufferAddress = nil
         self.usesDirectOutput = usesDirectOutput
         self.preparedUiSeed = nil
     }
@@ -2439,6 +2470,7 @@ private enum NativeState {
     static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
     static var actualHdrPipelines: [UInt: MetallumActualHdrPipelines] = [:]
     static var uiBackdropPipelines: [UInt: MetallumUiBackdropPipelines] = [:]
+    static var menuBlurPipelines: [UInt: MetallumMenuBlurPipelines] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
@@ -3190,6 +3222,52 @@ private func ensureUiBackdropPipelines(device: MTLDevice) -> MetallumUiBackdropP
     }
 }
 
+private func ensureMenuBlurPipelines(device: MTLDevice) -> MetallumMenuBlurPipelines? {
+    let key = objectAddress(device)
+    if let cached = NativeState.menuBlurPipelines[key] {
+        return cached
+    }
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .present)
+        guard let vertex = library.makeFunction(name: "metallum_offscreen_vs"),
+              let composeFragment = library.makeFunction(name: "metallum_menu_blur_compose_fs"),
+              let blurFragment = library.makeFunction(name: "metallum_menu_blur_fs"),
+              let resolveFragment = library.makeFunction(name: "metallum_menu_blur_resolve_fs") else {
+            recordBuiltinPipelineCreation(device: device, succeeded: false)
+            return nil
+        }
+
+        func makePipeline(
+            fragment: MTLFunction,
+            resolvesUiSeed: Bool = false
+        ) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertex
+            descriptor.fragmentFunction = fragment
+            descriptor.colorAttachments[0].pixelFormat = .rgba16Float
+            descriptor.colorAttachments[0].isBlendingEnabled = false
+            if resolvesUiSeed {
+                descriptor.colorAttachments[1].pixelFormat = .rgba8Unorm
+                descriptor.colorAttachments[1].isBlendingEnabled = false
+            }
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+
+        let pipelines = MetallumMenuBlurPipelines(
+            compose: try makePipeline(fragment: composeFragment),
+            blur: try makePipeline(fragment: blurFragment),
+            resolve: try makePipeline(fragment: resolveFragment, resolvesUiSeed: true)
+        )
+        recordBuiltinPipelineCreation(device: device, count: 3, succeeded: true)
+        NativeState.menuBlurPipelines[key] = pipelines
+        return pipelines
+    } catch {
+        recordBuiltinPipelineCreation(device: device, succeeded: false)
+        NSLog("[metallum] Failed to create coherent HDR menu-blur pipelines: %@", String(describing: error))
+        return nil
+    }
+}
+
 private func ensureHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
     let key = objectAddress(device)
     if let cached = NativeState.hdrPipelines[key] {
@@ -3329,6 +3407,8 @@ private func ensureHdrWorkspace(
             cached.displayHeight = displayHeight
             cached.uiMaskA = nil
             cached.uiMaskB = nil
+            cached.menuBlurA = nil
+            cached.menuBlurB = nil
             cached.lastHistogramUptime = nil
             cached.histogramNeedsInitialization = true
         }
@@ -3401,6 +3481,46 @@ private func ensureHdrWorkspace(
         : "Metallum actual HDR exposure histogram"
     NativeState.hdrWorkspaces[key] = workspace
     return workspace
+}
+
+private func ensureMenuBlurTextures(
+    device: MTLDevice,
+    workspace: MetallumHdrWorkspace,
+    width: Int,
+    height: Int
+) -> (MTLTexture, MTLTexture)? {
+    func valid(_ texture: MTLTexture?) -> Bool {
+        texture != nil
+            && texture!.width == width
+            && texture!.height == height
+            && texture!.pixelFormat == .rgba16Float
+    }
+    if valid(workspace.menuBlurA), valid(workspace.menuBlurB) {
+        return (workspace.menuBlurA!, workspace.menuBlurB!)
+    }
+
+    func makeTexture(label: String) -> MTLTexture? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.hazardTrackingMode = .tracked
+        descriptor.usage = [.renderTarget, .shaderRead]
+        let texture = device.makeTexture(descriptor: descriptor)
+        texture?.label = label
+        return texture
+    }
+
+    guard let first = makeTexture(label: "Metallum coherent menu blur A"),
+          let second = makeTexture(label: "Metallum coherent menu blur B") else {
+        return nil
+    }
+    workspace.menuBlurA = first
+    workspace.menuBlurB = second
+    return (first, second)
 }
 
 private func makeHdrPassEncoder(
@@ -3508,8 +3628,8 @@ private func ensureSpatialWorkspace(
             mipmapped: false
         )
         textureDescriptor.storageMode = .private
-        textureDescriptor.hazardTrackingMode = .untracked
-        textureDescriptor.usage = scaler.outputTextureUsage.union(.shaderRead)
+        textureDescriptor.hazardTrackingMode = .tracked
+        textureDescriptor.usage = scaler.outputTextureUsage.union([.shaderRead, .renderTarget])
         guard let allocated = device.makeTexture(descriptor: textureDescriptor) else {
             NSLog("[metallum] Failed to allocate MetalFX spatial output")
             return nil
@@ -3567,6 +3687,24 @@ private func currentSpatialOutput(
         return nil
     }
     return output
+}
+
+private func currentSpatialOutput(
+    commandBuffer: MTLCommandBuffer,
+    inputTexture: MTLTexture,
+    outputWidth: Int,
+    outputHeight: Int
+) -> MTLTexture? {
+    guard let workspace = NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)],
+          workspace.outputCommandBufferAddress == objectAddress(commandBuffer) else {
+        return nil
+    }
+    return currentSpatialOutput(
+        device: commandBuffer.device,
+        inputTexture: inputTexture,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight
+    )
 }
 
 private func validatedPreparedSpatialUiSeed(
@@ -5145,6 +5283,7 @@ private func prepareRendererGeneration(
     if !spatialEnabled {
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
+        NativeState.menuBlurPipelines.removeValue(forKey: key)
     }
     let prepared: Bool
     if snapshot.outputMode == 0 {
@@ -5167,6 +5306,7 @@ private func prepareRendererGeneration(
             && ensureActualHdrLinearUiOnlyPipeline(device: device, colorFormat: .rgba16Float) != nil
             && ensureActualNativeWorldUiPipeline(device: device) != nil
             && ensureUiBackdropPipelines(device: device) != nil
+            && ensureMenuBlurPipelines(device: device) != nil
             && (!spatialEnabled || (
                 ensureActualWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
@@ -5178,6 +5318,7 @@ private func prepareRendererGeneration(
             && ensureLegacyHdrPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
             && ensureNativeWorldUiPipeline(device: device) != nil
             && ensureUiBackdropPipelines(device: device) != nil
+            && ensureMenuBlurPipelines(device: device) != nil
             && ensureHdrFallbackAdaptiveState(device: device) != nil
             && ensureHdrFallbackDepthTexture(device: device) != nil
             && (!spatialEnabled || (
@@ -6046,6 +6187,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.actualHdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.uiBackdropPipelines.removeValue(forKey: deviceAddress)
+        NativeState.menuBlurPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
@@ -8050,6 +8192,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 fence: globalFence
             )
             workspace.scaler.encode(commandBuffer: commandBuffer)
+            workspace.outputCommandBufferAddress = objectAddress(commandBuffer)
             endExternalGpuTiming(
                 metalFxTiming,
                 commandBuffer: commandBuffer,
@@ -8211,6 +8354,156 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
         }
         trackedEndEncoding(encoder)
         workspace.preparedUiSeed = nil
+        return 1
+    }
+}
+
+@_cdecl("metallum_MTLCommandBuffer_encodeCoherentMenuBlur")
+public func metallum_MTLCommandBuffer_encodeCoherentMenuBlur(
+    _ commandBuffer: MTLCommandBuffer,
+    _ sourceTexture: MTLTexture,
+    _ uiTexture: MTLTexture,
+    _ globalFence: MTLFence?,
+    _ radius: Float,
+    _ currentHeadroom: Float
+) -> Int32 {
+    return autoreleasepool {
+        guard radius.isFinite,
+              radius >= 1.0,
+              sourceTexture.textureType == .type2D,
+              sourceTexture.sampleCount == 1,
+              sourceTexture.usage.contains(.shaderRead),
+              uiTexture.pixelFormat == .rgba8Unorm,
+              uiTexture.textureType == .type2D,
+              uiTexture.sampleCount == 1,
+              uiTexture.usage.contains(.shaderRead),
+              uiTexture.usage.contains(.renderTarget),
+              objectAddress(sourceTexture.device) == objectAddress(commandBuffer.device),
+              objectAddress(uiTexture.device) == objectAddress(commandBuffer.device),
+              globalFence == nil || objectAddress(globalFence!.device) == objectAddress(commandBuffer.device),
+              let hdrTexture = currentNativeHdrWorldComposite(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: uiTexture.width,
+                outputHeight: uiTexture.height
+              ) ?? currentSpatialOutput(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: uiTexture.width,
+                outputHeight: uiTexture.height
+              ),
+              hdrTexture.pixelFormat == .rgba16Float,
+              hdrTexture.usage.contains(.shaderRead),
+              hdrTexture.usage.contains(.renderTarget),
+              hdrTexture.width == uiTexture.width,
+              hdrTexture.height == uiTexture.height,
+              let workspace = NativeState.hdrWorkspaces[objectAddress(commandBuffer.device)],
+              workspace.displayWidth == uiTexture.width,
+              workspace.displayHeight == uiTexture.height,
+              let blurTextures = ensureMenuBlurTextures(
+                device: commandBuffer.device,
+                workspace: workspace,
+                width: uiTexture.width,
+                height: uiTexture.height
+              ),
+              let pipelines = ensureMenuBlurPipelines(device: commandBuffer.device),
+              let samplers = presentSamplers(device: commandBuffer.device) else {
+            return 0
+        }
+
+        let effectiveRadius = min(max(round(radius), 1.0), 64.0)
+        let effectiveHeadroom = min(
+            max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
+            8.0
+        )
+        var uniforms = MetallumMenuBlurUniforms(
+            blurDirection: SIMD2<Float>(0.0, 0.0),
+            radius: effectiveRadius,
+            currentHeadroom: effectiveHeadroom
+        )
+
+        guard let compose = makeHdrPassEncoder(
+            commandBuffer: commandBuffer,
+            target: blurTextures.0,
+            pipeline: pipelines.compose,
+            stage: .uiSeed
+        ) else {
+            return -1
+        }
+        compose.label = "Metallum coherent menu blur compose"
+        if let globalFence {
+            compose.waitForFence(globalFence, before: .fragment)
+        }
+        compose.setFragmentTexture(uiTexture, index: 0)
+        compose.setFragmentTexture(hdrTexture, index: 1)
+        withUnsafeBytes(of: &uniforms) { bytes in
+            compose.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        compose.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        trackedEndEncoding(compose)
+
+        let directions = [
+            SIMD2<Float>(1.0, 0.0),
+            SIMD2<Float>(0.0, 1.0),
+            SIMD2<Float>(1.0, 0.0),
+            SIMD2<Float>(0.0, 1.0),
+            SIMD2<Float>(1.0, 0.0)
+        ]
+        var readTexture = blurTextures.0
+        var writeTexture = blurTextures.1
+        for (index, direction) in directions.enumerated() {
+            guard let encoder = makeHdrPassEncoder(
+                commandBuffer: commandBuffer,
+                target: writeTexture,
+                pipeline: pipelines.blur,
+                stage: .uiSeed
+            ) else {
+                return -1
+            }
+            encoder.label = "Metallum coherent menu blur pass \(index + 1)"
+            uniforms.blurDirection = direction
+            encoder.setFragmentTexture(readTexture, index: 0)
+            encoder.setFragmentSamplerState(samplers.linear, index: 0)
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            trackedEndEncoding(encoder)
+            swap(&readTexture, &writeTexture)
+        }
+
+        let resolvePass = MTLRenderPassDescriptor()
+        resolvePass.colorAttachments[0].texture = hdrTexture
+        resolvePass.colorAttachments[0].loadAction = .dontCare
+        resolvePass.colorAttachments[0].storeAction = .store
+        resolvePass.colorAttachments[1].texture = uiTexture
+        resolvePass.colorAttachments[1].loadAction = .dontCare
+        resolvePass.colorAttachments[1].storeAction = .store
+        attachGpuTiming(resolvePass, commandBuffer: commandBuffer, stage: .uiSeed)
+        guard let resolve = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: resolvePass) else {
+            return -1
+        }
+        resolve.label = "Metallum coherent menu blur resolve"
+        resolve.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: Double(uiTexture.width),
+            height: Double(uiTexture.height),
+            znear: 0.0,
+            zfar: 1.0
+        ))
+        resolve.setRenderPipelineState(pipelines.resolve)
+        uniforms.blurDirection = SIMD2<Float>(0.0, 1.0)
+        resolve.setFragmentTexture(readTexture, index: 0)
+        resolve.setFragmentSamplerState(samplers.linear, index: 0)
+        withUnsafeBytes(of: &uniforms) { bytes in
+            resolve.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        resolve.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        if let globalFence {
+            resolve.updateFence(globalFence, after: .fragment)
+        }
+        trackedEndEncoding(resolve)
         return 1
     }
 }

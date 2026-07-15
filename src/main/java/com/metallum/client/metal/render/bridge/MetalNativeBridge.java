@@ -351,6 +351,19 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS
                     )
             );
+            MTLCommandBufferEncodeCoherentMenuBlur = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodeCoherentMenuBlur",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            FLOAT,
+                            FLOAT
+                    )
+            );
             MTLCommandBufferEncodeSpatialScreenshot = downcallWithoutCritical(
                     lookup,
                     "metallum_MTLCommandBuffer_encodeSpatialScreenshot",
@@ -542,6 +555,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferEncodeHdrUiBackdrop;
     private static final MethodHandle MTLRenderCommandEncoderEncodePreparedHdrUiBackdrop;
     private static final MethodHandle MTLCommandBufferMaterializePreparedHdrUiBackdrop;
+    private static final MethodHandle MTLCommandBufferEncodeCoherentMenuBlur;
     private static final MethodHandle MTLCommandBufferEncodeSpatialScreenshot;
     private static final MethodHandle createBuffer;
     private static final MethodHandle createStaticGeometryBuffer;
@@ -1820,6 +1834,28 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop", throwable);
+        }
+    }
+
+    public static int MTLCommandBuffer_encodeCoherentMenuBlur(
+            final MemorySegment commandBuffer,
+            final MemorySegment sourceTexture,
+            final MemorySegment uiTexture,
+            final MemorySegment globalFence,
+            final float radius,
+            final float currentHeadroom
+    ) {
+        try {
+            return (int) MTLCommandBufferEncodeCoherentMenuBlur.invokeExact(
+                    segment(commandBuffer),
+                    segment(sourceTexture),
+                    segment(uiTexture),
+                    segment(globalFence),
+                    radius,
+                    currentHeadroom
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLCommandBuffer_encodeCoherentMenuBlur", throwable);
         }
     }
 

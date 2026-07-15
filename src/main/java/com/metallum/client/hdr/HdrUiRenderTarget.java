@@ -10,10 +10,12 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.LevelLoadingScreen;
 import net.minecraft.client.gui.screens.LoadingOverlay;
+import net.minecraft.client.gui.screens.ProgressScreen;
 import org.jspecify.annotations.Nullable;
 
 /** Owns the scene-seeded SDR target used by GuiRenderer in the FP16 scene mode. */
 public final class HdrUiRenderTarget {
+    private static final int LOADING_SETTLE_FRAMES = 3;
     @Nullable
     private static TextureTarget target;
     @Nullable
@@ -23,11 +25,14 @@ public final class HdrUiRenderTarget {
     private static boolean activationLogged;
     private static boolean screenshotLogged;
     private static boolean screenshotFallbackLogged;
+    private static boolean coherentBlurFallbackLogged;
     private static boolean lastUiFinished;
     private static boolean backdropBlurredThisFrame;
     private static boolean spatialActiveThisFrame;
     private static boolean spatialHdrPrecomposedThisFrame;
     private static boolean lastSpatialHdrPrecomposed;
+    private static int loadingSettleFramesRemaining;
+    private static boolean loadingTransitionThisFrame;
     @Nullable
     private static RenderTarget activeSource;
     @Nullable
@@ -37,6 +42,13 @@ public final class HdrUiRenderTarget {
     }
 
     public static RenderTarget begin(final RenderTarget mainTarget) {
+        if (shouldReuseActiveTarget(
+                activeThisFrame,
+                target != null,
+                activeSource == mainTarget
+        )) {
+            return target;
+        }
         activeThisFrame = false;
         activeSource = null;
         lastUiFinished = false;
@@ -44,6 +56,17 @@ public final class HdrUiRenderTarget {
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = MetalFxSpatialScaling.isActive();
         spatialHdrPrecomposedThisFrame = false;
+        Minecraft minecraft = Minecraft.getInstance();
+        boolean loadingSurfaceActive = minecraft.gui.screen() instanceof LevelLoadingScreen
+                || minecraft.gui.screen() instanceof ProgressScreen
+                || minecraft.gui.overlay() instanceof LoadingOverlay;
+        if (loadingSurfaceActive) {
+            loadingSettleFramesRemaining = LOADING_SETTLE_FRAMES;
+        }
+        loadingTransitionThisFrame = loadingSurfaceActive || loadingSettleFramesRemaining > 0;
+        if (!loadingSurfaceActive && loadingSettleFramesRemaining > 0) {
+            loadingSettleFramesRemaining--;
+        }
         if ((!HdrSceneState.isRequested()
                 && !MetallumMaterialState.isGenerationActive()
                 && !spatialActiveThisFrame)
@@ -81,7 +104,8 @@ public final class HdrUiRenderTarget {
 
             if (!MetalHdrFrame.prepareUiBackdrop(
                     mainTarget.getColorTextureView(),
-                    target.getColorTextureView()
+                    target.getColorTextureView(),
+                    shouldPrecomposeHdrBackdrop(loadingTransitionThisFrame)
             )) {
                 throw new IllegalStateException("Metal rejected the SDR UI backdrop");
             }
@@ -119,12 +143,11 @@ public final class HdrUiRenderTarget {
     public static void finish() {
         if (activeThisFrame && target != null) {
             try {
-                Minecraft minecraft = Minecraft.getInstance();
                 boolean suppressSceneEnhancement = shouldSuppressSceneEnhancement(
                         backdropBlurredThisFrame,
                         spatialHdrPrecomposedThisFrame,
-                        minecraft.gui.screen() instanceof LevelLoadingScreen,
-                        minecraft.gui.overlay() instanceof LoadingOverlay
+                        loadingTransitionThisFrame,
+                        false
                 );
                 MetalHdrFrame.captureUi(target.getColorTextureView(), suppressSceneEnhancement);
                 lastUiFinished = true;
@@ -147,6 +170,7 @@ public final class HdrUiRenderTarget {
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = false;
         spatialHdrPrecomposedThisFrame = false;
+        loadingTransitionThisFrame = false;
     }
 
     /** Marks a menu frame whose seeded scene was intentionally blurred. */
@@ -175,6 +199,40 @@ public final class HdrUiRenderTarget {
 
     static boolean shouldProcessSdrBackdropBlur(final boolean hdrWorldPrecomposed) {
         return !hdrWorldPrecomposed;
+    }
+
+    static boolean shouldPrecomposeHdrBackdrop(final boolean loadingTransitionActive) {
+        return !loadingTransitionActive;
+    }
+
+    static boolean shouldReuseActiveTarget(
+            final boolean active,
+            final boolean targetAvailable,
+            final boolean sameSource
+    ) {
+        return active && targetAvailable && sameSource;
+    }
+
+    /** Blurs the composed FP16 world and the pre-blur GUI into matching HDR/SDR outputs. */
+    public static boolean processCoherentBackdropBlur(final float radius) {
+        if (!activeThisFrame
+                || !spatialHdrPrecomposedThisFrame
+                || activeSource == null
+                || target == null) {
+            return false;
+        }
+        boolean blurred = MetalHdrFrame.blurUiBackdrop(
+                activeSource.getColorTextureView(),
+                target.getColorTextureView(),
+                radius
+        );
+        if (blurred) {
+            markBackdropBlurred();
+        } else if (!coherentBlurFallbackLogged) {
+            coherentBlurFallbackLogged = true;
+            Metallum.LOGGER.warn("Coherent HDR menu blur was unavailable; keeping the stable sharp backdrop");
+        }
+        return blurred;
     }
 
     public static RenderTarget screenshotTargetFor(final RenderTarget source) {
@@ -234,6 +292,8 @@ public final class HdrUiRenderTarget {
         spatialActiveThisFrame = false;
         spatialHdrPrecomposedThisFrame = false;
         lastSpatialHdrPrecomposed = false;
+        loadingSettleFramesRemaining = 0;
+        loadingTransitionThisFrame = false;
         if (target != null) {
             MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
             target.destroyBuffers();

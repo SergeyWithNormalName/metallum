@@ -285,6 +285,16 @@ public final class MetallumMaterialContractTests {
     }
 
     private static void testLoadingUiContinuity() {
+        require(HdrUiRenderTarget.shouldReuseActiveTarget(true, true, true),
+                "panorama preparation is not reused by the following GUI draw");
+        require(!HdrUiRenderTarget.shouldReuseActiveTarget(true, true, false),
+                "a panorama target was reused for a different scene source");
+        require(!HdrUiRenderTarget.shouldReuseActiveTarget(false, true, true),
+                "an inactive panorama target bypassed normal GUI preparation");
+        require(!HdrUiRenderTarget.shouldPrecomposeHdrBackdrop(true),
+                "loading transition still admits adaptive HDR precompose behind SDR UI");
+        require(HdrUiRenderTarget.shouldPrecomposeHdrBackdrop(false),
+                "settled world UI lost its coherent HDR precompose");
         require(!HdrUiRenderTarget.shouldProcessSdrBackdropBlur(true),
                 "separated HDR presentation still permits a mismatched SDR backdrop blur");
         require(HdrUiRenderTarget.shouldProcessSdrBackdropBlur(false),

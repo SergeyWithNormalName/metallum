@@ -88,6 +88,13 @@ float3 metallum_linear_to_srgb(float3 linearValue) {
   return select(high, low, bounded <= float3(0.0031308));
 }
 
+float3 metallum_linear_to_extended_srgb(float3 linearValue) {
+  linearValue = metallum_finite_nonnegative(linearValue);
+  float3 low = linearValue * 12.92;
+  float3 high = 1.055 * pow(linearValue, float3(1.0 / 2.4)) - 0.055;
+  return select(high, low, linearValue <= float3(0.0031308));
+}
+
 float3 metallum_encode_sdr(float3 value, uint sourceEncoding) {
   // RGBA8 and legacy FP16 sources already contain display-encoded sRGB.
   // A scene-linear FP16 source needs the inverse transfer when HDR output
@@ -793,6 +800,33 @@ fragment NativeWorldUiOutput metallum_actual_native_world_ui_fs(
   return out;
 }
 
+float3 metallum_spatial_composite_linear(
+  float4 uiValue,
+  float3 spatialHdr,
+  float currentHeadroom
+) {
+  float3 uiEncoded = clamp(uiValue.rgb, 0.0, 1.0);
+  spatialHdr = metallum_finite_nonnegative(spatialHdr);
+  float3 seedEncoded = metallum_encode_sdr(spatialHdr, 2u);
+  seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  float visibility = metallum_spatial_scene_visibility(uiValue, seedEncoded);
+  if (visibility >= 1.0 && metallum_peak_metric(spatialHdr) <= currentHeadroom) {
+    return spatialHdr;
+  }
+  float3 uiLinear = metallum_srgb_to_linear(uiEncoded, false);
+  if (visibility <= 0.0) {
+    return uiLinear;
+  }
+  float3 seedLinear = metallum_srgb_to_linear(seedEncoded, false);
+  float3 visibleDelta = visibility * (spatialHdr - seedLinear);
+  visibleDelta *= metallum_visible_delta_scale(
+    uiLinear,
+    visibleDelta,
+    currentHeadroom
+  );
+  return metallum_sanitize_output(uiLinear + visibleDelta, currentHeadroom);
+}
+
 fragment float4 metallum_spatial_present_fs(
   PresentVertexOut in [[stage_in]],
   texture2d<float> uiFrame [[texture(0)]],
@@ -806,33 +840,96 @@ fragment float4 metallum_spatial_present_fs(
     coordinate.y = maximumCoordinate.y - coordinate.y;
   }
   float4 uiValue = uiFrame.read(coordinate);
-  float3 uiEncoded = clamp(uiValue.rgb, 0.0, 1.0);
-
   float3 spatialHdr = metallum_finite_nonnegative(
     spatialHdrFrame.read(coordinate).rgb
   );
-  float3 seedEncoded = metallum_encode_sdr(spatialHdr, 2u);
-  seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
-  float visibility = metallum_spatial_scene_visibility(uiValue, seedEncoded);
-  if (visibility >= 1.0
-      && metallum_peak_metric(spatialHdr) <= uniforms.currentHeadroom) {
-    return float4(spatialHdr, 1.0);
-  }
-  float3 uiLinear = metallum_srgb_to_linear(uiEncoded, false);
-  if (visibility <= 0.0) {
-    return float4(uiLinear, 1.0);
-  }
-  float3 seedLinear = metallum_srgb_to_linear(seedEncoded, false);
-  float3 visibleDelta = visibility * (spatialHdr - seedLinear);
-  visibleDelta *= metallum_visible_delta_scale(
-    uiLinear,
-    visibleDelta,
-    uniforms.currentHeadroom
-  );
   return float4(
-    metallum_sanitize_output(uiLinear + visibleDelta, uniforms.currentHeadroom),
+    metallum_spatial_composite_linear(
+      uiValue,
+      spatialHdr,
+      uniforms.currentHeadroom
+    ),
     1.0
   );
+}
+
+struct MenuBlurUniforms {
+  float2 blurDirection;
+  float radius;
+  float currentHeadroom;
+};
+
+struct MenuBlurOutput {
+  float4 hdr [[color(0)]];
+  float4 uiSeed [[color(1)]];
+};
+
+float4 metallum_menu_blur_sample(
+  texture2d<float> source,
+  sampler linearSampler,
+  float2 uv,
+  constant MenuBlurUniforms& uniforms
+) {
+  float actualRadius = max(round(uniforms.radius), 1.0);
+  float2 sourceSize = float2(source.get_width(), source.get_height());
+  float2 sampleStep = uniforms.blurDirection / max(sourceSize, float2(1.0));
+  float4 blurred = float4(0.0);
+  for (float offset = -actualRadius + 0.5;
+       offset <= actualRadius;
+       offset += 2.0) {
+    blurred += source.sample(linearSampler, uv + sampleStep * offset);
+  }
+  blurred += source.sample(linearSampler, uv + sampleStep * actualRadius) * 0.5;
+  return blurred / (actualRadius + 0.5);
+}
+
+fragment float4 metallum_menu_blur_compose_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> uiFrame [[texture(0)]],
+  texture2d<float> spatialHdrFrame [[texture(1)]],
+  constant MenuBlurUniforms& uniforms [[buffer(0)]]
+) {
+  uint2 textureSize = uint2(uiFrame.get_width(), uiFrame.get_height());
+  uint2 maximumCoordinate = max(textureSize, uint2(1u)) - 1u;
+  uint2 coordinate = min(uint2(in.position.xy), maximumCoordinate);
+  float3 combinedLinear = metallum_spatial_composite_linear(
+    uiFrame.read(coordinate),
+    spatialHdrFrame.read(coordinate).rgb,
+    uniforms.currentHeadroom
+  );
+  return float4(metallum_linear_to_extended_srgb(combinedLinear), 1.0);
+}
+
+fragment float4 metallum_menu_blur_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> source [[texture(0)]],
+  sampler linearSampler [[sampler(0)]],
+  constant MenuBlurUniforms& uniforms [[buffer(0)]]
+) {
+  return metallum_menu_blur_sample(source, linearSampler, in.uv, uniforms);
+}
+
+fragment MenuBlurOutput metallum_menu_blur_resolve_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> source [[texture(0)]],
+  sampler linearSampler [[sampler(0)]],
+  constant MenuBlurUniforms& uniforms [[buffer(0)]]
+) {
+  float3 encoded = metallum_menu_blur_sample(
+    source,
+    linearSampler,
+    in.uv,
+    uniforms
+  ).rgb;
+  float3 linear = metallum_sanitize_output(
+    metallum_srgb_to_linear(encoded, true),
+    uniforms.currentHeadroom
+  );
+  float3 seedEncoded = floor(clamp(encoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  MenuBlurOutput out;
+  out.hdr = float4(linear, 1.0);
+  out.uiSeed = float4(seedEncoded, 0.0);
+  return out;
 }
 
 fragment float4 metallum_spatial_screenshot_fs(

@@ -1318,7 +1318,8 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     boolean prepareHdrUiBackdrop(
             final MetalGpuTexture source,
-            final MetalGpuTexture destination
+            final MetalGpuTexture destination,
+            final boolean hdrPrecomposeAllowed
     ) {
         boolean spatial = MetalFxSpatialScaling.isActive();
         boolean compatible = this.isHdrSceneReadyForUi(source)
@@ -1335,7 +1336,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         boolean materialHdr = this.isMaterialHdrGenerationActive();
-        boolean precomposeHdr = (materialHdr || this.hdrEnhancedActive)
+        boolean precomposeHdr = hdrPrecomposeAllowed
+                && (materialHdr || this.hdrEnhancedActive)
                 && this.hdrWorldSceneAvailable
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex
@@ -1398,6 +1400,24 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     boolean isSpatialHdrPrecomposedForCurrentSubmit() {
         return this.spatialHdrPrecomposedSubmitIndex == this.commandEncoder.currentSubmitIndex();
+    }
+
+    boolean blurHdrUiBackdrop(
+            final MetalGpuTexture rawScene,
+            final MetalGpuTexture ui,
+            final float radius
+    ) {
+        return this.isSpatialHdrPrecomposedForCurrentSubmit()
+                && !rawScene.isClosed()
+                && !ui.isClosed()
+                && rawScene.getFormat() == GpuFormat.RGBA16_FLOAT
+                && ui.getFormat() == GpuFormat.RGBA8_UNORM
+                && this.commandEncoder.encodeCoherentMenuBlur(
+                        rawScene,
+                        ui,
+                        radius,
+                        this.hdrCurrentHeadroom
+                );
     }
 
     boolean prepareSpatialScreenshot(

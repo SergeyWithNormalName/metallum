@@ -128,6 +128,14 @@ private typealias NativeMaterializePreparedBackdropFunction = @convention(c) (
     UnsafeRawPointer?, // destinationTexture
     UnsafeRawPointer?  // globalFence
 ) -> Int32
+private typealias NativeCoherentMenuBlurFunction = @convention(c) (
+    UnsafeRawPointer?, // commandBuffer
+    UnsafeRawPointer?, // sourceTexture
+    UnsafeRawPointer?, // uiTexture
+    UnsafeRawPointer?, // globalFence
+    Float,             // radius
+    Float              // currentHeadroom
+) -> Int32
 private typealias NativePresentFunction = @convention(c) (
     UnsafeRawPointer?, // commandBuffer
     UnsafeRawPointer?, // layer
@@ -2250,7 +2258,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 46, "HDR validation check count changed unexpectedly: \(passCount), expected 46")
+        try require(passCount == 47, "HDR validation check count changed unexpectedly: \(passCount), expected 47")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -4150,6 +4158,10 @@ private final class ValueValidation {
                 handle,
                 "metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop"
             ),
+            let coherentMenuBlurSymbol = dlsym(
+                handle,
+                "metallum_MTLCommandBuffer_encodeCoherentMenuBlur"
+            ),
             let spatialScreenshotSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeSpatialScreenshot"),
             let presentSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
         else {
@@ -4186,6 +4198,10 @@ private final class ValueValidation {
         let materializePreparedBackdrop = unsafeBitCast(
             materializePreparedBackdropSymbol,
             to: NativeMaterializePreparedBackdropFunction.self
+        )
+        let coherentMenuBlur = unsafeBitCast(
+            coherentMenuBlurSymbol,
+            to: NativeCoherentMenuBlurFunction.self
         )
         let spatialScreenshot = unsafeBitCast(
             spatialScreenshotSymbol,
@@ -4741,6 +4757,111 @@ private final class ValueValidation {
         )
         passCount += 1
         print("PASS native-resolution HDR reconstruction fuses the exact SDR UI seed and uses lightweight present")
+
+        let coherentBlurUi = try gpu.makeRgba8Texture(
+            width: 16,
+            height: 16,
+            bytes: SIMD4<UInt8>(0, 0, 0, 255)
+        )
+        guard let coherentBlurCommandBuffer = backdropQueue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Coherent HDR menu blur command buffer creation failed")
+        }
+        let coherentBlurBackdropStatus = backdrop(
+            objectPointer(coherentBlurCommandBuffer as AnyObject),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(coherentBlurUi as AnyObject),
+            objectPointer(nativePrecomposeDepth as AnyObject),
+            nil,
+            nil,
+            2,
+            0,
+            0,
+            1,
+            0,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            coherentBlurBackdropStatus == 4,
+            "Coherent HDR menu blur precompose returned \(coherentBlurBackdropStatus)"
+        )
+        let preBlurUiPass = MTLRenderPassDescriptor()
+        preBlurUiPass.colorAttachments[0].texture = coherentBlurUi
+        preBlurUiPass.colorAttachments[0].loadAction = .load
+        preBlurUiPass.colorAttachments[0].storeAction = .store
+        guard let preBlurUiEncoder = coherentBlurCommandBuffer.makeRenderCommandEncoder(
+            descriptor: preBlurUiPass
+        ) else {
+            throw ValidationFailure.message("Pre-blur UI encoder creation failed")
+        }
+        preBlurUiEncoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: 16,
+            height: 16,
+            znear: 0,
+            zfar: 1
+        ))
+        preBlurUiEncoder.setScissorRect(MTLScissorRect(x: 7, y: 0, width: 2, height: 16))
+        gpu.encodeUiAlphaOverlay(
+            encoder: preBlurUiEncoder,
+            encodedSource: SIMD4<Float>(1, 0, 0, 1)
+        )
+        preBlurUiEncoder.endEncoding()
+        let coherentBlurStatus = coherentMenuBlur(
+            objectPointer(coherentBlurCommandBuffer as AnyObject),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(coherentBlurUi as AnyObject),
+            nil,
+            2,
+            4
+        )
+        try require(coherentBlurStatus == 1, "Coherent HDR menu blur returned \(coherentBlurStatus)")
+        let coherentBlurPresentStatus = present(
+            objectPointer(coherentBlurCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(nativePrecomposeSource as AnyObject),
+            objectPointer(nativePrecomposeDepth as AnyObject),
+            nil,
+            objectPointer(coherentBlurUi as AnyObject),
+            nil,
+            1,
+            2,
+            2,
+            0,
+            0,
+            4,
+            1,
+            0
+        )
+        try require(
+            coherentBlurPresentStatus == 1,
+            "Coherent HDR menu blur present returned \(coherentBlurPresentStatus)"
+        )
+        coherentBlurCommandBuffer.commit()
+        coherentBlurCommandBuffer.waitUntilCompleted()
+        try require(
+            coherentBlurCommandBuffer.status == .completed,
+            "Coherent HDR menu blur GPU command failed: \(String(describing: coherentBlurCommandBuffer.error))"
+        )
+        let coherentBlurEdge = gpu.readRgba8(texture: coherentBlurUi, x: 0, y: 8)
+        let coherentBlurSpread = gpu.readRgba8(texture: coherentBlurUi, x: 5, y: 8)
+        let coherentBlurCenter = gpu.readRgba8(texture: coherentBlurUi, x: 8, y: 8)
+        try require(
+            coherentBlurCenter.x > coherentBlurEdge.x
+                && coherentBlurCenter.y + 4 < coherentBlurEdge.y
+                && coherentBlurCenter.z + 4 < coherentBlurEdge.z
+                && coherentBlurSpread.y < coherentBlurEdge.y
+                && coherentBlurEdge.w == 0
+                && coherentBlurSpread.w == 0
+                && coherentBlurCenter.w == 0,
+            "Coherent HDR menu blur did not include and spread the pre-blur UI while preserving the exact alpha-zero seed: edge \(coherentBlurEdge), spread \(coherentBlurSpread), center \(coherentBlurCenter)"
+        )
+        passCount += 1
+        print("PASS coherent HDR menu blur includes pre-blur UI and resolves one matching alpha-zero SDR seed")
 
         let precomposedPixels = (0..<8).flatMap { y in
             Array(
