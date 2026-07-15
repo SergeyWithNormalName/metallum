@@ -6,6 +6,8 @@ import java.nio.ByteBuffer;
 public final class SodiumLightSidecarPacking {
     public static final int GEOMETRY_VERTEX_STRIDE = 20;
     public static final int SIDECAR_VERTEX_STRIDE = 2;
+    public static final int BLOCK_LIGHT_OFFSET = 16;
+    public static final int SKY_LIGHT_OFFSET = 17;
 
     private static final int BLOCK_COORDINATE_SHIFT = 0;
     private static final int SKY_COORDINATE_SHIFT = 8;
@@ -55,8 +57,8 @@ public final class SodiumLightSidecarPacking {
         for (int vertex = 0; vertex < vertexCount; vertex++) {
             int geometryOffset = sourcePosition + vertex * GEOMETRY_VERTEX_STRIDE;
             int packed = packCoordinates(
-                    Byte.toUnsignedInt(geometry.get(geometryOffset + 16)),
-                    Byte.toUnsignedInt(geometry.get(geometryOffset + 17))
+                    Byte.toUnsignedInt(geometry.get(geometryOffset + BLOCK_LIGHT_OFFSET)),
+                    Byte.toUnsignedInt(geometry.get(geometryOffset + SKY_LIGHT_OFFSET))
             );
             int sidecarOffset = destinationPosition + vertex * SIDECAR_VERTEX_STRIDE;
             destination.put(sidecarOffset, (byte) packed);

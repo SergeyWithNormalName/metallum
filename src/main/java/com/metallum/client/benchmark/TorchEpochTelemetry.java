@@ -68,6 +68,24 @@ public final class TorchEpochTelemetry {
         GLOBAL.recordAcceptedGeometryPayloadBytes(bytes);
     }
 
+    public static void recordInPlaceGeometryRefresh(
+            final long sectionKey,
+            final long bytes,
+            final long meshCommands
+    ) {
+        GLOBAL.recordInPlaceGeometryRefresh(sectionKey, bytes, meshCommands);
+    }
+
+    /** Remains queryable after {@link #end()} until the next epoch is begun. */
+    public static boolean wasInPlaceGeometryRefreshed(final long sectionKey) {
+        return GLOBAL.wasInPlaceGeometryRefreshed(sectionKey);
+    }
+
+    /** Remains queryable after {@link #end()} until the next epoch is begun. */
+    public static boolean wasBuildOutput(final long sectionKey) {
+        return GLOBAL.wasBuildOutput(sectionKey);
+    }
+
     public static void recordSidecarUpload(final long bytes, final long commands) {
         GLOBAL.recordSidecarUpload(bytes, commands);
     }
@@ -107,6 +125,10 @@ public final class TorchEpochTelemetry {
             long uniqueBuildOutputSections,
             long acceptedMeshPayloadBytes,
             long acceptedGeometryPayloadBytes,
+            long inPlaceGeometryRefreshOutputs,
+            long uniqueInPlaceGeometryRefreshSections,
+            long inPlaceGeometryRefreshBytes,
+            long inPlaceGeometryRefreshMeshCommands,
             long sidecarProducedBytes,
             long sidecarUploadedBytes,
             long sidecarUploadCommands,
@@ -129,6 +151,7 @@ public final class TorchEpochTelemetry {
         private final BoundedLongSet requestSections;
         private final BoundedLongSet taskSections;
         private final BoundedLongSet outputSections;
+        private final BoundedLongSet inPlaceSections;
 
         private volatile boolean active;
         private long epochId;
@@ -137,6 +160,9 @@ public final class TorchEpochTelemetry {
         private long buildOutputCount;
         private long acceptedMeshPayloadBytes;
         private long acceptedGeometryPayloadBytes;
+        private long inPlaceGeometryRefreshOutputs;
+        private long inPlaceGeometryRefreshBytes;
+        private long inPlaceGeometryRefreshMeshCommands;
         private long sidecarProducedBytes;
         private long sidecarUploadedBytes;
         private long sidecarUploadCommands;
@@ -157,6 +183,7 @@ public final class TorchEpochTelemetry {
             this.requestSections = new BoundedLongSet(uniqueSectionLimit);
             this.taskSections = new BoundedLongSet(uniqueSectionLimit);
             this.outputSections = new BoundedLongSet(uniqueSectionLimit);
+            this.inPlaceSections = new BoundedLongSet(uniqueSectionLimit);
         }
 
         void begin(final long newEpochId) {
@@ -190,6 +217,10 @@ public final class TorchEpochTelemetry {
                     this.outputSections.size(),
                     this.acceptedMeshPayloadBytes,
                     this.acceptedGeometryPayloadBytes,
+                    this.inPlaceGeometryRefreshOutputs,
+                    this.inPlaceSections.size(),
+                    this.inPlaceGeometryRefreshBytes,
+                    this.inPlaceGeometryRefreshMeshCommands,
                     this.sidecarProducedBytes,
                     this.sidecarUploadedBytes,
                     this.sidecarUploadCommands,
@@ -262,6 +293,35 @@ public final class TorchEpochTelemetry {
             this.acceptedGeometryPayloadBytes = this.add(this.acceptedGeometryPayloadBytes, bytes);
         }
 
+        void recordInPlaceGeometryRefresh(
+                final long sectionKey,
+                final long bytes,
+                final long meshCommands
+        ) {
+            if (!this.active) {
+                return;
+            }
+            if (bytes < 0L || meshCommands < 0L) {
+                this.recordError();
+                return;
+            }
+            this.inPlaceGeometryRefreshOutputs = this.add(this.inPlaceGeometryRefreshOutputs, 1L);
+            this.recordUnique(this.inPlaceSections, sectionKey);
+            this.inPlaceGeometryRefreshBytes = this.add(this.inPlaceGeometryRefreshBytes, bytes);
+            this.inPlaceGeometryRefreshMeshCommands = this.add(
+                    this.inPlaceGeometryRefreshMeshCommands,
+                    meshCommands
+            );
+        }
+
+        boolean wasInPlaceGeometryRefreshed(final long sectionKey) {
+            return this.inPlaceSections.contains(sectionKey);
+        }
+
+        boolean wasBuildOutput(final long sectionKey) {
+            return this.outputSections.contains(sectionKey);
+        }
+
         void recordSidecarUpload(final long bytes, final long commands) {
             if (!this.active) {
                 return;
@@ -332,6 +392,9 @@ public final class TorchEpochTelemetry {
             this.buildOutputCount = 0L;
             this.acceptedMeshPayloadBytes = 0L;
             this.acceptedGeometryPayloadBytes = 0L;
+            this.inPlaceGeometryRefreshOutputs = 0L;
+            this.inPlaceGeometryRefreshBytes = 0L;
+            this.inPlaceGeometryRefreshMeshCommands = 0L;
             this.sidecarProducedBytes = 0L;
             this.sidecarUploadedBytes = 0L;
             this.sidecarUploadCommands = 0L;
@@ -350,6 +413,7 @@ public final class TorchEpochTelemetry {
             this.requestSections.clear();
             this.taskSections.clear();
             this.outputSections.clear();
+            this.inPlaceSections.clear();
         }
 
         boolean isActive() {
@@ -423,6 +487,17 @@ public final class TorchEpochTelemetry {
 
         int size() {
             return this.size;
+        }
+
+        boolean contains(final long key) {
+            int index = mix(key) & this.mask;
+            while (this.occupied[index] != 0) {
+                if (this.keys[index] == key) {
+                    return true;
+                }
+                index = index + 1 & this.mask;
+            }
+            return false;
         }
 
         void clear() {

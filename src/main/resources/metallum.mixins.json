@@ -34,8 +34,12 @@
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
     "sodium.GlBufferArenaLightSidecarMixin",
+    "sodium.GlBufferSegmentTerrainAccessMixin",
     "sodium.PendingBufferCopyCommandAccessor",
     "sodium.RenderRegionDeviceResourcesLightSidecarMixin",
+    "sodium.RenderRegionManagerTerrainRefreshMixin",
+    "sodium.RenderSectionTerrainBaselineMixin",
+    "sodium.SectionRenderDataStorageTerrainAccessMixin",
     "sodium.SodiumPreferredGraphicsApiMixin"
   ],
   "injectors": {

@@ -2,6 +2,8 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
+import com.metallum.client.sodium.SodiumTerrainMeshLayout;
+import com.metallum.client.sodium.SodiumTerrainUploadBaseline;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -43,6 +45,8 @@ public final class SodiumLightSidecarTests {
         testGeometryPayloadPacking();
         testReusedArenaCapacityRoundsDownToWholeVertices();
         testPackingRejectsInvalidInputs();
+        testTerrainMeshLayoutUsesOnlyUploadMetadata();
+        testTerrainUploadBaselineMatchesOnlyUploadLayout();
         testMslPatchAndIdempotence();
         testMslPatchPreservesExistingResourceArguments();
         testMslPatchRejectsUnsafeAnchors();
@@ -137,6 +141,95 @@ public final class SodiumLightSidecarTests {
                 "sidecar capacity did not follow the rounded geometry vertex count"
         );
         expectIllegalArgument(() -> SodiumLightSidecar.expectedSidecarBytes(19L));
+    }
+
+    private static void testTerrainMeshLayoutUsesOnlyUploadMetadata() {
+        int geometryBytes = SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE * 5;
+        int[] segments = {4, 1};
+        SodiumTerrainMeshLayout layout = SodiumTerrainMeshLayout.capture(geometryBytes, segments);
+        segments[0] = 99;
+
+        require(layout.geometryBytes() == geometryBytes, "mesh layout changed geometry bytes");
+        require(layout.vertexCount() == 5, "mesh layout changed vertex count");
+        require(layout.matches(SodiumTerrainMeshLayout.capture(geometryBytes, new int[]{4, 1})),
+                "mesh layout retained mutable vertex segments");
+        require(!layout.matches(SodiumTerrainMeshLayout.capture(geometryBytes, new int[]{4, 2})),
+                "mesh layout ignored vertex segments");
+        require(!layout.matches(SodiumTerrainMeshLayout.capture(
+                geometryBytes + SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE,
+                new int[]{4, 1}
+        )), "mesh layout ignored geometry length");
+        expectIllegalArgument(() -> SodiumTerrainMeshLayout.capture(
+                SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE - 1,
+                new int[0]
+        ));
+        expectIllegalArgument(() -> SodiumTerrainMeshLayout.capture(-1, new int[0]));
+    }
+
+    private static void testTerrainUploadBaselineMatchesOnlyUploadLayout() {
+        SodiumTerrainMeshLayout residentLayout = SodiumTerrainMeshLayout.capture(
+                SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE,
+                new int[]{1}
+        );
+        SodiumTerrainMeshLayout changedSegments = SodiumTerrainMeshLayout.capture(
+                SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE,
+                new int[]{2}
+        );
+        long[] visibility = {11L, 22L};
+        SodiumTerrainMeshLayout[] meshes = {residentLayout, null};
+        SodiumTerrainUploadBaseline baseline = new SodiumTerrainUploadBaseline(7, visibility, meshes);
+
+        visibility[0] = 99L;
+        meshes[0] = changedSegments;
+        meshes[1] = residentLayout;
+        require(
+                baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        7,
+                        new long[]{11L, 22L},
+                        new SodiumTerrainMeshLayout[]{residentLayout, null}
+                )),
+                "baseline retained mutable constructor arrays"
+        );
+        require(
+                !baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        8,
+                        new long[]{11L, 22L},
+                        new SodiumTerrainMeshLayout[]{residentLayout, null}
+                )),
+                "baseline ignored section flags"
+        );
+        require(
+                !baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        7,
+                        new long[]{11L, 23L},
+                        new SodiumTerrainMeshLayout[]{residentLayout, null}
+                )),
+                "baseline ignored visibility data"
+        );
+        require(
+                !baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        7,
+                        new long[]{11L, 22L},
+                        new SodiumTerrainMeshLayout[]{null, null}
+                )),
+                "baseline ignored a missing render-pass mesh"
+        );
+        require(
+                !baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        7,
+                        new long[]{11L, 22L},
+                        new SodiumTerrainMeshLayout[]{residentLayout, residentLayout}
+                )),
+                "baseline ignored an added render-pass mesh"
+        );
+        require(
+                !baseline.matchesUploadLayout(new SodiumTerrainUploadBaseline(
+                        7,
+                        new long[]{11L, 22L},
+                        new SodiumTerrainMeshLayout[]{changedSegments, null}
+                )),
+                "baseline ignored changed vertex segments"
+        );
     }
 
     private static void testMslPatchAndIdempotence() {

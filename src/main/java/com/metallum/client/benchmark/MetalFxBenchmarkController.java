@@ -669,6 +669,13 @@ public final class MetalFxBenchmarkController {
         }
 
         TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
+        long targetSectionKey = SectionPos.asLong(
+                SectionPos.blockToSectionCoord(config.x()),
+                SectionPos.blockToSectionCoord(config.y()),
+                SectionPos.blockToSectionCoord(config.z())
+        );
+        boolean targetSectionProducedOutput = TorchEpochTelemetry.wasBuildOutput(targetSectionKey);
+        boolean targetSectionRefreshedInPlace = TorchEpochTelemetry.wasInPlaceGeometryRefreshed(targetSectionKey);
         SodiumLightSidecar.Snapshot sidecar = SodiumLightSidecar.snapshot();
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch={} requests={}/{} tasks={}/{} outputs={}/{} accepted_mesh_payload_bytes={} queue={}/{} busy={}/{} pending_results={}/{} max_pending_age_ns={} errors={} overflow={}",
@@ -691,11 +698,18 @@ public final class MetalFxBenchmarkController {
                 snapshot.overflowCount()
         );
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_SIDECAR epoch={} configured={} active={} accepted_geometry_payload_bytes={} produced_bytes={} uploaded_bytes={} upload_commands={} resize_copy_bytes={} resize_copy_commands={} telemetry_fallbacks={} companions={} live_geometry_bytes={} live_sidecar_bytes={} peak_sidecar_bytes={} patched_pipelines={} runtime_fallbacks={}",
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_SIDECAR epoch={} configured={} active={} accepted_geometry_payload_bytes={} in_place_outputs={} unique_in_place_sections={} in_place_geometry_bytes={} in_place_mesh_commands={} full_upload_geometry_bytes={} target_section_output={} target_section_in_place={} produced_bytes={} uploaded_bytes={} upload_commands={} resize_copy_bytes={} resize_copy_commands={} telemetry_fallbacks={} companions={} live_geometry_bytes={} live_sidecar_bytes={} peak_sidecar_bytes={} patched_pipelines={} runtime_fallbacks={}",
                 snapshot.epochId(),
                 sidecar.configured(),
                 sidecar.runtimeActive(),
                 snapshot.acceptedGeometryPayloadBytes(),
+                snapshot.inPlaceGeometryRefreshOutputs(),
+                snapshot.uniqueInPlaceGeometryRefreshSections(),
+                snapshot.inPlaceGeometryRefreshBytes(),
+                snapshot.inPlaceGeometryRefreshMeshCommands(),
+                snapshot.acceptedGeometryPayloadBytes() - snapshot.inPlaceGeometryRefreshBytes(),
+                targetSectionProducedOutput,
+                targetSectionRefreshedInPlace,
                 snapshot.sidecarProducedBytes(),
                 snapshot.sidecarUploadedBytes(),
                 snapshot.sidecarUploadCommands(),
@@ -748,6 +762,31 @@ public final class MetalFxBenchmarkController {
                 fail(minecraft, "TORCH_EPOCH accepted geometry payload was not compact Sodium vertex data");
                 return;
             }
+            long inPlaceGeometryBytes = snapshot.inPlaceGeometryRefreshBytes();
+            long inPlaceOutputs = snapshot.inPlaceGeometryRefreshOutputs();
+            long uniqueInPlaceSections = snapshot.uniqueInPlaceGeometryRefreshSections();
+            long inPlaceMeshCommands = snapshot.inPlaceGeometryRefreshMeshCommands();
+            long fullUploadGeometryBytes = acceptedGeometryBytes - inPlaceGeometryBytes;
+            if (!targetSectionProducedOutput) {
+                fail(minecraft, "TORCH_EPOCH did not observe an output for the torch-containing section");
+                return;
+            }
+            if (targetSectionRefreshedInPlace) {
+                fail(minecraft, "TORCH_EPOCH reused the torch-containing section despite mesh layout change");
+                return;
+            }
+            if (inPlaceOutputs <= 0L
+                    || inPlaceOutputs >= snapshot.buildOutputCount()
+                    || uniqueInPlaceSections <= 0L
+                    || uniqueInPlaceSections > inPlaceOutputs
+                    || inPlaceMeshCommands < inPlaceOutputs
+                    || inPlaceGeometryBytes <= 0L
+                    || inPlaceGeometryBytes % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L
+                    || fullUploadGeometryBytes <= 0L
+                    || fullUploadGeometryBytes % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L) {
+                fail(minecraft, "TORCH_EPOCH did not split resident refreshes from full geometry uploads");
+                return;
+            }
             long expectedUploadedSidecarBytes = acceptedGeometryBytes
                     / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
                     * SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE;
@@ -772,7 +811,7 @@ public final class MetalFxBenchmarkController {
 
         this.torchEpochFinished = true;
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_END route={} position={},{},{} measured_frame={} rebuild_requests={} unique_requested_sections={} meshing_tasks={} unique_meshed_sections={} mesh_outputs={} unique_uploaded_sections={} accepted_mesh_payload_bytes={} max_builder_queue_depth={} final_builder_queue_depth={} max_busy_workers={} final_busy_workers={} max_pending_results={} final_pending_results={} max_pending_age_ns={} telemetry_errors={} telemetry_overflow={}",
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_END route={} position={},{},{} measured_frame={} rebuild_requests={} unique_requested_sections={} meshing_tasks={} unique_meshed_sections={} mesh_outputs={} unique_uploaded_sections={} accepted_mesh_payload_bytes={} in_place_outputs={} unique_in_place_sections={} in_place_geometry_bytes={} full_upload_geometry_bytes={} target_section_output={} target_section_in_place={} max_builder_queue_depth={} final_builder_queue_depth={} max_busy_workers={} final_busy_workers={} max_pending_results={} final_pending_results={} max_pending_age_ns={} telemetry_errors={} telemetry_overflow={}",
                 this.route.routeId(),
                 config.x(),
                 config.y(),
@@ -785,6 +824,12 @@ public final class MetalFxBenchmarkController {
                 snapshot.buildOutputCount(),
                 snapshot.uniqueBuildOutputSections(),
                 snapshot.acceptedMeshPayloadBytes(),
+                snapshot.inPlaceGeometryRefreshOutputs(),
+                snapshot.uniqueInPlaceGeometryRefreshSections(),
+                snapshot.inPlaceGeometryRefreshBytes(),
+                snapshot.acceptedGeometryPayloadBytes() - snapshot.inPlaceGeometryRefreshBytes(),
+                targetSectionProducedOutput,
+                targetSectionRefreshedInPlace,
                 snapshot.maximumBuilderQueueDepth(),
                 snapshot.finalBuilderQueueDepth(),
                 snapshot.maximumBusyWorkerCount(),

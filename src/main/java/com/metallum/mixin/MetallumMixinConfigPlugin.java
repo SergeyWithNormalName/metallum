@@ -18,8 +18,12 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String BENCHMARK_SODIUM_MIXIN_PREFIX = "com.metallum.mixin.benchmark.sodium.";
     private static final Set<String> SODIUM_LIGHT_SIDECAR_MIXINS = Set.of(
             "com.metallum.mixin.sodium.GlBufferArenaLightSidecarMixin",
+            "com.metallum.mixin.sodium.GlBufferSegmentTerrainAccessMixin",
             "com.metallum.mixin.sodium.PendingBufferCopyCommandAccessor",
-            "com.metallum.mixin.sodium.RenderRegionDeviceResourcesLightSidecarMixin"
+            "com.metallum.mixin.sodium.RenderRegionDeviceResourcesLightSidecarMixin",
+            "com.metallum.mixin.sodium.RenderRegionManagerTerrainRefreshMixin",
+            "com.metallum.mixin.sodium.RenderSectionTerrainBaselineMixin",
+            "com.metallum.mixin.sodium.SectionRenderDataStorageTerrainAccessMixin"
     );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";

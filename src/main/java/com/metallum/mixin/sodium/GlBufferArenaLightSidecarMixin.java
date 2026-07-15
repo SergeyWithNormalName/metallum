@@ -81,6 +81,71 @@ abstract class GlBufferArenaLightSidecarMixin implements SodiumLightSidecarArena
         }
     }
 
+    @Override
+    public long metallum$enqueueInPlaceTerrainRefresh(
+            final ByteBuffer geometry,
+            final long allocationVertexOffset,
+            final long allocationVertexCount
+    ) {
+        GpuBuffer sidecar = this.metallum$lightSidecar;
+        if (sidecar == null || !SodiumLightSidecar.isRuntimeActive()) {
+            throw new IllegalStateException("Sodium light sidecar is not available for an in-place refresh");
+        }
+        if (this.stride != SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE) {
+            throw new IllegalStateException("in-place terrain refresh used a non-geometry arena");
+        }
+        if (allocationVertexOffset < 0L || allocationVertexCount <= 0L) {
+            throw new IllegalStateException("in-place terrain refresh used an invalid allocation range");
+        }
+
+        ByteBuffer source = geometry.duplicate();
+        int geometryBytes = source.remaining();
+        if (geometryBytes % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0) {
+            throw new IllegalStateException("unaligned in-place terrain refresh: " + geometryBytes);
+        }
+        long vertexCount = geometryBytes / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE;
+        if (vertexCount != allocationVertexCount) {
+            throw new IllegalStateException(
+                    "in-place terrain allocation length changed: allocation=" + allocationVertexCount
+                            + ", payload=" + vertexCount
+            );
+        }
+
+        long geometryOffset = Math.multiplyExact(
+                allocationVertexOffset,
+                SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+        );
+        if (Math.addExact(geometryOffset, geometryBytes) > this.arenaBuffer.size()) {
+            throw new IllegalStateException("in-place terrain refresh exceeds its geometry buffer");
+        }
+
+        int sidecarBytes = Math.multiplyExact(
+                Math.toIntExact(vertexCount),
+                SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+        );
+        long sidecarOffset = Math.multiplyExact(
+                allocationVertexOffset,
+                SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+        );
+        if (Math.addExact(sidecarOffset, sidecarBytes) > sidecar.size()) {
+            throw new IllegalStateException("in-place terrain refresh exceeds its light companion");
+        }
+
+        ByteBuffer packed = MemoryUtil.memAlloc(sidecarBytes);
+        try {
+            int packedVertices = SodiumLightSidecarPacking.packGeometry(source, packed);
+            if (packedVertices != vertexCount) {
+                throw new IllegalStateException("in-place terrain light vertex count changed while packing");
+            }
+            packed.flip();
+            this.stagingBuffer.enqueueCopy(geometry.duplicate(), this.arenaBuffer, geometryOffset);
+            this.stagingBuffer.enqueueCopy(packed, sidecar, sidecarOffset);
+        } finally {
+            MemoryUtil.memFree(packed);
+        }
+        return sidecarBytes;
+    }
+
     @Inject(method = "tryUpload", at = @At("RETURN"))
     private void metallum$uploadLightSidecar(
             final PendingUpload upload,
