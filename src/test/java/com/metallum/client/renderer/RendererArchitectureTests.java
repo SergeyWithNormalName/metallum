@@ -14,6 +14,9 @@ import com.metallum.client.renderer.temporal.Matrix4;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.ValueLayout;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.Properties;
 import java.util.Set;
@@ -271,6 +274,40 @@ public final class RendererArchitectureTests {
                         && defaults.lightingPreset() == LightingPreset.BALANCED
                         && !defaults.frameInterpolation(),
                 "renderer config defaults are not fail-closed");
+        RendererConfig lightingEnabled = defaults.withImprovedLighting(true);
+        require(lightingEnabled.improvedLighting()
+                        && lightingEnabled.lightingPreset() == LightingPreset.BALANCED
+                        && !lightingEnabled.frameInterpolation(),
+                "Sodium improved-lighting toggle changed another renderer policy axis");
+        Path temporaryDirectory = null;
+        try {
+            temporaryDirectory = Files.createTempDirectory("metallum-renderer-config-");
+            Path configPath = temporaryDirectory.resolve("metallum-renderer.properties");
+            RendererConfig original = new RendererConfig(false, LightingPreset.ULTRA, true);
+            original.save(configPath);
+            original.withImprovedLighting(true).save(configPath);
+            RendererConfig persisted = RendererConfig.load(configPath);
+            require(persisted.improvedLighting()
+                            && persisted.lightingPreset() == LightingPreset.ULTRA
+                            && persisted.frameInterpolation(),
+                    "persisted lighting toggle lost another renderer config axis");
+            Files.delete(configPath);
+            Files.delete(temporaryDirectory);
+            temporaryDirectory = null;
+        } catch (IOException exception) {
+            throw new AssertionError("renderer config roundtrip failed", exception);
+        } finally {
+            if (temporaryDirectory != null) {
+                try {
+                    Files.deleteIfExists(temporaryDirectory.resolve(
+                            "metallum-renderer.properties"
+                    ));
+                    Files.deleteIfExists(temporaryDirectory);
+                } catch (IOException ignored) {
+                    // The assertion above already carries the original failure.
+                }
+            }
+        }
         Properties configured = new Properties();
         configured.setProperty("improvedLighting", "true");
         configured.setProperty("lightingPreset", "ultra");
@@ -422,6 +459,84 @@ public final class RendererArchitectureTests {
                         == RendererGenerationManifest.SceneStorageContract
                         .LEGACY_HDR_SEMANTIC_RGBA16F,
                 "startup Legacy HDR FP16 storage was rejected as an RGBA8 MainTarget");
+
+        RendererGenerationPlanner.Plan legacyEnhancedStartup = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8
+        );
+        require(legacyEnhancedStartup.resolution().config().lightingMode()
+                        == LightingMode.LEGACY
+                        && legacyEnhancedStartup.resolution().config().outputMode()
+                        == DisplayOutputMode.HDR
+                        && legacyEnhancedStartup.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_HDR_SEMANTIC_SRGB8
+                        && legacyEnhancedStartup.manifest().sceneStorageContract().bytesPerPixel()
+                        == 4
+                        && !legacyEnhancedStartup.manifest().sceneStorageContract().sceneLinear()
+                        && legacyEnhancedStartup.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract
+                        .LEGACY_SEMANTIC_RECONSTRUCTION,
+                "live EDR-to-Enhanced transition rejected the startup-fixed RGBA8 scene");
+        Set<String> legacyEnhancedResources = Set.of(
+                "main_color", "main_depth", "drawable", "hdr_semantic",
+                "scene_depth_snapshot", "scene_color_snapshot", "hdr_emission", "hdr_bloom",
+                "hdr_histogram", "hdr_adaptive_state", "hdr_ui_control_a", "hdr_ui_control_b"
+        );
+        Set<String> legacyEnhancedPasses = Set.of(
+                "world_render", "ui_render", "present", "scene_color_snapshot",
+                "scene_depth_snapshot", "hdr_extract", "hdr_exposure_reduce",
+                "hdr_bloom_combined", "hdr_ui_compare", "hdr_ui_dilate"
+        );
+        long halfDisplayPixels = ((display.width() + 1L) / 2L)
+                * ((display.height() + 1L) / 2L);
+        long expectedLegacyEnhancedBytes = renderPixels * 4L
+                + renderPixels * 4L
+                + renderPixels * 4L
+                + quarterPixels * 8L
+                + quarterPixels * 8L
+                + 64L * Integer.BYTES
+                + 32L
+                + halfDisplayPixels * 2L
+                + halfDisplayPixels * 2L;
+        require(resourceNames(legacyEnhancedStartup.manifest()).equals(legacyEnhancedResources)
+                        && passNames(legacyEnhancedStartup.manifest()).equals(legacyEnhancedPasses)
+                        && legacyEnhancedStartup.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.HDR_ONLY)
+                        == expectedLegacyEnhancedBytes,
+                "Legacy Enhanced RGBA8 manifest diverged from its fallback frame graph");
+
+        RendererGenerationPlanner.Plan legacyLiveEnhanced = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8,
+                false
+        );
+        Set<String> liveEnhancedResources = new java.util.HashSet<>(legacyEnhancedResources);
+        liveEnhancedResources.remove("hdr_semantic");
+        require(resourceNames(legacyLiveEnhanced.manifest()).equals(liveEnhancedResources)
+                        && passNames(legacyLiveEnhanced.manifest()).equals(legacyEnhancedPasses)
+                        && legacyLiveEnhanced.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.HDR_ONLY)
+                        == expectedLegacyEnhancedBytes - renderPixels * 4L,
+                "live EDR-to-Enhanced manifest retained an unavailable semantic attachment");
 
         RendererGenerationPlanner.Plan legacyHdrStorageToSdr = RendererGenerationPlanner.plan(
                 LightingMode.LEGACY,

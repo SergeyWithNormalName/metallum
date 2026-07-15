@@ -151,8 +151,8 @@ final class MetalSurface implements GpuSurfaceBackend {
         HdrOutputMode desiredMode = this.forcedOutputModeUntilReconfigure != null
                 ? this.forcedOutputModeUntilReconfigure
                 : this.device.availableHdrOutputMode(this.device.hdrConfig().mode().resolve(this.edrCapabilities));
-        this.device.setHdrOutputMode(desiredMode, this.edrCapabilities.currentHeadroom());
         if (desiredMode == this.outputMode || this.configuration == null) {
+            this.device.setHdrOutputMode(desiredMode, this.edrCapabilities.currentHeadroom());
             if (this.configuration != null) {
                 this.updateContentsHeadroomIfNeeded(desiredMode);
             }
@@ -166,7 +166,6 @@ final class MetalSurface implements GpuSurfaceBackend {
         }
 
         this.forcedOutputModeUntilReconfigure = this.outputMode;
-        this.device.setHdrOutputMode(this.outputMode, this.edrCapabilities.currentHeadroom());
         Metallum.LOGGER.error("Failed to switch Metal output to {}; keeping {}", desiredMode, this.outputMode);
     }
 

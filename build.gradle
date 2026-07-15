@@ -221,6 +221,14 @@ tasks.register("rendererArchitectureUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.renderer.RendererArchitectureTests")
 }
 
+tasks.register("sodiumConfigUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates Metallum options against the pinned Sodium Config API"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gui.MetallumSodiumConfigTests")
+}
+
 tasks.register("temporalContractValidation", JavaExec) {
 	group = "verification"
 	description = "Validates L1 per-frame contracts, one-shot resets and diagnostics-off isolation"
@@ -780,6 +788,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("rendererArchitectureUnitTest"))
+	dependsOn(tasks.named("sodiumConfigUnitTest"))
 	dependsOn(tasks.named("temporalContractValidation"))
 	dependsOn(tasks.named("frameSynthesisUnitTest"))
 	dependsOn(tasks.named("workBudgetUnitTest"))

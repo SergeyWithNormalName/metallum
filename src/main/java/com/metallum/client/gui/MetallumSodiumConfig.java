@@ -7,8 +7,10 @@ import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
+import com.metallum.client.renderer.RendererConfig;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
+import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
@@ -27,6 +29,26 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
             .setName("Metallum")
             .addPage(builder.createOptionPage()
                 .setName(Component.translatable("metallum.options.page"))
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.lighting"))
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "improved_lighting")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.improved_lighting.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.improved_lighting.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setImprovedLighting,
+                                    () -> RendererConfig.load().improvedLighting()
+                            )
+                    )
+                )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.metalfx"))
                     .addOption(builder.createEnumOption(
@@ -199,6 +221,10 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     private static HdrConfig getConfig() {
         MetalDevice device = MetalDevice.getInstance();
         return device != null ? device.hdrConfig() : HdrConfig.load();
+    }
+
+    private static void setImprovedLighting(final boolean enabled) {
+        RendererConfig.load().withImprovedLighting(enabled).save();
     }
 
     private static void updateConfig(java.util.function.Function<HdrConfig, HdrConfig> updater) {

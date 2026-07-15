@@ -1,5 +1,8 @@
 {
   "metallum.options.page": "Metallum",
+  "metallum.options.group.lighting": "Освещение",
+  "metallum.options.improved_lighting.name": "Улучшенное освещение",
+  "metallum.options.improved_lighting.tooltip": "Включает scene-linear освещение Metallum. Изменение применяется после перезапуска игры.",
   "metallum.options.group.metalfx": "MetalFX",
   "metallum.options.metalfx_spatial_scaling.name": "MetalFX Spatial Scaling",
   "metallum.options.metalfx_spatial_scaling.off": "Выкл.",

@@ -20,6 +20,7 @@ public record RendererGenerationManifest(
     public enum SceneStorageContract {
         LEGACY_SDR_SRGB8(4, false, false),
         LEGACY_SDR_SRGB_RGBA16F_COMPAT(8, false, false),
+        LEGACY_HDR_SEMANTIC_SRGB8(4, false, false),
         LEGACY_HDR_SEMANTIC_RGBA16F(8, false, false),
         METALLUM_SDR_LINEAR_RGBA8(4, true, false),
         METALLUM_SDR_LINEAR_RGBA16F_COMPAT(8, true, true),
@@ -143,7 +144,9 @@ public record RendererGenerationManifest(
                     == SceneStorageContract.METALLUM_SDR_LINEAR_RGBA16F_COMPAT;
         }
         if (config.outputMode() == DisplayOutputMode.HDR) {
-            return sceneStorageContract == SceneStorageContract.LEGACY_HDR_SEMANTIC_RGBA16F;
+            return sceneStorageContract == SceneStorageContract.LEGACY_HDR_SEMANTIC_SRGB8
+                    || sceneStorageContract
+                    == SceneStorageContract.LEGACY_HDR_SEMANTIC_RGBA16F;
         }
         return sceneStorageContract == SceneStorageContract.LEGACY_SDR_SRGB8
                 || sceneStorageContract == SceneStorageContract

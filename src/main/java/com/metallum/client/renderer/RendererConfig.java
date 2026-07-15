@@ -31,6 +31,10 @@ public record RendererConfig(
 
     public static RendererConfig load() {
         Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        return load(path);
+    }
+
+    static RendererConfig load(final Path path) {
         Properties properties = defaultProperties();
         if (Files.isRegularFile(path)) {
             try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
@@ -42,6 +46,26 @@ public record RendererConfig(
             writeDefaults(path, properties);
         }
         return from(properties);
+    }
+
+    public RendererConfig withImprovedLighting(final boolean enabled) {
+        return new RendererConfig(enabled, this.lightingPreset, this.frameInterpolation);
+    }
+
+    public void save() {
+        Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
+        this.save(path);
+    }
+
+    void save(final Path path) {
+        Properties properties = new Properties();
+        properties.setProperty("improvedLighting", Boolean.toString(this.improvedLighting));
+        properties.setProperty(
+                "lightingPreset",
+                this.lightingPreset.name().toLowerCase(java.util.Locale.ROOT)
+        );
+        properties.setProperty("frameInterpolation", Boolean.toString(this.frameInterpolation));
+        writeProperties(path, properties, "Metallum renderer settings");
     }
 
     static RendererConfig from(final Properties properties) {
@@ -61,16 +85,25 @@ public record RendererConfig(
     }
 
     private static void writeDefaults(final Path path, final Properties properties) {
+        writeProperties(
+                path,
+                properties,
+                "Metallum renderer settings (restart Minecraft after changing)"
+        );
+    }
+
+    private static void writeProperties(
+            final Path path,
+            final Properties properties,
+            final String comment
+    ) {
         try {
             Files.createDirectories(path.getParent());
             try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
-                properties.store(
-                        writer,
-                        "Metallum renderer settings (restart Minecraft after changing)"
-                );
+                properties.store(writer, comment);
             }
         } catch (IOException exception) {
-            Metallum.LOGGER.warn("Failed to create default renderer config at {}", path, exception);
+            Metallum.LOGGER.warn("Failed to write renderer config at {}", path, exception);
         }
     }
 }

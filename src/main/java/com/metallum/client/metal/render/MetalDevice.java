@@ -628,7 +628,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 new RendererGenerationPlanner.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
                 new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
                 this.temporalDiagnosticsActive,
-                materialSceneStorage
+                materialSceneStorage,
+                HdrSemanticState.isRequested()
         );
         if (!plan.manifest().executable()) {
             throw new IllegalStateException("Non-executable renderer generation passed admission");
@@ -660,7 +661,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                         new RendererGenerationPlanner.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
                         new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
                         false,
-                        materialSceneStorage
+                        materialSceneStorage,
+                        HdrSemanticState.isRequested()
                 );
             }
         }
