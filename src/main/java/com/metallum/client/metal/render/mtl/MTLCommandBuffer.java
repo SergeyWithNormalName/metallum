@@ -283,6 +283,17 @@ public final class MTLCommandBuffer {
         );
     }
 
+    public int encodeTemporalDiagnostics(
+            final MemorySegment depthTexture,
+            final MemorySegment motionTexture,
+            final MemorySegment reactiveTexture,
+            final MemorySegment globalFence
+    ) {
+        return MetalNativeBridge.metallum_encode_temporal_diagnostics_v1(
+                handle(), depthTexture, motionTexture, reactiveTexture, globalFence
+        );
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

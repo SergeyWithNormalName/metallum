@@ -97,15 +97,27 @@ public final class MetalNativeBridge {
                     "metallum_validate_frame_graph_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            validateFrameStateV1 = downcallWithoutCritical(
+            validateFrameStateV2 = downcallWithoutCritical(
                     lookup,
-                    "metallum_validate_frame_state_v1",
+                    "metallum_validate_frame_state_v2",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            setFrameStateV1 = downcallWithoutCritical(
+            setFrameStateV2 = downcallWithoutCritical(
                     lookup,
-                    "metallum_set_frame_state_v1",
+                    "metallum_set_frame_state_v2",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_encode_temporal_diagnostics_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS
+                    )
             );
             initPipelines = downcallWithoutCritical(
                     lookup,
@@ -480,8 +492,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle recordJavaWorkload;
     private static final MethodHandle validateFrameGraphV1;
-    private static final MethodHandle validateFrameStateV1;
-    private static final MethodHandle setFrameStateV1;
+    private static final MethodHandle validateFrameStateV2;
+    private static final MethodHandle setFrameStateV2;
+    private static final MethodHandle encodeTemporalDiagnosticsV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -707,12 +720,32 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static int metallum_validate_frame_state_v1(final MemorySegment packet) {
-        return invokeFrameState("metallum_validate_frame_state_v1", validateFrameStateV1, packet);
+    public static int metallum_validate_frame_state_v2(final MemorySegment packet) {
+        return invokeFrameState("metallum_validate_frame_state_v2", validateFrameStateV2, packet);
     }
 
-    public static int metallum_set_frame_state_v1(final MemorySegment packet) {
-        return invokeFrameState("metallum_set_frame_state_v1", setFrameStateV1, packet);
+    public static int metallum_set_frame_state_v2(final MemorySegment packet) {
+        return invokeFrameState("metallum_set_frame_state_v2", setFrameStateV2, packet);
+    }
+
+    public static int metallum_encode_temporal_diagnostics_v1(
+            final MemorySegment commandBuffer,
+            final MemorySegment depthTexture,
+            final MemorySegment motionTexture,
+            final MemorySegment reactiveTexture,
+            final MemorySegment globalFence
+    ) {
+        try {
+            return (int) encodeTemporalDiagnosticsV1.invokeExact(
+                    segment(commandBuffer),
+                    segment(depthTexture),
+                    segment(motionTexture),
+                    segment(reactiveTexture),
+                    segment(globalFence)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_encode_temporal_diagnostics_v1", throwable);
+        }
     }
 
     private static int invokeFrameState(

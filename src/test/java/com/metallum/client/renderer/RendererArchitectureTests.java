@@ -529,7 +529,9 @@ public final class RendererArchitectureTests {
                         && Double.doubleToLongBits(sdr.jitterOffset().y())
                         == Double.doubleToLongBits(0.0),
                 "P2 zero jitter is not deterministic");
-        expectIllegalArgument(() -> new FrameState.JitterOffset(0.25, 0.0));
+        require(new FrameState.JitterOffset(0.25, 0.0).x() == 0.25,
+                "Temporal-ready jitter offsets should admit sub-pixel samples");
+        expectIllegalArgument(() -> new FrameState.JitterOffset(0.5001, 0.0));
         expectIllegalArgument(() -> new FrameState.Extent(0, 720));
     }
 

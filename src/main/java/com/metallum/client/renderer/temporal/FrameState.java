@@ -34,7 +34,18 @@ public record FrameState(
         double exposure,
         double preExposure,
         JitterOffset jitterOffset,
-        Set<HistoryResetReason> historyResetReasons
+        Set<HistoryResetReason> historyResetReasons,
+        long submitIndex,
+        int inFlightSlot,
+        double deltaSeconds,
+        double nearPlane,
+        double farPlane,
+        CameraPosition currentCameraPosition,
+        CameraPosition previousCameraPosition,
+        long worldIdentity,
+        long dimensionIdentity,
+        double currentDisplayHeadroom,
+        double potentialDisplayHeadroom
 ) {
     public enum HistoryResetReason {
         FIRST_FRAME,
@@ -66,9 +77,18 @@ public record FrameState(
             if (!Double.isFinite(x) || !Double.isFinite(y)) {
                 throw new IllegalArgumentException("Jitter must be finite");
             }
-            if (Double.doubleToLongBits(x) != Double.doubleToLongBits(0.0)
-                    || Double.doubleToLongBits(y) != Double.doubleToLongBits(0.0)) {
-                throw new IllegalArgumentException("P2 preparation contract requires exact zero jitter");
+            if (Math.abs(x) > 0.5 || Math.abs(y) > 0.5) {
+                throw new IllegalArgumentException("Jitter must stay within half a render pixel");
+            }
+        }
+    }
+
+    public record CameraPosition(double x, double y, double z) {
+        public static final CameraPosition ORIGIN = new CameraPosition(0.0, 0.0, 0.0);
+
+        public CameraPosition {
+            if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+                throw new IllegalArgumentException("Camera position must be finite");
             }
         }
     }
@@ -79,9 +99,10 @@ public record FrameState(
             long hdr,
             long lighting,
             long upscale,
-            long interpolation
+            long interpolation,
+            long diagnostic
     ) {
-        public static final ResourceBytes NONE = new ResourceBytes(0L, 0L, 0L, 0L, 0L);
+        public static final ResourceBytes NONE = new ResourceBytes(0L, 0L, 0L, 0L, 0L, 0L);
 
         public ResourceBytes {
             requireNonNegative(base, "base resource bytes");
@@ -89,6 +110,17 @@ public record FrameState(
             requireNonNegative(lighting, "lighting resource bytes");
             requireNonNegative(upscale, "upscale resource bytes");
             requireNonNegative(interpolation, "interpolation resource bytes");
+            requireNonNegative(diagnostic, "diagnostic resource bytes");
+        }
+
+        public ResourceBytes(
+                final long base,
+                final long hdr,
+                final long lighting,
+                final long upscale,
+                final long interpolation
+        ) {
+            this(base, hdr, lighting, upscale, interpolation, 0L);
         }
     }
 
@@ -178,10 +210,90 @@ public record FrameState(
         requirePositiveFinite(preExposure, "pre-exposure");
         Objects.requireNonNull(jitterOffset, "jitterOffset");
         Objects.requireNonNull(historyResetReasons, "historyResetReasons");
-        EnumSet<HistoryResetReason> resetCopy = historyResetReasons.isEmpty()
-                ? EnumSet.noneOf(HistoryResetReason.class)
-                : EnumSet.copyOf(historyResetReasons);
-        historyResetReasons = Collections.unmodifiableSet(resetCopy);
+        historyResetReasons = historyResetReasons.isEmpty()
+                ? Set.of()
+                : Collections.unmodifiableSet(EnumSet.copyOf(historyResetReasons));
+        requireNonNegative(submitIndex, "submit index");
+        if (inFlightSlot < 0 || inFlightSlot >= 3) {
+            throw new IllegalArgumentException("In-flight slot must be in [0, 2]");
+        }
+        requireNonNegativeFinite(deltaSeconds, "delta seconds");
+        requirePositiveFinite(nearPlane, "near plane");
+        requirePositiveFinite(farPlane, "far plane");
+        if (farPlane <= nearPlane) {
+            throw new IllegalArgumentException("Far plane must be greater than near plane");
+        }
+        Objects.requireNonNull(currentCameraPosition, "currentCameraPosition");
+        Objects.requireNonNull(previousCameraPosition, "previousCameraPosition");
+        requireNonNegative(worldIdentity, "world identity");
+        requireNonNegative(dimensionIdentity, "dimension identity");
+        requireHeadroom(currentDisplayHeadroom, "current display headroom");
+        requireHeadroom(potentialDisplayHeadroom, "potential display headroom");
+        if (potentialDisplayHeadroom < currentDisplayHeadroom) {
+            throw new IllegalArgumentException("Potential display headroom must cover current headroom");
+        }
+    }
+
+    /** Compatibility constructor for L0 callers while production migrates to the v2 frame ABI. */
+    public FrameState(
+            final FrameContract contract,
+            final long frameId,
+            final long rendererGenerationId,
+            final long historyGeneration,
+            final long lightingGenerationId,
+            final long outputGenerationId,
+            final LightingMode lightingMode,
+            final DisplayOutputMode outputMode,
+            final LightingPreset lightingPreset,
+            final RendererFeatureMask featureMask,
+            final MetalExecutorKind executorKind,
+            final int frameGraphVersion,
+            final ResourceBytes resourceBytes,
+            final LightingWork lightingWork,
+            final Transforms currentTransforms,
+            final Transforms previousTransforms,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final double exposure,
+            final double preExposure,
+            final JitterOffset jitterOffset,
+            final Set<HistoryResetReason> historyResetReasons
+    ) {
+        this(
+                contract,
+                frameId,
+                rendererGenerationId,
+                historyGeneration,
+                lightingGenerationId,
+                outputGenerationId,
+                lightingMode,
+                outputMode,
+                lightingPreset,
+                featureMask,
+                executorKind,
+                frameGraphVersion,
+                resourceBytes,
+                lightingWork,
+                currentTransforms,
+                previousTransforms,
+                renderExtent,
+                displayExtent,
+                exposure,
+                preExposure,
+                jitterOffset,
+                historyResetReasons,
+                frameId,
+                (int) (frameId % 3L),
+                1.0 / 60.0,
+                0.05,
+                1_000.0,
+                CameraPosition.ORIGIN,
+                CameraPosition.ORIGIN,
+                0L,
+                0L,
+                1.0,
+                1.0
+        );
     }
 
     /** Compatibility constructor for preparation callers that do not yet own a generation manifest. */
@@ -241,31 +353,46 @@ public record FrameState(
         Objects.requireNonNull(current, "current");
         Objects.requireNonNull(eventReasons, "eventReasons");
         EnumSet<HistoryResetReason> reasons = eventReasons.isEmpty()
-                ? EnumSet.noneOf(HistoryResetReason.class)
+                ? null
                 : EnumSet.copyOf(eventReasons);
         if (previous == null) {
+            if (reasons == null) {
+                reasons = EnumSet.noneOf(HistoryResetReason.class);
+            }
             reasons.add(HistoryResetReason.FIRST_FRAME);
             return Collections.unmodifiableSet(reasons);
         }
+        if (previous.worldIdentity != current.worldIdentity) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
+            reasons.add(HistoryResetReason.WORLD_LOAD_UNLOAD);
+        } else if (previous.dimensionIdentity != current.dimensionIdentity) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
+            reasons.add(HistoryResetReason.DIMENSION_CHANGE);
+        }
         if (!previous.displayExtent.equals(current.displayExtent)) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.RESIZE);
         }
         if (!previous.renderExtent.equals(current.renderExtent)
                 && previous.displayExtent.equals(current.displayExtent)) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.INTERNAL_RENDER_SCALE_CHANGE);
         }
         if (previous.rendererGenerationId != current.rendererGenerationId) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.RENDERER_GENERATION_CHANGE);
         }
         if (previous.lightingGenerationId != current.lightingGenerationId
                 || previous.lightingMode != current.lightingMode) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.LIGHTING_MODE_CHANGE);
         }
         if (previous.outputGenerationId != current.outputGenerationId
                 || previous.outputMode != current.outputMode) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.OUTPUT_MODE_CHANGE);
         }
-        return Collections.unmodifiableSet(reasons);
+        return reasons == null ? Set.of() : Collections.unmodifiableSet(reasons);
     }
 
     private static void requireNonNegative(final long value, final String name) {
@@ -283,6 +410,18 @@ public record FrameState(
     private static void requirePositiveFinite(final double value, final String name) {
         if (!(value > 0.0) || !Double.isFinite(value)) {
             throw new IllegalArgumentException(name + " must be positive and finite");
+        }
+    }
+
+    private static void requireNonNegativeFinite(final double value, final String name) {
+        if (value < 0.0 || !Double.isFinite(value)) {
+            throw new IllegalArgumentException(name + " must be non-negative and finite");
+        }
+    }
+
+    private static void requireHeadroom(final double value, final String name) {
+        if (!(value >= 1.0) || !Double.isFinite(value)) {
+            throw new IllegalArgumentException(name + " must be finite and at least 1.0");
         }
     }
 }

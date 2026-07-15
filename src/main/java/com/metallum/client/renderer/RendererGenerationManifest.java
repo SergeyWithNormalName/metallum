@@ -19,7 +19,8 @@ public record RendererGenerationManifest(
         HDR_ONLY,
         LIGHTING_ONLY,
         UPSCALE_ONLY,
-        INTERPOLATION_ONLY
+        INTERPOLATION_ONLY,
+        DIAGNOSTIC_ONLY
     }
 
     public record Resource(String name, Domain domain, long bytes, boolean external) {

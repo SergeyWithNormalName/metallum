@@ -627,14 +627,17 @@ def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
         result[field] = raw
 
     resources = value.get("resource_bytes")
-    if not isinstance(resources, dict) or set(resources) != {
-        "base", "hdr", "lighting", "upscale", "interpolation",
+    legacy_resource_keys = {"base", "hdr", "lighting", "upscale", "interpolation"}
+    if not isinstance(resources, dict) or set(resources) not in {
+        frozenset(legacy_resource_keys),
+        frozenset(legacy_resource_keys | {"diagnostic"}),
     }:
         raise ReportError(f"line {line}: renderer_generation.resource_bytes has invalid keys")
     result["resource_bytes"] = {
         field: _integer(raw, f"renderer_generation.resource_bytes.{field}", line)
         for field, raw in resources.items()
     }
+    result["resource_bytes"].setdefault("diagnostic", 0)
     lighting_work = value.get("lighting_work")
     if not isinstance(lighting_work, dict) or set(lighting_work) != {
         "light_count", "pass_count", "dispatch_count", "upload_bytes",
@@ -644,6 +647,42 @@ def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
         field: _integer(raw, f"renderer_generation.lighting_work.{field}", line)
         for field, raw in lighting_work.items()
     }
+    temporal = value.get("temporal_diagnostics")
+    if temporal is None:
+        temporal = {
+            "resource_bytes": 0,
+            "motion_bytes": 0,
+            "reactive_bytes": 0,
+            "pass_count": 0,
+            "encoder_count": 0,
+            "pso_count": 0,
+        }
+    temporal_keys = {
+        "resource_bytes", "motion_bytes", "reactive_bytes",
+        "pass_count", "encoder_count", "pso_count",
+    }
+    if not isinstance(temporal, dict) or set(temporal) != temporal_keys:
+        raise ReportError(f"line {line}: renderer_generation.temporal_diagnostics has invalid keys")
+    result["temporal_diagnostics"] = {
+        field: _integer(raw, f"renderer_generation.temporal_diagnostics.{field}", line)
+        for field, raw in temporal.items()
+    }
+    diagnostic = result["temporal_diagnostics"]
+    if (diagnostic["resource_bytes"] != result["resource_bytes"]["diagnostic"]
+            or diagnostic["motion_bytes"] + diagnostic["reactive_bytes"]
+            != diagnostic["resource_bytes"]):
+        raise ReportError(f"line {line}: temporal diagnostic byte declaration mismatch")
+    if result["resource_bytes"]["diagnostic"] == 0 and any(
+        diagnostic[field] != 0
+        for field in ("motion_bytes", "reactive_bytes", "pass_count", "encoder_count", "pso_count")
+    ):
+        raise ReportError(f"line {line}: diagnostics-off generation contains GPU work")
+    if result["resource_bytes"]["diagnostic"] != 0 and (
+        diagnostic["pass_count"] != 1
+        or diagnostic["encoder_count"] != 1
+        or diagnostic["pso_count"] != 1
+    ):
+        raise ReportError(f"line {line}: diagnostics-on generation has an invalid GPU declaration")
 
     if result["feature_mask"] & ~0b111:
         raise ReportError(f"line {line}: renderer_generation.feature_mask has unknown bits")
@@ -1284,7 +1323,14 @@ def summarize(
     if any(value is not None for value in renderer_generations):
         if not all(value is not None for value in renderer_generations):
             raise ReportError("selected windows mix renderer-generation telemetry presence")
-        if any(value != renderer_generations[0] for value in renderer_generations[1:]):
+        stable_generations = []
+        for value in renderer_generations:
+            stable = dict(value)
+            # ABI v2 publishes every rendered frame; frame_id is dynamic while
+            # the renderer generation declaration remains stable.
+            stable.pop("frame_id", None)
+            stable_generations.append(stable)
+        if any(value != stable_generations[0] for value in stable_generations[1:]):
             raise ReportError("selected windows mix renderer-generation declarations")
     dropped = sum(window.dropped for window in selected)
     if dropped:
@@ -2004,6 +2050,42 @@ def _validate_release_bundle(
     if supplied_report != raw_report:
         raise ReportError("benchmark summary is bound to a different raw report")
     normalized_summary = dict(supplied_summary)
+    # L0 summaries predate the diagnostic-only declaration. Keep those
+    # already-attested raw bundles comparable by materializing the two new
+    # zero declarations, but only when the raw report itself is legacy. A new
+    # report cannot omit the fields and pass this normalization.
+    raw_has_temporal_declaration = False
+    raw_has_renderer_generation = False
+    with raw_report.open("r", encoding="utf-8") as stream:
+        for source_line in stream:
+            value = json.loads(source_line)
+            generation = value.get("renderer_generation")
+            if not isinstance(generation, dict):
+                continue
+            raw_has_renderer_generation = True
+            resources = generation.get("resource_bytes")
+            if (isinstance(resources, dict) and "diagnostic" in resources) \
+                    or "temporal_diagnostics" in generation:
+                raw_has_temporal_declaration = True
+                break
+    if raw_has_renderer_generation and not raw_has_temporal_declaration:
+        generation = normalized_summary.get("renderer_generation")
+        if isinstance(generation, dict):
+            generation = dict(generation)
+            resources = generation.get("resource_bytes")
+            if isinstance(resources, dict):
+                resources = dict(resources)
+                resources.setdefault("diagnostic", 0)
+                generation["resource_bytes"] = resources
+            generation.setdefault("temporal_diagnostics", {
+                "resource_bytes": 0,
+                "motion_bytes": 0,
+                "reactive_bytes": 0,
+                "pass_count": 0,
+                "encoder_count": 0,
+                "pso_count": 0,
+            })
+            normalized_summary["renderer_generation"] = generation
     normalized_summary["report"] = str(supplied_report)
     expected_summary = dict(recomputed_summary)
     expected_summary["report"] = str(raw_report)

@@ -53,6 +53,25 @@ public final class MetalCapabilities {
         public static final FormatUsageProfile UNAVAILABLE = new FormatUsageProfile(false, false);
     }
 
+    /** One-time MetalFX Temporal + reactive-mask diagnostic admission evidence. */
+    public record TemporalProfile(
+            boolean metalFxTemporal,
+            boolean reactiveMaskApi,
+            boolean depth32Float,
+            boolean rg16Float,
+            boolean r8Unorm,
+            boolean requiredTextureUsages
+    ) {
+        public static final TemporalProfile UNAVAILABLE = new TemporalProfile(
+                false, false, false, false, false, false
+        );
+
+        public boolean diagnosticsSupported() {
+            return this.metalFxTemporal && this.reactiveMaskApi && this.depth32Float
+                    && this.rg16Float && this.r8Unorm && this.requiredTextureUsages;
+        }
+    }
+
     public record DisplayCapabilities(
             int maximumFramesPerSecond,
             float currentHeadroom,
@@ -94,23 +113,27 @@ public final class MetalCapabilities {
     static final long NATIVE_REQUIRED_TEXTURE_FORMATS_USAGES = 1L << 13;
     static final long NATIVE_DISPLAY_REFRESH = 1L << 14;
     static final long NATIVE_DISPLAY_HEADROOM = 1L << 15;
+    static final long NATIVE_TEMPORAL_PROFILE = 1L << 16;
     static final int NATIVE_REFRESH_SHIFT = 48;
     static final long NATIVE_REFRESH_MASK = 0xffffL << NATIVE_REFRESH_SHIFT;
 
     private final Set<Feature> features;
     private final Map<Feature, Evidence> evidence;
     private final FormatUsageProfile formatUsageProfile;
+    private final TemporalProfile temporalProfile;
     private final DisplayCapabilities displayCapabilities;
 
     private MetalCapabilities(
             final Set<Feature> features,
             final Map<Feature, Evidence> evidence,
             final FormatUsageProfile formatUsageProfile,
+            final TemporalProfile temporalProfile,
             final DisplayCapabilities displayCapabilities
     ) {
         Objects.requireNonNull(features, "features");
         Objects.requireNonNull(evidence, "evidence");
         this.formatUsageProfile = Objects.requireNonNull(formatUsageProfile, "formatUsageProfile");
+        this.temporalProfile = Objects.requireNonNull(temporalProfile, "temporalProfile");
         this.displayCapabilities = Objects.requireNonNull(displayCapabilities, "displayCapabilities");
         EnumSet<Feature> featureCopy = features.isEmpty()
                 ? EnumSet.noneOf(Feature.class)
@@ -138,6 +161,7 @@ public final class MetalCapabilities {
                 values,
                 evidence,
                 new FormatUsageProfile(formats, false),
+                TemporalProfile.UNAVAILABLE,
                 display
         );
     }
@@ -196,10 +220,14 @@ public final class MetalCapabilities {
 
         int refresh = (int) ((nativeSnapshot & NATIVE_REFRESH_MASK) >>> NATIVE_REFRESH_SHIFT);
         boolean formats = features.contains(Feature.REQUIRED_TEXTURE_FORMATS_USAGES);
+        boolean temporalProfile = (nativeSnapshot & NATIVE_TEMPORAL_PROFILE) != 0L;
         return new MetalCapabilities(
                 features,
                 evidence,
-                new FormatUsageProfile(formats, false),
+                new FormatUsageProfile(formats, temporalProfile),
+                temporalProfile
+                        ? new TemporalProfile(true, true, true, true, true, true)
+                        : TemporalProfile.UNAVAILABLE,
                 new DisplayCapabilities(
                         features.contains(Feature.DISPLAY_REFRESH) ? refresh : 0,
                         edrCapabilities.currentHeadroom(),
@@ -236,6 +264,10 @@ public final class MetalCapabilities {
 
     public FormatUsageProfile formatUsageProfile() {
         return this.formatUsageProfile;
+    }
+
+    public TemporalProfile temporalProfile() {
+        return this.temporalProfile;
     }
 
     public DisplayCapabilities displayCapabilities() {

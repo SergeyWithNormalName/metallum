@@ -51,6 +51,32 @@ public final class RendererGenerationPlanner {
             final Extent renderExtent,
             final Extent displayExtent
     ) {
+        return plan(
+                requestedLighting,
+                requestedOutput,
+                requestedExecutor,
+                requestedPreset,
+                requestedFeatures,
+                currentSafeOutput,
+                capabilities,
+                renderExtent,
+                displayExtent,
+                false
+        );
+    }
+
+    public static Plan plan(
+            final LightingMode requestedLighting,
+            final DisplayOutputMode requestedOutput,
+            final MetalExecutorKind requestedExecutor,
+            final LightingPreset requestedPreset,
+            final RendererFeatureMask requestedFeatures,
+            final DisplayOutputMode currentSafeOutput,
+            final MetalCapabilities capabilities,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final boolean temporalDiagnostics
+    ) {
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
                 requestedLighting,
                 requestedOutput,
@@ -66,7 +92,7 @@ public final class RendererGenerationPlanner {
                 requestedOutput,
                 requestedFeatures,
                 resolution,
-                manifest(resolution.config(), renderExtent, displayExtent)
+                manifest(resolution.config(), renderExtent, displayExtent, temporalDiagnostics)
         );
     }
 
@@ -74,6 +100,15 @@ public final class RendererGenerationPlanner {
             final RendererGenerationConfig config,
             final Extent renderExtent,
             final Extent displayExtent
+    ) {
+        return manifest(config, renderExtent, displayExtent, false);
+    }
+
+    public static RendererGenerationManifest manifest(
+            final RendererGenerationConfig config,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final boolean temporalDiagnostics
     ) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(renderExtent, "renderExtent");
@@ -164,6 +199,26 @@ public final class RendererGenerationPlanner {
         }
         if (config.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION)) {
             throw new IllegalStateException("L0 must not create a Frame Interpolation manifest");
+        }
+        if (temporalDiagnostics) {
+            long diagnosticBytes = multiply(renderExtent.pixels(), 5L * 3L);
+            resources.add(resource(
+                    "temporal_motion_ring",
+                    RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY,
+                    multiply(renderExtent.pixels(), 4L * 3L),
+                    false
+            ));
+            resources.add(resource(
+                    "temporal_reactive_ring",
+                    RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY,
+                    multiply(renderExtent.pixels(), 3L),
+                    false
+            ));
+            if (diagnosticBytes <= 0L) {
+                throw new IllegalStateException("Temporal diagnostic byte count overflowed");
+            }
+            passes.add(pass("temporal_camera_motion_diagnostic",
+                    RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY));
         }
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,

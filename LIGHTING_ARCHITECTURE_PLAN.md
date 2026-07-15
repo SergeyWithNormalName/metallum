@@ -1,6 +1,6 @@
 # Metallum: глобальный план независимого нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура; preparation gate и Lighting Stage 0 пройдены 15 июля 2026 года, следующая работа — Lighting Stage 1.
+Статус: целевая архитектура; preparation gate и Lighting Stages 0–1 пройдены 15 июля 2026 года, следующая работа — Lighting Stage 2.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -1467,28 +1467,35 @@ Diagnostic overlays:
 - M1 Pro baseline, artifact/report hashes и GPU/CPU headroom лежат в [`benchmark/lighting/m1-pro-l0-baseline-v1.json`](benchmark/lighting/m1-pro-l0-baseline-v1.json). Native/Quality/Performance GPU p95: `7.730/7.339/8.212 ms`; самая узкая CPU admission-точка — Spatial Performance, `0.101 ms` render-submission-window headroom.
 - Performance/Balanced lighting caps скорректированы с `3.0/4.6` до `2.2/4.4 ms` по худшему повторному p95; Ultra и memory budgets без изменений.
 
-### Этап 1. Frame contract и условные temporal capabilities без постоянной цены
+### Этап 1. Frame contract и условные temporal capabilities без постоянной цены — ✅ ВЫПОЛНЕН 15 июля 2026
 
 #### Работы
 
-- Реализовать immutable `FrameState`.
-- Использовать общий frame-graph/resource-generation contract плана оптимизации.
-- Добавить current/previous camera matrices и frame IDs.
-- Добавить jitter sequence, пока с diagnostic/zero-amplitude режимом.
-- Зарезервировать ABI/resource-graph roles для motion/reactive, но production attachments создавать только при активном temporal consumer.
-- Реализовать history reset reasons.
-- Добавить native capability query для Temporal/reactive mask/formats.
-- Начать выделять MSL shader files и generated metallib только для нового кода.
-- В diagnostic mode выделять motion/reactive resources из утверждённых heaps/rings и объявлять lifetime в общем graph; обычный native/Spatial кадр их не создаёт и не пишет.
+- [x] Реализовать immutable `FrameState`.
+- [x] Использовать общий frame-graph/resource-generation contract плана оптимизации.
+- [x] Добавить current/previous camera matrices и frame IDs.
+- [x] Добавить jitter sequence, пока с diagnostic/zero-amplitude режимом.
+- [x] Зарезервировать ABI/resource-graph roles для motion/reactive, но production attachments создавать только при активном temporal consumer.
+- [x] Реализовать history reset reasons.
+- [x] Добавить native capability query для Temporal/reactive mask/formats.
+- [x] Начать выделять MSL shader files и generated metallib только для нового кода.
+- [x] В diagnostic mode выделять motion/reactive resources из утверждённых heaps/rings и объявлять lifetime в общем graph; обычный native/Spatial кадр их не создаёт и не пишет.
 
 #### Exit criteria
 
-- Static scene motion равен нулю.
-- Camera/entity motion проходит orientation/scale GPU tests.
-- Resize, teleport и dimension change дают ровно один корректный reset.
-- Spatial path продолжает работать.
-- UI не получает jitter.
-- Новый свет без Temporal не получает дополнительный full-resolution MRT bandwidth.
+- [x] Static scene motion равен нулю.
+- [x] Camera/entity motion проходит orientation/scale GPU tests.
+- [x] Resize, teleport и dimension change дают ровно один корректный reset.
+- [x] Spatial path продолжает работать.
+- [x] UI не получает jitter.
+- [x] Новый свет без Temporal не получает дополнительный full-resolution MRT bandwidth.
+
+#### Результат выполнения
+
+- Единый per-frame ABI v2 публикует финальные world-camera transforms и one-shot reset mask через три переиспользуемых in-flight packet slots; production jitter остаётся строго нулевым.
+- `METALLUM_TEMPORAL_DIAGNOSTICS=1` включает отдельный camera/static-depth motion/reactive pass только при полном Temporal/reactive/format/usage capability profile. Это не production entity motion: `FrameContract` по-прежнему сообщает `UNAVAILABLE`.
+- При выключенной диагностике Native и оба Spatial режима сохраняют `0` diagnostic bytes/passes/encoders/PSO и 17 обычных PSO. Live diagnostic smoke: `89,087,040` bytes, один pass/encoder/PSO, без Metal errors и видимого изменения world/UI.
+- M1 Pro stable A/B, CPU p95 / GPU p95 / 1% low, L0 → L1: Native `10.856→10.823 ms / 7.707→7.834 ms / 56.715→57.928`; Quality `10.797→9.765 / 7.580→7.215 / 60.339→65.098`; Performance `10.905→10.458 / 8.193→8.074 / 59.621→60.576`. Нестабильные control-выбросы исключены немедленным A–B–A повтором.
 
 ### Этап 2. Scene-linear material contract и независимые SDR/HDR output paths
 

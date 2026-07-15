@@ -34,28 +34,54 @@ private func writeUInt64(_ value: UInt64, at offset: Int, into bytes: inout [UIn
     }
 }
 
+private func writeFloat(_ value: Float, at offset: Int, into bytes: inout [UInt8]) {
+    writeUInt32(value.bitPattern, at: offset, into: &bytes)
+}
+
+private func writeDouble(_ value: Double, at offset: Int, into bytes: inout [UInt8]) {
+    writeUInt64(value.bitPattern, at: offset, into: &bytes)
+}
+
 private func validPacket() -> [UInt8] {
-    var bytes = [UInt8](repeating: 0, count: 160)
-    writeUInt32(1, at: 0, into: &bytes)
-    writeUInt32(160, at: 4, into: &bytes)
+    var bytes = [UInt8](repeating: 0, count: 816)
+    writeUInt32(2, at: 0, into: &bytes)
+    writeUInt32(816, at: 4, into: &bytes)
     writeUInt32(1, at: 8, into: &bytes)
     writeUInt32(2, at: 12, into: &bytes)
     writeUInt64(42, at: 16, into: &bytes)
-    writeUInt64(7, at: 24, into: &bytes)
+    writeUInt64(7, at: 24, into: &bytes) // submit; slot 1
     writeUInt64(8, at: 32, into: &bytes)
     writeUInt64(9, at: 40, into: &bytes)
     writeUInt64(10, at: 48, into: &bytes)
-    writeUInt32(0, at: 56, into: &bytes) // legacy
-    writeUInt32(1, at: 60, into: &bytes) // HDR
-    writeUInt32(0, at: 64, into: &bytes) // Metal 3
-    writeUInt32(1, at: 68, into: &bytes) // Balanced
-    writeUInt64(1, at: 72, into: &bytes) // Spatial
-    writeUInt32(1280, at: 80, into: &bytes)
-    writeUInt32(720, at: 84, into: &bytes)
-    writeUInt32(2560, at: 88, into: &bytes)
-    writeUInt32(1440, at: 92, into: &bytes)
-    writeUInt64(64, at: 104, into: &bytes) // HDR resources
-    writeUInt64(128, at: 120, into: &bytes) // upscale resources
+    writeUInt64(11, at: 56, into: &bytes)
+    writeUInt64(12, at: 64, into: &bytes)
+    writeUInt64(13, at: 72, into: &bytes)
+    writeUInt64(1, at: 80, into: &bytes) // first frame reset
+    writeUInt64(1, at: 88, into: &bytes) // Spatial
+    writeUInt32(0, at: 96, into: &bytes) // legacy
+    writeUInt32(1, at: 100, into: &bytes) // HDR
+    writeUInt32(0, at: 104, into: &bytes) // Metal 3
+    writeUInt32(1, at: 108, into: &bytes) // Balanced
+    writeUInt32(1280, at: 112, into: &bytes)
+    writeUInt32(720, at: 116, into: &bytes)
+    writeUInt32(2560, at: 120, into: &bytes)
+    writeUInt32(1440, at: 124, into: &bytes)
+    writeUInt32(1, at: 128, into: &bytes)
+    writeFloat(1.0 / 60.0, at: 136, into: &bytes)
+    writeFloat(0.05, at: 140, into: &bytes)
+    writeFloat(1024, at: 144, into: &bytes)
+    writeFloat(1, at: 156, into: &bytes)
+    writeFloat(1, at: 160, into: &bytes)
+    writeFloat(1, at: 164, into: &bytes)
+    writeFloat(1, at: 168, into: &bytes)
+    writeUInt64(64, at: 184, into: &bytes) // HDR resources
+    writeUInt64(128, at: 200, into: &bytes) // upscale resources
+    for index in 0..<6 { writeDouble(Double(index), at: 248 + index * 8, into: &bytes) }
+    for matrix in 0..<8 {
+        for diagonal in 0..<4 {
+            writeFloat(1, at: 296 + matrix * 64 + diagonal * 20, into: &bytes)
+        }
+    }
     return bytes
 }
 
@@ -73,7 +99,7 @@ private enum FrameStateAbiValidationMain {
                 throw ValidationFailure.message("Could not load native library")
             }
             defer { dlclose(handle) }
-            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v1") else {
+            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v2") else {
                 throw ValidationFailure.message("Native FrameState ABI validator symbol is missing")
             }
             let nativeValidate = unsafeBitCast(symbol, to: NativeValidateFunction.self)
@@ -81,25 +107,31 @@ private enum FrameStateAbiValidationMain {
             try require(validate(nativeValidate, valid) == 1, "Valid FrameState packet was rejected")
 
             var invalidVersion = valid
-            writeUInt32(2, at: 0, into: &invalidVersion)
+            writeUInt32(1, at: 0, into: &invalidVersion)
             try require(validate(nativeValidate, invalidVersion) == -2, "Version mismatch was accepted")
             var lightingLeak = valid
-            writeUInt64(1, at: 112, into: &lightingLeak)
+            writeUInt64(1, at: 192, into: &lightingLeak)
             try require(validate(nativeValidate, lightingLeak) == -5, "Legacy lighting bytes were accepted")
             var sdrHdrLeak = valid
-            writeUInt32(0, at: 60, into: &sdrHdrLeak)
+            writeUInt32(0, at: 100, into: &sdrHdrLeak)
             try require(validate(nativeValidate, sdrHdrLeak) == -6, "SDR HDR bytes were accepted")
             var nativeUpscaleLeak = valid
-            writeUInt64(0, at: 72, into: &nativeUpscaleLeak)
+            writeUInt64(0, at: 88, into: &nativeUpscaleLeak)
             try require(validate(nativeValidate, nativeUpscaleLeak) == -7,
                         "Native-resolution upscale bytes were accepted")
             var interpolationLeak = valid
-            writeUInt64(1, at: 128, into: &interpolationLeak)
+            writeUInt64(1, at: 208, into: &interpolationLeak)
             try require(validate(nativeValidate, interpolationLeak) == -8,
                         "Disabled interpolation bytes were accepted")
-            let truncated = valid.withUnsafeBytes { nativeValidate($0.baseAddress, 159) }
+            var badSlot = valid
+            writeUInt32(2, at: 128, into: &badSlot)
+            try require(validate(nativeValidate, badSlot) == -4, "Mismatched in-flight slot was accepted")
+            var nonFiniteMatrix = valid
+            writeFloat(.nan, at: 296, into: &nonFiniteMatrix)
+            try require(validate(nativeValidate, nonFiniteMatrix) == -4, "NaN transform was accepted")
+            let truncated = valid.withUnsafeBytes { nativeValidate($0.baseAddress, 815) }
             try require(truncated == -1, "Truncated FrameState packet was accepted")
-            print("Native FrameState ABI validation passed (6 negative cases)")
+            print("Native FrameState ABI v2 validation passed (8 negative cases)")
         } catch {
             fputs("Native FrameState ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

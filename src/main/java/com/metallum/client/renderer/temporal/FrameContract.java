@@ -14,6 +14,19 @@ public record FrameContract(
         UiComposition uiComposition
 ) {
     public static final int CURRENT_VERSION = 1;
+    private static final FrameContract TEMPORAL_PREPARATION = new FrameContract(
+            CURRENT_VERSION,
+            new MotionVectorContract(
+                    MotionVectorAvailability.UNAVAILABLE,
+                    MotionVectorDelta.PREVIOUS_NDC_MINUS_CURRENT_NDC,
+                    MotionVectorUnits.RENDER_PIXELS,
+                    HorizontalAxis.POSITIVE_RIGHT,
+                    VerticalAxis.POSITIVE_DOWN
+            ),
+            new DepthContract(DepthRange.ZERO_TO_ONE, true),
+            ReactiveMaskAvailability.UNAVAILABLE,
+            UiComposition.SEPARATE_SDR_TEXTURE
+    );
 
     public enum MotionVectorAvailability {
         UNAVAILABLE,
@@ -92,18 +105,6 @@ public record FrameContract(
 
     /** Current preparation contract: declarations only, with all future temporal inputs disabled. */
     public static FrameContract temporalPreparationV1() {
-        return new FrameContract(
-                CURRENT_VERSION,
-                new MotionVectorContract(
-                        MotionVectorAvailability.UNAVAILABLE,
-                        MotionVectorDelta.PREVIOUS_NDC_MINUS_CURRENT_NDC,
-                        MotionVectorUnits.RENDER_PIXELS,
-                        HorizontalAxis.POSITIVE_RIGHT,
-                        VerticalAxis.POSITIVE_DOWN
-                ),
-                new DepthContract(DepthRange.ZERO_TO_ONE, true),
-                ReactiveMaskAvailability.UNAVAILABLE,
-                UiComposition.SEPARATE_SDR_TEXTURE
-        );
+        return TEMPORAL_PREPARATION;
     }
 }

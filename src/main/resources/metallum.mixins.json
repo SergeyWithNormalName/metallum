@@ -22,6 +22,7 @@
     "render.HdrSceneCaptureMixin",
     "render.GameRendererAccessor",
     "render.GameRendererMetalFxMixin",
+    "render.ClientPacketListenerTemporalMixin",
     "render.GuiRendererHdrMixin",
     "render.HdrShaderMixin",
     "render.KeyboardHandlerMixin",

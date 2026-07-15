@@ -994,6 +994,25 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return this.currentSubmitIndex;
     }
 
+    int encodeTemporalDiagnostics(
+            final MetalGpuTexture depth,
+            final TemporalDiagnosticResources.Pair outputs
+    ) {
+        submitRenderPass();
+        endEncoder();
+        int status = commandBuffer().encodeTemporalDiagnostics(
+                depth.nativeHandle(),
+                outputs.motion().nativeHandle(),
+                outputs.reactive().nativeHandle(),
+                this.fence
+        );
+        if (status == 1) {
+            outputs.motion().markContentsDirty();
+            outputs.reactive().markContentsDirty();
+        }
+        return status;
+    }
+
     void setGpuTimingStage(final MetalGpuTimingStage stage) {
         MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
         if (this.gpuTimingStage == next) {

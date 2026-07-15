@@ -11,6 +11,7 @@ import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
+import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.renderer.MetalCapabilities;
@@ -23,8 +24,12 @@ import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.RendererGenerationManifest;
 import com.metallum.client.renderer.RendererGenerationPlanner;
 import com.metallum.client.renderer.temporal.FrameContract;
+import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
-import com.metallum.client.renderer.temporal.FrameStateAbi;
+import com.metallum.client.renderer.temporal.FrameStatePacketRing;
+import com.metallum.client.renderer.temporal.FrameStateTracker;
+import com.metallum.client.renderer.temporal.TemporalResetEvents;
+import com.metallum.client.renderer.temporal.TemporalDiagnostics;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -47,7 +52,6 @@ import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.Arena;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Supplier;
@@ -113,6 +117,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final MetalCapabilities rendererCapabilities;
     private final RendererConfig rendererConfig;
     private final boolean spatialScalingSupported;
+    private final boolean temporalDiagnosticsConfigured;
+    private boolean temporalDiagnosticsActive;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
@@ -159,6 +165,16 @@ public final class MetalDevice implements GpuDeviceBackend {
     private RendererGenerationKey publishedRendererGeneration;
     private long rendererGenerationId;
     private boolean rendererAdmissionLogged;
+    private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
+    private final FrameStateTracker frameStateTracker = new FrameStateTracker();
+    @Nullable
+    private RendererGenerationConfig activeRendererGeneration;
+    private FrameState.ResourceBytes activeRendererResourceBytes = FrameState.ResourceBytes.NONE;
+    private FrameState.@Nullable Extent activeRenderExtent;
+    private FrameState.@Nullable Extent activeDisplayExtent;
+    @Nullable
+    private TemporalDiagnosticResources temporalDiagnosticResources;
+    private boolean temporalDiagnosticFailureLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -216,6 +232,16 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.rendererCapabilities = discoveredCapabilities;
         this.rendererConfig = RendererConfig.load();
+        this.temporalDiagnosticsConfigured = TemporalDiagnostics.configured();
+        this.temporalDiagnosticsActive = this.temporalDiagnosticsConfigured
+                && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
+        if (this.temporalDiagnosticsActive) {
+            TemporalDiagnosticFrameGraph.initialize();
+        } else if (this.temporalDiagnosticsConfigured) {
+            Metallum.LOGGER.warn(
+                    "Temporal diagnostics requested but the MetalFX reactive/format/usage profile is unavailable; diagnostics are disabled"
+            );
+        }
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.spatialScalingSupported = this.rendererCapabilities.supports(
                 MetalCapabilities.Feature.METALFX_SPATIAL
@@ -244,6 +270,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested() ? "enabled" : "disabled"
         );
         Metallum.LOGGER.info("MetalFX spatial scaling support: {}", this.spatialScalingSupported ? "available" : "unavailable");
+        Metallum.LOGGER.info(
+                "Temporal camera-motion diagnostics: {}",
+                this.temporalDiagnosticsActive ? "enabled (camera/static-depth only)" : "disabled"
+        );
         Metallum.LOGGER.info(
                 "Renderer L0 request: lighting={}, preset={}, frameInterpolation={} (production executor Metal 3)",
                 this.rendererConfig.improvedLighting() ? "METALLUM" : "LEGACY",
@@ -401,10 +431,15 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSemanticMask.close();
             this.hdrSemanticMask = null;
         }
+        if (this.temporalDiagnosticResources != null) {
+            this.temporalDiagnosticResources.close();
+            this.temporalDiagnosticResources = null;
+        }
         SodiumLightSidecar.releaseAll();
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
+        this.frameStatePackets.close();
         this.clearPipelineCache();
         try {
             MetalNativeBridge.metallum_NSView_clearLayer(this.cocoaView);
@@ -521,6 +556,16 @@ public final class MetalDevice implements GpuDeviceBackend {
         DisplayOutputMode requestedOutput = this.hdrOutputMode == HdrOutputMode.SDR
                 ? DisplayOutputMode.SDR
                 : DisplayOutputMode.HDR;
+        RendererGenerationKey currentKey = this.publishedRendererGeneration;
+        if (currentKey != null
+                && currentKey.renderWidth() == dimensions.renderWidth()
+                && currentKey.renderHeight() == dimensions.renderHeight()
+                && currentKey.displayWidth() == dimensions.displayWidth()
+                && currentKey.displayHeight() == dimensions.displayHeight()
+                && currentKey.outputMode() == requestedOutput
+                && currentKey.spatialActive() == spatialActive) {
+            return;
+        }
         RendererGenerationKey key = new RendererGenerationKey(
                 dimensions.renderWidth(),
                 dimensions.renderHeight(),
@@ -529,9 +574,6 @@ public final class MetalDevice implements GpuDeviceBackend {
                 requestedOutput,
                 spatialActive
         );
-        if (key.equals(this.publishedRendererGeneration)) {
-            return;
-        }
 
         LightingMode requestedLighting = this.rendererConfig.improvedLighting()
                 ? LightingMode.METALLUM
@@ -548,10 +590,41 @@ public final class MetalDevice implements GpuDeviceBackend {
                 requestedOutput,
                 this.rendererCapabilities,
                 new RendererGenerationPlanner.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
-                new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight())
+                new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
+                this.temporalDiagnosticsActive
         );
         if (!plan.manifest().executable()) {
             throw new IllegalStateException("Non-executable renderer generation passed L0 admission");
+        }
+
+        TemporalDiagnosticResources nextDiagnosticResources = null;
+        if (this.temporalDiagnosticsActive) {
+            try {
+                nextDiagnosticResources = TemporalDiagnosticResources.create(
+                        this, dimensions.renderWidth(), dimensions.renderHeight()
+                );
+            } catch (RuntimeException exception) {
+                this.temporalDiagnosticsActive = false;
+                if (!this.temporalDiagnosticFailureLogged) {
+                    this.temporalDiagnosticFailureLogged = true;
+                    Metallum.LOGGER.warn(
+                            "Temporal diagnostic resource ring creation failed; continuing with the normal renderer path",
+                            exception
+                    );
+                }
+                plan = RendererGenerationPlanner.plan(
+                        requestedLighting,
+                        requestedOutput,
+                        MetalExecutorKind.METAL3,
+                        this.rendererConfig.lightingPreset(),
+                        activeFeatures,
+                        requestedOutput,
+                        this.rendererCapabilities,
+                        new RendererGenerationPlanner.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
+                        new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
+                        false
+                );
+            }
         }
 
         RendererGenerationConfig resolved = plan.resolution().config();
@@ -561,42 +634,24 @@ public final class MetalDevice implements GpuDeviceBackend {
                 manifest.resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.LIGHTING_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY)
+                manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY)
         );
-        FrameState.Transforms transforms = FrameState.Transforms.identity();
         long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
-        FrameState state = new FrameState(
-                FrameContract.temporalPreparationV1(),
-                0L,
-                nextGeneration,
-                0L,
-                nextGeneration,
-                nextGeneration,
-                resolved.lightingMode(),
-                resolved.outputMode(),
-                resolved.lightingPreset(),
-                resolved.featureMask(),
-                resolved.executorKind(),
-                resolved.frameResourceContractVersion(),
-                resourceBytes,
-                FrameState.LightingWork.NONE,
-                transforms,
-                transforms,
-                new FrameState.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
-                new FrameState.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
-                1.0,
-                1.0,
-                FrameState.JitterOffset.ZERO,
-                Set.of()
-        );
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment packet = FrameStateAbi.encode(state, arena);
-            int status = MetalNativeBridge.metallum_set_frame_state_v1(packet);
-            if (status != 1) {
-                throw new IllegalStateException("Native FrameState admission failed with status " + status);
-            }
-        }
         this.rendererGenerationId = nextGeneration;
+        this.activeRendererGeneration = resolved;
+        this.activeRendererResourceBytes = resourceBytes;
+        this.activeRenderExtent = new FrameState.Extent(
+                dimensions.renderWidth(), dimensions.renderHeight()
+        );
+        this.activeDisplayExtent = new FrameState.Extent(
+                dimensions.displayWidth(), dimensions.displayHeight()
+        );
+        TemporalDiagnosticResources previousDiagnostics = this.temporalDiagnosticResources;
+        this.temporalDiagnosticResources = nextDiagnosticResources;
+        if (previousDiagnostics != null) {
+            previousDiagnostics.close();
+        }
         this.publishedRendererGeneration = key;
         if (!this.rendererAdmissionLogged) {
             this.rendererAdmissionLogged = true;
@@ -620,6 +675,101 @@ public final class MetalDevice implements GpuDeviceBackend {
                 Metallum.LOGGER.warn(
                         "Frame Interpolation was requested but remains disabled until its production admission stage"
                 );
+            }
+        }
+    }
+
+    /** Publishes one final world-camera snapshot into its reusable in-flight ABI slot. */
+    public synchronized FrameState publishFrameState(final FrameCapture capture) {
+        Objects.requireNonNull(capture, "capture");
+        RendererGenerationConfig generation = this.activeRendererGeneration;
+        RendererGenerationKey generationKey = this.publishedRendererGeneration;
+        FrameState.Extent renderExtent = this.activeRenderExtent;
+        FrameState.Extent displayExtent = this.activeDisplayExtent;
+        if (generation == null || generationKey == null
+                || renderExtent == null || displayExtent == null) {
+            throw new IllegalStateException("Renderer generation must be admitted before FrameState publication");
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        FrameState candidate = new FrameState(
+                FrameContract.temporalPreparationV1(),
+                0L,
+                this.rendererGenerationId,
+                0L,
+                this.rendererGenerationId,
+                this.rendererGenerationId,
+                generation.lightingMode(),
+                generation.outputMode(),
+                generation.lightingPreset(),
+                generation.featureMask(),
+                generation.executorKind(),
+                generation.frameResourceContractVersion(),
+                this.activeRendererResourceBytes,
+                FrameState.LightingWork.NONE,
+                capture.transforms(),
+                capture.transforms(),
+                renderExtent,
+                displayExtent,
+                1.0,
+                1.0,
+                FrameState.JitterOffset.ZERO,
+                Set.of(),
+                submitIndex,
+                (int) (submitIndex % FrameStatePacketRing.SLOT_COUNT),
+                capture.deltaSeconds(),
+                capture.nearPlane(),
+                capture.farPlane(),
+                capture.cameraPosition(),
+                capture.cameraPosition(),
+                capture.worldIdentity(),
+                capture.dimensionIdentity(),
+                this.hdrCurrentHeadroom,
+                Math.max(
+                        this.hdrCurrentHeadroom,
+                        this.rendererCapabilities.displayCapabilities().potentialHeadroom()
+                )
+        );
+        FrameState published = this.frameStateTracker.prepare(candidate, TemporalResetEvents.consume());
+        MemorySegment packet = this.frameStatePackets.encode(published);
+        int status = MetalNativeBridge.metallum_set_frame_state_v2(packet);
+        if (status != 1) {
+            throw new IllegalStateException("Native FrameState v2 admission failed with status " + status);
+        }
+        this.frameStateTracker.commit(published);
+        return published;
+    }
+
+    /** Encodes the isolated diagnostic between world depth completion and the UI depth clear. */
+    public synchronized void encodeTemporalDiagnostics(final GpuTexture depthTexture) {
+        TemporalDiagnosticResources resources = this.temporalDiagnosticResources;
+        if (!this.temporalDiagnosticsActive || resources == null) {
+            return;
+        }
+        if (!(depthTexture instanceof MetalGpuTexture depth)
+                || depth.getFormat() != GpuFormat.D32_FLOAT) {
+            this.disableTemporalDiagnostics("main depth is not a Metal D32Float texture", null);
+            return;
+        }
+        int slot = (int) (this.commandEncoder.currentSubmitIndex() % FrameStatePacketRing.SLOT_COUNT);
+        int status = this.commandEncoder.encodeTemporalDiagnostics(depth, resources.pair(slot));
+        if (status < 0) {
+            this.disableTemporalDiagnostics("native diagnostic pass failed with status " + status, null);
+        }
+    }
+
+    private void disableTemporalDiagnostics(final String reason, @Nullable final Throwable exception) {
+        this.temporalDiagnosticsActive = false;
+        if (this.temporalDiagnosticResources != null) {
+            this.temporalDiagnosticResources.close();
+            this.temporalDiagnosticResources = null;
+        }
+        this.publishedRendererGeneration = null;
+        if (!this.temporalDiagnosticFailureLogged) {
+            this.temporalDiagnosticFailureLogged = true;
+            if (exception == null) {
+                Metallum.LOGGER.warn("Temporal diagnostics disabled: {}", reason);
+            } else {
+                Metallum.LOGGER.warn("Temporal diagnostics disabled: {}", reason, exception);
             }
         }
     }

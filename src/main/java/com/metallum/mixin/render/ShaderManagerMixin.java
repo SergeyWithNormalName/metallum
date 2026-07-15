@@ -3,6 +3,8 @@ package com.metallum.mixin.render;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
+import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.mojang.blaze3d.shaders.ShaderType;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.renderer.ShaderManager;
@@ -70,6 +72,7 @@ abstract class ShaderManagerMixin {
             final CallbackInfo ci
     ) {
         SceneLinearPreflightGate.commitCandidate();
+        TemporalResetEvents.signal(FrameState.HistoryResetReason.RESOURCE_PACK_SHADER_RELOAD);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
