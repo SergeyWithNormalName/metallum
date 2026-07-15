@@ -1537,6 +1537,43 @@ Diagnostic overlays:
 - Live output generation публикуется только после успешной перенастройки `CAMetalLayer`, поэтому отклонённая native-смена не меняет активный Java generation.
 - Финальная L2-регрессия ограничила material flavor реальным world pass, восстановила fence-цепочку SDR UI seed, откалибровала legacy lightmap для linear multiplication и ограничила Actual bloom доступным headroom. FP16 loading overlay сохраняет белый логотип Mojang. На встроенном дисплее подтверждены нормальная ночь, HDR-пики и отсутствие menu/world артефактов.
 
+### Этап 2.5. Отделить Metallum material renderer от улучшенного освещения
+
+Этот этап обязателен до L3. L2 уже является самостоятельным полезным renderer/material/HDR path и не должен впоследствии выключаться вместе с clustered lighting, shadows, voxel GI или volumetrics.
+
+#### Пользовательский результат
+
+- `Улучшенное освещение = Off` сохраняет Metallum material contract L2, scene-linear SDR и actual-radiance HDR, но использует ванильную lightmap/модель света и не запускает ни одной подсистемы L3+.
+- `Улучшенное освещение = On` запрашивает advanced lighting L3+ поверх того же L2 contract.
+- HDR остаётся независимым `Off/On`: при Metallum material contract используется L2 actual-radiance path, при автоматическом Legacy fallback — legacy reconstruction.
+- Обычному игроку не добавляется отдельная настройка renderer contract: Metallum выбирается автоматически при полном shader-role coverage, а принудительный Legacy разрешён только как скрытый compatibility/developer override.
+
+#### Работы
+
+- Разделить нынешнюю перегруженную ось `LightingMode.LEGACY/METALLUM` минимум на `RenderContractMode.LEGACY/METALLUM` и `LightingModel.VANILLA/ADVANCED` либо эквивалентные типизированные сущности с теми же semantics.
+- Сделать L2 Metallum material renderer автоматическим основным contract при успешном coverage/admission независимо от настройки advanced lighting.
+- Перепривязать пользовательский `improvedLighting` только к `LightingModel.ADVANCED`, то есть только к L3 и последующим lighting subsystems.
+- Зафиксировать допустимые resolved combinations: Legacy+Vanilla+SDR/HDR, Metallum+Vanilla+SDR/HDR и Metallum+Advanced+SDR/HDR. Advanced lighting без Metallum material contract недопустим.
+- Сохранить для Metallum+Vanilla+HDR `METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F` и `ACTUAL_RADIANCE_EXPOSURE_BLOOM`; semantic attachment и inferred reconstruction там запрещены.
+- Разделить frame-graph/resource domains L2 material path и L3+ lighting work. При Vanilla lighting должны отсутствовать light registry, cluster buffers/passes, advanced shadow caches, voxel/GI/froxel resources и их очереди.
+- Сделать fallback независимым: failure advanced-lighting admission возвращает Metallum+Vanilla с тем же SDR/HDR output; только failure L2 material coverage возвращает Legacy+Vanilla, также сохраняя запрос HDR.
+- Добавить schema-versioned migration текущего `improvedLighting`: старое значение означало включение L2 и не должно молча включить будущую дорогую L3-систему. После миграции L2 выбирается автоматически, а запрос Advanced по умолчанию остаётся `Off`, пока L3 не реализован и не прошёл admission.
+- До готовности L3 не показывать advanced lighting как фактически активный: requested `On` обязан fail-closed разрешаться в Vanilla/Unavailable и явно отражаться в diagnostics.
+- Обновить окружающие архитектурные разделы, matrix, telemetry и terminology плана, если после реализации они всё ещё смешивают material renderer и lighting model.
+- Не реализовывать light extraction, clustered forward+, цветные источники, новые тени, voxels, GI или volumetrics в этом этапе.
+
+#### Exit criteria
+
+- С `improvedLighting=Off` активен и полностью работоспособен L2 Metallum material renderer в SDR и HDR; визуальные/numeric результаты L2 не регрессировали.
+- Metallum+Vanilla+HDR сохраняет actual radiance выше `1.0` до histogram/bloom/display mapping и не имеет legacy semantic/reconstruction resources или PSO.
+- Manifest/telemetry доказывают нулевые bytes, passes, encoders, PSO и work queues всех L3+ domains при Vanilla lighting.
+- Artificial failure Advanced admission оставляет Metallum+Vanilla и текущий SDR/HDR output; artificial failure material coverage атомарно даёт Legacy+Vanilla с сохранением HDR-запроса.
+- Config migration детерминирована, покрыта тестами и не включает Advanced lighting пользователям только из-за старого L2 opt-in.
+- Native, Spatial Quality и Spatial Performance работают с Metallum+Vanilla в SDR/HDR; UI остаётся полноразмерным SDR.
+- L2 build, HDR numeric validations, resource/generation matrix, Metal validation и runtime smoke проходят без новых ошибок.
+- На M1 Pro отсутствует необъяснённая CPU/GPU p95 или memory-регрессия относительно завершённого L2 при одинаковых settings.
+- В production frame graph по-прежнему нет ни одной фактической работы L3.
+
 ### Этап 3. Light registry и clustered forward+
 
 #### Работы
