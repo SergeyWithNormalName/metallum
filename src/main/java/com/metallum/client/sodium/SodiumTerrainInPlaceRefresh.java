@@ -10,10 +10,35 @@ import java.util.List;
 /** Fully validated resident allocation refresh prepared before touching staging state. */
 public record SodiumTerrainInPlaceRefresh(
         ChunkBuildOutput output,
-        List<Mesh> meshes
+        List<Mesh> meshes,
+        SodiumTerrainUploadBaseline residentBaseline,
+        ByteBuffer[] geometryByPass,
+        boolean lightOnly
 ) {
     public SodiumTerrainInPlaceRefresh {
         meshes = List.copyOf(meshes);
+        geometryByPass = duplicateGeometry(geometryByPass);
+    }
+
+    @Override
+    public ByteBuffer[] geometryByPass() {
+        return duplicateGeometry(this.geometryByPass);
+    }
+
+    public SodiumTerrainUploadBaseline captureStaticGeometry(
+            final SodiumTerrainUploadBaseline nextBaseline
+    ) {
+        return nextBaseline.withStaticGeometry(this.geometryByPass);
+    }
+
+    private static ByteBuffer[] duplicateGeometry(final ByteBuffer[] geometry) {
+        ByteBuffer[] copy = geometry.clone();
+        for (int index = 0; index < copy.length; index++) {
+            if (copy[index] != null) {
+                copy[index] = copy[index].duplicate();
+            }
+        }
+        return copy;
     }
 
     public record Mesh(

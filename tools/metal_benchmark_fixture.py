@@ -891,14 +891,14 @@ def route_values(path: Path) -> list[str]:
         raise FixtureError(f"cannot read route {path}: {error}") from error
     route = _object(payload, "root")
     schema_version = _integer(route.get("schema_version"), "schema_version", 1)
-    if schema_version not in (1, 2):
+    if schema_version not in (1, 2, 3):
         raise FixtureError("unsupported route schema_version")
     root_keys = {
         "schema_version", "id", "fixture", "player", "dimension",
         "position", "rotation", "camera", "clock", "weather", "simulation",
         "readiness",
     }
-    if schema_version == 2:
+    if schema_version >= 2:
         root_keys.add("torch_epoch")
     _exact_keys(route, "root", root_keys)
     route_id = _string(route.get("id"), "id", SAFE_ID_RE)
@@ -995,14 +995,13 @@ def route_values(path: Path) -> list[str]:
         return values
 
     torch_epoch = _object(route.get("torch_epoch"), "torch_epoch")
-    _exact_keys(
-        torch_epoch,
-        "torch_epoch",
-        {
-            "position", "initial_block", "support_block",
-            "apply_after_measured_frames", "observation_frames",
-        },
-    )
+    torch_epoch_keys = {
+        "position", "initial_block", "support_block",
+        "apply_after_measured_frames", "observation_frames",
+    }
+    if schema_version == 3:
+        torch_epoch_keys.add("remove_after_measured_frames")
+    _exact_keys(torch_epoch, "torch_epoch", torch_epoch_keys)
     torch_position = torch_epoch.get("position")
     if not isinstance(torch_position, list) or len(torch_position) != 3:
         raise FixtureError("route torch_epoch.position must contain exactly three integers")
@@ -1042,8 +1041,8 @@ def route_values(path: Path) -> list[str]:
         raise FixtureError(
             "route torch epoch must use a 300-frame baseline and 300-frame observation window"
         )
-    return values + [
-        "TORCH_EPOCH",
+    workload_values = [
+        "TORCH_EPOCH" if schema_version == 2 else "TORCH_TOGGLE",
         str(torch_x),
         str(torch_y),
         str(torch_z),
@@ -1052,6 +1051,19 @@ def route_values(path: Path) -> list[str]:
         str(apply_after_measured_frames),
         str(observation_frames),
     ]
+    if schema_version == 2:
+        return values + workload_values
+
+    remove_after_measured_frames = _integer(
+        torch_epoch.get("remove_after_measured_frames"),
+        "torch_epoch.remove_after_measured_frames",
+        1,
+    )
+    if remove_after_measured_frames != 450:
+        raise FixtureError(
+            "route torch toggle must remove the torch after exactly 450 measured frames"
+        )
+    return values + workload_values + [str(remove_after_measured_frames)]
 
 
 def self_test() -> None:
@@ -1158,6 +1170,23 @@ def self_test() -> None:
             "minecraft:grass_block", "300", "300",
         ]
 
+        torch_toggle_route_payload = json.loads(json.dumps(torch_route_payload))
+        torch_toggle_route_payload["schema_version"] = 3
+        torch_toggle_route_payload["id"] = "test-torch-toggle-v1"
+        torch_toggle_route_payload["torch_epoch"]["remove_after_measured_frames"] = 450
+        torch_toggle_route = root / "torch-toggle-route.json"
+        torch_toggle_route.write_text(
+            json.dumps(torch_toggle_route_payload),
+            encoding="utf-8",
+        )
+        torch_toggle_values = route_values(torch_toggle_route)
+        assert torch_toggle_values[0] == "test-torch-toggle-v1"
+        assert len(torch_toggle_values) == 28
+        assert torch_toggle_values[19:] == [
+            "TORCH_TOGGLE", "80", "75", "-112", "minecraft:air",
+            "minecraft:grass_block", "300", "300", "450",
+        ]
+
         invalid_route = root / "invalid-route.json"
 
         def expect_route_error(payload: dict[str, object], expected: str) -> None:
@@ -1180,6 +1209,14 @@ def self_test() -> None:
         invalid_torch_route = json.loads(json.dumps(torch_route_payload))
         invalid_torch_route["torch_epoch"]["observation_frames"] = 600
         expect_route_error(invalid_torch_route, "300-frame baseline")
+
+        invalid_torch_route = json.loads(json.dumps(torch_route_payload))
+        invalid_torch_route["torch_epoch"]["remove_after_measured_frames"] = 450
+        expect_route_error(invalid_torch_route, "torch_epoch fields are invalid")
+
+        invalid_torch_toggle_route = json.loads(json.dumps(torch_toggle_route_payload))
+        invalid_torch_toggle_route["torch_epoch"]["remove_after_measured_frames"] = 449
+        expect_route_error(invalid_torch_toggle_route, "exactly 450 measured frames")
 
         options = root / "options.txt"
         options.write_text(

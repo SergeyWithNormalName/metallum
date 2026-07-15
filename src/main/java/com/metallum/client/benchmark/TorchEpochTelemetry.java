@@ -76,9 +76,44 @@ public final class TorchEpochTelemetry {
         GLOBAL.recordInPlaceGeometryRefresh(sectionKey, bytes, meshCommands);
     }
 
+    /**
+     * Records the compact subset of successful in-place terrain refreshes.
+     *
+     * <p>The caller must also record the refresh through
+     * {@link #recordInPlaceGeometryRefresh(long, long, long)} so the existing
+     * in-place counters remain the union of full and compact refreshes.</p>
+     */
+    public static void recordCompactLightPatchOutput(
+            final long sectionKey,
+            final long geometryBytesElided,
+            final long meshCommandsElided
+    ) {
+        GLOBAL.recordCompactLightPatchOutput(
+                sectionKey,
+                geometryBytesElided,
+                meshCommandsElided
+        );
+    }
+
+    public static void recordNativeLightPatch(
+            final long dispatches,
+            final long meshCommands
+    ) {
+        GLOBAL.recordNativeLightPatch(dispatches, meshCommands);
+    }
+
+    public static void recordCompactLightPatchFallback() {
+        GLOBAL.recordCompactLightPatchFallback();
+    }
+
     /** Remains queryable after {@link #end()} until the next epoch is begun. */
     public static boolean wasInPlaceGeometryRefreshed(final long sectionKey) {
         return GLOBAL.wasInPlaceGeometryRefreshed(sectionKey);
+    }
+
+    /** Remains queryable after {@link #end()} until the next epoch is begun. */
+    public static boolean wasCompactLightPatched(final long sectionKey) {
+        return GLOBAL.wasCompactLightPatched(sectionKey);
     }
 
     /** Remains queryable after {@link #end()} until the next epoch is begun. */
@@ -129,6 +164,13 @@ public final class TorchEpochTelemetry {
             long uniqueInPlaceGeometryRefreshSections,
             long inPlaceGeometryRefreshBytes,
             long inPlaceGeometryRefreshMeshCommands,
+            long compactLightPatchOutputs,
+            long uniqueCompactLightPatchSections,
+            long geometryBytesElided,
+            long geometryMeshCommandsElided,
+            long nativeLightPatchDispatches,
+            long nativeLightPatchMeshCommands,
+            long compactLightPatchFallbackCount,
             long sidecarProducedBytes,
             long sidecarUploadedBytes,
             long sidecarUploadCommands,
@@ -152,6 +194,7 @@ public final class TorchEpochTelemetry {
         private final BoundedLongSet taskSections;
         private final BoundedLongSet outputSections;
         private final BoundedLongSet inPlaceSections;
+        private final BoundedLongSet compactLightPatchSections;
 
         private volatile boolean active;
         private long epochId;
@@ -163,6 +206,12 @@ public final class TorchEpochTelemetry {
         private long inPlaceGeometryRefreshOutputs;
         private long inPlaceGeometryRefreshBytes;
         private long inPlaceGeometryRefreshMeshCommands;
+        private long compactLightPatchOutputs;
+        private long geometryBytesElided;
+        private long geometryMeshCommandsElided;
+        private long nativeLightPatchDispatches;
+        private long nativeLightPatchMeshCommands;
+        private long compactLightPatchFallbackCount;
         private long sidecarProducedBytes;
         private long sidecarUploadedBytes;
         private long sidecarUploadCommands;
@@ -184,6 +233,7 @@ public final class TorchEpochTelemetry {
             this.taskSections = new BoundedLongSet(uniqueSectionLimit);
             this.outputSections = new BoundedLongSet(uniqueSectionLimit);
             this.inPlaceSections = new BoundedLongSet(uniqueSectionLimit);
+            this.compactLightPatchSections = new BoundedLongSet(uniqueSectionLimit);
         }
 
         void begin(final long newEpochId) {
@@ -221,6 +271,13 @@ public final class TorchEpochTelemetry {
                     this.inPlaceSections.size(),
                     this.inPlaceGeometryRefreshBytes,
                     this.inPlaceGeometryRefreshMeshCommands,
+                    this.compactLightPatchOutputs,
+                    this.compactLightPatchSections.size(),
+                    this.geometryBytesElided,
+                    this.geometryMeshCommandsElided,
+                    this.nativeLightPatchDispatches,
+                    this.nativeLightPatchMeshCommands,
+                    this.compactLightPatchFallbackCount,
                     this.sidecarProducedBytes,
                     this.sidecarUploadedBytes,
                     this.sidecarUploadCommands,
@@ -318,6 +375,59 @@ public final class TorchEpochTelemetry {
             return this.inPlaceSections.contains(sectionKey);
         }
 
+        void recordCompactLightPatchOutput(
+                final long sectionKey,
+                final long geometryBytes,
+                final long meshCommands
+        ) {
+            if (!this.active) {
+                return;
+            }
+            if (geometryBytes < 0L || meshCommands < 0L) {
+                this.recordError();
+                return;
+            }
+            this.compactLightPatchOutputs = this.add(this.compactLightPatchOutputs, 1L);
+            this.recordUnique(this.compactLightPatchSections, sectionKey);
+            this.geometryBytesElided = this.add(this.geometryBytesElided, geometryBytes);
+            this.geometryMeshCommandsElided = this.add(
+                    this.geometryMeshCommandsElided,
+                    meshCommands
+            );
+        }
+
+        boolean wasCompactLightPatched(final long sectionKey) {
+            return this.compactLightPatchSections.contains(sectionKey);
+        }
+
+        void recordNativeLightPatch(final long dispatches, final long meshCommands) {
+            if (!this.active) {
+                return;
+            }
+            if (dispatches < 0L || meshCommands < 0L) {
+                this.recordError();
+                return;
+            }
+            this.nativeLightPatchDispatches = this.add(
+                    this.nativeLightPatchDispatches,
+                    dispatches
+            );
+            this.nativeLightPatchMeshCommands = this.add(
+                    this.nativeLightPatchMeshCommands,
+                    meshCommands
+            );
+        }
+
+        void recordCompactLightPatchFallback() {
+            if (!this.active) {
+                return;
+            }
+            this.compactLightPatchFallbackCount = this.add(
+                    this.compactLightPatchFallbackCount,
+                    1L
+            );
+        }
+
         boolean wasBuildOutput(final long sectionKey) {
             return this.outputSections.contains(sectionKey);
         }
@@ -395,6 +505,12 @@ public final class TorchEpochTelemetry {
             this.inPlaceGeometryRefreshOutputs = 0L;
             this.inPlaceGeometryRefreshBytes = 0L;
             this.inPlaceGeometryRefreshMeshCommands = 0L;
+            this.compactLightPatchOutputs = 0L;
+            this.geometryBytesElided = 0L;
+            this.geometryMeshCommandsElided = 0L;
+            this.nativeLightPatchDispatches = 0L;
+            this.nativeLightPatchMeshCommands = 0L;
+            this.compactLightPatchFallbackCount = 0L;
             this.sidecarProducedBytes = 0L;
             this.sidecarUploadedBytes = 0L;
             this.sidecarUploadCommands = 0L;
@@ -414,6 +530,7 @@ public final class TorchEpochTelemetry {
             this.taskSections.clear();
             this.outputSections.clear();
             this.inPlaceSections.clear();
+            this.compactLightPatchSections.clear();
         }
 
         boolean isActive() {

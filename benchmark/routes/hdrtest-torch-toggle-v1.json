@@ -1,0 +1,53 @@
+{
+  "schema_version": 3,
+  "id": "hdrtest-torch-toggle-v1",
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:overworld",
+  "position": [
+    86.1241372798128,
+    74.0,
+    -95.57730763953901
+  ],
+  "rotation": {
+    "yaw": 155.39700317,
+    "pitch": 13.20000648
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 181406,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 1200,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  },
+  "torch_epoch": {
+    "position": [
+      80,
+      75,
+      -112
+    ],
+    "initial_block": "minecraft:air",
+    "support_block": "minecraft:grass_block",
+    "apply_after_measured_frames": 300,
+    "observation_frames": 300,
+    "remove_after_measured_frames": 450
+  }
+}

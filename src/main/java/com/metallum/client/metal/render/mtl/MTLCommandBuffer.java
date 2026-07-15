@@ -267,6 +267,19 @@ public final class MTLCommandBuffer {
         MetalNativeBridge.MTLCommandBuffer_popDebugGroup(handle());
     }
 
+    public int encodeSodiumLightLegacyPatchBatch(
+            final MemorySegment packet,
+            final long commandCount,
+            final MemorySegment globalFence
+    ) {
+        return MetalNativeBridge.MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch(
+                handle(),
+                globalFence,
+                packet,
+                commandCount
+        );
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

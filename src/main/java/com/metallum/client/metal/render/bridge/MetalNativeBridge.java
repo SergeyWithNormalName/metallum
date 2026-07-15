@@ -22,7 +22,8 @@ public final class MetalNativeBridge {
     private static final String[] BUILTIN_SHADER_RESOURCE_PATHS = {
             "/natives/macos/shaders/MetallumPresent.metal",
             "/natives/macos/shaders/MetallumHdrEffects.metal",
-            "/natives/macos/shaders/MetallumClear.metal"
+            "/natives/macos/shaders/MetallumClear.metal",
+            "/natives/macos/shaders/MetallumSodiumLightPatch.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
@@ -117,6 +118,18 @@ public final class MetalNativeBridge {
             MTLCommandBufferWaitUntilCompleted = downcallWithoutCritical(lookup, "metallum_MTLCommandBuffer_waitUntilCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
             MTLCommandBufferPushDebugGroup = downcall(lookup, "metallum_MTLCommandBuffer_pushDebugGroup", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLCommandBufferPopDebugGroup = downcall(lookup, "metallum_MTLCommandBuffer_popDebugGroup", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+            MTLCommandBufferEncodeSodiumLightLegacyPatchBatch = downcallWithoutCritical(
+                    lookup,
+                    "metallum_MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG
+                    )
+            );
             MTLCommandBufferMakeBlitCommandEncoder = downcall(lookup, "metallum_MTLCommandBuffer_makeBlitCommandEncoder", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             MTLCommandEncoderEndEncoding = downcall(lookup, "metallum_MTLCommandEncoder_endEncoding", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             MTLBlitCommandEncoderCopyFromBufferToBuffer = downcall(
@@ -462,6 +475,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferWaitUntilCompleted;
     private static final MethodHandle MTLCommandBufferPushDebugGroup;
     private static final MethodHandle MTLCommandBufferPopDebugGroup;
+    private static final MethodHandle MTLCommandBufferEncodeSodiumLightLegacyPatchBatch;
     private static final MethodHandle MTLCommandBufferMakeBlitCommandEncoder;
     private static final MethodHandle MTLCommandEncoderEndEncoding;
     private static final MethodHandle MTLBlitCommandEncoderCopyFromBufferToBuffer;
@@ -782,6 +796,28 @@ public final class MetalNativeBridge {
             MTLCommandBufferPopDebugGroup.invokeExact(segment(commandBuffer));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_popDebugGroup", throwable);
+        }
+    }
+
+    public static int MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch(
+            final MemorySegment commandBuffer,
+            final MemorySegment globalFence,
+            final MemorySegment packet,
+            final long commandCount
+    ) {
+        try {
+            return (int) MTLCommandBufferEncodeSodiumLightLegacyPatchBatch.invokeExact(
+                    segment(commandBuffer),
+                    segment(globalFence),
+                    segment(packet),
+                    packet.byteSize(),
+                    commandCount
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure(
+                    "metallum_MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch_v1",
+                    throwable
+            );
         }
     }
 

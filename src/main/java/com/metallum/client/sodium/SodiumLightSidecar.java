@@ -158,6 +158,7 @@ public final class SodiumLightSidecar {
         runtimeFailed = true;
         fallbackCount++;
         lastFailure = reason;
+        SodiumTerrainStaticShadow.releaseAll();
         Throwable reportedException = exception;
         try {
             TorchEpochTelemetry.recordSidecarFallback();
@@ -204,6 +205,7 @@ public final class SodiumLightSidecar {
         COMPANIONS.clear();
         liveGeometryBytes = 0L;
         liveSidecarBytes = 0L;
+        SodiumTerrainStaticShadow.releaseAll();
     }
 
     public static long expectedSidecarBytes(final long geometryBytes) {

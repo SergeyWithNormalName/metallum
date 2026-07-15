@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumTerrainMeshLayout;
+import com.metallum.client.sodium.SodiumTerrainStaticShadow;
 import com.metallum.client.sodium.SodiumTerrainUploadBaseline;
 
 import java.nio.ByteBuffer;
@@ -47,6 +48,9 @@ public final class SodiumLightSidecarTests {
         testPackingRejectsInvalidInputs();
         testTerrainMeshLayoutUsesOnlyUploadMetadata();
         testTerrainUploadBaselineMatchesOnlyUploadLayout();
+        testTerrainStaticShadowIgnoresOnlyLightBytes();
+        testTerrainStaticShadowCacheIsBoundedAndLru();
+        testTerrainUploadBaselineRequiresExactStaticGeometry();
         testMslPatchAndIdempotence();
         testMslPatchPreservesExistingResourceArguments();
         testMslPatchRejectsUnsafeAnchors();
@@ -232,6 +236,96 @@ public final class SodiumLightSidecarTests {
         );
     }
 
+    private static void testTerrainStaticShadowIgnoresOnlyLightBytes() {
+        SodiumTerrainStaticShadow.Cache cache = new SodiumTerrainStaticShadow.Cache(36L);
+        ByteBuffer resident = patternedGeometry(2, 5);
+        byte[] original = resident.array().clone();
+        SodiumTerrainStaticShadow shadow = cache.capture(resident);
+        require(Arrays.equals(resident.array(), original), "static shadow capture changed source geometry");
+
+        ByteBuffer lightChanged = resident.duplicate();
+        lightChanged.put(16, (byte) 91);
+        lightChanged.put(17, (byte) 92);
+        lightChanged.put(36, (byte) 93);
+        lightChanged.put(37, (byte) 94);
+        require(shadow.matches(lightChanged), "exact static shadow treated light bytes as geometry");
+
+        ByteBuffer prefixChanged = lightChanged.duplicate();
+        prefixChanged.put(15, (byte) (prefixChanged.get(15) + 1));
+        require(!shadow.matches(prefixChanged), "exact static shadow ignored a pre-light geometry byte");
+
+        ByteBuffer suffixChanged = lightChanged.duplicate();
+        suffixChanged.put(18, (byte) (suffixChanged.get(18) + 1));
+        require(!shadow.matches(suffixChanged), "exact static shadow ignored a post-light geometry byte");
+        require(shadow.isResident(), "ordinary static shadow was not retained");
+        shadow.close();
+        require(cache.snapshot().liveBytes() == 0L, "closed static shadow retained cache bytes");
+    }
+
+    private static void testTerrainStaticShadowCacheIsBoundedAndLru() {
+        SodiumTerrainStaticShadow.Cache cache = new SodiumTerrainStaticShadow.Cache(36L);
+        SodiumTerrainStaticShadow first = cache.capture(patternedGeometry(1, 1));
+        SodiumTerrainStaticShadow second = cache.capture(patternedGeometry(1, 2));
+        require(first.matches(patternedGeometry(1, 1)), "LRU touch rejected identical static geometry");
+        SodiumTerrainStaticShadow third = cache.capture(patternedGeometry(1, 3));
+
+        require(first.isResident(), "recently touched static shadow was evicted");
+        require(!second.isResident(), "least-recently-used static shadow survived eviction");
+        require(third.isResident(), "new static shadow was not retained");
+        require(cache.snapshot().liveBytes() == 36L, "bounded static shadow cache exceeded capacity");
+        require(cache.snapshot().evictionCount() == 1L, "static shadow eviction was not counted");
+
+        SodiumTerrainStaticShadow rejected = new SodiumTerrainStaticShadow.Cache(17L)
+                .capture(patternedGeometry(1, 4));
+        require(!rejected.isResident(), "oversized static shadow entered a bounded cache");
+        first.close();
+        second.close();
+        third.close();
+        rejected.close();
+    }
+
+    private static void testTerrainUploadBaselineRequiresExactStaticGeometry() {
+        int geometryBytes = SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE * 2;
+        SodiumTerrainMeshLayout layout = SodiumTerrainMeshLayout.capture(geometryBytes, new int[]{2});
+        SodiumTerrainUploadBaseline metadata = new SodiumTerrainUploadBaseline(
+                3,
+                new long[]{7L},
+                new SodiumTerrainMeshLayout[]{layout, null}
+        );
+        ByteBuffer resident = patternedGeometry(2, 9);
+        SodiumTerrainUploadBaseline exact = metadata.withStaticGeometry(new ByteBuffer[]{resident, null});
+        require(exact.hasResidentStaticGeometry(), "captured baseline did not retain exact static geometry");
+
+        ByteBuffer relit = resident.duplicate();
+        relit.put(16, (byte) 31);
+        relit.put(17, (byte) 47);
+        relit.put(36, (byte) 63);
+        relit.put(37, (byte) 79);
+        require(
+                exact.matchesStaticGeometry(new ByteBuffer[]{relit, null}),
+                "second light-only transition did not match resident static geometry"
+        );
+        ByteBuffer relitAgain = relit.duplicate();
+        relitAgain.put(16, (byte) 95);
+        require(
+                exact.matchesStaticGeometry(new ByteBuffer[]{relitAgain, null}),
+                "repeated light-only transition lost exact admission"
+        );
+
+        ByteBuffer materialChanged = relitAgain.duplicate();
+        materialChanged.put(19, (byte) (materialChanged.get(19) ^ 0x40));
+        require(
+                !exact.matchesStaticGeometry(new ByteBuffer[]{materialChanged, null}),
+                "static material change was admitted as light-only"
+        );
+        require(
+                !metadata.matchesStaticGeometry(new ByteBuffer[]{resident, null}),
+                "metadata-only baseline admitted compact light upload"
+        );
+        exact.close();
+        metadata.close();
+    }
+
     private static void testMslPatchAndIdempotence() {
         SodiumLightSidecarMslPatcher.Result result = SodiumLightSidecarMslPatcher.patch(
                 SYNTHETIC_SODIUM_MSL,
@@ -333,6 +427,16 @@ public final class SodiumLightSidecarTests {
         ByteBuffer geometry = ByteBuffer.allocate(SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE);
         geometry.put(16, (byte) 8);
         geometry.put(17, (byte) 8);
+        return geometry;
+    }
+
+    private static ByteBuffer patternedGeometry(final int vertices, final int seed) {
+        ByteBuffer geometry = ByteBuffer.allocate(
+                Math.multiplyExact(vertices, SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE)
+        );
+        for (int offset = 0; offset < geometry.capacity(); offset++) {
+            geometry.put(offset, (byte) (seed * 17 + offset * 13));
+        }
         return geometry;
     }
 

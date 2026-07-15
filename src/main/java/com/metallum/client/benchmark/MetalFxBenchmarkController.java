@@ -6,6 +6,8 @@ import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
+import com.metallum.client.sodium.SodiumTerrainLightPatch;
+import com.metallum.client.sodium.SodiumTerrainStaticShadow;
 import com.mojang.blaze3d.platform.Monitor;
 import com.mojang.blaze3d.platform.VideoMode;
 import com.mojang.blaze3d.platform.Window;
@@ -88,14 +90,15 @@ public final class MetalFxBenchmarkController {
 
     private enum WorkloadKind {
         STATIC,
-        TORCH_EPOCH;
+        TORCH_EPOCH,
+        TORCH_TOGGLE;
 
         private static WorkloadKind fromEnvironment() {
             try {
                 return valueOf(requiredEnv("METALLUM_BENCHMARK_ROUTE_KIND"));
             } catch (IllegalArgumentException exception) {
                 throw new IllegalArgumentException(
-                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC or TORCH_EPOCH",
+                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, or TORCH_TOGGLE",
                         exception
                 );
             }
@@ -107,9 +110,10 @@ public final class MetalFxBenchmarkController {
             int y,
             int z,
             int applyAfterMeasuredFrames,
-            int observationFrames
+            int observationFrames,
+            int removeAfterMeasuredFrames
     ) {
-        private static TorchEpochConfig fromEnvironment() {
+        private static TorchEpochConfig fromEnvironment(final WorkloadKind workloadKind) {
             String initialBlock = requiredEnv("METALLUM_BENCHMARK_TORCH_INITIAL_BLOCK");
             String supportBlock = requiredEnv("METALLUM_BENCHMARK_TORCH_SUPPORT_BLOCK");
             if (!"minecraft:air".equals(initialBlock)) {
@@ -127,7 +131,10 @@ public final class MetalFxBenchmarkController {
                     integer("METALLUM_BENCHMARK_TORCH_POSITION_Y"),
                     integer("METALLUM_BENCHMARK_TORCH_POSITION_Z"),
                     positiveIntStrict("METALLUM_BENCHMARK_TORCH_APPLY_AFTER_MEASURED_FRAMES"),
-                    positiveIntStrict("METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES")
+                    positiveIntStrict("METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES"),
+                    workloadKind == WorkloadKind.TORCH_TOGGLE
+                            ? positiveIntStrict("METALLUM_BENCHMARK_TORCH_REMOVE_AFTER_MEASURED_FRAMES")
+                            : 0
             );
         }
 
@@ -137,6 +144,10 @@ public final class MetalFxBenchmarkController {
 
         private long endMeasuredFrame() {
             return (long) this.applyAfterMeasuredFrames + this.observationFrames;
+        }
+
+        private boolean removesTorch() {
+            return this.removeAfterMeasuredFrames > 0;
         }
     }
 
@@ -203,9 +214,9 @@ public final class MetalFxBenchmarkController {
             double positionEpsilon = positiveFiniteDouble("METALLUM_BENCHMARK_POSITION_EPSILON");
             float angleEpsilon = positiveFiniteFloat("METALLUM_BENCHMARK_ANGLE_EPSILON");
             WorkloadKind workloadKind = WorkloadKind.fromEnvironment();
-            TorchEpochConfig torchEpoch = workloadKind == WorkloadKind.TORCH_EPOCH
-                    ? TorchEpochConfig.fromEnvironment()
-                    : null;
+            TorchEpochConfig torchEpoch = workloadKind == WorkloadKind.STATIC
+                    ? null
+                    : TorchEpochConfig.fromEnvironment(workloadKind);
             return new RouteConfig(
                     routeId,
                     routeSha256,
@@ -287,12 +298,16 @@ public final class MetalFxBenchmarkController {
     private final AtomicBoolean torchEpochServerTaskPending = new AtomicBoolean();
     private boolean torchEpochRequested;
     private boolean torchEpochAppliedLogged;
+    private boolean torchEpochRemovalRequested;
+    private boolean torchEpochRemovedLogged;
     private boolean torchEpochFinished;
     private long torchEpochToken;
+    private long torchEpochRemovalToken;
     private long nextTorchEpochToken;
     private volatile long completedTorchEpochToken;
     private volatile String torchEpochFailure;
     private int torchEpochAppliedMeasuredFrame = -1;
+    private int torchEpochRemovedMeasuredFrame = -1;
     private final AtomicBoolean survivalGuardTaskPending = new AtomicBoolean();
     private UUID guardedPlayerId;
     private volatile boolean survivalGuardApplied;
@@ -389,6 +404,16 @@ public final class MetalFxBenchmarkController {
             } else if (Math.floorMod(torchEpoch.x(), 16) != 0
                     || Math.floorMod(torchEpoch.z(), 16) != 0) {
                 error = "TORCH_EPOCH must run on an x/z section boundary";
+            } else if (torchEpoch.applyAfterMeasuredFrames() != 300
+                    || torchEpoch.observationFrames() != 300) {
+                error = "TORCH_EPOCH requires a 300-frame baseline and observation window";
+            } else if (torchEpoch.removesTorch()
+                    && torchEpoch.removeAfterMeasuredFrames() != 450) {
+                error = "TORCH_TOGGLE must remove the torch after exactly 450 measured frames";
+            } else if (torchEpoch.removesTorch()
+                    && (torchEpoch.removeAfterMeasuredFrames() <= torchEpoch.applyAfterMeasuredFrames()
+                    || torchEpoch.removeAfterMeasuredFrames() >= torchEpoch.endMeasuredFrame())) {
+                error = "TORCH_TOGGLE removal must lie strictly inside the observation window";
             } else if (torchEpoch.endMeasuredFrame() >= this.measureFrames) {
                 error = "TORCH_EPOCH must end before the measurement segment ends";
             }
@@ -531,6 +556,17 @@ public final class MetalFxBenchmarkController {
         if (this.stage != Stage.RUNNING) {
             return;
         }
+        if (config.removesTorch()
+                && !this.torchEpochRemovalRequested
+                && this.measuredFrames == config.removeAfterMeasuredFrames()) {
+            beginTorchEpochRemoval(minecraft, config);
+        }
+        if (this.torchEpochRemovalRequested && !this.torchEpochRemovedLogged) {
+            pollTorchEpochRemoval(minecraft, config);
+        }
+        if (this.stage != Stage.RUNNING) {
+            return;
+        }
         if (this.measuredFrames == config.endMeasuredFrame()) {
             finishTorchEpoch(minecraft, config);
         }
@@ -649,19 +685,148 @@ public final class MetalFxBenchmarkController {
         );
     }
 
+    private void beginTorchEpochRemoval(
+            final Minecraft minecraft,
+            final TorchEpochConfig config
+    ) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null) {
+            fail(minecraft, "TORCH_TOGGLE requires an integrated singleplayer server");
+            return;
+        }
+        if (!this.torchEpochAppliedLogged
+                || this.torchEpochServerTaskPending.get()
+                || this.routeServerTaskPending.get()
+                || this.survivalGuardTaskPending.get()
+                || this.completedTorchEpochToken < this.torchEpochToken) {
+            fail(minecraft, "TORCH_TOGGLE placement server task was not idle before removal");
+            return;
+        }
+        if (!minecraft.level.getBlockState(config.position()).is(Blocks.TORCH)) {
+            fail(minecraft, "TORCH_TOGGLE client did not receive the torch before removal");
+            return;
+        }
+        if (!minecraft.levelRenderer.hasRenderedAllSections()) {
+            fail(minecraft, "TORCH_TOGGLE first terrain refresh did not drain before removal");
+            return;
+        }
+        if (!this.torchEpochServerTaskPending.compareAndSet(false, true)) {
+            fail(minecraft, "TORCH_TOGGLE removal server task was already pending");
+            return;
+        }
+
+        this.torchEpochRemovalRequested = true;
+        this.torchEpochRemovalToken = ++this.nextTorchEpochToken;
+        try {
+            long token = this.torchEpochRemovalToken;
+            server.executeIfPossible(() -> {
+                try {
+                    this.torchEpochFailure = removeTorchEpoch(server, config);
+                } catch (RuntimeException exception) {
+                    this.torchEpochFailure = "TORCH_TOGGLE removal server task failed: "
+                            + exception.getClass().getSimpleName();
+                    Metallum.LOGGER.error(
+                            "METALLUM_BENCHMARK TORCH_TOGGLE removal server task failed",
+                            exception
+                    );
+                } finally {
+                    this.completedTorchEpochToken = token;
+                    this.torchEpochServerTaskPending.set(false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.torchEpochServerTaskPending.set(false);
+            this.torchEpochFailure = "could not submit TORCH_TOGGLE removal server task: "
+                    + exception.getClass().getSimpleName();
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK TORCH_TOGGLE removal task submission failed",
+                    exception
+            );
+        }
+    }
+
+    private String removeTorchEpoch(
+            final IntegratedServer server,
+            final TorchEpochConfig config
+    ) {
+        ServerLevel level = server.getLevel(this.route.dimension());
+        if (level == null) {
+            return "TORCH_TOGGLE benchmark dimension is unavailable";
+        }
+        BlockPos position = config.position();
+        level.getChunkSource().getChunk(
+                SectionPos.blockToSectionCoord(position.getX()),
+                SectionPos.blockToSectionCoord(position.getZ()),
+                ChunkStatus.FULL,
+                true
+        );
+        if (!level.getBlockState(position).is(Blocks.TORCH)) {
+            return "TORCH_TOGGLE server block was not torch before removal";
+        }
+        if (!level.getBlockState(position.below()).is(Blocks.GRASS_BLOCK)) {
+            return "TORCH_TOGGLE support block is not grass_block before removal";
+        }
+        if (!level.setBlock(position, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL)) {
+            return "TORCH_TOGGLE server rejected the torch removal";
+        }
+        if (!level.getBlockState(position).is(Blocks.AIR)) {
+            return "TORCH_TOGGLE server state did not return to air";
+        }
+        return null;
+    }
+
+    private void pollTorchEpochRemoval(
+            final Minecraft minecraft,
+            final TorchEpochConfig config
+    ) {
+        if (this.torchEpochFailure != null) {
+            fail(minecraft, this.torchEpochFailure);
+            return;
+        }
+        if (this.torchEpochServerTaskPending.get()
+                || this.completedTorchEpochToken < this.torchEpochRemovalToken) {
+            return;
+        }
+        this.torchEpochRemovedLogged = true;
+        this.torchEpochRemovedMeasuredFrame = this.measuredFrames;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_REMOVED route={} position={},{},{} measured_frame={} requested_frame={}",
+                this.route.routeId(),
+                config.x(),
+                config.y(),
+                config.z(),
+                this.torchEpochRemovedMeasuredFrame,
+                config.removeAfterMeasuredFrames()
+        );
+    }
+
     private void finishTorchEpoch(
             final Minecraft minecraft,
             final TorchEpochConfig config
     ) {
-        if (this.torchEpochServerTaskPending.get()
-                || this.completedTorchEpochToken < this.torchEpochToken
-                || !this.torchEpochAppliedLogged) {
-            fail(minecraft, "TORCH_EPOCH placement did not complete inside its observation window");
-            return;
-        }
-        if (!minecraft.level.getBlockState(config.position()).is(Blocks.TORCH)) {
-            fail(minecraft, "TORCH_EPOCH client did not receive the torch state");
-            return;
+        if (config.removesTorch()) {
+            if (this.torchEpochServerTaskPending.get()
+                    || !this.torchEpochRemovalRequested
+                    || this.completedTorchEpochToken < this.torchEpochRemovalToken
+                    || !this.torchEpochRemovedLogged) {
+                fail(minecraft, "TORCH_TOGGLE removal did not complete inside its observation window");
+                return;
+            }
+            if (!minecraft.level.getBlockState(config.position()).is(Blocks.AIR)) {
+                fail(minecraft, "TORCH_TOGGLE client final block did not return to air");
+                return;
+            }
+        } else {
+            if (this.torchEpochServerTaskPending.get()
+                    || this.completedTorchEpochToken < this.torchEpochToken
+                    || !this.torchEpochAppliedLogged) {
+                fail(minecraft, "TORCH_EPOCH placement did not complete inside its observation window");
+                return;
+            }
+            if (!minecraft.level.getBlockState(config.position()).is(Blocks.TORCH)) {
+                fail(minecraft, "TORCH_EPOCH client did not receive the torch state");
+                return;
+            }
         }
         if (!minecraft.levelRenderer.hasRenderedAllSections()) {
             fail(minecraft, "TORCH_EPOCH terrain rebuild queue did not drain");
@@ -676,7 +841,12 @@ public final class MetalFxBenchmarkController {
         );
         boolean targetSectionProducedOutput = TorchEpochTelemetry.wasBuildOutput(targetSectionKey);
         boolean targetSectionRefreshedInPlace = TorchEpochTelemetry.wasInPlaceGeometryRefreshed(targetSectionKey);
+        boolean targetSectionCompactLightPatched = TorchEpochTelemetry.wasCompactLightPatched(targetSectionKey);
         SodiumLightSidecar.Snapshot sidecar = SodiumLightSidecar.snapshot();
+        SodiumTerrainLightPatch.Snapshot lightPatch = SodiumTerrainLightPatch.snapshot();
+        SodiumTerrainStaticShadow.Snapshot shadow = lightPatch.shadow();
+        long submittedGeometryBytes = snapshot.acceptedGeometryPayloadBytes()
+                - snapshot.geometryBytesElided();
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch={} requests={}/{} tasks={}/{} outputs={}/{} accepted_mesh_payload_bytes={} queue={}/{} busy={}/{} pending_results={}/{} max_pending_age_ns={} errors={} overflow={}",
                 snapshot.epochId(),
@@ -707,7 +877,7 @@ public final class MetalFxBenchmarkController {
                 snapshot.uniqueInPlaceGeometryRefreshSections(),
                 snapshot.inPlaceGeometryRefreshBytes(),
                 snapshot.inPlaceGeometryRefreshMeshCommands(),
-                snapshot.acceptedGeometryPayloadBytes() - snapshot.inPlaceGeometryRefreshBytes(),
+                submittedGeometryBytes,
                 targetSectionProducedOutput,
                 targetSectionRefreshedInPlace,
                 snapshot.sidecarProducedBytes(),
@@ -722,6 +892,28 @@ public final class MetalFxBenchmarkController {
                 sidecar.peakSidecarBytes(),
                 sidecar.patchedPipelineCount(),
                 sidecar.fallbackCount()
+        );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_LIGHT_PATCH epoch={} configured={} active={} compact_outputs={} unique_compact_sections={} geometry_bytes_elided={} geometry_mesh_commands_elided={} submitted_geometry_bytes={} native_dispatches={} native_mesh_commands={} local_fallbacks={} runtime_fallbacks={} target_section_compact={} shadow_capacity_bytes={} shadow_live_bytes={} shadow_peak_bytes={} resident_shadows={} shadow_evictions={} shadow_rejected_captures={}",
+                snapshot.epochId(),
+                lightPatch.configured(),
+                lightPatch.runtimeActive(),
+                snapshot.compactLightPatchOutputs(),
+                snapshot.uniqueCompactLightPatchSections(),
+                snapshot.geometryBytesElided(),
+                snapshot.geometryMeshCommandsElided(),
+                submittedGeometryBytes,
+                snapshot.nativeLightPatchDispatches(),
+                snapshot.nativeLightPatchMeshCommands(),
+                snapshot.compactLightPatchFallbackCount(),
+                lightPatch.fallbackCount(),
+                targetSectionCompactLightPatched,
+                shadow.capacityBytes(),
+                shadow.liveBytes(),
+                shadow.peakBytes(),
+                shadow.residentShadows(),
+                shadow.evictionCount(),
+                shadow.rejectedCaptureCount()
         );
         if (snapshot.epochId() != this.torchEpochToken) {
             fail(minecraft, "TORCH_EPOCH telemetry epoch identity changed");
@@ -766,7 +958,7 @@ public final class MetalFxBenchmarkController {
             long inPlaceOutputs = snapshot.inPlaceGeometryRefreshOutputs();
             long uniqueInPlaceSections = snapshot.uniqueInPlaceGeometryRefreshSections();
             long inPlaceMeshCommands = snapshot.inPlaceGeometryRefreshMeshCommands();
-            long fullUploadGeometryBytes = acceptedGeometryBytes - inPlaceGeometryBytes;
+            long fullUploadGeometryBytes = acceptedGeometryBytes - snapshot.geometryBytesElided();
             if (!targetSectionProducedOutput) {
                 fail(minecraft, "TORCH_EPOCH did not observe an output for the torch-containing section");
                 return;
@@ -809,6 +1001,67 @@ public final class MetalFxBenchmarkController {
             }
         }
 
+        if (lightPatch.configured()) {
+            if (!lightPatch.runtimeActive()
+                    || lightPatch.fallbackCount() != 0L
+                    || snapshot.compactLightPatchFallbackCount() != 0L) {
+                fail(minecraft, "TORCH_EPOCH compact Sodium light patch entered a fallback path");
+                return;
+            }
+            if (!targetSectionProducedOutput) {
+                fail(minecraft, "TORCH_EPOCH compact light patch did not observe the torch-containing section");
+                return;
+            }
+            if (targetSectionCompactLightPatched) {
+                fail(minecraft, "TORCH_EPOCH compact light patch reused the geometry-changing target section");
+                return;
+            }
+
+            long acceptedGeometryBytes = snapshot.acceptedGeometryPayloadBytes();
+            long inPlaceOutputs = snapshot.inPlaceGeometryRefreshOutputs();
+            long uniqueInPlaceSections = snapshot.uniqueInPlaceGeometryRefreshSections();
+            long inPlaceGeometryBytes = snapshot.inPlaceGeometryRefreshBytes();
+            long inPlaceMeshCommands = snapshot.inPlaceGeometryRefreshMeshCommands();
+            long compactOutputs = snapshot.compactLightPatchOutputs();
+            long uniqueCompactSections = snapshot.uniqueCompactLightPatchSections();
+            long geometryBytesElided = snapshot.geometryBytesElided();
+            long geometryMeshCommandsElided = snapshot.geometryMeshCommandsElided();
+            long nativeDispatches = snapshot.nativeLightPatchDispatches();
+            long nativeMeshCommands = snapshot.nativeLightPatchMeshCommands();
+            long fullSubmittedGeometryBytes = acceptedGeometryBytes - geometryBytesElided;
+            if (compactOutputs <= 0L
+                    || compactOutputs > inPlaceOutputs
+                    || uniqueCompactSections <= 0L
+                    || uniqueCompactSections > compactOutputs
+                    || uniqueCompactSections > uniqueInPlaceSections
+                    || geometryBytesElided <= 0L
+                    || geometryBytesElided > inPlaceGeometryBytes
+                    || geometryBytesElided % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L
+                    || geometryMeshCommandsElided < compactOutputs
+                    || geometryMeshCommandsElided > inPlaceMeshCommands
+                    || nativeDispatches <= 0L
+                    || nativeDispatches > nativeMeshCommands
+                    || nativeMeshCommands != geometryMeshCommandsElided
+                    || fullSubmittedGeometryBytes <= 0L
+                    || fullSubmittedGeometryBytes
+                    % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L) {
+                fail(minecraft, "TORCH_EPOCH compact light-patch accounting was not an exact in-place subset");
+                return;
+            }
+
+            long expectedUploadedSidecarBytes = acceptedGeometryBytes
+                    / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+                    * SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE;
+            if (acceptedGeometryBytes <= 0L
+                    || acceptedGeometryBytes
+                    % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L
+                    || snapshot.sidecarProducedBytes() != expectedUploadedSidecarBytes
+                    || snapshot.sidecarUploadedBytes() != expectedUploadedSidecarBytes) {
+                fail(minecraft, "TORCH_EPOCH compact light patch did not preserve exact sidecar coverage");
+                return;
+            }
+        }
+
         this.torchEpochFinished = true;
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_END route={} position={},{},{} measured_frame={} rebuild_requests={} unique_requested_sections={} meshing_tasks={} unique_meshed_sections={} mesh_outputs={} unique_uploaded_sections={} accepted_mesh_payload_bytes={} in_place_outputs={} unique_in_place_sections={} in_place_geometry_bytes={} full_upload_geometry_bytes={} target_section_output={} target_section_in_place={} max_builder_queue_depth={} final_builder_queue_depth={} max_busy_workers={} final_busy_workers={} max_pending_results={} final_pending_results={} max_pending_age_ns={} telemetry_errors={} telemetry_overflow={}",
@@ -827,7 +1080,7 @@ public final class MetalFxBenchmarkController {
                 snapshot.inPlaceGeometryRefreshOutputs(),
                 snapshot.uniqueInPlaceGeometryRefreshSections(),
                 snapshot.inPlaceGeometryRefreshBytes(),
-                snapshot.acceptedGeometryPayloadBytes() - snapshot.inPlaceGeometryRefreshBytes(),
+                submittedGeometryBytes,
                 targetSectionProducedOutput,
                 targetSectionRefreshedInPlace,
                 snapshot.maximumBuilderQueueDepth(),
@@ -1418,6 +1671,11 @@ public final class MetalFxBenchmarkController {
         if (!level.getBlockState(position.below()).is(Blocks.GRASS_BLOCK)) {
             return "TORCH_EPOCH server support block differs from grass_block";
         }
+        if (config.removesTorch() && this.torchEpochRemovedLogged) {
+            return level.getBlockState(position).is(Blocks.AIR)
+                    ? null
+                    : "TORCH_TOGGLE server final block differs from air";
+        }
         if (this.torchEpochAppliedLogged) {
             return level.getBlockState(position).is(Blocks.TORCH)
                     ? null
@@ -1436,6 +1694,11 @@ public final class MetalFxBenchmarkController {
         BlockPos position = config.position();
         if (!minecraft.level.getBlockState(position.below()).is(Blocks.GRASS_BLOCK)) {
             return "TORCH_EPOCH client support block differs from grass_block";
+        }
+        if (config.removesTorch() && this.torchEpochRemovedLogged) {
+            return minecraft.level.getBlockState(position).is(Blocks.AIR)
+                    ? null
+                    : "TORCH_TOGGLE client final block differs from air";
         }
         if (this.torchEpochAppliedLogged) {
             return minecraft.level.getBlockState(position).is(Blocks.TORCH)
@@ -1563,11 +1826,15 @@ public final class MetalFxBenchmarkController {
         this.torchEpochServerTaskPending.set(false);
         this.torchEpochRequested = false;
         this.torchEpochAppliedLogged = false;
+        this.torchEpochRemovalRequested = false;
+        this.torchEpochRemovedLogged = false;
         this.torchEpochFinished = false;
         this.torchEpochToken = 0L;
+        this.torchEpochRemovalToken = 0L;
         this.completedTorchEpochToken = 0L;
         this.torchEpochFailure = null;
         this.torchEpochAppliedMeasuredFrame = -1;
+        this.torchEpochRemovedMeasuredFrame = -1;
         MetalFxSpatialScaling.setBenchmarkOverride(mode);
         MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode);
         this.segmentFrame = 0;

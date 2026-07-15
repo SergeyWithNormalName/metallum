@@ -1,6 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.benchmark.TorchEpochTelemetry;
+import com.metallum.client.metal.render.SodiumLightLegacyPatchBatch;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarArena;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
@@ -87,6 +88,39 @@ abstract class GlBufferArenaLightSidecarMixin implements SodiumLightSidecarArena
             final long allocationVertexOffset,
             final long allocationVertexCount
     ) {
+        this.metallum$enqueueTerrainLightPayload(
+                geometry,
+                allocationVertexOffset,
+                allocationVertexCount,
+                true
+        );
+        return Math.multiplyExact(
+                allocationVertexCount,
+                SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+        );
+    }
+
+    @Override
+    public SodiumLightLegacyPatchBatch.Patch metallum$enqueueInPlaceTerrainLightRefresh(
+            final ByteBuffer geometry,
+            final long allocationVertexOffset,
+            final long allocationVertexCount
+    ) {
+        return this.metallum$enqueueTerrainLightPayload(
+                geometry,
+                allocationVertexOffset,
+                allocationVertexCount,
+                false
+        );
+    }
+
+    @Unique
+    private SodiumLightLegacyPatchBatch.Patch metallum$enqueueTerrainLightPayload(
+            final ByteBuffer geometry,
+            final long allocationVertexOffset,
+            final long allocationVertexCount,
+            final boolean uploadFullGeometry
+    ) {
         GpuBuffer sidecar = this.metallum$lightSidecar;
         if (sidecar == null || !SodiumLightSidecar.isRuntimeActive()) {
             throw new IllegalStateException("Sodium light sidecar is not available for an in-place refresh");
@@ -138,12 +172,19 @@ abstract class GlBufferArenaLightSidecarMixin implements SodiumLightSidecarArena
                 throw new IllegalStateException("in-place terrain light vertex count changed while packing");
             }
             packed.flip();
-            this.stagingBuffer.enqueueCopy(geometry.duplicate(), this.arenaBuffer, geometryOffset);
+            if (uploadFullGeometry) {
+                this.stagingBuffer.enqueueCopy(source, this.arenaBuffer, geometryOffset);
+            }
             this.stagingBuffer.enqueueCopy(packed, sidecar, sidecarOffset);
         } finally {
             MemoryUtil.memFree(packed);
         }
-        return sidecarBytes;
+        return new SodiumLightLegacyPatchBatch.Patch(
+                this.arenaBuffer,
+                sidecar,
+                allocationVertexOffset,
+                allocationVertexCount
+        );
     }
 
     @Inject(method = "tryUpload", at = @At("RETURN"))

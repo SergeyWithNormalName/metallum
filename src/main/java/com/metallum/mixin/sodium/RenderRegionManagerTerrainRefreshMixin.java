@@ -1,12 +1,14 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.benchmark.TorchEpochTelemetry;
+import com.metallum.client.metal.render.SodiumLightLegacyPatchBatch;
 import com.metallum.client.sodium.SodiumBufferSegmentAccess;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarArena;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumSectionRenderDataAccess;
 import com.metallum.client.sodium.SodiumTerrainInPlaceRefresh;
+import com.metallum.client.sodium.SodiumTerrainLightPatch;
 import com.metallum.client.sodium.SodiumTerrainMeshLayout;
 import com.metallum.client.sodium.SodiumTerrainUploadBaseline;
 import com.metallum.client.sodium.SodiumTerrainUploadBaselineAccess;
@@ -53,6 +55,10 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
     @Nullable
     private IdentityHashMap<ChunkBuildOutput, SodiumTerrainUploadBaseline> metallum$pendingBaselines;
 
+    @Unique
+    @Nullable
+    private IdentityHashMap<ChunkBuildOutput, SodiumTerrainInPlaceRefresh> metallum$successfulRefreshes;
+
     @Inject(
             method = "uploadResults(Ljava/util/Collection;Lnet/caffeinemc/mods/sodium/client/render/chunk/UniformBufferManager;)V",
             at = @At("HEAD")
@@ -63,6 +69,7 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
             final CallbackInfo ci
     ) {
         this.metallum$pendingBaselines = null;
+        this.metallum$successfulRefreshes = null;
     }
 
     @Inject(method = "createMeshUploadQueues", at = @At("RETURN"))
@@ -121,6 +128,7 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
             metallum$validateNoOverlappingRanges(refreshes);
             long sidecarBytes = 0L;
             long meshCommands = 0L;
+            List<SodiumLightLegacyPatchBatch.Patch> lightPatches = new ArrayList<>();
             long[] geometryBytesByRefresh = new long[refreshes.size()];
             long[] meshCommandsByRefresh = new long[refreshes.size()];
             for (int refreshIndex = 0; refreshIndex < refreshes.size(); refreshIndex++) {
@@ -131,14 +139,30 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
                             geometryBytesByRefresh[refreshIndex],
                             mesh.geometry().remaining()
                     );
-                    sidecarBytes = Math.addExact(
-                            sidecarBytes,
-                            ((SodiumLightSidecarArena) mesh.arena()).metallum$enqueueInPlaceTerrainRefresh(
-                                    mesh.geometry(),
-                                    allocation.getOffset(),
-                                    allocation.getLength()
-                            )
-                    );
+                    SodiumLightSidecarArena sidecarArena = (SodiumLightSidecarArena) mesh.arena();
+                    if (refresh.lightOnly()) {
+                        lightPatches.add(sidecarArena.metallum$enqueueInPlaceTerrainLightRefresh(
+                                mesh.geometry(),
+                                allocation.getOffset(),
+                                allocation.getLength()
+                        ));
+                        sidecarBytes = Math.addExact(
+                                sidecarBytes,
+                                Math.multiplyExact(
+                                        allocation.getLength(),
+                                        SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+                                )
+                        );
+                    } else {
+                        sidecarBytes = Math.addExact(
+                                sidecarBytes,
+                                sidecarArena.metallum$enqueueInPlaceTerrainRefresh(
+                                        mesh.geometry(),
+                                        allocation.getOffset(),
+                                        allocation.getLength()
+                                )
+                        );
+                    }
                     meshCommandsByRefresh[refreshIndex] = Math.addExact(
                             meshCommandsByRefresh[refreshIndex],
                             1L
@@ -148,9 +172,32 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
             }
             this.stagingBuffer.flush();
 
+            if (!lightPatches.isEmpty()) {
+                SodiumLightLegacyPatchBatch.Status patchStatus;
+                try {
+                    patchStatus = SodiumLightLegacyPatchBatch.encode(lightPatches);
+                } catch (Throwable throwable) {
+                    SodiumTerrainLightPatch.fail("Metal legacy-light patch batch threw", throwable);
+                    return;
+                }
+                if (patchStatus != SodiumLightLegacyPatchBatch.Status.ENCODED) {
+                    SodiumTerrainLightPatch.fail(
+                            "Metal legacy-light patch batch returned " + patchStatus,
+                            null
+                    );
+                    return;
+                }
+                TorchEpochTelemetry.recordNativeLightPatch(1L, lightPatches.size());
+            }
+
             for (Reference2ReferenceMap.Entry<RenderRegion, List<BuilderTaskOutput>> entry : cir.getReturnValue()) {
                 entry.getValue().removeIf(reusable::containsKey);
             }
+            IdentityHashMap<ChunkBuildOutput, SodiumTerrainInPlaceRefresh> successful = new IdentityHashMap<>();
+            for (SodiumTerrainInPlaceRefresh refresh : refreshes) {
+                successful.put(refresh.output(), refresh);
+            }
+            this.metallum$successfulRefreshes = successful;
             for (int refreshIndex = 0; refreshIndex < refreshes.size(); refreshIndex++) {
                 RenderSection section = refreshes.get(refreshIndex).output().section;
                 TorchEpochTelemetry.recordInPlaceGeometryRefresh(
@@ -162,6 +209,17 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
                         geometryBytesByRefresh[refreshIndex],
                         meshCommandsByRefresh[refreshIndex]
                 );
+                if (refreshes.get(refreshIndex).lightOnly()) {
+                    TorchEpochTelemetry.recordCompactLightPatchOutput(
+                            SectionPos.asLong(
+                                    section.getChunkX(),
+                                    section.getChunkY(),
+                                    section.getChunkZ()
+                            ),
+                            geometryBytesByRefresh[refreshIndex],
+                            meshCommandsByRefresh[refreshIndex]
+                    );
+                }
             }
             TorchEpochTelemetry.recordSidecarUpload(sidecarBytes, meshCommands);
         } catch (Throwable throwable) {
@@ -179,14 +237,32 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
             final CallbackInfo ci
     ) {
         IdentityHashMap<ChunkBuildOutput, SodiumTerrainUploadBaseline> baselines = this.metallum$pendingBaselines;
+        IdentityHashMap<ChunkBuildOutput, SodiumTerrainInPlaceRefresh> successful =
+                this.metallum$successfulRefreshes;
         this.metallum$pendingBaselines = null;
+        this.metallum$successfulRefreshes = null;
         if (baselines == null) {
             return;
         }
         for (Map.Entry<ChunkBuildOutput, SodiumTerrainUploadBaseline> entry : baselines.entrySet()) {
             RenderSection section = entry.getKey().section;
+            SodiumTerrainUploadBaseline baseline = entry.getValue();
+            SodiumTerrainInPlaceRefresh refresh = successful == null ? null : successful.get(entry.getKey());
+            if (refresh != null) {
+                if (refresh.lightOnly()) {
+                    baseline = refresh.residentBaseline();
+                } else if (SodiumTerrainLightPatch.isRuntimeActive()) {
+                    try {
+                        baseline = refresh.captureStaticGeometry(baseline);
+                    } catch (Throwable throwable) {
+                        SodiumTerrainLightPatch.fail("could not retain exact resident terrain geometry", throwable);
+                    }
+                }
+            }
             if (!section.isDisposed()) {
-                ((SodiumTerrainUploadBaselineAccess) section).metallum$setTerrainUploadBaseline(entry.getValue());
+                ((SodiumTerrainUploadBaselineAccess) section).metallum$setTerrainUploadBaseline(baseline);
+            } else {
+                baseline.close();
             }
         }
     }
@@ -242,6 +318,7 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
         int sectionIndex = section.getSectionIndex();
         TerrainRenderPass[] passes = DefaultTerrainRenderPasses.ALL;
         List<SodiumTerrainInPlaceRefresh.Mesh> meshes = new ArrayList<>();
+        ByteBuffer[] geometryByPass = new ByteBuffer[passes.length];
         for (int index = 0; index < passes.length; index++) {
             SodiumTerrainMeshLayout layout = nextBaseline.mesh(index);
             BuiltSectionMeshParts mesh = output.getMesh(passes[index]);
@@ -293,9 +370,27 @@ abstract class RenderRegionManagerTerrainRefreshMixin {
                     || Math.addExact(sidecarOffset, expectedSidecarBytes) > sidecar.size()) {
                 return null;
             }
+            geometryByPass[index] = geometry.duplicate();
             meshes.add(new SodiumTerrainInPlaceRefresh.Mesh(geometryArena, allocation, geometry));
         }
-        return meshes.isEmpty() ? null : new SodiumTerrainInPlaceRefresh(output, meshes);
+        if (meshes.isEmpty()) {
+            return null;
+        }
+        boolean lightOnly = false;
+        if (SodiumTerrainLightPatch.isRuntimeActive()) {
+            try {
+                lightOnly = resident.matchesStaticGeometry(geometryByPass);
+            } catch (Throwable throwable) {
+                SodiumTerrainLightPatch.fail("could not compare exact resident terrain geometry", throwable);
+            }
+        }
+        return new SodiumTerrainInPlaceRefresh(
+                output,
+                meshes,
+                resident,
+                geometryByPass,
+                lightOnly
+        );
     }
 
     @Unique

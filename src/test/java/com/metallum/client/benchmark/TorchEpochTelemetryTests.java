@@ -8,7 +8,9 @@ public final class TorchEpochTelemetryTests {
         testInactiveEpochIsANoOp();
         testLifecycleCountersAndSafeEnd();
         testSidecarCountersAndValidation();
+        testCompactLightPatchTransitionsAndIdentities();
         testBoundedUniqueSectionTracking();
+        testCompactCounterOverflow();
         testRestartAndAbortRecovery();
     }
 
@@ -20,6 +22,9 @@ public final class TorchEpochTelemetryTests {
         recorder.recordAcceptedMeshPayloadBytes(256L);
         recorder.recordAcceptedGeometryPayloadBytes(240L);
         recorder.recordInPlaceGeometryRefresh(1L, 200L, 2L);
+        recorder.recordCompactLightPatchOutput(1L, 200L, 2L);
+        recorder.recordNativeLightPatch(1L, 2L);
+        recorder.recordCompactLightPatchFallback();
         recorder.recordSidecarUpload(64L, 1L);
         recorder.recordSidecarResizeCopies(32L, 2L);
         recorder.recordSidecarFallback();
@@ -39,6 +44,18 @@ public final class TorchEpochTelemetryTests {
                 "inactive recorder counted unique in-place sections");
         require(snapshot.inPlaceGeometryRefreshBytes() == 0L, "inactive recorder counted in-place bytes");
         require(snapshot.inPlaceGeometryRefreshMeshCommands() == 0L, "inactive recorder counted in-place commands");
+        require(snapshot.compactLightPatchOutputs() == 0L, "inactive recorder counted compact outputs");
+        require(snapshot.uniqueCompactLightPatchSections() == 0L,
+                "inactive recorder counted unique compact sections");
+        require(snapshot.geometryBytesElided() == 0L, "inactive recorder counted elided geometry bytes");
+        require(snapshot.geometryMeshCommandsElided() == 0L,
+                "inactive recorder counted elided geometry commands");
+        require(snapshot.nativeLightPatchDispatches() == 0L,
+                "inactive recorder counted native patch dispatches");
+        require(snapshot.nativeLightPatchMeshCommands() == 0L,
+                "inactive recorder counted native patch mesh commands");
+        require(snapshot.compactLightPatchFallbackCount() == 0L,
+                "inactive recorder counted compact local fallbacks");
         require(snapshot.sidecarProducedBytes() == 0L, "inactive recorder counted sidecar production");
         require(snapshot.sidecarUploadedBytes() == 0L, "inactive recorder counted sidecar uploads");
         require(snapshot.sidecarUploadCommands() == 0L, "inactive recorder counted sidecar upload commands");
@@ -48,6 +65,7 @@ public final class TorchEpochTelemetryTests {
         require(snapshot.errorCount() == 0L, "inactive recorder counted errors");
         require(!recorder.wasBuildOutput(1L), "inactive recorder retained a build-output identity");
         require(!recorder.wasInPlaceGeometryRefreshed(1L), "inactive recorder retained an in-place identity");
+        require(!recorder.wasCompactLightPatched(1L), "inactive recorder retained a compact identity");
     }
 
     private static void testLifecycleCountersAndSafeEnd() {
@@ -127,6 +145,10 @@ public final class TorchEpochTelemetryTests {
         recorder.recordSidecarResizeCopies(0L, -1L);
         recorder.recordInPlaceGeometryRefresh(0L, -1L, 0L);
         recorder.recordInPlaceGeometryRefresh(0L, 0L, -1L);
+        recorder.recordCompactLightPatchOutput(0L, -1L, 0L);
+        recorder.recordCompactLightPatchOutput(0L, 0L, -1L);
+        recorder.recordNativeLightPatch(-1L, 0L);
+        recorder.recordNativeLightPatch(0L, -1L);
 
         TorchEpochTelemetry.Snapshot snapshot = recorder.end();
         require(snapshot.sidecarProducedBytes() == 56L, "sidecar produced byte count mismatch");
@@ -140,8 +162,51 @@ public final class TorchEpochTelemetryTests {
                 "duplicate in-place section was counted twice");
         require(snapshot.inPlaceGeometryRefreshBytes() == 400L, "in-place byte counter mismatch");
         require(snapshot.inPlaceGeometryRefreshMeshCommands() == 3L, "in-place command counter mismatch");
-        require(snapshot.errorCount() == 6L, "invalid sidecar samples were not counted as errors");
+        require(snapshot.errorCount() == 10L, "invalid sidecar samples were not counted as errors");
         require(snapshot.overflowCount() == 0L, "ordinary sidecar counters unexpectedly overflowed");
+    }
+
+    private static void testCompactLightPatchTransitionsAndIdentities() {
+        TorchEpochTelemetry.Recorder recorder = TorchEpochTelemetry.recorderForTests(4);
+        recorder.begin(126L);
+        recorder.recordBuildOutput(10L);
+        recorder.recordBuildOutput(20L);
+        recorder.recordInPlaceGeometryRefresh(10L, 60L, 1L);
+        recorder.recordInPlaceGeometryRefresh(20L, 80L, 2L);
+        recorder.recordCompactLightPatchOutput(20L, 80L, 2L);
+        recorder.recordNativeLightPatch(1L, 2L);
+        recorder.recordInPlaceGeometryRefresh(20L, 40L, 1L);
+        recorder.recordCompactLightPatchOutput(20L, 40L, 1L);
+        recorder.recordNativeLightPatch(1L, 1L);
+        recorder.recordCompactLightPatchFallback();
+        recorder.recordCompactLightPatchFallback();
+
+        TorchEpochTelemetry.Snapshot active = recorder.snapshot();
+        require(active.inPlaceGeometryRefreshOutputs() == 3L,
+                "compact refreshes were not retained in the in-place union");
+        require(active.uniqueInPlaceGeometryRefreshSections() == 2L,
+                "in-place union identity count mismatch");
+        require(active.compactLightPatchOutputs() == 2L, "compact output count mismatch");
+        require(active.uniqueCompactLightPatchSections() == 1L,
+                "duplicate compact section was counted twice");
+        require(active.geometryBytesElided() == 120L, "elided geometry byte count mismatch");
+        require(active.geometryMeshCommandsElided() == 3L,
+                "elided geometry command count mismatch");
+        require(active.nativeLightPatchDispatches() == 2L,
+                "native light-patch dispatch count mismatch");
+        require(active.nativeLightPatchMeshCommands() == 3L,
+                "native light-patch mesh command count mismatch");
+        require(active.compactLightPatchFallbackCount() == 2L,
+                "compact local fallback count mismatch");
+        require(recorder.wasCompactLightPatched(20L), "active epoch lost compact identity");
+        require(!recorder.wasCompactLightPatched(10L), "full refresh acquired compact identity");
+
+        TorchEpochTelemetry.Snapshot ended = recorder.end();
+        require(recorder.wasCompactLightPatched(20L), "closed epoch lost compact identity");
+        recorder.recordCompactLightPatchOutput(30L, 20L, 1L);
+        recorder.recordNativeLightPatch(1L, 1L);
+        recorder.recordCompactLightPatchFallback();
+        require(recorder.end().equals(ended), "inactive compact record changed a closed epoch");
     }
 
     private static void testBoundedUniqueSectionTracking() {
@@ -154,14 +219,44 @@ public final class TorchEpochTelemetryTests {
         recorder.recordInPlaceGeometryRefresh(0L, 20L, 1L);
         recorder.recordInPlaceGeometryRefresh(Long.MIN_VALUE, 20L, 1L);
         recorder.recordInPlaceGeometryRefresh(Long.MAX_VALUE, 20L, 1L);
+        recorder.recordCompactLightPatchOutput(0L, 20L, 1L);
+        recorder.recordCompactLightPatchOutput(Long.MIN_VALUE, 20L, 1L);
+        recorder.recordCompactLightPatchOutput(Long.MAX_VALUE, 20L, 1L);
 
         TorchEpochTelemetry.Snapshot snapshot = recorder.end();
         require(snapshot.rebuildRequestCount() == 4L, "bounded recorder lost total requests");
         require(snapshot.uniqueRebuildRequestSections() == 2L, "bounded recorder exceeded its unique limit");
         require(snapshot.uniqueInPlaceGeometryRefreshSections() == 2L,
                 "bounded recorder exceeded its in-place unique limit");
-        require(snapshot.overflowCount() == 2L, "bounded recorder did not report unique overflows");
+        require(snapshot.uniqueCompactLightPatchSections() == 2L,
+                "bounded recorder exceeded its compact unique limit");
+        require(snapshot.overflowCount() == 3L, "bounded recorder did not report unique overflows");
         require(snapshot.errorCount() == 0L, "bounded overflow was misreported as an error");
+    }
+
+    private static void testCompactCounterOverflow() {
+        TorchEpochTelemetry.Recorder recorder = TorchEpochTelemetry.recorderForTests(2);
+        recorder.begin(168L);
+        recorder.recordCompactLightPatchOutput(1L, Long.MAX_VALUE, Long.MAX_VALUE);
+        recorder.recordCompactLightPatchOutput(1L, 1L, 1L);
+        recorder.recordNativeLightPatch(Long.MAX_VALUE, Long.MAX_VALUE);
+        recorder.recordNativeLightPatch(1L, 1L);
+
+        TorchEpochTelemetry.Snapshot snapshot = recorder.end();
+        require(snapshot.compactLightPatchOutputs() == 2L,
+                "numeric overflow lost compact output identities");
+        require(snapshot.uniqueCompactLightPatchSections() == 1L,
+                "numeric overflow changed compact unique identities");
+        require(snapshot.geometryBytesElided() == Long.MAX_VALUE,
+                "elided geometry byte overflow did not saturate");
+        require(snapshot.geometryMeshCommandsElided() == Long.MAX_VALUE,
+                "elided geometry command overflow did not saturate");
+        require(snapshot.nativeLightPatchDispatches() == Long.MAX_VALUE,
+                "native dispatch overflow did not saturate");
+        require(snapshot.nativeLightPatchMeshCommands() == Long.MAX_VALUE,
+                "native mesh-command overflow did not saturate");
+        require(snapshot.overflowCount() == 4L, "compact numeric overflows were not diagnosed");
+        require(snapshot.errorCount() == 0L, "compact numeric overflow was misreported as an error");
     }
 
     private static void testRestartAndAbortRecovery() {
@@ -170,6 +265,7 @@ public final class TorchEpochTelemetryTests {
         recorder.recordRebuildRequest(1L);
         recorder.recordBuildOutput(1L);
         recorder.recordInPlaceGeometryRefresh(1L, 20L, 1L);
+        recorder.recordCompactLightPatchOutput(1L, 20L, 1L);
         recorder.begin(2L);
 
         TorchEpochTelemetry.Snapshot restarted = recorder.snapshot();
@@ -178,6 +274,7 @@ public final class TorchEpochTelemetryTests {
         require(restarted.rebuildRequestCount() == 0L, "replacement epoch retained old counters");
         require(!recorder.wasBuildOutput(1L), "replacement epoch retained build-output identity");
         require(!recorder.wasInPlaceGeometryRefreshed(1L), "replacement epoch retained in-place identity");
+        require(!recorder.wasCompactLightPatched(1L), "replacement epoch retained compact identity");
         require(restarted.errorCount() == 1L, "replacement of active epoch was not diagnosed");
 
         recorder.abort();
@@ -188,8 +285,10 @@ public final class TorchEpochTelemetryTests {
         require(aborted.rebuildRequestCount() == 0L, "abort retained lifecycle counters");
         require(aborted.sidecarUploadedBytes() == 0L, "abort retained sidecar counters");
         require(aborted.inPlaceGeometryRefreshBytes() == 0L, "abort retained in-place counters");
+        require(aborted.geometryBytesElided() == 0L, "abort retained compact counters");
         require(!recorder.wasBuildOutput(1L), "abort retained a build-output identity");
         require(!recorder.wasInPlaceGeometryRefreshed(1L), "abort retained an in-place identity");
+        require(!recorder.wasCompactLightPatched(1L), "abort retained a compact identity");
     }
 
     private static void require(final boolean condition, final String message) {

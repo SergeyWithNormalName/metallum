@@ -22,10 +22,12 @@ import org.joml.Vector4fc;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -45,6 +47,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT);
     private final MetalTransientMemory transientMemory;
     private final MetalResourceBindingPacket resourceBindingPacket = new MetalResourceBindingPacket();
+    private final Arena sodiumLightPatchPacketArena = Arena.ofShared();
+    private final MemorySegment sodiumLightPatchPacket = this.sodiumLightPatchPacketArena.allocate(
+            SodiumLightLegacyPatchBatch.packetBytes(SodiumLightLegacyPatchBatch.MAX_PATCHES),
+            Long.BYTES
+    );
     private final Map<MetalGpuTexture, Vector4fc> pendingColorClears = new IdentityHashMap<>();
     private final Map<MetalGpuTexture, Double> pendingDepthClears = new IdentityHashMap<>();
     private final MemorySegment fence;
@@ -621,6 +628,29 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         pendingDepthClears.put((MetalGpuTexture) depthTexture, clearDepth);
     }
 
+    int encodeSodiumLightLegacyPatchBatch(final List<SodiumLightLegacyPatchBatch.Patch> patches) {
+        for (int index = 0; index < patches.size(); index++) {
+            SodiumLightLegacyPatchBatch.Patch patch = patches.get(index);
+            SodiumLightLegacyPatchBatch.writeRecord(
+                    this.sodiumLightPatchPacket,
+                    index,
+                    ((MetalGpuBuffer) patch.geometry()).nativeHandle(),
+                    ((MetalGpuBuffer) patch.sidecar()).nativeHandle(),
+                    patch.vertexOffset(),
+                    patch.vertexCount()
+            );
+        }
+        submitRenderPass();
+        // The sidecar upload is normally the active blit encoder. Closing it
+        // publishes its fence before the native batch opens one compute encoder.
+        endEncoder();
+        MemorySegment packet = this.sodiumLightPatchPacket.asSlice(
+                0L,
+                SodiumLightLegacyPatchBatch.packetBytes(patches.size())
+        );
+        return commandBuffer().encodeSodiumLightLegacyPatchBatch(packet, patches.size(), fence);
+    }
+
     @Override
     public void writeToBuffer(final GpuBufferSlice destination, final ByteBuffer data) {
         MetalGpuBuffer buffer = (MetalGpuBuffer) destination.buffer();
@@ -926,6 +956,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         transientMemory.close();
         resourceBindingPacket.close();
+        sodiumLightPatchPacketArena.close();
         device.queueResourceRelease(fence);
         destroyQueue.close();
         dynamicBackingPool.drain();

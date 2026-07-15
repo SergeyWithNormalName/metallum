@@ -1,21 +1,36 @@
 package com.metallum.client.sodium;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 
 /** Immutable resident upload layout committed only after a successful Sodium upload. */
-public final class SodiumTerrainUploadBaseline {
+public final class SodiumTerrainUploadBaseline implements AutoCloseable {
     private final int sectionFlags;
     private final long[] visibilityData;
     private final SodiumTerrainMeshLayout[] meshes;
+    private final SodiumTerrainStaticShadow[] staticShadows;
 
     public SodiumTerrainUploadBaseline(
             final int sectionFlags,
             final long[] visibilityData,
             final SodiumTerrainMeshLayout[] meshes
     ) {
+        this(sectionFlags, visibilityData, meshes, new SodiumTerrainStaticShadow[meshes.length]);
+    }
+
+    private SodiumTerrainUploadBaseline(
+            final int sectionFlags,
+            final long[] visibilityData,
+            final SodiumTerrainMeshLayout[] meshes,
+            final SodiumTerrainStaticShadow[] staticShadows
+    ) {
+        if (meshes.length != staticShadows.length) {
+            throw new IllegalArgumentException("terrain layout/static shadow count mismatch");
+        }
         this.sectionFlags = sectionFlags;
         this.visibilityData = visibilityData.clone();
         this.meshes = meshes.clone();
+        this.staticShadows = staticShadows.clone();
     }
 
     public boolean matchesUploadLayout(final SodiumTerrainUploadBaseline other) {
@@ -41,5 +56,89 @@ public final class SodiumTerrainUploadBaseline {
 
     public int meshCount() {
         return this.meshes.length;
+    }
+
+    /**
+     * Captures exact non-light bytes after a full resident refresh succeeded.
+     * A cache eviction only makes {@link #matchesStaticGeometry(ByteBuffer[])}
+     * return false and therefore restores the full upload path.
+     */
+    public SodiumTerrainUploadBaseline withStaticGeometry(final ByteBuffer[] geometryByMesh) {
+        if (geometryByMesh.length != this.meshes.length) {
+            throw new IllegalArgumentException("terrain geometry/static shadow count mismatch");
+        }
+        SodiumTerrainStaticShadow[] captured = new SodiumTerrainStaticShadow[this.meshes.length];
+        try {
+            for (int index = 0; index < this.meshes.length; index++) {
+                SodiumTerrainMeshLayout layout = this.meshes[index];
+                ByteBuffer geometry = geometryByMesh[index];
+                if (layout == null) {
+                    if (geometry != null) {
+                        throw new IllegalArgumentException("terrain geometry exists without a mesh layout");
+                    }
+                    continue;
+                }
+                if (geometry == null || geometry.remaining() != layout.geometryBytes()) {
+                    throw new IllegalArgumentException("terrain static shadow geometry length changed");
+                }
+                captured[index] = SodiumTerrainStaticShadow.capture(geometry);
+            }
+            return new SodiumTerrainUploadBaseline(
+                    this.sectionFlags,
+                    this.visibilityData,
+                    this.meshes,
+                    captured
+            );
+        } catch (RuntimeException | Error throwable) {
+            for (SodiumTerrainStaticShadow shadow : captured) {
+                if (shadow != null) {
+                    shadow.close();
+                }
+            }
+            throw throwable;
+        }
+    }
+
+    public boolean matchesStaticGeometry(final ByteBuffer[] geometryByMesh) {
+        if (geometryByMesh.length != this.meshes.length) {
+            return false;
+        }
+        for (int index = 0; index < this.meshes.length; index++) {
+            SodiumTerrainMeshLayout layout = this.meshes[index];
+            ByteBuffer geometry = geometryByMesh[index];
+            SodiumTerrainStaticShadow shadow = this.staticShadows[index];
+            if (layout == null) {
+                if (geometry != null || shadow != null) {
+                    return false;
+                }
+                continue;
+            }
+            if (geometry == null
+                    || geometry.remaining() != layout.geometryBytes()
+                    || shadow == null
+                    || !shadow.matches(geometry)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean hasResidentStaticGeometry() {
+        for (int index = 0; index < this.meshes.length; index++) {
+            if (this.meshes[index] != null
+                    && (this.staticShadows[index] == null || !this.staticShadows[index].isResident())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public void close() {
+        for (SodiumTerrainStaticShadow shadow : this.staticShadows) {
+            if (shadow != null) {
+                shadow.close();
+            }
+        }
     }
 }

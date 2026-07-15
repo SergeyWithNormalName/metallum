@@ -22,7 +22,8 @@ def macNativeLibrary = layout.buildDirectory.file("generated/metallum/natives/ma
 def macMetalSources = [
 	Present: layout.projectDirectory.file("src/main/metal/MetallumPresent.metal"),
 	HdrEffects: layout.projectDirectory.file("src/main/metal/MetallumHdrEffects.metal"),
-	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal")
+	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal"),
+	SodiumLightPatch: layout.projectDirectory.file("src/main/metal/MetallumSodiumLightPatch.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -198,6 +199,51 @@ def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimi
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
 def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
 def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
+def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-tests/SodiumLightLegacyPatchValidation")
+
+tasks.register("compileSodiumLightLegacyPatchValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native batched Sodium legacy-light patch validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/SodiumLightLegacyPatchValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(sodiumLightLegacyPatchValidationBinary)
+
+	doFirst {
+		sodiumLightLegacyPatchValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", sodiumLightLegacyPatchValidationBinary.get().asFile.absolutePath,
+		"src/test/native/SodiumLightLegacyPatchValidation.swift"
+}
+
+tasks.register("sodiumLightLegacyPatchNativeValidation", Exec) {
+	group = "verification"
+	description = "Validates the one-encoder Sodium legacy-light patch batch and failure atomicity"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileSodiumLightLegacyPatchValidation")
+	)
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine sodiumLightLegacyPatchValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
 
 tasks.register("compileStaticGeometryHeapValidation", Exec) {
 	group = "verification"
@@ -508,6 +554,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
+	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))
 	dependsOn(tasks.named("staticGeometryHeapValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))

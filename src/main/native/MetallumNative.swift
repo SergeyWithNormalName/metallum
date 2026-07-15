@@ -28,12 +28,14 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     case present
     case hdrEffects
     case clear
+    case sodiumLightPatch
 
     var sourceFileName: String {
         switch self {
         case .present: "MetallumPresent.metal"
         case .hdrEffects: "MetallumHdrEffects.metal"
         case .clear: "MetallumClear.metal"
+        case .sodiumLightPatch: "MetallumSodiumLightPatch.metal"
         }
     }
 
@@ -62,6 +64,8 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
             ]
         case .clear:
             ["metallum_clear_vs", "metallum_clear_fs"]
+        case .sodiumLightPatch:
+            ["metallum_sodium_light_legacy_patch"]
         }
     }
 }
@@ -2301,6 +2305,7 @@ private enum NativeState {
     static var spatialScreenshotPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var worldPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var nativeWorldUiPipelines: [UInt: MTLRenderPipelineState] = [:]
+    static var sodiumLightPatchPipelines: [UInt: MTLComputePipelineState] = [:]
     static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
@@ -2834,7 +2839,7 @@ private func recordBuiltinPipelineCreation(
 
 private func builtinShaderInitializationStatus(_ state: MetallumBuiltinShaderState) -> Int32 {
     let snapshot = state.snapshot()
-    guard snapshot.pipelineFailureCount == 0, snapshot.pipelineCount >= 16 else {
+    guard snapshot.pipelineFailureCount == 0, snapshot.pipelineCount >= 17 else {
         return -1
     }
     switch snapshot.mode {
@@ -2845,6 +2850,39 @@ private func builtinShaderInitializationStatus(_ state: MetallumBuiltinShaderSta
     default:
         return -1
     }
+}
+
+private func buildSodiumLightPatchPipeline(device: MTLDevice) -> MTLComputePipelineState? {
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .sodiumLightPatch)
+        guard let function = library.makeFunction(name: "metallum_sodium_light_legacy_patch") else {
+            recordBuiltinPipelineCreation(device: device, succeeded: false)
+            NSLog("[metallum] Failed to create Sodium legacy-light patch shader function")
+            return nil
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        recordBuiltinPipelineCreation(device: device, succeeded: true)
+        return pipeline
+    } catch {
+        recordBuiltinPipelineCreation(device: device, succeeded: false)
+        NSLog(
+            "[metallum] Failed to create Sodium legacy-light patch pipeline: %@",
+            String(describing: error)
+        )
+        return nil
+    }
+}
+
+private func ensureSodiumLightPatchPipeline(device: MTLDevice) -> MTLComputePipelineState? {
+    let key = objectAddress(device)
+    if let cached = NativeState.sodiumLightPatchPipelines[key] {
+        return cached
+    }
+    let pipeline = buildSodiumLightPatchPipeline(device: device)
+    if let pipeline {
+        NativeState.sodiumLightPatchPipelines[key] = pipeline
+    }
+    return pipeline
 }
 
 
@@ -4168,6 +4206,7 @@ private func ensureClearColorDepthPipeline(_ device: MTLDevice, _ colorFormat: M
 
 private func probeBuiltinPipelineCacheHits(device: MTLDevice) -> Int {
     var hits = 0
+    hits += ensureSodiumLightPatchPipeline(device: device) == nil ? 0 : 1
     hits += ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm) == nil ? 0 : 1
     hits += ensurePresentPipeline(device: device, colorFormat: .rgba16Float) == nil ? 0 : 1
     hits += ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float) == nil ? 0 : 1
@@ -4442,6 +4481,7 @@ public func metallum_init_pipelines(_ device: MTLDevice) -> Int32 {
         }
         _ = loadPrecompiledBuiltinShaderLibrary(device: device)
         let warmupStart = ProcessInfo.processInfo.systemUptime
+        _ = ensureSodiumLightPatchPipeline(device: device)
         _ = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm)
         _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
         _ = ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float)
@@ -4513,6 +4553,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
             $0.key.deviceAddress != deviceAddress
         }
         NativeState.nativeWorldUiPipelines.removeValue(forKey: deviceAddress)
+        NativeState.sodiumLightPatchPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
@@ -4836,6 +4877,180 @@ public func metallum_MTLCommandBuffer_pushDebugGroup(
 @_cdecl("metallum_MTLCommandBuffer_popDebugGroup")
 public func metallum_MTLCommandBuffer_popDebugGroup(_ commandBuffer: MTLCommandBuffer) {
     commandBuffer.popDebugGroup()
+}
+
+private enum MetallumSodiumLightPatchAbiV1 {
+    static let recordBytes: UInt64 = 32
+    static let maxRecords: UInt64 = 4_096
+
+    static let encoded: Int32 = 1
+    static let empty: Int32 = 0
+    static let errorNullArgument: Int32 = -1
+    static let errorPacket: Int32 = -2
+    static let errorHandle: Int32 = -3
+    static let errorObjectType: Int32 = -4
+    static let errorDevice: Int32 = -5
+    static let errorRange: Int32 = -6
+    static let errorOverlap: Int32 = -7
+    static let errorPipeline: Int32 = -8
+    static let errorEncoder: Int32 = -9
+}
+
+private struct MetallumSodiumLightPatchRange {
+    let start: UInt64
+    let end: UInt64
+}
+
+private struct MetallumPreparedSodiumLightPatch {
+    let geometry: MTLBuffer
+    let sidecar: MTLBuffer
+    let vertexOffset: UInt32
+    let vertexCount: UInt32
+}
+
+@inline(__always)
+private func sodiumLightPatchUInt64(_ packet: UnsafeRawPointer, _ offset: Int) -> UInt64 {
+    UInt64(littleEndian: packet.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
+}
+
+private func sodiumLightPatchRangesOverlap(
+    _ rangesByBuffer: [UInt: [MetallumSodiumLightPatchRange]]
+) -> Bool {
+    for ranges in rangesByBuffer.values where ranges.count > 1 {
+        let sorted = ranges.sorted {
+            $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start
+        }
+        for index in 1..<sorted.count where sorted[index].start < sorted[index - 1].end {
+            return true
+        }
+    }
+    return false
+}
+
+@_cdecl("metallum_MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch_v1")
+public func metallum_MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch_v1(
+    _ commandBuffer: MTLCommandBuffer?,
+    _ globalFence: MTLFence?,
+    _ packetPointer: UnsafeRawPointer?,
+    _ packetCapacityBytes: UInt64,
+    _ commandCount: UInt64
+) -> Int32 {
+    if commandCount == 0 {
+        return MetallumSodiumLightPatchAbiV1.empty
+    }
+    guard let commandBuffer, let globalFence, let packet = packetPointer else {
+        return MetallumSodiumLightPatchAbiV1.errorNullArgument
+    }
+    let (expectedBytes, byteCountOverflow) = commandCount.multipliedReportingOverflow(
+        by: MetallumSodiumLightPatchAbiV1.recordBytes
+    )
+    guard !byteCountOverflow,
+          commandCount <= MetallumSodiumLightPatchAbiV1.maxRecords,
+          expectedBytes <= packetCapacityBytes,
+          expectedBytes <= UInt64(Int.max) else {
+        return MetallumSodiumLightPatchAbiV1.errorPacket
+    }
+
+    let deviceAddress = objectAddress(commandBuffer.device)
+    guard objectAddress(globalFence.device) == deviceAddress else {
+        return MetallumSodiumLightPatchAbiV1.errorDevice
+    }
+
+    // Validate and retain Swift references for every record before creating an
+    // encoder. Every error status therefore leaves both buffers untouched.
+    var prepared: [MetallumPreparedSodiumLightPatch] = []
+    prepared.reserveCapacity(Int(commandCount))
+    var geometryRanges: [UInt: [MetallumSodiumLightPatchRange]] = [:]
+    var sidecarRanges: [UInt: [MetallumSodiumLightPatchRange]] = [:]
+    var geometryAddresses = Set<UInt>()
+    var sidecarAddresses = Set<UInt>()
+
+    for commandIndex in 0..<Int(commandCount) {
+        let record = commandIndex * Int(MetallumSodiumLightPatchAbiV1.recordBytes)
+        let geometryAddress = sodiumLightPatchUInt64(packet, record)
+        let sidecarAddress = sodiumLightPatchUInt64(packet, record + 8)
+        let vertexOffset = sodiumLightPatchUInt64(packet, record + 16)
+        let vertexCount = sodiumLightPatchUInt64(packet, record + 24)
+
+        guard geometryAddress != 0, sidecarAddress != 0,
+              let geometryObject = bindingPacketObject(geometryAddress),
+              let sidecarObject = bindingPacketObject(sidecarAddress) else {
+            return MetallumSodiumLightPatchAbiV1.errorHandle
+        }
+        guard let geometry = geometryObject as? MTLBuffer,
+              let sidecar = sidecarObject as? MTLBuffer else {
+            return MetallumSodiumLightPatchAbiV1.errorObjectType
+        }
+        guard objectAddress(geometry.device) == deviceAddress,
+              objectAddress(sidecar.device) == deviceAddress else {
+            return MetallumSodiumLightPatchAbiV1.errorDevice
+        }
+
+        let (vertexEnd, vertexOverflow) = vertexOffset.addingReportingOverflow(vertexCount)
+        let (geometryByteEnd, geometryOverflow) = vertexEnd.multipliedReportingOverflow(by: 20)
+        let (sidecarByteEnd, sidecarOverflow) = vertexEnd.multipliedReportingOverflow(by: 2)
+        guard vertexCount > 0,
+              !vertexOverflow, !geometryOverflow, !sidecarOverflow,
+              vertexEnd <= UInt64(UInt32.max),
+              geometryByteEnd <= UInt64(geometry.length),
+              sidecarByteEnd <= UInt64(sidecar.length) else {
+            return MetallumSodiumLightPatchAbiV1.errorRange
+        }
+
+        let geometryKey = objectAddress(geometry)
+        let sidecarKey = objectAddress(sidecar)
+        geometryAddresses.insert(geometryKey)
+        sidecarAddresses.insert(sidecarKey)
+        let range = MetallumSodiumLightPatchRange(start: vertexOffset, end: vertexEnd)
+        geometryRanges[geometryKey, default: []].append(range)
+        sidecarRanges[sidecarKey, default: []].append(range)
+        prepared.append(
+            MetallumPreparedSodiumLightPatch(
+                geometry: geometry,
+                sidecar: sidecar,
+                vertexOffset: UInt32(vertexOffset),
+                vertexCount: UInt32(vertexCount)
+            )
+        )
+    }
+
+    guard geometryAddresses.isDisjoint(with: sidecarAddresses),
+          !sodiumLightPatchRangesOverlap(geometryRanges),
+          !sodiumLightPatchRangesOverlap(sidecarRanges) else {
+        return MetallumSodiumLightPatchAbiV1.errorOverlap
+    }
+    guard let pipeline = ensureSodiumLightPatchPipeline(device: commandBuffer.device),
+          pipeline.threadExecutionWidth > 0,
+          pipeline.maxTotalThreadsPerThreadgroup > 0 else {
+        return MetallumSodiumLightPatchAbiV1.errorPipeline
+    }
+
+    let pass = MTLComputePassDescriptor()
+    guard let encoder = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: pass) else {
+        return MetallumSodiumLightPatchAbiV1.errorEncoder
+    }
+    encoder.label = "Metallum Sodium legacy-light patch batch"
+    encoder.waitForFence(globalFence)
+    encoder.setComputePipelineState(pipeline)
+    let threadgroupWidth = min(
+        pipeline.threadExecutionWidth,
+        pipeline.maxTotalThreadsPerThreadgroup
+    )
+    for command in prepared {
+        encoder.setBuffer(command.geometry, offset: 0, index: 0)
+        encoder.setBuffer(command.sidecar, offset: 0, index: 1)
+        var range = SIMD2<UInt32>(command.vertexOffset, command.vertexCount)
+        withUnsafeBytes(of: &range) { bytes in
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 2)
+        }
+        encoder.dispatchThreads(
+            MTLSize(width: Int(command.vertexCount), height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        )
+    }
+    encoder.updateFence(globalFence)
+    trackedEndEncoding(encoder)
+    return MetallumSodiumLightPatchAbiV1.encoded
 }
 
 @_cdecl("metallum_MTLCommandBuffer_makeBlitCommandEncoder")

@@ -1,12 +1,16 @@
 package com.metallum.client.metal.render;
 
+import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -35,6 +39,7 @@ public final class MetalRuntimeTests {
         testGpuTimingStageAbi();
         testResourceBindingPacketReuseAndValidation();
         testResourceBindingBatchSelector();
+        testSodiumLightLegacyPatchPacketAndFacadeValidation();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testHdrSceneColorRouting();
@@ -404,6 +409,82 @@ public final class MetalRuntimeTests {
                 "single dirty resource did not preserve the direct FFM path");
         require(MetalRenderPass.shouldBatchResourceBindings((1L << 2) | (1L << 61)),
                 "multiple dirty resources did not select the packet batch path");
+    }
+
+    private static void testSodiumLightLegacyPatchPacketAndFacadeValidation() {
+        require(SodiumLightLegacyPatchBatch.encode(null)
+                        == SodiumLightLegacyPatchBatch.Status.INVALID_ARGUMENT,
+                "null Sodium light patch batch was accepted");
+        require(SodiumLightLegacyPatchBatch.encode(List.of())
+                        == SodiumLightLegacyPatchBatch.Status.EMPTY,
+                "empty Sodium light patch batch did not remain a no-op");
+        require(SodiumLightLegacyPatchBatch.encode(List.of(
+                        new SodiumLightLegacyPatchBatch.Patch(null, null, 0L, 1L)
+                )) == SodiumLightLegacyPatchBatch.Status.INVALID_ARGUMENT,
+                "null Sodium light patch buffers were accepted");
+
+        GpuBuffer foreignBuffer = new GpuBuffer(GpuBuffer.USAGE_VERTEX, 40L) {
+            @Override
+            public boolean isClosed() {
+                return false;
+            }
+
+            @Override
+            public void close() {
+            }
+
+            @Override
+            public GpuBufferSlice.MappedView map(
+                    final long offset,
+                    final long length,
+                    final boolean read,
+                    final boolean write
+            ) {
+                throw new UnsupportedOperationException();
+            }
+        };
+        require(SodiumLightLegacyPatchBatch.encode(List.of(
+                        new SodiumLightLegacyPatchBatch.Patch(foreignBuffer, foreignBuffer, 0L, 1L)
+                )) == SodiumLightLegacyPatchBatch.Status.INVALID_BUFFER_TYPE,
+                "non-Metal Sodium light patch buffer reached the native ABI");
+
+        require(SodiumLightLegacyPatchBatch.packetBytes(0) == 0L
+                        && SodiumLightLegacyPatchBatch.packetBytes(2) == 64L,
+                "Sodium light patch packet size mismatch");
+        boolean oversizedRejected = false;
+        try {
+            SodiumLightLegacyPatchBatch.packetBytes(SodiumLightLegacyPatchBatch.MAX_PATCHES + 1);
+        } catch (IllegalArgumentException expected) {
+            oversizedRejected = true;
+        }
+        require(oversizedRejected, "Sodium light patch packet exceeded its ABI record cap");
+
+        ValueLayout.OfLong littleEndianLong = ValueLayout.JAVA_LONG_UNALIGNED
+                .withOrder(ByteOrder.LITTLE_ENDIAN);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = arena.allocate(64L, Long.BYTES);
+            SodiumLightLegacyPatchBatch.writeRecord(
+                    packet,
+                    1,
+                    MemorySegment.ofAddress(0x1111L),
+                    MemorySegment.ofAddress(0x2222L),
+                    7L,
+                    13L
+            );
+            require(packet.get(littleEndianLong, 32L) == 0x1111L
+                            && packet.get(littleEndianLong, 40L) == 0x2222L
+                            && packet.get(littleEndianLong, 48L) == 7L
+                            && packet.get(littleEndianLong, 56L) == 13L,
+                    "Sodium light patch record layout drifted from the native ABI");
+        }
+
+        for (int code = -9; code <= 1; code++) {
+            require(SodiumLightLegacyPatchBatch.Status.fromNative(code).nativeCode() == code,
+                    "Sodium light patch native status mapping mismatch for " + code);
+        }
+        require(SodiumLightLegacyPatchBatch.Status.fromNative(-1000)
+                        == SodiumLightLegacyPatchBatch.Status.UNKNOWN_NATIVE_FAILURE,
+                "unknown Sodium light patch native status was treated as success");
     }
 
     private static void testJavaWorkloadTelemetryGateAndReset() {
