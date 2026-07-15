@@ -42,6 +42,7 @@ import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
+import com.mojang.blaze3d.pipeline.TextureTarget;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
@@ -128,6 +129,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final boolean temporalDiagnosticsConfigured;
     private boolean temporalDiagnosticsActive;
     private final MetalCommandEncoder commandEncoder;
+    private int trackedTextureAllocationDepth;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
@@ -333,7 +335,18 @@ public final class MetalDevice implements GpuDeviceBackend {
             final int depthOrLayers,
             final int mipLevels
     ) {
-        return this.createTexture(this.resolveDebugLabel(label), usage, format, width, height, depthOrLayers, mipLevels);
+        String debugLabel = this.resolveDebugLabel(label);
+        return new MetalGpuTexture(
+                this,
+                usage,
+                debugLabel == null ? "" : debugLabel,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevels,
+                shouldTrackTextureHazards(this.trackedTextureAllocationDepth)
+        );
     }
 
     @Override
@@ -346,7 +359,36 @@ public final class MetalDevice implements GpuDeviceBackend {
             final int depthOrLayers,
             final int mipLevels
     ) {
-        return new MetalGpuTexture(this, usage, label == null ? "" : label, format, width, height, depthOrLayers, mipLevels);
+        return new MetalGpuTexture(
+                this,
+                usage,
+                label == null ? "" : label,
+                format,
+                width,
+                height,
+                depthOrLayers,
+                mipLevels,
+                shouldTrackTextureHazards(this.trackedTextureAllocationDepth)
+        );
+    }
+
+    TextureTarget createTrackedTextureTarget(
+            final String label,
+            final int width,
+            final int height,
+            final boolean useDepth,
+            final GpuFormat format
+    ) {
+        this.trackedTextureAllocationDepth++;
+        try {
+            return new TextureTarget(label, width, height, useDepth, format);
+        } finally {
+            this.trackedTextureAllocationDepth--;
+        }
+    }
+
+    static boolean shouldTrackTextureHazards(final int trackedAllocationDepth) {
+        return trackedAllocationDepth > 0;
     }
 
     @Override

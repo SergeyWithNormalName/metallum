@@ -48,6 +48,16 @@ abstract class GuiRendererHdrMixin {
             return;
         }
 
+        // The native HDR fast path keeps a sharp FP16 world and an exact
+        // quantized SDR seed. Vanilla's blur filters only that SDR seed, so
+        // its pixels no longer correspond to the HDR world sampled by the
+        // separated present shader. The resulting sharp/blurred mixture is a
+        // spatial distortion, not a valid HDR blur. Keep the stable sharp
+        // backdrop here; ordinary screen shading and GUI draws still render.
+        if (!HdrUiRenderTarget.shouldProcessSdrBackdropBlur()) {
+            return;
+        }
+
         PostChain blur = Minecraft.getInstance().getShaderManager().getPostChain(
                 GameRendererAccessor.metallum$getBlurPostChainId(),
                 LevelTargetBundle.MAIN_TARGETS

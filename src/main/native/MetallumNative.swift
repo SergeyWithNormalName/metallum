@@ -6896,6 +6896,7 @@ public func metallum_create_texture_2d(
     _ cubeCompatible: UInt64,
     _ usage: MTLTextureUsage,
     _ storageMode: MTLStorageMode,
+    _ trackedHazards: Int32,
     _ labelPtr: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
@@ -6922,7 +6923,7 @@ public func metallum_create_texture_2d(
         descriptor.mipmapLevelCount = max(Int(mipLevels), 1)
         descriptor.usage = usage
         descriptor.storageMode = storageMode
-        descriptor.hazardTrackingMode = .untracked
+        descriptor.hazardTrackingMode = trackedHazards != 0 ? .tracked : .untracked
         guard let texture = device.makeTexture(descriptor: descriptor) else {
             return nil
         }

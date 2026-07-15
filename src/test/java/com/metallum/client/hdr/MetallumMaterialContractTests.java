@@ -285,6 +285,10 @@ public final class MetallumMaterialContractTests {
     }
 
     private static void testLoadingUiContinuity() {
+        require(!HdrUiRenderTarget.shouldProcessSdrBackdropBlur(true),
+                "separated HDR presentation still permits a mismatched SDR backdrop blur");
+        require(HdrUiRenderTarget.shouldProcessSdrBackdropBlur(false),
+                "output-only UI lost its ordinary SDR backdrop blur");
         require(HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, false, false, false),
                 "non-precomposed blurred UI lost its safe output-only fallback");
         require(!HdrUiRenderTarget.shouldSuppressSceneEnhancement(true, true, false, false),

@@ -2,6 +2,8 @@ package com.metallum.client.metal.render;
 
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.GpuFormat;
+import com.mojang.blaze3d.pipeline.TextureTarget;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 
@@ -17,6 +19,29 @@ public final class MetalHdrFrame {
             final boolean hasLevel
     ) {
         return resourcesLoaded && advanceGameTime && hasLevel;
+    }
+
+    /** Allocates the reused GUI attachments with cross-submit Metal hazard tracking. */
+    public static TextureTarget createTrackedUiTarget(
+            final GpuTextureView mainColorView,
+            final String label,
+            final int width,
+            final int height,
+            final boolean useDepth,
+            final GpuFormat format
+    ) {
+        if (mainColorView != null
+                && !mainColorView.isClosed()
+                && mainColorView.texture() instanceof MetalGpuTexture color) {
+            return color.device().createTrackedTextureTarget(
+                    label,
+                    width,
+                    height,
+                    useDepth,
+                    format
+            );
+        }
+        return new TextureTarget(label, width, height, useDepth, format);
     }
 
     /** Limits the material shader flavor to GameRenderer's real world pass. */

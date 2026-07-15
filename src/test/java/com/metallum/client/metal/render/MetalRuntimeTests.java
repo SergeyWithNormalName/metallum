@@ -55,6 +55,7 @@ public final class MetalRuntimeTests {
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
+        testTrackedUiTextureAllocationScope();
         testWorldSceneCaptureGate();
         testMaterialWorldPassGate();
         testMojangLogoFp16BlendCompatibility();
@@ -658,6 +659,15 @@ public final class MetalRuntimeTests {
                 "Actual EDR title/loading frame lost its required SDR UI target");
         require(!MetalDevice.shouldRouteScene(false, false, true, false),
                 "Legacy SDR unexpectedly enabled scene routing");
+    }
+
+    private static void testTrackedUiTextureAllocationScope() {
+        require(!MetalDevice.shouldTrackTextureHazards(0),
+                "ordinary Metal textures unexpectedly enabled implicit hazard tracking");
+        require(MetalDevice.shouldTrackTextureHazards(1),
+                "reused SDR UI attachments did not enable cross-submit hazard tracking");
+        require(MetalDevice.shouldTrackTextureHazards(2),
+                "nested tracked texture allocation scope lost its tracking contract");
     }
 
     private static void testMaterialWorldPassGate() {

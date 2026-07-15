@@ -374,7 +374,7 @@ public final class MetalNativeBridge {
             createTexture2d = downcall(
                     lookup,
                     "metallum_create_texture_2d",
-                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, ValueLayout.ADDRESS)
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, LONG, LONG, INT, ValueLayout.ADDRESS)
             );
             createTextureView = downcall(lookup, "metallum_create_texture_view", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG));
             createBufferTextureView = downcall(
@@ -1076,6 +1076,7 @@ public final class MetalNativeBridge {
             final long cubeCompatible,
             final long usage,
             final MTLStorageMode storageMode,
+            final boolean trackedHazards,
             final String label
     ) {
         try (Arena arena = Arena.ofConfined()) {
@@ -1089,6 +1090,7 @@ public final class MetalNativeBridge {
                     cubeCompatible,
                     usage,
                     storageMode.value,
+                    trackedHazards ? 1 : 0,
                     toCString(arena, label)
             );
         } catch (Throwable throwable) {

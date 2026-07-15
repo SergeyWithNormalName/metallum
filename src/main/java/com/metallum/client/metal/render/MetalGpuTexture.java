@@ -39,6 +39,20 @@ final class MetalGpuTexture extends GpuTexture {
             final int depthOrLayers,
             final int mipLevels
     ) {
+        this(device, usage, label, format, width, height, depthOrLayers, mipLevels, false);
+    }
+
+    MetalGpuTexture(
+            final MetalDevice device,
+            @GpuTexture.Usage final int usage,
+            final String label,
+            final GpuFormat format,
+            final int width,
+            final int height,
+            final int depthOrLayers,
+            final int mipLevels,
+            final boolean trackedHazards
+    ) {
         super(usage, label, format, width, height, depthOrLayers, mipLevels);
         this.device = device;
         this.mtlPixelFormat = MTLPixelFormat.from(format);
@@ -53,6 +67,7 @@ final class MetalGpuTexture extends GpuTexture {
                 (usage & GpuTexture.USAGE_CUBEMAP_COMPATIBLE) != 0 ? 1L : 0L,
                 toMtlTextureUsage(usage),
                 MTLStorageMode.Private,
+                trackedHazards,
                 label
         );
         if (MetalNativeBridge.isNullHandle(createdTexture)) {

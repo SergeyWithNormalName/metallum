@@ -62,7 +62,8 @@ public final class HdrUiRenderTarget {
                     ? Minecraft.getInstance().getWindow().getHeight()
                     : mainTarget.height;
             if (target == null || target.width != targetWidth || target.height != targetHeight) {
-                TextureTarget replacement = new TextureTarget(
+                TextureTarget replacement = MetalHdrFrame.createTrackedUiTarget(
+                        mainTarget.getColorTextureView(),
                         "Metallum SDR UI",
                         targetWidth,
                         targetHeight,
@@ -165,6 +166,15 @@ public final class HdrUiRenderTarget {
     @Nullable
     public static RenderTarget activeTarget() {
         return activeThisFrame ? target : null;
+    }
+
+    /** Allows SDR blur only when no separately presented HDR world must match it. */
+    public static boolean shouldProcessSdrBackdropBlur() {
+        return shouldProcessSdrBackdropBlur(spatialHdrPrecomposedThisFrame);
+    }
+
+    static boolean shouldProcessSdrBackdropBlur(final boolean hdrWorldPrecomposed) {
+        return !hdrWorldPrecomposed;
     }
 
     public static RenderTarget screenshotTargetFor(final RenderTarget source) {
