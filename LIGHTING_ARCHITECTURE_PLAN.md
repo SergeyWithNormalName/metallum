@@ -1,6 +1,6 @@
 # Metallum: глобальный план независимого нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура и поэтапный план реализации после базовой оптимизации renderer.
+Статус: целевая архитектура; preparation gate пройден 15 июля 2026 года, следующая работа — Lighting Stage 0.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -28,6 +28,39 @@ Iris: намеренно не является целью совместимос
 - generated metallib, per-frame rings и resource lifetime validation готовы к использованию lighting subsystems.
 
 До этого разрешены только исследования, тестовые сцены, ABI/математические unit tests и capability scaffolding, не создающие постоянный второй render path.
+
+### Lighting Preparation Readiness — 15 июля 2026
+
+Этот checklist фиксирует только фактически готовые контракты. Он не означает, что новое освещение, temporal processing или production Metal 4 renderer уже реализованы.
+
+- [x] O0–O6 подтверждены кодом, targeted validation, full `clean check` и имеющимся runtime evidence.
+- [x] `LightingMode` и `DisplayOutputMode` независимы; renderer generation устойчиво отказывает в Legacy/SDR/Metal 3 при отсутствии capability.
+- [x] Immutable versioned `FrameState`/`FrameContract` готовы; production jitter остаётся нулевым, motion/reactive inputs обозначены как unavailable.
+- [x] History-reset contract покрывает first frame, resize, world/dimension transitions, teleport/camera cut, projection/FOV, renderer/lighting/output generation, internal scale и reload.
+- [x] Один immutable capability snapshot собирается при создании `MetalDevice`; MetalFX capabilities не привязаны к выбору Metal 3/Metal 4 executor.
+- [x] Изолированный native Metal 4 lifecycle harness проходит на M1 Pro/macOS 26+ и корректно skipped на неподходящей OS/architecture/SDK.
+- [x] Pure `FrameSynthesisContract` описывает admission, cadence, presentation order, drawable ownership и in-flight lifetime, но не включает Frame Interpolation.
+- [x] `BoundedWorkQueue` задаёт capacity/item/time budgets, coalescing, priority, starvation bound, deterministic order, overflow fallback и telemetry; к production lighting queues он пока не подключён.
+- [x] Production output и видимая картинка не изменены; HDR/SDR routing остался прежним.
+- [x] Production executor остаётся Metal 3; Metal 4 command allocators, argument tables, residency sets и barriers есть только в test harness.
+- [x] Постоянные lighting resources, motion/reactive textures и новые lighting passes не выделяются.
+
+В O2 приняты только уже доказанные bounded in-flight upload foundations. Кандидаты private/write-combined upload и дополнительной copy batching не возвращаются без нового положительного A/B: прежние измерения не показали прироста либо ухудшали стабильность. O3 resource lifetime/synchronization foundation готов, но transient lighting heap aliasing сознательно не делается до появления реальных lighting lifetimes.
+
+До первого lighting vertical slice сознательно отложены и **не считаются реализованными**:
+
+- O7 Hi-Z/ICB/instancing;
+- production Metal 4 executor O8c–O8f;
+- production argument tables, residency sets и explicit barriers;
+- Metal 4 performance A/B;
+- MetalFX Temporal scaler;
+- MetalFX Frame Interpolation;
+- motion/reactive attachments;
+- dynamic resolution;
+- transient lighting heap aliasing;
+- оптимизация новых lighting passes.
+
+Единственная новая production-цена preparation layer — один capability discovery при создании `MetalDevice` и расширенные timing metadata. Новые generation/frame graph/temporal/synthesis/work-budget модели не вызываются из per-frame production path. Поэтому искусственный FPS benchmark для preparation gate не требуется; Metal 4 A/B будет нужен только после появления production executor и репрезентативной lighting-нагрузки.
 
 ---
 
