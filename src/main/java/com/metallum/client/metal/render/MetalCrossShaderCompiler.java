@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
 import com.mojang.blaze3d.pipeline.BindGroupLayout.UniformDescription;
@@ -74,9 +75,112 @@ final class MetalCrossShaderCompiler {
                 }
             }
 
+            EnumMap<HdrShaderFlavor, MetalCompiledRenderPipeline.ShaderVariantSource> patchedVariants =
+                    patchSodiumLightSidecar(device, pipeline, variants);
+            if (patchedVariants != null) {
+                MetalCompiledRenderPipeline patchedPipeline = null;
+                try {
+                    patchedPipeline = new MetalCompiledRenderPipeline(device, pipeline, role, patchedVariants);
+                    if (patchedPipeline.isValid()) {
+                        SodiumLightSidecar.notePatchedPipeline(pipeline.getLocation().toString());
+                        return patchedPipeline;
+                    }
+                    patchedPipeline.close();
+                    SodiumLightSidecar.fail(
+                            "Metal rejected the patched terrain shader pipeline " + pipeline.getLocation(),
+                            null
+                    );
+                } catch (RuntimeException exception) {
+                    if (patchedPipeline != null) {
+                        patchedPipeline.close();
+                    }
+                    SodiumLightSidecar.fail(
+                            "Metal could not compile the patched terrain shader pipeline " + pipeline.getLocation(),
+                            exception
+                    );
+                }
+            }
+
             return new MetalCompiledRenderPipeline(device, pipeline, role, variants);
         } catch (ShaderCompileException e) {
             throw new IllegalStateException("Failed to compile Metal cross shader for pipeline " + pipeline.getLocation(), e);
+        }
+    }
+
+    @Nullable
+    private static EnumMap<HdrShaderFlavor, MetalCompiledRenderPipeline.ShaderVariantSource> patchSodiumLightSidecar(
+            final MetalDevice device,
+            final RenderPipeline pipeline,
+            final EnumMap<HdrShaderFlavor, MetalCompiledRenderPipeline.ShaderVariantSource> variants
+    ) {
+        if (!SodiumLightSidecar.isRuntimeActive() || !SodiumLightSidecarMslPatcher.isTarget(pipeline)) {
+            return null;
+        }
+
+        MetalCompiledRenderPipeline.ShaderVariantSource legacy = variants.get(HdrShaderFlavor.LEGACY);
+        if (legacy == null) {
+            SodiumLightSidecar.fail(
+                    "target terrain pipeline is missing its legacy shader flavor " + pipeline.getLocation(),
+                    null
+            );
+            return null;
+        }
+
+        try {
+            device.sodiumLightSidecarBindings();
+            int dataBufferSlot = Math.addExact(
+                    MetalCompiledRenderPipeline.firstAvailableVertexBufferSlot(legacy.resources()),
+                    MetalRenderPass.MAX_VERTEX_BUFFERS
+            );
+            int controlBufferSlot = Math.addExact(dataBufferSlot, 1);
+            EnumMap<HdrShaderFlavor, MetalCompiledRenderPipeline.ShaderVariantSource> patchedVariants =
+                    new EnumMap<>(HdrShaderFlavor.class);
+
+            for (Map.Entry<HdrShaderFlavor, MetalCompiledRenderPipeline.ShaderVariantSource> entry
+                    : variants.entrySet()) {
+                MetalCompiledRenderPipeline.ShaderVariantSource variant = entry.getValue();
+                SodiumLightSidecarMslPatcher.Result patch = SodiumLightSidecarMslPatcher.patch(
+                        variant.vertexMsl(),
+                        variant.vertexEntryPoint(),
+                        dataBufferSlot,
+                        controlBufferSlot
+                );
+                if (!patch.success()) {
+                    com.metallum.Metallum.LOGGER.warn(
+                            "Sodium light sidecar did not patch pipeline {} flavor {}; keeping legacy packed lighting: {}",
+                            pipeline.getLocation(),
+                            entry.getKey(),
+                            patch.reason()
+                    );
+                    SodiumLightSidecar.fail(
+                            "could not patch terrain pipeline " + pipeline.getLocation()
+                                    + " flavor " + entry.getKey() + ": " + patch.reason(),
+                            null
+                    );
+                    return null;
+                }
+                patchedVariants.put(entry.getKey(), new MetalCompiledRenderPipeline.ShaderVariantSource(
+                        patch.source(),
+                        variant.fragmentMsl(),
+                        variant.vertexEntryPoint(),
+                        variant.fragmentEntryPoint(),
+                        variant.resources(),
+                        variant.semanticOutput()
+                ));
+            }
+
+            return patchedVariants;
+        } catch (RuntimeException exception) {
+            com.metallum.Metallum.LOGGER.warn(
+                    "Sodium light sidecar could not prepare pipeline {}; keeping legacy packed lighting",
+                    pipeline.getLocation(),
+                    exception
+            );
+            SodiumLightSidecar.fail(
+                    "could not prepare terrain shader sidecar slots for pipeline " + pipeline.getLocation(),
+                    exception
+            );
+            return null;
         }
     }
 

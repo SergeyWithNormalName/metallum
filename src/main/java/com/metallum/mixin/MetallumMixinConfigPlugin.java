@@ -16,12 +16,18 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String PREFERRED_GRAPHICS_API_MIXIN = "com.metallum.mixin.render.PreferredGraphicsApiMixin";
     private static final String BENCHMARK_MIXIN_PREFIX = "com.metallum.mixin.benchmark.";
     private static final String BENCHMARK_SODIUM_MIXIN_PREFIX = "com.metallum.mixin.benchmark.sodium.";
+    private static final Set<String> SODIUM_LIGHT_SIDECAR_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.GlBufferArenaLightSidecarMixin",
+            "com.metallum.mixin.sodium.PendingBufferCopyCommandAccessor",
+            "com.metallum.mixin.sodium.RenderRegionDeviceResourcesLightSidecarMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
     private boolean isMacOs;
     private boolean isDefaultGraphicsApi;
     private boolean benchmarkEnabled;
+    private boolean sodiumLightSidecarEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -29,6 +35,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.isMacOs = osName.toLowerCase(Locale.ROOT).contains("mac");
         this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
+        this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
     }
 
     @Override
@@ -48,6 +55,11 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (mixinClassName.startsWith(BENCHMARK_MIXIN_PREFIX)) {
             return this.benchmarkEnabled && this.isDefaultGraphicsApi;
+        }
+        if (SODIUM_LIGHT_SIDECAR_MIXINS.contains(mixinClassName)) {
+            return this.sodiumLightSidecarEnabled
+                    && this.isDefaultGraphicsApi
+                    && FabricLoader.getInstance().isModLoaded("sodium");
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
@@ -89,5 +101,15 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
 
         return true;
+    }
+
+    private static boolean isEnabled(String value) {
+        if (value == null) {
+            return false;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "1", "true", "yes", "on" -> true;
+            default -> false;
+        };
     }
 }

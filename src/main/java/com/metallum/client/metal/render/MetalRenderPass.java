@@ -3,6 +3,8 @@ package com.metallum.client.metal.render;
 import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
+import com.metallum.client.sodium.SodiumLightSidecar;
+import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.IndexType;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -61,6 +63,11 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean scissorDirty = true;
     private boolean vertexBuffersDirty = true;
     private boolean pipelineDirty = true;
+    private boolean lastSidecarRuntimeActive;
+    private int boundSidecarControlSlot = -1;
+    private boolean boundSidecarControlEnabled;
+    @Nullable
+    private MTLRenderCommandEncoder boundRenderEncoder;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -301,7 +308,13 @@ final class MetalRenderPass implements RenderPassBackend {
                 draw.uniformUploaderConsumer().accept(uniformArgument, this::setUniform);
             }
 
-            if (scissorDirty || vertexBuffersDirty || dirtyDescriptorMask != 0L || pipelineDirty) {
+            if (scissorDirty
+                    || vertexBuffersDirty
+                    || dirtyDescriptorMask != 0L
+                    || pipelineDirty
+                    || (compiledPipeline != null
+                    && compiledPipeline.usesSodiumLightSidecar()
+                    && this.boundRenderEncoder != enc)) {
                 bindDrawState(enc);
             }
             MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
@@ -438,6 +451,78 @@ final class MetalRenderPass implements RenderPassBackend {
             int metalSlot = firstSlot + slot;
             enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
         }
+        if (compiledPipeline.usesSodiumLightSidecar()) {
+            pushSodiumLightSidecar(enc);
+        }
+    }
+
+    private void pushSodiumLightSidecar(final MTLRenderCommandEncoder enc) {
+        MetalDevice.SodiumLightSidecarBindings bindings = this.device.sodiumLightSidecarBindings();
+        MetalGpuBuffer dataBuffer = bindings.dummyData();
+        long dataOffset = 0L;
+        boolean enabled = false;
+        GpuBufferSlice geometry = this.vertexBuffers[0];
+
+        if (SodiumLightSidecar.isRuntimeActive() && geometry != null) {
+            try {
+                long geometryOffset = geometry.offset();
+                long geometryLength = geometry.length();
+                long geometryEnd = Math.addExact(geometryOffset, geometryLength);
+                if (geometryOffset < 0L
+                        || geometryLength < SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+                        || geometryEnd > geometry.buffer().size()
+                        || geometryOffset % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L) {
+                    throw new IllegalStateException(
+                            "terrain geometry slice has an invalid compact-vertex offset or bounds"
+                    );
+                }
+
+                GpuBuffer sidecar = SodiumLightSidecar.find(geometry.buffer());
+                if (!(sidecar instanceof MetalGpuBuffer nativeSidecar) || sidecar.isClosed()) {
+                    throw new IllegalStateException("terrain geometry buffer has no live Metal light sidecar");
+                }
+                long sidecarOffset = Math.multiplyExact(
+                        geometryOffset / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE,
+                        SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+                );
+                long sidecarLength = Math.multiplyExact(
+                        geometryLength / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE,
+                        SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE
+                );
+                if (sidecarOffset >= sidecar.size()
+                        || Math.addExact(sidecarOffset, sidecarLength) > sidecar.size()) {
+                    throw new IllegalStateException("terrain light sidecar slice exceeds its companion buffer");
+                }
+                if (SodiumLightSidecar.isRuntimeActive()) {
+                    dataBuffer = nativeSidecar;
+                    dataOffset = sidecarOffset;
+                    enabled = true;
+                }
+            } catch (RuntimeException exception) {
+                SodiumLightSidecar.fail("could not bind a terrain light sidecar", exception);
+            }
+        }
+
+        int dataSlot = this.compiledPipeline.sodiumLightSidecarBufferSlot();
+        enc.setBuffer(
+                dataBuffer.nativeHandle(),
+                dataOffset,
+                dataSlot,
+                MetalCompiledRenderPipeline.STAGE_VERTEX
+        );
+        int controlSlot = dataSlot + 1;
+        if (this.boundSidecarControlSlot != controlSlot
+                || this.boundSidecarControlEnabled != enabled) {
+            enc.setBuffer(
+                    bindings.control().nativeHandle(),
+                    enabled ? Integer.BYTES : 0L,
+                    controlSlot,
+                    MetalCompiledRenderPipeline.STAGE_VERTEX
+            );
+            this.boundSidecarControlSlot = controlSlot;
+            this.boundSidecarControlEnabled = enabled;
+        }
+        this.lastSidecarRuntimeActive = SodiumLightSidecar.isRuntimeActive();
     }
 
     private void drawTriangleFan(MTLRenderCommandEncoder encoder, final int firstVertex, final int vertexCount, final int instanceCount, final int baseInstance) {
@@ -509,6 +594,17 @@ final class MetalRenderPass implements RenderPassBackend {
     private void bindDrawState(final MTLRenderCommandEncoder enc) {
         if (compiledPipeline == null) {
             throw new IllegalStateException("Pipeline is missing");
+        }
+
+        boolean sidecarPipeline = compiledPipeline.usesSodiumLightSidecar();
+        if (sidecarPipeline && this.boundRenderEncoder != enc) {
+            this.invalidateNativeEncoderState();
+            this.boundRenderEncoder = enc;
+        }
+
+        if (sidecarPipeline
+                && this.lastSidecarRuntimeActive != SodiumLightSidecar.isRuntimeActive()) {
+            this.vertexBuffersDirty = true;
         }
 
         if (pipelineDirty) {
@@ -632,6 +728,7 @@ final class MetalRenderPass implements RenderPassBackend {
         this.pipelineDirty = true;
         this.scissorDirty = true;
         this.vertexBuffersDirty = true;
+        this.boundSidecarControlSlot = -1;
         if (this.compiledPipeline != null) {
             this.dirtyDescriptorMask |= this.compiledPipeline.allResourceMask();
         }

@@ -13,6 +13,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
@@ -51,6 +52,16 @@ public final class MetalDevice implements GpuDeviceBackend {
     record SemanticAttachment(MemorySegment texture, boolean clear) {
     }
 
+    record SodiumLightSidecarBindings(
+            MetalGpuBuffer dummyData,
+            MetalGpuBuffer control
+    ) {
+        void close() {
+            this.control.close();
+            this.dummyData.close();
+        }
+    }
+
     record HdrSceneInputs(
             MemorySegment scene,
             MemorySegment depth,
@@ -83,6 +94,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
+    @Nullable
+    private SodiumLightSidecarBindings sodiumLightSidecarBindings;
     private ShaderSource activeShaderSource;
     @Nullable
     private MetalGpuTexture hdrSceneSnapshot;
@@ -326,6 +339,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSemanticMask.close();
             this.hdrSemanticMask = null;
         }
+        SodiumLightSidecar.releaseAll();
+        this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
         this.commandEncoder.close();
         this.clearPipelineCache();
@@ -359,6 +374,45 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     MemorySegment metalDeviceHandle() {
         return this.metalDeviceHandle;
+    }
+
+    synchronized SodiumLightSidecarBindings sodiumLightSidecarBindings() {
+        if (this.sodiumLightSidecarBindings != null) {
+            return this.sodiumLightSidecarBindings;
+        }
+
+        MetalGpuBuffer dummyData = null;
+        MetalGpuBuffer control = null;
+        try {
+            int sharedBindingUsage = GpuBuffer.USAGE_MAP_WRITE | GpuBuffer.USAGE_UNIFORM;
+            dummyData = new MetalGpuBuffer(this, sharedBindingUsage, Short.BYTES);
+            control = new MetalGpuBuffer(this, sharedBindingUsage, Integer.BYTES * 2L);
+            try (var mapped = dummyData.map(0L, Short.BYTES, false, true)) {
+                mapped.data().putShort(0, (short) 0);
+            }
+            try (var mapped = control.map(0L, Integer.BYTES * 2L, false, true)) {
+                mapped.data().putInt(0, 0);
+                mapped.data().putInt(Integer.BYTES, 1);
+            }
+            this.sodiumLightSidecarBindings = new SodiumLightSidecarBindings(dummyData, control);
+            return this.sodiumLightSidecarBindings;
+        } catch (RuntimeException exception) {
+            if (control != null) {
+                control.close();
+            }
+            if (dummyData != null) {
+                dummyData.close();
+            }
+            throw exception;
+        }
+    }
+
+    private synchronized void closeSodiumLightSidecarBindings() {
+        if (this.sodiumLightSidecarBindings == null) {
+            return;
+        }
+        this.sodiumLightSidecarBindings.close();
+        this.sodiumLightSidecarBindings = null;
     }
 
     void waitForSubmittedGpuWork() {

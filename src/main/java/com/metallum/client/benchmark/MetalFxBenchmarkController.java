@@ -4,6 +4,8 @@ import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
+import com.metallum.client.sodium.SodiumLightSidecar;
+import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.mojang.blaze3d.platform.Monitor;
 import com.mojang.blaze3d.platform.VideoMode;
 import com.mojang.blaze3d.platform.Window;
@@ -667,6 +669,7 @@ public final class MetalFxBenchmarkController {
         }
 
         TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
+        SodiumLightSidecar.Snapshot sidecar = SodiumLightSidecar.snapshot();
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch={} requests={}/{} tasks={}/{} outputs={}/{} accepted_mesh_payload_bytes={} queue={}/{} busy={}/{} pending_results={}/{} max_pending_age_ns={} errors={} overflow={}",
                 snapshot.epochId(),
@@ -686,6 +689,25 @@ public final class MetalFxBenchmarkController {
                 snapshot.maximumPendingAgeNanos(),
                 snapshot.errorCount(),
                 snapshot.overflowCount()
+        );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_SIDECAR epoch={} configured={} active={} accepted_geometry_payload_bytes={} produced_bytes={} uploaded_bytes={} upload_commands={} resize_copy_bytes={} resize_copy_commands={} telemetry_fallbacks={} companions={} live_geometry_bytes={} live_sidecar_bytes={} peak_sidecar_bytes={} patched_pipelines={} runtime_fallbacks={}",
+                snapshot.epochId(),
+                sidecar.configured(),
+                sidecar.runtimeActive(),
+                snapshot.acceptedGeometryPayloadBytes(),
+                snapshot.sidecarProducedBytes(),
+                snapshot.sidecarUploadedBytes(),
+                snapshot.sidecarUploadCommands(),
+                snapshot.sidecarResizeCopyBytes(),
+                snapshot.sidecarResizeCopyCommands(),
+                snapshot.sidecarFallbackCount(),
+                sidecar.companionCount(),
+                sidecar.liveGeometryBytes(),
+                sidecar.liveSidecarBytes(),
+                sidecar.peakSidecarBytes(),
+                sidecar.patchedPipelineCount(),
+                sidecar.fallbackCount()
         );
         if (snapshot.epochId() != this.torchEpochToken) {
             fail(minecraft, "TORCH_EPOCH telemetry epoch identity changed");
@@ -707,6 +729,45 @@ public final class MetalFxBenchmarkController {
                 || snapshot.acceptedMeshPayloadBytes() == 0L) {
             fail(minecraft, "TORCH_EPOCH did not observe the expected rebuild lifecycle");
             return;
+        }
+        if (sidecar.configured()) {
+            if (!sidecar.runtimeActive()
+                    || sidecar.fallbackCount() != 0L
+                    || snapshot.sidecarFallbackCount() != 0L) {
+                fail(minecraft, "TORCH_EPOCH Sodium light sidecar entered its legacy fallback path");
+                return;
+            }
+            if (sidecar.patchedPipelineCount() == 0) {
+                fail(minecraft, "TORCH_EPOCH did not observe a patched Sodium light pipeline");
+                return;
+            }
+
+            long acceptedGeometryBytes = snapshot.acceptedGeometryPayloadBytes();
+            if (acceptedGeometryBytes <= 0L
+                    || acceptedGeometryBytes % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L) {
+                fail(minecraft, "TORCH_EPOCH accepted geometry payload was not compact Sodium vertex data");
+                return;
+            }
+            long expectedUploadedSidecarBytes = acceptedGeometryBytes
+                    / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+                    * SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE;
+            if (snapshot.sidecarProducedBytes() != expectedUploadedSidecarBytes
+                    || snapshot.sidecarUploadedBytes() != expectedUploadedSidecarBytes
+                    || snapshot.sidecarUploadCommands() == 0L) {
+                fail(minecraft, "TORCH_EPOCH Sodium light sidecar upload did not exactly mirror accepted geometry bytes");
+                return;
+            }
+
+            long liveGeometryBytes = sidecar.liveGeometryBytes();
+            if (sidecar.companionCount() == 0
+                    || liveGeometryBytes <= 0L
+                    || liveGeometryBytes % SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE != 0L
+                    || sidecar.liveSidecarBytes() != liveGeometryBytes
+                    / SodiumLightSidecarPacking.GEOMETRY_VERTEX_STRIDE
+                    * SodiumLightSidecarPacking.SIDECAR_VERTEX_STRIDE) {
+                fail(minecraft, "TORCH_EPOCH Sodium light sidecar live storage ratio changed from 10 percent");
+                return;
+            }
         }
 
         this.torchEpochFinished = true;

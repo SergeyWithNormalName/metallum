@@ -33,6 +33,9 @@
     "sodium.DefaultFluidRendererHdrMixin",
     "sodium.DrawBackendMixin",
     "sodium.DrawContextMixin",
+    "sodium.GlBufferArenaLightSidecarMixin",
+    "sodium.PendingBufferCopyCommandAccessor",
+    "sodium.RenderRegionDeviceResourcesLightSidecarMixin",
     "sodium.SodiumPreferredGraphicsApiMixin"
   ],
   "injectors": {

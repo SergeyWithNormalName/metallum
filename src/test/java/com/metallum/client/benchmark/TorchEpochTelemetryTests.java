@@ -7,6 +7,7 @@ public final class TorchEpochTelemetryTests {
     public static void main(final String[] args) {
         testInactiveEpochIsANoOp();
         testLifecycleCountersAndSafeEnd();
+        testSidecarCountersAndValidation();
         testBoundedUniqueSectionTracking();
         testRestartAndAbortRecovery();
     }
@@ -17,6 +18,10 @@ public final class TorchEpochTelemetryTests {
         recorder.recordRebuildTask(1L, 99L);
         recorder.recordBuildOutput(1L);
         recorder.recordAcceptedMeshPayloadBytes(256L);
+        recorder.recordAcceptedGeometryPayloadBytes(240L);
+        recorder.recordSidecarUpload(64L, 1L);
+        recorder.recordSidecarResizeCopies(32L, 2L);
+        recorder.recordSidecarFallback();
         recorder.recordBuilderWorkState(9, 2, 1);
         recorder.recordError();
 
@@ -27,6 +32,13 @@ public final class TorchEpochTelemetryTests {
         require(snapshot.rebuildTaskCount() == 0L, "inactive recorder counted tasks");
         require(snapshot.buildOutputCount() == 0L, "inactive recorder counted outputs");
         require(snapshot.acceptedMeshPayloadBytes() == 0L, "inactive recorder counted mesh bytes");
+        require(snapshot.acceptedGeometryPayloadBytes() == 0L, "inactive recorder counted geometry bytes");
+        require(snapshot.sidecarProducedBytes() == 0L, "inactive recorder counted sidecar production");
+        require(snapshot.sidecarUploadedBytes() == 0L, "inactive recorder counted sidecar uploads");
+        require(snapshot.sidecarUploadCommands() == 0L, "inactive recorder counted sidecar upload commands");
+        require(snapshot.sidecarResizeCopyBytes() == 0L, "inactive recorder counted sidecar resize bytes");
+        require(snapshot.sidecarResizeCopyCommands() == 0L, "inactive recorder counted sidecar resize commands");
+        require(snapshot.sidecarFallbackCount() == 0L, "inactive recorder counted sidecar fallbacks");
         require(snapshot.errorCount() == 0L, "inactive recorder counted errors");
     }
 
@@ -43,6 +55,8 @@ public final class TorchEpochTelemetryTests {
         recorder.recordBuildOutput(30L);
         recorder.recordAcceptedMeshPayloadBytes(120L);
         recorder.recordAcceptedMeshPayloadBytes(80L);
+        recorder.recordAcceptedGeometryPayloadBytes(100L);
+        recorder.recordAcceptedGeometryPayloadBytes(60L);
         recorder.recordBuilderWorkState(2, 1, 0);
         recorder.recordBuilderWorkState(5, 3, 2);
         recorder.recordBuilderWorkState(3, 2, 1);
@@ -60,6 +74,7 @@ public final class TorchEpochTelemetryTests {
         require(active.buildOutputCount() == 3L, "output count mismatch");
         require(active.uniqueBuildOutputSections() == 2L, "unique output section count mismatch");
         require(active.acceptedMeshPayloadBytes() == 200L, "mesh payload byte count mismatch");
+        require(active.acceptedGeometryPayloadBytes() == 160L, "geometry payload byte count mismatch");
         require(active.maximumBuilderQueueDepth() == 5, "maximum builder queue depth mismatch");
         require(active.finalBuilderQueueDepth() == 3, "final builder queue depth mismatch");
         require(active.maximumBusyWorkerCount() == 3, "maximum busy worker count mismatch");
@@ -74,6 +89,32 @@ public final class TorchEpochTelemetryTests {
         require(!ended.active(), "ended epoch remained active");
         recorder.recordRebuildRequest(99L);
         require(recorder.end().equals(ended), "safe repeated end changed a closed epoch");
+    }
+
+    private static void testSidecarCountersAndValidation() {
+        TorchEpochTelemetry.Recorder recorder = TorchEpochTelemetry.recorderForTests(4);
+        recorder.begin(84L);
+        recorder.recordSidecarUpload(20L, 1L);
+        recorder.recordSidecarUpload(36L, 2L);
+        recorder.recordSidecarResizeCopies(100L, 3L);
+        recorder.recordSidecarResizeCopies(20L, 1L);
+        recorder.recordSidecarFallback();
+        recorder.recordSidecarFallback();
+
+        recorder.recordSidecarUpload(-1L, 1L);
+        recorder.recordSidecarUpload(1L, -1L);
+        recorder.recordSidecarResizeCopies(-1L, 0L);
+        recorder.recordSidecarResizeCopies(0L, -1L);
+
+        TorchEpochTelemetry.Snapshot snapshot = recorder.end();
+        require(snapshot.sidecarProducedBytes() == 56L, "sidecar produced byte count mismatch");
+        require(snapshot.sidecarUploadedBytes() == 56L, "sidecar uploaded byte count mismatch");
+        require(snapshot.sidecarUploadCommands() == 3L, "sidecar upload command count mismatch");
+        require(snapshot.sidecarResizeCopyBytes() == 120L, "sidecar resize byte count mismatch");
+        require(snapshot.sidecarResizeCopyCommands() == 4L, "sidecar resize command count mismatch");
+        require(snapshot.sidecarFallbackCount() == 2L, "sidecar fallback count mismatch");
+        require(snapshot.errorCount() == 4L, "invalid sidecar samples were not counted as errors");
+        require(snapshot.overflowCount() == 0L, "ordinary sidecar counters unexpectedly overflowed");
     }
 
     private static void testBoundedUniqueSectionTracking() {
@@ -109,6 +150,7 @@ public final class TorchEpochTelemetryTests {
         require(aborted.epochId() == 0L, "abort retained epoch ID");
         require(aborted.errorCount() == 0L, "abort retained diagnostics");
         require(aborted.rebuildRequestCount() == 0L, "abort retained lifecycle counters");
+        require(aborted.sidecarUploadedBytes() == 0L, "abort retained sidecar counters");
     }
 
     private static void require(final boolean condition, final String message) {

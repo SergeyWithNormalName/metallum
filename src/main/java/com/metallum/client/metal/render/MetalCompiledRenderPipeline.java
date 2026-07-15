@@ -67,6 +67,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final ResourceBinding[] resourcesByBindingIndex;
     private final long allResourceMask;
     private final int firstAvailableVertexBufferSlot;
+    private final boolean usesSodiumLightSidecar;
+    private final int sodiumLightSidecarBufferSlot;
     private final MTLCullMode cullMode;
     private final MTLTriangleFillMode fillMode;
     private final float depthBiasScaleFactor;
@@ -143,6 +145,12 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.allResourceMask = resourceMask;
 
         this.firstAvailableVertexBufferSlot = firstAvailableVertexBufferSlot(this.resources);
+        this.usesSodiumLightSidecar = SodiumLightSidecarMslPatcher.isPatched(legacy.vertexMsl());
+        this.sodiumLightSidecarBufferSlot = this.usesSodiumLightSidecar
+                ? Math.addExact(this.firstAvailableVertexBufferSlot, MetalRenderPass.MAX_VERTEX_BUFFERS)
+                : -1;
+        validateSodiumLightSidecarVariants(info, variants, this.usesSodiumLightSidecar,
+                this.sodiumLightSidecarBufferSlot);
         this.cullMode = info.isCull() ? MTLCullMode.Back : MTLCullMode.None;
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
@@ -151,6 +159,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         Map<HdrShaderFlavor, ShaderFunctions> compiledFunctions = new java.util.EnumMap<>(HdrShaderFlavor.class);
         boolean allFunctionsValid = true;
+        boolean sidecarSceneVariantsValid = true;
         for (Map.Entry<HdrShaderFlavor, ShaderVariantSource> entry : variants.entrySet()) {
             ShaderVariantSource variant = entry.getValue();
             ShaderFunctions functions = new ShaderFunctions(
@@ -159,9 +168,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     variant.semanticOutput()
             );
             if (entry.getKey() != HdrShaderFlavor.LEGACY && !functions.isValid()) {
-                SceneLinearPreflightGate.rejectSceneVariant(
-                        "Metal rejected " + entry.getKey() + " functions for " + info.getLocation()
-                );
+                if (this.usesSodiumLightSidecar) {
+                    sidecarSceneVariantsValid = false;
+                } else {
+                    SceneLinearPreflightGate.rejectSceneVariant(
+                            "Metal rejected " + entry.getKey() + " functions for " + info.getLocation()
+                    );
+                }
                 continue;
             }
             compiledFunctions.put(entry.getKey(), functions);
@@ -196,6 +209,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         ShaderFunctions initialFunctions = this.shaderFunctions.get(initialFlavor);
 
         MemorySegment withoutDepth = MemorySegment.NULL;
+        MemorySegment withDepth = MemorySegment.NULL;
+        boolean sidecarScenePipelinesValid = true;
         if (allFunctionsValid && initialFunctions != null && initialFunctions.isValid()) {
             try (MTLVertexDescriptor vertexDescriptor = buildVertexDescriptor(info, this.firstAvailableVertexBufferSlot)) {
                 withoutDepth = compileAndCache(
@@ -208,7 +223,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         initialFunctions,
                         vertexDescriptor
                 );
-                compileAndCache(
+                withDepth = compileAndCache(
                         new PipelineKey(
                                 initialFlavor,
                                 colorFormat,
@@ -219,21 +234,25 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor
                 );
 
-                warmSceneLinearPipelines(vertexDescriptor);
+                sidecarScenePipelinesValid = warmSceneLinearPipelines(vertexDescriptor);
             }
         }
-        this.isValid = allFunctionsValid && !MetalNativeBridge.isNullHandle(withoutDepth);
+        this.isValid = allFunctionsValid
+                && !MetalNativeBridge.isNullHandle(withoutDepth)
+                && (!this.usesSodiumLightSidecar || !MetalNativeBridge.isNullHandle(withDepth))
+                && (!this.usesSodiumLightSidecar
+                || (sidecarSceneVariantsValid && sidecarScenePipelinesValid));
     }
 
-    private void warmSceneLinearPipelines(final MTLVertexDescriptor vertexDescriptor) {
+    private boolean warmSceneLinearPipelines(final MTLVertexDescriptor vertexDescriptor) {
         if (!SceneLinearPreflightGate.shouldCompileSceneVariants() || !this.hdrRole.supportsSceneLinearFlavor()) {
-            return;
+            return true;
         }
 
         HdrShaderFlavor sceneFlavor = this.hdrRole.sceneLinearFlavor();
         ShaderFunctions sceneFunctions = this.shaderFunctions.get(sceneFlavor);
         if (sceneFunctions == null || !sceneFunctions.isValid()) {
-            return;
+            return false;
         }
 
         for (MTLPixelFormat depthFormat : List.of(MTLPixelFormat.Invalid, MTLPixelFormat.Depth32Float)) {
@@ -244,12 +263,15 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     MTLPixelFormat.Invalid
             );
             if (MetalNativeBridge.isNullHandle(compileAndCache(key, sceneFunctions, vertexDescriptor))) {
-                SceneLinearPreflightGate.rejectSceneVariant(
-                        "Metal rejected the prewarmed " + key + " pipeline state for " + this.info.getLocation()
-                );
-                return;
+                if (!this.usesSodiumLightSidecar) {
+                    SceneLinearPreflightGate.rejectSceneVariant(
+                            "Metal rejected the prewarmed " + key + " pipeline state for " + this.info.getLocation()
+                    );
+                }
+                return false;
             }
         }
+        return true;
     }
 
     private MemorySegment compileAndCache(
@@ -378,6 +400,17 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
     int firstAvailableVertexBufferSlot() {
         return this.firstAvailableVertexBufferSlot;
+    }
+
+    boolean usesSodiumLightSidecar() {
+        return this.usesSodiumLightSidecar;
+    }
+
+    int sodiumLightSidecarBufferSlot() {
+        if (!this.usesSodiumLightSidecar) {
+            throw new IllegalStateException("Pipeline does not use the Sodium light sidecar: " + this.info.getLocation());
+        }
+        return this.sodiumLightSidecarBufferSlot;
     }
 
     float depthBiasScaleFactor() {
@@ -536,7 +569,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return vertexDesc;
     }
 
-    private static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
+    static int firstAvailableVertexBufferSlot(final List<ResourceBinding> resources) {
         int maxVertexBufferBinding = -1;
         for (ResourceBinding resource : resources) {
             if (resource.kind() == ResourceKind.UNIFORM_BUFFER && (resource.stageMask() & STAGE_VERTEX) != 0) {
@@ -544,6 +577,40 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             }
         }
         return maxVertexBufferBinding + 1;
+    }
+
+    private static void validateSodiumLightSidecarVariants(
+            final RenderPipeline pipeline,
+            final Map<HdrShaderFlavor, ShaderVariantSource> variants,
+            final boolean expectedPatched,
+            final int dataBufferSlot
+    ) {
+        int controlBufferSlot = expectedPatched ? Math.addExact(dataBufferSlot, 1) : -1;
+        if (expectedPatched && controlBufferSlot > 30) {
+            throw new IllegalStateException(
+                    "Sodium light sidecar exceeds Metal vertex buffer slots for pipeline " + pipeline.getLocation()
+            );
+        }
+
+        String dataBinding = "[[buffer(" + dataBufferSlot + ")]]";
+        String controlBinding = "[[buffer(" + controlBufferSlot + ")]]";
+        for (Map.Entry<HdrShaderFlavor, ShaderVariantSource> entry : variants.entrySet()) {
+            String vertexMsl = entry.getValue().vertexMsl();
+            boolean patched = SodiumLightSidecarMslPatcher.isPatched(vertexMsl);
+            if (patched != expectedPatched) {
+                throw new IllegalStateException(
+                        "Sodium light sidecar variants were not patched atomically for pipeline "
+                                + pipeline.getLocation()
+                );
+            }
+            if (expectedPatched
+                    && (!vertexMsl.contains(dataBinding) || !vertexMsl.contains(controlBinding))) {
+                throw new IllegalStateException(
+                        "Sodium light sidecar buffer slots changed for pipeline " + pipeline.getLocation()
+                                + " flavor " + entry.getKey()
+                );
+            }
+        }
     }
 
     @Override

@@ -64,6 +64,22 @@ public final class TorchEpochTelemetry {
         GLOBAL.recordAcceptedMeshPayloadBytes(bytes);
     }
 
+    public static void recordAcceptedGeometryPayloadBytes(final long bytes) {
+        GLOBAL.recordAcceptedGeometryPayloadBytes(bytes);
+    }
+
+    public static void recordSidecarUpload(final long bytes, final long commands) {
+        GLOBAL.recordSidecarUpload(bytes, commands);
+    }
+
+    public static void recordSidecarResizeCopies(final long bytes, final long commands) {
+        GLOBAL.recordSidecarResizeCopies(bytes, commands);
+    }
+
+    public static void recordSidecarFallback() {
+        GLOBAL.recordSidecarFallback();
+    }
+
     public static void recordBuilderWorkState(
             final int queuedJobs,
             final int busyWorkers,
@@ -90,6 +106,13 @@ public final class TorchEpochTelemetry {
             long buildOutputCount,
             long uniqueBuildOutputSections,
             long acceptedMeshPayloadBytes,
+            long acceptedGeometryPayloadBytes,
+            long sidecarProducedBytes,
+            long sidecarUploadedBytes,
+            long sidecarUploadCommands,
+            long sidecarResizeCopyBytes,
+            long sidecarResizeCopyCommands,
+            long sidecarFallbackCount,
             int maximumBuilderQueueDepth,
             int finalBuilderQueueDepth,
             int maximumBusyWorkerCount,
@@ -113,6 +136,13 @@ public final class TorchEpochTelemetry {
         private long rebuildTaskCount;
         private long buildOutputCount;
         private long acceptedMeshPayloadBytes;
+        private long acceptedGeometryPayloadBytes;
+        private long sidecarProducedBytes;
+        private long sidecarUploadedBytes;
+        private long sidecarUploadCommands;
+        private long sidecarResizeCopyBytes;
+        private long sidecarResizeCopyCommands;
+        private long sidecarFallbackCount;
         private int maximumBuilderQueueDepth;
         private int finalBuilderQueueDepth;
         private int maximumBusyWorkerCount;
@@ -159,6 +189,13 @@ public final class TorchEpochTelemetry {
                     this.buildOutputCount,
                     this.outputSections.size(),
                     this.acceptedMeshPayloadBytes,
+                    this.acceptedGeometryPayloadBytes,
+                    this.sidecarProducedBytes,
+                    this.sidecarUploadedBytes,
+                    this.sidecarUploadCommands,
+                    this.sidecarResizeCopyBytes,
+                    this.sidecarResizeCopyCommands,
+                    this.sidecarFallbackCount,
                     this.maximumBuilderQueueDepth,
                     this.finalBuilderQueueDepth,
                     this.maximumBusyWorkerCount,
@@ -214,6 +251,49 @@ public final class TorchEpochTelemetry {
             this.acceptedMeshPayloadBytes = this.add(this.acceptedMeshPayloadBytes, bytes);
         }
 
+        void recordAcceptedGeometryPayloadBytes(final long bytes) {
+            if (!this.active) {
+                return;
+            }
+            if (bytes < 0L) {
+                this.recordError();
+                return;
+            }
+            this.acceptedGeometryPayloadBytes = this.add(this.acceptedGeometryPayloadBytes, bytes);
+        }
+
+        void recordSidecarUpload(final long bytes, final long commands) {
+            if (!this.active) {
+                return;
+            }
+            if (bytes < 0L || commands < 0L) {
+                this.recordError();
+                return;
+            }
+            this.sidecarProducedBytes = this.add(this.sidecarProducedBytes, bytes);
+            this.sidecarUploadedBytes = this.add(this.sidecarUploadedBytes, bytes);
+            this.sidecarUploadCommands = this.add(this.sidecarUploadCommands, commands);
+        }
+
+        void recordSidecarResizeCopies(final long bytes, final long commands) {
+            if (!this.active) {
+                return;
+            }
+            if (bytes < 0L || commands < 0L) {
+                this.recordError();
+                return;
+            }
+            this.sidecarResizeCopyBytes = this.add(this.sidecarResizeCopyBytes, bytes);
+            this.sidecarResizeCopyCommands = this.add(this.sidecarResizeCopyCommands, commands);
+        }
+
+        void recordSidecarFallback() {
+            if (!this.active) {
+                return;
+            }
+            this.sidecarFallbackCount = this.add(this.sidecarFallbackCount, 1L);
+        }
+
         void recordBuilderWorkState(
                 final int queuedJobs,
                 final int busyWorkers,
@@ -251,6 +331,13 @@ public final class TorchEpochTelemetry {
             this.rebuildTaskCount = 0L;
             this.buildOutputCount = 0L;
             this.acceptedMeshPayloadBytes = 0L;
+            this.acceptedGeometryPayloadBytes = 0L;
+            this.sidecarProducedBytes = 0L;
+            this.sidecarUploadedBytes = 0L;
+            this.sidecarUploadCommands = 0L;
+            this.sidecarResizeCopyBytes = 0L;
+            this.sidecarResizeCopyCommands = 0L;
+            this.sidecarFallbackCount = 0L;
             this.maximumBuilderQueueDepth = 0;
             this.finalBuilderQueueDepth = 0;
             this.maximumBusyWorkerCount = 0;

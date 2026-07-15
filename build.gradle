@@ -166,6 +166,15 @@ tasks.register("torchEpochTelemetryUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.benchmark.TorchEpochTelemetryTests")
 }
 
+tasks.register("sodiumLightSidecarUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs exhaustive Sodium compact-light sidecar packing and MSL patch tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.SodiumLightSidecarTests")
+	environment "METALLUM_SODIUM_LIGHT_SIDECAR", "0"
+}
+
 tasks.register("frameGraphValidation", JavaExec) {
 	group = "verification"
 	description = "Validates the typed Metal frame graph and versioned ABI header"
@@ -495,6 +504,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
+	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))

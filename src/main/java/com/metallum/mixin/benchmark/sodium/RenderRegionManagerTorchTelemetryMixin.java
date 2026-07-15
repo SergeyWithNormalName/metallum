@@ -4,6 +4,7 @@ import com.metallum.client.benchmark.TorchEpochTelemetry;
 import net.caffeinemc.mods.sodium.client.render.chunk.UniformBufferManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.BuilderTaskOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
+import net.caffeinemc.mods.sodium.client.render.chunk.data.BuiltSectionMeshParts;
 import net.caffeinemc.mods.sodium.client.render.chunk.region.RenderRegionManager;
 import net.minecraft.core.SectionPos;
 import org.spongepowered.asm.mixin.Mixin;
@@ -40,6 +41,14 @@ abstract class RenderRegionManagerTorchTelemetryMixin {
                         output.section.getChunkZ()
                 ));
                 TorchEpochTelemetry.recordAcceptedMeshPayloadBytes(output.getResultSize());
+                long geometryPayloadBytes = 0L;
+                for (BuiltSectionMeshParts mesh : output.meshes.values()) {
+                    geometryPayloadBytes = Math.addExact(
+                            geometryPayloadBytes,
+                            mesh.getVertexData().getLength()
+                    );
+                }
+                TorchEpochTelemetry.recordAcceptedGeometryPayloadBytes(geometryPayloadBytes);
             }
         } catch (RuntimeException exception) {
             TorchEpochTelemetry.recordError();
