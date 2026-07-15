@@ -1532,6 +1532,7 @@ Diagnostic overlays:
 - В Metallum+HDR histogram управляет только exposure, bloom берётся из actual radiance; semantic/depth/reconstruction отсутствуют. Оба SDR generation имеют `0` HDR bytes/passes/PSO. SDR UI остаётся отдельным `RGBA8` target; title/loading UI обрабатывается без запуска HDR effects.
 - GPU numeric validation: radiance `1.640` сохраняется до display mapping и даёт `2.828`; `hdrStrength` и Legacy reconstruction на неё не влияют; sRGB `0.5 → 0.214`, UI-only `0.5 → 0.216`, 50% alpha white → `0.5` linear.
 - M1 Pro, Native 3024×1964, EDR headroom `8`, 3000 кадров: Legacy+HDR `137.316 FPS / 7.402 ms GPU p95`, Metallum+HDR `158.362 FPS / 6.454 ms`; verdict `IMPROVEMENT`. HDR resources уменьшены с `148,478,688` до `100,965,600` bytes за счёт удаления semantic/depth/reconstruction.
+- Legacy+EDR остаётся display-only режимом с SDR/RGBA8 scene generation; HDR generation требуется только для semantic `ENHANCED` или допущенного Metallum actual-radiance path. Это разделение закрыто регрессионным тестом и live startup-проверкой.
 
 ### Этап 3. Light registry и clustered forward+
 

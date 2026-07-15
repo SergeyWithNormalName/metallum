@@ -569,11 +569,18 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrOutputMode storageCompatibleOutput = MetallumMaterialState.resolveCompatibleOutput(
                 this.hdrOutputMode
         );
-        DisplayOutputMode requestedOutput = storageCompatibleOutput == HdrOutputMode.SDR
-                ? DisplayOutputMode.SDR
-                : DisplayOutputMode.HDR;
         MetallumMaterialState.Admission materialAdmission = MetallumMaterialState.admission();
         long materialCoverageEpoch = materialAdmission.coverageEpoch();
+        boolean materialStorageCompatible = MetallumMaterialState.isSceneStorageCompatible(
+                storageCompatibleOutput != HdrOutputMode.SDR
+        );
+        boolean materialGenerationAvailable = this.rendererConfig.improvedLighting()
+                && materialAdmission.active()
+                && materialStorageCompatible;
+        DisplayOutputMode requestedOutput = resolveRendererOutputMode(
+                storageCompatibleOutput,
+                materialGenerationAvailable
+        );
         RendererGenerationKey currentKey = this.publishedRendererGeneration;
         if (currentKey != null
                 && currentKey.renderWidth() == dimensions.renderWidth()
@@ -605,11 +612,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested(),
                 MetallumMaterialState.requiresFp16Scene()
         );
-        boolean materialStorageCompatible = MetallumMaterialState.isSceneStorageCompatible(
-                requestedOutput == DisplayOutputMode.HDR
-        );
-        MetalCapabilities generationCapabilities = materialAdmission.active()
-                && materialStorageCompatible
+        MetalCapabilities generationCapabilities = materialGenerationAvailable
                 ? this.rendererCapabilities.withRuntimeFeature(
                         MetalCapabilities.Feature.METALLUM_LIGHTING
                 )
@@ -871,6 +874,23 @@ public final class MetalDevice implements GpuDeviceBackend {
         return storageCompatibleMode == HdrOutputMode.ENHANCED && hdrEnhancementUnavailable
                 ? HdrOutputMode.EDR
                 : storageCompatibleMode;
+    }
+
+    /**
+     * Resolves the scene-generation output axis independently from the exact
+     * CAMetalLayer output mode. Legacy EDR is display-only and keeps its SDR
+     * scene contract; only semantic ENHANCED or admitted material radiance
+     * needs an HDR scene generation.
+     */
+    static DisplayOutputMode resolveRendererOutputMode(
+            final HdrOutputMode outputMode,
+            final boolean materialGenerationAvailable
+    ) {
+        Objects.requireNonNull(outputMode, "outputMode");
+        return outputMode == HdrOutputMode.ENHANCED
+                || (outputMode == HdrOutputMode.EDR && materialGenerationAvailable)
+                ? DisplayOutputMode.HDR
+                : DisplayOutputMode.SDR;
     }
 
     static RendererGenerationPlanner.MaterialSceneStorage resolveMainSceneStorage(

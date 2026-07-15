@@ -689,6 +689,16 @@ public final class MetalRuntimeTests {
                         == RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8,
                 "MainTarget storage routing ignored a Legacy or METALLUM startup FP16 request");
 
+        require(MetalDevice.resolveRendererOutputMode(HdrOutputMode.SDR, false)
+                        == DisplayOutputMode.SDR
+                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.EDR, false)
+                        == DisplayOutputMode.SDR
+                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.ENHANCED, false)
+                        == DisplayOutputMode.HDR
+                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.EDR, true)
+                        == DisplayOutputMode.HDR,
+                "Legacy EDR was confused with a semantic/material HDR scene generation");
+
         MetallumMaterialState.configure(true, false);
         require(MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.EDR, false)
                         == HdrOutputMode.SDR
