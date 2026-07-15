@@ -1,11 +1,21 @@
 package com.metallum.client.metal.render.framegraph;
 
+import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.MetalCapabilities;
+import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RendererGenerationConfig;
+import com.metallum.client.renderer.temporal.FrameContract;
+
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 public final class FrameGraphTests {
     private FrameGraphTests() {
@@ -18,6 +28,7 @@ public final class FrameGraphTests {
         testLifetimeViolation();
         testMissingDependencyAndCycle();
         testAttachmentContracts();
+        testGenerationCapabilityCompiler();
         testNativeHdrGraphTopology();
         testSpatialHdrGraphTopology();
         testAbiHeader();
@@ -141,6 +152,242 @@ public final class FrameGraphTests {
                                 )))
                 ),
                 "load action"
+        );
+    }
+
+    private static void testGenerationCapabilityCompiler() {
+        require(EnumSet.complementOf(EnumSet.of(FrameGraph.ResourceRole.GENERIC)).equals(EnumSet.of(
+                        FrameGraph.ResourceRole.SCENE_RADIANCE,
+                        FrameGraph.ResourceRole.DEPTH,
+                        FrameGraph.ResourceRole.MOTION,
+                        FrameGraph.ResourceRole.REACTIVE_MASK,
+                        FrameGraph.ResourceRole.SHADOW_DATA,
+                        FrameGraph.ResourceRole.CLUSTER_DATA,
+                        FrameGraph.ResourceRole.LIGHTING_HISTORY,
+                        FrameGraph.ResourceRole.TEMPORAL_OUTPUT,
+                        FrameGraph.ResourceRole.INTERPOLATED_OUTPUT,
+                        FrameGraph.ResourceRole.SDR_UI)),
+                "future frame-graph resource roles are incomplete");
+
+        RendererGenerationConfig sdrMetal3 = generation(
+                LightingMode.LEGACY,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                MetalCapabilities.productionMetal3(false)
+        );
+        FrameContract separatedUi = FrameContract.temporalPreparationV1();
+
+        expectGenerationFailure(
+                graphWithContract(contract(
+                        Set.of(MetalCapabilities.Feature.METAL4_CORE),
+                        Set.of(),
+                        FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL,
+                        null,
+                        FrameGraph.OutputApplicability.ANY,
+                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.PresentationUiContract.NOT_PRESENTATION
+                )),
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "required capability"
+        );
+        expectGenerationFailure(
+                graphWithContract(contract(
+                        Set.of(), Set.of(), FrameGraph.ImplementationTarget.METAL4, null,
+                        FrameGraph.OutputApplicability.ANY,
+                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.PresentationUiContract.NOT_PRESENTATION
+                )),
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "no fallback"
+        );
+        expectGenerationFailure(
+                graphWithContract(contract(
+                        Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
+                        FrameGraph.OutputApplicability.HDR_ONLY,
+                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.PresentationUiContract.NOT_PRESENTATION
+                )),
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "output applicability"
+        );
+        expectGenerationFailure(
+                graphWithContract(contract(
+                        Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
+                        FrameGraph.OutputApplicability.ANY,
+                        FrameGraph.LightingApplicability.METALLUM_ONLY,
+                        FrameGraph.PresentationUiContract.NOT_PRESENTATION
+                )),
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "lighting applicability"
+        );
+
+        FrameContract compositedUi = new FrameContract(
+                separatedUi.version(),
+                separatedUi.motionVectors(),
+                separatedUi.depth(),
+                separatedUi.reactiveMask(),
+                FrameContract.UiComposition.COMPOSITED_WITH_WORLD
+        );
+        expectGenerationFailure(
+                graphWithContract(contract(
+                        Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
+                        FrameGraph.OutputApplicability.ANY,
+                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.PresentationUiContract.SEPARATE_SDR_UI_REQUIRED
+                )),
+                sdrMetal3,
+                compositedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "presentation UI"
+        );
+
+        FrameGraph historyGraph = historyReadGraph(7L);
+        expectGenerationFailure(
+                historyGraph,
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "history read"
+        );
+        expectGenerationFailure(
+                historyGraph,
+                sdrMetal3,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.valid(8L),
+                "history read"
+        );
+        require(FrameGraphCompiler.compile(
+                        historyGraph,
+                        sdrMetal3,
+                        separatedUi,
+                        FrameGraphCompiler.HistoryState.valid(7L)
+                ).passes().size() == 1,
+                "matching history generation was rejected");
+
+        MetalCapabilities fallbackCapabilities = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE,
+                MetalCapabilities.Feature.METAL4_CORE,
+                MetalCapabilities.Feature.HDR_OUTPUT
+        );
+        RendererGenerationConfig fallbackGeneration = generation(
+                LightingMode.LEGACY,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                fallbackCapabilities
+        );
+        FrameGraph fallbackGraph = graphWithContract(contract(
+                Set.of(),
+                Set.of(MetalCapabilities.Feature.HDR_OUTPUT),
+                FrameGraph.ImplementationTarget.METAL4,
+                FrameGraph.ImplementationTarget.METAL3,
+                FrameGraph.OutputApplicability.ANY,
+                FrameGraph.LightingApplicability.ANY,
+                FrameGraph.PresentationUiContract.NOT_PRESENTATION
+        ));
+        FrameGraphCompiler.CompiledPass selected = FrameGraphCompiler.compile(
+                fallbackGraph,
+                fallbackGeneration,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid()
+        ).passes().getFirst();
+        require(selected.implementation().target() == FrameGraph.ImplementationTarget.METAL3
+                        && selected.enabledOptionalCapabilities().equals(
+                        EnumSet.of(MetalCapabilities.Feature.HDR_OUTPUT)),
+                "generation compiler did not select the declared fallback/optional capability");
+    }
+
+    private static RendererGenerationConfig generation(
+            final LightingMode lighting,
+            final DisplayOutputMode output,
+            final MetalExecutorKind executor,
+            final MetalCapabilities capabilities
+    ) {
+        return new RendererGenerationConfig(lighting, output, executor, capabilities, 1);
+    }
+
+    private static FrameGraph graphWithContract(final FrameGraph.PassContract contract) {
+        return new FrameGraph(
+                List.of(),
+                List.of(new FrameGraph.PassDesc(
+                        passId(0, "future"),
+                        FrameGraph.EncoderClass.COMPUTE,
+                        List.of(),
+                        List.of(),
+                        contract
+                ))
+        );
+    }
+
+    private static FrameGraph historyReadGraph(final long generation) {
+        FrameGraph.PassId read = passId(0, "history_read");
+        FrameGraph.ResourceId history = resourceId(0, "history");
+        return new FrameGraph(
+                List.of(new FrameGraph.ResourceDesc(
+                        history,
+                        FrameGraph.PersistenceClass.HISTORY,
+                        new FrameGraph.ResourceShape(
+                                FrameGraph.ResourceType.TEXTURE,
+                                "rgba16_float",
+                                "render_extent"
+                        ),
+                        true,
+                        FrameGraph.Lifetime.wholeGraph(),
+                        FrameGraph.ResourceRole.LIGHTING_HISTORY
+                )),
+                List.of(new FrameGraph.PassDesc(
+                        read,
+                        FrameGraph.EncoderClass.COMPUTE,
+                        List.of(),
+                        List.of(FrameGraph.ResourceAccess.history(
+                                history,
+                                FrameGraph.AccessKind.READ,
+                                FrameGraph.PipelineStage.COMPUTE,
+                                FrameGraph.HistoryRole.READ,
+                                generation
+                        ))
+                ))
+        );
+    }
+
+    private static FrameGraph.PassContract contract(
+            final Set<MetalCapabilities.Feature> required,
+            final Set<MetalCapabilities.Feature> optional,
+            final FrameGraph.ImplementationTarget primary,
+            final FrameGraph.ImplementationTarget fallback,
+            final FrameGraph.OutputApplicability output,
+            final FrameGraph.LightingApplicability lighting,
+            final FrameGraph.PresentationUiContract ui
+    ) {
+        return new FrameGraph.PassContract(
+                required,
+                optional,
+                new FrameGraph.PassImplementation("primary", primary),
+                Optional.ofNullable(fallback).map(target ->
+                        new FrameGraph.PassImplementation("fallback", target)),
+                output,
+                lighting,
+                ui
+        );
+    }
+
+    private static void expectGenerationFailure(
+            final FrameGraph graph,
+            final RendererGenerationConfig generation,
+            final FrameContract frameContract,
+            final FrameGraphCompiler.HistoryState history,
+            final String messagePart
+    ) {
+        expectFailure(
+                () -> FrameGraphCompiler.compile(graph, generation, frameContract, history),
+                messagePart
         );
     }
 

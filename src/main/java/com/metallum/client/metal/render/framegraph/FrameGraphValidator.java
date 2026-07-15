@@ -191,6 +191,7 @@ public final class FrameGraphValidator {
                 }
                 validateStage(pass, access);
                 validateAttachment(pass, access, resource);
+                validateHistory(pass, access, resource);
                 byResource.computeIfAbsent(access.resource().value(), ignored -> new ArrayList<>())
                         .add(new PassAccess(
                                 pass.id().value(),
@@ -289,6 +290,25 @@ public final class FrameGraphValidator {
         return access.kind().writes()
                 && (!access.attachment().isAttachment()
                     || access.attachment().storeAction() == FrameGraph.StoreAction.STORE);
+    }
+
+    private static void validateHistory(
+            final FrameGraph.PassDesc pass,
+            final FrameGraph.ResourceAccess access,
+            final FrameGraph.ResourceDesc resource
+    ) {
+        FrameGraph.HistoryRole role = access.historyRole();
+        if (role == FrameGraph.HistoryRole.NONE) {
+            return;
+        }
+        if (resource.persistence() != FrameGraph.PersistenceClass.HISTORY) {
+            throw invalid("pass " + pass.id().name() + " declares history access to non-history resource "
+                    + resource.id().name());
+        }
+        if (role.reads() != access.kind().reads() || role.writes() != access.kind().writes()) {
+            throw invalid("pass " + pass.id().name() + " history role does not match access kind for "
+                    + resource.id().name());
+        }
     }
 
     private static boolean orderedOrSame(

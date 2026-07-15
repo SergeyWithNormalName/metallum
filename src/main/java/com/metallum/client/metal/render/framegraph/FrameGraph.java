@@ -1,7 +1,13 @@
 package com.metallum.client.metal.render.framegraph;
 
+import com.metallum.client.renderer.MetalCapabilities;
+
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 
 /** Immutable, whole-resource frame graph contract. */
 public final class FrameGraph {
@@ -51,6 +57,44 @@ public final class FrameGraph {
         TEXTURE
     }
 
+    /** Semantic roles are declarations only; they do not allocate a resource. */
+    public enum ResourceRole {
+        GENERIC,
+        SCENE_RADIANCE,
+        DEPTH,
+        MOTION,
+        REACTIVE_MASK,
+        SHADOW_DATA,
+        CLUSTER_DATA,
+        LIGHTING_HISTORY,
+        TEMPORAL_OUTPUT,
+        INTERPOLATED_OUTPUT,
+        SDR_UI
+    }
+
+    public enum HistoryRole {
+        NONE(false, false),
+        READ(true, false),
+        WRITE(false, true),
+        READ_WRITE(true, true);
+
+        private final boolean reads;
+        private final boolean writes;
+
+        HistoryRole(final boolean reads, final boolean writes) {
+            this.reads = reads;
+            this.writes = writes;
+        }
+
+        public boolean reads() {
+            return this.reads;
+        }
+
+        public boolean writes() {
+            return this.writes;
+        }
+    }
+
     public enum AttachmentRole {
         NONE,
         COLOR,
@@ -76,6 +120,30 @@ public final class FrameGraph {
         COMPUTE,
         BLIT,
         EXTERNAL_METALFX
+    }
+
+    public enum ImplementationTarget {
+        EXECUTOR_NEUTRAL,
+        METAL3,
+        METAL4
+    }
+
+    public enum OutputApplicability {
+        ANY,
+        SDR_ONLY,
+        HDR_ONLY
+    }
+
+    public enum LightingApplicability {
+        ANY,
+        LEGACY_ONLY,
+        METALLUM_ONLY
+    }
+
+    public enum PresentationUiContract {
+        NOT_PRESENTATION,
+        SEPARATE_SDR_UI_REQUIRED,
+        COMPOSITED_UI_REQUIRED
     }
 
     public record PassId(int value, String name) {
@@ -192,13 +260,25 @@ public final class FrameGraph {
             PersistenceClass persistence,
             ResourceShape shape,
             boolean initiallyDefined,
-            Lifetime lifetime
+            Lifetime lifetime,
+            ResourceRole role
     ) {
         public ResourceDesc {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(persistence, "persistence");
             Objects.requireNonNull(shape, "shape");
             Objects.requireNonNull(lifetime, "lifetime");
+            Objects.requireNonNull(role, "role");
+        }
+
+        public ResourceDesc(
+                final ResourceId id,
+                final PersistenceClass persistence,
+                final ResourceShape shape,
+                final boolean initiallyDefined,
+                final Lifetime lifetime
+        ) {
+            this(id, persistence, shape, initiallyDefined, lifetime, ResourceRole.GENERIC);
         }
     }
 
@@ -206,13 +286,31 @@ public final class FrameGraph {
             ResourceId resource,
             AccessKind kind,
             PipelineStage stage,
-            AttachmentContract attachment
+            AttachmentContract attachment,
+            HistoryRole historyRole,
+            long historyGeneration
     ) {
         public ResourceAccess {
             Objects.requireNonNull(resource, "resource");
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(stage, "stage");
             Objects.requireNonNull(attachment, "attachment");
+            Objects.requireNonNull(historyRole, "historyRole");
+            if (historyRole == HistoryRole.NONE && historyGeneration != -1L) {
+                throw new IllegalArgumentException("A non-history access cannot declare a history generation");
+            }
+            if (historyRole != HistoryRole.NONE && historyGeneration < 0L) {
+                throw new IllegalArgumentException("A history access needs a non-negative generation");
+            }
+        }
+
+        public ResourceAccess(
+                final ResourceId resource,
+                final AccessKind kind,
+                final PipelineStage stage,
+                final AttachmentContract attachment
+        ) {
+            this(resource, kind, stage, attachment, HistoryRole.NONE, -1L);
         }
 
         public ResourceAccess(
@@ -220,7 +318,80 @@ public final class FrameGraph {
                 final AccessKind kind,
                 final PipelineStage stage
         ) {
-            this(resource, kind, stage, AttachmentContract.none());
+            this(resource, kind, stage, AttachmentContract.none(), HistoryRole.NONE, -1L);
+        }
+
+        public static ResourceAccess history(
+                final ResourceId resource,
+                final AccessKind kind,
+                final PipelineStage stage,
+                final HistoryRole historyRole,
+                final long historyGeneration
+        ) {
+            return new ResourceAccess(
+                    resource,
+                    kind,
+                    stage,
+                    AttachmentContract.none(),
+                    historyRole,
+                    historyGeneration
+            );
+        }
+    }
+
+    public record PassImplementation(String name, ImplementationTarget target) {
+        public PassImplementation {
+            name = requireName(name, "pass implementation");
+            Objects.requireNonNull(target, "target");
+        }
+    }
+
+    /** Generation-level metadata; neutral defaults preserve the production graph and ABI v1. */
+    public record PassContract(
+            Set<MetalCapabilities.Feature> requiredCapabilities,
+            Set<MetalCapabilities.Feature> optionalCapabilities,
+            PassImplementation primaryImplementation,
+            Optional<PassImplementation> fallbackImplementation,
+            OutputApplicability outputApplicability,
+            LightingApplicability lightingApplicability,
+            PresentationUiContract presentationUiContract
+    ) {
+        private static final PassContract NEUTRAL = new PassContract(
+                Set.of(),
+                Set.of(),
+                new PassImplementation("executor-neutral", ImplementationTarget.EXECUTOR_NEUTRAL),
+                Optional.empty(),
+                OutputApplicability.ANY,
+                LightingApplicability.ANY,
+                PresentationUiContract.NOT_PRESENTATION
+        );
+
+        public PassContract {
+            Objects.requireNonNull(requiredCapabilities, "requiredCapabilities");
+            Objects.requireNonNull(optionalCapabilities, "optionalCapabilities");
+            requiredCapabilities = immutableFeatures(requiredCapabilities);
+            optionalCapabilities = immutableFeatures(optionalCapabilities);
+            if (!Collections.disjoint(requiredCapabilities, optionalCapabilities)) {
+                throw new IllegalArgumentException("Required and optional capabilities must be disjoint");
+            }
+            Objects.requireNonNull(primaryImplementation, "primaryImplementation");
+            Objects.requireNonNull(fallbackImplementation, "fallbackImplementation");
+            Objects.requireNonNull(outputApplicability, "outputApplicability");
+            Objects.requireNonNull(lightingApplicability, "lightingApplicability");
+            Objects.requireNonNull(presentationUiContract, "presentationUiContract");
+        }
+
+        public static PassContract neutral() {
+            return NEUTRAL;
+        }
+
+        private static Set<MetalCapabilities.Feature> immutableFeatures(
+                final Set<MetalCapabilities.Feature> source
+        ) {
+            EnumSet<MetalCapabilities.Feature> copy = source.isEmpty()
+                    ? EnumSet.noneOf(MetalCapabilities.Feature.class)
+                    : EnumSet.copyOf(source);
+            return Collections.unmodifiableSet(copy);
         }
     }
 
@@ -228,13 +399,24 @@ public final class FrameGraph {
             PassId id,
             EncoderClass encoder,
             List<PassId> dependencies,
-            List<ResourceAccess> accesses
+            List<ResourceAccess> accesses,
+            PassContract contract
     ) {
         public PassDesc {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(encoder, "encoder");
             dependencies = List.copyOf(dependencies);
             accesses = List.copyOf(accesses);
+            Objects.requireNonNull(contract, "contract");
+        }
+
+        public PassDesc(
+                final PassId id,
+                final EncoderClass encoder,
+                final List<PassId> dependencies,
+                final List<ResourceAccess> accesses
+        ) {
+            this(id, encoder, dependencies, accesses, PassContract.neutral());
         }
     }
 
