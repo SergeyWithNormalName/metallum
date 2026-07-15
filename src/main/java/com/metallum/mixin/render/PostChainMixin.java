@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.MetallumMaterialState;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
@@ -100,7 +101,8 @@ abstract class PostChainMixin {
         if (this.metallum$processInputFormat != null) {
             return this.metallum$processInputFormat;
         }
-        return HdrSceneState.isRequested() && this.metallum$transparencyChain
+        return (HdrSceneState.isRequested() || MetallumMaterialState.requiresFp16Scene())
+                && this.metallum$transparencyChain
                 ? GpuFormat.RGBA16_FLOAT
                 : original;
     }

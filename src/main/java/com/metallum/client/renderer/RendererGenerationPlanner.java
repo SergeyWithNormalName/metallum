@@ -4,8 +4,15 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-/** Pure L0 admission and manifest planner; it allocates no GPU resources. */
+/** Pure generation admission and manifest planner; it allocates no GPU resources. */
 public final class RendererGenerationPlanner {
+    /** Startup-fixed physical storage of a METALLUM MainTarget. */
+    public enum MaterialSceneStorage {
+        MODE_DEFAULT,
+        FIXED_LINEAR_RGBA8,
+        FIXED_LINEAR_RGBA16F
+    }
+
     public record Extent(int width, int height) {
         public Extent {
             if (width <= 0 || height <= 0) {
@@ -77,6 +84,35 @@ public final class RendererGenerationPlanner {
             final Extent displayExtent,
             final boolean temporalDiagnostics
     ) {
+        return plan(
+                requestedLighting,
+                requestedOutput,
+                requestedExecutor,
+                requestedPreset,
+                requestedFeatures,
+                currentSafeOutput,
+                capabilities,
+                renderExtent,
+                displayExtent,
+                temporalDiagnostics,
+                MaterialSceneStorage.MODE_DEFAULT
+        );
+    }
+
+    public static Plan plan(
+            final LightingMode requestedLighting,
+            final DisplayOutputMode requestedOutput,
+            final MetalExecutorKind requestedExecutor,
+            final LightingPreset requestedPreset,
+            final RendererFeatureMask requestedFeatures,
+            final DisplayOutputMode currentSafeOutput,
+            final MetalCapabilities capabilities,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final boolean temporalDiagnostics,
+            final MaterialSceneStorage materialSceneStorage
+    ) {
+        Objects.requireNonNull(materialSceneStorage, "materialSceneStorage");
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
                 requestedLighting,
                 requestedOutput,
@@ -92,7 +128,13 @@ public final class RendererGenerationPlanner {
                 requestedOutput,
                 requestedFeatures,
                 resolution,
-                manifest(resolution.config(), renderExtent, displayExtent, temporalDiagnostics)
+                manifest(
+                        resolution.config(),
+                        renderExtent,
+                        displayExtent,
+                        temporalDiagnostics,
+                        materialSceneStorage
+                )
         );
     }
 
@@ -110,28 +152,44 @@ public final class RendererGenerationPlanner {
             final Extent displayExtent,
             final boolean temporalDiagnostics
     ) {
+        return manifest(
+                config,
+                renderExtent,
+                displayExtent,
+                temporalDiagnostics,
+                MaterialSceneStorage.MODE_DEFAULT
+        );
+    }
+
+    public static RendererGenerationManifest manifest(
+            final RendererGenerationConfig config,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final boolean temporalDiagnostics,
+            final MaterialSceneStorage materialSceneStorage
+    ) {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(renderExtent, "renderExtent");
         Objects.requireNonNull(displayExtent, "displayExtent");
-
-        if (config.lightingMode() == LightingMode.METALLUM) {
-            return new RendererGenerationManifest(
-                    RendererGenerationManifest.CURRENT_VERSION,
-                    config,
-                    false,
-                    List.of(),
-                    List.of(),
-                    "lighting shader-role coverage is incomplete"
-            );
-        }
+        Objects.requireNonNull(materialSceneStorage, "materialSceneStorage");
 
         List<RendererGenerationManifest.Resource> resources = new ArrayList<>();
         List<RendererGenerationManifest.Pass> passes = new ArrayList<>();
+        boolean metallum = config.lightingMode() == LightingMode.METALLUM;
         boolean spatial = config.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING);
+        RendererGenerationManifest.SceneStorageContract sceneStorage = sceneStorage(
+                config,
+                materialSceneStorage
+        );
+        RendererGenerationManifest.HdrPipelineContract hdrPipeline = hdrPipeline(config);
         resources.add(resource("main_color", RendererGenerationManifest.Domain.BASE, 0L, true));
         resources.add(resource("main_depth", RendererGenerationManifest.Domain.BASE, 0L, true));
         resources.add(resource("drawable", RendererGenerationManifest.Domain.BASE, 0L, true));
         passes.add(pass("world_render", RendererGenerationManifest.Domain.BASE));
+        if (metallum && config.outputMode() == DisplayOutputMode.SDR) {
+            passes.add(pass("scene_linear_ui_seed",
+                    RendererGenerationManifest.Domain.LIGHTING_ONLY));
+        }
         passes.add(pass(spatial ? "ui_render_with_seed" : "ui_render",
                 RendererGenerationManifest.Domain.BASE));
         passes.add(pass("present", RendererGenerationManifest.Domain.BASE));
@@ -142,10 +200,13 @@ public final class RendererGenerationPlanner {
             long quarterWidth = Math.max((renderExtent.width() + 3L) / 4L, 1L);
             long quarterHeight = Math.max((renderExtent.height() + 3L) / 4L, 1L);
             long quarterPixels = Math.multiplyExact(quarterWidth, quarterHeight);
-            resources.add(resource("hdr_semantic", RendererGenerationManifest.Domain.HDR_ONLY,
-                    multiply(renderPixels, 4L), false));
-            resources.add(resource("scene_depth_snapshot", RendererGenerationManifest.Domain.HDR_ONLY,
-                    multiply(renderPixels, 4L), false));
+            if (!metallum) {
+                resources.add(resource("hdr_semantic", RendererGenerationManifest.Domain.HDR_ONLY,
+                        multiply(renderPixels, 4L), false));
+                resources.add(resource("scene_depth_snapshot",
+                        RendererGenerationManifest.Domain.HDR_ONLY,
+                        multiply(renderPixels, 4L), false));
+            }
             resources.add(resource("hdr_emission", RendererGenerationManifest.Domain.HDR_ONLY,
                     multiply(quarterPixels, 8L), false));
             resources.add(resource("hdr_bloom", RendererGenerationManifest.Domain.HDR_ONLY,
@@ -160,12 +221,24 @@ public final class RendererGenerationPlanner {
                     multiply(displayPixels, 4L), false));
             resources.add(resource("sdr_ui_depth", RendererGenerationManifest.Domain.HDR_ONLY,
                     multiply(displayPixels, 4L), false));
-            passes.add(pass("scene_depth_snapshot", RendererGenerationManifest.Domain.HDR_ONLY));
+            if (!metallum) {
+                passes.add(pass("scene_depth_snapshot", RendererGenerationManifest.Domain.HDR_ONLY));
+            }
             passes.add(pass("hdr_extract", RendererGenerationManifest.Domain.HDR_ONLY));
             passes.add(pass("hdr_exposure_reduce", RendererGenerationManifest.Domain.HDR_ONLY));
             passes.add(pass("hdr_bloom_combined", RendererGenerationManifest.Domain.HDR_ONLY));
-            passes.add(pass(spatial ? "hdr_world_reconstruction" : "hdr_world_ui_seed",
-                    RendererGenerationManifest.Domain.HDR_ONLY));
+            passes.add(pass(
+                    metallum
+                            ? "hdr_world_actual_radiance"
+                            : spatial ? "hdr_world_reconstruction" : "hdr_world_ui_seed",
+                    RendererGenerationManifest.Domain.HDR_ONLY
+            ));
+        } else if (metallum) {
+            long displayPixels = displayExtent.pixels();
+            resources.add(resource("sdr_ui_color", RendererGenerationManifest.Domain.LIGHTING_ONLY,
+                    multiply(displayPixels, 4L), false));
+            resources.add(resource("sdr_ui_depth", RendererGenerationManifest.Domain.LIGHTING_ONLY,
+                    multiply(displayPixels, 4L), false));
         }
 
         if (spatial) {
@@ -223,11 +296,54 @@ public final class RendererGenerationPlanner {
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,
                 config,
+                sceneStorage,
+                hdrPipeline,
                 true,
                 resources,
                 passes,
                 null
         );
+    }
+
+    private static RendererGenerationManifest.SceneStorageContract sceneStorage(
+            final RendererGenerationConfig config,
+            final MaterialSceneStorage materialSceneStorage
+    ) {
+        if (config.outputMode() == DisplayOutputMode.HDR
+                && materialSceneStorage == MaterialSceneStorage.FIXED_LINEAR_RGBA8) {
+            throw new IllegalArgumentException(
+                    "HDR output cannot use the startup-fixed RGBA8 scene target"
+            );
+        }
+        if (config.lightingMode() == LightingMode.METALLUM) {
+            if (config.outputMode() == DisplayOutputMode.HDR) {
+                return RendererGenerationManifest.SceneStorageContract
+                        .METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F;
+            }
+            return materialSceneStorage == MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+                    ? RendererGenerationManifest.SceneStorageContract
+                    .METALLUM_SDR_LINEAR_RGBA16F_COMPAT
+                    : RendererGenerationManifest.SceneStorageContract.METALLUM_SDR_LINEAR_RGBA8;
+        }
+        if (config.outputMode() == DisplayOutputMode.HDR) {
+            return RendererGenerationManifest.SceneStorageContract.LEGACY_HDR_SEMANTIC_RGBA16F;
+        }
+        return materialSceneStorage == MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+                ? RendererGenerationManifest.SceneStorageContract
+                .LEGACY_SDR_SRGB_RGBA16F_COMPAT
+                : RendererGenerationManifest.SceneStorageContract.LEGACY_SDR_SRGB8;
+    }
+
+    private static RendererGenerationManifest.HdrPipelineContract hdrPipeline(
+            final RendererGenerationConfig config
+    ) {
+        if (config.outputMode() == DisplayOutputMode.SDR) {
+            return RendererGenerationManifest.HdrPipelineContract.NONE;
+        }
+        return config.lightingMode() == LightingMode.METALLUM
+                ? RendererGenerationManifest.HdrPipelineContract
+                .ACTUAL_RADIANCE_EXPOSURE_BLOOM
+                : RendererGenerationManifest.HdrPipelineContract.LEGACY_SEMANTIC_RECONSTRUCTION;
     }
 
     private static long multiply(final long left, final long right) {

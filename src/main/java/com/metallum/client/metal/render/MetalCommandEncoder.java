@@ -5,6 +5,7 @@ import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
@@ -61,6 +62,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MetalRenderPass currentRenderPass;
     @Nullable
     private MTLCommandBuffer commandBuffer;
+    private long commandBufferRendererGenerationId = Long.MIN_VALUE;
+    private long commandBufferMaterialCoverageEpoch = Long.MIN_VALUE;
+    private boolean rendererGenerationFrameInvalidated;
+    private boolean rendererGenerationPresentationResolved;
     @Nullable
     private MTLCommandEncoder currentEncoder;
     private MemorySegment renderColorAttachment = MemorySegment.NULL;
@@ -99,9 +104,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (this.workloadTelemetry != null) {
             this.cpuRenderSubmissionStartNanos = System.nanoTime();
         }
-        return commandBuffer = device.commandQueue.makeCommandBuffer(
+        commandBuffer = device.commandQueue.makeCommandBuffer(
                 device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
         );
+        this.commandBufferRendererGenerationId = this.device.rendererGenerationIdForPresentation();
+        this.commandBufferMaterialCoverageEpoch = MetallumMaterialPreflightGate.epoch();
+        return commandBuffer;
     }
 
     MTLBlitCommandEncoder blitCommandEncoder() {
@@ -142,6 +150,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     @Override
     public void submit() {
         if (commandBuffer == null) {
+            resetCommandBufferGenerationState();
             return;
         }
 
@@ -157,6 +166,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         InFlight toClose = inFlight[slot];
         inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore);
         commandBuffer = null;
+        resetCommandBufferGenerationState();
         gpuTimingStage = MetalGpuTimingStage.NONE;
         currentSubmitIndex++;
 
@@ -170,6 +180,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         transientMemory.rotate();
         destroyQueue.rotate();
+    }
+
+    void invalidateRendererGenerationFrame() {
+        this.rendererGenerationFrameInvalidated = true;
+    }
+
+    private void resetCommandBufferGenerationState() {
+        this.commandBufferRendererGenerationId = Long.MIN_VALUE;
+        this.commandBufferMaterialCoverageEpoch = Long.MIN_VALUE;
+        if (this.rendererGenerationPresentationResolved) {
+            this.rendererGenerationFrameInvalidated = false;
+            this.rendererGenerationPresentationResolved = false;
+        }
     }
 
     private void recordJavaWorkload() {
@@ -403,6 +426,16 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         materializePendingUiSeed();
         endEncoder();
         MTLCommandBuffer commandBuffer = commandBuffer();
+        this.rendererGenerationPresentationResolved = true;
+        if (!shouldPresentRendererGeneration(
+                this.rendererGenerationFrameInvalidated,
+                this.commandBufferRendererGenerationId,
+                this.device.rendererGenerationIdForPresentation(),
+                this.commandBufferMaterialCoverageEpoch,
+                MetallumMaterialPreflightGate.epoch()
+        )) {
+            return MTLCommandBuffer.PresentResult.STALE_GENERATION;
+        }
         MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs(source);
         return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
@@ -420,6 +453,20 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
         );
+    }
+
+    static boolean shouldPresentRendererGeneration(
+            final boolean explicitlyInvalidated,
+            final long encodedRendererGenerationId,
+            final long currentRendererGenerationId,
+            final long encodedMaterialCoverageEpoch,
+            final long currentMaterialCoverageEpoch
+    ) {
+        return !explicitlyInvalidated
+                && encodedRendererGenerationId >= 0L
+                && encodedRendererGenerationId == currentRendererGenerationId
+                && encodedMaterialCoverageEpoch >= 0L
+                && encodedMaterialCoverageEpoch == currentMaterialCoverageEpoch;
     }
 
     int encodeHdrUiBackdrop(
@@ -1080,13 +1127,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         texture.recordMaterializedClear(colorClear, depthClear, linearClear != null);
     }
 
-    private static SceneLinearClearColor.Rgb decodeClearRgbIfNeeded(
+    private SceneLinearClearColor.Rgb decodeClearRgbIfNeeded(
             final MetalGpuTexture texture,
             @Nullable final Vector4fc clearColor
     ) {
         if (clearColor == null || !SceneLinearClearColor.shouldDecode(
                 texture.getFormat() == GpuFormat.RGBA16_FLOAT,
-                texture.hasSceneColorClearRole()
+                texture.hasSceneColorClearRole(),
+                this.device.isMaterialGenerationActive(),
+                this.device.isLegacyHdrSceneLinearGenerationActive()
         )) {
             return null;
         }

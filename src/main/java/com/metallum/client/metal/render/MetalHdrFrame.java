@@ -22,6 +22,13 @@ public final class MetalHdrFrame {
         }
     }
 
+    /** Declares an encoded SDR/UI attachment which must never select the material flavor. */
+    public static void markDisplaySdrColor(final GpuTexture texture) {
+        if (texture instanceof MetalGpuTexture color) {
+            color.markDisplaySdrColorRole();
+        }
+    }
+
     public static void captureScene(final GpuTextureView colorView, final GpuTextureView depthView) {
         if (colorView == null || colorView.isClosed() || depthView == null || depthView.isClosed()) {
             return;

@@ -29,6 +29,17 @@ struct HdrAdaptiveState {
   uint valid;
 };
 
+struct ActualHdrExposureState {
+  float exposure;
+  float scenePeak;
+  float medianLog2;
+  float p90Log2;
+  float p99Log2;
+  float brightCoverage;
+  float currentHeadroom;
+  uint valid;
+};
+
 float3 metallum_srgb_to_linear(float3 encoded, bool extendedRange) {
   float3 magnitude = extendedRange ? abs(encoded) : clamp(encoded, 0.0, 1.0);
   float3 low = magnitude / 12.92;
@@ -230,6 +241,29 @@ vertex PresentVertexOut metallum_offscreen_vs(uint vertexId [[vertex_id]]) {
   return out;
 }
 
+// Both SDR generations use this bounded output-only PSO. It deliberately has
+// no scene-depth, semantic, histogram, bloom, or adaptive-state bindings.
+fragment float4 metallum_sdr_present_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> finalFrame [[texture(0)]],
+  texture2d<float> uiFrame [[texture(1)]],
+  sampler smp [[sampler(0)]],
+  constant PresentUniforms& uniforms [[buffer(0)]]
+) {
+  if (uniforms.diagnosticPattern != 0u) {
+    float level = min(metallum_diagnostic_level(in.uv.x), 1.0);
+    float grid = step(0.012, fract(in.uv.x * 11.0));
+    return float4(metallum_linear_to_srgb(float3(level * grid)), 1.0);
+  }
+  float3 value = uniforms.uiAvailable != 0u
+    ? clamp(uiFrame.sample(smp, in.uv).rgb, 0.0, 1.0)
+    : metallum_encode_sdr(
+        finalFrame.sample(smp, in.uv).rgb,
+        uniforms.sourceEncoding
+      );
+  return float4(value, 1.0);
+}
+
 fragment float4 metallum_present_fs(
   PresentVertexOut in [[stage_in]],
   texture2d<float> finalFrame [[texture(0)]],
@@ -400,6 +434,100 @@ fragment float4 metallum_present_fs(
   return float4(mappedBaseColor + visibleDelta, 1.0);
 }
 
+float3 metallum_actual_hdr_world(
+  float2 uv,
+  texture2d<float> sceneFrame,
+  texture2d<float> bloomFrame,
+  sampler smp,
+  sampler auxiliarySmp,
+  constant PresentUniforms& uniforms,
+  constant ActualHdrExposureState& exposureState
+) {
+  float exposure = exposureState.valid != 0u
+    ? clamp(exposureState.exposure, 0.25, 1.0)
+    : 1.0;
+  float3 sceneRadiance = max(sceneFrame.sample(smp, uv).rgb, 0.0);
+  float3 bloomRadiance = max(bloomFrame.sample(auxiliarySmp, uv).rgb, 0.0);
+  // hdrStrength belongs exclusively to Legacy inferred reconstruction.
+  // METALLUM actual radiance is invariant to that compatibility control.
+  float bloomScale = clamp(uniforms.bloomStrength, 0.0, 1.0);
+  float3 exposed = sceneRadiance * exposure + bloomRadiance * bloomScale;
+  return metallum_map_to_headroom(exposed, uniforms.currentHeadroom);
+}
+
+fragment float4 metallum_actual_hdr_present_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> finalFrame [[texture(0)]],
+  texture2d<float> sceneFrame [[texture(1)]],
+  texture2d<float> bloomFrame [[texture(2)]],
+  texture2d<float> uiMaskFrame [[texture(3)]],
+  texture2d<float> uiFrame [[texture(4)]],
+  sampler smp [[sampler(0)]],
+  sampler auxiliarySmp [[sampler(1)]],
+  constant PresentUniforms& uniforms [[buffer(0)]],
+  constant ActualHdrExposureState& exposureState [[buffer(1)]]
+) {
+  if (uniforms.diagnosticPattern != 0u) {
+    float level = metallum_diagnostic_level(in.uv.x);
+    float grid = step(0.012, fract(in.uv.x * 11.0));
+    return float4(float3(level * grid), 1.0);
+  }
+
+  float3 sceneRadiance = max(sceneFrame.sample(smp, in.uv).rgb, 0.0);
+  float3 mappedScene = metallum_actual_hdr_world(
+    in.uv,
+    sceneFrame,
+    bloomFrame,
+    smp,
+    auxiliarySmp,
+    uniforms,
+    exposureState
+  );
+  if (uniforms.uiAvailable == 0u) {
+    return float4(mappedScene, 1.0);
+  }
+
+  // The GUI target is a complete display-referred SDR composite seeded from
+  // the same scene before HDR display mapping. Add only the visible HDR delta.
+  float3 uiLinear = metallum_srgb_to_linear(
+    clamp(uiFrame.sample(auxiliarySmp, in.uv).rgb, 0.0, 1.0),
+    false
+  );
+  float3 mappedSeed = metallum_map_to_headroom(sceneRadiance, uniforms.currentHeadroom);
+  float2 uiControl = clamp(uiMaskFrame.sample(auxiliarySmp, in.uv).rg, 0.0, 1.0);
+  float visibility = (1.0 - uiControl.r) * (1.0 - uiControl.g);
+  float3 visibleDelta = visibility * (mappedScene - mappedSeed);
+  visibleDelta *= metallum_visible_delta_scale(
+    uiLinear,
+    visibleDelta,
+    uniforms.currentHeadroom
+  );
+  return float4(clamp(uiLinear + visibleDelta, 0.0, uniforms.currentHeadroom), 1.0);
+}
+
+// Menu/loading frames can have a complete RGBA8 UI composite before a world
+// scene exists. This output-only path intentionally exposes no HDR-effects,
+// bloom, histogram, semantic, depth, or adaptive-state bindings.
+fragment float4 metallum_actual_hdr_ui_only_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> uiFrame [[texture(0)]],
+  sampler smp [[sampler(0)]]
+) {
+  float3 uiEncoded = clamp(uiFrame.sample(smp, in.uv).rgb, 0.0, 1.0);
+  return float4(metallum_srgb_to_linear(uiEncoded, false), 1.0);
+}
+
+// Before the first scene capture, METALLUM can render the title/loading UI
+// directly into its scene-linear FP16 MainTarget. Preserve that linear SDR
+// value at reference white; decoding it as sRGB here would darken it twice.
+fragment float4 metallum_actual_hdr_linear_ui_only_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> linearUiFrame [[texture(0)]],
+  sampler smp [[sampler(0)]]
+) {
+  return float4(clamp(linearUiFrame.sample(smp, in.uv).rgb, 0.0, 1.0), 1.0);
+}
+
 float3 metallum_reconstruct_world(
   float2 uv,
   texture2d<float> sceneFrame,
@@ -534,6 +662,26 @@ fragment float4 metallum_spatial_world_fs(
   ), 1.0);
 }
 
+fragment float4 metallum_actual_spatial_world_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> sceneFrame [[texture(0)]],
+  texture2d<float> bloomFrame [[texture(1)]],
+  sampler smp [[sampler(0)]],
+  sampler auxiliarySmp [[sampler(1)]],
+  constant PresentUniforms& uniforms [[buffer(0)]],
+  constant ActualHdrExposureState& exposureState [[buffer(1)]]
+) {
+  return float4(metallum_actual_hdr_world(
+    in.uv,
+    sceneFrame,
+    bloomFrame,
+    smp,
+    auxiliarySmp,
+    uniforms,
+    exposureState
+  ), 1.0);
+}
+
 fragment NativeWorldUiOutput metallum_native_world_ui_fs(
   PresentVertexOut in [[stage_in]],
   texture2d<float> sceneFrame [[texture(0)]],
@@ -559,6 +707,37 @@ fragment NativeWorldUiOutput metallum_native_world_ui_fs(
     adaptive
   );
   float3 seedEncoded = metallum_encode_sdr(sceneHdr, 2u);
+  seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
+  NativeWorldUiOutput out;
+  out.hdr = float4(sceneHdr, 1.0);
+  out.uiSeed = float4(seedEncoded, 0.0);
+  return out;
+}
+
+fragment NativeWorldUiOutput metallum_actual_native_world_ui_fs(
+  PresentVertexOut in [[stage_in]],
+  texture2d<float> sceneFrame [[texture(0)]],
+  texture2d<float> bloomFrame [[texture(1)]],
+  sampler smp [[sampler(0)]],
+  sampler auxiliarySmp [[sampler(1)]],
+  constant PresentUniforms& uniforms [[buffer(0)]],
+  constant ActualHdrExposureState& exposureState [[buffer(1)]]
+) {
+  float3 sceneHdr = metallum_actual_hdr_world(
+    in.uv,
+    sceneFrame,
+    bloomFrame,
+    smp,
+    auxiliarySmp,
+    uniforms,
+    exposureState
+  );
+  // Seed from unexposed material radiance so SDR UI remains independent of
+  // the live exposure/headroom state used only at the display boundary.
+  float3 seedEncoded = metallum_encode_sdr(
+    max(sceneFrame.sample(smp, in.uv).rgb, 0.0),
+    2u
+  );
   seedEncoded = floor(clamp(seedEncoded, 0.0, 1.0) * 255.0 + 0.5) / 255.0;
   NativeWorldUiOutput out;
   out.hdr = float4(sceneHdr, 1.0);

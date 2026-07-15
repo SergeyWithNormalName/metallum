@@ -20,6 +20,9 @@ public final class HdrSceneState {
     }
 
     public static HdrSourceEncoding sourceEncoding() {
+        if (MetallumMaterialState.isGenerationActive()) {
+            return HdrSourceEncoding.LINEAR;
+        }
         if (requested && SceneLinearPreflightGate.isActive()) {
             return HdrSourceEncoding.LINEAR;
         }

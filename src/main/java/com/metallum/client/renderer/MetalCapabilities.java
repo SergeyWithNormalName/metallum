@@ -278,6 +278,28 @@ public final class MetalCapabilities {
         return this.features.contains(Objects.requireNonNull(feature, "feature"));
     }
 
+    /** Adds one feature proven by a runtime admission gate without mutating discovery evidence. */
+    public MetalCapabilities withRuntimeFeature(final Feature feature) {
+        Objects.requireNonNull(feature, "feature");
+        if (this.features.contains(feature)) {
+            return this;
+        }
+        EnumSet<Feature> resolvedFeatures = this.features.isEmpty()
+                ? EnumSet.noneOf(Feature.class)
+                : EnumSet.copyOf(this.features);
+        resolvedFeatures.add(feature);
+        EnumMap<Feature, Evidence> resolvedEvidence = new EnumMap<>(Feature.class);
+        resolvedEvidence.putAll(this.evidence);
+        resolvedEvidence.put(feature, Evidence.RUNTIME_PROBE);
+        return new MetalCapabilities(
+                resolvedFeatures,
+                resolvedEvidence,
+                this.formatUsageProfile,
+                this.temporalProfile,
+                this.displayCapabilities
+        );
+    }
+
     public boolean supports(final LightingMode mode) {
         return switch (Objects.requireNonNull(mode, "mode")) {
             case LEGACY -> true;

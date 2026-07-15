@@ -11,6 +11,7 @@ public final class MTLCommandBuffer {
     public enum PresentResult {
         FAILED,
         NO_DRAWABLE,
+        STALE_GENERATION,
         PRESENTED;
 
         private static PresentResult fromNative(final int value) {

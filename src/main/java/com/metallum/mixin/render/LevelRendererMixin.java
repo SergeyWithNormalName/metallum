@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.MetalGpuTimingStage;
 import com.mojang.blaze3d.GpuFormat;
@@ -26,7 +27,8 @@ abstract class LevelRendererMixin {
             require = 1
     )
     private GpuFormat metallum$upgradeSceneContinuationTargets(final GpuFormat original) {
-        return HdrSceneState.isRequested() && original == GpuFormat.RGBA8_UNORM
+        return (HdrSceneState.isRequested() || MetallumMaterialState.requiresFp16Scene())
+                && original == GpuFormat.RGBA8_UNORM
                 ? GpuFormat.RGBA16_FLOAT
                 : original;
     }

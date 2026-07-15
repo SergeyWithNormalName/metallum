@@ -71,6 +71,13 @@ private struct HeadroomLimiterCase {
 }
 
 private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Int32
+private typealias NativeSetFrameStateFunction = @convention(c) (
+    UnsafeRawPointer?,
+    UInt64
+) -> Int32
+private typealias NativeGenerationContractFunction = @convention(c) (
+    UnsafeRawPointer?
+) -> UInt64
 private typealias NativeCreateEdrMonitorFunction = @convention(c) (
     UnsafeRawPointer? // window
 ) -> UnsafeMutableRawPointer?
@@ -149,6 +156,75 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
 
 private func objectPointer(_ object: AnyObject) -> UnsafeRawPointer {
     UnsafeRawPointer(Unmanaged.passUnretained(object).toOpaque())
+}
+
+private func writeFrameUInt32(_ value: UInt32, at offset: Int, into bytes: inout [UInt8]) {
+    var little = value.littleEndian
+    Swift.withUnsafeBytes(of: &little) { source in
+        bytes.replaceSubrange(offset..<(offset + source.count), with: source)
+    }
+}
+
+private func writeFrameUInt64(_ value: UInt64, at offset: Int, into bytes: inout [UInt8]) {
+    var little = value.littleEndian
+    Swift.withUnsafeBytes(of: &little) { source in
+        bytes.replaceSubrange(offset..<(offset + source.count), with: source)
+    }
+}
+
+private func writeFrameFloat(_ value: Float, at offset: Int, into bytes: inout [UInt8]) {
+    writeFrameUInt32(value.bitPattern, at: offset, into: &bytes)
+}
+
+private func writeFrameDouble(_ value: Double, at offset: Int, into bytes: inout [UInt8]) {
+    writeFrameUInt64(value.bitPattern, at: offset, into: &bytes)
+}
+
+private func rendererGenerationPacket(
+    generation: UInt64,
+    lightingMode: UInt32,
+    outputMode: UInt32
+) -> [UInt8] {
+    var bytes = [UInt8](repeating: 0, count: 816)
+    writeFrameUInt32(2, at: 0, into: &bytes)
+    writeFrameUInt32(816, at: 4, into: &bytes)
+    writeFrameUInt32(1, at: 8, into: &bytes)
+    writeFrameUInt32(2, at: 12, into: &bytes)
+    writeFrameUInt64(42, at: 16, into: &bytes)
+    writeFrameUInt64(7, at: 24, into: &bytes)
+    writeFrameUInt64(generation, at: 32, into: &bytes)
+    writeFrameUInt64(9, at: 40, into: &bytes)
+    writeFrameUInt64(generation, at: 48, into: &bytes)
+    writeFrameUInt64(generation, at: 56, into: &bytes)
+    writeFrameUInt64(12, at: 64, into: &bytes)
+    writeFrameUInt64(13, at: 72, into: &bytes)
+    writeFrameUInt64(1, at: 80, into: &bytes)
+    writeFrameUInt32(lightingMode, at: 96, into: &bytes)
+    writeFrameUInt32(outputMode, at: 100, into: &bytes)
+    writeFrameUInt32(0, at: 104, into: &bytes)
+    writeFrameUInt32(1, at: 108, into: &bytes)
+    writeFrameUInt32(16, at: 112, into: &bytes)
+    writeFrameUInt32(16, at: 116, into: &bytes)
+    writeFrameUInt32(16, at: 120, into: &bytes)
+    writeFrameUInt32(16, at: 124, into: &bytes)
+    writeFrameUInt32(1, at: 128, into: &bytes)
+    writeFrameFloat(1.0 / 60.0, at: 136, into: &bytes)
+    writeFrameFloat(0.05, at: 140, into: &bytes)
+    writeFrameFloat(1024, at: 144, into: &bytes)
+    writeFrameFloat(1, at: 156, into: &bytes)
+    writeFrameFloat(1, at: 160, into: &bytes)
+    writeFrameFloat(1, at: 164, into: &bytes)
+    writeFrameFloat(1, at: 168, into: &bytes)
+    writeFrameUInt64(outputMode == 0 ? 0 : 64, at: 184, into: &bytes)
+    for index in 0..<6 {
+        writeFrameDouble(Double(index), at: 248 + index * 8, into: &bytes)
+    }
+    for matrix in 0..<8 {
+        for diagonal in 0..<4 {
+            writeFrameFloat(1, at: 296 + matrix * 64 + diagonal * 20, into: &bytes)
+        }
+    }
+    return bytes
 }
 
 private func colorSpacesEqual(_ lhs: CGColorSpace?, _ rhs: CGColorSpace?) -> Bool {
@@ -368,10 +444,14 @@ private final class GpuHarness {
     let device: MTLDevice
     private let queue: MTLCommandQueue
     private let presentPipeline: MTLRenderPipelineState
+    private let actualWorldPipeline: MTLRenderPipelineState
+    private let actualUiOnlyPipeline: MTLRenderPipelineState
+    private let actualLinearUiOnlyPipeline: MTLRenderPipelineState
     private let worldPresentPipeline: MTLRenderPipelineState
     private let spatialWorldPipeline: MTLRenderPipelineState
     private let spatialPresentPipeline: MTLRenderPipelineState
     private let extractPipeline: MTLRenderPipelineState
+    private let actualExtractPipeline: MTLRenderPipelineState
     private let blurPipeline: MTLComputePipelineState
     private let legacyBlurPipeline: MTLRenderPipelineState
     private let uiComparePipeline: MTLRenderPipelineState
@@ -380,6 +460,7 @@ private final class GpuHarness {
     private let uiAlphaBlendPipeline: MTLRenderPipelineState
     private let uiAlphaBlendDepthPipeline: MTLRenderPipelineState
     private let histogramReducePipeline: MTLComputePipelineState
+    private let actualExposureReducePipeline: MTLComputePipelineState
     private let headroomLimiterTestPipeline: MTLComputePipelineState
     private let nearestSampler: MTLSamplerState
     private let linearSampler: MTLSamplerState
@@ -410,6 +491,9 @@ private final class GpuHarness {
             let presentVertex = presentLibrary.makeFunction(name: "metallum_present_vs"),
             let offscreenVertex = presentLibrary.makeFunction(name: "metallum_offscreen_vs"),
             let presentFragment = presentLibrary.makeFunction(name: "metallum_present_fs"),
+            let actualWorldFragment = presentLibrary.makeFunction(name: "metallum_actual_spatial_world_fs"),
+            let actualUiOnlyFragment = presentLibrary.makeFunction(name: "metallum_actual_hdr_ui_only_fs"),
+            let actualLinearUiOnlyFragment = presentLibrary.makeFunction(name: "metallum_actual_hdr_linear_ui_only_fs"),
             let spatialWorldFragment = presentLibrary.makeFunction(name: "metallum_spatial_world_fs"),
             let spatialPresentFragment = presentLibrary.makeFunction(name: "metallum_spatial_present_fs"),
             let headroomLimiterTest = presentLibrary.makeFunction(name: "metallum_test_headroom_limiter")
@@ -423,6 +507,29 @@ private final class GpuHarness {
         presentDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         presentDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.presentPipeline = try device.makeRenderPipelineState(descriptor: presentDescriptor)
+        let actualWorldDescriptor = MTLRenderPipelineDescriptor()
+        actualWorldDescriptor.label = "Metallum actual-radiance HDR validation"
+        actualWorldDescriptor.vertexFunction = offscreenVertex
+        actualWorldDescriptor.fragmentFunction = actualWorldFragment
+        actualWorldDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        actualWorldDescriptor.colorAttachments[0].isBlendingEnabled = false
+        self.actualWorldPipeline = try device.makeRenderPipelineState(
+            descriptor: actualWorldDescriptor
+        )
+        let actualUiOnlyDescriptor = MTLRenderPipelineDescriptor()
+        actualUiOnlyDescriptor.label = "Metallum actual-HDR UI-only validation"
+        actualUiOnlyDescriptor.vertexFunction = presentVertex
+        actualUiOnlyDescriptor.fragmentFunction = actualUiOnlyFragment
+        actualUiOnlyDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        actualUiOnlyDescriptor.colorAttachments[0].isBlendingEnabled = false
+        self.actualUiOnlyPipeline = try device.makeRenderPipelineState(
+            descriptor: actualUiOnlyDescriptor
+        )
+        actualUiOnlyDescriptor.label = "Metallum actual-HDR linear UI-only validation"
+        actualUiOnlyDescriptor.fragmentFunction = actualLinearUiOnlyFragment
+        self.actualLinearUiOnlyPipeline = try device.makeRenderPipelineState(
+            descriptor: actualUiOnlyDescriptor
+        )
         let worldPresentDescriptor = MTLRenderPipelineDescriptor()
         worldPresentDescriptor.label = "Metallum spatial HDR world validation present"
         worldPresentDescriptor.vertexFunction = offscreenVertex
@@ -457,7 +564,9 @@ private final class GpuHarness {
         guard
             let effectsVertex = effectsLibrary.makeFunction(name: "metallum_hdr_vs"),
             let extractFragment = effectsLibrary.makeFunction(name: "metallum_hdr_extract_fs"),
+            let actualExtractFragment = effectsLibrary.makeFunction(name: "metallum_actual_hdr_extract_fs"),
             let histogramReduce = effectsLibrary.makeFunction(name: "metallum_hdr_histogram_reduce"),
+            let actualExposureReduce = effectsLibrary.makeFunction(name: "metallum_actual_hdr_exposure_reduce"),
             let blurFunction = effectsLibrary.makeFunction(name: "metallum_hdr_blur"),
             let uiCompareFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_compare_fs"),
             let uiDilateFragment = effectsLibrary.makeFunction(name: "metallum_hdr_ui_dilate_fs")
@@ -471,7 +580,13 @@ private final class GpuHarness {
         extractDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         extractDescriptor.colorAttachments[0].isBlendingEnabled = false
         self.extractPipeline = try device.makeRenderPipelineState(descriptor: extractDescriptor)
+        extractDescriptor.label = "Metallum actual-radiance HDR extract validation"
+        extractDescriptor.fragmentFunction = actualExtractFragment
+        self.actualExtractPipeline = try device.makeRenderPipelineState(descriptor: extractDescriptor)
         self.histogramReducePipeline = try device.makeComputePipelineState(function: histogramReduce)
+        self.actualExposureReducePipeline = try device.makeComputePipelineState(
+            function: actualExposureReduce
+        )
 
         self.blurPipeline = try device.makeComputePipelineState(function: blurFunction)
 
@@ -1014,6 +1129,215 @@ private final class GpuHarness {
         )
         encoder.endEncoding()
         try complete(commandBuffer, label: "combined HDR Gaussian blur")
+        return output
+    }
+
+    func analyzeActualRadiance(
+        scene: MTLTexture,
+        currentHeadroom: Float
+    ) throws -> (extract: MTLTexture, state: HdrAdaptiveState) {
+        let outputWidth = max((scene.width + 3) / 4, 1)
+        let outputHeight = max((scene.height + 3) / 4, 1)
+        let output = try makePrivateRgba16FloatTexture(width: outputWidth, height: outputHeight)
+        var initialState = HdrAdaptiveState(
+            breakpoint: 1.0,
+            inferredPeak: 1.0,
+            medianLog2: -12.0,
+            p90Log2: -12.0,
+            p99Log2: -12.0,
+            brightCoverage: 0.0,
+            currentHeadroom: 1.0,
+            valid: 0
+        )
+        guard let histogram = device.makeBuffer(
+                length: 64 * MemoryLayout<UInt32>.stride,
+                options: .storageModeShared
+              ), let stateBuffer = withUnsafeBytes(of: &initialState, { bytes in
+                device.makeBuffer(
+                    bytes: bytes.baseAddress!,
+                    length: bytes.count,
+                    options: .storageModeShared
+                )
+              }), let commandBuffer = queue.makeCommandBuffer(),
+              let clear = commandBuffer.makeBlitCommandEncoder() else {
+            throw ValidationFailure.message("Actual HDR analysis resource creation failed")
+        }
+        clear.fill(buffer: histogram, range: 0..<histogram.length, value: 0)
+        clear.endEncoding()
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let extract = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Actual HDR extract encoder creation failed")
+        }
+        extract.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(outputWidth),
+            height: Double(outputHeight),
+            znear: 0,
+            zfar: 1
+        ))
+        extract.setRenderPipelineState(actualExtractPipeline)
+        // The actual-radiance function exposes no semantic/depth bindings.
+        extract.setFragmentTexture(scene, index: 0)
+        extract.setFragmentBuffer(histogram, offset: 0, index: 1)
+        var extractUniforms = HdrExtractUniforms(
+            sourceEncoding: 2,
+            semanticAvailable: 0,
+            sourceSize: SIMD2<UInt32>(UInt32(scene.width), UInt32(scene.height)),
+            histogramEnabled: 1,
+            _padding0: 0
+        )
+        extract.setFragmentBytes(
+            &extractUniforms,
+            length: MemoryLayout<HdrExtractUniforms>.stride,
+            index: 0
+        )
+        extract.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        extract.endEncoding()
+
+        guard let reduce = commandBuffer.makeComputeCommandEncoder() else {
+            throw ValidationFailure.message("Actual HDR exposure encoder creation failed")
+        }
+        reduce.setComputePipelineState(actualExposureReducePipeline)
+        reduce.setBuffer(histogram, offset: 0, index: 0)
+        reduce.setBuffer(stateBuffer, offset: 0, index: 1)
+        var reduceUniforms = HdrHistogramReduceUniforms(
+            currentHeadroom: currentHeadroom,
+            deltaTime: 0,
+            forceReset: 1,
+            _padding0: 0
+        )
+        reduce.setBytes(
+            &reduceUniforms,
+            length: MemoryLayout<HdrHistogramReduceUniforms>.stride,
+            index: 2
+        )
+        reduce.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        reduce.endEncoding()
+        try complete(commandBuffer, label: "actual HDR extract/exposure")
+        let state = stateBuffer.contents().assumingMemoryBound(to: HdrAdaptiveState.self).pointee
+        return (output, state)
+    }
+
+    func renderActualWorld(
+        scene: MTLTexture,
+        bloom: MTLTexture,
+        state: HdrAdaptiveState,
+        headroom: Float,
+        legacyReconstructionStrength: Float
+    ) throws -> MTLTexture {
+        let output = try makePrivateRgba16FloatTexture(width: scene.width, height: scene.height)
+        var mutableState = state
+        guard let stateBuffer = withUnsafeBytes(of: &mutableState, { bytes in
+                device.makeBuffer(
+                    bytes: bytes.baseAddress!,
+                    length: bytes.count,
+                    options: .storageModeShared
+                )
+              }), let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Actual HDR world resource creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Actual HDR world encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(scene.width),
+            height: Double(scene.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(actualWorldPipeline)
+        encoder.setFragmentTexture(scene, index: 0)
+        encoder.setFragmentTexture(bloom, index: 1)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.setFragmentSamplerState(linearSampler, index: 1)
+        var uniforms = PresentUniforms(
+            mode: 2,
+            sourceEncoding: 2,
+            diagnosticPattern: 0,
+            currentHeadroom: headroom,
+            hdrStrength: legacyReconstructionStrength,
+            bloomStrength: 0.22,
+            sceneAvailable: 1,
+            uiAvailable: 0,
+            semanticAvailable: 0
+        )
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PresentUniforms>.stride, index: 0)
+        encoder.setFragmentBuffer(stateBuffer, offset: 0, index: 1)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "actual HDR world mapping")
+        return output
+    }
+
+    func renderActualHdrUiOnly(ui: MTLTexture) throws -> MTLTexture {
+        let output = try makePrivateRgba16FloatTexture(width: ui.width, height: ui.height)
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Actual HDR UI-only command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Actual HDR UI-only encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(ui.width),
+            height: Double(ui.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(actualUiOnlyPipeline)
+        encoder.setFragmentTexture(ui, index: 0)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "actual HDR UI-only mapping")
+        return output
+    }
+
+    func renderActualHdrLinearUiOnly(source: MTLTexture) throws -> MTLTexture {
+        let output = try makePrivateRgba16FloatTexture(width: source.width, height: source.height)
+        guard let commandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Actual HDR linear UI-only command buffer creation failed")
+        }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = output
+        pass.colorAttachments[0].loadAction = .dontCare
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw ValidationFailure.message("Actual HDR linear UI-only encoder creation failed")
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0,
+            originY: 0,
+            width: Double(source.width),
+            height: Double(source.height),
+            znear: 0,
+            zfar: 1
+        ))
+        encoder.setRenderPipelineState(actualLinearUiOnlyPipeline)
+        encoder.setFragmentTexture(source, index: 0)
+        encoder.setFragmentSamplerState(nearestSampler, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        try complete(commandBuffer, label: "actual HDR linear UI-only mapping")
         return output
     }
 
@@ -1808,6 +2132,7 @@ private final class ValueValidation {
     func run() throws {
         try validateSdrIdentityAtHeadroomOne()
         try validateSdrOutputTransferContracts()
+        try validateActualRadiancePath()
         try validateNonsemanticWhiteUsesHeadroom()
         try validateMidtoneIdentity()
         try validateSaturatedSdrIdentity()
@@ -1834,7 +2159,7 @@ private final class ValueValidation {
         try validateImmediateHeadroomDropCap()
         try validateFrameRateIndependentSmoothing()
         try validateNativeBackdropAndPresentAbi()
-        try require(passCount == 41, "HDR validation check count changed unexpectedly: \(passCount), expected 41")
+        try require(passCount == 44, "HDR validation check count changed unexpectedly: \(passCount), expected 44")
         print("HDR GPU value validation passed (\(passCount) checks)")
     }
 
@@ -1889,6 +2214,75 @@ private final class ValueValidation {
         try require(abs(value.x - expected) < 0.004, "SDR identity expected \(expected), got \(rgbaDescription(value))")
         try require(value.x <= 1.001, "SDR identity escaped SDR range: \(rgbaDescription(value))")
         pass("SDR appearance identity at headroom 1", value)
+    }
+
+    private func validateActualRadiancePath() throws {
+        let scene = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(2.5, 1.5, 0.5, 1.0)
+        )
+        let analysis = try gpu.analyzeActualRadiance(scene: scene, currentHeadroom: 4.0)
+        let extracted = try gpu.readRgba16Float(texture: analysis.extract)
+        try require(
+            extracted.w > 1.0,
+            "Actual-radiance histogram input was clipped before exposure: \(extracted.w)"
+        )
+        try require(
+            extracted.x > 0.5 && extracted.y > 0.05 && extracted.z < 0.001,
+            "Actual bloom seed was not extracted from over-reference radiance: \(rgbaDescription(extracted))"
+        )
+        try require(
+            analysis.state.valid == 1
+                && analysis.state.inferredPeak > 1.0
+                && analysis.state.breakpoint > 0.0
+                && analysis.state.breakpoint <= 1.0,
+            "Actual exposure state did not report measured HDR radiance"
+        )
+
+        let reconstructionOff = try gpu.renderActualWorld(
+            scene: scene,
+            bloom: analysis.extract,
+            state: analysis.state,
+            headroom: 4.0,
+            legacyReconstructionStrength: 0.0
+        )
+        let reconstructionMax = try gpu.renderActualWorld(
+            scene: scene,
+            bloom: analysis.extract,
+            state: analysis.state,
+            headroom: 4.0,
+            legacyReconstructionStrength: 2.0
+        )
+        let outputOff = try gpu.readRgba16Float(texture: reconstructionOff)
+        let outputMax = try gpu.readRgba16Float(texture: reconstructionMax)
+        let toggleDelta = max(
+            abs(outputOff.x - outputMax.x),
+            max(abs(outputOff.y - outputMax.y), abs(outputOff.z - outputMax.z))
+        )
+        try require(toggleDelta < 0.0005, "Legacy reconstruction control changed actual HDR: \(toggleDelta)")
+        try require(
+            max(outputOff.x, max(outputOff.y, outputOff.z)) > 1.0
+                && max(outputOff.x, max(outputOff.y, outputOff.z)) <= 4.001,
+            "Actual HDR display mapping lost or exceeded headroom: \(rgbaDescription(outputOff))"
+        )
+
+        let referenceWhite = try gpu.makeRgba16FloatTexture(
+            value: SIMD4<Float>(1.0, 1.0, 1.0, 1.0)
+        )
+        let referenceAnalysis = try gpu.analyzeActualRadiance(
+            scene: referenceWhite,
+            currentHeadroom: 4.0
+        )
+        let referenceExtract = try gpu.readRgba16Float(texture: referenceAnalysis.extract)
+        try require(
+            max(referenceExtract.x, max(referenceExtract.y, referenceExtract.z)) < 0.001,
+            "Reference white incorrectly generated actual HDR bloom: \(rgbaDescription(referenceExtract))"
+        )
+        passCount += 1
+        print(String(
+            format: "PASS actual FP16 radiance survives exposure/bloom mapping and ignores legacy reconstruction: pre-map %.3f, output %.3f",
+            extracted.w,
+            max(outputOff.x, max(outputOff.y, outputOff.z))
+        ))
     }
 
     private func validateSdrOutputTransferContracts() throws {
@@ -3505,6 +3899,11 @@ private final class ValueValidation {
         }
         guard
             let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+            let setFrameStateSymbol = dlsym(handle, "metallum_set_frame_state_v2"),
+            let generationContractSymbol = dlsym(
+                handle,
+                "metallum_renderer_generation_native_contract_v1"
+            ),
             let createEdrMonitorSymbol = dlsym(handle, "metallum_create_edr_monitor"),
             let edrMonitorQuerySymbol = dlsym(handle, "metallum_EDRMonitor_query"),
             let releaseSymbol = dlsym(handle, "metallum_release_object"),
@@ -3521,6 +3920,14 @@ private final class ValueValidation {
             throw ValidationFailure.message("Native HDR present symbols are missing")
         }
         let initialize = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+        let setFrameState = unsafeBitCast(
+            setFrameStateSymbol,
+            to: NativeSetFrameStateFunction.self
+        )
+        let generationContract = unsafeBitCast(
+            generationContractSymbol,
+            to: NativeGenerationContractFunction.self
+        )
         let createEdrMonitor = unsafeBitCast(
             createEdrMonitorSymbol,
             to: NativeCreateEdrMonitorFunction.self
@@ -4300,6 +4707,166 @@ private final class ValueValidation {
                     "No-scene present command failed: \(noSceneDetail)")
         passCount += 1
         print("PASS native present ABI accepts uiTexture and binds adaptive fallback without a scene")
+
+        let actualHdrPacket = rendererGenerationPacket(
+            generation: 200,
+            lightingMode: 1,
+            outputMode: 1
+        )
+        let actualSetStatus = actualHdrPacket.withUnsafeBytes {
+            setFrameState($0.baseAddress, UInt64($0.count))
+        }
+        try require(actualSetStatus == 1, "METALLUM HDR FrameState returned \(actualSetStatus)")
+        let expectedActualContract: UInt64 = (1 << 0) | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 9) | (1 << 10)
+        let prePresentContract = generationContract(objectPointer(gpu.device as AnyObject))
+        try require(
+            prePresentContract == expectedActualContract,
+            "METALLUM HDR UI-only prewarm contract was not exact: \(prePresentContract)"
+        )
+
+        let uiOnlyOutput = try gpu.renderActualHdrUiOnly(ui: ui)
+        let uiOnlyPixel = try gpu.readRgba16Float(texture: uiOnlyOutput, x: 8, y: 8)
+        let quantizedHalf = Float(128) / 255.0
+        let expectedUiLinear = srgbToLinear(quantizedHalf)
+        try require(
+            abs(uiOnlyPixel.x - expectedUiLinear) < 0.001
+                && abs(uiOnlyPixel.y - expectedUiLinear) < 0.001
+                && abs(uiOnlyPixel.z - expectedUiLinear) < 0.001
+                && abs(uiOnlyPixel.w - 1.0) < 0.001,
+            "METALLUM HDR UI-only output did not decode sRGB once: \(rgbaDescription(uiOnlyPixel)), expected \(expectedUiLinear)"
+        )
+        try require(
+            abs(uiOnlyPixel.x - srgbToLinear(0.5)) < 0.003,
+            "Quantized 0.5 sRGB did not map near 0.214 linear: \(uiOnlyPixel.x)"
+        )
+
+        guard let actualUiOnlyCommandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("METALLUM HDR UI-only command buffer creation failed")
+        }
+        let actualUiOnlyStatus = present(
+            objectPointer(actualUiOnlyCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(source as AnyObject),
+            nil,
+            nil,
+            nil,
+            objectPointer(ui as AnyObject),
+            nil,
+            0,
+            2,
+            0,
+            0,
+            4,
+            1,
+            1
+        )
+        try require(
+            actualUiOnlyStatus == 1,
+            "METALLUM HDR UI-only present returned \(actualUiOnlyStatus)"
+        )
+        actualUiOnlyCommandBuffer.commit()
+        actualUiOnlyCommandBuffer.waitUntilCompleted()
+        let actualUiOnlyDetail = actualUiOnlyCommandBuffer.error.map(String.init(describing:))
+            ?? "unknown GPU error"
+        try require(
+            actualUiOnlyCommandBuffer.status == .completed,
+            "METALLUM HDR UI-only GPU command failed: \(actualUiOnlyDetail)"
+        )
+        let postPresentContract = generationContract(objectPointer(gpu.device as AnyObject))
+        try require(
+            postPresentContract == prePresentContract && postPresentContract & (1 << 6) == 0,
+            "METALLUM HDR UI-only present allocated HDR workspace/effects state: \(postPresentContract)"
+        )
+
+        let linearUiSource = try gpu.makeRgba16FloatTexture(
+            width: 16,
+            height: 16,
+            value: SIMD4<Float>(0.214, 1.25, -0.1, 0.5)
+        )
+        let linearUiOnlyOutput = try gpu.renderActualHdrLinearUiOnly(source: linearUiSource)
+        let linearUiOnlyPixel = try gpu.readRgba16Float(
+            texture: linearUiOnlyOutput,
+            x: 8,
+            y: 8
+        )
+        try require(
+            abs(linearUiOnlyPixel.x - 0.214) < 0.001
+                && abs(linearUiOnlyPixel.y - 1.0) < 0.001
+                && abs(linearUiOnlyPixel.z) < 0.001
+                && abs(linearUiOnlyPixel.w - 1.0) < 0.001,
+            "METALLUM HDR linear UI-only output changed transfer or missed SDR clamp: \(rgbaDescription(linearUiOnlyPixel))"
+        )
+        try require(
+            abs(linearUiOnlyPixel.x - srgbToLinear(0.214)) > 0.15,
+            "METALLUM HDR linear UI-only output decoded an already-linear value again: \(linearUiOnlyPixel.x)"
+        )
+
+        guard let actualLinearUiOnlyCommandBuffer = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("METALLUM HDR linear UI-only command buffer creation failed")
+        }
+        let actualLinearUiOnlyStatus = present(
+            objectPointer(actualLinearUiOnlyCommandBuffer as AnyObject),
+            objectPointer(layer),
+            objectPointer(linearUiSource as AnyObject),
+            nil,
+            nil,
+            nil,
+            nil,
+            nil,
+            0,
+            2,
+            2,
+            0,
+            4,
+            1,
+            1
+        )
+        try require(
+            actualLinearUiOnlyStatus == 1,
+            "METALLUM HDR linear UI-only present returned \(actualLinearUiOnlyStatus)"
+        )
+        actualLinearUiOnlyCommandBuffer.commit()
+        actualLinearUiOnlyCommandBuffer.waitUntilCompleted()
+        let actualLinearUiOnlyDetail = actualLinearUiOnlyCommandBuffer.error
+            .map(String.init(describing:)) ?? "unknown GPU error"
+        try require(
+            actualLinearUiOnlyCommandBuffer.status == .completed,
+            "METALLUM HDR linear UI-only GPU command failed: \(actualLinearUiOnlyDetail)"
+        )
+        let linearPostPresentContract = generationContract(objectPointer(gpu.device as AnyObject))
+        try require(
+            linearPostPresentContract == prePresentContract
+                && linearPostPresentContract & (1 << 6) == 0,
+            "METALLUM HDR linear UI-only present allocated HDR workspace/effects state: \(linearPostPresentContract)"
+        )
+        passCount += 1
+        print(
+            String(
+                format: "PASS METALLUM HDR linear UI-only present preserves 0.214 linear without effects/workspace: %.3f",
+                linearUiOnlyPixel.x
+            )
+        )
+
+        let actualSdrPacket = rendererGenerationPacket(
+            generation: 201,
+            lightingMode: 1,
+            outputMode: 0
+        )
+        let actualSdrSetStatus = actualSdrPacket.withUnsafeBytes {
+            setFrameState($0.baseAddress, UInt64($0.count))
+        }
+        try require(actualSdrSetStatus == 1, "METALLUM SDR FrameState returned \(actualSdrSetStatus)")
+        try require(
+            generationContract(objectPointer(gpu.device as AnyObject)) == 3,
+            "METALLUM SDR transition retained an actual-HDR UI-only PSO"
+        )
+        passCount += 1
+        print(
+            String(
+                format: "PASS METALLUM HDR UI-only present completes without HDR effects/workspace and decodes 0.5 sRGB once: %.3f linear",
+                uiOnlyPixel.x
+            )
+        )
     }
 
     private func pass(_ name: String, _ value: SIMD4<Float>) {

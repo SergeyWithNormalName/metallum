@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Metal
 
 private enum ValidationFailure: Error, CustomStringConvertible {
     case message(String)
@@ -15,6 +16,12 @@ private typealias NativeValidateFunction = @convention(c) (
     UnsafeRawPointer?,
     UInt64
 ) -> Int32
+private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Int32
+private typealias NativeGenerationContractFunction = @convention(c) (UnsafeRawPointer?) -> UInt64
+
+private func objectPointer(_ object: AnyObject) -> UnsafeRawPointer {
+    UnsafeRawPointer(Unmanaged.passUnretained(object).toOpaque())
+}
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     guard condition() else { throw ValidationFailure.message(message) }
@@ -89,6 +96,25 @@ private func validate(_ function: NativeValidateFunction, _ bytes: [UInt8]) -> I
     bytes.withUnsafeBytes { function($0.baseAddress, UInt64($0.count)) }
 }
 
+private func generationPacket(
+    _ source: [UInt8],
+    generation: UInt64,
+    lightingMode: UInt32,
+    outputMode: UInt32,
+    spatial: Bool
+) -> [UInt8] {
+    var bytes = source
+    writeUInt64(generation, at: 32, into: &bytes)
+    writeUInt64(generation, at: 48, into: &bytes)
+    writeUInt64(generation, at: 56, into: &bytes)
+    writeUInt32(lightingMode, at: 96, into: &bytes)
+    writeUInt32(outputMode, at: 100, into: &bytes)
+    writeUInt64(spatial ? 1 : 0, at: 88, into: &bytes)
+    writeUInt64(outputMode == 0 ? 0 : 64, at: 184, into: &bytes)
+    writeUInt64(spatial ? 128 : 0, at: 200, into: &bytes)
+    return bytes
+}
+
 @main
 private enum FrameStateAbiValidationMain {
     static func main() {
@@ -99,10 +125,22 @@ private enum FrameStateAbiValidationMain {
                 throw ValidationFailure.message("Could not load native library")
             }
             defer { dlclose(handle) }
-            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v2") else {
+            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v2"),
+                  let setSymbol = dlsym(handle, "metallum_set_frame_state_v2"),
+                  let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+                  let contractSymbol = dlsym(
+                    handle,
+                    "metallum_renderer_generation_native_contract_v1"
+                  ) else {
                 throw ValidationFailure.message("Native FrameState ABI validator symbol is missing")
             }
             let nativeValidate = unsafeBitCast(symbol, to: NativeValidateFunction.self)
+            let nativeSet = unsafeBitCast(setSymbol, to: NativeValidateFunction.self)
+            let nativeInit = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+            let nativeContract = unsafeBitCast(
+                contractSymbol,
+                to: NativeGenerationContractFunction.self
+            )
             let valid = validPacket()
             try require(validate(nativeValidate, valid) == 1, "Valid FrameState packet was rejected")
 
@@ -131,7 +169,77 @@ private enum FrameStateAbiValidationMain {
             try require(validate(nativeValidate, nonFiniteMatrix) == -4, "NaN transform was accepted")
             let truncated = valid.withUnsafeBytes { nativeValidate($0.baseAddress, 815) }
             try require(truncated == -1, "Truncated FrameState packet was accepted")
-            print("Native FrameState ABI v2 validation passed (8 negative cases)")
+
+            guard let device = MTLCreateSystemDefaultDevice() else {
+                throw ValidationFailure.message("No Metal device is available")
+            }
+            let devicePointer = objectPointer(device as AnyObject)
+            try require(nativeInit(devicePointer) > 0, "Base SDR pipeline initialization failed")
+            try require(nativeContract(devicePointer) == 1, "Base initialization created HDR PSOs/resources")
+
+            let legacyHdr = generationPacket(
+                valid,
+                generation: 100,
+                lightingMode: 0,
+                outputMode: 1,
+                spatial: true
+            )
+            try require(validate(nativeSet, legacyHdr) == 1, "Legacy HDR generation prewarm failed")
+            let legacyHdrContract = nativeContract(devicePointer)
+            try require(
+                legacyHdrContract & ((1 << 2) | (1 << 3) | (1 << 7))
+                    == ((1 << 2) | (1 << 3) | (1 << 7)),
+                "Legacy HDR generation is missing effects/reconstruction/fallback PSOs"
+            )
+            try require(
+                legacyHdrContract & ((1 << 4) | (1 << 5) | (1 << 6)) == 0,
+                "Legacy HDR generation leaked actual-HDR PSOs or eager workspace"
+            )
+
+            let actualHdr = generationPacket(
+                valid,
+                generation: 101,
+                lightingMode: 1,
+                outputMode: 1,
+                spatial: true
+            )
+            try require(validate(nativeSet, actualHdr) == 1, "METALLUM HDR generation prewarm failed")
+            let actualHdrContract = nativeContract(devicePointer)
+            try require(
+                actualHdrContract == ((1 << 0) | (1 << 1) | (1 << 4) | (1 << 5) | (1 << 8) | (1 << 9) | (1 << 10)),
+                "METALLUM HDR generation prewarmed an incomplete or non-exact PSO set: \(actualHdrContract)"
+            )
+            try require(
+                actualHdrContract & ((1 << 2) | (1 << 3) | (1 << 6) | (1 << 7)) == 0,
+                "METALLUM HDR generation retained Legacy reconstruction/semantic resources"
+            )
+
+            let actualSdr = generationPacket(
+                valid,
+                generation: 102,
+                lightingMode: 1,
+                outputMode: 0,
+                spatial: false
+            )
+            try require(validate(nativeSet, actualSdr) == 1, "METALLUM SDR generation prewarm failed")
+            try require(
+                nativeContract(devicePointer) == 3,
+                "METALLUM SDR generation retained actual-HDR UI-only/effects PSOs or created work beyond SDR present/UI seed"
+            )
+
+            let legacySdr = generationPacket(
+                valid,
+                generation: 103,
+                lightingMode: 0,
+                outputMode: 0,
+                spatial: false
+            )
+            try require(validate(nativeSet, legacySdr) == 1, "Legacy SDR generation prewarm failed")
+            try require(
+                nativeContract(devicePointer) == 1,
+                "Legacy SDR generation retained HDR/UI-seed PSOs or resources"
+            )
+            print("Native FrameState ABI v2 validation passed (8 negative cases + 4 exact native generations)")
         } catch {
             fputs("Native FrameState ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

@@ -1,6 +1,9 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.MetallumMaterialPreflightGate;
+import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
+import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -32,10 +35,15 @@ abstract class ShaderManagerMixin {
             final CallbackInfo ci
     ) {
         Map<SceneLinearPreflightGate.ShaderKey, String> sources = new HashMap<>();
+        Map<MetallumMaterialPreflightGate.ShaderKey, String> materialSources = new HashMap<>();
         for (Map.Entry<?, String> entry : shaderSources(configs).entrySet()) {
             Object rawKey = entry.getKey();
             if (!(rawKey instanceof ShaderSourceKeyAccessor accessor)) {
                 SceneLinearPreflightGate.beginCandidate(new SceneLinearPreflightGate.Evaluation(
+                        false,
+                        "could not inspect ShaderManager compilation-cache keys"
+                ));
+                MetallumMaterialPreflightGate.beginCandidate(new MetallumMaterialPreflightGate.Evaluation(
                         false,
                         "could not inspect ShaderManager compilation-cache keys"
                 ));
@@ -50,12 +58,28 @@ abstract class ShaderManagerMixin {
                     new SceneLinearPreflightGate.ShaderKey(id.getNamespace(), id.getPath(), stage),
                     entry.getValue()
             );
+            materialSources.put(
+                    new MetallumMaterialPreflightGate.ShaderKey(
+                            id.getNamespace(),
+                            id.getPath(),
+                            shaderType == ShaderType.VERTEX
+                                    ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                                    : MetallumMaterialShaderPatcher.Stage.FRAGMENT
+                    ),
+                    entry.getValue()
+            );
         }
 
         FabricLoader loader = FabricLoader.getInstance();
         SceneLinearPreflightGate.beginCandidate(SceneLinearPreflightGate.evaluate(
                 sources,
                 HdrSceneState.isRequested(),
+                loader.isModLoaded("iris"),
+                loader.isModLoaded("sodium")
+        ));
+        MetallumMaterialPreflightGate.beginCandidate(MetallumMaterialPreflightGate.evaluate(
+                materialSources,
+                MetallumMaterialState.isRequested(),
                 loader.isModLoaded("iris"),
                 loader.isModLoaded("sodium")
         ));
@@ -72,6 +96,7 @@ abstract class ShaderManagerMixin {
             final CallbackInfo ci
     ) {
         SceneLinearPreflightGate.commitCandidate();
+        MetallumMaterialPreflightGate.commitCandidate();
         TemporalResetEvents.signal(FrameState.HistoryResetReason.RESOURCE_PACK_SHADER_RELOAD);
     }
 

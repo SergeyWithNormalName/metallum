@@ -54,6 +54,46 @@ public final class HdrPipelinePolicy {
             "core/text_background"
     );
 
+    /*
+     * Minecraft 26.2 normally pairs a scene fragment shader with the vertex
+     * shader of the same name. The two intentional exceptions are
+     * debug_point -> position_color and screenquad -> blit_screen. Keep the
+     * complete vertex set explicit so a resource reload cannot activate a
+     * material generation which will later fail when either exception is
+     * compiled.
+     */
+    private static final Set<String> VANILLA_SCENE_VERTEX_SHADERS = Set.of(
+            "core/block",
+            "core/debug_point",
+            "core/entity",
+            "core/glint",
+            "core/gui",
+            "core/item",
+            "core/panorama",
+            "core/particle",
+            "core/position",
+            "core/position_color",
+            "core/position_tex",
+            "core/position_tex_color",
+            "core/rendertype_beacon_beam",
+            "core/rendertype_clouds",
+            "core/rendertype_crumbling",
+            "core/rendertype_end_portal",
+            "core/rendertype_entity_shadow",
+            "core/rendertype_leash",
+            "core/rendertype_lightning",
+            "core/rendertype_lines",
+            "core/rendertype_outline",
+            "core/rendertype_water_mask",
+            "core/rendertype_world_border",
+            "core/screenquad",
+            "core/sky",
+            "core/stars",
+            "core/terrain",
+            "core/text",
+            "core/text_background"
+    );
+
     private static final Set<String> VANILLA_SCENE_POST_SHADERS = Set.of(
             "post/bits",
             "post/blit",
@@ -64,6 +104,10 @@ public final class HdrPipelinePolicy {
             "post/invert",
             "post/spiderclip",
             "post/transparency"
+    );
+
+    private static final Set<String> VANILLA_SCENE_POST_VERTEX_SHADERS = Set.of(
+            "post/rotscale"
     );
 
     private static final Set<String> SODIUM_SCENE_PIPELINES = Set.of(
@@ -79,6 +123,18 @@ public final class HdrPipelinePolicy {
         return VANILLA_SCENE_FRAGMENT_SHADERS;
     }
 
+    static Set<String> requiredVanillaRasterVertexShaders() {
+        return VANILLA_SCENE_VERTEX_SHADERS;
+    }
+
+    static Set<String> requiredVanillaPostFragmentShaders() {
+        return VANILLA_SCENE_POST_SHADERS;
+    }
+
+    static Set<String> requiredVanillaPostVertexShaders() {
+        return VANILLA_SCENE_POST_VERTEX_SHADERS;
+    }
+
     public static Role classify(
             final String pipelineNamespace,
             final String pipelinePath,
@@ -91,6 +147,11 @@ public final class HdrPipelinePolicy {
                 && "pipeline/lightmap".equals(pipelinePath)
                 && "minecraft".equals(fragmentShaderNamespace)
                 && "core/lightmap".equals(fragmentShaderPath)) {
+            return Role.LIGHTMAP_DATA;
+        }
+        if ("minecraft".equals(pipelineNamespace)
+                && ("pipeline/animate_sprite_blit".equals(pipelinePath)
+                || "pipeline/animate_sprite_interpolate".equals(pipelinePath))) {
             return Role.LIGHTMAP_DATA;
         }
 

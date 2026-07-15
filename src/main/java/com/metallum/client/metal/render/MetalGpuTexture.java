@@ -24,6 +24,7 @@ final class MetalGpuTexture extends GpuTexture {
     @Nullable
     private Double materializedDepthClear;
     private boolean sceneColorClearRole;
+    private boolean displaySdrColorRole;
     private int views = 1;
     @Nullable
     private MemorySegment nativeHandle;
@@ -94,7 +95,7 @@ final class MetalGpuTexture extends GpuTexture {
     }
 
     void markSceneColorClearRole() {
-        if (!this.sceneColorClearRole) {
+        if (!this.displaySdrColorRole && !this.sceneColorClearRole) {
             // A cached logical clear is only redundant while its color-space
             // contract is unchanged. The declaration is attachment-owned and
             // intentionally sticky: an unknown pipeline must not turn a
@@ -106,6 +107,18 @@ final class MetalGpuTexture extends GpuTexture {
 
     boolean hasSceneColorClearRole() {
         return this.sceneColorClearRole;
+    }
+
+    void markDisplaySdrColorRole() {
+        if (!this.displaySdrColorRole || this.sceneColorClearRole) {
+            this.materializedColorClear = null;
+            this.sceneColorClearRole = false;
+            this.displaySdrColorRole = true;
+        }
+    }
+
+    boolean hasDisplaySdrColorRole() {
+        return this.displaySdrColorRole;
     }
 
     MemorySegment nativeHandle() {

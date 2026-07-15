@@ -152,6 +152,14 @@ tasks.register("hdrUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.hdr.HdrConfigTests")
 }
 
+tasks.register("materialContractUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates L2 material adapters against Minecraft and Sodium runtime shader resources"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.hdr.MetallumMaterialContractTests")
+}
+
 tasks.register("metalRuntimeUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free Metal runtime lifecycle tests"
@@ -460,6 +468,7 @@ tasks.register("compileFrameStateAbiValidation", Exec) {
 		"-O",
 		"-parse-as-library",
 		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Metal",
 		"-o", frameStateAbiValidationBinary.get().asFile.absolutePath,
 		"src/test/native/FrameStateAbiValidation.swift"
 }
@@ -468,7 +477,11 @@ tasks.register("frameStateAbiNativeValidation", Exec) {
 	group = "verification"
 	description = "Validates native renderer FrameState lighting and disabled-feature invariants"
 	onlyIf { isAppleSiliconMac }
-	dependsOn(tasks.named("buildMacNative"), tasks.named("compileFrameStateAbiValidation"))
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileFrameStateAbiValidation")
+	)
 
 	inputs.file("src/main/native/MetallumNative.swift")
 	inputs.file(macNativeLibrary)
@@ -759,6 +772,7 @@ tasks.named("test", Test) {
 
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
+	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))

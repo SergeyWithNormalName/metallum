@@ -73,13 +73,17 @@ public final class SceneLinearShaderPatcher {
         if (source == null) {
             return Result.failure(null, "shader source is missing");
         }
-        if (flavor == HdrShaderFlavor.LEGACY || stage == Stage.VERTEX) {
+        if (flavor == HdrShaderFlavor.LEGACY
+                || flavor == HdrShaderFlavor.LEGACY_HDR_SEMANTIC
+                || stage == Stage.VERTEX) {
             return Result.success(source);
         }
         return switch (flavor) {
             case LEGACY -> Result.success(source);
+            case LEGACY_HDR_SEMANTIC -> Result.success(source);
             case SCENE_RASTER_LINEAR -> patchRasterBoundary(source);
             case SCENE_POST_LINEAR -> patchPost(namespace, path, source);
+            case METALLUM -> Result.failure(source, "METALLUM uses its material-profile patcher");
         };
     }
 

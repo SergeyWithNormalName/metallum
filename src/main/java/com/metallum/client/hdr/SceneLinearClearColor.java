@@ -17,14 +17,41 @@ public final class SceneLinearClearColor {
     private SceneLinearClearColor() {
     }
 
-    /** Returns whether an encoded clear belongs to an active FP16 scene-color boundary. */
+    /** Returns whether an encoded clear belongs to an active linear scene-color boundary. */
     public static boolean shouldDecode(
             final boolean rgba16FloatAttachment,
             final boolean sceneColorRole
     ) {
-        return SceneLinearPreflightGate.isActive()
-                && rgba16FloatAttachment
-                && sceneColorRole;
+        return shouldDecode(
+                rgba16FloatAttachment,
+                sceneColorRole,
+                MetallumMaterialState.isGenerationActive()
+        );
+    }
+
+    public static boolean shouldDecode(
+            final boolean rgba16FloatAttachment,
+            final boolean sceneColorRole,
+            final boolean materialGenerationActive
+    ) {
+        return shouldDecode(
+                rgba16FloatAttachment,
+                sceneColorRole,
+                materialGenerationActive,
+                SceneLinearPreflightGate.isActive()
+        );
+    }
+
+    /** Uses resolved generation state so an FP16 Legacy-SDR compatibility target stays gamma encoded. */
+    public static boolean shouldDecode(
+            final boolean rgba16FloatAttachment,
+            final boolean sceneColorRole,
+            final boolean materialGenerationActive,
+            final boolean legacyHdrSceneLinearGenerationActive
+    ) {
+        return sceneColorRole
+                && (materialGenerationActive
+                || (legacyHdrSceneLinearGenerationActive && rgba16FloatAttachment));
     }
 
     /** Decodes one sign-preserving extended-sRGB component to linear light. */

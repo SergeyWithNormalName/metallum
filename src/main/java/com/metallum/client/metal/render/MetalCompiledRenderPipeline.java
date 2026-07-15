@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
@@ -75,7 +76,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final float depthBiasConstant;
     private final MTLPrimitiveType topology;
     private final int vertexBufferCount;
-    private final boolean semanticOutput;
     private final HdrPipelinePolicy.Role hdrRole;
     private final Map<HdrShaderFlavor, ShaderFunctions> shaderFunctions;
 
@@ -88,8 +88,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private final boolean isValid;
     private boolean closed = false;
     private long legacyColorFormatsLogged;
+    private long legacyHdrSemanticColorFormatsLogged;
     private long sceneRasterColorFormatsLogged;
     private long scenePostColorFormatsLogged;
+    private long materialColorFormatsLogged;
 
     private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
 
@@ -119,6 +121,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 && hdrRole.supportsSceneLinearFlavor()
                 && !variants.containsKey(hdrRole.sceneLinearFlavor())) {
             throw new IllegalArgumentException("Pipeline is missing its scene-linear shader flavor: " + info.getLocation());
+        }
+        if (MetallumMaterialPreflightGate.shouldCompileMaterialVariants()
+                && hdrRole.supportsSceneLinearFlavor()
+                && !variants.containsKey(HdrShaderFlavor.METALLUM)) {
+            throw new IllegalArgumentException("Pipeline is missing its METALLUM material flavor: " + info.getLocation());
         }
 
         this.resources = legacy.resources();
@@ -155,8 +162,6 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         this.fillMode = info.getPolygonMode() == PolygonMode.WIREFRAME ? MTLTriangleFillMode.Lines : MTLTriangleFillMode.Fill;
         this.topology = MTLPrimitiveType.from(info.getPrimitiveTopology());
         this.vertexBufferCount = info.getVertexFormatBindings().length;
-        this.semanticOutput = legacy.semanticOutput();
-
         Map<HdrShaderFlavor, ShaderFunctions> compiledFunctions = new java.util.EnumMap<>(HdrShaderFlavor.class);
         boolean allFunctionsValid = true;
         boolean sidecarSceneVariantsValid = true;
@@ -168,7 +173,16 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     variant.semanticOutput()
             );
             if (entry.getKey() != HdrShaderFlavor.LEGACY && !functions.isValid()) {
-                if (this.usesSodiumLightSidecar) {
+                if (entry.getKey() == HdrShaderFlavor.METALLUM) {
+                    MetallumMaterialPreflightGate.rejectMaterialVariant(
+                            "Metal rejected METALLUM functions for " + info.getLocation()
+                    );
+                } else if (entry.getKey() == HdrShaderFlavor.LEGACY_HDR_SEMANTIC) {
+                    com.metallum.Metallum.LOGGER.warn(
+                            "Metal rejected Legacy HDR semantic functions for {}; output remains on the base Legacy shader",
+                            info.getLocation()
+                    );
+                } else if (this.usesSodiumLightSidecar) {
                     sidecarSceneVariantsValid = false;
                 } else {
                     SceneLinearPreflightGate.rejectSceneVariant(
@@ -205,7 +219,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         var colorTarget = info.getColorTargetState();
         MTLPixelFormat colorFormat = colorTarget != null ? MTLPixelFormat.from(colorTarget.format()) : MTLPixelFormat.RGBA8Unorm;
-        HdrShaderFlavor initialFlavor = selectFlavor(colorFormat);
+        HdrShaderFlavor initialFlavor = selectFlavor(colorFormat, false);
         ShaderFunctions initialFunctions = this.shaderFunctions.get(initialFlavor);
 
         MemorySegment withoutDepth = MemorySegment.NULL;
@@ -234,7 +248,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         vertexDescriptor
                 );
 
-                sidecarScenePipelinesValid = warmSceneLinearPipelines(vertexDescriptor);
+                sidecarScenePipelinesValid = warmSceneLinearPipelines(vertexDescriptor)
+                        && warmMaterialPipelines(vertexDescriptor);
             }
         }
         this.isValid = allFunctionsValid
@@ -269,6 +284,38 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     );
                 }
                 return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean warmMaterialPipelines(final MTLVertexDescriptor vertexDescriptor) {
+        if (!MetallumMaterialPreflightGate.shouldCompileMaterialVariants()
+                || !this.hdrRole.supportsSceneLinearFlavor()) {
+            return true;
+        }
+        ShaderFunctions materialFunctions = this.shaderFunctions.get(HdrShaderFlavor.METALLUM);
+        if (materialFunctions == null || !materialFunctions.isValid() || materialFunctions.semanticOutput()) {
+            MetallumMaterialPreflightGate.rejectMaterialVariant(
+                    "METALLUM functions are unavailable or retained semantic output for " + this.info.getLocation()
+            );
+            return false;
+        }
+        for (MTLPixelFormat colorFormat : List.of(MTLPixelFormat.RGBA8Unorm, MTLPixelFormat.RGBA16Float)) {
+            for (MTLPixelFormat depthFormat : List.of(MTLPixelFormat.Invalid, MTLPixelFormat.Depth32Float)) {
+                PipelineKey key = new PipelineKey(
+                        HdrShaderFlavor.METALLUM,
+                        colorFormat,
+                        depthFormat,
+                        MTLPixelFormat.Invalid
+                );
+                if (MetalNativeBridge.isNullHandle(compileAndCache(key, materialFunctions, vertexDescriptor))) {
+                    MetallumMaterialPreflightGate.rejectMaterialVariant(
+                            "Metal rejected the prewarmed " + key + " pipeline state for "
+                                    + this.info.getLocation()
+                    );
+                    return false;
+                }
             }
         }
         return true;
@@ -428,12 +475,13 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     public synchronized MemorySegment getNativePipeline(
             final MTLPixelFormat colorFormat,
             final MTLPixelFormat depthFormat,
-            final MTLPixelFormat stencilFormat
+            final MTLPixelFormat stencilFormat,
+            final boolean materialSceneAttachment
     ) {
         if (this.closed) {
             throw new IllegalStateException("Pipeline has been closed: " + this.info.getLocation());
         }
-        HdrShaderFlavor flavor = selectFlavor(colorFormat);
+        HdrShaderFlavor flavor = selectFlavor(colorFormat, materialSceneAttachment);
         ShaderFunctions functions = this.shaderFunctions.get(flavor);
         if (functions == null || !functions.isValid()) {
             throw new IllegalStateException(
@@ -462,12 +510,23 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return pipeline;
     }
 
-    private HdrShaderFlavor selectFlavor(final MTLPixelFormat colorFormat) {
+    private HdrShaderFlavor selectFlavor(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        if (materialSceneAttachment && this.device.isMaterialGenerationActive()) {
+            if (this.hdrRole.supportsSceneLinearFlavor()) {
+                return HdrShaderFlavor.METALLUM;
+            }
+        }
         boolean rgba16Float = colorFormat == MTLPixelFormat.RGBA16Float;
-        HdrShaderFlavor flavor = HdrPipelinePolicy.selectFlavor(
+        HdrShaderFlavor flavor = selectLegacyGenerationFlavor(
                 this.hdrRole,
+                this.device.isLegacyHdrSemanticGenerationActive(),
+                materialSceneAttachment,
                 SceneLinearPreflightGate.isActive(),
-                rgba16Float
+                rgba16Float,
+                this.shaderFunctions.containsKey(HdrShaderFlavor.LEGACY_HDR_SEMANTIC)
         );
         if (rgba16Float
                 && SceneLinearPreflightGate.isActive()
@@ -479,6 +538,25 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             );
         }
         return flavor;
+    }
+
+    static HdrShaderFlavor selectLegacyGenerationFlavor(
+            final HdrPipelinePolicy.Role role,
+            final boolean legacyHdrGeneration,
+            final boolean sceneColorAttachment,
+            final boolean sceneLinearActive,
+            final boolean rgba16Float,
+            final boolean semanticVariantAvailable
+    ) {
+        if (!legacyHdrGeneration || !sceneColorAttachment) {
+            return HdrShaderFlavor.LEGACY;
+        }
+        if (sceneLinearActive && rgba16Float) {
+            return HdrPipelinePolicy.selectFlavor(role, true, true);
+        }
+        return role == HdrPipelinePolicy.Role.SCENE_RASTER && semanticVariantAvailable
+                ? HdrShaderFlavor.LEGACY_HDR_SEMANTIC
+                : HdrShaderFlavor.LEGACY;
     }
 
     private void logFlavorSelectionOnce(
@@ -493,8 +571,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         long colorFormatBit = 1L << colorFormatOrdinal;
         long loggedColorFormats = switch (flavor) {
             case LEGACY -> this.legacyColorFormatsLogged;
+            case LEGACY_HDR_SEMANTIC -> this.legacyHdrSemanticColorFormatsLogged;
             case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged;
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged;
+            case METALLUM -> this.materialColorFormatsLogged;
         };
         if ((loggedColorFormats & colorFormatBit) != 0L) {
             return;
@@ -502,8 +582,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
         switch (flavor) {
             case LEGACY -> this.legacyColorFormatsLogged |= colorFormatBit;
+            case LEGACY_HDR_SEMANTIC -> this.legacyHdrSemanticColorFormatsLogged |= colorFormatBit;
             case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged |= colorFormatBit;
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged |= colorFormatBit;
+            case METALLUM -> this.materialColorFormatsLogged |= colorFormatBit;
         }
         com.metallum.Metallum.LOGGER.debug(
                 "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",
@@ -527,12 +609,53 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
         return this.vertexBufferCount;
     }
 
-    boolean semanticOutput() {
-        return this.semanticOutput;
+    boolean semanticOutput(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        ShaderFunctions functions = this.shaderFunctions.get(selectFlavor(colorFormat, materialSceneAttachment));
+        return functions != null && functions.semanticOutput();
     }
 
     boolean sceneColorRole() {
         return this.hdrRole.supportsSceneLinearFlavor();
+    }
+
+    boolean shouldSuppressUnsupportedMaterialDraw(
+            final boolean materialGenerationActive,
+            final boolean sceneColorAttachment,
+            final boolean displaySdrAttachment
+    ) {
+        return shouldSuppressUnsupportedMaterialDraw(
+                materialGenerationActive,
+                sceneColorAttachment,
+                displaySdrAttachment,
+                this.hdrRole,
+                this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM),
+                MetallumMaterialPreflightGate.isActive()
+        );
+    }
+
+    void rejectUnsupportedMaterialScenePipeline() {
+        MetallumMaterialPreflightGate.rejectMaterialVariant(
+                "unsupported scene pipeline role " + this.info.getLocation()
+        );
+    }
+
+    static boolean shouldSuppressUnsupportedMaterialDraw(
+            final boolean materialGenerationActive,
+            final boolean sceneColorAttachment,
+            final boolean displaySdrAttachment,
+            final HdrPipelinePolicy.Role role,
+            final boolean materialFlavorAvailable,
+            final boolean materialCoverageActive
+    ) {
+        return materialGenerationActive
+                && sceneColorAttachment
+                && !displaySdrAttachment
+                && (!materialCoverageActive
+                || !role.supportsSceneLinearFlavor()
+                || !materialFlavorAvailable);
     }
 
     private static MTLVertexDescriptor buildVertexDescriptor(

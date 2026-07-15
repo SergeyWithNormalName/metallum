@@ -125,6 +125,7 @@ final class MetalRenderPass implements RenderPassBackend {
             vertexBuffersDirty = true;
             pipelineDirty = true;
         }
+        suppressUnsupportedMaterialDraw();
     }
 
     @Override
@@ -216,6 +217,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void drawIndexed(final int indexCount, final int instanceCount, final int firstIndex, final int vertexOffset, final int firstInstance) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
 
@@ -225,6 +229,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void multiDrawIndexed(@NonNull IntBuffer drawParameters, int instanceCount, int firstInstance, int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
@@ -241,6 +248,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void multiDrawIndexed(@NonNull PointerBuffer firstIndexOffsets, @NonNull IntBuffer indexCounts, @NonNull IntBuffer vertexOffsets, int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             throw new UnsupportedOperationException("Metal backend does not support triangle fan multiDrawIndexed");
@@ -266,6 +276,9 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void drawIndexedIndirect(final @NonNull GpuBufferSlice commands, final int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             throw new UnsupportedOperationException("Metal backend does not support triangle fan indirect draws");
@@ -294,6 +307,9 @@ final class MetalRenderPass implements RenderPassBackend {
             final @NonNull Collection<String> dynamicUniforms,
             final @NonNull T uniformArgument
     ) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         IndexType fallbackIndexType = defaultIndexType == null ? IndexType.SHORT : defaultIndexType;
         MTLRenderCommandEncoder enc = renderEncoder();
 
@@ -327,6 +343,9 @@ final class MetalRenderPass implements RenderPassBackend {
         if (vertexCount <= 0 || instanceCount <= 0) {
             return;
         }
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
         MTLRenderCommandEncoder enc = renderEncoder();
 
@@ -341,16 +360,25 @@ final class MetalRenderPass implements RenderPassBackend {
 
     @Override
     public void multiDraw(@NonNull IntBuffer drawParameters, int instanceCount, int firstInstance, int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         throw new UnsupportedOperationException();
     }
 
     @Override
     public void multiDraw(@NonNull IntBuffer firstVertices, @NonNull IntBuffer vertexCounts, int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         throw new UnsupportedOperationException();
     }
 
     @Override
     public void drawIndirect(final @NonNull GpuBufferSlice commands, final int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
         MTLPrimitiveType primitiveType = primitiveTopology();
         if (primitiveType == MTLPrimitiveType.TriangleFan) {
             throw new UnsupportedOperationException("Metal backend does not support triangle fan indirect draws");
@@ -373,6 +401,24 @@ final class MetalRenderPass implements RenderPassBackend {
         if (pool instanceof MetalGpuQueryPool metalPool && index >= 0 && index < pool.size()) {
             metalPool.setValue(index, device.getTimestampNow());
         }
+    }
+
+    private boolean suppressUnsupportedMaterialDraw() {
+        MetalCompiledRenderPipeline pipeline = this.compiledPipeline;
+        if (pipeline == null) {
+            return false;
+        }
+        MetalGpuTexture colorAttachment = (MetalGpuTexture) this.colorTexture.texture();
+        boolean suppress = pipeline.shouldSuppressUnsupportedMaterialDraw(
+                this.device.isMaterialGenerationActive(),
+                colorAttachment.hasSceneColorClearRole(),
+                colorAttachment.hasDisplaySdrColorRole()
+        );
+        if (suppress) {
+            pipeline.rejectUnsupportedMaterialScenePipeline();
+            this.commandEncoder.invalidateRendererGenerationFrame();
+        }
+        return suppress;
     }
 
     MTLPixelFormat colorAttachmentFormat() {
@@ -407,15 +453,23 @@ final class MetalRenderPass implements RenderPassBackend {
         boolean clearDepthNow = clearDepthEnabled;
         boolean decodeClearColor = clearColorNow && SceneLinearClearColor.shouldDecode(
                 colorAttachment.getFormat() == GpuFormat.RGBA16_FLOAT,
-                colorAttachment.hasSceneColorClearRole()
+                colorAttachment.hasSceneColorClearRole(),
+                this.device.isMaterialGenerationActive(),
+                this.device.isLegacyHdrSceneLinearGenerationActive()
         );
+        boolean materialSceneAttachment = colorAttachment.hasSceneColorClearRole()
+                && !colorAttachment.hasDisplaySdrColorRole();
         SceneLinearClearColor.Rgb linearClear = decodeClearColor
                 ? SceneLinearClearColor.extendedSrgbToLinear(clearColor.x(), clearColor.y(), clearColor.z())
                 : null;
         MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
                 colorTextureView,
                 depthTextureView,
-                compiledPipeline != null && compiledPipeline.semanticOutput(),
+                this.device.isLegacyHdrSemanticGenerationActive()
+                        && compiledPipeline != null && compiledPipeline.semanticOutput(
+                        colorAttachment.mtlPixelFormat(),
+                        materialSceneAttachment
+                ),
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,
@@ -612,7 +666,15 @@ final class MetalRenderPass implements RenderPassBackend {
             MTLPixelFormat depthFormat = depthAttachmentFormat();
             MTLPixelFormat stencilFormat = stencilAttachmentFormat();
             boolean useDepth = depthFormat.value != MTLPixelFormat.Invalid.value;
-            MemorySegment pipelineHandle = compiledPipeline.getNativePipeline(colorFormat, depthFormat, stencilFormat);
+            MetalGpuTexture colorAttachment = (MetalGpuTexture) this.colorTexture.texture();
+            boolean materialSceneAttachment = colorAttachment.hasSceneColorClearRole()
+                    && !colorAttachment.hasDisplaySdrColorRole();
+            MemorySegment pipelineHandle = compiledPipeline.getNativePipeline(
+                    colorFormat,
+                    depthFormat,
+                    stencilFormat,
+                    materialSceneAttachment
+            );
             if (MetalNativeBridge.isNullHandle(pipelineHandle)) {
                 throw new IllegalStateException("Native pipeline is unavailable");
             }

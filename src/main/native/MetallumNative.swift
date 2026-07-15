@@ -47,9 +47,15 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
             [
                 "metallum_present_vs",
                 "metallum_offscreen_vs",
+                "metallum_sdr_present_fs",
                 "metallum_present_fs",
+                "metallum_actual_hdr_present_fs",
+                "metallum_actual_hdr_ui_only_fs",
+                "metallum_actual_hdr_linear_ui_only_fs",
                 "metallum_spatial_world_fs",
+                "metallum_actual_spatial_world_fs",
                 "metallum_native_world_ui_fs",
+                "metallum_actual_native_world_ui_fs",
                 "metallum_spatial_present_fs",
                 "metallum_spatial_screenshot_fs"
             ]
@@ -57,8 +63,10 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
             [
                 "metallum_hdr_vs",
                 "metallum_hdr_extract_fs",
+                "metallum_actual_hdr_extract_fs",
                 "metallum_hdr_histogram_build",
                 "metallum_hdr_histogram_reduce",
+                "metallum_actual_hdr_exposure_reduce",
                 "metallum_hdr_blur",
                 "metallum_hdr_ui_backdrop_fs",
                 "metallum_hdr_ui_compare_fs",
@@ -116,6 +124,7 @@ private final class MetallumBuiltinShaderState {
     var pipelineCacheMissCount = 0
     var pipelineCreationsAfterWarmup = 0
     var warmupComplete = false
+    var generationWarmupInProgress = false
 
     func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock()
@@ -200,10 +209,6 @@ private final class MetallumHdrPipelines {
     let extract: MTLRenderPipelineState
     let histogramReduce: MTLComputePipelineState
     let blur: MTLComputePipelineState
-    let uiBackdrop: MTLRenderPipelineState
-    let uiBackdropVertexFunction: MTLFunction
-    let uiBackdropFragmentFunction: MTLFunction
-    var uiBackdropAttachmentVariants: [MetallumHdrUiBackdropPipelineKey: MTLRenderPipelineState]
     let uiCompare: MTLRenderPipelineState
     let uiDilate: MTLRenderPipelineState
 
@@ -211,25 +216,58 @@ private final class MetallumHdrPipelines {
         extract: MTLRenderPipelineState,
         histogramReduce: MTLComputePipelineState,
         blur: MTLComputePipelineState,
-        uiBackdrop: MTLRenderPipelineState,
-        uiBackdropVertexFunction: MTLFunction,
-        uiBackdropFragmentFunction: MTLFunction,
         uiCompare: MTLRenderPipelineState,
         uiDilate: MTLRenderPipelineState
     ) {
         self.extract = extract
         self.histogramReduce = histogramReduce
         self.blur = blur
-        self.uiBackdrop = uiBackdrop
-        self.uiBackdropVertexFunction = uiBackdropVertexFunction
-        self.uiBackdropFragmentFunction = uiBackdropFragmentFunction
-        self.uiBackdropAttachmentVariants = [:]
         self.uiCompare = uiCompare
         self.uiDilate = uiDilate
     }
 }
 
+private final class MetallumActualHdrPipelines {
+    let extract: MTLRenderPipelineState
+    let exposureReduce: MTLComputePipelineState
+    let blur: MTLComputePipelineState
+    let uiCompare: MTLRenderPipelineState
+    let uiDilate: MTLRenderPipelineState
+
+    init(
+        extract: MTLRenderPipelineState,
+        exposureReduce: MTLComputePipelineState,
+        blur: MTLComputePipelineState,
+        uiCompare: MTLRenderPipelineState,
+        uiDilate: MTLRenderPipelineState
+    ) {
+        self.extract = extract
+        self.exposureReduce = exposureReduce
+        self.blur = blur
+        self.uiCompare = uiCompare
+        self.uiDilate = uiDilate
+    }
+}
+
+private final class MetallumUiBackdropPipelines {
+    let standard: MTLRenderPipelineState
+    let vertexFunction: MTLFunction
+    let fragmentFunction: MTLFunction
+    var attachmentVariants: [MetallumHdrUiBackdropPipelineKey: MTLRenderPipelineState] = [:]
+
+    init(
+        standard: MTLRenderPipelineState,
+        vertexFunction: MTLFunction,
+        fragmentFunction: MTLFunction
+    ) {
+        self.standard = standard
+        self.vertexFunction = vertexFunction
+        self.fragmentFunction = fragmentFunction
+    }
+}
+
 private final class MetallumHdrWorkspace {
+    let lightingMode: UInt32
     let sourceWidth: Int
     let sourceHeight: Int
     var displayWidth: Int
@@ -246,6 +284,7 @@ private final class MetallumHdrWorkspace {
     var histogramNeedsInitialization: Bool
 
     init(
+        lightingMode: UInt32,
         sourceWidth: Int,
         sourceHeight: Int,
         displayWidth: Int,
@@ -255,6 +294,7 @@ private final class MetallumHdrWorkspace {
         histogram: MTLBuffer,
         adaptiveState: MTLBuffer
     ) {
+        self.lightingMode = lightingMode
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.displayWidth = displayWidth
@@ -281,6 +321,7 @@ private final class MetallumSpatialWorkspace {
     let inputPixelFormat: MTLPixelFormat
     let outputPixelFormat: MTLPixelFormat
     let colorProcessingMode: MTLFXSpatialScalerColorProcessingMode
+    let convertsLinearToPerceptual: Bool
     let scaler: MTLFXSpatialScaler
     let perceptualInput: MTLTexture?
     var output: MTLTexture?
@@ -296,6 +337,7 @@ private final class MetallumSpatialWorkspace {
         inputPixelFormat: MTLPixelFormat,
         outputPixelFormat: MTLPixelFormat,
         colorProcessingMode: MTLFXSpatialScalerColorProcessingMode,
+        convertsLinearToPerceptual: Bool,
         scaler: MTLFXSpatialScaler,
         perceptualInput: MTLTexture?,
         output: MTLTexture?,
@@ -309,6 +351,7 @@ private final class MetallumSpatialWorkspace {
         self.inputPixelFormat = inputPixelFormat
         self.outputPixelFormat = outputPixelFormat
         self.colorProcessingMode = colorProcessingMode
+        self.convertsLinearToPerceptual = convertsLinearToPerceptual
         self.scaler = scaler
         self.perceptualInput = perceptualInput
         self.output = output
@@ -908,6 +951,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case uiSeed = 9
     case ui = 10
     case present = 11
+    case actualHdrDisplay = 12
 
     var reportName: String {
         switch self {
@@ -923,6 +967,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .uiSeed: "UI seed"
         case .ui: "UI draw"
         case .present: "present"
+        case .actualHdrDisplay: "actual-radiance HDR display mapping"
         }
     }
 
@@ -2377,14 +2422,23 @@ private enum NativeState {
     static var debugLabelsEnabled = false
     static var depthStencilStates: [DepthStencilKey: MTLDepthStencilState] = [:]
     static var clearPipelines: [PipelineVariantKey: MTLRenderPipelineState] = [:]
+    // The base present cache contains only the two-generation SDR shader.
     static var presentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static var legacyHdrPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static var actualHdrPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static var actualHdrUiOnlyPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static var actualHdrLinearUiOnlyPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var spatialPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var spatialScreenshotPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var worldPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
     static var nativeWorldUiPipelines: [UInt: MTLRenderPipelineState] = [:]
+    static var actualWorldPresentPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static var actualNativeWorldUiPipelines: [UInt: MTLRenderPipelineState] = [:]
     static var sodiumLightPatchPipelines: [UInt: MTLComputePipelineState] = [:]
     static var temporalDiagnosticPipelines: [UInt: MTLRenderPipelineState] = [:]
     static var hdrPipelines: [UInt: MetallumHdrPipelines] = [:]
+    static var actualHdrPipelines: [UInt: MetallumActualHdrPipelines] = [:]
+    static var uiBackdropPipelines: [UInt: MetallumUiBackdropPipelines] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
@@ -2392,6 +2446,8 @@ private enum NativeState {
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
     static var builtinShaderStates: [UInt: MetallumBuiltinShaderState] = [:]
+    static var initializedDevices: [UInt: MTLDevice] = [:]
+    static var preparedRendererGenerations: [UInt: UInt64] = [:]
     static let builtinShaderStatesLock = NSLock()
     static let benchmarkTelemetryState = MetallumBenchmarkTelemetryState()
     static let rendererFrameState = MetallumRendererFrameStateStore()
@@ -2914,7 +2970,7 @@ private func recordBuiltinPipelineCreation(
         state.pipelineCacheMissCount += count
         if succeeded {
             state.pipelineCount += count
-            if state.warmupComplete {
+            if state.warmupComplete && !state.generationWarmupInProgress {
                 state.pipelineCreationsAfterWarmup += count
             }
         } else {
@@ -2925,7 +2981,7 @@ private func recordBuiltinPipelineCreation(
 
 private func builtinShaderInitializationStatus(_ state: MetallumBuiltinShaderState) -> Int32 {
     let snapshot = state.snapshot()
-    guard snapshot.pipelineFailureCount == 0, snapshot.pipelineCount >= 17 else {
+    guard snapshot.pipelineFailureCount == 0, snapshot.pipelineCount >= 5 else {
         return -1
     }
     switch snapshot.mode {
@@ -3009,7 +3065,6 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             let extractFunction = library.makeFunction(name: "metallum_hdr_extract_fs"),
             let histogramReduceFunction = library.makeFunction(name: "metallum_hdr_histogram_reduce"),
             let blurFunction = library.makeFunction(name: "metallum_hdr_blur"),
-            let uiBackdropFunction = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs"),
             let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
             let uiDilateFunction = library.makeFunction(name: "metallum_hdr_ui_dilate_fs")
         else {
@@ -3034,17 +3089,103 @@ private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
             extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
             histogramReduce: device.makeComputePipelineState(function: histogramReduceFunction),
             blur: device.makeComputePipelineState(function: blurFunction),
-            uiBackdrop: makePipeline(uiBackdropFunction, colorFormat: .rgba8Unorm),
-            uiBackdropVertexFunction: vertexFunction,
-            uiBackdropFragmentFunction: uiBackdropFunction,
             uiCompare: makePipeline(uiCompareFunction, colorFormat: .rg8Unorm),
             uiDilate: makePipeline(uiDilateFunction, colorFormat: .rg8Unorm)
         )
-        recordBuiltinPipelineCreation(device: device, count: 6, succeeded: true)
+        recordBuiltinPipelineCreation(device: device, count: 5, succeeded: true)
         return pipelines
     } catch {
         recordBuiltinPipelineCreation(device: device, succeeded: false)
         NSLog("[metallum] Failed to create HDR effect pipelines: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func buildActualHdrPipelines(device: MTLDevice) -> MetallumActualHdrPipelines? {
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .hdrEffects)
+        guard
+            let vertexFunction = library.makeFunction(name: "metallum_hdr_vs"),
+            let extractFunction = library.makeFunction(name: "metallum_actual_hdr_extract_fs"),
+            let exposureReduceFunction = library.makeFunction(name: "metallum_actual_hdr_exposure_reduce"),
+            let blurFunction = library.makeFunction(name: "metallum_hdr_blur"),
+            let uiCompareFunction = library.makeFunction(name: "metallum_hdr_ui_compare_fs"),
+            let uiDilateFunction = library.makeFunction(name: "metallum_hdr_ui_dilate_fs")
+        else {
+            recordBuiltinPipelineCreation(device: device, succeeded: false)
+            NSLog("[metallum] Failed to create actual-radiance HDR shader functions")
+            return nil
+        }
+
+        func makePipeline(
+            _ fragmentFunction: MTLFunction,
+            colorFormat: MTLPixelFormat
+        ) throws -> MTLRenderPipelineState {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = colorFormat
+            descriptor.colorAttachments[0].isBlendingEnabled = false
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        }
+
+        let pipelines = try MetallumActualHdrPipelines(
+            extract: makePipeline(extractFunction, colorFormat: .rgba16Float),
+            exposureReduce: device.makeComputePipelineState(function: exposureReduceFunction),
+            blur: device.makeComputePipelineState(function: blurFunction),
+            uiCompare: makePipeline(uiCompareFunction, colorFormat: .rg8Unorm),
+            uiDilate: makePipeline(uiDilateFunction, colorFormat: .rg8Unorm)
+        )
+        recordBuiltinPipelineCreation(device: device, count: 5, succeeded: true)
+        return pipelines
+    } catch {
+        recordBuiltinPipelineCreation(device: device, succeeded: false)
+        NSLog("[metallum] Failed to create actual-radiance HDR pipelines: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func ensureActualHdrPipelines(device: MTLDevice) -> MetallumActualHdrPipelines? {
+    let key = objectAddress(device)
+    if let cached = NativeState.actualHdrPipelines[key] {
+        return cached
+    }
+    let pipelines = buildActualHdrPipelines(device: device)
+    if let pipelines {
+        NativeState.actualHdrPipelines[key] = pipelines
+    }
+    return pipelines
+}
+
+private func ensureUiBackdropPipelines(device: MTLDevice) -> MetallumUiBackdropPipelines? {
+    let key = objectAddress(device)
+    if let cached = NativeState.uiBackdropPipelines[key] {
+        return cached
+    }
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .hdrEffects)
+        guard let vertex = library.makeFunction(name: "metallum_hdr_vs"),
+              let fragment = library.makeFunction(name: "metallum_hdr_ui_backdrop_fs") else {
+            recordBuiltinPipelineCreation(device: device, succeeded: false)
+            return nil
+        }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertex
+        descriptor.fragmentFunction = fragment
+        descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        let standard = try device.makeRenderPipelineState(descriptor: descriptor)
+        recordBuiltinPipelineCreation(device: device, succeeded: true)
+        let pipelines = MetallumUiBackdropPipelines(
+            standard: standard,
+            vertexFunction: vertex,
+            fragmentFunction: fragment
+        )
+        NativeState.uiBackdropPipelines[key] = pipelines
+        return pipelines
+    } catch {
+        recordBuiltinPipelineCreation(device: device, succeeded: false)
+        NSLog("[metallum] Failed to create SDR UI backdrop pipeline: %@", String(describing: error))
         return nil
     }
 }
@@ -3063,25 +3204,25 @@ private func ensureHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
 
 private func ensureHdrUiBackdropPipeline(
     device: MTLDevice,
-    pipelines: MetallumHdrPipelines,
+    pipelines: MetallumUiBackdropPipelines,
     depthFormat: MTLPixelFormat,
     stencilFormat: MTLPixelFormat
 ) -> MTLRenderPipelineState? {
     if depthFormat == .invalid && stencilFormat == .invalid {
-        return pipelines.uiBackdrop
+        return pipelines.standard
     }
     let key = MetallumHdrUiBackdropPipelineKey(
         depthFormat: depthFormat.rawValue,
         stencilFormat: stencilFormat.rawValue
     )
-    if let cached = pipelines.uiBackdropAttachmentVariants[key] {
+    if let cached = pipelines.attachmentVariants[key] {
         return cached
     }
 
     let descriptor = MTLRenderPipelineDescriptor()
     descriptor.label = "Metallum fused HDR UI backdrop"
-    descriptor.vertexFunction = pipelines.uiBackdropVertexFunction
-    descriptor.fragmentFunction = pipelines.uiBackdropFragmentFunction
+    descriptor.vertexFunction = pipelines.vertexFunction
+    descriptor.fragmentFunction = pipelines.fragmentFunction
     descriptor.colorAttachments[0].pixelFormat = .rgba8Unorm
     descriptor.colorAttachments[0].isBlendingEnabled = false
     descriptor.depthAttachmentPixelFormat = depthFormat
@@ -3089,7 +3230,7 @@ private func ensureHdrUiBackdropPipeline(
     do {
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         recordBuiltinPipelineCreation(device: device, succeeded: true)
-        pipelines.uiBackdropAttachmentVariants[key] = pipeline
+        pipelines.attachmentVariants[key] = pipeline
         return pipeline
     } catch {
         recordBuiltinPipelineCreation(device: device, succeeded: false)
@@ -3103,9 +3244,14 @@ private func ensureHdrUiBackdropPipeline(
     }
 }
 
-private func makeHdrAdaptiveStateBuffer(device: MTLDevice, label: String) -> MTLBuffer? {
+private func makeHdrAdaptiveStateBuffer(
+    device: MTLDevice,
+    label: String,
+    actualRadiance: Bool = false
+) -> MTLBuffer? {
     var initialState = MetallumHdrAdaptiveState(
-        breakpoint: 0.70,
+        // The first two fields are exposure/measured peak in the actual path.
+        breakpoint: actualRadiance ? 1.0 : 0.70,
         inferredPeak: 1.0,
         medianLog2: -12.0,
         p90Log2: -12.0,
@@ -3163,6 +3309,7 @@ private func ensureHdrFallbackDepthTexture(device: MTLDevice) -> MTLTexture? {
 
 private func ensureHdrWorkspace(
     device: MTLDevice,
+    lightingMode: UInt32 = 0,
     sourceWidth: Int,
     sourceHeight: Int,
     displayWidth: Int,
@@ -3170,6 +3317,7 @@ private func ensureHdrWorkspace(
 ) -> MetallumHdrWorkspace? {
     let key = objectAddress(device)
     if let cached = NativeState.hdrWorkspaces[key],
+       cached.lightingMode == lightingMode,
        cached.sourceWidth == sourceWidth,
        cached.sourceHeight == sourceHeight {
         if cached.displayWidth != displayWidth || cached.displayHeight != displayHeight {
@@ -3227,7 +3375,10 @@ private func ensureHdrWorkspace(
         ),
         let adaptiveState = makeHdrAdaptiveStateBuffer(
             device: device,
-            label: "Metallum HDR adaptive state"
+            label: lightingMode == 0
+                ? "Metallum legacy HDR adaptive state"
+                : "Metallum actual HDR exposure state",
+            actualRadiance: lightingMode != 0
         )
     else {
         NSLog("[metallum] Failed to allocate HDR workspace for %dx%d", sourceWidth, sourceHeight)
@@ -3235,6 +3386,7 @@ private func ensureHdrWorkspace(
     }
 
     let workspace = MetallumHdrWorkspace(
+        lightingMode: lightingMode,
         sourceWidth: sourceWidth,
         sourceHeight: sourceHeight,
         displayWidth: displayWidth,
@@ -3244,7 +3396,9 @@ private func ensureHdrWorkspace(
         histogram: histogram,
         adaptiveState: adaptiveState
     )
-    histogram.label = "Metallum HDR luminance histogram"
+    histogram.label = lightingMode == 0
+        ? "Metallum legacy HDR luminance histogram"
+        : "Metallum actual HDR exposure histogram"
     NativeState.hdrWorkspaces[key] = workspace
     return workspace
 }
@@ -3285,6 +3439,7 @@ private func ensureSpatialWorkspace(
     inputPixelFormat: MTLPixelFormat,
     outputPixelFormat: MTLPixelFormat,
     colorProcessingMode: MTLFXSpatialScalerColorProcessingMode,
+    convertsLinearToPerceptual: Bool,
     usesDirectOutput: Bool
 ) -> MetallumSpatialWorkspace? {
     let key = objectAddress(device)
@@ -3297,6 +3452,7 @@ private func ensureSpatialWorkspace(
        cached.inputPixelFormat == inputPixelFormat,
        cached.outputPixelFormat == outputPixelFormat,
        cached.colorProcessingMode == colorProcessingMode,
+       cached.convertsLinearToPerceptual == convertsLinearToPerceptual,
        cached.usesDirectOutput == usesDirectOutput {
         return cached
     }
@@ -3325,7 +3481,7 @@ private func ensureSpatialWorkspace(
     }
 
     var perceptualInput: MTLTexture?
-    if sourcePixelFormat != inputPixelFormat {
+    if sourcePixelFormat != inputPixelFormat || convertsLinearToPerceptual {
         let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: inputPixelFormat,
             width: inputWidth,
@@ -3371,6 +3527,7 @@ private func ensureSpatialWorkspace(
         inputPixelFormat: inputPixelFormat,
         outputPixelFormat: outputPixelFormat,
         colorProcessingMode: colorProcessingMode,
+        convertsLinearToPerceptual: convertsLinearToPerceptual,
         scaler: scaler,
         perceptualInput: perceptualInput,
         output: output,
@@ -3701,6 +3858,170 @@ private func encodeHdrWorldEffects(
     )
 }
 
+private func encodeActualHdrWorldEffects(
+    commandBuffer: MTLCommandBuffer,
+    sceneTexture: MTLTexture,
+    globalFence: MTLFence?,
+    sourceEncoding: Int32,
+    currentHeadroom: Float,
+    displayWidth: Int,
+    displayHeight: Int
+) -> MetallumHdrWorldOutputs? {
+    guard sceneTexture.pixelFormat == .rgba16Float,
+          sourceEncoding == 2,
+          let pipelines = ensureActualHdrPipelines(device: commandBuffer.device),
+          let workspace = ensureHdrWorkspace(
+            device: commandBuffer.device,
+            lightingMode: 1,
+            sourceWidth: sceneTexture.width,
+            sourceHeight: sceneTexture.height,
+            displayWidth: displayWidth,
+            displayHeight: displayHeight
+          ) else {
+        return nil
+    }
+
+    let now = ProcessInfo.processInfo.systemUptime
+    let previousUptime = workspace.lastHistogramUptime
+    let deltaTime = previousUptime.map { max(now - $0, 0.0) } ?? 0.0
+    let forceReset = previousUptime == nil || deltaTime > 1.0
+    workspace.lastHistogramUptime = now
+
+    if workspace.histogramNeedsInitialization {
+        let clearPass = MTLBlitPassDescriptor()
+        attachGpuTiming(clearPass, commandBuffer: commandBuffer, stage: .histogramExposure)
+        guard let clear = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: clearPass) else {
+            return nil
+        }
+        clear.label = "Metallum actual HDR histogram initialization"
+        clear.fill(buffer: workspace.histogram, range: 0..<workspace.histogram.length, value: 0)
+        trackedEndEncoding(clear)
+    }
+
+    guard let extract = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: workspace.emission,
+        pipeline: pipelines.extract,
+        stage: .hdrExtract
+    ) else {
+        return nil
+    }
+    extract.label = "Metallum actual-radiance bloom extract + exposure histogram"
+    if let globalFence {
+        extract.waitForFence(globalFence, before: .fragment)
+    }
+    extract.setFragmentTexture(sceneTexture, index: 0)
+    extract.setFragmentBuffer(workspace.histogram, offset: 0, index: 1)
+    var extractUniforms = MetallumHdrExtractUniforms(
+        sourceEncoding: 2,
+        semanticAvailable: 0,
+        sourceSize: SIMD2<UInt32>(UInt32(sceneTexture.width), UInt32(sceneTexture.height)),
+        histogramEnabled: 1,
+        _padding0: 0
+    )
+    withUnsafeBytes(of: &extractUniforms) { bytes in
+        extract.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    extract.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        extract.updateFence(globalFence, after: .fragment)
+    }
+    trackedEndEncoding(extract)
+
+    let bloomThreadgroupMemoryLength = (24 * 24 + 16 * 24)
+        * 4 * MemoryLayout<Float16>.stride
+    guard pipelines.blur.maxTotalThreadsPerThreadgroup >= 16 * 16,
+          commandBuffer.device.maxThreadgroupMemoryLength >= bloomThreadgroupMemoryLength else {
+        workspace.histogramNeedsInitialization = true
+        return nil
+    }
+
+    let reducePass = MTLComputePassDescriptor()
+    attachGpuTiming(reducePass, commandBuffer: commandBuffer, stage: .histogramExposure)
+    guard let reduce = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: reducePass) else {
+        workspace.histogramNeedsInitialization = true
+        return nil
+    }
+    let fuseBloom = !NativeState.gpuTimingDetailEnabled
+    reduce.label = fuseBloom
+        ? "Metallum actual HDR exposure + bloom"
+        : "Metallum actual HDR exposure"
+    reduce.setComputePipelineState(pipelines.exposureReduce)
+    reduce.setBuffer(workspace.histogram, offset: 0, index: 0)
+    reduce.setBuffer(workspace.adaptiveState, offset: 0, index: 1)
+    var reduceUniforms = MetallumHdrHistogramReduceUniforms(
+        currentHeadroom: currentHeadroom,
+        deltaTime: Float(min(deltaTime, 2.0)),
+        forceReset: forceReset ? 1 : 0,
+        _padding0: 0
+    )
+    withUnsafeBytes(of: &reduceUniforms) { bytes in
+        reduce.setBytes(bytes.baseAddress!, length: bytes.count, index: 2)
+    }
+    reduce.dispatchThreads(
+        MTLSize(width: 1, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+    )
+    if fuseBloom {
+        reduce.setComputePipelineState(pipelines.blur)
+        reduce.setTexture(workspace.emission, index: 0)
+        reduce.setTexture(workspace.bloom, index: 1)
+        reduce.setThreadgroupMemoryLength(
+            24 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 0
+        )
+        reduce.setThreadgroupMemoryLength(
+            16 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 1
+        )
+        reduce.dispatchThreadgroups(
+            MTLSize(
+                width: (workspace.bloom.width + 15) / 16,
+                height: (workspace.bloom.height + 15) / 16,
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
+        )
+    }
+    trackedEndEncoding(reduce)
+    workspace.histogramNeedsInitialization = false
+
+    if !fuseBloom {
+        let bloomPass = MTLComputePassDescriptor()
+        attachGpuTiming(bloomPass, commandBuffer: commandBuffer, stage: .bloomHorizontal)
+        guard let bloom = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: bloomPass) else {
+            return nil
+        }
+        bloom.label = "Metallum actual-radiance bloom"
+        bloom.setComputePipelineState(pipelines.blur)
+        bloom.setTexture(workspace.emission, index: 0)
+        bloom.setTexture(workspace.bloom, index: 1)
+        bloom.setThreadgroupMemoryLength(
+            24 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 0
+        )
+        bloom.setThreadgroupMemoryLength(
+            16 * 24 * 4 * MemoryLayout<Float16>.stride,
+            index: 1
+        )
+        bloom.dispatchThreadgroups(
+            MTLSize(
+                width: (workspace.bloom.width + 15) / 16,
+                height: (workspace.bloom.height + 15) / 16,
+                depth: 1
+            ),
+            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1)
+        )
+        trackedEndEncoding(bloom)
+    }
+
+    return MetallumHdrWorldOutputs(
+        emission: workspace.emission,
+        bloom: workspace.bloom,
+        adaptiveState: workspace.adaptiveState
+    )
+}
+
 private func encodeHdrUiMask(
     commandBuffer: MTLCommandBuffer,
     finalTexture: MTLTexture,
@@ -3798,6 +4119,98 @@ private func encodeHdrUiMask(
     return uiMaskB
 }
 
+private func encodeActualHdrUiMask(
+    commandBuffer: MTLCommandBuffer,
+    finalTexture: MTLTexture,
+    sceneTexture: MTLTexture,
+    uiTexture: MTLTexture?,
+    globalFence: MTLFence?,
+    displayWidth: Int,
+    displayHeight: Int
+) -> MTLTexture? {
+    guard let pipelines = ensureActualHdrPipelines(device: commandBuffer.device),
+          let workspace = ensureHdrWorkspace(
+            device: commandBuffer.device,
+            lightingMode: 1,
+            sourceWidth: sceneTexture.width,
+            sourceHeight: sceneTexture.height,
+            displayWidth: displayWidth,
+            displayHeight: displayHeight
+          ) else {
+        return nil
+    }
+
+    let maskWidth = max((displayWidth + 1) / 2, 1)
+    let maskHeight = max((displayHeight + 1) / 2, 1)
+    if workspace.uiMaskA?.width != maskWidth
+        || workspace.uiMaskA?.height != maskHeight
+        || workspace.uiMaskB?.width != maskWidth
+        || workspace.uiMaskB?.height != maskHeight {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rg8Unorm,
+            width: maskWidth,
+            height: maskHeight,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.hazardTrackingMode = .tracked
+        guard let maskA = commandBuffer.device.makeTexture(descriptor: descriptor),
+              let maskB = commandBuffer.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        maskA.label = "Metallum actual HDR UI control A"
+        maskB.label = "Metallum actual HDR UI control B"
+        workspace.uiMaskA = maskA
+        workspace.uiMaskB = maskB
+    }
+    guard let uiMaskA = workspace.uiMaskA, let uiMaskB = workspace.uiMaskB else {
+        return nil
+    }
+
+    guard let compare = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: uiMaskA,
+        pipeline: pipelines.uiCompare,
+        stage: .actualHdrDisplay
+    ) else {
+        return nil
+    }
+    if let globalFence {
+        compare.waitForFence(globalFence, before: .fragment)
+    }
+    compare.setFragmentTexture(uiTexture ?? finalTexture, index: 0)
+    compare.setFragmentTexture(sceneTexture, index: 1)
+    var uniforms = MetallumHdrUiCompareUniforms(
+        sourceEncoding: 2,
+        seededUiAvailable: uiTexture == nil ? 0 : 1,
+        scaleScene: sceneTexture.width == finalTexture.width
+            && sceneTexture.height == finalTexture.height ? 0 : 1,
+        _padding0: 0
+    )
+    withUnsafeBytes(of: &uniforms) { bytes in
+        compare.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    compare.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        compare.updateFence(globalFence, after: .fragment)
+    }
+    trackedEndEncoding(compare)
+
+    guard let dilate = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: uiMaskB,
+        pipeline: pipelines.uiDilate,
+        stage: .actualHdrDisplay
+    ) else {
+        return nil
+    }
+    dilate.setFragmentTexture(uiMaskA, index: 0)
+    dilate.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    trackedEndEncoding(dilate)
+    return uiMaskB
+}
+
 private func encodeHdrEffects(
     commandBuffer: MTLCommandBuffer,
     finalTexture: MTLTexture,
@@ -3827,6 +4240,42 @@ private func encodeHdrEffects(
         uiTexture: uiTexture,
         globalFence: globalFence,
         sourceEncoding: sourceEncoding,
+        displayWidth: displaySceneTexture.width,
+        displayHeight: displaySceneTexture.height
+    ) else {
+        return nil
+    }
+    return MetallumHdrOutputs(
+        emission: world.emission,
+        bloom: world.bloom,
+        uiMask: uiMask,
+        adaptiveState: world.adaptiveState
+    )
+}
+
+private func encodeActualHdrEffects(
+    commandBuffer: MTLCommandBuffer,
+    finalTexture: MTLTexture,
+    sceneTexture: MTLTexture,
+    displaySceneTexture: MTLTexture,
+    uiTexture: MTLTexture?,
+    globalFence: MTLFence?,
+    currentHeadroom: Float
+) -> MetallumHdrOutputs? {
+    guard let world = encodeActualHdrWorldEffects(
+        commandBuffer: commandBuffer,
+        sceneTexture: sceneTexture,
+        globalFence: globalFence,
+        sourceEncoding: 2,
+        currentHeadroom: currentHeadroom,
+        displayWidth: displaySceneTexture.width,
+        displayHeight: displaySceneTexture.height
+    ), let uiMask = encodeActualHdrUiMask(
+        commandBuffer: commandBuffer,
+        finalTexture: finalTexture,
+        sceneTexture: displaySceneTexture,
+        uiTexture: uiTexture,
+        globalFence: globalFence,
         displayWidth: displaySceneTexture.width,
         displayHeight: displaySceneTexture.height
     ) else {
@@ -3952,6 +4401,111 @@ private func encodeNativeHdrWorldUiComposite(
     return worldComposite
 }
 
+private func encodeActualNativeHdrWorldUiComposite(
+    commandBuffer: MTLCommandBuffer,
+    sceneTexture: MTLTexture,
+    uiSeedTexture: MTLTexture,
+    globalFence: MTLFence?,
+    currentHeadroom: Float,
+    hdrStrength: Float,
+    bloomStrength: Float
+) -> MTLTexture? {
+    guard sceneTexture.pixelFormat == .rgba16Float,
+          sceneTexture.width == uiSeedTexture.width,
+          sceneTexture.height == uiSeedTexture.height,
+          let world = encodeActualHdrWorldEffects(
+            commandBuffer: commandBuffer,
+            sceneTexture: sceneTexture,
+            globalFence: globalFence,
+            sourceEncoding: 2,
+            currentHeadroom: currentHeadroom,
+            displayWidth: sceneTexture.width,
+            displayHeight: sceneTexture.height
+          ), let workspace = ensureHdrWorkspace(
+            device: commandBuffer.device,
+            lightingMode: 1,
+            sourceWidth: sceneTexture.width,
+            sourceHeight: sceneTexture.height,
+            displayWidth: sceneTexture.width,
+            displayHeight: sceneTexture.height
+          ), let pipeline = ensureActualNativeWorldUiPipeline(device: commandBuffer.device),
+          let samplers = presentSamplers(device: commandBuffer.device) else {
+        return nil
+    }
+
+    let worldComposite: MTLTexture
+    if let existing = workspace.worldComposite {
+        worldComposite = existing
+    } else {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: sceneTexture.width,
+            height: sceneTexture.height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.hazardTrackingMode = .tracked
+        guard let allocated = commandBuffer.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        allocated.label = "Metallum actual native HDR world"
+        workspace.worldComposite = allocated
+        worldComposite = allocated
+    }
+
+    let renderPass = MTLRenderPassDescriptor()
+    renderPass.colorAttachments[0].texture = worldComposite
+    renderPass.colorAttachments[0].loadAction = .dontCare
+    renderPass.colorAttachments[0].storeAction = .store
+    renderPass.colorAttachments[1].texture = uiSeedTexture
+    renderPass.colorAttachments[1].loadAction = .dontCare
+    renderPass.colorAttachments[1].storeAction = .store
+    attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .actualHdrDisplay)
+    guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+        return nil
+    }
+    encoder.label = "Metallum actual HDR world + SDR UI seed"
+    if let globalFence {
+        encoder.waitForFence(globalFence, before: .fragment)
+    }
+    encoder.setViewport(MTLViewport(
+        originX: 0.0,
+        originY: 0.0,
+        width: Double(sceneTexture.width),
+        height: Double(sceneTexture.height),
+        znear: 0.0,
+        zfar: 1.0
+    ))
+    encoder.setRenderPipelineState(pipeline)
+    encoder.setFragmentTexture(sceneTexture, index: 0)
+    encoder.setFragmentTexture(world.bloom, index: 1)
+    encoder.setFragmentSamplerState(samplers.nearest, index: 0)
+    encoder.setFragmentSamplerState(samplers.linear, index: 1)
+    var uniforms = MetallumPresentUniforms(
+        mode: 2,
+        sourceEncoding: 2,
+        diagnosticPattern: 0,
+        currentHeadroom: currentHeadroom,
+        hdrStrength: hdrStrength,
+        bloomStrength: bloomStrength,
+        sceneAvailable: 1,
+        uiAvailable: 0,
+        semanticAvailable: 0
+    )
+    withUnsafeBytes(of: &uniforms) { bytes in
+        encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    encoder.setFragmentBuffer(world.adaptiveState, offset: 0, index: 1)
+    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        encoder.updateFence(globalFence, after: .fragment)
+    }
+    trackedEndEncoding(encoder)
+    workspace.worldCompositeCommandBufferAddress = objectAddress(commandBuffer)
+    return worldComposite
+}
+
 private func encodeSpatialHdrWorldComposite(
     commandBuffer: MTLCommandBuffer,
     sceneTexture: MTLTexture,
@@ -4050,6 +4604,97 @@ private func encodeSpatialHdrWorldComposite(
     return worldComposite
 }
 
+private func encodeActualSpatialHdrWorldComposite(
+    commandBuffer: MTLCommandBuffer,
+    sceneTexture: MTLTexture,
+    globalFence: MTLFence?,
+    currentHeadroom: Float,
+    hdrStrength: Float,
+    bloomStrength: Float,
+    displayWidth: Int,
+    displayHeight: Int
+) -> MTLTexture? {
+    guard sceneTexture.pixelFormat == .rgba16Float,
+          let world = encodeActualHdrWorldEffects(
+            commandBuffer: commandBuffer,
+            sceneTexture: sceneTexture,
+            globalFence: globalFence,
+            sourceEncoding: 2,
+            currentHeadroom: currentHeadroom,
+            displayWidth: displayWidth,
+            displayHeight: displayHeight
+          ), let workspace = ensureHdrWorkspace(
+            device: commandBuffer.device,
+            lightingMode: 1,
+            sourceWidth: sceneTexture.width,
+            sourceHeight: sceneTexture.height,
+            displayWidth: displayWidth,
+            displayHeight: displayHeight
+          ) else {
+        return nil
+    }
+    let worldComposite: MTLTexture
+    if let existing = workspace.worldComposite {
+        worldComposite = existing
+    } else {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: sceneTexture.width,
+            height: sceneTexture.height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.renderTarget, .shaderRead]
+        descriptor.hazardTrackingMode = .tracked
+        guard let allocated = commandBuffer.device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        allocated.label = "Metallum actual HDR spatial world"
+        workspace.worldComposite = allocated
+        worldComposite = allocated
+    }
+    guard let pipeline = ensureActualWorldPresentPipeline(
+        device: commandBuffer.device,
+        colorFormat: .rgba16Float
+    ), let samplers = presentSamplers(device: commandBuffer.device),
+       let encoder = makeHdrPassEncoder(
+        commandBuffer: commandBuffer,
+        target: worldComposite,
+        pipeline: pipeline,
+        stage: .actualHdrDisplay
+       ) else {
+        return nil
+    }
+    if let globalFence {
+        encoder.waitForFence(globalFence, before: .fragment)
+    }
+    encoder.setFragmentTexture(sceneTexture, index: 0)
+    encoder.setFragmentTexture(world.bloom, index: 1)
+    encoder.setFragmentSamplerState(samplers.nearest, index: 0)
+    encoder.setFragmentSamplerState(samplers.linear, index: 1)
+    var uniforms = MetallumPresentUniforms(
+        mode: 2,
+        sourceEncoding: 2,
+        diagnosticPattern: 0,
+        currentHeadroom: currentHeadroom,
+        hdrStrength: hdrStrength,
+        bloomStrength: bloomStrength,
+        sceneAvailable: 1,
+        uiAvailable: 0,
+        semanticAvailable: 0
+    )
+    withUnsafeBytes(of: &uniforms) { bytes in
+        encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+    }
+    encoder.setFragmentBuffer(world.adaptiveState, offset: 0, index: 1)
+    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+    if let globalFence {
+        encoder.updateFence(globalFence, after: .fragment)
+    }
+    trackedEndEncoding(encoder)
+    return worldComposite
+}
+
 private struct MetallumClearUniforms {
     var z: Float
     var _padding0: SIMD3<Float>
@@ -4135,7 +4780,7 @@ private func buildClearPipeline(
 private func buildPresentPipeline(
     device: MTLDevice,
     colorFormat: MTLPixelFormat,
-    fragmentName: String = "metallum_present_fs",
+    fragmentName: String = "metallum_sdr_present_fs",
     vertexName: String = "metallum_present_vs"
 ) -> MTLRenderPipelineState? {
     do {
@@ -4199,6 +4844,36 @@ private func ensureNativeWorldUiPipeline(device: MTLDevice) -> MTLRenderPipeline
     }
 }
 
+private func ensureActualNativeWorldUiPipeline(device: MTLDevice) -> MTLRenderPipelineState? {
+    let key = objectAddress(device)
+    if let cached = NativeState.actualNativeWorldUiPipelines[key] {
+        return cached
+    }
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .present)
+        guard let vertex = library.makeFunction(name: "metallum_offscreen_vs"),
+              let fragment = library.makeFunction(name: "metallum_actual_native_world_ui_fs") else {
+            recordBuiltinPipelineCreation(device: device, succeeded: false)
+            return nil
+        }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertex
+        descriptor.fragmentFunction = fragment
+        descriptor.colorAttachments[0].pixelFormat = .rgba16Float
+        descriptor.colorAttachments[0].isBlendingEnabled = false
+        descriptor.colorAttachments[1].pixelFormat = .rgba8Unorm
+        descriptor.colorAttachments[1].isBlendingEnabled = false
+        let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        recordBuiltinPipelineCreation(device: device, succeeded: true)
+        NativeState.actualNativeWorldUiPipelines[key] = pipeline
+        return pipeline
+    } catch {
+        recordBuiltinPipelineCreation(device: device, succeeded: false)
+        NSLog("[metallum] Failed to create actual HDR/UI pipeline: %@", String(describing: error))
+        return nil
+    }
+}
+
 private func ensureWorldPresentPipeline(
     device: MTLDevice,
     colorFormat: MTLPixelFormat
@@ -4218,6 +4893,26 @@ private func ensureWorldPresentPipeline(
     )
     if let pipeline {
         NativeState.worldPresentPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+private func ensureActualWorldPresentPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.actualWorldPresentPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_actual_spatial_world_fs",
+        vertexName: "metallum_offscreen_vs"
+    )
+    if let pipeline {
+        NativeState.actualWorldPresentPipelines[key] = pipeline
     }
     return pipeline
 }
@@ -4286,6 +4981,82 @@ private func ensurePresentPipeline(
     return pipeline
 }
 
+private func ensureLegacyHdrPresentPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.legacyHdrPresentPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_present_fs"
+    )
+    if let pipeline {
+        NativeState.legacyHdrPresentPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+private func ensureActualHdrPresentPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.actualHdrPresentPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_actual_hdr_present_fs"
+    )
+    if let pipeline {
+        NativeState.actualHdrPresentPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+private func ensureActualHdrUiOnlyPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.actualHdrUiOnlyPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_actual_hdr_ui_only_fs"
+    )
+    if let pipeline {
+        NativeState.actualHdrUiOnlyPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
+private func ensureActualHdrLinearUiOnlyPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.actualHdrLinearUiOnlyPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_actual_hdr_linear_ui_only_fs"
+    )
+    if let pipeline {
+        NativeState.actualHdrLinearUiOnlyPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
 private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
     let descriptor = MTLSamplerDescriptor()
     descriptor.minFilter = filter
@@ -4323,24 +5094,102 @@ private func probeBuiltinPipelineCacheHits(device: MTLDevice) -> Int {
     var hits = 0
     hits += ensureSodiumLightPatchPipeline(device: device) == nil ? 0 : 1
     hits += ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm) == nil ? 0 : 1
-    hits += ensurePresentPipeline(device: device, colorFormat: .rgba16Float) == nil ? 0 : 1
-    hits += ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float) == nil ? 0 : 1
-    hits += ensureNativeWorldUiPipeline(device: device) == nil ? 0 : 1
-    hits += ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) == nil ? 0 : 1
-    hits += ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) == nil ? 0 : 1
-    if let hdrPipelines = ensureHdrPipelines(device: device) {
-        hits += 6
-        hits += ensureHdrUiBackdropPipeline(
-            device: device,
-            pipelines: hdrPipelines,
-            depthFormat: .depth32Float,
-            stencilFormat: .invalid
-        ) == nil ? 0 : 1
-    }
     hits += ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float) == nil ? 0 : 1
     hits += ensureClearColorDepthPipeline(device, .rgba8Unorm, .depth32Float) == nil ? 0 : 1
     hits += ensureClearColorDepthPipeline(device, .bgra8Unorm, .invalid) == nil ? 0 : 1
     return hits
+}
+
+private func removePipelines(
+    _ pipelines: inout [PresentPipelineKey: MTLRenderPipelineState],
+    deviceAddress: UInt
+) {
+    pipelines = pipelines.filter { $0.key.deviceAddress != deviceAddress }
+}
+
+private func purgeLegacyHdrGeneration(deviceAddress: UInt) {
+    NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
+    removePipelines(&NativeState.legacyHdrPresentPipelines, deviceAddress: deviceAddress)
+    removePipelines(&NativeState.worldPresentPipelines, deviceAddress: deviceAddress)
+    NativeState.nativeWorldUiPipelines.removeValue(forKey: deviceAddress)
+    NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
+    NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
+}
+
+private func purgeActualHdrGeneration(deviceAddress: UInt) {
+    NativeState.actualHdrPipelines.removeValue(forKey: deviceAddress)
+    removePipelines(&NativeState.actualHdrPresentPipelines, deviceAddress: deviceAddress)
+    removePipelines(&NativeState.actualHdrUiOnlyPipelines, deviceAddress: deviceAddress)
+    removePipelines(&NativeState.actualHdrLinearUiOnlyPipelines, deviceAddress: deviceAddress)
+    removePipelines(&NativeState.actualWorldPresentPipelines, deviceAddress: deviceAddress)
+    NativeState.actualNativeWorldUiPipelines.removeValue(forKey: deviceAddress)
+}
+
+private func prepareRendererGeneration(
+    device: MTLDevice,
+    snapshot: MetallumRendererFrameStateSnapshot
+) -> Bool {
+    let key = objectAddress(device)
+    if NativeState.preparedRendererGenerations[key] == snapshot.rendererGenerationId {
+        return true
+    }
+
+    let shaderState = builtinShaderState(device: device)
+    shaderState.withLock { shaderState.generationWarmupInProgress = true }
+    defer { shaderState.withLock { shaderState.generationWarmupInProgress = false } }
+
+    // Resolution-dependent HDR resources never cross renderer generations.
+    NativeState.hdrWorkspaces.removeValue(forKey: key)
+    NativeState.spatialWorkspaces.removeValue(forKey: key)
+    let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV2.spatialBit != 0
+    if !spatialEnabled {
+        removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
+        removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
+    }
+    let prepared: Bool
+    if snapshot.outputMode == 0 {
+        // Both SDR generations retain only the compact SDR present contract.
+        purgeLegacyHdrGeneration(deviceAddress: key)
+        purgeActualHdrGeneration(deviceAddress: key)
+        removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
+        removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
+        if snapshot.lightingMode == 0 {
+            NativeState.uiBackdropPipelines.removeValue(forKey: key)
+        }
+        prepared = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm) != nil
+            && (snapshot.lightingMode == 0 || ensureUiBackdropPipelines(device: device) != nil)
+    } else if snapshot.lightingMode != 0 {
+        // A METALLUM generation owns no semantic/inferred-reconstruction PSO.
+        purgeLegacyHdrGeneration(deviceAddress: key)
+        prepared = ensureActualHdrPipelines(device: device) != nil
+            && ensureActualHdrPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+            && ensureActualHdrUiOnlyPipeline(device: device, colorFormat: .rgba16Float) != nil
+            && ensureActualHdrLinearUiOnlyPipeline(device: device, colorFormat: .rgba16Float) != nil
+            && ensureActualNativeWorldUiPipeline(device: device) != nil
+            && ensureUiBackdropPipelines(device: device) != nil
+            && (!spatialEnabled || (
+                ensureActualWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+                && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+                && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
+            ))
+    } else {
+        purgeActualHdrGeneration(deviceAddress: key)
+        prepared = ensureHdrPipelines(device: device) != nil
+            && ensureLegacyHdrPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+            && ensureNativeWorldUiPipeline(device: device) != nil
+            && ensureUiBackdropPipelines(device: device) != nil
+            && ensureHdrFallbackAdaptiveState(device: device) != nil
+            && ensureHdrFallbackDepthTexture(device: device) != nil
+            && (!spatialEnabled || (
+                ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+                && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
+                && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
+            ))
+    }
+    if prepared {
+        NativeState.preparedRendererGenerations[key] = snapshot.rendererGenerationId
+    }
+    return prepared
 }
 
 private enum MetallumFrameStateAbiV2 {
@@ -4774,9 +5623,54 @@ public func metallum_set_frame_state_v2(
 ) -> Int32 {
     let (status, snapshot) = parseFrameStateV2(packet, byteSize)
     if status == 1, let snapshot {
+        for device in NativeState.initializedDevices.values {
+            guard prepareRendererGeneration(device: device, snapshot: snapshot) else {
+                return -7
+            }
+        }
         NativeState.rendererFrameState.update(snapshot)
     }
     return status
+}
+
+// Read-only native validation surface for the four renderer-generation
+// contracts. Bits: 0 SDR present, 1 SDR UI seed, 2 Legacy HDR effects,
+// 3 Legacy reconstruction display, 4 actual HDR effects, 5 actual HDR display,
+// 6 HDR workspace, 7 Legacy fallback resources, 8 spatial HDR display,
+// 9 actual-HDR RGBA8 UI-only display, 10 actual-HDR linear-FP16 UI-only display.
+@_cdecl("metallum_renderer_generation_native_contract_v1")
+public func metallum_renderer_generation_native_contract_v1(_ device: MTLDevice) -> UInt64 {
+    let key = objectAddress(device)
+    func hasPipeline(_ values: [PresentPipelineKey: MTLRenderPipelineState]) -> Bool {
+        values.keys.contains { $0.deviceAddress == key }
+    }
+    var result: UInt64 = 0
+    if hasPipeline(NativeState.presentPipelines) { result |= 1 << 0 }
+    if NativeState.uiBackdropPipelines[key] != nil { result |= 1 << 1 }
+    if NativeState.hdrPipelines[key] != nil { result |= 1 << 2 }
+    if hasPipeline(NativeState.legacyHdrPresentPipelines)
+        || hasPipeline(NativeState.worldPresentPipelines)
+        || NativeState.nativeWorldUiPipelines[key] != nil {
+        result |= 1 << 3
+    }
+    if NativeState.actualHdrPipelines[key] != nil { result |= 1 << 4 }
+    if hasPipeline(NativeState.actualHdrPresentPipelines)
+        || hasPipeline(NativeState.actualWorldPresentPipelines)
+        || NativeState.actualNativeWorldUiPipelines[key] != nil {
+        result |= 1 << 5
+    }
+    if NativeState.hdrWorkspaces[key] != nil { result |= 1 << 6 }
+    if NativeState.hdrFallbackAdaptiveStates[key] != nil
+        || NativeState.hdrFallbackDepthTextures[key] != nil {
+        result |= 1 << 7
+    }
+    if hasPipeline(NativeState.spatialPresentPipelines)
+        || hasPipeline(NativeState.spatialScreenshotPipelines) {
+        result |= 1 << 8
+    }
+    if hasPipeline(NativeState.actualHdrUiOnlyPipelines) { result |= 1 << 9 }
+    if hasPipeline(NativeState.actualHdrLinearUiOnlyPipelines) { result |= 1 << 10 }
+    return result
 }
 
 private enum MetallumFrameGraphAbiV1 {
@@ -5071,35 +5965,21 @@ public func metallum_init_pipelines(_ device: MTLDevice) -> Int32 {
         guard !shaderState.snapshot().warmupComplete else {
             return builtinShaderInitializationStatus(shaderState)
         }
+        NativeState.initializedDevices[deviceAddress] = device
         _ = loadPrecompiledBuiltinShaderLibrary(device: device)
-        do {
-            let diagnostics = try resolveBuiltinShaderLibrary(device: device, shaderSet: .temporalDiagnostics)
-            if MetallumBuiltinShaderSet.temporalDiagnostics.requiredFunctionNames.contains(
-                where: { diagnostics.makeFunction(name: $0) == nil }
-            ) {
+        for shaderSet in MetallumBuiltinShaderSet.allCases {
+            do {
+                let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: shaderSet)
+                if shaderSet.requiredFunctionNames.contains(where: { library.makeFunction(name: $0) == nil }) {
+                    recordBuiltinPipelineCreation(device: device, succeeded: false)
+                }
+            } catch {
                 recordBuiltinPipelineCreation(device: device, succeeded: false)
             }
-        } catch {
-            recordBuiltinPipelineCreation(device: device, succeeded: false)
         }
         let warmupStart = ProcessInfo.processInfo.systemUptime
         _ = ensureSodiumLightPatchPipeline(device: device)
         _ = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm)
-        _ = ensurePresentPipeline(device: device, colorFormat: .rgba16Float)
-        _ = ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float)
-        _ = ensureNativeWorldUiPipeline(device: device)
-        _ = ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float)
-        _ = ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm)
-        if let hdrPipelines = ensureHdrPipelines(device: device) {
-            _ = ensureHdrUiBackdropPipeline(
-                device: device,
-                pipelines: hdrPipelines,
-                depthFormat: .depth32Float,
-                stencilFormat: .invalid
-            )
-        }
-        _ = ensureHdrFallbackAdaptiveState(device: device)
-        _ = ensureHdrFallbackDepthTexture(device: device)
         NativeState.presentLinearSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .linear)
         NativeState.presentNearestSamplers[deviceAddress] = buildPresentSampler(device: device, filter: .nearest)
         _ = ensureClearColorDepthPipeline(device, .bgra8Unorm, .depth32Float)
@@ -5145,6 +6025,10 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.presentPipelines = NativeState.presentPipelines.filter {
             $0.key.deviceAddress != deviceAddress
         }
+        removePipelines(&NativeState.legacyHdrPresentPipelines, deviceAddress: deviceAddress)
+        removePipelines(&NativeState.actualHdrPresentPipelines, deviceAddress: deviceAddress)
+        removePipelines(&NativeState.actualHdrUiOnlyPipelines, deviceAddress: deviceAddress)
+        removePipelines(&NativeState.actualHdrLinearUiOnlyPipelines, deviceAddress: deviceAddress)
         NativeState.spatialPresentPipelines = NativeState.spatialPresentPipelines.filter {
             $0.key.deviceAddress != deviceAddress
         }
@@ -5154,16 +6038,22 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.worldPresentPipelines = NativeState.worldPresentPipelines.filter {
             $0.key.deviceAddress != deviceAddress
         }
+        removePipelines(&NativeState.actualWorldPresentPipelines, deviceAddress: deviceAddress)
         NativeState.nativeWorldUiPipelines.removeValue(forKey: deviceAddress)
+        NativeState.actualNativeWorldUiPipelines.removeValue(forKey: deviceAddress)
         NativeState.sodiumLightPatchPipelines.removeValue(forKey: deviceAddress)
         NativeState.temporalDiagnosticPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrPipelines.removeValue(forKey: deviceAddress)
+        NativeState.actualHdrPipelines.removeValue(forKey: deviceAddress)
+        NativeState.uiBackdropPipelines.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
         NativeState.spatialWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.presentNearestSamplers.removeValue(forKey: deviceAddress)
         NativeState.presentLinearSamplers.removeValue(forKey: deviceAddress)
+        NativeState.initializedDevices.removeValue(forKey: deviceAddress)
+        NativeState.preparedRendererGenerations.removeValue(forKey: deviceAddress)
         removeBuiltinShaderState(device: device)
     }
 }
@@ -6983,14 +7873,35 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 && semanticTexture!.width == sourceTexture.width
                 && semanticTexture!.height == sourceTexture.height
                 && semanticTexture!.pixelFormat == .rgba8Unorm)
-        let canPrecomposeHdr = hdrPrecomposeEnabled != 0
+        let frameState = NativeState.rendererFrameState.snapshot()
+        let actualLighting = frameState?.lightingMode == 1
+        let actualHdrGeneration = actualLighting && frameState?.outputMode == 1
+        let canPrecomposeActualHdr = hdrPrecomposeEnabled != 0
+            && actualHdrGeneration
+            && sourceTexture.pixelFormat == .rgba16Float
+            && sourceEncoding == 2
+        let canPrecomposeLegacyHdr = hdrPrecomposeEnabled != 0
+            && !actualLighting
             && sourceTexture.pixelFormat == .rgba16Float
             && compatibleDepth
             && compatibleSemantic
+        let canPrecomposeHdr = canPrecomposeActualHdr || canPrecomposeLegacyHdr
         if spatialScalingEnabled == 0 && canPrecomposeHdr {
             guard destinationTexture.width == sourceTexture.width,
-                  destinationTexture.height == sourceTexture.height,
-                  encodeNativeHdrWorldUiComposite(
+                  destinationTexture.height == sourceTexture.height else {
+                return -3
+            }
+            let composite = canPrecomposeActualHdr
+                ? encodeActualNativeHdrWorldUiComposite(
+                    commandBuffer: commandBuffer,
+                    sceneTexture: sourceTexture,
+                    uiSeedTexture: destinationTexture,
+                    globalFence: globalFence,
+                    currentHeadroom: effectiveHeadroom,
+                    hdrStrength: effectiveHdrStrength,
+                    bloomStrength: effectiveBloomStrength
+                  )
+                : encodeNativeHdrWorldUiComposite(
                     commandBuffer: commandBuffer,
                     sceneTexture: sourceTexture,
                     sceneDepthTexture: sceneDepthTexture!,
@@ -7001,9 +7912,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                     currentHeadroom: effectiveHeadroom,
                     hdrStrength: effectiveHdrStrength,
                     bloomStrength: effectiveBloomStrength
-                  ) != nil else {
-                return -3
-            }
+                  )
+            guard composite != nil else { return -3 }
             return 4
         }
         var hdrPrecomposed = false
@@ -7014,19 +7924,31 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             let scalerOutputPixelFormat: MTLPixelFormat
             let scalerColorProcessingMode: MTLFXSpatialScalerColorProcessingMode
             if canPrecomposeHdr {
-                guard let composite = encodeSpatialHdrWorldComposite(
-                    commandBuffer: commandBuffer,
-                    sceneTexture: sourceTexture,
-                    sceneDepthTexture: sceneDepthTexture!,
-                    semanticTexture: semanticTexture,
-                    globalFence: globalFence,
-                    sourceEncoding: sourceEncoding,
-                    currentHeadroom: effectiveHeadroom,
-                    hdrStrength: effectiveHdrStrength,
-                    bloomStrength: effectiveBloomStrength,
-                    displayWidth: destinationTexture.width,
-                    displayHeight: destinationTexture.height
-                ) else {
+                let composite = canPrecomposeActualHdr
+                    ? encodeActualSpatialHdrWorldComposite(
+                        commandBuffer: commandBuffer,
+                        sceneTexture: sourceTexture,
+                        globalFence: globalFence,
+                        currentHeadroom: effectiveHeadroom,
+                        hdrStrength: effectiveHdrStrength,
+                        bloomStrength: effectiveBloomStrength,
+                        displayWidth: destinationTexture.width,
+                        displayHeight: destinationTexture.height
+                      )
+                    : encodeSpatialHdrWorldComposite(
+                        commandBuffer: commandBuffer,
+                        sceneTexture: sourceTexture,
+                        sceneDepthTexture: sceneDepthTexture!,
+                        semanticTexture: semanticTexture,
+                        globalFence: globalFence,
+                        sourceEncoding: sourceEncoding,
+                        currentHeadroom: effectiveHeadroom,
+                        hdrStrength: effectiveHdrStrength,
+                        bloomStrength: effectiveBloomStrength,
+                        displayWidth: destinationTexture.width,
+                        displayHeight: destinationTexture.height
+                      )
+                guard let composite else {
                     return -3
                 }
                 scalerInput = composite
@@ -7059,6 +7981,9 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                     inputPixelFormat: scalerInputPixelFormat,
                     outputPixelFormat: scalerOutputPixelFormat,
                     colorProcessingMode: scalerColorProcessingMode,
+                    convertsLinearToPerceptual: sourceEncoding == 2
+                        && !canPrecomposeHdr
+                        && scalerColorProcessingMode == .perceptual,
                     usesDirectOutput: useDirectPerceptualOutput
                 )
             else {
@@ -7067,11 +7992,11 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
 
             let preparedScalerInput: MTLTexture
             if let perceptualInput = workspace.perceptualInput {
-                guard let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+                guard let pipelines = ensureUiBackdropPipelines(device: commandBuffer.device),
                       let encoder = makeHdrPassEncoder(
                         commandBuffer: commandBuffer,
                         target: perceptualInput,
-                        pipeline: pipelines.uiBackdrop,
+                        pipeline: pipelines.standard,
                         stage: .metalFx
                       ) else {
                     return -1
@@ -7142,7 +8067,7 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 // reconstruct this quantized SDR seed directly from that
                 // texture, eliminating a second raw-scene sample per pixel.
                 if deferSpatialHdrUiSeed != 0 {
-                    guard ensureHdrPipelines(device: commandBuffer.device) != nil else {
+                    guard ensureUiBackdropPipelines(device: commandBuffer.device) != nil else {
                         return -1
                     }
                     workspace.preparedUiSeed = MetallumPreparedSpatialUiSeed(
@@ -7185,11 +8110,11 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         }
 
         guard
-            let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+            let pipelines = ensureUiBackdropPipelines(device: commandBuffer.device),
             let encoder = makeHdrPassEncoder(
                 commandBuffer: commandBuffer,
                 target: destinationTexture,
-                pipeline: pipelines.uiBackdrop,
+                pipeline: pipelines.standard,
                 stage: .uiSeed
             )
         else {
@@ -7226,7 +8151,7 @@ public func metallum_MTLRenderCommandEncoder_encodePreparedHdrUiBackdrop(
                   commandBuffer: commandBuffer,
                   sourceTexture: sourceTexture,
                   destinationTexture: destinationTexture
-              ), let pipelines = ensureHdrPipelines(device: commandBuffer.device),
+              ), let pipelines = ensureUiBackdropPipelines(device: commandBuffer.device),
               let pipeline = ensureHdrUiBackdropPipeline(
                 device: commandBuffer.device,
                 pipelines: pipelines,
@@ -7264,7 +8189,7 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
                 commandBuffer: commandBuffer,
                 sourceTexture: sourceTexture,
                 destinationTexture: destinationTexture
-              ), let pipelines = ensureHdrPipelines(device: commandBuffer.device) else {
+              ), let pipelines = ensureUiBackdropPipelines(device: commandBuffer.device) else {
             return 0
         }
 
@@ -7280,7 +8205,7 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
         guard let encoder = makeHdrPassEncoder(
             commandBuffer: commandBuffer,
             target: destinationTexture,
-            pipeline: pipelines.uiBackdrop,
+            pipeline: pipelines.standard,
             stage: .uiSeed
         ) else {
             return 0
@@ -7289,7 +8214,7 @@ public func metallum_MTLCommandBuffer_materializePreparedHdrUiBackdrop(
             encoder: encoder,
             output: prepared.output,
             destination: destinationTexture,
-            pipeline: pipelines.uiBackdrop
+            pipeline: pipelines.standard
         )
         if let globalFence {
             encoder.updateFence(globalFence, after: .fragment)
@@ -7421,6 +8346,11 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
             8.0
         )
+        let frameState = NativeState.rendererFrameState.snapshot()
+        let actualLighting = frameState?.lightingMode == 1
+        let actualHdrGeneration = actualLighting
+            && frameState?.outputMode == 1
+            && outputMode != 0
         let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
         let hasCompatibleDepth = sceneTexture != nil
             && sceneDepthTexture != nil
@@ -7434,10 +8364,22 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     return false
                 }
             }()
-        let hasCompatibleScene = canEnhance
+        let hasCompatibleLegacyScene = canEnhance
             && sceneTexture != nil
             && hasCompatibleDepth
-        let hasCompatibleSemantic = hasCompatibleScene
+        let hasCompatibleActualScene = actualHdrGeneration
+            && sceneTexture != nil
+            && sceneTexture!.pixelFormat == .rgba16Float
+            && sceneTexture!.textureType == .type2D
+            && sceneTexture!.sampleCount == 1
+            && sceneTexture!.usage.contains(.shaderRead)
+            && objectAddress(sceneTexture!.device) == objectAddress(commandBuffer.device)
+            && sourceEncoding == 2
+        let hasCompatibleScene = actualLighting
+            ? hasCompatibleActualScene
+            : hasCompatibleLegacyScene
+        let hasCompatibleSemantic = !actualLighting
+            && hasCompatibleLegacyScene
             && semanticTexture != nil
             && semanticTexture!.width == sceneTexture!.width
             && semanticTexture!.height == sceneTexture!.height
@@ -7474,6 +8416,18 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
             && ((uiTexture!.width == sourceTexture.width && uiTexture!.height == sourceTexture.height)
                 || candidatePrecomposedOutput != nil)
+        let actualHdrUiOnly = actualHdrGeneration
+            && !hasCompatibleScene
+            && hasCompatibleUi
+        let actualHdrLinearUiOnly = actualHdrGeneration
+            && !hasCompatibleScene
+            && !hasCompatibleUi
+            && sourceEncoding == 2
+            && sourceTexture.pixelFormat == .rgba16Float
+            && sourceTexture.textureType == .type2D
+            && sourceTexture.sampleCount == 1
+            && sourceTexture.usage.contains(.shaderRead)
+            && objectAddress(sourceTexture.device) == objectAddress(commandBuffer.device)
         let displaySceneTexture = candidatePrecomposedOutput ?? sceneTexture ?? sourceTexture
         let hasHdrPrecompose = spatialHdrPrecomposed != 0
             && hasCompatibleScene
@@ -7485,23 +8439,33 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && candidatePrecomposedOutput!.height == uiTexture!.height
 
         if hasCompatibleScene {
-            guard
-                ensureHdrPipelines(device: commandBuffer.device) != nil,
-                ensureHdrWorkspace(
+            let workspace = ensureHdrWorkspace(
                     device: commandBuffer.device,
+                    lightingMode: actualLighting ? 1 : 0,
                     sourceWidth: sceneTexture!.width,
                     sourceHeight: sceneTexture!.height,
                     displayWidth: displaySceneTexture.width,
                     displayHeight: displaySceneTexture.height
-                ) != nil
-            else {
+                )
+            let pipelinesReady = actualLighting
+                ? ensureActualHdrPipelines(device: commandBuffer.device) != nil
+                : ensureHdrPipelines(device: commandBuffer.device) != nil
+            guard pipelinesReady, workspace != nil else {
                 return -1
             }
         }
 
         let presentPipeline = hasHdrPrecompose
             ? ensureSpatialPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-            : ensurePresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
+            : outputMode == 0
+                ? ensurePresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
+                : actualHdrUiOnly
+                    ? ensureActualHdrUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
+                    : actualHdrLinearUiOnly
+                        ? ensureActualHdrLinearUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
+                        : actualLighting
+                            ? ensureActualHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
+                            : ensureLegacyHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
         guard let presentPipeline else {
             NSLog("[metallum] No present pipeline for layer format %lu", layer.pixelFormat.rawValue)
             return -1
@@ -7528,6 +8492,125 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         }
         guard let drawable = nextDrawable else {
             return 0
+        }
+
+        if actualHdrUiOnly || actualHdrLinearUiOnly {
+            let outputOnlyTexture = actualHdrUiOnly ? uiTexture! : sourceTexture
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
+            guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+                return -1
+            }
+            if let globalFence {
+                encoder.waitForFence(globalFence, before: .fragment)
+            }
+            encoder.setViewport(MTLViewport(
+                originX: 0.0,
+                originY: 0.0,
+                width: Double(drawable.texture.width),
+                height: Double(drawable.texture.height),
+                znear: 0.0,
+                zfar: 1.0
+            ))
+            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setFragmentTexture(outputOnlyTexture, index: 0)
+            let requiresScaling = outputOnlyTexture.width != drawable.texture.width
+                || outputOnlyTexture.height != drawable.texture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if let globalFence {
+                encoder.updateFence(globalFence, after: .fragment)
+            }
+            trackedEndEncoding(encoder)
+            commandBuffer.present(drawable)
+            if NativeState.gpuTimingStats != nil {
+                MetallumGpuTimingCoordinator.shared.markPresented(
+                    commandBuffer,
+                    renderWidth: outputOnlyTexture.width,
+                    renderHeight: outputOnlyTexture.height,
+                    displayWidth: drawable.texture.width,
+                    displayHeight: drawable.texture.height,
+                    outputMode: outputMode,
+                    sourceEncoding: actualHdrUiOnly ? 0 : 2,
+                    diagnosticPattern: false,
+                    hdrStrength: 0.0,
+                    bloomStrength: 0.0,
+                    currentHeadroom: effectiveHeadroom,
+                    displaySyncEnabled: layer.displaySyncEnabled
+                )
+            }
+            return 1
+        }
+
+        if outputMode == 0 {
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
+            guard let encoder = trackedMakeRenderCommandEncoder(
+                commandBuffer,
+                descriptor: renderPass
+            ) else {
+                return -1
+            }
+            if let globalFence {
+                encoder.waitForFence(globalFence, before: .fragment)
+            }
+            encoder.setViewport(MTLViewport(
+                originX: 0.0,
+                originY: 0.0,
+                width: Double(drawable.texture.width),
+                height: Double(drawable.texture.height),
+                znear: 0.0,
+                zfar: 1.0
+            ))
+            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setFragmentTexture(sourceTexture, index: 0)
+            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 1)
+            let requiresScaling = sourceTexture.width != drawable.texture.width
+                || sourceTexture.height != drawable.texture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            var uniforms = MetallumPresentUniforms(
+                mode: 0,
+                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+                currentHeadroom: 1.0,
+                hdrStrength: 0.0,
+                bloomStrength: 0.0,
+                sceneAvailable: 0,
+                uiAvailable: hasCompatibleUi ? 1 : 0,
+                semanticAvailable: 0
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if let globalFence {
+                encoder.updateFence(globalFence, after: .fragment)
+            }
+            trackedEndEncoding(encoder)
+            commandBuffer.present(drawable)
+            if NativeState.gpuTimingStats != nil {
+                MetallumGpuTimingCoordinator.shared.markPresented(
+                    commandBuffer,
+                    renderWidth: sourceTexture.width,
+                    renderHeight: sourceTexture.height,
+                    displayWidth: drawable.texture.width,
+                    displayHeight: drawable.texture.height,
+                    outputMode: 0,
+                    sourceEncoding: sourceEncoding,
+                    diagnosticPattern: diagnosticPattern != 0,
+                    hdrStrength: 0.0,
+                    bloomStrength: 0.0,
+                    currentHeadroom: 1.0,
+                    displaySyncEnabled: layer.displaySyncEnabled
+                )
+            }
+            return 1
         }
 
         let separatedHdrTexture = hasHdrPrecompose ? candidatePrecomposedOutput : nil
@@ -7611,19 +8694,31 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         var hdrOutputs: MetallumHdrOutputs?
         var hasHdrScene = false
-        if hasCompatibleScene, let sceneTexture, let sceneDepthTexture {
-            hdrOutputs = encodeHdrEffects(
-                commandBuffer: commandBuffer,
-                finalTexture: sourceTexture,
-                sceneTexture: sceneTexture,
-                displaySceneTexture: displaySceneTexture,
-                sceneDepthTexture: sceneDepthTexture,
-                semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
-                uiTexture: hasCompatibleUi ? uiTexture : nil,
-                globalFence: globalFence,
-                sourceEncoding: sourceEncoding,
-                currentHeadroom: effectiveHeadroom
-            )
+        if hasCompatibleScene, let sceneTexture {
+            if actualLighting {
+                hdrOutputs = encodeActualHdrEffects(
+                    commandBuffer: commandBuffer,
+                    finalTexture: sourceTexture,
+                    sceneTexture: sceneTexture,
+                    displaySceneTexture: displaySceneTexture,
+                    uiTexture: hasCompatibleUi ? uiTexture : nil,
+                    globalFence: globalFence,
+                    currentHeadroom: effectiveHeadroom
+                )
+            } else if let sceneDepthTexture {
+                hdrOutputs = encodeHdrEffects(
+                    commandBuffer: commandBuffer,
+                    finalTexture: sourceTexture,
+                    sceneTexture: sceneTexture,
+                    displaySceneTexture: displaySceneTexture,
+                    sceneDepthTexture: sceneDepthTexture,
+                    semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
+                    uiTexture: hasCompatibleUi ? uiTexture : nil,
+                    globalFence: globalFence,
+                    sourceEncoding: sourceEncoding,
+                    currentHeadroom: effectiveHeadroom
+                )
+            }
             guard hdrOutputs != nil else {
                 return -1
             }
@@ -7633,6 +8728,10 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         let adaptiveState: MTLBuffer?
         if hasHdrScene {
             adaptiveState = hdrOutputs?.adaptiveState
+        } else if actualLighting {
+            // A METALLUM HDR generation must never silently fall through to
+            // the Legacy inferred-reconstruction state.
+            return -1
         } else {
             adaptiveState = ensureHdrFallbackAdaptiveState(device: commandBuffer.device)
         }
@@ -7640,13 +8739,14 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return -1
         }
 
-        let presentDepthTexture: MTLTexture
-        if hasHdrScene, let sceneDepthTexture {
+        let presentDepthTexture: MTLTexture?
+        if actualLighting {
+            presentDepthTexture = nil
+        } else if hasHdrScene, let sceneDepthTexture {
             presentDepthTexture = sceneDepthTexture
-        } else if let fallbackDepth = ensureHdrFallbackDepthTexture(device: commandBuffer.device) {
-            presentDepthTexture = fallbackDepth
         } else {
-            return -1
+            presentDepthTexture = ensureHdrFallbackDepthTexture(device: commandBuffer.device)
+            if presentDepthTexture == nil { return -1 }
         }
 
         let renderPass = MTLRenderPassDescriptor()
@@ -7673,25 +8773,35 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         ))
 
         encoder.setRenderPipelineState(presentPipeline)
-        encoder.setFragmentTexture(sourceTexture, index: 0)
-        encoder.setFragmentTexture(hasHdrScene ? sceneTexture : sourceTexture, index: 1)
-        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.emission : sourceTexture, index: 2)
-        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
-        encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
-        encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 5)
-        encoder.setFragmentTexture(hasCompatibleSemantic ? semanticTexture : sourceTexture, index: 6)
-        encoder.setFragmentTexture(presentDepthTexture, index: 7)
+        if actualLighting {
+            encoder.setFragmentTexture(sourceTexture, index: 0)
+            encoder.setFragmentTexture(sceneTexture!, index: 1)
+            encoder.setFragmentTexture(hdrOutputs!.bloom, index: 2)
+            encoder.setFragmentTexture(hdrOutputs!.uiMask, index: 3)
+            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 4)
+        } else {
+            encoder.setFragmentTexture(sourceTexture, index: 0)
+            encoder.setFragmentTexture(hasHdrScene ? sceneTexture : sourceTexture, index: 1)
+            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.emission : sourceTexture, index: 2)
+            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
+            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
+            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 5)
+            encoder.setFragmentTexture(hasCompatibleSemantic ? semanticTexture : sourceTexture, index: 6)
+            encoder.setFragmentTexture(presentDepthTexture!, index: 7)
+        }
 
         var uniforms = MetallumPresentUniforms(
             mode: UInt32(clamping: max(outputMode, 0)),
-            sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+            sourceEncoding: actualLighting ? 2 : UInt32(clamping: max(sourceEncoding, 0)),
             diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
             currentHeadroom: effectiveHeadroom,
-            hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+            hdrStrength: actualLighting
+                ? 0.0
+                : (hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0),
             bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
             sceneAvailable: hasHdrScene ? 1 : 0,
             uiAvailable: hasCompatibleUi ? 1 : 0,
-            semanticAvailable: hasCompatibleSemantic ? 1 : 0
+            semanticAvailable: actualLighting ? 0 : (hasCompatibleSemantic ? 1 : 0)
         )
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)

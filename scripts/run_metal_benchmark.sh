@@ -8,7 +8,7 @@ ANALYZER="$ROOT/tools/metal_benchmark_report.py"
 FIXTURE_HELPER="$ROOT/tools/metal_benchmark_fixture.py"
 RUN_DIR="$ROOT/run"
 OUTPUT_DIR="$RUN_DIR/logs/metallum-benchmarks"
-REFERENCE_OUTPUT_DIR="$RUN_DIR/lighting-reference/l0"
+REFERENCE_OUTPUT_DIR=${METALLUM_L2_REFERENCE_OUTPUT_DIR:-"$RUN_DIR/lighting-reference/l0"}
 DEFAULT_ROUTE_SPEC="benchmark/routes/hdrtest-static-v1.json"
 DEFAULT_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-v1.json"
 ARTIFACT_CLASSES="build/classes/java/main"
@@ -19,8 +19,10 @@ MONITOR_NAME="Built-in Retina Display"
 WIDTH=3024
 HEIGHT=1964
 REFRESH_HZ=120
-WARMUP_FRAMES=1800
-MEASURE_FRAMES=3000
+WARMUP_FRAMES=${METALLUM_L2_WARMUP_FRAMES:-1800}
+MEASURE_FRAMES=${METALLUM_L2_MEASURE_FRAMES:-3000}
+TIMING_DETAIL=${METALLUM_L2_TIMING_DETAIL:-0}
+METAL_VALIDATION=${METALLUM_L2_METAL_VALIDATION:-0}
 MIN_MAX_FPS=240
 
 ROUTE_SPEC_ARGUMENT="$DEFAULT_ROUTE_SPEC"
@@ -36,6 +38,7 @@ RUN_WORLD_TOKEN=""
 RUN_WORLD_IDENTITY=""
 FIXTURE_DIGEST_BEFORE=""
 SETTINGS_VALUES_BEFORE=""
+RENDERER_VALUES_BEFORE=""
 ARTIFACT_SHA256=""
 ATTEST_PENDING=0
 
@@ -57,6 +60,16 @@ Options:
   --preflight-only   validate route/config/immutable fixture without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
   -h, --help         show this help
+
+L2 diagnostic environment:
+  METALLUM_L2_WARMUP_FRAMES / METALLUM_L2_MEASURE_FRAMES
+      override the 300-frame-aligned run lengths
+  METALLUM_L2_TIMING_DETAIL=1
+      include per-stage timing for zero-work validation
+  METALLUM_L2_METAL_VALIDATION=1
+      retain caller-provided Metal API/shader validation variables
+  METALLUM_L2_REFERENCE_OUTPUT_DIR=DIR
+      place ignored L2 captures outside the default L0 reference directory
 
 Compare completed reports with:
   python3 tools/metal_benchmark_report.py compare BASELINE.jsonl CANDIDATE.jsonl
@@ -116,6 +129,16 @@ case "$METALFX_MODE" in
     OFF|QUALITY|PERFORMANCE) ;;
     *) die "--metalfx must be OFF, QUALITY, or PERFORMANCE (AUTO is not reproducible)" ;;
 esac
+
+case "$WARMUP_FRAMES:$MEASURE_FRAMES:$TIMING_DETAIL:$METAL_VALIDATION" in
+    *[!0-9:]*|::*|:*:|*::* ) die "L2 frame/detail/validation overrides must be non-negative integers" ;;
+esac
+[ "$WARMUP_FRAMES" -ge 300 ] && [ $((WARMUP_FRAMES % 300)) -eq 0 ] \
+    || die "METALLUM_L2_WARMUP_FRAMES must be a multiple of 300 and at least 300"
+[ "$MEASURE_FRAMES" -ge 300 ] && [ $((MEASURE_FRAMES % 300)) -eq 0 ] \
+    || die "METALLUM_L2_MEASURE_FRAMES must be a multiple of 300 and at least 300"
+case "$TIMING_DETAIL" in 0|1) ;; *) die "METALLUM_L2_TIMING_DETAIL must be 0 or 1" ;; esac
+case "$METAL_VALIDATION" in 0|1) ;; *) die "METALLUM_L2_METAL_VALIDATION must be 0 or 1" ;; esac
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required for report validation"
 command -v pgrep >/dev/null 2>&1 || die "pgrep is required for process isolation"
@@ -267,6 +290,7 @@ require_value "$FIXTURE_DIGEST_BEFORE" "$FIXTURE_SHA256" "fixture digest"
 
 OPTIONS_FILE="$RUN_DIR/options.txt"
 HDR_CONFIG="$RUN_DIR/config/metallum-hdr.properties"
+RENDERER_CONFIG="$RUN_DIR/config/metallum-renderer.properties"
 METALFX_CONFIG="$RUN_DIR/config/metallum-metalfx.properties"
 SODIUM_OPTIONS="$RUN_DIR/config/sodium-options.json"
 SODIUM_MIXINS="$RUN_DIR/config/sodium-mixins.properties"
@@ -274,6 +298,7 @@ RESOURCEPACKS_DIR="$RUN_DIR/resourcepacks"
 FABRIC_DEFAULT_PACKS="$RUN_DIR/data/fabric_default_resource_packs.json"
 [ -f "$OPTIONS_FILE" ] || die "missing Minecraft config: run/options.txt"
 [ -f "$HDR_CONFIG" ] || die "missing HDR config"
+[ -f "$RENDERER_CONFIG" ] || die "missing renderer config"
 [ -f "$METALFX_CONFIG" ] || die "missing MetalFX config"
 [ -f "$SODIUM_OPTIONS" ] || die "missing Sodium options config"
 [ -f "$SODIUM_MIXINS" ] || die "missing Sodium mixin config"
@@ -300,13 +325,28 @@ IFS=$'\t' read -r \
     HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE <<< "$settings_values"
 SETTINGS_VALUES_BEFORE=$settings_values
 
-require_value "$HDR_MODE" "scene" "HDR mode"
+case "$HDR_MODE" in
+    off|scene) ;;
+    *) die "HDR mode must be off or scene for the L2 matrix (found ${HDR_MODE:-<missing>})" ;;
+esac
 require_value "$HDR_SOURCE_ENCODING" "srgb" "HDR sourceEncoding"
 require_value "$PERSISTENT_METALFX_MODE" "off" "persistent MetalFX mode"
 case "$MAX_FPS" in
     ''|*[!0-9]*) die "maxFps must be an integer >= $MIN_MAX_FPS (found ${MAX_FPS:-<missing>})" ;;
 esac
 require_value "$MAX_FPS" "260" "maxFps"
+
+renderer_value() {
+    local key=$1
+    awk -F= -v key="$key" '$1 == key { print $2 }' "$RENDERER_CONFIG"
+}
+RENDERER_LIGHTING=$(renderer_value improvedLighting)
+RENDERER_PRESET=$(renderer_value lightingPreset)
+RENDERER_INTERPOLATION=$(renderer_value frameInterpolation)
+case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
+require_value "$RENDERER_PRESET" "balanced" "renderer lightingPreset"
+require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
+RENDERER_VALUES_BEFORE="$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION"
 
 mkdir -p "$OUTPUT_DIR"
 git -C "$ROOT" check-ignore -q "$OUTPUT_DIR/.metallum-benchmark-probe" \
@@ -345,7 +385,7 @@ ACCEPTED_JSON="$OUTPUT_DIR/$stem.accepted.json"
 echo "Metallum benchmark preflight passed"
 echo "  display: $MONITOR_NAME, ${WIDTH}x${HEIGHT}@${REFRESH_HZ}, exclusive fullscreen"
 echo "  pacing: VSync off, maxFps=$MAX_FPS"
-echo "  scene: HDR scene/sRGB source, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
+echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$RENDERER_LIGHTING, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
@@ -399,6 +439,7 @@ cleanup() {
     local active_processes=""
     local source_after=""
     local settings_after=""
+    local renderer_after=""
     local artifact_after=""
 
     trap - EXIT HUP INT TERM
@@ -427,6 +468,12 @@ cleanup() {
         "$FABRIC_DEFAULT_PACKS")
     if [ "$?" -ne 0 ] || [ "$settings_after" != "${SETTINGS_VALUES_BEFORE:-}" ]; then
         echo "ERROR: benchmark performance/quality settings changed during the run" >&2
+        cleanup_status=2
+    fi
+
+    renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)"
+    if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
+        echo "ERROR: renderer generation settings changed during the run" >&2
         cleanup_status=2
     fi
 
@@ -530,9 +577,11 @@ echo "  temporary world: $RUN_WORLD_NAME (strict APFS CoW clone)"
 
 # Performance runs must not inherit debug/capture/HUD instrumentation. The
 # built-in timestamp report remains enabled with non-intrusive detail disabled.
-unset MTL_DEBUG_LAYER
-unset MTL_SHADER_VALIDATION
-unset MTL_SHADER_VALIDATION_REPORT_TO_STDERR
+if [ "$METAL_VALIDATION" -eq 0 ]; then
+    unset MTL_DEBUG_LAYER
+    unset MTL_SHADER_VALIDATION
+    unset MTL_SHADER_VALIDATION_REPORT_TO_STDERR
+fi
 unset MTL_CAPTURE_ENABLED
 unset MTL_HUD_ENABLED
 unset MTL_HUD_LOG_ENABLED
@@ -613,7 +662,7 @@ METALLUM_BENCHMARK_TORCH_APPLY_AFTER_MEASURED_FRAMES="$TORCH_APPLY_AFTER_MEASURE
 METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES="$TORCH_OBSERVATION_FRAMES" \
 METALLUM_BENCHMARK_TORCH_REMOVE_AFTER_MEASURED_FRAMES="$TORCH_REMOVE_AFTER_MEASURED_FRAMES" \
 METALLUM_GPU_TIMING=1 \
-METALLUM_GPU_TIMING_DETAIL=0 \
+METALLUM_GPU_TIMING_DETAIL="$TIMING_DETAIL" \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
     ./gradlew --no-daemon runClient --console=plain \
         "--args=--username $PLAYER_NAME --uuid $PLAYER_UUID --quickPlaySingleplayer $RUN_WORLD_NAME" \
@@ -765,11 +814,19 @@ complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ "$complete_count" -eq 1 ] || die "expected exactly one matching COMPLETE marker (found $complete_count)"
 [ -s "$RAW_REPORT" ] || die "GPU timing JSONL report is missing or empty"
 
+RELEASE_ARG=""
+if [ "$HDR_MODE" = "scene" ] \
+    && [ "$TIMING_DETAIL" -eq 0 ] \
+    && [ "$METAL_VALIDATION" -eq 0 ] \
+    && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+    RELEASE_ARG=--release-contract
+fi
+
 python3 "$ANALYZER" summarize "$RAW_REPORT" \
     --measure-frames "$MEASURE_FRAMES" \
     --segment 0 \
     --scaler-mode "$METALFX_MODE" \
-    --release-contract \
+    ${RELEASE_ARG:+$RELEASE_ARG} \
     --source-sha256 "$SOURCE_SHA256" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --settings-id "$SETTINGS_ID" \
@@ -789,7 +846,7 @@ python3 "$ANALYZER" summarize "$RAW_REPORT" \
     --measure-frames "$MEASURE_FRAMES" \
     --segment 0 \
     --scaler-mode "$METALFX_MODE" \
-    --release-contract \
+    ${RELEASE_ARG:+$RELEASE_ARG} \
     --source-sha256 "$SOURCE_SHA256" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --settings-id "$SETTINGS_ID" \
@@ -833,4 +890,8 @@ echo "  raw: $RAW_REPORT"
 echo "  summary: $SUMMARY_JSON"
 echo "  Minecraft log: $MINECRAFT_LOG"
 echo "  console log: $CONSOLE_LOG"
-ATTEST_PENDING=$((1 - CAPTURE_REFERENCE))
+if [ -n "$RELEASE_ARG" ]; then
+    ATTEST_PENDING=1
+else
+    ATTEST_PENDING=0
+fi

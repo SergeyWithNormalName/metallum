@@ -1,5 +1,13 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.RendererGenerationPlanner;
+import com.metallum.client.hdr.HdrOutputMode;
+import com.metallum.client.hdr.HdrPipelinePolicy;
+import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.MetallumMaterialState;
+import com.metallum.client.hdr.SceneLinearClearColor;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.textures.AddressMode;
@@ -43,6 +51,8 @@ public final class MetalRuntimeTests {
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testHdrSceneColorRouting();
+        testL2GenerationResourceRouting();
+        testL2AtomicMaterialFallback();
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -615,6 +625,133 @@ public final class MetalRuntimeTests {
                         MetalDevice.HdrSceneColorState.SNAPSHOT,
                         false, false, false, false, true
                 ), "missing HDR snapshot handle was accepted");
+    }
+
+    private static void testL2GenerationResourceRouting() {
+        require(MetalDevice.usesLegacyHdrSemanticAttachment(
+                        LightingMode.LEGACY, DisplayOutputMode.HDR
+                ), "Legacy HDR lost its semantic attachment");
+        require(!MetalDevice.usesLegacyHdrSemanticAttachment(
+                        LightingMode.METALLUM, DisplayOutputMode.HDR
+                ), "METALLUM HDR retained the semantic attachment");
+        require(!MetalDevice.usesLegacyHdrSemanticAttachment(
+                        LightingMode.LEGACY, DisplayOutputMode.SDR
+                ), "Legacy SDR created a semantic attachment");
+        require(!MetalDevice.usesLegacyHdrSemanticAttachment(
+                        LightingMode.METALLUM, DisplayOutputMode.SDR
+                ), "METALLUM SDR created a semantic attachment");
+
+        require(MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.LEGACY, true),
+                "Legacy enhanced HDR lost its depth snapshot");
+        require(!MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.METALLUM, true),
+                "METALLUM HDR retained inferred-reconstruction depth work");
+        require(!MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.LEGACY, false),
+                "inactive Legacy enhancement created depth work");
+
+        require(MetalCompiledRenderPipeline.selectLegacyGenerationFlavor(
+                        HdrPipelinePolicy.Role.SCENE_RASTER,
+                        false, true, false, false, true
+                ) == HdrShaderFlavor.LEGACY,
+                "Legacy SDR selected a semantic shader flavor");
+        require(MetalCompiledRenderPipeline.selectLegacyGenerationFlavor(
+                        HdrPipelinePolicy.Role.SCENE_RASTER,
+                        true, true, false, true, true
+                ) == HdrShaderFlavor.LEGACY_HDR_SEMANTIC,
+                "Legacy HDR fallback did not select its isolated semantic flavor");
+        require(MetalCompiledRenderPipeline.selectLegacyGenerationFlavor(
+                        HdrPipelinePolicy.Role.SCENE_RASTER,
+                        true, true, true, true, true
+                ) == HdrShaderFlavor.SCENE_RASTER_LINEAR,
+                "Legacy scene-linear HDR did not retain its semantic scene flavor");
+        require(MetalCompiledRenderPipeline.selectLegacyGenerationFlavor(
+                        HdrPipelinePolicy.Role.SCENE_RASTER,
+                        true, false, true, true, true
+                ) == HdrShaderFlavor.LEGACY,
+                "display/UI attachment selected a Legacy HDR scene flavor");
+
+        require(!MetalDevice.usesSemanticShaderFlavor(HdrShaderFlavor.LEGACY)
+                        && !MetalDevice.usesSemanticShaderFlavor(HdrShaderFlavor.METALLUM)
+                        && MetalDevice.usesSemanticShaderFlavor(
+                        HdrShaderFlavor.LEGACY_HDR_SEMANTIC),
+                "semantic patching escaped its Legacy HDR-only shader variants");
+        require(SceneLinearClearColor.shouldDecode(false, true, true),
+                "METALLUM SDR scene clear was not decoded to linear light");
+        require(SceneLinearClearColor.shouldDecode(true, true, true),
+                "METALLUM HDR scene clear was not decoded to linear light");
+        require(!SceneLinearClearColor.shouldDecode(false, false, true),
+                "display/UI clear was decoded as material scene color");
+
+        require(MetalDevice.resolveMainSceneStorage(true, false)
+                        == RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+                        && MetalDevice.resolveMainSceneStorage(false, true)
+                        == RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+                        && MetalDevice.resolveMainSceneStorage(false, false)
+                        == RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8,
+                "MainTarget storage routing ignored a Legacy or METALLUM startup FP16 request");
+
+        MetallumMaterialState.configure(true, false);
+        require(MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.EDR, false)
+                        == HdrOutputMode.SDR
+                        && MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.ENHANCED, false)
+                        == HdrOutputMode.SDR,
+                "startup METALLUM RGBA8 routing admitted a live HDR output");
+        MetallumMaterialState.configure(true, true);
+        require(MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.EDR, false)
+                        == HdrOutputMode.EDR
+                        && MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.ENHANCED, false)
+                        == HdrOutputMode.ENHANCED
+                        && MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.ENHANCED, true)
+                        == HdrOutputMode.EDR,
+                "startup METALLUM FP16 routing did not preserve independently safe output modes");
+        MetallumMaterialState.reset();
+    }
+
+    private static void testL2AtomicMaterialFallback() {
+        require(MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        true, true, false, HdrPipelinePolicy.Role.UNKNOWN,
+                        false, true
+                ), "unknown material scene pipeline was not suppressed");
+        require(!MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        true, true, false, HdrPipelinePolicy.Role.SCENE_RASTER,
+                        true, true
+                ), "known material scene pipeline was suppressed");
+        require(MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        true, true, false, HdrPipelinePolicy.Role.SCENE_RASTER,
+                        false, false
+                ), "failed lazy material variant was not suppressed");
+        require(!MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        false, true, false, HdrPipelinePolicy.Role.UNKNOWN,
+                        false, false
+                ), "Legacy scene draw was suppressed");
+        require(!MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        true, true, true, HdrPipelinePolicy.Role.UNKNOWN,
+                        false, false
+                ), "separate SDR UI/display draw was suppressed");
+        require(!MetalCompiledRenderPipeline.shouldSuppressUnsupportedMaterialDraw(
+                        true, false, false, HdrPipelinePolicy.Role.UNKNOWN,
+                        false, false
+                ), "non-scene data draw was suppressed");
+
+        require(MetalCommandEncoder.shouldPresentRendererGeneration(
+                        false, 7L, 7L, 11L, 11L
+                ), "matching renderer generation was dropped");
+        require(!MetalCommandEncoder.shouldPresentRendererGeneration(
+                        true, 7L, 7L, 11L, 11L
+                ), "explicitly invalidated renderer generation was presented");
+        require(!MetalCommandEncoder.shouldPresentRendererGeneration(
+                        false, 7L, 8L, 11L, 11L
+                ), "stale renderer-generation ID was presented");
+        require(!MetalCommandEncoder.shouldPresentRendererGeneration(
+                        false, 7L, 7L, 11L, 12L
+                ), "stale material-coverage epoch was presented");
+        require(!MetalCommandEncoder.shouldPresentRendererGeneration(
+                        false, Long.MIN_VALUE, 0L, Long.MIN_VALUE, 0L
+                ), "unstamped command buffer was presented");
+
+        require(!SceneLinearClearColor.shouldDecode(true, true, false, false),
+                "Legacy SDR FP16 compatibility clear was decoded to linear");
+        require(SceneLinearClearColor.shouldDecode(true, true, false, true),
+                "resolved Legacy HDR scene-linear clear stayed gamma encoded");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

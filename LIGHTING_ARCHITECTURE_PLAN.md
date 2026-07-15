@@ -1497,33 +1497,41 @@ Diagnostic overlays:
 - При выключенной диагностике Native и оба Spatial режима сохраняют `0` diagnostic bytes/passes/encoders/PSO и 17 обычных PSO. Live diagnostic smoke: `89,087,040` bytes, один pass/encoder/PSO, без Metal errors и видимого изменения world/UI.
 - M1 Pro stable A/B, CPU p95 / GPU p95 / 1% low, L0 → L1: Native `10.856→10.823 ms / 7.707→7.834 ms / 56.715→57.928`; Quality `10.797→9.765 / 7.580→7.215 / 60.339→65.098`; Performance `10.905→10.458 / 8.193→8.074 / 59.621→60.576`. Нестабильные control-выбросы исключены немедленным A–B–A повтором.
 
-### Этап 2. Scene-linear material contract и независимые SDR/HDR output paths
+### Этап 2. Scene-linear material contract и независимые SDR/HDR output paths — ✅ ВЫПОЛНЕН 15 июля 2026
 
 #### Работы
 
-- Ввести `METALLUM` shader/material flavor.
-- Перевести texture sampling, albedo multiplication, fog и blending нового path в linear contract.
-- Для Metallum+HDR писать actual FP16 scene radiance.
-- Для Metallum+SDR выбрать минимальный достаточный scene format по numeric tests и GPU capture; не переносить в него полноразмерную FP16/HDR цену без доказанной необходимости.
-- Перевести emission на явную линейную шкалу.
-- Перестроить HDR histogram как exposure-only и извлекать HDR bloom из actual radiance.
-- Отключить inferred reconstruction только в Metallum+HDR.
-- После полного shader-role coverage не выделять/очищать/писать legacy semantic attachment и не создавать reconstruction PSO ни в одной `LightingMode.METALLUM` generation.
-- Передавать HDR FP16 `sceneColor` scaler/present без дублирующего scene snapshot, если lifetime graph разрешает прямое чтение.
-- Сохранить текущий semantic HDR целиком только в Legacy+HDR.
-- В обоих SDR-режимах исключить semantic attachment, HDR histogram, reconstruction, EDR mapping, HDR bloom и HDR-only PSO/resources.
-- Добавить отдельные generation/resource tests для Legacy+SDR, Legacy+HDR, Metallum+SDR и Metallum+HDR.
+- [x] Ввести `METALLUM` shader/material flavor.
+- [x] Перевести texture sampling, albedo multiplication, fog и blending нового path в linear contract.
+- [x] Для Metallum+HDR писать actual FP16 scene radiance.
+- [x] Для Metallum+SDR выбрать минимальный достаточный scene format по numeric tests и GPU capture; не переносить в него полноразмерную FP16/HDR цену без доказанной необходимости.
+- [x] Перевести emission на явную линейную шкалу.
+- [x] Перестроить HDR histogram как exposure-only и извлекать HDR bloom из actual radiance.
+- [x] Отключить inferred reconstruction только в Metallum+HDR.
+- [x] После полного shader-role coverage не выделять/очищать/писать legacy semantic attachment и не создавать reconstruction PSO ни в одной `LightingMode.METALLUM` generation.
+- [x] Передавать HDR FP16 `sceneColor` scaler/present без дублирующего scene snapshot, если lifetime graph разрешает прямое чтение.
+- [x] Сохранить текущий semantic HDR целиком только в Legacy+HDR.
+- [x] В обоих SDR-режимах исключить semantic attachment, HDR histogram, reconstruction, EDR mapping, HDR bloom и HDR-only PSO/resources.
+- [x] Добавить отдельные generation/resource tests для Legacy+SDR, Legacy+HDR, Metallum+SDR и Metallum+HDR.
 
 #### Exit criteria
 
-- Reference white, emission и headroom проходят numeric GPU validation в HDR; SDR mapping сохраняет цвет и lighting ordering без HDR-only pipeline.
-- Нет double decode/encode.
-- Metallum+SDR и Metallum+HDR дают эквивалентное lighting solution до output boundary, но вправе использовать разные storage formats.
-- UI остаётся SDR и визуально совпадает с legacy.
-- Unsupported shader role атомарно блокирует только новый lighting mode, сохраняя независимо выбранный SDR/HDR output через legacy lighting.
-- HDR off подтверждён timing/resource telemetry как отсутствие работы, а не нулевая интенсивность внутри всё ещё запущенных passes.
-- Metallum+HDR numeric probes доказывают, что radiance выше `1.0` присутствует до histogram/bloom/display mapping; отключение reconstruction не меняет эти значения.
-- При одинаковом разрешении отдельно измерена цена Legacy+HDR и Metallum+HDR; новый native-HDR path не принимается при необъяснённой регрессии и должен показать, какие legacy reconstruction/semantic costs он устранил.
+- [x] Reference white, emission и headroom проходят numeric GPU validation в HDR; SDR mapping сохраняет цвет и lighting ordering без HDR-only pipeline.
+- [x] Нет double decode/encode.
+- [x] Metallum+SDR и Metallum+HDR дают эквивалентное lighting solution до output boundary, но вправе использовать разные storage formats.
+- [x] UI остаётся SDR и визуально совпадает с legacy.
+- [x] Unsupported shader role атомарно блокирует только новый lighting mode, сохраняя независимо выбранный SDR/HDR output через legacy lighting.
+- [x] HDR off подтверждён timing/resource telemetry как отсутствие работы, а не нулевая интенсивность внутри всё ещё запущенных passes.
+- [x] Metallum+HDR numeric probes доказывают, что radiance выше `1.0` присутствует до histogram/bloom/display mapping; отключение reconstruction не меняет эти значения.
+- [x] При одинаковом разрешении отдельно измерена цена Legacy+HDR и Metallum+HDR; новый native-HDR path не принимается при необъяснённой регрессии и должен показать, какие legacy reconstruction/semantic costs он устранил.
+
+#### Результат выполнения
+
+- Реализованы четыре изолированных generation-контракта: Legacy+SDR `RGBA8`, Legacy+HDR semantic `RGBA16F`, Metallum+SDR scene-linear `RGBA8`, Metallum+HDR actual-radiance `RGBA16F`. Для атомарной смены output добавлены только переходные FP16 compatibility generations; steady-state форматы и ресурсы остаются указанными выше.
+- `METALLUM` покрывает реальные shader roles Minecraft 26.2 и Sodium; texture/albedo/tint/fog/blending и emission линейны. Неизвестный role инвалидирует текущий кадр и на следующей generation оставляет тот же SDR/HDR output с Legacy lighting.
+- В Metallum+HDR histogram управляет только exposure, bloom берётся из actual radiance; semantic/depth/reconstruction отсутствуют. Оба SDR generation имеют `0` HDR bytes/passes/PSO. SDR UI остаётся отдельным `RGBA8` target; title/loading UI обрабатывается без запуска HDR effects.
+- GPU numeric validation: radiance `1.640` сохраняется до display mapping и даёт `2.828`; `hdrStrength` и Legacy reconstruction на неё не влияют; sRGB `0.5 → 0.214`, UI-only `0.5 → 0.216`, 50% alpha white → `0.5` linear.
+- M1 Pro, Native 3024×1964, EDR headroom `8`, 3000 кадров: Legacy+HDR `137.316 FPS / 7.402 ms GPU p95`, Metallum+HDR `158.362 FPS / 6.454 ms`; verdict `IMPROVEMENT`. HDR resources уменьшены с `148,478,688` до `100,965,600` bytes за счёт удаления semantic/depth/reconstruction.
 
 ### Этап 3. Light registry и clustered forward+
 

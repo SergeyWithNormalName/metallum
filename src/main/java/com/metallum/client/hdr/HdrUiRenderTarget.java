@@ -42,7 +42,9 @@ public final class HdrUiRenderTarget {
         backdropBlurredThisFrame = false;
         spatialActiveThisFrame = MetalFxSpatialScaling.isActive();
         spatialHdrPrecomposedThisFrame = false;
-        if ((!HdrSceneState.isRequested() && !spatialActiveThisFrame)
+        if ((!HdrSceneState.isRequested()
+                && !MetallumMaterialState.isGenerationActive()
+                && !spatialActiveThisFrame)
                 || (unavailable && !spatialActiveThisFrame)) {
             return fallbackToMainTarget(mainTarget);
         }
@@ -72,6 +74,7 @@ public final class HdrUiRenderTarget {
                     previous.destroyBuffers();
                 }
             }
+            MetalHdrFrame.markDisplaySdrColor(target.getColorTexture());
 
             if (!MetalHdrFrame.prepareUiBackdrop(
                     mainTarget.getColorTextureView(),
@@ -95,6 +98,7 @@ public final class HdrUiRenderTarget {
             unavailable = false;
             return target;
         } catch (Throwable throwable) {
+            rejectMaterialGenerationAfterSeedFailure();
             try {
                 MetalHdrFrame.materializeSceneFallback(mainTarget.getColorTextureView());
             } catch (Throwable fallbackFailure) {
@@ -116,6 +120,7 @@ public final class HdrUiRenderTarget {
                 lastUiFinished = true;
                 lastUiSource = activeSource;
             } catch (Throwable throwable) {
+                rejectMaterialGenerationAfterSeedFailure();
                 if (spatialActiveThisFrame) {
                     disableScalingAfterFailure(throwable);
                 } else {
@@ -244,6 +249,22 @@ public final class HdrUiRenderTarget {
                 "Failed to prepare the seeded SDR UI target; rendering GUI into MainTarget for safety",
                 throwable
         );
+    }
+
+    static boolean shouldRejectMaterialGenerationAfterSeedFailure(
+            final boolean materialGenerationActive
+    ) {
+        return materialGenerationActive;
+    }
+
+    private static void rejectMaterialGenerationAfterSeedFailure() {
+        if (shouldRejectMaterialGenerationAfterSeedFailure(
+                MetallumMaterialState.isGenerationActive()
+        )) {
+            MetallumMaterialPreflightGate.rejectMaterialVariant(
+                    "seeded SDR UI target failed during a METALLUM generation"
+            );
+        }
     }
 
     private static RenderTarget fallbackToMainTarget(final RenderTarget mainTarget) {

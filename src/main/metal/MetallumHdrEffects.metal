@@ -43,6 +43,20 @@ struct HdrAdaptiveState {
   uint valid;
 };
 
+// METALLUM scene color already contains physical scene-linear radiance. This
+// state therefore controls exposure only; scenePeak is a measured percentile,
+// never a reconstructed highlight target.
+struct ActualHdrExposureState {
+  float exposure;
+  float scenePeak;
+  float medianLog2;
+  float p90Log2;
+  float p99Log2;
+  float brightCoverage;
+  float currentHeadroom;
+  uint valid;
+};
+
 vertex HdrVertexOut metallum_hdr_vs(uint vertexId [[vertex_id]]) {
   const float2 positions[3] = {
     float2(-1.0,  1.0),
@@ -172,6 +186,45 @@ fragment float4 metallum_hdr_extract_fs(
   // Keeping the old visual fallback would apply two unrelated heuristics
   // to the same pixel and create excessive halos.
   return float4(0.0, 0.0, 0.0, averageY);
+}
+
+fragment float4 metallum_actual_hdr_extract_fs(
+  HdrVertexOut in [[stage_in]],
+  texture2d<float> scene [[texture(0)]],
+  constant HdrExtractUniforms& uniforms [[buffer(0)]],
+  device atomic_uint* histogram [[buffer(1)]]
+) {
+  uint2 origin = uint2(in.position.xy) * 4u;
+  uint2 maximumCoordinate = max(uniforms.sourceSize, uint2(1u)) - 1u;
+  float3 bloomSum = float3(0.0);
+  float averageY = 0.0;
+
+  for (uint yIndex = 0u; yIndex < 4u; ++yIndex) {
+    for (uint xIndex = 0u; xIndex < 4u; ++xIndex) {
+      uint2 coordinate = min(origin + uint2(xIndex, yIndex), maximumCoordinate);
+      float3 radiance = metallum_hdr_decode(
+        scene.read(coordinate).rgb,
+        uniforms.sourceEncoding
+      );
+      averageY += metallum_hdr_luminance(radiance);
+
+      // Reference white is 1.0 in the material contract. Bloom is extracted
+      // only from actual over-reference radiance, without semantic markers or
+      // an inferred replacement for clipped SDR highlights.
+      float3 overReference = max(radiance - 1.0, 0.0);
+      float bloomGate = smoothstep(0.0, 0.25, metallum_hdr_luminance(overReference));
+      bloomSum += overReference * bloomGate;
+    }
+  }
+  averageY *= 1.0 / 16.0;
+
+  if (uniforms.histogramEnabled != 0u) {
+    float logY = clamp(log2(max(averageY, exp2(-12.0))), -12.0, 4.0);
+    uint bin = min(uint((logY + 12.0) * 4.0), 63u);
+    atomic_fetch_add_explicit(&histogram[bin], 1u, memory_order_relaxed);
+  }
+
+  return float4(bloomSum * (1.0 / 16.0), averageY);
 }
 
 kernel void metallum_hdr_histogram_build(
@@ -354,6 +407,101 @@ kernel void metallum_hdr_histogram_reduce(
   next.p90Log2 = p90Log2;
   next.p99Log2 = p99Log2;
   next.brightCoverage = clamp(brightCoverage, 0.0, 1.0);
+  next.currentHeadroom = safeHeadroom;
+  next.valid = 1u;
+  stateBuffer[0] = next;
+}
+
+kernel void metallum_actual_hdr_exposure_reduce(
+  device atomic_uint* histogram [[buffer(0)]],
+  device ActualHdrExposureState* stateBuffer [[buffer(1)]],
+  constant HdrHistogramReduceUniforms& uniforms [[buffer(2)]],
+  uint index [[thread_position_in_grid]]
+) {
+  if (index != 0u) {
+    return;
+  }
+
+  uint bins[64];
+  uint total = 0u;
+  uint brightCount = 0u;
+  for (uint bin = 0u; bin < 64u; ++bin) {
+    uint count = atomic_exchange_explicit(&histogram[bin], 0u, memory_order_relaxed);
+    bins[bin] = count;
+    total += count;
+    if (bin >= 48u) { // Y >= reference white.
+      brightCount += count;
+    }
+  }
+
+  ActualHdrExposureState previous = stateBuffer[0];
+  float safeHeadroom = clamp(uniforms.currentHeadroom, 1.0, 8.0);
+  if (total == 0u) {
+    previous.exposure = previous.valid == 0u ? 1.0 : clamp(previous.exposure, 0.25, 1.0);
+    previous.scenePeak = previous.valid == 0u ? 1.0 : max(previous.scenePeak, 0.0);
+    previous.currentHeadroom = safeHeadroom;
+    stateBuffer[0] = previous;
+    return;
+  }
+
+  uint rank50 = max(uint(ceil(float(total) * 0.50)), 1u);
+  uint rank90 = max(uint(ceil(float(total) * 0.90)), 1u);
+  uint rank99 = max(uint(ceil(float(total) * 0.99)), 1u);
+  uint cumulative = 0u;
+  uint bin50 = 63u;
+  uint bin90 = 63u;
+  uint bin99 = 63u;
+  bool found50 = false;
+  bool found90 = false;
+  bool found99 = false;
+  for (uint bin = 0u; bin < 64u; ++bin) {
+    cumulative += bins[bin];
+    if (!found50 && cumulative >= rank50) {
+      bin50 = bin;
+      found50 = true;
+    }
+    if (!found90 && cumulative >= rank90) {
+      bin90 = bin;
+      found90 = true;
+    }
+    if (!found99 && cumulative >= rank99) {
+      bin99 = bin;
+      found99 = true;
+    }
+  }
+
+  float p50Log2 = -12.0 + (float(bin50) + 0.5) * 0.25;
+  float p90Log2 = -12.0 + (float(bin90) + 0.5) * 0.25;
+  float p99Log2 = -12.0 + (float(bin99) + 0.5) * 0.25;
+  float measuredPeak = exp2(p99Log2);
+
+  // Exposure never invents range and never boosts a dim scene. It only
+  // attenuates when measured scene radiance would exceed the live EDR budget.
+  float targetExposure = min(
+    1.0,
+    max(0.25, (safeHeadroom * 0.92) / max(measuredPeak, 1.0))
+  );
+  bool reset = uniforms.forceReset != 0u
+    || previous.valid == 0u
+    || uniforms.deltaTime > 1.0
+    || abs(p50Log2 - previous.medianLog2) > 2.0;
+  float exposure = targetExposure;
+  if (!reset) {
+    // Reduce exposure quickly, recover slowly, and cap immediately after a
+    // headroom drop so no over-range frame remains in flight.
+    float timeConstant = targetExposure < previous.exposure ? 0.12 : 0.75;
+    float blend = 1.0 - exp(-max(uniforms.deltaTime, 0.0) / timeConstant);
+    exposure = mix(previous.exposure, targetExposure, clamp(blend, 0.0, 1.0));
+  }
+  exposure = min(exposure, targetExposure);
+
+  ActualHdrExposureState next;
+  next.exposure = clamp(exposure, 0.25, 1.0);
+  next.scenePeak = measuredPeak;
+  next.medianLog2 = p50Log2;
+  next.p90Log2 = p90Log2;
+  next.p99Log2 = p99Log2;
+  next.brightCoverage = float(brightCount) / max(float(total), 1.0);
   next.currentHeadroom = safeHeadroom;
   next.valid = 1u;
   stateBuffer[0] = next;

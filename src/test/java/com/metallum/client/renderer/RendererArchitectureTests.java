@@ -1,6 +1,12 @@
 package com.metallum.client.renderer;
 
 import com.metallum.client.hdr.EdrCapabilities;
+import com.metallum.client.hdr.HdrOutputMode;
+import com.metallum.client.hdr.HdrSceneState;
+import com.metallum.client.hdr.HdrSourceEncoding;
+import com.metallum.client.hdr.MetallumMaterialPreflightGate;
+import com.metallum.client.hdr.MetallumMaterialState;
+import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStateAbi;
@@ -20,6 +26,8 @@ public final class RendererArchitectureTests {
     public static void main(final String[] args) {
         testIndependentModeMatrix();
         testProductionMetallumRejection();
+        testRuntimeMaterialCapabilityAdmission();
+        testMaterialGenerationPublication();
         testFailClosedSelection();
         testIndependentOptionalFeatureFallback();
         testRendererConfigDefaults();
@@ -33,7 +41,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2/P4/L0 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4/L0/L2 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -92,6 +100,99 @@ public final class RendererArchitectureTests {
                 "unimplemented lighting did not fail closed");
         require(resolution.config().outputMode() == DisplayOutputMode.HDR,
                 "lighting fallback changed the current safe HDR output");
+    }
+
+    private static void testRuntimeMaterialCapabilityAdmission() {
+        MetalCapabilities discovered = MetalCapabilities.productionMetal3(true);
+        MetalCapabilities admitted = discovered.withRuntimeFeature(
+                MetalCapabilities.Feature.METALLUM_LIGHTING
+        );
+        require(!discovered.supports(MetalCapabilities.Feature.METALLUM_LIGHTING),
+                "runtime material admission mutated the discovery snapshot");
+        require(admitted.supports(MetalCapabilities.Feature.METALLUM_LIGHTING)
+                        && admitted.evidenceFor(MetalCapabilities.Feature.METALLUM_LIGHTING)
+                        == MetalCapabilities.Evidence.RUNTIME_PROBE,
+                "runtime material admission lost its capability evidence");
+
+        RendererGenerationConfig.Resolution admittedHdr = RendererGenerationConfig.resolve(
+                LightingMode.METALLUM,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                DisplayOutputMode.HDR,
+                admitted,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        require(!admittedHdr.fellBack()
+                        && admittedHdr.config().lightingMode() == LightingMode.METALLUM
+                        && admittedHdr.config().outputMode() == DisplayOutputMode.HDR,
+                "runtime material capability did not admit METALLUM HDR atomically");
+
+        RendererGenerationConfig.Resolution rejectedHdr = RendererGenerationConfig.resolve(
+                LightingMode.METALLUM,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                DisplayOutputMode.HDR,
+                discovered,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        require(rejectedHdr.fellBack()
+                        && rejectedHdr.config().lightingMode() == LightingMode.LEGACY
+                        && rejectedHdr.config().outputMode() == DisplayOutputMode.HDR,
+                "material rejection changed the independently supported HDR output");
+    }
+
+    private static void testMaterialGenerationPublication() {
+        HdrSceneState.reset();
+        MetallumMaterialState.configure(true, false);
+        long pendingEpoch = MetallumMaterialState.admission().coverageEpoch();
+        require(!MetallumMaterialState.isGenerationActive()
+                        && HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB,
+                "pending material coverage leaked into the published scene contract");
+        require(!MetallumMaterialState.requiresFp16Scene(),
+                "METALLUM SDR requested an FP16 main scene");
+        require(MetallumMaterialState.isSceneStorageCompatible(false)
+                        && !MetallumMaterialState.isSceneStorageCompatible(true),
+                "METALLUM SDR storage admitted the HDR scene contract");
+        require(MetallumMaterialState.resolveCompatibleOutput(HdrOutputMode.SDR)
+                        == HdrOutputMode.SDR
+                        && MetallumMaterialState.resolveCompatibleOutput(HdrOutputMode.EDR)
+                        == HdrOutputMode.SDR
+                        && MetallumMaterialState.resolveCompatibleOutput(HdrOutputMode.ENHANCED)
+                        == HdrOutputMode.SDR,
+                "startup METALLUM RGBA8 storage did not clamp only the live output axis to SDR");
+
+        MetallumMaterialPreflightGate.install(new MetallumMaterialPreflightGate.Evaluation(
+                true, "synthetic complete material coverage"
+        ));
+        MetallumMaterialState.Admission admission = MetallumMaterialState.admission();
+        require(admission.active() && admission.coverageEpoch() > pendingEpoch,
+                "material coverage did not advance the renderer generation epoch");
+        MetallumMaterialState.publishGeneration(true);
+        require(MetallumMaterialState.isGenerationActive()
+                        && HdrSceneState.sourceEncoding() == HdrSourceEncoding.LINEAR
+                        && SceneLinearClearColor.shouldDecode(false, true, true),
+                "admitted material generation did not publish one linear decode contract");
+
+        MetallumMaterialState.configure(true, true);
+        require(MetallumMaterialState.requiresFp16Scene()
+                        && MetallumMaterialState.isSceneStorageCompatible(true)
+                        && MetallumMaterialState.isSceneStorageCompatible(false)
+                        && MetallumMaterialState.resolveCompatibleOutput(HdrOutputMode.EDR)
+                        == HdrOutputMode.EDR
+                        && MetallumMaterialState.resolveCompatibleOutput(HdrOutputMode.ENHANCED)
+                        == HdrOutputMode.ENHANCED
+                        && !MetallumMaterialState.isGenerationActive()
+                        && HdrSceneState.sourceEncoding() == HdrSourceEncoding.SRGB,
+                "startup METALLUM FP16 storage did not admit both HDR and SDR outputs");
+        MetallumMaterialPreflightGate.install(new MetallumMaterialPreflightGate.Evaluation(
+                true, "synthetic FP16 material coverage"
+        ));
+        MetallumMaterialState.publishGeneration(true);
+        require(HdrSceneState.sourceEncoding() == HdrSourceEncoding.LINEAR
+                        && SceneLinearClearColor.shouldDecode(true, true, true),
+                "METALLUM FP16-to-SDR transition lost its scene-linear clear contract");
+        MetallumMaterialState.reset();
+        HdrSceneState.reset();
     }
 
     private static void testFailClosedSelection() {
@@ -197,6 +298,10 @@ public final class RendererArchitectureTests {
         );
         RendererGenerationPlanner.Extent render = new RendererGenerationPlanner.Extent(1280, 720);
         RendererGenerationPlanner.Extent display = new RendererGenerationPlanner.Extent(2560, 1440);
+        long renderPixels = 1280L * 720L;
+        long displayPixels = 2560L * 1440L;
+        long quarterPixels = 320L * 180L;
+
         for (LightingMode lighting : LightingMode.values()) {
             for (DisplayOutputMode output : DisplayOutputMode.values()) {
                 RendererGenerationPlanner.Plan plan = RendererGenerationPlanner.plan(
@@ -213,12 +318,9 @@ public final class RendererArchitectureTests {
                 require(plan.resolution().config().lightingMode() == lighting
                                 && plan.resolution().config().outputMode() == output,
                         "one of the four declarative combinations failed to compile");
-                require(plan.manifest().passCount(RendererGenerationManifest.Domain.LIGHTING_ONLY) == 0L
-                                && plan.manifest().resourceBytes(
-                                RendererGenerationManifest.Domain.LIGHTING_ONLY) == 0L,
-                        "L0 unexpectedly allocated or scheduled lighting work");
-                require(plan.manifest().executable() == (lighting == LightingMode.LEGACY),
-                        "L0 coverage admission mismatch");
+                require(plan.manifest().executable(),
+                        "capability-admitted L2 generation was not executable");
+                requireNoL3Work(plan.manifest());
                 if (output == DisplayOutputMode.SDR) {
                     require(plan.manifest().passCount(RendererGenerationManifest.Domain.HDR_ONLY) == 0L
                                     && plan.manifest().resourceBytes(
@@ -227,6 +329,322 @@ public final class RendererArchitectureTests {
                 }
             }
         }
+
+        RendererGenerationPlanner.Plan legacySdr = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                render,
+                display
+        );
+        require(legacySdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract.LEGACY_SDR_SRGB8
+                        && legacySdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract.NONE,
+                "Legacy + SDR storage/output contract changed");
+        require(resourceNames(legacySdr.manifest()).equals(Set.of(
+                        "main_color", "main_depth", "drawable"
+                )) && passNames(legacySdr.manifest()).equals(Set.of(
+                        "world_render", "ui_render", "present"
+                )),
+                "Legacy + SDR retained optional work");
+        require(legacySdr.manifest().resourceBytes(RendererGenerationManifest.Domain.LIGHTING_ONLY)
+                        == 0L
+                        && legacySdr.manifest().passCount(
+                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == 0L,
+                "Legacy + SDR retained lighting work");
+
+        RendererGenerationPlanner.Plan legacyHdr = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                render,
+                display
+        );
+        require(legacyHdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_HDR_SEMANTIC_RGBA16F
+                        && legacyHdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract
+                        .LEGACY_SEMANTIC_RECONSTRUCTION,
+                "Legacy + HDR semantic reconstruction contract changed");
+        require(resourceNames(legacyHdr.manifest()).equals(Set.of(
+                        "main_color", "main_depth", "drawable", "hdr_semantic",
+                        "scene_depth_snapshot", "hdr_emission", "hdr_bloom",
+                        "hdr_histogram", "hdr_adaptive_state", "hdr_world_composite",
+                        "sdr_ui_color", "sdr_ui_depth"
+                )),
+                "Legacy + HDR resource topology changed");
+        require(passNames(legacyHdr.manifest()).equals(Set.of(
+                        "world_render", "ui_render", "present", "scene_depth_snapshot",
+                        "hdr_extract", "hdr_exposure_reduce", "hdr_bloom_combined",
+                        "hdr_world_ui_seed"
+                )),
+                "Legacy + HDR pass topology changed");
+        long expectedLegacyHdrBytes = renderPixels * 4L
+                + renderPixels * 4L
+                + quarterPixels * 8L
+                + quarterPixels * 8L
+                + 64L * Integer.BYTES
+                + 32L
+                + displayPixels * 8L
+                + displayPixels * 4L
+                + displayPixels * 4L;
+        require(legacyHdr.manifest().resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY)
+                        == expectedLegacyHdrBytes,
+                "Legacy + HDR owned resource sizes changed");
+
+        RendererGenerationPlanner.Plan legacyHdrStartup = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+        );
+        require(legacyHdrStartup.resolution().config().lightingMode() == LightingMode.LEGACY
+                        && legacyHdrStartup.resolution().config().outputMode()
+                        == DisplayOutputMode.HDR
+                        && legacyHdrStartup.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_HDR_SEMANTIC_RGBA16F,
+                "startup Legacy HDR FP16 storage was rejected as an RGBA8 MainTarget");
+
+        RendererGenerationPlanner.Plan legacyHdrStorageToSdr = RendererGenerationPlanner.plan(
+                LightingMode.LEGACY,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+        );
+        require(legacyHdrStorageToSdr.resolution().config().lightingMode()
+                        == LightingMode.LEGACY
+                        && legacyHdrStorageToSdr.resolution().config().outputMode()
+                        == DisplayOutputMode.SDR
+                        && legacyHdrStorageToSdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_SDR_SRGB_RGBA16F_COMPAT
+                        && legacyHdrStorageToSdr.manifest().sceneStorageContract().bytesPerPixel()
+                        == 8
+                        && !legacyHdrStorageToSdr.manifest().sceneStorageContract().sceneLinear()
+                        && legacyHdrStorageToSdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract.NONE
+                        && legacyHdrStorageToSdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L
+                        && legacyHdrStorageToSdr.manifest().passCount(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L
+                        && resourceNames(legacyHdrStorageToSdr.manifest()).equals(
+                        resourceNames(legacySdr.manifest()))
+                        && passNames(legacyHdrStorageToSdr.manifest()).equals(
+                        passNames(legacySdr.manifest())),
+                "Legacy HDR-to-SDR transition mismatched its fixed FP16 backing or retained HDR work");
+
+        RendererGenerationPlanner.Plan metallumSdr = RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                render,
+                display
+        );
+        require(metallumSdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .METALLUM_SDR_LINEAR_RGBA8
+                        && metallumSdr.manifest().sceneStorageContract().bytesPerPixel() == 4
+                        && metallumSdr.manifest().sceneStorageContract().sceneLinear()
+                        && metallumSdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract.NONE,
+                "Metallum + SDR did not select compact scene-linear RGBA8 storage");
+        require(resourceNames(metallumSdr.manifest()).equals(Set.of(
+                        "main_color", "main_depth", "drawable", "sdr_ui_color", "sdr_ui_depth"
+                )),
+                "Metallum + SDR did not isolate its SDR UI resources");
+        require(passNames(metallumSdr.manifest()).equals(Set.of(
+                        "world_render", "scene_linear_ui_seed", "ui_render", "present"
+                )),
+                "Metallum + SDR retained HDR or reconstruction passes");
+        require(metallumSdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == displayPixels * 8L
+                        && metallumSdr.manifest().passCount(
+                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == 1L,
+                "Metallum + SDR UI isolation estimate changed");
+
+        RendererGenerationPlanner.Plan metallumHdrStorageToSdr = RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+        );
+        require(metallumHdrStorageToSdr.resolution().config().lightingMode()
+                        == LightingMode.METALLUM
+                        && metallumHdrStorageToSdr.resolution().config().outputMode()
+                        == DisplayOutputMode.SDR
+                        && metallumHdrStorageToSdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .METALLUM_SDR_LINEAR_RGBA16F_COMPAT
+                        && metallumHdrStorageToSdr.manifest().sceneStorageContract().bytesPerPixel()
+                        == 8
+                        && metallumHdrStorageToSdr.manifest().sceneStorageContract().sceneLinear()
+                        && metallumHdrStorageToSdr.manifest().sceneStorageContract()
+                        .actualHdrRadiance()
+                        && metallumHdrStorageToSdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract.NONE,
+                "startup METALLUM HDR storage did not remain an explicit FP16-linear SDR contract");
+        require(metallumHdrStorageToSdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L
+                        && metallumHdrStorageToSdr.manifest().passCount(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L
+                        && resourceNames(metallumHdrStorageToSdr.manifest()).equals(
+                        resourceNames(metallumSdr.manifest()))
+                        && passNames(metallumHdrStorageToSdr.manifest()).equals(
+                        passNames(metallumSdr.manifest())),
+                "METALLUM FP16-compatible SDR generation retained HDR resources or work");
+
+        RendererGenerationPlanner.Plan metallumHdr = RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                render,
+                display
+        );
+        require(metallumHdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F
+                        && metallumHdr.manifest().sceneStorageContract().bytesPerPixel() == 8
+                        && metallumHdr.manifest().sceneStorageContract().sceneLinear()
+                        && metallumHdr.manifest().sceneStorageContract().actualHdrRadiance()
+                        && metallumHdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract
+                        .ACTUAL_RADIANCE_EXPOSURE_BLOOM,
+                "Metallum + HDR did not declare actual FP16 scene radiance");
+        require(resourceNames(metallumHdr.manifest()).equals(Set.of(
+                        "main_color", "main_depth", "drawable", "hdr_emission", "hdr_bloom",
+                        "hdr_histogram", "hdr_adaptive_state", "hdr_world_composite",
+                        "sdr_ui_color", "sdr_ui_depth"
+                )),
+                "Metallum + HDR retained semantic/depth-reconstruction resources");
+        require(passNames(metallumHdr.manifest()).equals(Set.of(
+                        "world_render", "ui_render", "present", "hdr_extract",
+                        "hdr_exposure_reduce", "hdr_bloom_combined",
+                        "hdr_world_actual_radiance"
+                )),
+                "Metallum + HDR retained inferred reconstruction passes");
+        long expectedMetallumHdrBytes = quarterPixels * 8L
+                + quarterPixels * 8L
+                + 64L * Integer.BYTES
+                + 32L
+                + displayPixels * 8L
+                + displayPixels * 4L
+                + displayPixels * 4L;
+        require(metallumHdr.manifest().resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY)
+                        == expectedMetallumHdrBytes,
+                "Metallum + HDR resource estimate retained semantic/depth allocations");
+        expectIllegalArgument(() -> RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8
+        ));
+
+        MetalCapabilities noMaterialShaders = MetalCapabilities.productionMetal3(true);
+        RendererGenerationPlanner.Plan shaderRoleFallback = RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                noMaterialShaders,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+        );
+        require(shaderRoleFallback.resolution().rejectionReasons().equals(EnumSet.of(
+                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE))
+                        && shaderRoleFallback.resolution().config().lightingMode()
+                        == LightingMode.LEGACY
+                        && shaderRoleFallback.resolution().config().outputMode()
+                        == DisplayOutputMode.HDR
+                        && shaderRoleFallback.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_HDR_SEMANTIC_RGBA16F,
+                "material shader-role fallback changed the independently safe HDR output axis");
+
+        RendererGenerationPlanner.Plan shaderRoleFallbackSdr = RendererGenerationPlanner.plan(
+                LightingMode.METALLUM,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                noMaterialShaders,
+                render,
+                display,
+                false,
+                RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
+        );
+        require(shaderRoleFallbackSdr.resolution().rejectionReasons().equals(EnumSet.of(
+                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE))
+                        && shaderRoleFallbackSdr.resolution().config().lightingMode()
+                        == LightingMode.LEGACY
+                        && shaderRoleFallbackSdr.resolution().config().outputMode()
+                        == DisplayOutputMode.SDR
+                        && shaderRoleFallbackSdr.manifest().sceneStorageContract()
+                        == RendererGenerationManifest.SceneStorageContract
+                        .LEGACY_SDR_SRGB_RGBA16F_COMPAT
+                        && shaderRoleFallbackSdr.manifest().sceneStorageContract().bytesPerPixel()
+                        == 8
+                        && !shaderRoleFallbackSdr.manifest().sceneStorageContract().sceneLinear()
+                        && !shaderRoleFallbackSdr.manifest().sceneStorageContract()
+                        .actualHdrRadiance()
+                        && shaderRoleFallbackSdr.manifest().hdrPipelineContract()
+                        == RendererGenerationManifest.HdrPipelineContract.NONE
+                        && shaderRoleFallbackSdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L
+                        && shaderRoleFallbackSdr.manifest().passCount(
+                        RendererGenerationManifest.Domain.HDR_ONLY) == 0L,
+                "material shader-role fallback mismatched the safe SDR FP16 backing contract");
 
         RendererGenerationPlanner.Plan spatial = RendererGenerationPlanner.plan(
                 LightingMode.LEGACY,
@@ -243,9 +661,6 @@ public final class RendererArchitectureTests {
                         && spatial.manifest().resourceBytes(
                         RendererGenerationManifest.Domain.UPSCALE_ONLY) > 0L,
                 "Spatial manifest did not declare its isolated work");
-        long renderPixels = 1280L * 720L;
-        long displayPixels = 2560L * 1440L;
-        long quarterPixels = 320L * 180L;
         long expectedSpatialHdrBytes = renderPixels * 4L
                 + renderPixels * 4L
                 + quarterPixels * 8L
@@ -310,6 +725,33 @@ public final class RendererArchitectureTests {
                         && spatialSdr.manifest().passes().stream().anyMatch(pass ->
                         pass.name().equals("metalfx_perceptual_prepare")),
                 "Spatial SDR manifest diverged from its direct-output path");
+    }
+
+    private static Set<String> resourceNames(final RendererGenerationManifest manifest) {
+        return Set.copyOf(manifest.resources().stream()
+                .map(RendererGenerationManifest.Resource::name)
+                .toList());
+    }
+
+    private static Set<String> passNames(final RendererGenerationManifest manifest) {
+        return Set.copyOf(manifest.passes().stream()
+                .map(RendererGenerationManifest.Pass::name)
+                .toList());
+    }
+
+    private static void requireNoL3Work(final RendererGenerationManifest manifest) {
+        Set<String> allowedLightingResources = Set.of("sdr_ui_color", "sdr_ui_depth");
+        Set<String> allowedLightingPasses = Set.of("scene_linear_ui_seed");
+        require(manifest.resources().stream()
+                        .filter(resource -> resource.domain()
+                                == RendererGenerationManifest.Domain.LIGHTING_ONLY)
+                        .allMatch(resource -> allowedLightingResources.contains(resource.name())),
+                "L2 manifest declared an L3 lighting resource");
+        require(manifest.passes().stream()
+                        .filter(pass -> pass.domain()
+                                == RendererGenerationManifest.Domain.LIGHTING_ONLY)
+                        .allMatch(pass -> allowedLightingPasses.contains(pass.name())),
+                "L2 manifest scheduled an L3 lighting pass");
     }
 
     private static void testImmutableCapabilitySnapshot() {

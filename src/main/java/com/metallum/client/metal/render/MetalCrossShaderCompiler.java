@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
+import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
@@ -56,6 +57,28 @@ final class MetalCrossShaderCompiler {
             );
             variants.put(HdrShaderFlavor.LEGACY, legacy);
 
+            if (com.metallum.client.hdr.HdrSemanticState.isRequested()
+                    && role == HdrPipelinePolicy.Role.SCENE_RASTER) {
+                try {
+                    MetalCompiledRenderPipeline.ShaderVariantSource semantic = compileVariant(
+                            device,
+                            pipeline,
+                            shaderSource,
+                            HdrShaderFlavor.LEGACY_HDR_SEMANTIC
+                    );
+                    validateVariantParity(
+                            pipeline, HdrShaderFlavor.LEGACY_HDR_SEMANTIC, legacy, semantic
+                    );
+                    variants.put(HdrShaderFlavor.LEGACY_HDR_SEMANTIC, semantic);
+                } catch (ShaderCompileException | RuntimeException exception) {
+                    com.metallum.Metallum.LOGGER.warn(
+                            "Legacy HDR semantic variant is unavailable for {}; output remains on the base Legacy shader: {}",
+                            pipeline.getLocation(),
+                            failureMessage(exception)
+                    );
+                }
+            }
+
             if (SceneLinearPreflightGate.shouldCompileSceneVariants() && role.supportsSceneLinearFlavor()) {
                 HdrShaderFlavor sceneFlavor = role.sceneLinearFlavor();
                 try {
@@ -65,13 +88,33 @@ final class MetalCrossShaderCompiler {
                             shaderSource,
                             sceneFlavor
                     );
-                    validateVariantParity(pipeline, legacy, sceneLinear);
+                    validateVariantParity(pipeline, sceneFlavor, legacy, sceneLinear);
                     variants.put(sceneFlavor, sceneLinear);
                 } catch (ShaderCompileException | RuntimeException exception) {
                     SceneLinearPreflightGate.rejectSceneVariant(
                             "failed to compile " + sceneFlavor + " for " + pipeline.getLocation()
                                     + ": " + failureMessage(exception)
                     );
+                }
+            }
+
+            if (MetallumMaterialPreflightGate.shouldCompileMaterialVariants()) {
+                if (role.supportsSceneLinearFlavor()) {
+                    try {
+                        MetalCompiledRenderPipeline.ShaderVariantSource material = compileVariant(
+                                device,
+                                pipeline,
+                                shaderSource,
+                                HdrShaderFlavor.METALLUM
+                        );
+                        validateVariantParity(pipeline, HdrShaderFlavor.METALLUM, legacy, material);
+                        variants.put(HdrShaderFlavor.METALLUM, material);
+                    } catch (ShaderCompileException | RuntimeException exception) {
+                        MetallumMaterialPreflightGate.rejectMaterialVariant(
+                                "failed to compile METALLUM for " + pipeline.getLocation()
+                                        + ": " + failureMessage(exception)
+                        );
+                    }
                 }
             }
 
@@ -252,15 +295,26 @@ final class MetalCrossShaderCompiler {
 
     private static void validateVariantParity(
             final RenderPipeline pipeline,
+            final HdrShaderFlavor flavor,
             final MetalCompiledRenderPipeline.ShaderVariantSource legacy,
-            final MetalCompiledRenderPipeline.ShaderVariantSource sceneLinear
+            final MetalCompiledRenderPipeline.ShaderVariantSource variant
     ) {
-        if (!legacy.resources().equals(sceneLinear.resources())) {
+        if (!legacy.resources().equals(variant.resources())) {
             throw new IllegalStateException(
                     "HDR shader variants changed resource layout for pipeline " + pipeline.getLocation()
             );
         }
-        if (legacy.semanticOutput() != sceneLinear.semanticOutput()) {
+        if (flavor == HdrShaderFlavor.METALLUM) {
+            if (variant.semanticOutput()) {
+                throw new IllegalStateException(
+                        "METALLUM material variant retained a semantic attachment for pipeline "
+                                + pipeline.getLocation()
+                );
+            }
+        } else if (flavor != HdrShaderFlavor.LEGACY_HDR_SEMANTIC
+                && flavor != HdrShaderFlavor.SCENE_RASTER_LINEAR
+                && flavor != HdrShaderFlavor.SCENE_POST_LINEAR
+                && legacy.semanticOutput() != variant.semanticOutput()) {
             throw new IllegalStateException(
                     "HDR shader variants changed semantic attachment output for pipeline " + pipeline.getLocation()
             );
