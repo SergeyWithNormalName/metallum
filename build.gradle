@@ -220,6 +220,14 @@ tasks.register("frameSynthesisUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.renderer.temporal.FrameSynthesisTests")
 }
 
+tasks.register("workBudgetUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs bounded future renderer work-queue budget and starvation tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.work.BoundedWorkQueueTests")
+}
+
 tasks.register("spatialScalingUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs MetalFX preset and render-resolution policy tests"
@@ -632,6 +640,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("rendererArchitectureUnitTest"))
 	dependsOn(tasks.named("frameSynthesisUnitTest"))
+	dependsOn(tasks.named("workBudgetUnitTest"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
 	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))
