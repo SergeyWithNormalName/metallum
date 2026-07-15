@@ -7,6 +7,9 @@ public final class TorchEpochTelemetryTests {
     public static void main(final String[] args) {
         testInactiveEpochIsANoOp();
         testLifecycleCountersAndSafeEnd();
+        testStickyRebuildCauseUnion();
+        testExactLightScopesAndFailClosedDefault();
+        testScopeMismatchFailsClosed();
         testSidecarCountersAndValidation();
         testCompactLightPatchTransitionsAndIdentities();
         testBoundedUniqueSectionTracking();
@@ -35,6 +38,12 @@ public final class TorchEpochTelemetryTests {
         require(!snapshot.active(), "inactive recorder became active");
         require(snapshot.epochId() == 0L, "inactive recorder changed epoch ID");
         require(snapshot.rebuildRequestCount() == 0L, "inactive recorder counted requests");
+        require(snapshot.lightRebuildRequestCount() == 0L, "inactive recorder counted light requests");
+        require(snapshot.geometryOrUnknownRebuildRequestCount() == 0L,
+                "inactive recorder counted geometry-or-unknown requests");
+        require(snapshot.lightOnlyRebuildSections() == 0L, "inactive recorder retained light-only causes");
+        require(recorder.rebuildCause(1L) == TorchEpochTelemetry.RebuildCause.NONE,
+                "inactive recorder retained a rebuild cause");
         require(snapshot.rebuildTaskCount() == 0L, "inactive recorder counted tasks");
         require(snapshot.buildOutputCount() == 0L, "inactive recorder counted outputs");
         require(snapshot.acceptedMeshPayloadBytes() == 0L, "inactive recorder counted mesh bytes");
@@ -97,6 +106,9 @@ public final class TorchEpochTelemetryTests {
         require(active.epochId() == 42L, "epoch ID mismatch");
         require(active.rebuildRequestCount() == 3L, "request count mismatch");
         require(active.uniqueRebuildRequestSections() == 2L, "unique request section count mismatch");
+        require(active.lightRebuildRequestCount() == 0L, "unscoped requests were classified as light");
+        require(active.geometryOrUnknownRebuildRequestCount() == 3L,
+                "unscoped requests were not classified fail-closed");
         require(active.rebuildTaskCount() == 3L, "task count mismatch");
         require(active.uniqueRebuildTaskSections() == 3L, "unique task section count mismatch");
         require(active.buildOutputCount() == 3L, "output count mismatch");
@@ -125,6 +137,90 @@ public final class TorchEpochTelemetryTests {
         require(!recorder.wasInPlaceGeometryRefreshed(20L), "closed epoch invented in-place identity");
         recorder.recordRebuildRequest(99L);
         require(recorder.end().equals(ended), "safe repeated end changed a closed epoch");
+    }
+
+    private static void testStickyRebuildCauseUnion() {
+        TorchEpochTelemetry.Recorder recorder = TorchEpochTelemetry.recorderForTests(8);
+        recorder.begin(63L);
+        recorder.recordRebuildRequest(10L, TorchEpochTelemetry.RebuildCause.LIGHT_ONLY);
+        recorder.recordRebuildRequest(20L, TorchEpochTelemetry.RebuildCause.LIGHT_ONLY);
+        recorder.recordRebuildRequest(20L, TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN);
+        recorder.recordRebuildRequest(30L, TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN);
+        recorder.recordRebuildRequest(30L, TorchEpochTelemetry.RebuildCause.LIGHT_ONLY);
+        recorder.recordRebuildRequest(40L, TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN);
+
+        TorchEpochTelemetry.Snapshot snapshot = recorder.end();
+        require(snapshot.rebuildRequestCount() == 6L, "cause union lost total requests");
+        require(snapshot.uniqueRebuildRequestSections() == 4L, "cause union lost section identities");
+        require(snapshot.lightRebuildRequestCount() == 3L, "light request count mismatch");
+        require(snapshot.geometryOrUnknownRebuildRequestCount() == 3L,
+                "geometry-or-unknown request count mismatch");
+        require(snapshot.uniqueLightRebuildRequestSections() == 3L,
+                "unique light request count mismatch");
+        require(snapshot.uniqueGeometryOrUnknownRebuildRequestSections() == 3L,
+                "unique geometry request count mismatch");
+        require(snapshot.lightOnlyRebuildSections() == 1L, "light-only section count mismatch");
+        require(snapshot.mixedRebuildCauseSections() == 2L, "mixed cause count mismatch");
+        require(recorder.rebuildCause(10L) == TorchEpochTelemetry.RebuildCause.LIGHT_ONLY,
+                "pure light section lost its cause");
+        require(recorder.rebuildCause(20L) == TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN,
+                "light-then-geometry did not upgrade sticky cause");
+        require(recorder.rebuildCause(30L) == TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN,
+                "geometry-then-light downgraded sticky cause");
+        require(recorder.rebuildCause(40L) == TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN,
+                "geometry-only section lost its cause");
+        require(snapshot.errorCount() == 0L, "valid cause union produced an error");
+    }
+
+    private static void testExactLightScopesAndFailClosedDefault() {
+        TorchEpochTelemetry.abort();
+        TorchEpochTelemetry.begin(189L);
+        try (TorchEpochTelemetry.LightRebuildScope outer =
+                     TorchEpochTelemetry.openExactLightRebuildScope(10, 20, 30)) {
+            TorchEpochTelemetry.recordRebuildRequest(1L, 10, 20, 30);
+            try (TorchEpochTelemetry.LightRebuildScope inner =
+                         TorchEpochTelemetry.openNeighborLightRebuildScope(-5, 4, 7)) {
+                TorchEpochTelemetry.recordRebuildRequest(2L, -6, 5, 8);
+            }
+            TorchEpochTelemetry.recordRebuildRequest(3L, 10, 20, 30);
+        }
+        TorchEpochTelemetry.recordRebuildRequest(4L, 10, 20, 30);
+
+        TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
+        require(snapshot.lightRebuildRequestCount() == 3L, "valid light scopes lost requests");
+        require(snapshot.geometryOrUnknownRebuildRequestCount() == 1L,
+                "missing scope did not fail closed");
+        require(snapshot.lightOnlyRebuildSections() == 3L, "valid scoped sections were not light-only");
+        require(snapshot.lightScopeMismatchCount() == 0L, "valid nested scopes mismatched");
+        require(snapshot.lightScopeFailureCount() == 0L, "valid nested scopes failed restoration");
+        require(snapshot.errorCount() == 0L, "valid nested scopes produced an error");
+        require(TorchEpochTelemetry.rebuildCause(1L) == TorchEpochTelemetry.RebuildCause.LIGHT_ONLY,
+                "closed epoch lost exact light cause");
+        require(TorchEpochTelemetry.rebuildCause(4L)
+                        == TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN,
+                "unscoped rebuild was not geometry-or-unknown");
+        TorchEpochTelemetry.abort();
+    }
+
+    private static void testScopeMismatchFailsClosed() {
+        TorchEpochTelemetry.abort();
+        TorchEpochTelemetry.begin(231L);
+        try (TorchEpochTelemetry.LightRebuildScope ignored =
+                     TorchEpochTelemetry.openExactLightRebuildScope(1, 2, 3)) {
+            TorchEpochTelemetry.recordRebuildRequest(7L, 2, 2, 3);
+        }
+
+        TorchEpochTelemetry.Snapshot snapshot = TorchEpochTelemetry.end();
+        require(snapshot.lightRebuildRequestCount() == 0L, "scope mismatch was classified as light");
+        require(snapshot.geometryOrUnknownRebuildRequestCount() == 1L,
+                "scope mismatch did not fail closed");
+        require(snapshot.lightScopeMismatchCount() == 1L, "scope mismatch was not diagnosed");
+        require(snapshot.lightScopeFailureCount() == 0L, "ordinary mismatch corrupted scope restoration");
+        require(snapshot.errorCount() == 1L, "scope mismatch did not invalidate benchmark evidence");
+        require(TorchEpochTelemetry.rebuildCause(7L)
+                        == TorchEpochTelemetry.RebuildCause.GEOMETRY_OR_UNKNOWN,
+                "scope mismatch retained a light-only identity");
+        TorchEpochTelemetry.abort();
     }
 
     private static void testSidecarCountersAndValidation() {
@@ -272,6 +368,8 @@ public final class TorchEpochTelemetryTests {
         require(restarted.active(), "replacement epoch was not active");
         require(restarted.epochId() == 2L, "replacement epoch ID mismatch");
         require(restarted.rebuildRequestCount() == 0L, "replacement epoch retained old counters");
+        require(recorder.rebuildCause(1L) == TorchEpochTelemetry.RebuildCause.NONE,
+                "replacement epoch retained an old rebuild cause");
         require(!recorder.wasBuildOutput(1L), "replacement epoch retained build-output identity");
         require(!recorder.wasInPlaceGeometryRefreshed(1L), "replacement epoch retained in-place identity");
         require(!recorder.wasCompactLightPatched(1L), "replacement epoch retained compact identity");
@@ -286,6 +384,8 @@ public final class TorchEpochTelemetryTests {
         require(aborted.sidecarUploadedBytes() == 0L, "abort retained sidecar counters");
         require(aborted.inPlaceGeometryRefreshBytes() == 0L, "abort retained in-place counters");
         require(aborted.geometryBytesElided() == 0L, "abort retained compact counters");
+        require(recorder.rebuildCause(1L) == TorchEpochTelemetry.RebuildCause.NONE,
+                "abort retained a rebuild cause");
         require(!recorder.wasBuildOutput(1L), "abort retained a build-output identity");
         require(!recorder.wasInPlaceGeometryRefreshed(1L), "abort retained an in-place identity");
         require(!recorder.wasCompactLightPatched(1L), "abort retained a compact identity");

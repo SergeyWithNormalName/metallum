@@ -8,6 +8,8 @@
   "client": [
     "benchmark.MinecraftBenchmarkMixin",
     "benchmark.MinecraftServerBenchmarkMixin",
+    "benchmark.sodium.ClientChunkCacheTorchTelemetryMixin",
+    "benchmark.sodium.ClientPacketListenerTorchTelemetryMixin",
     "benchmark.sodium.RenderRegionManagerTorchTelemetryMixin",
     "benchmark.sodium.RenderSectionManagerTorchTelemetryMixin",
     "render.MainTargetMixin",

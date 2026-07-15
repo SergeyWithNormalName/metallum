@@ -47,7 +47,7 @@ abstract class RenderSectionManagerTorchTelemetryMixin {
         if (!TorchEpochTelemetry.isActive()) {
             return;
         }
-        TorchEpochTelemetry.recordRebuildRequest(SectionPos.asLong(x, y, z));
+        TorchEpochTelemetry.recordRebuildRequest(SectionPos.asLong(x, y, z), x, y, z);
     }
 
     @Inject(

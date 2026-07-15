@@ -848,10 +848,18 @@ public final class MetalFxBenchmarkController {
         long submittedGeometryBytes = snapshot.acceptedGeometryPayloadBytes()
                 - snapshot.geometryBytesElided();
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch={} requests={}/{} tasks={}/{} outputs={}/{} accepted_mesh_payload_bytes={} queue={}/{} busy={}/{} pending_results={}/{} max_pending_age_ns={} errors={} overflow={}",
+                "METALLUM_BENCHMARK EVENT=TORCH_EPOCH_COUNTERS epoch={} requests={}/{} light_requests={} geometry_or_unknown_requests={} unique_light_sections={} unique_geometry_or_unknown_sections={} light_only_sections={} mixed_cause_sections={} light_scope_mismatches={} light_scope_failures={} tasks={}/{} outputs={}/{} accepted_mesh_payload_bytes={} queue={}/{} busy={}/{} pending_results={}/{} max_pending_age_ns={} errors={} overflow={}",
                 snapshot.epochId(),
                 snapshot.rebuildRequestCount(),
                 snapshot.uniqueRebuildRequestSections(),
+                snapshot.lightRebuildRequestCount(),
+                snapshot.geometryOrUnknownRebuildRequestCount(),
+                snapshot.uniqueLightRebuildRequestSections(),
+                snapshot.uniqueGeometryOrUnknownRebuildRequestSections(),
+                snapshot.lightOnlyRebuildSections(),
+                snapshot.mixedRebuildCauseSections(),
+                snapshot.lightScopeMismatchCount(),
+                snapshot.lightScopeFailureCount(),
                 snapshot.rebuildTaskCount(),
                 snapshot.uniqueRebuildTaskSections(),
                 snapshot.buildOutputCount(),

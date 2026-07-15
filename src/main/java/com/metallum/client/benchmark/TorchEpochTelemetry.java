@@ -13,12 +13,17 @@ import java.util.Arrays;
 public final class TorchEpochTelemetry {
     private static final int DEFAULT_UNIQUE_SECTION_LIMIT = 8_192;
     private static final Recorder GLOBAL = new Recorder(DEFAULT_UNIQUE_SECTION_LIMIT);
+    private static final ThreadLocal<LightRebuildScopeState> LIGHT_REBUILD_SCOPE = new ThreadLocal<>();
 
     private TorchEpochTelemetry() {
     }
 
     public static void begin(final long epochId) {
+        boolean leakedScope = clearLightRebuildScope();
         GLOBAL.begin(epochId);
+        if (leakedScope) {
+            GLOBAL.recordLightScopeFailure();
+        }
     }
 
     /**
@@ -28,11 +33,15 @@ public final class TorchEpochTelemetry {
      * reset) snapshot unchanged.</p>
      */
     public static Snapshot end() {
+        if (clearLightRebuildScope()) {
+            GLOBAL.recordLightScopeFailure();
+        }
         return GLOBAL.end();
     }
 
     /** Discards any partial epoch after benchmark failure and returns to zero. */
     public static void abort() {
+        clearLightRebuildScope();
         GLOBAL.abort();
     }
 
@@ -47,6 +56,53 @@ public final class TorchEpochTelemetry {
 
     public static void recordRebuildRequest(final long sectionKey) {
         GLOBAL.recordRebuildRequest(sectionKey);
+    }
+
+    /**
+     * Records a rebuild while preserving the exact synchronous cause scope.
+     * Calls outside a valid light scope are deliberately classified as
+     * geometry-or-unknown.
+     */
+    public static void recordRebuildRequest(
+            final long sectionKey,
+            final int sectionX,
+            final int sectionY,
+            final int sectionZ
+    ) {
+        LightRebuildScopeState scope = LIGHT_REBUILD_SCOPE.get();
+        if (scope == null || !scope.valid) {
+            GLOBAL.recordRebuildRequest(sectionKey, RebuildCause.GEOMETRY_OR_UNKNOWN);
+            return;
+        }
+        if (!scope.contains(sectionX, sectionY, sectionZ)) {
+            GLOBAL.recordLightScopeMismatch();
+            GLOBAL.recordRebuildRequest(sectionKey, RebuildCause.GEOMETRY_OR_UNKNOWN);
+            return;
+        }
+        GLOBAL.recordRebuildRequest(sectionKey, RebuildCause.LIGHT_ONLY);
+    }
+
+    /** Opens a light-only scope for one exact section-dirty call. */
+    public static LightRebuildScope openExactLightRebuildScope(
+            final int sectionX,
+            final int sectionY,
+            final int sectionZ
+    ) {
+        return openLightRebuildScope(sectionX, sectionY, sectionZ, 0);
+    }
+
+    /** Opens a light-only scope for the 3x3x3 dirty range around one section. */
+    public static LightRebuildScope openNeighborLightRebuildScope(
+            final int sectionX,
+            final int sectionY,
+            final int sectionZ
+    ) {
+        return openLightRebuildScope(sectionX, sectionY, sectionZ, 1);
+    }
+
+    /** Remains queryable after {@link #end()} until the next epoch is begun. */
+    public static RebuildCause rebuildCause(final long sectionKey) {
+        return GLOBAL.rebuildCause(sectionKey);
     }
 
     public static void recordRebuildTask(
@@ -145,8 +201,117 @@ public final class TorchEpochTelemetry {
         GLOBAL.recordError();
     }
 
+    private static LightRebuildScope openLightRebuildScope(
+            final int sectionX,
+            final int sectionY,
+            final int sectionZ,
+            final int radius
+    ) {
+        if (!GLOBAL.isActive()) {
+            return new LightRebuildScope(null);
+        }
+        LightRebuildScopeState state = new LightRebuildScopeState(
+                LIGHT_REBUILD_SCOPE.get(),
+                sectionX,
+                sectionY,
+                sectionZ,
+                radius
+        );
+        LIGHT_REBUILD_SCOPE.set(state);
+        return new LightRebuildScope(state);
+    }
+
+    private static boolean clearLightRebuildScope() {
+        LightRebuildScopeState state = LIGHT_REBUILD_SCOPE.get();
+        if (state == null) {
+            return false;
+        }
+        while (state != null) {
+            state.valid = false;
+            state = state.parent;
+        }
+        LIGHT_REBUILD_SCOPE.remove();
+        return true;
+    }
+
     static Recorder recorderForTests(final int uniqueSectionLimit) {
         return new Recorder(uniqueSectionLimit);
+    }
+
+    public enum RebuildCause {
+        NONE,
+        LIGHT_ONLY,
+        GEOMETRY_OR_UNKNOWN
+    }
+
+    /** A re-entrant synchronous cause scope used only by exact benchmark hooks. */
+    public static final class LightRebuildScope implements AutoCloseable {
+        private final LightRebuildScopeState state;
+        private boolean closed;
+
+        private LightRebuildScope(final LightRebuildScopeState state) {
+            this.state = state;
+        }
+
+        @Override
+        public void close() {
+            if (this.state == null) {
+                this.closed = true;
+                return;
+            }
+            if (this.closed) {
+                this.state.valid = false;
+                LIGHT_REBUILD_SCOPE.remove();
+                GLOBAL.recordLightScopeFailure();
+                return;
+            }
+            this.closed = true;
+            LightRebuildScopeState current = LIGHT_REBUILD_SCOPE.get();
+            if (current != this.state) {
+                this.state.valid = false;
+                if (current != null) {
+                    current.valid = false;
+                }
+                LIGHT_REBUILD_SCOPE.remove();
+                GLOBAL.recordLightScopeFailure();
+                return;
+            }
+            this.state.valid = false;
+            if (this.state.parent == null) {
+                LIGHT_REBUILD_SCOPE.remove();
+            } else {
+                LIGHT_REBUILD_SCOPE.set(this.state.parent);
+            }
+        }
+    }
+
+    private static final class LightRebuildScopeState {
+        private final LightRebuildScopeState parent;
+        private final int centerX;
+        private final int centerY;
+        private final int centerZ;
+        private final int radius;
+        private volatile boolean valid = true;
+
+        private LightRebuildScopeState(
+                final LightRebuildScopeState parent,
+                final int centerX,
+                final int centerY,
+                final int centerZ,
+                final int radius
+        ) {
+            this.parent = parent;
+            this.centerX = centerX;
+            this.centerY = centerY;
+            this.centerZ = centerZ;
+            this.radius = radius;
+        }
+
+        private boolean contains(final int x, final int y, final int z) {
+            return Math.abs((long) x - this.centerX) <= this.radius
+                    && Math.abs((long) y - this.centerY) <= this.radius
+                    && Math.abs((long) z - this.centerZ) <= this.radius;
+        }
     }
 
     public record Snapshot(
@@ -154,6 +319,14 @@ public final class TorchEpochTelemetry {
             long epochId,
             long rebuildRequestCount,
             long uniqueRebuildRequestSections,
+            long lightRebuildRequestCount,
+            long geometryOrUnknownRebuildRequestCount,
+            long uniqueLightRebuildRequestSections,
+            long uniqueGeometryOrUnknownRebuildRequestSections,
+            long lightOnlyRebuildSections,
+            long mixedRebuildCauseSections,
+            long lightScopeMismatchCount,
+            long lightScopeFailureCount,
             long rebuildTaskCount,
             long uniqueRebuildTaskSections,
             long buildOutputCount,
@@ -190,7 +363,7 @@ public final class TorchEpochTelemetry {
     }
 
     static final class Recorder {
-        private final BoundedLongSet requestSections;
+        private final BoundedLongCauseMap requestCauses;
         private final BoundedLongSet taskSections;
         private final BoundedLongSet outputSections;
         private final BoundedLongSet inPlaceSections;
@@ -199,6 +372,10 @@ public final class TorchEpochTelemetry {
         private volatile boolean active;
         private long epochId;
         private long rebuildRequestCount;
+        private long lightRebuildRequestCount;
+        private long geometryOrUnknownRebuildRequestCount;
+        private long lightScopeMismatchCount;
+        private long lightScopeFailureCount;
         private long rebuildTaskCount;
         private long buildOutputCount;
         private long acceptedMeshPayloadBytes;
@@ -229,7 +406,7 @@ public final class TorchEpochTelemetry {
         private long overflowCount;
 
         Recorder(final int uniqueSectionLimit) {
-            this.requestSections = new BoundedLongSet(uniqueSectionLimit);
+            this.requestCauses = new BoundedLongCauseMap(uniqueSectionLimit);
             this.taskSections = new BoundedLongSet(uniqueSectionLimit);
             this.outputSections = new BoundedLongSet(uniqueSectionLimit);
             this.inPlaceSections = new BoundedLongSet(uniqueSectionLimit);
@@ -260,7 +437,15 @@ public final class TorchEpochTelemetry {
                     this.active,
                     this.epochId,
                     this.rebuildRequestCount,
-                    this.requestSections.size(),
+                    this.requestCauses.size(),
+                    this.lightRebuildRequestCount,
+                    this.geometryOrUnknownRebuildRequestCount,
+                    this.requestCauses.countWithLight(),
+                    this.requestCauses.countWithGeometryOrUnknown(),
+                    this.requestCauses.countLightOnly(),
+                    this.requestCauses.countMixed(),
+                    this.lightScopeMismatchCount,
+                    this.lightScopeFailureCount,
                     this.rebuildTaskCount,
                     this.taskSections.size(),
                     this.buildOutputCount,
@@ -297,11 +482,50 @@ public final class TorchEpochTelemetry {
         }
 
         void recordRebuildRequest(final long sectionKey) {
+            this.recordRebuildRequest(sectionKey, RebuildCause.GEOMETRY_OR_UNKNOWN);
+        }
+
+        void recordRebuildRequest(final long sectionKey, final RebuildCause cause) {
             if (!this.active) {
                 return;
             }
             this.rebuildRequestCount = this.add(this.rebuildRequestCount, 1L);
-            this.recordUnique(this.requestSections, sectionKey);
+            RebuildCause effectiveCause = cause;
+            if (effectiveCause == null || effectiveCause == RebuildCause.NONE) {
+                this.recordError();
+                effectiveCause = RebuildCause.GEOMETRY_OR_UNKNOWN;
+            }
+            if (effectiveCause == RebuildCause.LIGHT_ONLY) {
+                this.lightRebuildRequestCount = this.add(this.lightRebuildRequestCount, 1L);
+            } else {
+                this.geometryOrUnknownRebuildRequestCount = this.add(
+                        this.geometryOrUnknownRebuildRequestCount,
+                        1L
+                );
+            }
+            if (this.requestCauses.merge(sectionKey, effectiveCause) == BoundedLongCauseMap.OVERFLOW) {
+                this.recordOverflow();
+            }
+        }
+
+        RebuildCause rebuildCause(final long sectionKey) {
+            return this.requestCauses.cause(sectionKey);
+        }
+
+        void recordLightScopeMismatch() {
+            if (!this.active) {
+                return;
+            }
+            this.lightScopeMismatchCount = this.add(this.lightScopeMismatchCount, 1L);
+            this.recordError();
+        }
+
+        void recordLightScopeFailure() {
+            if (!this.active) {
+                return;
+            }
+            this.lightScopeFailureCount = this.add(this.lightScopeFailureCount, 1L);
+            this.recordError();
         }
 
         void recordRebuildTask(
@@ -498,6 +722,10 @@ public final class TorchEpochTelemetry {
         private void clear(final long newEpochId) {
             this.epochId = newEpochId;
             this.rebuildRequestCount = 0L;
+            this.lightRebuildRequestCount = 0L;
+            this.geometryOrUnknownRebuildRequestCount = 0L;
+            this.lightScopeMismatchCount = 0L;
+            this.lightScopeFailureCount = 0L;
             this.rebuildTaskCount = 0L;
             this.buildOutputCount = 0L;
             this.acceptedMeshPayloadBytes = 0L;
@@ -526,7 +754,7 @@ public final class TorchEpochTelemetry {
             this.maximumPendingAgeNanos = 0L;
             this.errorCount = 0L;
             this.overflowCount = 0L;
-            this.requestSections.clear();
+            this.requestCauses.clear();
             this.taskSections.clear();
             this.outputSections.clear();
             this.inPlaceSections.clear();
@@ -556,6 +784,107 @@ public final class TorchEpochTelemetry {
             if (this.overflowCount < Long.MAX_VALUE) {
                 this.overflowCount++;
             }
+        }
+    }
+
+    private static final class BoundedLongCauseMap {
+        private static final int RECORDED = 1;
+        private static final int OVERFLOW = -1;
+        private static final int MAX_LIMIT = 1 << 20;
+        private static final byte LIGHT = 1;
+        private static final byte GEOMETRY_OR_UNKNOWN = 2;
+
+        private final long[] keys;
+        private final byte[] flags;
+        private final byte[] occupied;
+        private final int limit;
+        private final int mask;
+        private int size;
+
+        BoundedLongCauseMap(final int limit) {
+            if (limit <= 0 || limit > MAX_LIMIT) {
+                throw new IllegalArgumentException("unique section limit must be between 1 and " + MAX_LIMIT);
+            }
+            int tableSize = 1;
+            while (tableSize < limit * 2) {
+                tableSize <<= 1;
+            }
+            this.keys = new long[tableSize];
+            this.flags = new byte[tableSize];
+            this.occupied = new byte[tableSize];
+            this.limit = limit;
+            this.mask = tableSize - 1;
+        }
+
+        int merge(final long key, final RebuildCause cause) {
+            byte causeFlag = cause == RebuildCause.LIGHT_ONLY ? LIGHT : GEOMETRY_OR_UNKNOWN;
+            int index = BoundedLongSet.mix(key) & this.mask;
+            while (this.occupied[index] != 0) {
+                if (this.keys[index] == key) {
+                    this.flags[index] |= causeFlag;
+                    return RECORDED;
+                }
+                index = index + 1 & this.mask;
+            }
+            if (this.size >= this.limit) {
+                return OVERFLOW;
+            }
+            this.occupied[index] = 1;
+            this.keys[index] = key;
+            this.flags[index] = causeFlag;
+            this.size++;
+            return RECORDED;
+        }
+
+        RebuildCause cause(final long key) {
+            int index = BoundedLongSet.mix(key) & this.mask;
+            while (this.occupied[index] != 0) {
+                if (this.keys[index] == key) {
+                    return (this.flags[index] & GEOMETRY_OR_UNKNOWN) != 0
+                            ? RebuildCause.GEOMETRY_OR_UNKNOWN
+                            : RebuildCause.LIGHT_ONLY;
+                }
+                index = index + 1 & this.mask;
+            }
+            return RebuildCause.NONE;
+        }
+
+        int size() {
+            return this.size;
+        }
+
+        int countWithLight() {
+            return this.countFlags(LIGHT, LIGHT);
+        }
+
+        int countWithGeometryOrUnknown() {
+            return this.countFlags(GEOMETRY_OR_UNKNOWN, GEOMETRY_OR_UNKNOWN);
+        }
+
+        int countLightOnly() {
+            return this.countFlags((byte) (LIGHT | GEOMETRY_OR_UNKNOWN), LIGHT);
+        }
+
+        int countMixed() {
+            return this.countFlags(
+                    (byte) (LIGHT | GEOMETRY_OR_UNKNOWN),
+                    (byte) (LIGHT | GEOMETRY_OR_UNKNOWN)
+            );
+        }
+
+        private int countFlags(final byte mask, final byte expected) {
+            int count = 0;
+            for (int index = 0; index < this.occupied.length; index++) {
+                if (this.occupied[index] != 0 && (this.flags[index] & mask) == expected) {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        void clear() {
+            Arrays.fill(this.occupied, (byte) 0);
+            this.size = 0;
         }
     }
 
