@@ -241,6 +241,7 @@ def builtinShaderLibraryValidationBinary = layout.buildDirectory.file("native-te
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
+def frameStateAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameStateAbiValidation")
 def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
 def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
 def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-tests/SodiumLightLegacyPatchValidation")
@@ -428,6 +429,40 @@ tasks.register("compileFrameGraphAbiValidation", Exec) {
 		"-target", "arm64-apple-macosx14.0",
 		"-o", frameGraphAbiValidationBinary.get().asFile.absolutePath,
 		"src/test/native/FrameGraphAbiValidation.swift"
+}
+
+tasks.register("compileFrameStateAbiValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native renderer FrameState ABI validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/FrameStateAbiValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(frameStateAbiValidationBinary)
+
+	doFirst {
+		frameStateAbiValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-o", frameStateAbiValidationBinary.get().asFile.absolutePath,
+		"src/test/native/FrameStateAbiValidation.swift"
+}
+
+tasks.register("frameStateAbiNativeValidation", Exec) {
+	group = "verification"
+	description = "Validates native renderer FrameState lighting and disabled-feature invariants"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("buildMacNative"), tasks.named("compileFrameStateAbiValidation"))
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file(macNativeLibrary)
+	commandLine frameStateAbiValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
 }
 
 tasks.register("frameGraphAbiNativeValidation", Exec) {
@@ -642,6 +677,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("frameSynthesisUnitTest"))
 	dependsOn(tasks.named("workBudgetUnitTest"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
+	dependsOn(tasks.named("frameStateAbiNativeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
 	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))
 	dependsOn(tasks.named("staticGeometryHeapValidation"))

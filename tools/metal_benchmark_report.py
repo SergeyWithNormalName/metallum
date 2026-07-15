@@ -153,7 +153,7 @@ STABLE_METADATA_KEYS = (
     "device_name", "registry_id", "executor", "refresh_hz", "render_width",
     "render_height", "display_width", "display_height", "scaler_active",
     "hdr_output_mode", "source_encoding", "diagnostic_pattern",
-    "bloom_strength", "current_edr_headroom",
+    "bloom_strength",
     "display_sync_enabled", "static_geometry_heaps_enabled",
 )
 COMPARISON_METADATA_KEYS = tuple(
@@ -194,8 +194,10 @@ class TimingWindow:
     low_1: float | None
     low_01: float | None
     present_interval: dict[str, float] | None
+    cpu_render_submission: dict[str, float] | None
     workload: dict[str, Any] | None
     metadata: dict[str, Any]
+    renderer_generation: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -243,6 +245,21 @@ def _parse_present_interval(value: Any, line: int) -> dict[str, float] | None:
         result[key] = _number(value.get(key), f"present_interval_ms.{key}", line)
     if not result["p50"] <= result["p95"] <= result["p99"] <= result["maximum"]:
         raise ReportError(f"line {line}: present-interval percentiles are not monotonic")
+    return result
+
+
+def _parse_cpu_render_submission(value: Any, line: int) -> dict[str, float]:
+    field = "cpu_render_submission_ms"
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: {field} must be an object")
+    samples = _integer(value.get("samples"), f"{field}.samples", line, 1)
+    result: dict[str, float] = {"samples": float(samples)}
+    for key in ("average", "p50", "p95", "p99", "maximum"):
+        result[key] = _number(value.get(key), f"{field}.{key}", line)
+    if not result["p50"] <= result["p95"] <= result["p99"] <= result["maximum"]:
+        raise ReportError(f"line {line}: CPU render-submission percentiles are not monotonic")
+    if result["average"] > result["maximum"]:
+        raise ReportError(f"line {line}: CPU render-submission average exceeds maximum")
     return result
 
 
@@ -578,11 +595,80 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
     return result
 
 
+def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: renderer_generation must be an object")
+    integer_fields = (
+        "frame_contract_version", "frame_graph_version", "frame_id",
+        "renderer_generation_id", "lighting_generation_id", "output_generation_id",
+        "feature_mask", "render_width", "render_height", "display_width", "display_height",
+    )
+    result = {
+        field: _integer(value.get(field), f"renderer_generation.{field}", line,
+                        1 if field in {"frame_contract_version", "frame_graph_version",
+                                      "render_width", "render_height", "display_width",
+                                      "display_height"} else 0)
+        for field in integer_fields
+    }
+    enum_values = {
+        "resolved_lighting_mode": {"legacy", "metallum"},
+        "resolved_output_mode": {"sdr", "hdr"},
+        "resolved_upscale_mode": {"native", "spatial", "temporal"},
+        "resolved_interpolation_mode": {"off", "frame_interpolation"},
+        "lighting_preset": {"performance", "balanced", "ultra"},
+        "executor": {"metal3", "metal4"},
+    }
+    for field, allowed in enum_values.items():
+        raw = value.get(field)
+        if raw not in allowed:
+            raise ReportError(
+                f"line {line}: renderer_generation.{field} must be one of {sorted(allowed)}"
+            )
+        result[field] = raw
+
+    resources = value.get("resource_bytes")
+    if not isinstance(resources, dict) or set(resources) != {
+        "base", "hdr", "lighting", "upscale", "interpolation",
+    }:
+        raise ReportError(f"line {line}: renderer_generation.resource_bytes has invalid keys")
+    result["resource_bytes"] = {
+        field: _integer(raw, f"renderer_generation.resource_bytes.{field}", line)
+        for field, raw in resources.items()
+    }
+    lighting_work = value.get("lighting_work")
+    if not isinstance(lighting_work, dict) or set(lighting_work) != {
+        "light_count", "pass_count", "dispatch_count", "upload_bytes",
+    }:
+        raise ReportError(f"line {line}: renderer_generation.lighting_work has invalid keys")
+    result["lighting_work"] = {
+        field: _integer(raw, f"renderer_generation.lighting_work.{field}", line)
+        for field, raw in lighting_work.items()
+    }
+
+    if result["feature_mask"] & ~0b111:
+        raise ReportError(f"line {line}: renderer_generation.feature_mask has unknown bits")
+    if result["feature_mask"] & 0b11 == 0b11:
+        raise ReportError(f"line {line}: Spatial and Temporal upscale bits are mutually exclusive")
+    if result["resolved_lighting_mode"] == "legacy" and (
+        result["resource_bytes"]["lighting"] != 0
+        or any(result["lighting_work"].values())
+    ):
+        raise ReportError(f"line {line}: Legacy generation contains lighting work/resources")
+    if result["resolved_output_mode"] == "sdr" and result["resource_bytes"]["hdr"] != 0:
+        raise ReportError(f"line {line}: SDR generation contains HDR resource bytes")
+    if result["resolved_upscale_mode"] == "native" and result["resource_bytes"]["upscale"] != 0:
+        raise ReportError(f"line {line}: native generation contains upscale resource bytes")
+    if (result["resolved_interpolation_mode"] == "off"
+            and result["resource_bytes"]["interpolation"] != 0):
+        raise ReportError(f"line {line}: interpolation-off generation contains resource bytes")
+    return result
+
+
 def _parse_window(payload: Any, line: int) -> TimingWindow:
     if not isinstance(payload, dict):
         raise ReportError(f"line {line}: JSON value must be an object")
     schema = _integer(payload.get("schema_version"), "schema_version", line, 1)
-    if schema not in (1, 2):
+    if schema not in (1, 2, 3):
         raise ReportError(f"line {line}: unsupported schema_version {schema}")
     detail = payload.get("detail_enabled")
     if not isinstance(detail, bool):
@@ -591,7 +677,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
 
     benchmark: dict[str, Any] = {}
     metadata: dict[str, Any] = {}
-    if schema == 2:
+    if schema >= 2:
         if not isinstance(payload.get("benchmark"), dict):
             raise ReportError(f"line {line}: benchmark must be an object")
         if not isinstance(payload.get("metadata"), dict):
@@ -599,9 +685,9 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         benchmark = payload["benchmark"]
         metadata = payload["metadata"]
 
-    phase = benchmark.get("phase") if schema == 2 else None
+    phase = benchmark.get("phase") if schema >= 2 else None
     segment: int | None = None
-    if schema == 2:
+    if schema >= 2:
         raw_segment = benchmark.get("segment_index")
         if phase == "startup":
             if isinstance(raw_segment, bool) or raw_segment != -1:
@@ -628,27 +714,35 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         phase=phase,
         generation=(
             _integer(benchmark.get("generation"), "benchmark.generation", line)
-            if schema == 2 else None
+            if schema >= 2 else None
         ),
         segment=segment,
-        scaler=benchmark.get("scaler_mode") if schema == 2 else None,
+        scaler=benchmark.get("scaler_mode") if schema >= 2 else None,
         low_1=_optional_number(payload.get("fps_1_percent_low"), "fps_1_percent_low", line),
         low_01=_optional_number(payload.get("fps_0_1_percent_low"), "fps_0_1_percent_low", line),
         present_interval=(
             _parse_present_interval(payload.get("present_interval_ms"), line)
-            if schema == 2 else None
+            if schema >= 2 else None
+        ),
+        cpu_render_submission=(
+            _parse_cpu_render_submission(payload.get("cpu_render_submission_ms"), line)
+            if schema >= 3 else None
         ),
         workload=(
             _parse_workload(payload.get("workload"), line)
-            if schema == 2 else None
+            if schema >= 2 else None
         ),
         metadata=metadata,
+        renderer_generation=(
+            _parse_renderer_generation(payload.get("renderer_generation"), line)
+            if schema >= 3 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
     if window.average_ms > window.maximum_ms:
         raise ReportError(f"line {line}: GPU average exceeds maximum")
-    if schema == 2:
+    if schema >= 2:
         for field, value in (("phase", window.phase), ("scaler_mode", window.scaler)):
             if not isinstance(value, str) or not value:
                 raise ReportError(f"line {line}: benchmark.{field} must be a string")
@@ -714,19 +808,19 @@ def select_measurement(
 ) -> tuple[list[TimingWindow], str]:
     if frames <= 0:
         raise ReportError("measurement frame count must be > 0")
-    if not any(window.schema == 2 for window in windows):
+    if not any(window.schema >= 2 for window in windows):
         return _tail_exact(windows, frames), f"schema-v1 tail of exactly {frames} frames"
 
     candidates = [
         window for window in windows
-        if window.schema == 2
+        if window.schema >= 2
         and window.phase == "measure"
         and window.segment == segment
         and window.scaler == scaler
     ]
     if not candidates:
         raise ReportError(
-            f"no schema-v2 measure windows for segment {segment}, scaler {scaler}"
+            f"no schema-v2+ measure windows for segment {segment}, scaler {scaler}"
         )
     generations = {window.generation for window in candidates}
     if len(generations) != 1:
@@ -734,10 +828,10 @@ def select_measurement(
     total = sum(window.frames for window in candidates)
     if total != frames:
         raise ReportError(
-            f"schema-v2 measurement contains {total} complete frames, expected {frames}"
+            f"schema-v2+ measurement contains {total} complete frames, expected {frames}"
         )
     return candidates, (
-        f"schema-v2 phase=measure segment={segment} scaler={scaler} generation="
+        f"schema-v2+ phase=measure segment={segment} scaler={scaler} generation="
         f"{next(iter(generations))}"
     )
 
@@ -1009,8 +1103,8 @@ def validate_release_contract(
 
     expected_scaling = scaler != "OFF"
     for window in windows:
-        if window.schema != 2:
-            raise ReportError(f"line {window.line}: release contract requires schema v2")
+        if window.schema not in (2, 3):
+            raise ReportError(f"line {window.line}: release contract requires schema v2 or v3")
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
         if window.low_1 is None or window.low_01 is None:
@@ -1184,8 +1278,14 @@ def summarize(
     selected, selection = select_measurement(all_windows, frames, segment, scaler)
     if len({window.detail for window in selected}) != 1:
         raise ReportError("selected windows mix detailed and basic instrumentation")
-    if selected[0].schema == 2:
+    if selected[0].schema >= 2:
         validate_selected_metadata_consistency(selected)
+    renderer_generations = [window.renderer_generation for window in selected]
+    if any(value is not None for value in renderer_generations):
+        if not all(value is not None for value in renderer_generations):
+            raise ReportError("selected windows mix renderer-generation telemetry presence")
+        if any(value != renderer_generations[0] for value in renderer_generations[1:]):
+            raise ReportError("selected windows mix renderer-generation declarations")
     dropped = sum(window.dropped for window in selected)
     if dropped:
         raise ReportError(f"selected windows contain {dropped} dropped timing events")
@@ -1254,11 +1354,32 @@ def summarize(
             key: _series([value[key] for value in intervals], selected)  # type: ignore[index]
             for key in ("average", "p50", "p95", "p99", "maximum")
         }
+    cpu_submissions = [window.cpu_render_submission for window in selected]
+    if all(value is not None for value in cpu_submissions):
+        result["cpu_render_submission_ms"] = {
+            key: _series([value[key] for value in cpu_submissions], selected)  # type: ignore[index]
+            for key in ("average", "p50", "p95", "p99", "maximum")
+        }
     workload = _aggregate_workload(selected)
     if workload is not None:
         result["workload"] = workload
-    if selected[0].schema == 2:
+    if selected[0].schema >= 2:
         result["metadata"] = selected[-1].metadata
+    if renderer_generations and renderer_generations[0] is not None:
+        result["renderer_generation"] = renderer_generations[0]
+    headrooms = [window.metadata.get("current_edr_headroom") for window in selected]
+    if all(
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0.0
+        for value in headrooms
+    ):
+        result["current_edr_headroom"] = {
+            "window_minimum": min(float(value) for value in headrooms),
+            "window_maximum": max(float(value) for value in headrooms),
+            "last_window": float(headrooms[-1]),
+        }
     return result
 
 
@@ -1599,8 +1720,8 @@ def _derive_release_summary(
     workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
-    if any(window.schema != 2 for window in windows):
-        raise ReportError("accepted raw report must contain schema-v2 windows only")
+    if any(window.schema not in (2, 3) for window in windows):
+        raise ReportError("accepted raw report must contain schema-v2/v3 windows only")
     measure_windows = [window for window in windows if window.phase == "measure"]
     if not measure_windows:
         raise ReportError("accepted raw report contains no measurement windows")
@@ -2373,6 +2494,42 @@ def self_test() -> None:
                     "static_geometry_heaps_enabled": heap_enabled,
                 },
             })
+            if schema >= 3:
+                payload["cpu_render_submission_ms"] = {
+                    "samples": 300,
+                    "average": 2.0,
+                    "p50": 1.8,
+                    "p95": 2.8,
+                    "p99": 3.2,
+                    "maximum": 4.0,
+                }
+                payload["renderer_generation"] = {
+                    "frame_contract_version": 1,
+                    "frame_graph_version": 2,
+                    "frame_id": 0,
+                    "renderer_generation_id": 1,
+                    "lighting_generation_id": 1,
+                    "output_generation_id": 1,
+                    "resolved_lighting_mode": "legacy",
+                    "resolved_output_mode": "hdr",
+                    "resolved_upscale_mode": "native",
+                    "resolved_interpolation_mode": "off",
+                    "lighting_preset": "balanced",
+                    "executor": "metal3",
+                    "feature_mask": 0,
+                    "render_width": BUILT_IN_WIDTH,
+                    "render_height": BUILT_IN_HEIGHT,
+                    "display_width": BUILT_IN_WIDTH,
+                    "display_height": BUILT_IN_HEIGHT,
+                    "resource_bytes": {
+                        "base": 0, "hdr": 1024, "lighting": 0,
+                        "upscale": 0, "interpolation": 0,
+                    },
+                    "lighting_work": {
+                        "light_count": 0, "pass_count": 0,
+                        "dispatch_count": 0, "upload_bytes": 0,
+                    },
+                }
         return payload
 
     def report_text(
@@ -2432,6 +2589,22 @@ def self_test() -> None:
         old = root / "old.jsonl"
         old.write_text("\n".join(json.dumps(line(1, i)) for i in range(10)) + "\n")
         old_summary = summarize(old, 3000, 0, "OFF")
+
+        schema3 = root / "schema3.jsonl"
+        schema3.write_text(
+            "\n".join(json.dumps(line(3, i)) for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        schema3_summary = summarize(schema3, 3000, 0, "OFF")
+        assert schema3_summary["renderer_generation"]["resolved_lighting_mode"] == "legacy"
+        invalid_schema3 = line(3, 1)
+        invalid_schema3["renderer_generation"]["resource_bytes"]["lighting"] = 1
+        invalid_schema3_path = root / "invalid-schema3.jsonl"
+        invalid_schema3_path.write_text(json.dumps(invalid_schema3) + "\n", encoding="utf-8")
+        expect_error(
+            lambda: load_report(invalid_schema3_path),
+            "Legacy generation contains lighting work/resources",
+        )
 
         def make_bundle(
             stem: str,

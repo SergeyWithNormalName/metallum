@@ -88,12 +88,23 @@ public final class MetalNativeBridge {
                             LONG,
                             LONG,
                             LONG,
+                            LONG,
                             LONG
                     )
             );
             validateFrameGraphV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_validate_frame_graph_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            validateFrameStateV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_validate_frame_state_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            setFrameStateV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_set_frame_state_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
             initPipelines = downcallWithoutCritical(
@@ -469,6 +480,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle recordJavaWorkload;
     private static final MethodHandle validateFrameGraphV1;
+    private static final MethodHandle validateFrameStateV1;
+    private static final MethodHandle setFrameStateV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -664,7 +677,8 @@ public final class MetalNativeBridge {
             final long cpuTransientRequestedBytes,
             final long cpuTransientReservedBytes,
             final long gpuTransientRequestedBytes,
-            final long gpuTransientReservedBytes
+            final long gpuTransientReservedBytes,
+            final long cpuRenderSubmissionNanos
     ) {
         try {
             recordJavaWorkload.invokeExact(
@@ -674,7 +688,8 @@ public final class MetalNativeBridge {
                     cpuTransientRequestedBytes,
                     cpuTransientReservedBytes,
                     gpuTransientRequestedBytes,
-                    gpuTransientReservedBytes
+                    gpuTransientReservedBytes,
+                    cpuRenderSubmissionNanos
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gpu_timing_record_java_workload", throwable);
@@ -689,6 +704,29 @@ public final class MetalNativeBridge {
             return (int) validateFrameGraphV1.invokeExact(segment(packet), packet.byteSize());
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_validate_frame_graph_v1", throwable);
+        }
+    }
+
+    public static int metallum_validate_frame_state_v1(final MemorySegment packet) {
+        return invokeFrameState("metallum_validate_frame_state_v1", validateFrameStateV1, packet);
+    }
+
+    public static int metallum_set_frame_state_v1(final MemorySegment packet) {
+        return invokeFrameState("metallum_set_frame_state_v1", setFrameStateV1, packet);
+    }
+
+    private static int invokeFrameState(
+            final String symbol,
+            final MethodHandle handle,
+            final MemorySegment packet
+    ) {
+        if (packet == null || packet.byteSize() == 0L) {
+            throw new IllegalArgumentException("FrameState ABI packet must not be empty");
+        }
+        try {
+            return (int) handle.invokeExact(segment(packet), packet.byteSize());
+        } catch (Throwable throwable) {
+            throw bridgeFailure(symbol, throwable);
         }
     }
 

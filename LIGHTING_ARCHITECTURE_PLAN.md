@@ -1,6 +1,6 @@
 # Metallum: глобальный план независимого нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура; preparation gate пройден 15 июля 2026 года, следующая работа — Lighting Stage 0.
+Статус: целевая архитектура; preparation gate и Lighting Stage 0 пройдены 15 июля 2026 года, следующая работа — Lighting Stage 1.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -1287,16 +1287,16 @@ dynamicResolution=false
 
 | Stage | Performance p95 | Balanced p95 | Ultra p95 |
 |---|---:|---:|---:|
-| Cluster build | ≤ 0.20 ms | ≤ 0.25 ms | ≤ 0.35 ms |
-| Дополнительная цена direct fragment lighting | ≤ 0.80 ms | ≤ 1.20 ms | ≤ 1.50 ms |
-| Voxel dirty upload/update в обычном кадре | ≤ 0.25 ms | ≤ 0.40 ms | ≤ 0.50 ms |
-| Cached sun/local shadow update | ≤ 0.55 ms | ≤ 0.85 ms | ≤ 1.15 ms |
-| GI propagation | ≤ 0.65 ms | ≤ 1.00 ms | ≤ 1.50 ms |
-| Volumetrics | ≤ 0.55 ms | ≤ 0.90 ms | ≤ 1.20 ms |
+| Cluster build | ≤ 0.15 ms | ≤ 0.25 ms | ≤ 0.35 ms |
+| Дополнительная цена direct fragment lighting | ≤ 0.65 ms | ≤ 1.10 ms | ≤ 1.50 ms |
+| Voxel dirty upload/update в обычном кадре | ≤ 0.15 ms | ≤ 0.40 ms | ≤ 0.50 ms |
+| Cached sun/local shadow update | ≤ 0.40 ms | ≤ 0.80 ms | ≤ 1.15 ms |
+| GI propagation | ≤ 0.50 ms | ≤ 0.95 ms | ≤ 1.50 ms |
+| Volumetrics | ≤ 0.35 ms | ≤ 0.90 ms | ≤ 1.20 ms |
 | Optional scaler | отдельный A/B budget; `0 ms` при native | отдельный A/B budget | отдельный A/B budget |
 | HDR mapping + histogram + bloom | ≤ 1.60 ms | ≤ 1.75 ms | ≤ 1.90 ms |
 
-Обычный дополнительный lighting overhead без scaler/HDR ориентировочно ограничивается примерно `3.0 ms` для Performance, `4.6 ms` для Balanced и `6.2 ms` для Ultra. Это не означает, что budget обязательно надо израсходовать. В SDR строка HDR имеет фактическую стоимость `0 ms` и нулевые persistent/transient HDR allocations; обычный SDR output учитывается в baseline present.
+Обычный дополнительный lighting overhead без scaler/HDR ограничивается `2.2 ms` для Performance, `4.4 ms` для Balanced и `6.2 ms` для Ultra. Performance/Balanced caps уточнены по худшему из повторных L0 baseline: `8.213 + 2.2 = 10.413 ms` и `8.213 + 4.4 = 12.613 ms`, что оставляет около `0.09 ms` до соответствующих full-frame gates. Это не означает, что budget обязательно надо израсходовать. В SDR строка HDR имеет фактическую стоимость `0 ms` и нулевые persistent/transient HDR allocations; обычный SDR output учитывается в baseline present.
 
 Update spike имеет тот же frame cap, что обычный кадр: после teleport/chunk churn лишняя работа остаётся в bounded queue. Допускается временно заменить обычную долю одного эффекта более крупным update, но не сложить все максимумы таблицы и не превысить общий frame target.
 
@@ -1431,34 +1431,41 @@ Diagnostic overlays:
 
 До выполнения этого этапа переход к этапу 0 запрещён.
 
-### Этап 0. Независимые feature gates, admission и эталонные сцены
+### Этап 0. Независимые feature gates, admission и эталонные сцены — ✅ ВЫПОЛНЕН 15 июля 2026
 
 #### Работы
 
-- Импортировать итоговые native-resolution и MetalFX Spatial timings из optimization baseline.
-- Рассчитать фактический остаток GPU/CPU frame budget под каждый lighting preset.
-- Добавить независимые `LightingMode.LEGACY/METALLUM`, `DisplayOutputMode.SDR/HDR` и отдельный upscale/interpolation feature mask без изменения картинки.
-- Реализовать generation planner для всех четырёх lighting/output комбинаций и описать точный resource/pass manifest каждой.
-- Добавить validation, доказывающую отсутствие HDR-only ресурсов/passes в SDR и lighting-only ресурсов/passes в legacy lighting.
-- Расширить общий versioned `FrameState`/native ABI lighting полями и unit tests, не создавая второй ABI.
-- Создать набор ручных test worlds/scenes.
-- Зафиксировать screenshots и HDR numeric probes.
-- Добавить resolved lighting/output/upscale/interpolation modes, preset, resource bytes и light-work поля в существующий timing report.
-- Утвердить stage/memory budgets либо явно скорректировать таблицы раздела 20 по capture.
+- [x] Импортировать итоговые native-resolution и MetalFX Spatial timings из optimization baseline.
+- [x] Рассчитать фактический остаток GPU/CPU frame budget под каждый lighting preset.
+- [x] Добавить независимые `LightingMode.LEGACY/METALLUM`, `DisplayOutputMode.SDR/HDR` и отдельный upscale/interpolation feature mask без изменения картинки.
+- [x] Реализовать generation planner для всех четырёх lighting/output комбинаций и описать точный resource/pass manifest каждой.
+- [x] Добавить validation, доказывающую отсутствие HDR-only ресурсов/passes в SDR и lighting-only ресурсов/passes в legacy lighting.
+- [x] Расширить общий versioned `FrameState`/native ABI lighting полями и unit tests, не создавая второй ABI.
+- [x] Создать набор ручных test worlds/scenes.
+- [x] Зафиксировать screenshots и HDR numeric probes.
+- [x] Добавить resolved lighting/output/upscale/interpolation modes, preset, resource bytes и light-work поля в существующий timing report.
+- [x] Утвердить stage/memory budgets либо явно скорректировать таблицы раздела 20 по capture.
 
 #### Exit criteria
 
-- Legacy output побитово/визуально не изменился в допустимых пределах.
-- Все существующие Gradle/native validations проходят.
-- Есть p50/p95/p99 baseline и вычисленный lighting headroom минимум для native, Spatial Quality и Spatial Performance.
-- Performance/Balanced/Ultra не превышают полный frame budget уже на бумаге при сумме утверждённых stage caps.
-- Новый mode безопасно отказывает и возвращается в legacy.
-- Каждая из четырёх комбинаций создаётся независимо; failure одной оси не меняет другую.
-- При SDR HDR-only resource/pass counters равны нулю; при legacy lighting lighting-work counters равны нулю.
+- [x] Legacy output побитово/визуально не изменился в допустимых пределах.
+- [x] Все существующие Gradle/native validations проходят.
+- [x] Есть p50/p95/p99 baseline и вычисленный lighting headroom минимум для native, Spatial Quality и Spatial Performance.
+- [x] Performance/Balanced/Ultra не превышают полный frame budget уже на бумаге при сумме утверждённых stage caps.
+- [x] Новый mode безопасно отказывает и возвращается в legacy.
+- [x] Каждая из четырёх комбинаций создаётся независимо; failure одной оси не меняет другую.
+- [x] При SDR HDR-only resource/pass counters равны нулю; при legacy lighting lighting-work counters равны нулю.
 
 #### Rollback
 
 Удаление feature gate полностью возвращает прежнее поведение; никаких новых permanent resources.
+
+#### Результат выполнения
+
+- Production остался Legacy + Metal 3; запрос METALLUM атомарно отклоняет только lighting-ось и сохраняет HDR; Frame Interpolation до своего этапа остаётся disabled.
+- 18 ручных scene contracts и SHA-256 трёх legacy HDR captures зафиксированы в [`benchmark/lighting/reference-scenes-l0-v1.json`](benchmark/lighting/reference-scenes-l0-v1.json); тяжёлые world/PNG artifacts намеренно остаются в ignored `run/`.
+- M1 Pro baseline, artifact/report hashes и GPU/CPU headroom лежат в [`benchmark/lighting/m1-pro-l0-baseline-v1.json`](benchmark/lighting/m1-pro-l0-baseline-v1.json). Native/Quality/Performance GPU p95: `7.730/7.339/8.212 ms`; самая узкая CPU admission-точка — Spatial Performance, `0.101 ms` render-submission-window headroom.
+- Performance/Balanced lighting caps скорректированы с `3.0/4.6` до `2.2/4.4 ms` по худшему повторному p95; Ultra и memory budgets без изменений.
 
 ### Этап 1. Frame contract и условные temporal capabilities без постоянной цены
 

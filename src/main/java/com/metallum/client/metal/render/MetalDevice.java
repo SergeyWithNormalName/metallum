@@ -14,6 +14,17 @@ import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.renderer.MetalCapabilities;
+import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RendererConfig;
+import com.metallum.client.renderer.RendererFeatureMask;
+import com.metallum.client.renderer.RendererGenerationConfig;
+import com.metallum.client.renderer.RendererGenerationManifest;
+import com.metallum.client.renderer.RendererGenerationPlanner;
+import com.metallum.client.renderer.temporal.FrameContract;
+import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.renderer.temporal.FrameStateAbi;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -36,6 +47,7 @@ import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.Arena;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.function.Supplier;
@@ -43,6 +55,16 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 public final class MetalDevice implements GpuDeviceBackend {
+    private record RendererGenerationKey(
+            int renderWidth,
+            int renderHeight,
+            int displayWidth,
+            int displayHeight,
+            DisplayOutputMode outputMode,
+            boolean spatialActive
+    ) {
+    }
+
     enum HdrSceneColorState {
         NONE,
         PENDING_REDIRECT,
@@ -89,6 +111,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private volatile HdrConfig hdrConfig;
     private final GpuDebugOptions debugOptions;
     private final MetalCapabilities rendererCapabilities;
+    private final RendererConfig rendererConfig;
     private final boolean spatialScalingSupported;
     private final MetalCommandEncoder commandEncoder;
     private final DeviceInfo deviceInfo;
@@ -132,6 +155,10 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean spatialHdrPrecomposeLogged;
     private boolean nativeHdrPrecomposeLogged;
     private boolean spatialPerceptualDirectLogged;
+    @Nullable
+    private RendererGenerationKey publishedRendererGeneration;
+    private long rendererGenerationId;
+    private boolean rendererAdmissionLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -188,6 +215,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             );
         }
         this.rendererCapabilities = discoveredCapabilities;
+        this.rendererConfig = RendererConfig.load();
         MetalNativeBridge.metallum_set_debug_labels_enabled(this.useLabels());
         this.spatialScalingSupported = this.rendererCapabilities.supports(
                 MetalCapabilities.Feature.METALFX_SPATIAL
@@ -216,6 +244,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested() ? "enabled" : "disabled"
         );
         Metallum.LOGGER.info("MetalFX spatial scaling support: {}", this.spatialScalingSupported ? "available" : "unavailable");
+        Metallum.LOGGER.info(
+                "Renderer L0 request: lighting={}, preset={}, frameInterpolation={} (production executor Metal 3)",
+                this.rendererConfig.improvedLighting() ? "METALLUM" : "LEGACY",
+                this.rendererConfig.lightingPreset(),
+                this.rendererConfig.frameInterpolation()
+        );
     }
 
     MetalCapabilities rendererCapabilities() {
@@ -471,6 +505,125 @@ public final class MetalDevice implements GpuDeviceBackend {
         return this.spatialScalingSupported;
     }
 
+    /** Publishes the immutable L0 generation declaration after output and scale resolution. */
+    public synchronized void publishRendererGenerationState(
+            final int displayWidth,
+            final int displayHeight
+    ) {
+        int safeDisplayWidth = Math.max(displayWidth, 1);
+        int safeDisplayHeight = Math.max(displayHeight, 1);
+        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
+                safeDisplayWidth,
+                safeDisplayHeight
+        );
+        boolean spatialActive = dimensions.renderWidth() != dimensions.displayWidth()
+                || dimensions.renderHeight() != dimensions.displayHeight();
+        DisplayOutputMode requestedOutput = this.hdrOutputMode == HdrOutputMode.SDR
+                ? DisplayOutputMode.SDR
+                : DisplayOutputMode.HDR;
+        RendererGenerationKey key = new RendererGenerationKey(
+                dimensions.renderWidth(),
+                dimensions.renderHeight(),
+                dimensions.displayWidth(),
+                dimensions.displayHeight(),
+                requestedOutput,
+                spatialActive
+        );
+        if (key.equals(this.publishedRendererGeneration)) {
+            return;
+        }
+
+        LightingMode requestedLighting = this.rendererConfig.improvedLighting()
+                ? LightingMode.METALLUM
+                : LightingMode.LEGACY;
+        RendererFeatureMask activeFeatures = spatialActive
+                ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
+                : RendererFeatureMask.NONE;
+        RendererGenerationPlanner.Plan plan = RendererGenerationPlanner.plan(
+                requestedLighting,
+                requestedOutput,
+                MetalExecutorKind.METAL3,
+                this.rendererConfig.lightingPreset(),
+                activeFeatures,
+                requestedOutput,
+                this.rendererCapabilities,
+                new RendererGenerationPlanner.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
+                new RendererGenerationPlanner.Extent(dimensions.displayWidth(), dimensions.displayHeight())
+        );
+        if (!plan.manifest().executable()) {
+            throw new IllegalStateException("Non-executable renderer generation passed L0 admission");
+        }
+
+        RendererGenerationConfig resolved = plan.resolution().config();
+        RendererGenerationManifest manifest = plan.manifest();
+        FrameState.ResourceBytes resourceBytes = new FrameState.ResourceBytes(
+                manifest.resourceBytes(RendererGenerationManifest.Domain.BASE),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.LIGHTING_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY)
+        );
+        FrameState.Transforms transforms = FrameState.Transforms.identity();
+        long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
+        FrameState state = new FrameState(
+                FrameContract.temporalPreparationV1(),
+                0L,
+                nextGeneration,
+                0L,
+                nextGeneration,
+                nextGeneration,
+                resolved.lightingMode(),
+                resolved.outputMode(),
+                resolved.lightingPreset(),
+                resolved.featureMask(),
+                resolved.executorKind(),
+                resolved.frameResourceContractVersion(),
+                resourceBytes,
+                FrameState.LightingWork.NONE,
+                transforms,
+                transforms,
+                new FrameState.Extent(dimensions.renderWidth(), dimensions.renderHeight()),
+                new FrameState.Extent(dimensions.displayWidth(), dimensions.displayHeight()),
+                1.0,
+                1.0,
+                FrameState.JitterOffset.ZERO,
+                Set.of()
+        );
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment packet = FrameStateAbi.encode(state, arena);
+            int status = MetalNativeBridge.metallum_set_frame_state_v1(packet);
+            if (status != 1) {
+                throw new IllegalStateException("Native FrameState admission failed with status " + status);
+            }
+        }
+        this.rendererGenerationId = nextGeneration;
+        this.publishedRendererGeneration = key;
+        if (!this.rendererAdmissionLogged) {
+            this.rendererAdmissionLogged = true;
+            if (plan.resolution().fellBack()) {
+                Metallum.LOGGER.warn(
+                        "Renderer L0 request resolved with fallback {}: lighting={}, output={}, upscale={}, interpolation=OFF",
+                        plan.resolution().rejectionReasons(),
+                        resolved.lightingMode(),
+                        resolved.outputMode(),
+                        spatialActive ? "SPATIAL" : "NATIVE"
+                );
+            } else {
+                Metallum.LOGGER.info(
+                        "Renderer L0 generation admitted: lighting={}, output={}, upscale={}, interpolation=OFF",
+                        resolved.lightingMode(),
+                        resolved.outputMode(),
+                        spatialActive ? "SPATIAL" : "NATIVE"
+                );
+            }
+            if (this.rendererConfig.frameInterpolation()) {
+                Metallum.LOGGER.warn(
+                        "Frame Interpolation was requested but remains disabled until its production admission stage"
+                );
+            }
+        }
+    }
+
     public HdrOutputMode hdrOutputMode() {
         return this.hdrOutputMode;
     }
@@ -505,6 +658,11 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.resetHdrSceneColor();
         }
         MetalFxSpatialScaling.onHdrOutputModeChanged(previousOutputMode, outputMode);
+        int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(0);
+        int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(0);
+        if (displayWidth > 0 && displayHeight > 0) {
+            this.publishRendererGenerationState(displayWidth, displayHeight);
+        }
     }
 
     HdrOutputMode availableHdrOutputMode(final HdrOutputMode requestedMode) {

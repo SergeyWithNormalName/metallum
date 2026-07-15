@@ -1481,6 +1481,7 @@ private final class MetallumWorkloadAccumulator {
     var cpuTransientReservedHighWaterBytes = 0
     var gpuSharedTransientRequestedHighWaterBytes = 0
     var gpuSharedTransientReservedHighWaterBytes = 0
+    var cpuRenderSubmissionNanoseconds: [UInt64] = []
 
     func recordEncoder(_ kind: MetallumWorkloadEncoderKind) {
         switch kind {
@@ -1818,7 +1819,8 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         cpuRequestedHighWater: UInt64,
         cpuReservedHighWater: UInt64,
         gpuRequestedHighWater: UInt64,
-        gpuReservedHighWater: UInt64
+        gpuReservedHighWater: UInt64,
+        cpuRenderSubmissionNanos: UInt64
     ) {
         guard cpuReservedHighWater >= cpuRequestedHighWater,
               gpuReservedHighWater >= gpuRequestedHighWater else {
@@ -1881,6 +1883,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             accumulator.gpuSharedTransientReservedHighWaterBytes,
             gpuReserved
         )
+        accumulator.cpuRenderSubmissionNanoseconds.append(cpuRenderSubmissionNanos)
         lock.unlock()
     }
 
@@ -1960,6 +1963,22 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             ]
         }
 
+        let sortedCpuRenderSubmission = window.workload.cpuRenderSubmissionNanoseconds.sorted()
+        let sortedCpuRenderSubmissionDouble = sortedCpuRenderSubmission.map { Double($0) }
+        let cpuRenderSubmissionReport: [String: Any] = [
+            "samples": sortedCpuRenderSubmission.count,
+            "average": sortedCpuRenderSubmission.isEmpty ? 0.0
+                : Double(sortedCpuRenderSubmission.reduce(0, +))
+                    / Double(sortedCpuRenderSubmission.count) / 1_000_000.0,
+            "p50": Self.percentile(sortedCpuRenderSubmissionDouble, fraction: 0.50)
+                / 1_000_000.0,
+            "p95": Self.percentile(sortedCpuRenderSubmissionDouble, fraction: 0.95)
+                / 1_000_000.0,
+            "p99": Self.percentile(sortedCpuRenderSubmissionDouble, fraction: 0.99)
+                / 1_000_000.0,
+            "maximum": Double(sortedCpuRenderSubmission.last ?? 0) / 1_000_000.0
+        ]
+
         let environment = ProcessInfo.processInfo.environment
         var metadata: [String: Any] = [
             "commit": environment["METALLUM_BENCHMARK_COMMIT"] ?? "unknown",
@@ -2025,8 +2044,46 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         workloadReport["private_geometry_heap"] = MetallumStaticGeometryHeapRegistry.shared
             .snapshot().report
 
+        let rendererGenerationReport: [String: Any]
+        if let frameState = NativeState.rendererFrameState.snapshot() {
+            rendererGenerationReport = frameState.report
+        } else {
+            let presentation = window.presentation
+            let hdr = (presentation?.outputMode ?? 0) == 0 ? "sdr" : "hdr"
+            let spatial = presentation.map {
+                $0.renderWidth != $0.displayWidth || $0.renderHeight != $0.displayHeight
+            } ?? false
+            rendererGenerationReport = [
+                "frame_contract_version": 1,
+                "frame_graph_version": 2,
+                "frame_id": 0,
+                "renderer_generation_id": 0,
+                "lighting_generation_id": 0,
+                "output_generation_id": 0,
+                "resolved_lighting_mode": "legacy",
+                "resolved_output_mode": hdr,
+                "resolved_upscale_mode": spatial ? "spatial" : "native",
+                "resolved_interpolation_mode": "off",
+                "lighting_preset": "balanced",
+                "executor": "metal3",
+                "feature_mask": spatial ? 1 : 0,
+                "render_width": presentation?.renderWidth ?? 1,
+                "render_height": presentation?.renderHeight ?? 1,
+                "display_width": presentation?.displayWidth ?? 1,
+                "display_height": presentation?.displayHeight ?? 1,
+                "resource_bytes": [
+                    "base": 0, "hdr": 0, "lighting": 0,
+                    "upscale": 0, "interpolation": 0
+                ],
+                "lighting_work": [
+                    "light_count": 0, "pass_count": 0,
+                    "dispatch_count": 0, "upload_bytes": 0
+                ]
+            ]
+        }
+
         writer.write([
-            "schema_version": 2,
+            "schema_version": 3,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
             "detail_enabled": NativeState.gpuTimingDetailEnabled,
             "presented_frames": window.sampleCount,
@@ -2034,6 +2091,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "fps_1_percent_low": Self.lowFps(sortedPresentIntervals, fraction: 0.01),
             "fps_0_1_percent_low": Self.lowFps(sortedPresentIntervals, fraction: 0.001),
             "present_interval_ms": presentIntervalReport,
+            "cpu_render_submission_ms": cpuRenderSubmissionReport,
             "presenting_command_buffer_gpu_ms": [
                 "average": gpuAverageMs,
                 "p50": gpuP50Ms,
@@ -2043,6 +2101,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             ],
             "benchmark": window.context.report,
             "metadata": metadata,
+            "renderer_generation": rendererGenerationReport,
             "stages": stages,
             "cpu_waits": waits,
             "workload": workloadReport,
@@ -2326,6 +2385,7 @@ private enum NativeState {
     static var builtinShaderStates: [UInt: MetallumBuiltinShaderState] = [:]
     static let builtinShaderStatesLock = NSLock()
     static let benchmarkTelemetryState = MetallumBenchmarkTelemetryState()
+    static let rendererFrameState = MetallumRendererFrameStateStore()
     static let staticGeometryHeapsEnabled = ProcessInfo.processInfo.environment[
         "METALLUM_STATIC_GEOMETRY_HEAPS"
     ] != "0"
@@ -4245,6 +4305,221 @@ private func probeBuiltinPipelineCacheHits(device: MTLDevice) -> Int {
     return hits
 }
 
+private enum MetallumFrameStateAbiV1 {
+    static let version: UInt32 = 1
+    static let packetBytes = 160
+    static let knownFeatureBits: UInt64 = 0b111
+    static let spatialBit: UInt64 = 1
+    static let temporalBit: UInt64 = 1 << 1
+    static let interpolationBit: UInt64 = 1 << 2
+}
+
+private struct MetallumRendererFrameStateSnapshot {
+    let frameContractVersion: UInt32
+    let frameGraphVersion: UInt32
+    let frameId: UInt64
+    let rendererGenerationId: UInt64
+    let lightingGenerationId: UInt64
+    let outputGenerationId: UInt64
+    let lightingMode: UInt32
+    let outputMode: UInt32
+    let executorKind: UInt32
+    let lightingPreset: UInt32
+    let featureMask: UInt64
+    let renderWidth: UInt32
+    let renderHeight: UInt32
+    let displayWidth: UInt32
+    let displayHeight: UInt32
+    let baseResourceBytes: UInt64
+    let hdrResourceBytes: UInt64
+    let lightingResourceBytes: UInt64
+    let upscaleResourceBytes: UInt64
+    let interpolationResourceBytes: UInt64
+    let lightCount: UInt32
+    let lightingPassCount: UInt32
+    let lightingDispatchCount: UInt32
+    let lightingUploadBytes: UInt64
+
+    var report: [String: Any] {
+        let upscaleMode: String
+        if featureMask & MetallumFrameStateAbiV1.spatialBit != 0 {
+            upscaleMode = "spatial"
+        } else if featureMask & MetallumFrameStateAbiV1.temporalBit != 0 {
+            upscaleMode = "temporal"
+        } else {
+            upscaleMode = "native"
+        }
+        return [
+            "frame_contract_version": frameContractVersion,
+            "frame_graph_version": frameGraphVersion,
+            "frame_id": frameId,
+            "renderer_generation_id": rendererGenerationId,
+            "lighting_generation_id": lightingGenerationId,
+            "output_generation_id": outputGenerationId,
+            "resolved_lighting_mode": lightingMode == 0 ? "legacy" : "metallum",
+            "resolved_output_mode": outputMode == 0 ? "sdr" : "hdr",
+            "resolved_upscale_mode": upscaleMode,
+            "resolved_interpolation_mode": featureMask & MetallumFrameStateAbiV1.interpolationBit == 0
+                ? "off" : "frame_interpolation",
+            "lighting_preset": ["performance", "balanced", "ultra"][Int(lightingPreset)],
+            "executor": executorKind == 0 ? "metal3" : "metal4",
+            "feature_mask": featureMask,
+            "render_width": renderWidth,
+            "render_height": renderHeight,
+            "display_width": displayWidth,
+            "display_height": displayHeight,
+            "resource_bytes": [
+                "base": baseResourceBytes,
+                "hdr": hdrResourceBytes,
+                "lighting": lightingResourceBytes,
+                "upscale": upscaleResourceBytes,
+                "interpolation": interpolationResourceBytes
+            ],
+            "lighting_work": [
+                "light_count": lightCount,
+                "pass_count": lightingPassCount,
+                "dispatch_count": lightingDispatchCount,
+                "upload_bytes": lightingUploadBytes
+            ]
+        ]
+    }
+}
+
+private final class MetallumRendererFrameStateStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: MetallumRendererFrameStateSnapshot?
+
+    func update(_ snapshot: MetallumRendererFrameStateSnapshot) {
+        lock.lock()
+        current = snapshot
+        lock.unlock()
+    }
+
+    func snapshot() -> MetallumRendererFrameStateSnapshot? {
+        lock.lock()
+        let value = current
+        lock.unlock()
+        return value
+    }
+}
+
+private func parseFrameStateV1(
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> (Int32, MetallumRendererFrameStateSnapshot?) {
+    guard let packet,
+          byteSize == UInt64(MetallumFrameStateAbiV1.packetBytes) else {
+        return (-1, nil)
+    }
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: packet, count: MetallumFrameStateAbiV1.packetBytes)
+    )
+    guard let version = reader.uint32(at: 0),
+          let declaredBytes = reader.uint32(at: 4),
+          let frameContractVersion = reader.uint32(at: 8),
+          let frameGraphVersion = reader.uint32(at: 12) else {
+        return (-1, nil)
+    }
+    guard version == MetallumFrameStateAbiV1.version else { return (-2, nil) }
+    guard declaredBytes == UInt32(MetallumFrameStateAbiV1.packetBytes),
+          frameContractVersion > 0, frameGraphVersion > 0 else {
+        return (-3, nil)
+    }
+    guard let frameId = reader.uint64(at: 16),
+          let rendererGenerationId = reader.uint64(at: 24),
+          reader.uint64(at: 32) != nil,
+          let lightingGenerationId = reader.uint64(at: 40),
+          let outputGenerationId = reader.uint64(at: 48),
+          let lightingMode = reader.uint32(at: 56),
+          let outputMode = reader.uint32(at: 60),
+          let executorKind = reader.uint32(at: 64),
+          let lightingPreset = reader.uint32(at: 68),
+          let featureMask = reader.uint64(at: 72),
+          let renderWidth = reader.uint32(at: 80),
+          let renderHeight = reader.uint32(at: 84),
+          let displayWidth = reader.uint32(at: 88),
+          let displayHeight = reader.uint32(at: 92),
+          let baseResourceBytes = reader.uint64(at: 96),
+          let hdrResourceBytes = reader.uint64(at: 104),
+          let lightingResourceBytes = reader.uint64(at: 112),
+          let upscaleResourceBytes = reader.uint64(at: 120),
+          let interpolationResourceBytes = reader.uint64(at: 128),
+          let lightCount = reader.uint32(at: 136),
+          let lightingPassCount = reader.uint32(at: 140),
+          let lightingDispatchCount = reader.uint32(at: 144),
+          let reserved = reader.uint32(at: 148),
+          let lightingUploadBytes = reader.uint64(at: 152) else {
+        return (-1, nil)
+    }
+    guard lightingMode <= 1, outputMode <= 1, executorKind <= 1,
+          lightingPreset <= 2, reserved == 0,
+          featureMask & ~MetallumFrameStateAbiV1.knownFeatureBits == 0,
+          featureMask & MetallumFrameStateAbiV1.spatialBit == 0
+            || featureMask & MetallumFrameStateAbiV1.temporalBit == 0,
+          renderWidth > 0, renderHeight > 0, displayWidth > 0, displayHeight > 0 else {
+        return (-4, nil)
+    }
+    if lightingMode == 0 && (lightingResourceBytes != 0 || lightCount != 0
+        || lightingPassCount != 0 || lightingDispatchCount != 0 || lightingUploadBytes != 0) {
+        return (-5, nil)
+    }
+    if outputMode == 0 && hdrResourceBytes != 0 { return (-6, nil) }
+    if featureMask & (MetallumFrameStateAbiV1.spatialBit | MetallumFrameStateAbiV1.temporalBit) == 0
+        && upscaleResourceBytes != 0 {
+        return (-7, nil)
+    }
+    if featureMask & MetallumFrameStateAbiV1.interpolationBit == 0
+        && interpolationResourceBytes != 0 {
+        return (-8, nil)
+    }
+    return (1, MetallumRendererFrameStateSnapshot(
+        frameContractVersion: frameContractVersion,
+        frameGraphVersion: frameGraphVersion,
+        frameId: frameId,
+        rendererGenerationId: rendererGenerationId,
+        lightingGenerationId: lightingGenerationId,
+        outputGenerationId: outputGenerationId,
+        lightingMode: lightingMode,
+        outputMode: outputMode,
+        executorKind: executorKind,
+        lightingPreset: lightingPreset,
+        featureMask: featureMask,
+        renderWidth: renderWidth,
+        renderHeight: renderHeight,
+        displayWidth: displayWidth,
+        displayHeight: displayHeight,
+        baseResourceBytes: baseResourceBytes,
+        hdrResourceBytes: hdrResourceBytes,
+        lightingResourceBytes: lightingResourceBytes,
+        upscaleResourceBytes: upscaleResourceBytes,
+        interpolationResourceBytes: interpolationResourceBytes,
+        lightCount: lightCount,
+        lightingPassCount: lightingPassCount,
+        lightingDispatchCount: lightingDispatchCount,
+        lightingUploadBytes: lightingUploadBytes
+    ))
+}
+
+@_cdecl("metallum_validate_frame_state_v1")
+public func metallum_validate_frame_state_v1(
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    parseFrameStateV1(packet, byteSize).0
+}
+
+@_cdecl("metallum_set_frame_state_v1")
+public func metallum_set_frame_state_v1(
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    let (status, snapshot) = parseFrameStateV1(packet, byteSize)
+    if status == 1, let snapshot {
+        NativeState.rendererFrameState.update(snapshot)
+    }
+    return status
+}
+
 private enum MetallumFrameGraphAbiV1 {
     static let version: UInt32 = 1
     static let headerBytes = 32
@@ -4884,7 +5159,8 @@ public func metallum_gpu_timing_record_java_workload(
     _ cpuRequestedHighWater: UInt64,
     _ cpuReservedHighWater: UInt64,
     _ gpuRequestedHighWater: UInt64,
-    _ gpuReservedHighWater: UInt64
+    _ gpuReservedHighWater: UInt64,
+    _ cpuRenderSubmissionNanos: UInt64
 ) {
     guard let stats = NativeState.gpuTimingStats else { return }
     stats.recordJavaWorkload(
@@ -4894,7 +5170,8 @@ public func metallum_gpu_timing_record_java_workload(
         cpuRequestedHighWater: cpuRequestedHighWater,
         cpuReservedHighWater: cpuReservedHighWater,
         gpuRequestedHighWater: gpuRequestedHighWater,
-        gpuReservedHighWater: gpuReservedHighWater
+        gpuReservedHighWater: gpuReservedHighWater,
+        cpuRenderSubmissionNanos: cpuRenderSubmissionNanos
     )
 }
 

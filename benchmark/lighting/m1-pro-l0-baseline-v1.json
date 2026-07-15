@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "id": "m1-pro-lighting-l0-baseline-v1",
+  "captured_utc": "2026-07-15",
+  "device": "Apple M1 Pro",
+  "display": "Built-in Retina Display 3024x1964@120",
+  "scene": "hdrtest-static-v1",
+  "measured_frames_per_mode": 3000,
+  "measured_source_sha256": "315d615bdb5c994c8029940e4cc70b18fe23279e56f0907ca4f7efa7c1b785c7",
+  "artifact_sha256": "76685346a4e9d83fe6ec7760791263a48c8437e96d4dfc4bd794495c1bfa00be",
+  "cpu_metric": "render-thread time from first Metal command-buffer acquisition to pre-commit workload publication; not total game-thread CPU time",
+  "budget_contract_ms": {
+    "performance": {"full_frame_gpu_p95": 10.5, "full_frame_cpu": 11.1111, "lighting_gpu_p95_cap": 2.2},
+    "balanced": {"full_frame_gpu_p95": 12.7, "full_frame_cpu": 13.3333, "lighting_gpu_p95_cap": 4.4},
+    "ultra": {"full_frame_gpu_p95": 16.0, "full_frame_cpu": 16.6667, "lighting_gpu_p95_cap": 6.2}
+  },
+  "metallum_fallback_proof": {
+    "request": "metallum+hdr+native",
+    "resolved": "legacy+hdr+native",
+    "rejection": "LIGHTING_UNAVAILABLE",
+    "lighting_work_zero": true,
+    "raw_sha256": "5b14148f9437fad9095581ca8664069989ecb5db5d209073ffa825846ff72ae2",
+    "summary_sha256": "b6a6f3fdc98f39565faccd5915f539503bf061d753a306d3ea70840acf6fec6f",
+    "attestation_sha256": "a213c4945ffd1d28ed44733d0545d68c9274db9a057a5ec8aa9ba8fd884610f2"
+  },
+  "modes": [
+    {
+      "mode": "native",
+      "render_dimensions": [3024, 1964],
+      "gpu_ms": {"p50": 6.5467, "p95": 7.7298, "p99": 10.0025},
+      "cpu_render_submission_ms": {"p50": 5.9114, "p95": 10.7932, "p99": 13.7095},
+      "fps": {"elapsed_weighted": 120.8279, "one_percent_low": 57.0651, "zero_point_one_percent_low": 52.5652},
+      "resource_bytes": {"hdr": 148478688, "upscale": 0, "lighting": 0, "interpolation": 0},
+      "headroom_ms": {
+        "performance": {"gpu": 2.7702, "cpu_render_submission": 0.3179, "gpu_with_lighting_cap": 9.9298},
+        "balanced": {"gpu": 4.9702, "cpu_render_submission": 2.5401, "gpu_with_lighting_cap": 12.1298},
+        "ultra": {"gpu": 8.2702, "cpu_render_submission": 5.8735, "gpu_with_lighting_cap": 13.9298}
+      },
+      "summary_sha256": "d9de1b6c2d9efe7a1ca818765c4e9d0102822c0e8a41d7a96f379edfdac4cde6",
+      "raw_sha256": "f951f79d034adc36c462ad42f4632bbc46228cb0094cc2b60f8540a45a662dd4",
+      "attestation_sha256": "187c46017a949f7d9babbd04693a46ca255fcfb2ffe3ad4829470df722b425af"
+    },
+    {
+      "mode": "spatial_quality",
+      "render_dimensions": [2016, 1309],
+      "gpu_ms": {"p50": 5.7943, "p95": 7.3389, "p99": 10.1313},
+      "cpu_render_submission_ms": {"p50": 5.0114, "p95": 10.3465, "p99": 13.1107},
+      "fps": {"elapsed_weighted": 131.9560, "one_percent_low": 60.1297, "zero_point_one_percent_low": 55.9547},
+      "resource_bytes": {"hdr": 92381472, "upscale": 47513088, "lighting": 0, "interpolation": 0},
+      "headroom_ms": {
+        "performance": {"gpu": 3.1611, "cpu_render_submission": 0.7646, "gpu_with_lighting_cap": 9.5389},
+        "balanced": {"gpu": 5.3611, "cpu_render_submission": 2.9868, "gpu_with_lighting_cap": 11.7389},
+        "ultra": {"gpu": 8.6611, "cpu_render_submission": 6.3202, "gpu_with_lighting_cap": 13.5389}
+      },
+      "summary_sha256": "2325e0475145636fa08f25bc0f5acb9f26ad72a610e41265e68f967836ef5111",
+      "raw_sha256": "53e8af4b0ae8d12cf92ae2b0bbb9dd2a1a816b834d3e427dc3b213f4ca9463b1",
+      "attestation_sha256": "c84fb5e5215c0aec80583c79a29e3603a1cfefa1c050ec183a315913918869c5"
+    },
+    {
+      "mode": "spatial_performance",
+      "render_dimensions": [1512, 982],
+      "gpu_ms": {"p50": 5.1549, "p95": 8.2125, "p99": 11.1465},
+      "cpu_render_submission_ms": {"p50": 5.9358, "p95": 11.0102, "p99": 13.7610},
+      "fps": {"elapsed_weighted": 133.7778, "one_percent_low": 59.7817, "zero_point_one_percent_low": 54.4783},
+      "resource_bytes": {"hdr": 72757728, "upscale": 47513088, "lighting": 0, "interpolation": 0},
+      "headroom_ms": {
+        "performance": {"gpu": 2.2875, "cpu_render_submission": 0.1009, "gpu_with_lighting_cap": 10.4125},
+        "balanced": {"gpu": 4.4875, "cpu_render_submission": 2.3231, "gpu_with_lighting_cap": 12.6125},
+        "ultra": {"gpu": 7.7875, "cpu_render_submission": 5.6565, "gpu_with_lighting_cap": 14.4125}
+      },
+      "summary_sha256": "3fec47d8eb47c6dbcb16b7bb523d673515c8d258d6455c31102e86a8de5a414a",
+      "raw_sha256": "50784ad82cbdd0125379be3659438797e2883e41ce9139728220119de165ef13",
+      "attestation_sha256": "001bee62657a97eb937283e46165562944a00da9ca10373fa724280f497e1eba"
+    }
+  ],
+  "admission_result": "All GPU full-frame sums fit the preset gates after reducing Performance/Balanced lighting caps to 2.2/4.4 ms against the worst repeated p95; Ultra remains 6.2 ms. Spatial Performance has the narrowest CPU render-submission window headroom at 0.1009 ms; this partial metric is not total game-thread CPU time."
+}

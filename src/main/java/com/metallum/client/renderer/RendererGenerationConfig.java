@@ -10,15 +10,19 @@ public record RendererGenerationConfig(
         LightingMode lightingMode,
         DisplayOutputMode outputMode,
         MetalExecutorKind executorKind,
+        LightingPreset lightingPreset,
+        RendererFeatureMask featureMask,
         MetalCapabilities capabilities,
         int frameResourceContractVersion
 ) {
-    public static final int CURRENT_FRAME_RESOURCE_CONTRACT_VERSION = 1;
+    public static final int CURRENT_FRAME_RESOURCE_CONTRACT_VERSION = 2;
 
     public enum RejectionReason {
         LIGHTING_UNAVAILABLE,
         OUTPUT_UNAVAILABLE,
-        EXECUTOR_UNAVAILABLE
+        EXECUTOR_UNAVAILABLE,
+        UPSCALER_UNAVAILABLE,
+        INTERPOLATION_UNAVAILABLE
     }
 
     public record Resolution(
@@ -43,6 +47,8 @@ public record RendererGenerationConfig(
         Objects.requireNonNull(lightingMode, "lightingMode");
         Objects.requireNonNull(outputMode, "outputMode");
         Objects.requireNonNull(executorKind, "executorKind");
+        Objects.requireNonNull(lightingPreset, "lightingPreset");
+        Objects.requireNonNull(featureMask, "featureMask");
         Objects.requireNonNull(capabilities, "capabilities");
         if (frameResourceContractVersion <= 0) {
             throw new IllegalArgumentException("Frame/resource contract version must be positive");
@@ -56,6 +62,36 @@ public record RendererGenerationConfig(
         if (!capabilities.supports(executorKind)) {
             throw new IllegalArgumentException("Executor is not supported by the capability snapshot");
         }
+        if (featureMask.contains(RendererFeatureMask.SPATIAL_UPSCALING)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_SPATIAL)) {
+            throw new IllegalArgumentException("Spatial upscaling is not supported");
+        }
+        if (featureMask.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)) {
+            throw new IllegalArgumentException("Temporal upscaling is not supported");
+        }
+        if (featureMask.contains(RendererFeatureMask.FRAME_INTERPOLATION)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION)) {
+            throw new IllegalArgumentException("Frame Interpolation is not supported");
+        }
+    }
+
+    public RendererGenerationConfig(
+            final LightingMode lightingMode,
+            final DisplayOutputMode outputMode,
+            final MetalExecutorKind executorKind,
+            final MetalCapabilities capabilities,
+            final int frameResourceContractVersion
+    ) {
+        this(
+                lightingMode,
+                outputMode,
+                executorKind,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                capabilities,
+                frameResourceContractVersion
+        );
     }
 
     public static Resolution resolve(
@@ -66,9 +102,33 @@ public record RendererGenerationConfig(
             final MetalCapabilities capabilities,
             final int frameResourceContractVersion
     ) {
+        return resolve(
+                requestedLighting,
+                requestedOutput,
+                requestedExecutor,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                currentSafeOutput,
+                capabilities,
+                frameResourceContractVersion
+        );
+    }
+
+    public static Resolution resolve(
+            final LightingMode requestedLighting,
+            final DisplayOutputMode requestedOutput,
+            final MetalExecutorKind requestedExecutor,
+            final LightingPreset requestedPreset,
+            final RendererFeatureMask requestedFeatures,
+            final DisplayOutputMode currentSafeOutput,
+            final MetalCapabilities capabilities,
+            final int frameResourceContractVersion
+    ) {
         Objects.requireNonNull(requestedLighting, "requestedLighting");
         Objects.requireNonNull(requestedOutput, "requestedOutput");
         Objects.requireNonNull(requestedExecutor, "requestedExecutor");
+        Objects.requireNonNull(requestedPreset, "requestedPreset");
+        Objects.requireNonNull(requestedFeatures, "requestedFeatures");
         Objects.requireNonNull(currentSafeOutput, "currentSafeOutput");
         Objects.requireNonNull(capabilities, "capabilities");
 
@@ -83,30 +143,45 @@ public record RendererGenerationConfig(
             reasons.add(RejectionReason.EXECUTOR_UNAVAILABLE);
         }
 
-        if (reasons.isEmpty()) {
-            return new Resolution(
-                    new RendererGenerationConfig(
-                            requestedLighting,
-                            requestedOutput,
-                            requestedExecutor,
-                            capabilities,
-                            frameResourceContractVersion
-                    ),
-                    reasons
-            );
+        RendererFeatureMask resolvedFeatures = requestedFeatures;
+        if (requestedFeatures.contains(RendererFeatureMask.SPATIAL_UPSCALING)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_SPATIAL)) {
+            resolvedFeatures = resolvedFeatures.without(RendererFeatureMask.SPATIAL_UPSCALING);
+            reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
+        }
+        if (requestedFeatures.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)) {
+            resolvedFeatures = resolvedFeatures.without(RendererFeatureMask.TEMPORAL_UPSCALING);
+            reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
+        }
+        if (requestedFeatures.contains(RendererFeatureMask.FRAME_INTERPOLATION)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION)) {
+            resolvedFeatures = resolvedFeatures.without(RendererFeatureMask.FRAME_INTERPOLATION);
+            reasons.add(RejectionReason.INTERPOLATION_UNAVAILABLE);
         }
 
         if (!capabilities.supports(MetalExecutorKind.METAL3)) {
             throw new IllegalStateException("Fail-closed selection requires the Metal 3 baseline");
         }
+        LightingMode resolvedLighting = capabilities.supports(requestedLighting)
+                ? requestedLighting
+                : LightingMode.LEGACY;
         DisplayOutputMode safeOutput = capabilities.supports(currentSafeOutput)
                 ? currentSafeOutput
                 : DisplayOutputMode.SDR;
+        DisplayOutputMode resolvedOutput = capabilities.supports(requestedOutput)
+                ? requestedOutput
+                : safeOutput;
+        MetalExecutorKind resolvedExecutor = capabilities.supports(requestedExecutor)
+                ? requestedExecutor
+                : MetalExecutorKind.METAL3;
         return new Resolution(
                 new RendererGenerationConfig(
-                        LightingMode.LEGACY,
-                        safeOutput,
-                        MetalExecutorKind.METAL3,
+                        resolvedLighting,
+                        resolvedOutput,
+                        resolvedExecutor,
+                        requestedPreset,
+                        resolvedFeatures,
                         capabilities,
                         frameResourceContractVersion
                 ),

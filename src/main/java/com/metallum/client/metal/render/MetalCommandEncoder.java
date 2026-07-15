@@ -68,6 +68,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MemorySegment renderDepthAttachment = MemorySegment.NULL;
     private final DynamicBackingPool<MemorySegment> dynamicBackingPool;
     private MetalGpuTimingStage gpuTimingStage = MetalGpuTimingStage.NONE;
+    private long cpuRenderSubmissionStartNanos;
     private final PendingUiSeedState<PendingUiSeed> pendingUiSeeds = new PendingUiSeedState<>();
 
     MetalCommandEncoder(final MetalDevice device) {
@@ -94,6 +95,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     MTLCommandBuffer commandBuffer() {
         if (commandBuffer != null) {
             return commandBuffer;
+        }
+        if (this.workloadTelemetry != null) {
+            this.cpuRenderSubmissionStartNanos = System.nanoTime();
         }
         return commandBuffer = device.commandQueue.makeCommandBuffer(
                 device.useLabels() ? "Metallum frame " + currentSubmitIndex : null
@@ -173,14 +177,19 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return;
         }
         MetalJavaWorkloadTelemetry.Snapshot snapshot = this.workloadTelemetry.snapshot();
+        long cpuRenderSubmissionNanos = this.cpuRenderSubmissionStartNanos == 0L
+                ? 0L
+                : Math.max(System.nanoTime() - this.cpuRenderSubmissionStartNanos, 0L);
         this.commandBuffer.recordJavaWorkload(
                 snapshot.cpuToSharedBytes(),
                 snapshot.cpuToSharedOperations(),
                 snapshot.cpuTransientRequestedBytes(),
                 snapshot.cpuTransientReservedBytes(),
                 snapshot.gpuTransientRequestedBytes(),
-                snapshot.gpuTransientReservedBytes()
+                snapshot.gpuTransientReservedBytes(),
+                cpuRenderSubmissionNanos
         );
+        this.cpuRenderSubmissionStartNanos = 0L;
         this.workloadTelemetry.reset();
     }
 

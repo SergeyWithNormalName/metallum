@@ -212,14 +212,16 @@ public final class MTLCommandBuffer {
             final long cpuTransientRequestedBytes,
             final long cpuTransientReservedBytes,
             final long gpuTransientRequestedBytes,
-            final long gpuTransientReservedBytes
+            final long gpuTransientReservedBytes,
+            final long cpuRenderSubmissionNanos
     ) {
         if (cpuToSharedBytes < 0L
                 || cpuToSharedOperations < 0L
                 || cpuTransientRequestedBytes < 0L
                 || cpuTransientReservedBytes < 0L
                 || gpuTransientRequestedBytes < 0L
-                || gpuTransientReservedBytes < 0L) {
+                || gpuTransientReservedBytes < 0L
+                || cpuRenderSubmissionNanos < 0L) {
             throw new IllegalArgumentException("Java workload counters must be non-negative");
         }
         if (cpuTransientReservedBytes < cpuTransientRequestedBytes
@@ -233,7 +235,8 @@ public final class MTLCommandBuffer {
                 cpuTransientRequestedBytes,
                 cpuTransientReservedBytes,
                 gpuTransientRequestedBytes,
-                gpuTransientReservedBytes
+                gpuTransientReservedBytes,
+                cpuRenderSubmissionNanos
         );
     }
 

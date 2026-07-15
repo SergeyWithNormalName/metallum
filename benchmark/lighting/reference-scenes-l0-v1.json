@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "lighting-reference-scenes-l0-v1",
+  "artifact_policy": {
+    "tracked": "scene contracts, fixture/route identities, capture hashes and numeric gates",
+    "ignored": "binary worlds and PNG captures under run/",
+    "fixture": "run/benchmark-fixtures/hdrtest-static-v1/world",
+    "route": "benchmark/routes/hdrtest-static-v1.json"
+  },
+  "stage0_capture_matrix": {
+    "scene": "static-heavy",
+    "lighting": "legacy",
+    "output": "hdr",
+    "upscale_modes": ["native", "spatial_quality", "spatial_performance"],
+    "captures": [
+      {
+        "upscale_mode": "native",
+        "ignored_path": "run/lighting-reference/l0/20260715T101814Z-ge1fb4e5769e3-dirty-l0-reference-native-off.png",
+        "sha256": "234f47d23d3bb23f1aeaaaaf83cc7c02b4bc0fe8855c989b60c07a53c9d5b1ea",
+        "dimensions": [3024, 1964]
+      },
+      {
+        "upscale_mode": "spatial_quality",
+        "ignored_path": "run/lighting-reference/l0/20260715T101931Z-ge1fb4e5769e3-dirty-l0-reference-spatial-quality-quality.png",
+        "sha256": "9067cb0502a1dc8aadf24ba4c5725ba88f6c77e3721fdde028d37783fefd924d",
+        "dimensions": [3024, 1964]
+      },
+      {
+        "upscale_mode": "spatial_performance",
+        "ignored_path": "run/lighting-reference/l0/20260715T102049Z-ge1fb4e5769e3-dirty-l0-reference-spatial-performance-performance.png",
+        "sha256": "2c6296b7ad1cf430ce5dfb7d5a332c4af305ae2596a233f4407671d9fc7297d3",
+        "dimensions": [3024, 1964]
+      }
+    ]
+  },
+  "numeric_gates": [
+    "hdrValueValidation",
+    "hdrUnitTest",
+    "frameStateAbiNativeValidation",
+    "rendererArchitectureUnitTest"
+  ],
+  "manual_scene_specs": [
+    {"id": "single-white-torch-room", "contract": "sealed dark room; one white torch"},
+    {"id": "rgb-light-room", "contract": "same room; isolated red, green and blue emitters"},
+    {"id": "one-block-occluder", "contract": "one full block between emitter and camera"},
+    {"id": "partial-shape-occluders", "contract": "slab, stairs, fence, pane and leaves before emitter"},
+    {"id": "moving-entity-shadow", "contract": "entity crosses emitter-to-wall path"},
+    {"id": "exposure-transition", "contract": "entity/camera crosses bright-to-dark boundary"},
+    {"id": "sun-cascade-motion", "contract": "sunrise, sunset and cascade-boundary motion"},
+    {"id": "weather-sky-change", "contract": "rain/thunder with fast sky-light transition"},
+    {"id": "water-glass", "contract": "camera above/below water with glass in view"},
+    {"id": "lava-particles", "contract": "lava plus emissive particles"},
+    {"id": "dimension-matrix", "contract": "Nether, End and one custom dimension"},
+    {"id": "chunk-boundary-churn", "contract": "load/unload chunks near camera"},
+    {"id": "camera-discontinuities", "contract": "fast flight, teleport and FOV change"},
+    {"id": "display-discontinuities", "contract": "resize, fullscreen and SDR/EDR display move"},
+    {"id": "low-scale-diagnostics", "contract": "low render scale with motion/reactive diagnostics"},
+    {"id": "lighting-output-matrix", "contract": "all four lighting/output combinations at one pose"},
+    {"id": "unknown-render-role", "contract": "custom role must adapt or atomically fall back lighting only"},
+    {"id": "frame-interpolation-ui", "contract": "camera, GUI, cursor, pause/menu and camera cut"}
+  ]
+}

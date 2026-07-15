@@ -1,7 +1,10 @@
 package com.metallum.client.renderer.temporal;
 
 import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RendererFeatureMask;
 
 import java.util.Collections;
 import java.util.EnumSet;
@@ -18,6 +21,12 @@ public record FrameState(
         long outputGenerationId,
         LightingMode lightingMode,
         DisplayOutputMode outputMode,
+        LightingPreset lightingPreset,
+        RendererFeatureMask featureMask,
+        MetalExecutorKind executorKind,
+        int frameGraphVersion,
+        ResourceBytes resourceBytes,
+        LightingWork lightingWork,
         Transforms currentTransforms,
         Transforms previousTransforms,
         Extent renderExtent,
@@ -64,6 +73,47 @@ public record FrameState(
         }
     }
 
+    /** Owned resource estimates for the active generation, split by independent feature axis. */
+    public record ResourceBytes(
+            long base,
+            long hdr,
+            long lighting,
+            long upscale,
+            long interpolation
+    ) {
+        public static final ResourceBytes NONE = new ResourceBytes(0L, 0L, 0L, 0L, 0L);
+
+        public ResourceBytes {
+            requireNonNegative(base, "base resource bytes");
+            requireNonNegative(hdr, "HDR resource bytes");
+            requireNonNegative(lighting, "lighting resource bytes");
+            requireNonNegative(upscale, "upscale resource bytes");
+            requireNonNegative(interpolation, "interpolation resource bytes");
+        }
+    }
+
+    /** Per-frame light work. L0 keeps every field exactly zero in Legacy generations. */
+    public record LightingWork(
+            int lightCount,
+            int passCount,
+            int dispatchCount,
+            long uploadBytes
+    ) {
+        public static final LightingWork NONE = new LightingWork(0, 0, 0, 0L);
+
+        public LightingWork {
+            requireNonNegative(lightCount, "light count");
+            requireNonNegative(passCount, "lighting pass count");
+            requireNonNegative(dispatchCount, "lighting dispatch count");
+            requireNonNegative(uploadBytes, "lighting upload bytes");
+        }
+
+        public boolean isEmpty() {
+            return this.lightCount == 0 && this.passCount == 0
+                    && this.dispatchCount == 0 && this.uploadBytes == 0L;
+        }
+    }
+
     public record Transforms(
             Matrix4 camera,
             Matrix4 view,
@@ -96,6 +146,30 @@ public record FrameState(
         requireNonNegative(outputGenerationId, "output generation ID");
         Objects.requireNonNull(lightingMode, "lightingMode");
         Objects.requireNonNull(outputMode, "outputMode");
+        Objects.requireNonNull(lightingPreset, "lightingPreset");
+        Objects.requireNonNull(featureMask, "featureMask");
+        Objects.requireNonNull(executorKind, "executorKind");
+        if (frameGraphVersion <= 0) {
+            throw new IllegalArgumentException("Frame graph version must be positive");
+        }
+        Objects.requireNonNull(resourceBytes, "resourceBytes");
+        Objects.requireNonNull(lightingWork, "lightingWork");
+        if (lightingMode == LightingMode.LEGACY
+                && (resourceBytes.lighting() != 0L || !lightingWork.isEmpty())) {
+            throw new IllegalArgumentException("Legacy frames must contain zero lighting work/resources");
+        }
+        if (outputMode == DisplayOutputMode.SDR && resourceBytes.hdr() != 0L) {
+            throw new IllegalArgumentException("SDR frames must contain zero HDR resource bytes");
+        }
+        if (!featureMask.contains(RendererFeatureMask.SPATIAL_UPSCALING)
+                && !featureMask.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                && resourceBytes.upscale() != 0L) {
+            throw new IllegalArgumentException("Native-resolution frames must contain zero upscale bytes");
+        }
+        if (!featureMask.contains(RendererFeatureMask.FRAME_INTERPOLATION)
+                && resourceBytes.interpolation() != 0L) {
+            throw new IllegalArgumentException("Frames without interpolation must contain zero interpolation bytes");
+        }
         Objects.requireNonNull(currentTransforms, "currentTransforms");
         Objects.requireNonNull(previousTransforms, "previousTransforms");
         Objects.requireNonNull(renderExtent, "renderExtent");
@@ -108,6 +182,51 @@ public record FrameState(
                 ? EnumSet.noneOf(HistoryResetReason.class)
                 : EnumSet.copyOf(historyResetReasons);
         historyResetReasons = Collections.unmodifiableSet(resetCopy);
+    }
+
+    /** Compatibility constructor for preparation callers that do not yet own a generation manifest. */
+    public FrameState(
+            final FrameContract contract,
+            final long frameId,
+            final long rendererGenerationId,
+            final long historyGeneration,
+            final long lightingGenerationId,
+            final long outputGenerationId,
+            final LightingMode lightingMode,
+            final DisplayOutputMode outputMode,
+            final Transforms currentTransforms,
+            final Transforms previousTransforms,
+            final Extent renderExtent,
+            final Extent displayExtent,
+            final double exposure,
+            final double preExposure,
+            final JitterOffset jitterOffset,
+            final Set<HistoryResetReason> historyResetReasons
+    ) {
+        this(
+                contract,
+                frameId,
+                rendererGenerationId,
+                historyGeneration,
+                lightingGenerationId,
+                outputGenerationId,
+                lightingMode,
+                outputMode,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                MetalExecutorKind.METAL3,
+                1,
+                ResourceBytes.NONE,
+                LightingWork.NONE,
+                currentTransforms,
+                previousTransforms,
+                renderExtent,
+                displayExtent,
+                exposure,
+                preExposure,
+                jitterOffset,
+                historyResetReasons
+        );
     }
 
     /**
@@ -151,6 +270,12 @@ public record FrameState(
 
     private static void requireNonNegative(final long value, final String name) {
         if (value < 0L) {
+            throw new IllegalArgumentException(name + " must be non-negative");
+        }
+    }
+
+    private static void requireNonNegative(final int value, final String name) {
+        if (value < 0) {
             throw new IllegalArgumentException(name + " must be non-negative");
         }
     }

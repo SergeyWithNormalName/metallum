@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metal.render.MetalDevice;
 import com.mojang.blaze3d.pipeline.MainTarget;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import net.minecraft.client.renderer.GameRenderer;
@@ -21,16 +22,18 @@ abstract class GameRendererMetalFxMixin {
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
+        int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(this.mainRenderTarget.width);
+        int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(this.mainRenderTarget.height);
         if (MetalFxSpatialScaling.consumePendingResize()) {
-            int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(this.mainRenderTarget.width);
-            int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(this.mainRenderTarget.height);
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
         }
         if (!MetalFxSpatialScaling.isActive()) {
+            MetalDevice device = MetalDevice.getInstance();
+            if (device != null) {
+                device.publishRendererGenerationState(displayWidth, displayHeight);
+            }
             return;
         }
-        int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(this.mainRenderTarget.width);
-        int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(this.mainRenderTarget.height);
         MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
                 displayWidth,
                 displayHeight
@@ -38,6 +41,10 @@ abstract class GameRendererMetalFxMixin {
         if (this.mainRenderTarget.width != dimensions.renderWidth()
                 || this.mainRenderTarget.height != dimensions.renderHeight()) {
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
+        }
+        MetalDevice device = MetalDevice.getInstance();
+        if (device != null) {
+            device.publishRendererGenerationState(displayWidth, displayHeight);
         }
     }
 

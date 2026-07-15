@@ -8,6 +8,7 @@ ANALYZER="$ROOT/tools/metal_benchmark_report.py"
 FIXTURE_HELPER="$ROOT/tools/metal_benchmark_fixture.py"
 RUN_DIR="$ROOT/run"
 OUTPUT_DIR="$RUN_DIR/logs/metallum-benchmarks"
+REFERENCE_OUTPUT_DIR="$RUN_DIR/lighting-reference/l0"
 DEFAULT_ROUTE_SPEC="benchmark/routes/hdrtest-static-v1.json"
 DEFAULT_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-v1.json"
 ARTIFACT_CLASSES="build/classes/java/main"
@@ -27,6 +28,7 @@ SETTINGS_SPEC_ARGUMENT="$DEFAULT_SETTINGS_SPEC"
 METALFX_MODE="OFF"
 LABEL="baseline"
 PREFLIGHT_ONLY=0
+CAPTURE_REFERENCE=0
 
 RUN_WORLD_PATH=""
 RUN_WORLD_NAME=""
@@ -53,6 +55,7 @@ Options:
   --metalfx MODE     OFF, QUALITY, or PERFORMANCE (default: OFF)
   --label LABEL      short artifact label (default: baseline)
   --preflight-only   validate route/config/immutable fixture without cloning
+  --capture-reference capture one ignored screenshot; this run is not attested
   -h, --help         show this help
 
 Compare completed reports with:
@@ -93,6 +96,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --preflight-only)
             PREFLIGHT_ONLY=1
+            shift
+            ;;
+        --capture-reference)
+            CAPTURE_REFERENCE=1
             shift
             ;;
         -h|--help)
@@ -360,6 +367,9 @@ echo "  frames: $WARMUP_FRAMES warmup + $MEASURE_FRAMES measurement"
 echo "  commit: $commit ($worktree_state worktree state)"
 echo "  source: $SOURCE_SHA256"
 echo "  raw report: $RAW_REPORT"
+if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
+    echo "  reference capture: enabled (performance result will not be attested)"
+fi
 
 if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
     exit 0
@@ -542,7 +552,7 @@ METALLUM_BENCHMARK_WARMUP_FRAMES="$WARMUP_FRAMES" \
 METALLUM_BENCHMARK_MEASURE_FRAMES="$MEASURE_FRAMES" \
 METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
-METALLUM_BENCHMARK_SCREENSHOTS=0 \
+METALLUM_BENCHMARK_SCREENSHOTS="$CAPTURE_REFERENCE" \
 METALLUM_BENCHMARK_COMMIT="$commit" \
 METALLUM_BENCHMARK_DIRTY="$dirty_flag" \
 METALLUM_BENCHMARK_SOURCE_SHA256="$SOURCE_SHA256" \
@@ -624,8 +634,13 @@ if grep -Fq "METALLUM_BENCHMARK EVENT=FAIL" "$MINECRAFT_LOG"; then
     grep -F "METALLUM_BENCHMARK EVENT=FAIL" "$MINECRAFT_LOG" >&2 || true
     die "benchmark controller reported failure"
 fi
-if grep -Fq "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" "$MINECRAFT_LOG"; then
-    die "benchmark unexpectedly requested a screenshot"
+screenshot_request_count=$(grep -Fc "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED" \
+    "$MINECRAFT_LOG" || true)
+if [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+    [ "$screenshot_request_count" -eq 0 ] || die "benchmark unexpectedly requested a screenshot"
+else
+    [ "$screenshot_request_count" -eq 1 ] \
+        || die "reference run expected exactly one screenshot request (found $screenshot_request_count)"
 fi
 if grep -Eq '\[metallum\] (Metal command buffer failed|GPU timing sample invalid|Static geometry heap teardown exceeded Sodium cache bound|Static geometry buffer release was not registered)' "$CONSOLE_LOG"; then
     grep -E '\[metallum\] (Metal command buffer failed|GPU timing sample invalid|Static geometry heap teardown exceeded Sodium cache bound|Static geometry buffer release was not registered)' "$CONSOLE_LOG" >&2 || true
@@ -793,9 +808,29 @@ python3 "$ANALYZER" summarize "$RAW_REPORT" \
 remaining_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
 [ -z "$remaining_processes" ] || die "benchmark returned but a Minecraft/runClient process remains:\n$remaining_processes"
 
-echo "Benchmark validated: COMPLETE present, no FAIL/screenshots, dropped timing events = 0"
+if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
+    captured_screenshot=""
+    captured_count=0
+    for screenshot in "$RUN_DIR"/screenshots/*.png; do
+        [ -f "$screenshot" ] || continue
+        screenshot_mtime=$(stat -f %m "$screenshot")
+        if [ "$screenshot_mtime" -ge "$start_epoch" ]; then
+            captured_screenshot=$screenshot
+            captured_count=$((captured_count + 1))
+        fi
+    done
+    [ "$captured_count" -eq 1 ] \
+        || die "reference run expected exactly one new PNG (found $captured_count)"
+    mkdir -p "$REFERENCE_OUTPUT_DIR"
+    reference_screenshot="$REFERENCE_OUTPUT_DIR/$stem.png"
+    cp "$captured_screenshot" "$reference_screenshot"
+    echo "Reference capture validated (not performance-attested): $reference_screenshot"
+    echo "  sha256: $(shasum -a 256 "$reference_screenshot" | awk '{print $1}')"
+else
+    echo "Benchmark validated: COMPLETE present, no FAIL/screenshots, dropped timing events = 0"
+fi
 echo "  raw: $RAW_REPORT"
 echo "  summary: $SUMMARY_JSON"
 echo "  Minecraft log: $MINECRAFT_LOG"
 echo "  console log: $CONSOLE_LOG"
-ATTEST_PENDING=1
+ATTEST_PENDING=$((1 - CAPTURE_REFERENCE))
