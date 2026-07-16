@@ -4,18 +4,32 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.function.Predicate;
 
-/** Reused once per LevelExtractor frame; accepts entities only from Minecraft's visible loop. */
+/** Reused once per LevelExtractor frame; bounds entity lights without losing visible influence. */
 public final class BoundedDynamicLightCollector {
     private final LightWorldToken world;
     private final int capacity;
-    private final PriorityQueue<AdvancedLight> worstFirst;
+    private final PriorityQueue<Candidate> worstFirst;
     private final Comparator<AdvancedLight> admissionOrder;
+    private final Predicate<AdvancedLight> intersectsView;
+    private final Comparator<Candidate> selectionOrder;
     private int offered;
 
     public BoundedDynamicLightCollector(final LightWorldToken world, final int capacity) {
+        this(world, capacity, light -> true);
+    }
+
+    public BoundedDynamicLightCollector(
+            final LightWorldToken world,
+            final int capacity,
+            final Predicate<AdvancedLight> intersectsView
+    ) {
         if (world == null) {
             throw new NullPointerException("world");
+        }
+        if (intersectsView == null) {
+            throw new NullPointerException("intersectsView");
         }
         if (capacity <= 0 || capacity > AdvancedLightRegistry.MAX_DYNAMIC_LIGHTS) {
             throw new IllegalArgumentException("Dynamic capacity is outside the registry bound");
@@ -23,7 +37,14 @@ public final class BoundedDynamicLightCollector {
         this.world = world;
         this.capacity = capacity;
         this.admissionOrder = FrameLightOrder.admissionComparator();
-        this.worstFirst = new PriorityQueue<>(capacity, this.admissionOrder.reversed());
+        this.intersectsView = intersectsView;
+        this.selectionOrder = (left, right) -> {
+            int visibilityOrder = Boolean.compare(right.intersectsView, left.intersectsView);
+            return visibilityOrder != 0
+                    ? visibilityOrder
+                    : this.admissionOrder.compare(left.light, right.light);
+        };
+        this.worstFirst = new PriorityQueue<>(capacity, this.selectionOrder.reversed());
     }
 
     public LightWorldToken world() {
@@ -38,14 +59,15 @@ public final class BoundedDynamicLightCollector {
             throw new IllegalArgumentException("Dynamic collectors accept only ENTITY lights");
         }
         this.offered++;
+        Candidate candidate = new Candidate(light, this.intersectsView.test(light));
         if (this.worstFirst.size() < this.capacity) {
-            this.worstFirst.add(light);
+            this.worstFirst.add(candidate);
             return;
         }
-        AdvancedLight worst = this.worstFirst.peek();
-        if (this.admissionOrder.compare(light, worst) < 0) {
+        Candidate worst = this.worstFirst.peek();
+        if (this.selectionOrder.compare(candidate, worst) < 0) {
             this.worstFirst.remove();
-            this.worstFirst.add(light);
+            this.worstFirst.add(candidate);
         }
     }
 
@@ -58,8 +80,13 @@ public final class BoundedDynamicLightCollector {
     }
 
     public List<AdvancedLight> finish() {
-        List<AdvancedLight> result = new ArrayList<>(this.worstFirst);
+        List<AdvancedLight> result = this.worstFirst.stream()
+                .map(Candidate::light)
+                .collect(ArrayList::new, ArrayList::add, ArrayList::addAll);
         result.sort(this.admissionOrder);
         return List.copyOf(result);
+    }
+
+    private record Candidate(AdvancedLight light, boolean intersectsView) {
     }
 }

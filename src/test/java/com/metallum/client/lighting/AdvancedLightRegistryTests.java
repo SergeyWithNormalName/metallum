@@ -2,6 +2,9 @@ package com.metallum.client.lighting;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.renderer.AdvancedLightingLayout;
+import com.metallum.client.renderer.temporal.FrameCapture;
+import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.renderer.temporal.Matrix4;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -38,6 +41,7 @@ public final class AdvancedLightRegistryTests {
     public static void main(final String[] args) {
         testMinecraftEmitterPolicy();
         testDenseBlockCompaction();
+        testDirectLightFrustumClassification();
         testFullCandidatePoolCameraStability();
         testExactStaticScanAndSectionCap();
         testOverrideRacePermutations();
@@ -339,76 +343,165 @@ public final class AdvancedLightRegistryTests {
                 "dense-section cache retained a removed source");
     }
 
+    private static void testDirectLightFrustumClassification() {
+        DirectLightFrustum forward = directLightFrustum(Matrix4.identity());
+        AdvancedLight intersectingEdge = exactTemplate(
+                1,
+                11.0,
+                0.0,
+                -10.0,
+                2.0F,
+                0.01F
+        ).materialize(1L, 1L);
+        AdvancedLight outsideGuard = exactTemplate(
+                240,
+                20.0,
+                0.0,
+                -10.0,
+                1.0F,
+                10.0F
+        ).materialize(2L, 1L);
+        AdvancedLight guardBand = exactTemplate(
+                240,
+                11.5,
+                0.0,
+                -10.0,
+                1.0F,
+                10.0F
+        ).materialize(6L, 1L);
+        AdvancedLight behindCamera = exactTemplate(
+                240,
+                0.0,
+                0.0,
+                10.0,
+                1.0F,
+                10.0F
+        ).materialize(3L, 1L);
+        AdvancedLight cameraInside = exactTemplate(
+                1,
+                0.0,
+                0.0,
+                0.0,
+                2.0F,
+                0.01F
+        ).materialize(4L, 1L);
+        AdvancedLight crossesFarPlane = exactTemplate(
+                1,
+                0.0,
+                0.0,
+                -104.0,
+                5.0F,
+                0.01F
+        ).materialize(5L, 1L);
+        require(forward.classify(intersectingEdge) == DirectLightFrustum.Tier.INTERSECTING,
+                "direct-light visibility tested the emitter point instead of its influence sphere");
+        require(forward.classify(outsideGuard) == DirectLightFrustum.Tier.BACKGROUND,
+                "fully off-frustum influence sphere was not classified as background");
+        require(forward.classify(guardBand) == DirectLightFrustum.Tier.GUARD_BAND,
+                "one-block direct-light guard band was not classified separately");
+        require(forward.classify(behindCamera) == DirectLightFrustum.Tier.BACKGROUND,
+                "light fully behind the camera was not classified as background");
+        require(forward.classify(cameraInside) == DirectLightFrustum.Tier.INTERSECTING,
+                "camera-inside influence sphere was incorrectly culled");
+        require(forward.classify(crossesFarPlane) == DirectLightFrustum.Tier.INTERSECTING,
+                "sphere crossing the far plane was culled by its center");
+
+        Matrix4 degenerateView = Matrix4.of(
+                0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0
+        );
+        require(directLightFrustum(degenerateView).classify(outsideGuard)
+                        == DirectLightFrustum.Tier.INTERSECTING,
+                "invalid view data did not fail open to a protected light");
+    }
+
     private static void testFullCandidatePoolCameraStability() {
         AdvancedLightRegistry registry = new AdvancedLightRegistry();
         Object world = new Object();
-        long stableId = 1L;
-        for (int section = 0; section < 16; section++) {
-            for (int localIndex = 0; localIndex < 256; localIndex++) {
-                int x = section * 32 + (localIndex & 15);
-                int z = localIndex >>> 4;
-                registry.recordBlockChange(
-                        world,
-                        DIMENSION,
-                        section,
-                        localIndex,
-                        stableId,
-                        exactTemplate(
-                                1 + localIndex % 240,
-                                x + 0.5,
-                                0.5,
-                                z + 0.5,
-                                2.5F,
-                                1.0F
-                        )
-                );
-                stableId++;
-            }
+        long dimVisibleId = AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
+        for (int index = 0; index < AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS; index++) {
+            long stableId = index + 1L;
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    index / 256,
+                    index & 255,
+                    stableId,
+                    exactTemplate(
+                            stableId == dimVisibleId ? 1 : 100,
+                            0.0,
+                            0.0,
+                            -10.0,
+                            2.5F,
+                            stableId == dimVisibleId ? 0.01F : 1.0F
+                    )
+            );
         }
-        LightFrameSnapshot origin = registry.snapshotForFrame(
-                0.0,
-                0.0,
-                0.0,
+        DirectLightFrustum forward = directLightFrustum(Matrix4.identity());
+        DirectLightFrustum backward = directLightFrustum(yaw180View());
+        LightFrameSnapshot forwardComplete = registry.snapshotForFrame(
+                forward,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        LightFrameSnapshot distant = registry.snapshotForFrame(
-                1_000.0,
-                250.0,
-                -1_000.0,
+        LightFrameSnapshot backwardComplete = registry.snapshotForFrame(
+                backward,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        require(origin.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
-                        && origin.droppedLightCount() == 0
-                        && origin.lights().equals(distant.lights()),
-                "full 4096-source candidate pool changed or dropped lights after camera motion");
+        require(forwardComplete.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && forwardComplete.droppedLightCount() == 0
+                        && forwardComplete.lights().equals(backwardComplete.lights()),
+                "complete 4096-source pool changed when no overflow required selection");
+
+        long brightBehindId = dimVisibleId + 1L;
         registry.recordBlockChange(
                 world,
                 DIMENSION,
                 16L,
                 0,
-                stableId,
-                exactTemplate(240, 10_000.5, 0.5, 0.5, 2.5F, 1.0F)
+                brightBehindId,
+                exactTemplate(240, 0.0, 0.0, 10.0, 2.5F, 10.0F)
         );
-        LightFrameSnapshot overflowOrigin = registry.snapshotForFrame(
-                        0.0,
-                        0.0,
-                        0.0,
-                        AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
-                        AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
-                );
-        LightFrameSnapshot overflowDistant = registry.snapshotForFrame(
-                -2_000.0,
-                400.0,
-                2_000.0,
+        LightFrameSnapshot forwardOverflow = registry.snapshotForFrame(
+                forward,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        require(overflowOrigin.droppedLightCount() == 1
-                        && overflowDistant.droppedLightCount() == 1
-                        && overflowOrigin.lights().equals(overflowDistant.lights()),
-                "4097th independent source did not produce one explicit bounded overflow");
+        require(forwardOverflow.droppedLightCount() == 1
+                        && stableIds(forwardOverflow.lights()).contains(dimVisibleId)
+                        && !stableIds(forwardOverflow.lights()).contains(brightBehindId)
+                        && registry.telemetry().protectedFrameLightOverflows() == 0L,
+                "bright background light displaced a dim visible influence sphere");
+
+        LightFrameSnapshot backwardOverflow = registry.snapshotForFrame(
+                backward,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(backwardOverflow.droppedLightCount() == 1
+                        && stableIds(backwardOverflow.lights()).contains(brightBehindId)
+                        && !stableIds(backwardOverflow.lights()).contains(dimVisibleId)
+                        && registry.telemetry().protectedFrameLightOverflows() == 0L,
+                "camera rotation did not refresh direct-light visibility admission");
+
+        registry.recordBlockChange(
+                world,
+                DIMENSION,
+                16L,
+                1,
+                brightBehindId + 1L,
+                exactTemplate(240, 0.0, 0.0, -10.0, 2.5F, 10.0F)
+        );
+        registry.snapshotForFrame(
+                forward,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(registry.telemetry().protectedFrameLightOverflows() == 1L,
+                "overflow of more than 4096 potentially visible influence spheres was hidden");
     }
 
     private static void testExactStaticScanAndSectionCap() {
@@ -992,6 +1085,18 @@ public final class AdvancedLightRegistryTests {
         require(retained.equals(reverseCollector.finish()),
                 "dynamic overflow changed with insertion order");
 
+        BoundedDynamicLightCollector visibilityCollector = new BoundedDynamicLightCollector(
+                token,
+                2,
+                light -> light.x() < 0.0
+        );
+        visibilityCollector.offer(entityLight(token, 30_001L, -1.0, 1, 0.01F));
+        visibilityCollector.offer(entityLight(token, 30_002L, -2.0, 2, 1.0F));
+        visibilityCollector.offer(entityLight(token, 30_003L, 1.0, 240, 10.0F));
+        require(stableIds(visibilityCollector.finish()).equals(List.of(30_002L, 30_001L))
+                        && visibilityCollector.dropped() == 1,
+                "dynamic pre-cap let a bright background source displace a visible source");
+
         registry.publishDynamicFrame(token, retained, collector.offered());
         LightFrameSnapshot snapshot = registry.snapshotForFrame(0, 0, 0, 73);
         require(snapshot.dynamicLightCount() == 73 && snapshot.staticLightCount() == 0,
@@ -1221,6 +1326,50 @@ public final class AdvancedLightRegistryTests {
         }
     }
 
+    private static DirectLightFrustum directLightFrustum(final Matrix4 view) {
+        Matrix4 projection = perspective90Projection(0.1, 100.0);
+        FrameState.Transforms transforms = new FrameState.Transforms(
+                Matrix4.identity(),
+                view,
+                projection,
+                Matrix4.identity(),
+                view,
+                projection
+        );
+        return DirectLightFrustum.from(new FrameCapture(
+                transforms,
+                FrameState.CameraPosition.ORIGIN,
+                1.0 / 60.0,
+                0.1,
+                100.0,
+                1L,
+                1L
+        ));
+    }
+
+    private static Matrix4 perspective90Projection(
+            final double nearPlane,
+            final double farPlane
+    ) {
+        double depthScale = -(farPlane + nearPlane) / (farPlane - nearPlane);
+        double depthTranslation = -(2.0 * farPlane * nearPlane) / (farPlane - nearPlane);
+        return Matrix4.of(
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, depthScale, -1.0,
+                0.0, 0.0, depthTranslation, 0.0
+        );
+    }
+
+    private static Matrix4 yaw180View() {
+        return Matrix4.of(
+                -1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, -1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0
+        );
+    }
+
     private static LightTemplate exactTemplate(
             final int priority,
             final double x,
@@ -1263,6 +1412,29 @@ public final class AdvancedLightRegistryTests {
                 3.15F,
                 240,
                 true
+        );
+    }
+
+    private static AdvancedLight entityLight(
+            final LightWorldToken token,
+            final long stableId,
+            final double x,
+            final int priority,
+            final float intensity
+    ) {
+        return new AdvancedLight(
+                stableId,
+                token.generation(),
+                LightSourceKind.ENTITY,
+                x,
+                0.0,
+                -10.0,
+                2.0F,
+                1.0F,
+                0.25F,
+                0.05F,
+                intensity,
+                priority
         );
     }
 

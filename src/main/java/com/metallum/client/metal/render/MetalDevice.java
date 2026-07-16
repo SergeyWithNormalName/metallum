@@ -18,6 +18,7 @@ import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.AdvancedLightRegistry;
+import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
@@ -1018,9 +1019,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && AdvancedLightingRuntime.isActive()
                 && lightingResources != null) {
             lightSnapshot = AdvancedLightRegistry.global().snapshotForFrameIfHealthy(
-                    capture.cameraPosition().x(),
-                    capture.cameraPosition().y(),
-                    capture.cameraPosition().z(),
+                    DirectLightFrustum.from(capture),
                     lightingResources.budget().maxLights(),
                     advancedLightingAdmissionLimit(generation.lightingPreset())
             );

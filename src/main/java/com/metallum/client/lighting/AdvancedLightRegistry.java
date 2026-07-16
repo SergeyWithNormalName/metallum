@@ -73,6 +73,7 @@ public final class AdvancedLightRegistry {
     private long residentSectionCapacityDrops;
     private long sectionLightOverflows;
     private long frameLightOverflows;
+    private long protectedFrameLightOverflows;
     private long registryFailures;
     private long admissionGeneration;
     private boolean healthy = true;
@@ -440,7 +441,34 @@ public final class AdvancedLightRegistry {
                 cameraY,
                 cameraZ,
                 maxLights,
+                admissionLimit,
+                null
+        );
+    }
+
+    /** Produces a direct-light frame whose bounded membership is conservative-view aware. */
+    public synchronized LightFrameSnapshot snapshotForFrame(
+            final DirectLightFrustum frustum,
+            final int maxLights,
+            final int admissionLimit
+    ) {
+        if (frustum == null) {
+            throw new NullPointerException("frustum");
+        }
+        validateFrameSnapshotRequest(
+                frustum.cameraX(),
+                frustum.cameraY(),
+                frustum.cameraZ(),
+                maxLights,
                 admissionLimit
+        );
+        return snapshotForFrameLocked(
+                frustum.cameraX(),
+                frustum.cameraY(),
+                frustum.cameraZ(),
+                maxLights,
+                admissionLimit,
+                frustum
         );
     }
 
@@ -478,7 +506,35 @@ public final class AdvancedLightRegistry {
                         cameraY,
                         cameraZ,
                         maxLights,
-                        admissionLimit
+                        admissionLimit,
+                        null
+                )
+                : null;
+    }
+
+    public synchronized @Nullable LightFrameSnapshot snapshotForFrameIfHealthy(
+            final DirectLightFrustum frustum,
+            final int maxLights,
+            final int admissionLimit
+    ) {
+        if (frustum == null) {
+            throw new NullPointerException("frustum");
+        }
+        validateFrameSnapshotRequest(
+                frustum.cameraX(),
+                frustum.cameraY(),
+                frustum.cameraZ(),
+                maxLights,
+                admissionLimit
+        );
+        return this.healthy
+                ? snapshotForFrameLocked(
+                        frustum.cameraX(),
+                        frustum.cameraY(),
+                        frustum.cameraZ(),
+                        maxLights,
+                        admissionLimit,
+                        frustum
                 )
                 : null;
     }
@@ -488,7 +544,8 @@ public final class AdvancedLightRegistry {
             final double cameraY,
             final double cameraZ,
             final int maxLights,
-            final int admissionLimit
+            final int admissionLimit,
+            final @Nullable DirectLightFrustum frustum
     ) {
         if (this.activeWorld == null) {
             return LightFrameSnapshot.empty();
@@ -496,6 +553,7 @@ public final class AdvancedLightRegistry {
 
         WorldState world = this.activeWorld;
         RetainedAdmissionState admission = world.retainedAdmission;
+        boolean directVisibility = frustum != null;
         boolean resetAdmission = admission.requiresReset(
                 maxLights,
                 admissionLimit,
@@ -503,7 +561,7 @@ public final class AdvancedLightRegistry {
                 cameraY,
                 cameraZ
         );
-        Set<Long> previousRetainedIds = resetAdmission
+        Set<Long> previousRetainedIds = directVisibility || resetAdmission
                 ? Set.of()
                 : new HashSet<>(admission.lightIds);
         Map<Long, AdvancedLight> currentRetained = new HashMap<>(
@@ -511,32 +569,88 @@ public final class AdvancedLightRegistry {
         );
         boolean productionFullPool = maxLights == MAX_FRAME_LIGHTS
                 && admissionLimit == maxLights;
-        Comparator<AdvancedLight> frameOrder = productionFullPool
+        Comparator<AdvancedLight> materialOrder = productionFullPool
                 ? FrameLightOrder.admissionComparator()
                 : FrameLightOrder.comparator(cameraX, cameraY, cameraZ);
-        PriorityQueue<AdvancedLight> selected = new PriorityQueue<>(
+        Comparator<FrameCandidate> selectionOrder = (left, right) -> {
+            int visibilityOrder = left.tier.compareTo(right.tier);
+            return visibilityOrder != 0
+                    ? visibilityOrder
+                    : materialOrder.compare(left.light, right.light);
+        };
+        PriorityQueue<FrameCandidate> selected = new PriorityQueue<>(
                 Math.max(1, maxLights),
-                frameOrder.reversed()
+                selectionOrder.reversed()
         );
         int total = 0;
+        int protectedCandidates = 0;
         for (SectionState section : world.sections.values()) {
             List<AdvancedLight> staticLights = section.compactedLights(
                     world.token.dimensionId()
             );
             total += staticLights.size();
             for (AdvancedLight light : staticLights) {
-                offerTopK(selected, light, maxLights, frameOrder);
+                DirectLightFrustum.Tier tier = frustum == null
+                        ? DirectLightFrustum.Tier.INTERSECTING
+                        : frustum.classify(light);
+                if (frustum != null && tier == DirectLightFrustum.Tier.INTERSECTING) {
+                    protectedCandidates++;
+                }
+                offerTopK(
+                        selected,
+                        new FrameCandidate(light, tier),
+                        maxLights,
+                        selectionOrder
+                );
                 captureRetainedLight(currentRetained, previousRetainedIds, light);
             }
         }
         for (AdvancedLight light : world.dynamicLights) {
             total++;
-            offerTopK(selected, light, maxLights, frameOrder);
+            DirectLightFrustum.Tier tier = frustum == null
+                    ? DirectLightFrustum.Tier.INTERSECTING
+                    : frustum.classify(light);
+            if (frustum != null && tier == DirectLightFrustum.Tier.INTERSECTING) {
+                protectedCandidates++;
+            }
+            offerTopK(
+                    selected,
+                    new FrameCandidate(light, tier),
+                    maxLights,
+                    selectionOrder
+            );
             captureRetainedLight(currentRetained, previousRetainedIds, light);
         }
 
-        List<AdvancedLight> candidates = new ArrayList<>(selected);
-        candidates.sort(frameOrder);
+        List<FrameCandidate> selectedCandidates = new ArrayList<>(selected);
+        selectedCandidates.sort(selectionOrder);
+        List<AdvancedLight> candidates = selectedCandidates.stream()
+                .map(FrameCandidate::light)
+                .toList();
+        if (directVisibility) {
+            // Retention must never let an off-frustum incumbent displace a currently intersecting
+            // source after a camera rotation. Keep the visibility-selected set and restore the
+            // camera-independent upload order required by deterministic cluster overflow.
+            List<AdvancedLight> ordered = new ArrayList<>(candidates);
+            ordered.sort(FrameLightOrder.admissionComparator());
+            admission.update(
+                    maxLights,
+                    admissionLimit,
+                    cameraX,
+                    cameraY,
+                    cameraZ,
+                    List.of()
+            );
+            int selectedProtected = (int) selectedCandidates.stream()
+                    .filter(candidate -> candidate.tier == DirectLightFrustum.Tier.INTERSECTING)
+                    .count();
+            return snapshot(
+                    world,
+                    total,
+                    ordered,
+                    protectedCandidates - selectedProtected
+            );
+        }
         List<AdvancedLight> retainedPrefix = retainAdmissionPrefix(
                 admission,
                 resetAdmission,
@@ -546,7 +660,7 @@ public final class AdvancedLightRegistry {
                 cameraX,
                 cameraY,
                 cameraZ,
-                frameOrder
+                materialOrder
         );
         Set<Long> retainedIds = new HashSet<>(Math.max(1, retainedPrefix.size()));
         List<AdvancedLight> ordered = new ArrayList<>(maxLights);
@@ -572,6 +686,15 @@ public final class AdvancedLightRegistry {
                 retainedPrefix.stream().map(AdvancedLight::stableId).toList()
         );
 
+        return snapshot(world, total, ordered, 0);
+    }
+
+    private LightFrameSnapshot snapshot(
+            final WorldState world,
+            final int total,
+            final List<AdvancedLight> ordered,
+            final int protectedDropped
+    ) {
         int staticCount = 0;
         for (AdvancedLight light : ordered) {
             if (light.kind() == LightSourceKind.BLOCK) {
@@ -580,6 +703,7 @@ public final class AdvancedLightRegistry {
         }
         int dropped = total - ordered.size();
         this.frameLightOverflows += dropped;
+        this.protectedFrameLightOverflows += protectedDropped;
         return new LightFrameSnapshot(
                 LightFrameSnapshot.CURRENT_VERSION,
                 world.token,
@@ -736,30 +860,37 @@ public final class AdvancedLightRegistry {
                 this.residentSectionCapacityDrops,
                 this.sectionLightOverflows,
                 this.frameLightOverflows,
+                this.protectedFrameLightOverflows,
                 this.registryFailures,
                 sections,
                 dynamic
         );
     }
 
-    private static void offerTopK(
-            final PriorityQueue<AdvancedLight> selected,
-            final AdvancedLight light,
+    private static <T> void offerTopK(
+            final PriorityQueue<T> selected,
+            final T candidate,
             final int maxLights,
-            final Comparator<AdvancedLight> frameOrder
+            final Comparator<T> frameOrder
     ) {
         if (maxLights == 0) {
             return;
         }
         if (selected.size() < maxLights) {
-            selected.add(light);
+            selected.add(candidate);
             return;
         }
-        AdvancedLight worst = selected.peek();
-        if (frameOrder.compare(light, worst) < 0) {
+        T worst = selected.peek();
+        if (frameOrder.compare(candidate, worst) < 0) {
             selected.remove();
-            selected.add(light);
+            selected.add(candidate);
         }
+    }
+
+    private record FrameCandidate(
+            AdvancedLight light,
+            DirectLightFrustum.Tier tier
+    ) {
     }
 
     private void retireActiveWorld() {

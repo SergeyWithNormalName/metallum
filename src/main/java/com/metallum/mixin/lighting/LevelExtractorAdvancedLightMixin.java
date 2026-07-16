@@ -6,6 +6,7 @@ import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.BoundedDynamicLightCollector;
+import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.MinecraftLightPolicy;
 import net.minecraft.client.Camera;
@@ -16,6 +17,7 @@ import net.minecraft.client.renderer.extract.LevelExtractor;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.AABB;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -110,7 +112,18 @@ abstract class LevelExtractorAdvancedLightMixin {
         LightWorldToken token = registry.openWorld(this.level, metallum$dimensionId(this.level));
         this.metallum$dynamicLights = new BoundedDynamicLightCollector(
                 token,
-                AdvancedLightRegistry.MAX_DYNAMIC_LIGHTS
+                AdvancedLightRegistry.MAX_DYNAMIC_LIGHTS,
+                light -> {
+                    double radius = light.radius() + DirectLightFrustum.GUARD_BAND_BLOCKS;
+                    return frustum.isVisible(new AABB(
+                            light.x() - radius,
+                            light.y() - radius,
+                            light.z() - radius,
+                            light.x() + radius,
+                            light.y() + radius,
+                            light.z() + radius
+                    ));
+                }
         );
         this.metallum$dynamicLightDeltaTracker = deltaTracker;
     }
