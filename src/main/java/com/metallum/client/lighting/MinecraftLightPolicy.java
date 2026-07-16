@@ -149,6 +149,9 @@ public final class MinecraftLightPolicy {
         if (path.contains("amethyst")) {
             return new float[]{0.48F, 0.12F, 1.0F};
         }
+        if (path.contains("portal")) {
+            return new float[]{0.48F, 0.12F, 1.0F};
+        }
         return new float[]{1.0F, 0.26F, 0.035F};
     }
 

@@ -135,6 +135,12 @@ public final class AdvancedLightRegistryTests {
                         && close(unknownMod[1], 1.0F)
                         && close(unknownMod[2], 1.0F),
                 "unknown mod emitter did not receive the neutral compatibility fallback");
+        float[] netherPortal = MinecraftLightPolicy.linearColorForIdentifier(
+                BuiltInRegistries.BLOCK.getKey(Blocks.NETHER_PORTAL));
+        require(close(netherPortal[0], 0.48F)
+                        && close(netherPortal[1], 0.12F)
+                        && close(netherPortal[2], 1.0F),
+                "nether portal block does not emit a purple hue");
         require(MinecraftLightPolicy.priorityForEmission(1)
                         < MinecraftLightPolicy.priorityForEmission(15),
                 "a dim held block can still outrank a full-brightness placed emitter");
