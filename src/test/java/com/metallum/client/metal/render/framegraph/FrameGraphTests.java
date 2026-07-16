@@ -45,20 +45,21 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 7 && graph.passes().size() == 4,
+        require(graph.resources().size() == 8 && graph.passes().size() == 4,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
                                 "lighting_upload_ring", "lighting_params", "gpu_lights",
-                                "cluster_membership_masks", "cluster_block_statistics",
+                                "cluster_membership_scratch", "cluster_compact_headers",
+                                "cluster_compact_indices",
                                 "cluster_statistics", "scene_radiance"
                         )),
-                "Advanced lighting resources do not describe the fused mask path");
+                "Advanced lighting resources do not describe the compact index path");
         List<String> passNames = graph.passes().stream()
                 .map(pass -> pass.id().name())
                 .toList();
         require(passNames.equals(List.of(
-                        "light_upload", "cluster_prepare", "cluster_masks", "direct_lighting")),
+                        "light_upload", "cluster_prepare", "cluster_build", "direct_lighting")),
                 "Advanced lighting pass order changed");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
@@ -71,20 +72,23 @@ public final class FrameGraphTests {
                             == FrameGraph.OutputApplicability.ANY,
                     "Advanced lighting pass is coupled to the wrong generation axes");
         }
-        FrameGraph.PassDesc masks = graph.passes().get(2);
-        require(masks.accesses().stream().anyMatch(access ->
-                        access.resource().name().equals("cluster_membership_masks")
+        FrameGraph.PassDesc build = graph.passes().get(2);
+        require(build.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("cluster_membership_scratch")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
-                "Fused cluster pass does not publish membership masks");
+                "Cluster build does not publish membership scratch");
         FrameGraph.PassDesc direct = graph.passes().getLast();
-        require(direct.dependencies().equals(List.of(masks.id()))
+        require(direct.dependencies().equals(List.of(build.id()))
                         && direct.accesses().stream().anyMatch(access ->
-                        access.resource().name().equals("cluster_membership_masks")
+                        access.resource().name().equals("cluster_compact_headers")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("cluster_compact_indices")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("scene_radiance")
                                 && access.kind() == FrameGraph.AccessKind.READ_WRITE),
-                "Direct lighting is not ordered after fused masks into scene radiance");
+                "Direct lighting is not ordered after compact cluster build into scene radiance");
     }
 
     private static void testReadBeforeWrite() {

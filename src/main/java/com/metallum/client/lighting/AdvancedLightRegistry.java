@@ -16,7 +16,10 @@ import org.jspecify.annotations.Nullable;
 /** Bounded, race-safe CPU registry for extraction and retained frame admission; owns no GPU data. */
 public final class AdvancedLightRegistry {
     public static final int CONTRACT_VERSION = 1;
-    public static final int MAX_LIGHTS_PER_SECTION = 256;
+    // A section contains at most 4096 emitting cells. Dense fluid compaction must observe the
+    // complete set before any bound is applied, otherwise its occupancy, support and energy are
+    // already irrecoverably lost. The cached effective list remains compact for dense fluids.
+    public static final int MAX_LIGHTS_PER_SECTION = StaticLightSectionScanner.BLOCKS_PER_SECTION;
     public static final int MAX_RESIDENT_SECTIONS = 8192;
     public static final int MAX_DYNAMIC_LIGHTS = 512;
     public static final int MAX_FRAME_LIGHTS = 4096;
@@ -281,6 +284,7 @@ public final class AdvancedLightRegistry {
         current.baseEpoch = task.baseEpoch();
         current.ownerToken = task.ownerToken();
         current.overrides.entrySet().removeIf(entry -> entry.getValue().epoch <= task.baseEpoch());
+        current.invalidateCompaction();
         if (current.base.isEmpty() && current.overrides.isEmpty()) {
             world.sections.remove(task.sectionKey());
         }
@@ -336,6 +340,7 @@ public final class AdvancedLightRegistry {
                 ? null
                 : replacement.materialize(stableId, mutationEpoch);
         section.overrides.put(localIndex, new Override(mutationEpoch, light));
+        section.invalidateCompaction();
         this.blockOverrides++;
     }
 
@@ -504,33 +509,24 @@ public final class AdvancedLightRegistry {
         Map<Long, AdvancedLight> currentRetained = new HashMap<>(
                 Math.max(1, previousRetainedIds.size())
         );
-        Comparator<AdvancedLight> frameOrder = FrameLightOrder.comparator(
-                cameraX,
-                cameraY,
-                cameraZ
-        );
+        boolean productionFullPool = maxLights == MAX_FRAME_LIGHTS
+                && admissionLimit == maxLights;
+        Comparator<AdvancedLight> frameOrder = productionFullPool
+                ? FrameLightOrder.admissionComparator()
+                : FrameLightOrder.comparator(cameraX, cameraY, cameraZ);
         PriorityQueue<AdvancedLight> selected = new PriorityQueue<>(
                 Math.max(1, maxLights),
                 frameOrder.reversed()
         );
         int total = 0;
         for (SectionState section : world.sections.values()) {
-            for (Map.Entry<Integer, AdvancedLight> entry : section.base.entrySet()) {
-                Override override = section.overrides.get(entry.getKey());
-                AdvancedLight light = override == null ? entry.getValue() : override.light;
-                if (light != null) {
-                    total++;
-                    offerTopK(selected, light, maxLights, frameOrder);
-                    captureRetainedLight(currentRetained, previousRetainedIds, light);
-                }
-            }
-            for (Map.Entry<Integer, Override> entry : section.overrides.entrySet()) {
-                if (!section.base.containsKey(entry.getKey()) && entry.getValue().light != null) {
-                    total++;
-                    AdvancedLight light = entry.getValue().light;
-                    offerTopK(selected, light, maxLights, frameOrder);
-                    captureRetainedLight(currentRetained, previousRetainedIds, light);
-                }
+            List<AdvancedLight> staticLights = section.compactedLights(
+                    world.token.dimensionId()
+            );
+            total += staticLights.size();
+            for (AdvancedLight light : staticLights) {
+                offerTopK(selected, light, maxLights, frameOrder);
+                captureRetainedLight(currentRetained, previousRetainedIds, light);
             }
         }
         for (AdvancedLight light : world.dynamicLights) {
@@ -900,8 +896,42 @@ public final class AdvancedLightRegistry {
     private static final class SectionState {
         private Map<Integer, AdvancedLight> base = Map.of();
         private final Map<Integer, Override> overrides = new HashMap<>();
+        private List<AdvancedLight> compactedLights = List.of();
+        private boolean compactionDirty = true;
         private long baseEpoch;
         private long ownerToken;
+
+        private List<AdvancedLight> compactedLights(final String dimensionId) {
+            if (!this.compactionDirty) {
+                return this.compactedLights;
+            }
+            List<AdvancedLight> effective = new ArrayList<>(
+                    this.base.size() + this.overrides.size()
+            );
+            for (Map.Entry<Integer, AdvancedLight> entry : this.base.entrySet()) {
+                Override override = this.overrides.get(entry.getKey());
+                AdvancedLight light = override == null ? entry.getValue() : override.light;
+                if (light != null) {
+                    effective.add(light);
+                }
+            }
+            for (Map.Entry<Integer, Override> entry : this.overrides.entrySet()) {
+                if (!this.base.containsKey(entry.getKey()) && entry.getValue().light != null) {
+                    effective.add(entry.getValue().light);
+                }
+            }
+            this.compactedLights = DenseBlockLightCompactor.compact(
+                    dimensionId,
+                    effective
+            ).lights();
+            this.compactionDirty = false;
+            return this.compactedLights;
+        }
+
+        private void invalidateCompaction() {
+            this.compactedLights = List.of();
+            this.compactionDirty = true;
+        }
     }
 
     private static final class RetiredWorld {

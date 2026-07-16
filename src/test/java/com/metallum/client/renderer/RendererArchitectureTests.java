@@ -1005,13 +1005,13 @@ public final class RendererArchitectureTests {
                 "lighting_upload_ring",
                 "gpu_lights",
                 "cluster_compact_headers",
-                "cluster_membership_masks",
-                "cluster_block_statistics",
+                "cluster_membership_scratch",
+                "cluster_compact_indices",
                 "lighting_params",
                 "cluster_statistics"
         );
         Set<String> expectedPasses = Set.of(
-                "light_upload", "cluster_prepare", "cluster_masks", "direct_lighting"
+                "light_upload", "cluster_prepare", "cluster_build", "direct_lighting"
         );
         Set<String> expectedPipelines = Set.of(
                 "cluster_prepare_pso", "cluster_masks_pso", "cluster_count_pso",

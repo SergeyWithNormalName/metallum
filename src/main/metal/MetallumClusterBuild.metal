@@ -3,12 +3,13 @@
 using namespace metal;
 
 constant uint METALLUM_LIGHTING_ABI_V1 = 1u;
-constant uint METALLUM_CLUSTER_CAP_V1 = 128u;
-constant uint METALLUM_CLUSTER_MEMBERSHIP_WORDS_V1 = 8u;
+constant uint METALLUM_CLUSTER_CAP_V1 = 256u;
+constant uint METALLUM_MAX_LIGHT_CANDIDATES_V1 = 4096u;
+constant uint METALLUM_CLUSTER_MEMBERSHIP_WORDS_V1 = 128u;
+constant uint METALLUM_LEGACY_CLUSTER_MASK_WORDS_V1 = 8u;
 constant uint METALLUM_PREFIX_BLOCK_SIZE_V1 = 256u;
 constant uint METALLUM_OCCUPANCY_BIN_COUNT_V1 = 32u;
 constant uint METALLUM_LIGHT_ADMISSION_ACCEPTED_V1 = 1u;
-constant uint METALLUM_CLUSTER_MASK_BATCH_FLAG_V1 = 1u << 1u;
 
 struct MetallumGpuLightV1 {
     float4 positionRadius;
@@ -82,7 +83,7 @@ enum MetallumClusterCounterV1 : uint {
 
 static_assert(sizeof(MetallumGpuLightV1) == 48, "GpuLight ABI must stay 48 bytes");
 static_assert(sizeof(MetallumClusterHeaderV1) == 8, "Cluster header ABI must stay 8 bytes");
-static_assert(sizeof(MetallumClusterScratchV1) == 32, "Cluster scratch ABI must stay 32 bytes");
+static_assert(sizeof(MetallumClusterScratchV1) == 512, "Cluster scratch ABI must stay 512 bytes");
 static_assert(sizeof(MetallumClusterBlockStatisticsV1) == 160,
     "Block statistics scratch ABI must stay 160 bytes");
 static_assert(sizeof(MetallumLightingParamsV1) == 256, "Lighting params ABI must stay 256 bytes");
@@ -295,137 +296,100 @@ kernel void metallum_cluster_prepare_v1(
     device MetallumGpuLightV1* lights [[buffer(3)]],
     uint index [[thread_position_in_grid]]
 ) {
-    if (index != 0u) {
-        return;
-    }
-    destination = source;
     const uint lightCount = source.gridAndLightCount.w;
-    if (lightCount == 0u) {
-        for (uint counter = 0u; counter < 32u; ++counter) {
+    const uint candidateLightCap = min(
+        source.reserved1.y,
+        METALLUM_MAX_LIGHT_CANDIDATES_V1
+    );
+    const uint candidateCount = min(lightCount, candidateLightCap);
+    if (index == 0u) {
+        destination = source;
+        destination.gridAndLightCount.w = candidateCount;
+        if (lightCount == 0u) {
+            for (uint counter = 0u; counter < 32u; ++counter) {
+                atomic_store_explicit(
+                    &statistics.counters[counter],
+                    0u,
+                    memory_order_relaxed
+                );
+            }
+            for (uint bin = 0u; bin < METALLUM_OCCUPANCY_BIN_COUNT_V1; ++bin) {
+                atomic_store_explicit(
+                    &statistics.occupancyBins[bin],
+                    0u,
+                    memory_order_relaxed
+                );
+            }
             atomic_store_explicit(
-                &statistics.counters[counter],
-                0u,
+                &statistics.counters[MetallumCounterAbiVersion],
+                METALLUM_LIGHTING_ABI_V1,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterClusterCount],
+                source.capacitiesAndFlags.x,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterRingSlot],
+                source.reserved0.y,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterGenerationLow],
+                source.frameIdAndGeneration.z,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterGenerationHigh],
+                source.frameIdAndGeneration.w,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterFrameLow],
+                source.frameIdAndGeneration.x,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterFrameHigh],
+                source.frameIdAndGeneration.y,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterEmptyClusters],
+                source.capacitiesAndFlags.x,
+                memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &statistics.occupancyBins[0],
+                source.capacitiesAndFlags.x,
+                memory_order_relaxed
+            );
+        } else {
+            atomic_store_explicit(
+                &statistics.counters[MetallumCounterAdmissionRejectedLights],
+                lightCount - candidateCount,
                 memory_order_relaxed
             );
         }
-        for (uint bin = 0u; bin < METALLUM_OCCUPANCY_BIN_COUNT_V1; ++bin) {
-            atomic_store_explicit(
-                &statistics.occupancyBins[bin],
-                0u,
-                memory_order_relaxed
-            );
-        }
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterAbiVersion],
-            METALLUM_LIGHTING_ABI_V1,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterClusterCount],
-            source.capacitiesAndFlags.x,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterRingSlot],
-            source.reserved0.y,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterGenerationLow],
-            source.frameIdAndGeneration.z,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterGenerationHigh],
-            source.frameIdAndGeneration.w,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterFrameLow],
-            source.frameIdAndGeneration.x,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterFrameHigh],
-            source.frameIdAndGeneration.y,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.counters[MetallumCounterEmptyClusters],
-            source.capacitiesAndFlags.x,
-            memory_order_relaxed
-        );
-        atomic_store_explicit(
-            &statistics.occupancyBins[0],
-            source.capacitiesAndFlags.x,
-            memory_order_relaxed
-        );
-        return;
     }
 
-    const ulong configuredBudget = ulong(source.reserved0.x);
-    const uint admittedLightCap = min(source.reserved1.y, 256u);
-    const bool tileLocalMaskPath =
-        (source.reserved0.z & METALLUM_CLUSTER_MASK_BATCH_FLAG_V1) != 0u;
-    ulong totalCovered = 0ul;
-    uint admittedCount = 0u;
-    uint rejectedLights = 0u;
-    for (uint lightIndex = 0u; lightIndex < lightCount; ++lightIndex) {
-        if (tileLocalMaskPath && lightIndex >= admittedLightCap) {
-            rejectedLights += lightCount - lightIndex;
-            break;
-        }
-        MetallumGpuLightV1 light = lights[lightIndex];
-        light.positionRadius.xyz = (source.viewRotation
-            * float4(light.positionRadius.xyz, 0.0f)).xyz;
-        const MetallumClusterBoundsV1 bounds = metallum_cluster_bounds(light, source);
-        if (tileLocalMaskPath) {
-            // Java supplies a retained, camera-stable prefix for the production mask path.
-            // Preserve that exact prefix even when one light is temporarily outside the
-            // frustum; view-dependent compaction here would make a different visible light
-            // enter or leave the admitted set after a tiny camera movement. Invalid bounds
-            // simply contribute no membership bits this frame.
-            if (admittedCount < admittedLightCap) {
-                metallum_store_cluster_bounds(
-                    light,
-                    bounds,
-                    bounds.valid ? METALLUM_LIGHT_ADMISSION_ACCEPTED_V1 : 0u
-                );
-                lights[admittedCount] = light;
-                admittedCount += 1u;
-            } else {
-                rejectedLights += 1u;
-            }
-            continue;
-        }
-        if (bounds.valid) {
-            const ulong covered = ulong(bounds.upper.x - bounds.lower.x)
-                * ulong(bounds.upper.y - bounds.lower.y)
-                * ulong(bounds.upper.z - bounds.lower.z);
-            const ulong prospectiveCovered = totalCovered + covered;
-            if (admittedCount < admittedLightCap && prospectiveCovered <= configuredBudget) {
-                metallum_store_cluster_bounds(
-                    light,
-                    bounds,
-                    METALLUM_LIGHT_ADMISSION_ACCEPTED_V1
-                );
-                totalCovered = prospectiveCovered;
-                // Stable in-place compaction is safe because the destination never exceeds
-                // the source upload index. Direct shaders and membership masks use this
-                // compact index, while reserved1.x retains the original uploaded count.
-                lights[admittedCount] = light;
-                admittedCount += 1u;
-            } else {
-                rejectedLights += 1u;
-            }
-        }
+    if (index >= candidateCount) {
+        return;
     }
-    destination.gridAndLightCount.w = admittedCount;
-    atomic_store_explicit(
-        &statistics.counters[MetallumCounterAdmissionRejectedLights],
-        rejectedLights,
-        memory_order_relaxed
+    MetallumGpuLightV1 light = lights[index];
+    light.positionRadius.xyz = (source.viewRotation
+        * float4(light.positionRadius.xyz, 0.0f)).xyz;
+    const MetallumClusterBoundsV1 bounds = metallum_cluster_bounds(light, source);
+    // ABI v1 uploads at most 4096 camera-stable candidates. Preserve their exact indices
+    // even when a candidate is outside the current frustum: compact cluster lists, not a
+    // view-dependent global prefix, decide which lights a fragment visits.
+    metallum_store_cluster_bounds(
+        light,
+        bounds,
+        bounds.valid ? METALLUM_LIGHT_ADMISSION_ACCEPTED_V1 : 0u
     );
+    lights[index] = light;
 }
 
 kernel void metallum_cluster_count_v1(
@@ -487,7 +451,7 @@ kernel void metallum_cluster_masks_v1(
     const uint activeLightCount = min(params.gridAndLightCount.w, 256u);
     const uint activeWords = min(
         (activeLightCount + 31u) >> 5u,
-        METALLUM_CLUSTER_MEMBERSHIP_WORDS_V1
+        METALLUM_LEGACY_CLUSTER_MASK_WORDS_V1
     );
     threadgroup uint4 lightMetadata[256];
     if (lane < activeLightCount) {
@@ -495,7 +459,7 @@ kernel void metallum_cluster_masks_v1(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint membership[METALLUM_CLUSTER_MEMBERSHIP_WORDS_V1] = {
+    uint membership[METALLUM_LEGACY_CLUSTER_MASK_WORDS_V1] = {
         0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
     };
     uint rawCount = 0u;
@@ -616,53 +580,6 @@ kernel void metallum_cluster_prefix_blocks_v1(
     inclusiveOffsets[lane] = selected;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    const bool tileLocalMaskPath =
-        (params.reserved0.z & METALLUM_CLUSTER_MASK_BATCH_FLAG_V1) != 0u;
-    if (tileLocalMaskPath) {
-        if (lane == 0u) {
-            uint requestedIndices = 0u;
-            uint overflowClusters = 0u;
-            uint perClusterDrops = 0u;
-            uint emptyClusters = 0u;
-            uint maximumOccupancy = 0u;
-            uint occupancyBins[METALLUM_OCCUPANCY_BIN_COUNT_V1];
-            for (uint bin = 0u; bin < METALLUM_OCCUPANCY_BIN_COUNT_V1; ++bin) {
-                occupancyBins[bin] = 0u;
-            }
-            for (uint localCluster = 0u; localCluster < blockLength; ++localCluster) {
-                const uint raw = rawCounts[localCluster];
-                const uint retained = min(
-                    raw,
-                    min(params.extentAndClusterCap.z, METALLUM_CLUSTER_CAP_V1)
-                );
-                requestedIndices += retained;
-                overflowClusters += raw > retained ? 1u : 0u;
-                perClusterDrops += raw - retained;
-                emptyClusters += retained == 0u ? 1u : 0u;
-                maximumOccupancy = max(maximumOccupancy, retained);
-                const uint occupancyBin = retained == 0u ? 0u : min(
-                    (retained + 3u) / 4u,
-                    METALLUM_OCCUPANCY_BIN_COUNT_V1 - 1u
-                );
-                occupancyBins[occupancyBin] += 1u;
-            }
-            MetallumClusterBlockStatisticsV1 summary;
-            summary.requestedIndices = requestedIndices;
-            summary.overflowClusters = overflowClusters;
-            summary.perClusterDrops = perClusterDrops;
-            summary.emptyClusters = emptyClusters;
-            summary.maximumOccupancy = maximumOccupancy;
-            for (uint reserved = 0u; reserved < 3u; ++reserved) {
-                summary.reserved[reserved] = 0u;
-            }
-            for (uint bin = 0u; bin < METALLUM_OCCUPANCY_BIN_COUNT_V1; ++bin) {
-                summary.occupancyBins[bin] = occupancyBins[bin];
-            }
-            blockStatistics[blockIndex] = summary;
-        }
-        return;
-    }
-
     // Hillis-Steele is intentionally local to one 256-cluster block. It replaces one
     // serial thread per block while keeping exact deterministic offsets.
     for (uint offset = 1u; offset < METALLUM_PREFIX_BLOCK_SIZE_V1; offset <<= 1u) {
@@ -750,9 +667,7 @@ kernel void metallum_cluster_prefix_groups_v1(
         const uint blockStart = block * METALLUM_PREFIX_BLOCK_SIZE_V1;
         const MetallumClusterBlockStatisticsV1 summary = blockStatistics[block];
         const uint total = summary.requestedIndices;
-        if ((params.reserved0.z & METALLUM_CLUSTER_MASK_BATCH_FLAG_V1) == 0u) {
-            headers[blockStart].offset = uint(cursor);
-        }
+        headers[blockStart].offset = uint(cursor);
         cursor += ulong(total);
         overflowClusters += summary.overflowClusters;
         perClusterDrops += summary.perClusterDrops;
@@ -763,11 +678,7 @@ kernel void metallum_cluster_prefix_groups_v1(
         }
     }
     const uint requested = uint(min(cursor, ulong(UINT_MAX)));
-    const bool tileLocalMaskPath =
-        (params.reserved0.z & METALLUM_CLUSTER_MASK_BATCH_FLAG_V1) != 0u;
-    const uint accepted = tileLocalMaskPath
-        ? requested
-        : min(requested, params.extentAndClusterCap.w);
+    const uint accepted = min(requested, params.extentAndClusterCap.w);
     atomic_store_explicit(
         &statistics.counters[MetallumCounterAbiVersion],
         METALLUM_LIGHTING_ABI_V1,
@@ -805,7 +716,7 @@ kernel void metallum_cluster_prefix_groups_v1(
     );
     atomic_store_explicit(
         &statistics.counters[MetallumCounterIndexCapacityDrops],
-        tileLocalMaskPath ? 0u : requested - accepted,
+        requested - accepted,
         memory_order_relaxed
     );
     atomic_store_explicit(

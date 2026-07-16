@@ -6,6 +6,7 @@ import java.util.UUID;
 public final class StableLightIds {
     private static final long BLOCK_DOMAIN = 0x4d4554414c424c4bL;
     private static final long ENTITY_DOMAIN = 0x4d4554414c454e54L;
+    private static final long DENSE_BLOCK_DOMAIN = 0x4d4554414c444e53L;
 
     private StableLightIds() {
     }
@@ -31,6 +32,39 @@ public final class StableLightIds {
                         ^ hashString(dimensionId)
                         ^ mix64(uuid.getMostSignificantBits())
                         ^ Long.rotateLeft(mix64(uuid.getLeastSignificantBits()), 29)
+        ));
+    }
+
+    public static long denseBlock(
+            final String dimensionId,
+            final int cellX,
+            final int cellY,
+            final int cellZ,
+            final int cellEdge,
+            final float radius,
+            final float red,
+            final float green,
+            final float blue,
+            final float intensity,
+            final int priority
+    ) {
+        long cell = mix64(Integer.toUnsignedLong(cellX));
+        cell ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(cellY)), 21);
+        cell ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(cellZ)), 42);
+        long signature = mix64(Integer.toUnsignedLong(cellEdge));
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(
+                Float.floatToRawIntBits(radius))), 7);
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(
+                Float.floatToRawIntBits(red))), 14);
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(
+                Float.floatToRawIntBits(green))), 21);
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(
+                Float.floatToRawIntBits(blue))), 28);
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(
+                Float.floatToRawIntBits(intensity))), 35);
+        signature ^= Long.rotateLeft(mix64(Integer.toUnsignedLong(priority)), 49);
+        return nonZero(mix64(
+                DENSE_BLOCK_DOMAIN ^ hashString(dimensionId) ^ cell ^ signature
         ));
     }
 

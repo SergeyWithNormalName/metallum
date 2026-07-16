@@ -978,13 +978,13 @@ private enum MetallumLightingAbiV1 {
     static let uploadHeaderBytes = 64
     static let gpuLightBytes = 48
     static let clusterHeaderBytes = 8
-    static let clusterScratchBytes = 32
+    static let clusterScratchBytes = 512
     static let lightIndexBytes = 4
     static let paramsBytes = 256
     static let statisticsBytes = 256
     static let completedStatsBytes = 128
     static let ringSlots = 3
-    static let clusterCap: UInt32 = 128
+    static let clusterCap: UInt32 = 256
     static let tileSize: UInt32 = 64
     static let depthSlices: UInt32 = 6
     static let prefixBlockSize: UInt32 = 256
@@ -994,6 +994,8 @@ private enum MetallumLightingAbiV1 {
     static let orderedBatchFlag: UInt32 = 1
     static let clusterMaskBatchFlag: UInt32 = 1 << 1
     static let knownBatchFlags = orderedBatchFlag | clusterMaskBatchFlag
+    // ABI v1 cluster membership is 128 UInt32 words per cluster, matching the full
+    // 4096-candidate upload pool independently from the per-cluster quality cap.
     static let maximumLights: UInt32 = 4_096
     static let maximumClusters: UInt32 = 1_048_576
     static let maximumIndices: UInt32 = 8_000_000
@@ -1427,15 +1429,30 @@ private final class MetallumLightingContext: @unchecked Sendable {
                     indexCapacityDrops: values[7],
                     admissionRejectedLights: values[8],
                     occupancyP50: min(
-                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 50),
+                        Self.quantile(
+                            histogram,
+                            emptyClusters: emptyClusters,
+                            percentile: 50,
+                            maximumOccupancy: maximumOccupancy
+                        ),
                         maximumOccupancy
                     ),
                     occupancyP95: min(
-                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 95),
+                        Self.quantile(
+                            histogram,
+                            emptyClusters: emptyClusters,
+                            percentile: 95,
+                            maximumOccupancy: maximumOccupancy
+                        ),
                         maximumOccupancy
                     ),
                     occupancyP99: min(
-                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 99),
+                        Self.quantile(
+                            histogram,
+                            emptyClusters: emptyClusters,
+                            percentile: 99,
+                            maximumOccupancy: maximumOccupancy
+                        ),
                         maximumOccupancy
                     ),
                     maximumOccupancy: maximumOccupancy
@@ -1496,7 +1513,8 @@ private final class MetallumLightingContext: @unchecked Sendable {
     private static func quantile(
         _ histogram: [UInt32],
         emptyClusters: UInt32,
-        percentile: UInt32
+        percentile: UInt32,
+        maximumOccupancy: UInt32
     ) -> UInt32 {
         let total = histogram.reduce(UInt64(0)) { $0 + UInt64($1) }
         guard total > 0 else { return 0 }
@@ -1511,10 +1529,10 @@ private final class MetallumLightingContext: @unchecked Sendable {
                 if bin == 0 {
                     return 0
                 }
-                return bin == histogram.count - 1 ? 128 : UInt32(bin * 4)
+                return bin == histogram.count - 1 ? maximumOccupancy : UInt32(bin * 4)
             }
         }
-        return 128
+        return maximumOccupancy
     }
 }
 
@@ -6681,34 +6699,18 @@ private func lightingParamsV1(
     viewRotation.columns.3 = SIMD4<Float>(0, 0, 0, 1)
     let logarithmicScale = Float(context.clustersZ) / log2(frame.farPlane / frame.nearPlane)
     let logarithmicBias = -log2(frame.nearPlane) * logarithmicScale
-    let presetWorkloadCeiling: UInt64
-    let admittedLightCap: UInt32
     let perClusterCap: UInt32
     switch frame.lightingPreset {
     case 0:
-        presetWorkloadCeiling = 250_000
-        admittedLightCap = 32
-        perClusterCap = 32
+        perClusterCap = MetallumLightingAbiV1.clusterCap
     case 1:
-        presetWorkloadCeiling = 500_000
-        admittedLightCap = 64
-        perClusterCap = 64
+        perClusterCap = MetallumLightingAbiV1.clusterCap
     case 2:
-        presetWorkloadCeiling = 750_000
-        admittedLightCap = 128
-        perClusterCap = 128
+        perClusterCap = MetallumLightingAbiV1.clusterCap
     default:
         preconditionFailure("FrameState admitted an unknown Advanced-lighting preset")
     }
-    // Selected cluster membership never exceeds total covered membership. Bounding the
-    // latter by index capacity makes the compact prefix intrinsically seam-free while the
-    // cluster-count floor still admits one production full-grid light.
-    let workloadBudget = UInt32(
-        min(
-            UInt64(context.indexCapacity),
-            max(UInt64(context.clusterCount), presetWorkloadCeiling)
-        )
-    )
+    let candidateLightCap = min(context.maxLights, MetallumLightingAbiV1.maximumLights)
     return MetallumLightingParamsV1(
         viewRotation: viewRotation,
         projection: frame.currentUnjitteredProjection,
@@ -6738,12 +6740,12 @@ private func lightingParamsV1(
             MetallumLightingAbiV1.tileSize
         ),
         reserved0: SIMD4(
-            workloadBudget,
+            0,
             batch.inFlightSlot,
             batch.flags,
             MetallumLightingAbiV1.version
         ),
-        reserved1: SIMD4(batch.lightCount, admittedLightCap, 0, 0),
+        reserved1: SIMD4(batch.lightCount, candidateLightCap, 0, 0),
         reserved2: SIMD4(repeating: 0)
     )
 }
@@ -6940,8 +6942,7 @@ public func metallum_lighting_upload_and_build_v1(
                 size: Int(batch.lightCount) * MetallumLightingAbiV1.gpuLightBytes
             )
         }
-        if batch.lightCount > 0
-                && batch.flags & MetallumLightingAbiV1.clusterMaskBatchFlag == 0 {
+        if batch.lightCount > 0 {
             upload.fill(buffer: context.clusterScratch, range: 0..<scratchPayloadBytes, value: 0)
         } else if batch.lightCount == 0 {
             // Empty frames skip prefix/fill, so retire every previous cluster membership
@@ -6982,9 +6983,14 @@ public func metallum_lighting_upload_and_build_v1(
         compute.setBuffer(context.params, offset: 0, index: 1)
         compute.setBuffer(context.statistics, offset: 0, index: 2)
         compute.setBuffer(context.gpuLights, offset: 0, index: 3)
+        let prepareThreads = max(1, Int(batch.lightCount))
+        let prepareWidth = min(
+            context.pipelines.prepare.maxTotalThreadsPerThreadgroup,
+            256
+        )
         compute.dispatchThreads(
-            MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            MTLSize(width: prepareThreads, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: prepareWidth, height: 1, depth: 1)
         )
         compute.memoryBarrier(scope: .buffers)
 
@@ -6994,43 +7000,29 @@ public func metallum_lighting_upload_and_build_v1(
                     / MetallumLightingAbiV1.prefixBlockSize
             )
             let prefixBlockWidth = Int(MetallumLightingAbiV1.prefixBlockSize)
-            let maskPath = batch.flags & MetallumLightingAbiV1.clusterMaskBatchFlag != 0
-            if maskPath {
-                compute.setComputePipelineState(context.pipelines.masks)
-                compute.setBuffer(context.gpuLights, offset: 0, index: 0)
-                compute.setBuffer(context.clusterScratch, offset: 0, index: 1)
-                compute.setBuffer(context.params, offset: 0, index: 2)
-                compute.setBuffer(context.lightIndices, offset: 0, index: 3)
-                compute.dispatchThreadgroups(
-                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: prefixBlockWidth, height: 1, depth: 1)
-                )
-            } else {
-                compute.setComputePipelineState(context.pipelines.count)
-                compute.setBuffer(context.gpuLights, offset: 0, index: 0)
-                compute.setBuffer(context.clusterScratch, offset: 0, index: 1)
-                compute.setBuffer(context.params, offset: 0, index: 2)
-                compute.setBuffer(context.statistics, offset: 0, index: 3)
-                let width = min(context.pipelines.count.maxTotalThreadsPerThreadgroup, 256)
-                let countThreadgroups = min(Int(batch.lightCount), Int(params.reserved1.y))
-                compute.dispatchThreadgroups(
-                    MTLSize(width: countThreadgroups, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
-                )
-                compute.memoryBarrier(scope: .buffers)
+            compute.setComputePipelineState(context.pipelines.count)
+            compute.setBuffer(context.gpuLights, offset: 0, index: 0)
+            compute.setBuffer(context.clusterScratch, offset: 0, index: 1)
+            compute.setBuffer(context.params, offset: 0, index: 2)
+            compute.setBuffer(context.statistics, offset: 0, index: 3)
+            let width = min(context.pipelines.count.maxTotalThreadsPerThreadgroup, 256)
+            compute.dispatchThreadgroups(
+                MTLSize(width: Int(batch.lightCount), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
+            )
+            compute.memoryBarrier(scope: .buffers)
 
-                compute.setComputePipelineState(context.pipelines.prefixBlocks)
-                compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
-                compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
-                compute.setBuffer(context.params, offset: 0, index: 2)
-                // The index buffer is unused until fill, so prefix passes temporarily reuse
-                // its beginning for exact per-block telemetry.
-                compute.setBuffer(context.lightIndices, offset: 0, index: 3)
-                compute.dispatchThreadgroups(
-                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: prefixBlockWidth, height: 1, depth: 1)
-                )
-            }
+            compute.setComputePipelineState(context.pipelines.prefixBlocks)
+            compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
+            compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
+            compute.setBuffer(context.params, offset: 0, index: 2)
+            // The index buffer is unused until fill, so prefix passes temporarily reuse
+            // its beginning for exact per-block telemetry.
+            compute.setBuffer(context.lightIndices, offset: 0, index: 3)
+            compute.dispatchThreadgroups(
+                MTLSize(width: prefixBlockCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: prefixBlockWidth, height: 1, depth: 1)
+            )
             compute.memoryBarrier(scope: .buffers)
 
             compute.setComputePipelineState(context.pipelines.prefixGroups)
@@ -7044,28 +7036,26 @@ public func metallum_lighting_upload_and_build_v1(
             )
             compute.memoryBarrier(scope: .buffers)
 
-            if !maskPath {
-                compute.setComputePipelineState(context.pipelines.prefixAdd)
-                compute.setBuffer(context.clusterHeaders, offset: 0, index: 0)
-                compute.setBuffer(context.params, offset: 0, index: 1)
-                let prefixAddWidth = Int(MetallumLightingAbiV1.prefixBlockSize)
-                compute.dispatchThreadgroups(
-                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: prefixAddWidth, height: 1, depth: 1)
-                )
-                compute.memoryBarrier(scope: .buffers)
+            compute.setComputePipelineState(context.pipelines.prefixAdd)
+            compute.setBuffer(context.clusterHeaders, offset: 0, index: 0)
+            compute.setBuffer(context.params, offset: 0, index: 1)
+            let prefixAddWidth = Int(MetallumLightingAbiV1.prefixBlockSize)
+            compute.dispatchThreadgroups(
+                MTLSize(width: prefixBlockCount, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: prefixAddWidth, height: 1, depth: 1)
+            )
+            compute.memoryBarrier(scope: .buffers)
 
-                compute.setComputePipelineState(context.pipelines.fill)
-                compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
-                compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
-                compute.setBuffer(context.lightIndices, offset: 0, index: 2)
-                compute.setBuffer(context.params, offset: 0, index: 3)
-                let fillWidth = min(context.pipelines.fill.maxTotalThreadsPerThreadgroup, 256)
-                compute.dispatchThreads(
-                    MTLSize(width: Int(context.clusterCount), height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: fillWidth, height: 1, depth: 1)
-                )
-            }
+            compute.setComputePipelineState(context.pipelines.fill)
+            compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
+            compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
+            compute.setBuffer(context.lightIndices, offset: 0, index: 2)
+            compute.setBuffer(context.params, offset: 0, index: 3)
+            let fillWidth = min(context.pipelines.fill.maxTotalThreadsPerThreadgroup, 256)
+            compute.dispatchThreads(
+                MTLSize(width: Int(context.clusterCount), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: fillWidth, height: 1, depth: 1)
+            )
         }
         compute.endEncoding()
 

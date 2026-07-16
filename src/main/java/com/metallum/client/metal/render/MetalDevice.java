@@ -1350,7 +1350,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
         encoder.setBuffer(
-                bindings.masks(), 0L, AdvancedLightingBindingAbi.CLUSTER_MASKS_SLOT,
+                bindings.headers(), 0L, AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
         encoder.setBuffer(
@@ -2067,11 +2067,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     static int advancedLightingAdmissionLimit(final LightingPreset preset) {
-        return switch (Objects.requireNonNull(preset, "preset")) {
-            case PERFORMANCE -> 32;
-            case BALANCED -> 64;
-            case ULTRA -> 128;
-        };
+        Objects.requireNonNull(preset, "preset");
+        return AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
     }
 
     static FrameState.AdvancedLightingWork advancedLightingWork(final int lightCount) {

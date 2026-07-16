@@ -81,6 +81,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uvec4 metadata;
             };
 
+            struct MetallumClusterHeaderV1 {
+                uint offset;
+                uint count;
+            };
+
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
                 mat4 projection;
@@ -98,9 +103,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 MetallumGpuLightV1 lights[];
             } metallumLightBuffer;
 
-            layout(std430, binding = 29) readonly buffer MetallumClusterMasksV1 {
-                uint membership[];
-            } metallumClusterMaskBuffer;
+            layout(std430, binding = 29) readonly buffer MetallumClusterHeadersV1 {
+                MetallumClusterHeaderV1 headers[];
+            } metallumClusterHeaderBuffer;
 
             layout(std430, binding = 30) readonly buffer MetallumClusterIndicesV1 {
                 uint indices[];
@@ -159,48 +164,45 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return vec3(0.0);
                 }
 
-                // Slot 30 remains part of ABI v1 while the production tile-local path reads
-                // the already deterministic membership masks from slot 29. The guarded
-                // branch prevents reflection from silently deleting the reserved binding.
-                if (metallumLighting.reserved2.x == 0xffffffffu) {
-                    return vec3(float(metallumClusterIndexBuffer.indices[0]));
+                MetallumClusterHeaderV1 header =
+                        metallumClusterHeaderBuffer.headers[cluster];
+                uint indexCapacity = metallumLighting.capacitiesAndFlags.z;
+                if (header.offset > indexCapacity
+                        || header.count > indexCapacity - header.offset) {
+                    return vec3(0.0);
                 }
 
-                uint countLimit = min(metallumLighting.extentAndClusterCap.z, 128u);
-                uint activeWords = min((activeLightCount + 31u) / 32u, 8u);
-                uint maskBase = cluster * 8u;
+                uint countLimit = min(
+                        min(header.count, metallumLighting.extentAndClusterCap.z),
+                        256u);
 
                 vec3 direct = vec3(0.0);
                 uint evaluated = 0u;
-                for (uint word = 0u; word < activeWords && evaluated < countLimit; ++word) {
-                    uint membership = metallumClusterMaskBuffer.membership[maskBase + word];
-                    while (membership != 0u && evaluated < countLimit) {
-                        uint bit = uint(findLSB(membership));
-                        uint lightIndex = word * 32u + bit;
-                        membership &= membership - 1u;
-                        if (lightIndex >= activeLightCount) {
-                            continue;
-                        }
-
-                        MetallumGpuLightV1 light = metallumLightBuffer.lights[lightIndex];
-                        float radius = max(light.positionRadius.w, 0.0);
-                        vec3 toLight = light.positionRadius.xyz - viewPosition;
-                        float distanceSquared = dot(toLight, toLight);
-                        if (radius <= 0.0 || distanceSquared >= radius * radius) {
-                            continue;
-                        }
-
-                        float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));
-                        float range = max(1.0 - sqrt(max(distanceSquared, 0.0)) / radius, 0.0);
-                        float attenuation = range * range;
-                        float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
-                        vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
-                                * max(light.linearColorIntensity.a, 0.0);
-                        direct += max(linearAlbedo, vec3(0.0))
-                                * radiance
-                                * (attenuation * nDotL * 0.31830988618);
-                        evaluated += 1u;
+                for (uint candidate = 0u; candidate < countLimit; ++candidate) {
+                    uint lightIndex = metallumClusterIndexBuffer.indices[
+                            header.offset + candidate];
+                    if (lightIndex >= activeLightCount) {
+                        continue;
                     }
+
+                    MetallumGpuLightV1 light = metallumLightBuffer.lights[lightIndex];
+                    float radius = max(light.positionRadius.w, 0.0);
+                    vec3 toLight = light.positionRadius.xyz - viewPosition;
+                    float distanceSquared = dot(toLight, toLight);
+                    if (radius <= 0.0 || distanceSquared >= radius * radius) {
+                        continue;
+                    }
+
+                    float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));
+                    float range = max(1.0 - sqrt(max(distanceSquared, 0.0)) / radius, 0.0);
+                    float attenuation = range * range;
+                    float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
+                    vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
+                            * max(light.linearColorIntensity.a, 0.0);
+                    direct += max(linearAlbedo, vec3(0.0))
+                            * radiance
+                            * (attenuation * nDotL * 0.31830988618);
+                    evaluated += 1u;
                 }
                 return direct;
             }
@@ -667,7 +669,7 @@ public final class AdvancedDirectLightingShaderPatcher {
         );
         if (AdvancedLightingLayout.TILE_SIZE != 64
                 || AdvancedLightingLayout.DEPTH_SLICES != 6
-                || AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER != 128) {
+                || AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER != 256) {
             throw new ExceptionInInitializerError("Advanced shader constants do not match the generation layout");
         }
     }

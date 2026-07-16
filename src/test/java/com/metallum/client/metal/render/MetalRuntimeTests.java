@@ -166,14 +166,23 @@ public final class MetalRuntimeTests {
     }
 
     private static void testAdvancedLightingAdmissionLimits() {
-        require(MetalDevice.advancedLightingAdmissionLimit(LightingPreset.PERFORMANCE) == 32
-                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.BALANCED) == 64
-                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.ULTRA) == 128,
-                "Java retained-admission limits drifted from the native preset contract");
+        require(MetalDevice.advancedLightingAdmissionLimit(LightingPreset.PERFORMANCE)
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.BALANCED)
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.ULTRA)
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                "Java retained candidate pool drifted from the native total-light contract");
         for (LightingPreset preset : LightingPreset.values()) {
-            require(AdvancedLightingLayout.forGeneration(preset, 1, 1).maxLights()
-                            == MetalDevice.advancedLightingAdmissionLimit(preset),
-                    "Retained admission drifted from the generation capacity for " + preset);
+            AdvancedLightingLayout.Budget budget = AdvancedLightingLayout.forGeneration(
+                    preset,
+                    1,
+                    1
+            );
+            int expectedClusterCap = AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER;
+            require(budget.maxLights() == MetalDevice.advancedLightingAdmissionLimit(preset)
+                            && budget.maxLightsPerCluster() == expectedClusterCap,
+                    "Total candidate/per-cluster limits drifted for " + preset);
         }
     }
 
@@ -194,10 +203,10 @@ public final class MetalRuntimeTests {
                         && populated.encoderCount() == 2
                         && populated.psoCount() == 9
                         && populated.workQueueCount() == 2
-                        && populated.dispatchCount() == 3
+                        && populated.dispatchCount() == 6
                         && populated.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES
                         + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE,
-                "Populated Advanced frame does not describe the fused mask pipeline");
+                "Populated Advanced frame does not describe the compact cluster pipeline");
         expectIllegalArgument(() -> MetalDevice.advancedLightingWork(-1));
     }
 

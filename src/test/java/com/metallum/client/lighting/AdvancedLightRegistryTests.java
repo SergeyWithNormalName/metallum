@@ -1,17 +1,27 @@
 package com.metallum.client.lighting;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.metallum.client.renderer.AdvancedLightingLayout;
+import net.minecraft.SharedConstants;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.extract.LevelExtractor;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.Bootstrap;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -26,6 +36,9 @@ public final class AdvancedLightRegistryTests {
     }
 
     public static void main(final String[] args) {
+        testMinecraftEmitterPolicy();
+        testDenseBlockCompaction();
+        testFullCandidatePoolCameraStability();
         testExactStaticScanAndSectionCap();
         testOverrideRacePermutations();
         testReplacementAndStaleDeleteOwnership();
@@ -43,6 +56,359 @@ public final class AdvancedLightRegistryTests {
         testRegistryFailureAdmissionGate();
         testStaleRegistryFailureCannotPoisonResetAdmission();
         System.out.println("Advanced light registry L3 race/bounds/property tests passed");
+    }
+
+    private static void testMinecraftEmitterPolicy() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        int emittingBlockIds = 0;
+        for (Holder.Reference<Block> reference : BuiltInRegistries.BLOCK.listElements().toList()) {
+            boolean blockEmits = false;
+            for (BlockState state : reference.value().getStateDefinition().getPossibleStates()) {
+                int emission = MinecraftLightPolicy.effectiveEmission(state);
+                LightTemplate template = MinecraftLightPolicy.block(state, 10, 20, 30);
+                if (emission == 0) {
+                    require(template == null,
+                            "zero-emission state produced an Advanced light: " + reference.key());
+                    continue;
+                }
+                blockEmits = true;
+                float normalized = emission / 15.0F;
+                float expectedIntensity = 0.15F
+                        + 3.0F * normalized * (float) Math.sqrt(normalized);
+                require(template != null
+                                && template.x() == 10.5
+                                && template.y() == 20.5
+                                && template.z() == 30.5
+                                && close(template.radius(), 1.5F + 0.75F * emission)
+                                && close(template.intensity(), expectedIntensity)
+                                && template.priority()
+                                == MinecraftLightPolicy.priorityForEmission(emission),
+                        "emitting state lost its data-driven level: " + reference.key()
+                                + " emission=" + emission);
+            }
+            if (blockEmits) {
+                emittingBlockIds++;
+            }
+        }
+        require(emittingBlockIds == 109,
+                "Minecraft 26.2 vanilla emitter census changed: " + emittingBlockIds);
+
+        require(MinecraftLightPolicy.block(Blocks.SOUL_TORCH.defaultBlockState(), 0, 0, 0)
+                        != null
+                        && !MinecraftLightPolicy.block(
+                        Blocks.SOUL_TORCH.defaultBlockState(), 0, 0, 0
+                ).denseCellEligible()
+                        && MinecraftLightPolicy.effectiveEmission(
+                        Blocks.SOUL_TORCH.defaultBlockState()) == 10,
+                "lower-emission soul torch was filtered out");
+        require(MinecraftLightPolicy.block(Blocks.LAVA.defaultBlockState(), 0, 0, 0)
+                        != null
+                        && MinecraftLightPolicy.block(
+                        Blocks.LAVA.defaultBlockState(), 0, 0, 0
+                ).denseCellEligible()
+                        && MinecraftLightPolicy.effectiveEmission(Blocks.LAVA.defaultBlockState())
+                        == 15,
+                "lava block/fluid cell did not resolve to one mergeable emitting template");
+        require(MinecraftLightPolicy.block(Blocks.WATER.defaultBlockState(), 0, 0, 0)
+                        == null,
+                "non-emissive fluid produced an Advanced light");
+
+        float[] redstoneWall = MinecraftLightPolicy.linearColorForIdentifier(
+                BuiltInRegistries.BLOCK.getKey(Blocks.REDSTONE_WALL_TORCH));
+        require(close(redstoneWall[0], 1.0F)
+                        && close(redstoneWall[1], 0.012F)
+                        && close(redstoneWall[2], 0.003F),
+                "redstone wall torch no longer shares the redstone hue");
+        float[] firefly = MinecraftLightPolicy.linearColorForIdentifier(
+                BuiltInRegistries.BLOCK.getKey(Blocks.FIREFLY_BUSH));
+        require(!close(firefly[1], 0.08F) || !close(firefly[2], 0.004F),
+                "firefly bush was misclassified as fire");
+        float[] unknownMod = MinecraftLightPolicy.linearColorForIdentifier(
+                Identifier.fromNamespaceAndPath("example", "soul_fire"));
+        require(close(unknownMod[0], 1.0F)
+                        && close(unknownMod[1], 1.0F)
+                        && close(unknownMod[2], 1.0F),
+                "unknown mod emitter did not receive the neutral compatibility fallback");
+        require(MinecraftLightPolicy.priorityForEmission(1)
+                        < MinecraftLightPolicy.priorityForEmission(15),
+                "a dim held block can still outrank a full-brightness placed emitter");
+    }
+
+    private static void testDenseBlockCompaction() {
+        List<AdvancedLight> plane = new ArrayList<>();
+        long stableId = 1L;
+        for (int z = 0; z < 16; z++) {
+            for (int x = 0; x < 16; x++) {
+                plane.add(lavaLike(stableId++, x, 0, z));
+            }
+        }
+        DenseBlockLightCompactor.Result compacted = DenseBlockLightCompactor.compact(
+                DIMENSION,
+                plane
+        );
+        require(compacted.rawLightCount() == 256
+                        && compacted.lights().size() == 16
+                        && compacted.aggregateGroupCount() == 16
+                        && compacted.mergedLightCount() == 240,
+                "16x1x16 lava-like plane did not compact to one proxy per 4x4 cell");
+        for (AdvancedLight member : plane) {
+            require(compacted.lights().stream().anyMatch(proxy -> {
+                double dx = member.x() - proxy.x();
+                double dy = member.y() - proxy.y();
+                double dz = member.z() - proxy.z();
+                return Math.sqrt(dx * dx + dy * dy + dz * dz) + member.radius()
+                        <= proxy.radius() + 1.0e-5;
+            }), "dense proxy radius does not contain a member influence sphere");
+        }
+        float sourceIntensity = plane.getFirst().intensity();
+        require(compacted.lights().stream().allMatch(proxy ->
+                        proxy.intensity() > sourceIntensity
+                                && proxy.intensity() < sourceIntensity * 16.0F),
+                "dense proxy energy scaling is outside its source-count bound");
+        double expectedPlaneEnergy = plane.stream()
+                .mapToDouble(AdvancedLightRegistryTests::integratedRadialEnergy)
+                .sum();
+        double compactedPlaneEnergy = compacted.lights().stream()
+                .mapToDouble(AdvancedLightRegistryTests::integratedRadialEnergy)
+                .sum();
+        require(relativeError(compactedPlaneEnergy, expectedPlaneEnergy) < 1.0e-5,
+                "dense proxy did not preserve integrated radial energy");
+
+        List<AdvancedLight> threeSources = plane.subList(0, 3);
+        List<AdvancedLight> fourSources = plane.subList(0, 4);
+        AdvancedLight fourProxy = DenseBlockLightCompactor.compact(
+                DIMENSION,
+                fourSources
+        ).lights().getFirst();
+        require(DenseBlockLightCompactor.compact(DIMENSION, threeSources).lights().size() == 3
+                        && DenseBlockLightCompactor.compact(DIMENSION, fourSources).lights().size()
+                        == 1,
+                "dense representation no longer uses the intended four-source threshold");
+        double[][] transitionProbes = {
+                {1.5, -1.5, 0.5},
+                {-1.0, -1.5, 0.5},
+                {5.0, -1.5, 0.5},
+                {1.5, -5.5, 0.5}
+        };
+        for (double[] probe : transitionProbes) {
+            double before = threeSources.stream().mapToDouble(light -> radialContribution(
+                    light, probe[0], probe[1], probe[2]
+            )).sum();
+            double after = radialContribution(fourProxy, probe[0], probe[1], probe[2]);
+            double ratio = after / before;
+            require(ratio >= 0.75 && ratio <= 1.50,
+                    "dense 3-to-4 transition changed radial light by " + ratio);
+        }
+
+        List<AdvancedLight> ordinaryBlocks = List.of(
+                exactBlockLight(30_001L, 0.5, 0.5, 0.5),
+                exactBlockLight(30_002L, 1.5, 0.5, 0.5),
+                exactBlockLight(30_003L, 2.5, 0.5, 0.5),
+                exactBlockLight(30_004L, 3.5, 0.5, 0.5)
+        );
+        require(DenseBlockLightCompactor.compact(DIMENSION, ordinaryBlocks).lights().size()
+                        == ordinaryBlocks.size(),
+                "ordinary block emitters were merged as if they were a dense fluid surface");
+
+        List<AdvancedLight> reversed = new ArrayList<>(plane);
+        Collections.reverse(reversed);
+        require(compacted.equals(DenseBlockLightCompactor.compact(DIMENSION, reversed)),
+                "dense compaction changed with insertion order");
+
+        AdvancedLight negative = lavaLike(10_000L, -1, -1, -1);
+        DenseBlockLightCompactor.GroupKey negativeKey =
+                DenseBlockLightCompactor.groupKey(negative);
+        require(negativeKey.cellX() == -4
+                        && negativeKey.cellY() == -4
+                        && negativeKey.cellZ() == -4,
+                "dense compaction did not use floor-aligned cells at negative coordinates");
+
+        List<AdvancedLight> mixed = new ArrayList<>(plane.subList(0, 4));
+        AdvancedLight differentHue = new AdvancedLight(
+                20_000L,
+                1L,
+                LightSourceKind.BLOCK,
+                0.5,
+                0.5,
+                0.5,
+                plane.getFirst().radius(),
+                0.035F,
+                0.34F,
+                1.0F,
+                plane.getFirst().intensity(),
+                plane.getFirst().priority()
+        );
+        mixed.add(differentHue);
+        DenseBlockLightCompactor.Result mixedResult = DenseBlockLightCompactor.compact(
+                DIMENSION,
+                mixed
+        );
+        require(mixedResult.lights().size() == 2
+                        && mixedResult.aggregateGroupCount() == 1
+                        && mixedResult.lights().stream().anyMatch(light ->
+                        light.stableId() == differentHue.stableId()),
+                "dense compaction merged different photometric signatures");
+
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        LightSectionTask denseTask = registry.beginSectionTask(world, DIMENSION, 77L);
+        LightSectionCandidate denseCandidate = StaticLightSectionScanner.scan(
+                denseTask,
+                0,
+                0,
+                0,
+                AdvancedLightRegistry.MAX_LIGHTS_PER_SECTION,
+                (localIndex, x, y, z) -> new LightTemplate(
+                        LightSourceKind.BLOCK,
+                        x + 0.5,
+                        y + 0.5,
+                        z + 0.5,
+                        12.75F,
+                        1.0F,
+                        0.08F,
+                        0.004F,
+                        3.15F,
+                        240,
+                        true
+                )
+        );
+        registry.noteStaticScan(denseCandidate);
+        require(denseCandidate.emittedLightCount() == 4096
+                        && denseCandidate.entries().size() == 4096
+                        && denseCandidate.droppedLightCount() == 0,
+                "dense section lost members before aggregation");
+        require(registry.publishAccepted(denseCandidate),
+                "stratified dense section was not accepted");
+        LightFrameSnapshot denseSnapshot = registry.snapshotForFrame(0, 0, 0, 256);
+        require(denseSnapshot.lights().size() == 64,
+                "full 16^3 dense section did not compact to all 64 spatial cells");
+        double fullSectionEnergy = denseSnapshot.lights().stream()
+                .mapToDouble(AdvancedLightRegistryTests::integratedRadialEnergy)
+                .sum();
+        double oneLavaEnergy = integratedRadialEnergy(lavaLike(40_000L, 0, 0, 0));
+        require(relativeError(fullSectionEnergy, oneLavaEnergy * 4096.0) < 1.0e-5,
+                "full dense section lost integrated energy during compaction");
+        for (int y = 0; y < 16; y++) {
+            for (int z = 0; z < 16; z++) {
+                for (int x = 0; x < 16; x++) {
+                    AdvancedLight member = lavaLike(50_000L + (y << 8 | z << 4 | x), x, y, z);
+                    require(denseSnapshot.lights().stream().anyMatch(proxy -> {
+                        double dx = member.x() - proxy.x();
+                        double dy = member.y() - proxy.y();
+                        double dz = member.z() - proxy.z();
+                        return Math.sqrt(dx * dx + dy * dy + dz * dz) + member.radius()
+                                <= proxy.radius() + 1.0e-5;
+                    }), "full dense section proxy support lost a fluid cell");
+                }
+            }
+        }
+        require(registry.telemetry().sectionLightOverflows() == 0L,
+                "represented dense cells were reported as section overflow");
+
+        long soulStableId = 99_999L;
+        registry.recordBlockChange(
+                world,
+                DIMENSION,
+                77L,
+                0,
+                soulStableId,
+                new LightTemplate(
+                        LightSourceKind.BLOCK,
+                        0.5,
+                        0.5,
+                        0.5,
+                        9.0F,
+                        0.035F,
+                        0.34F,
+                        1.0F,
+                        1.78F,
+                        160
+                )
+        );
+        LightFrameSnapshot withSoul = registry.snapshotForFrame(0, 0, 0, 128);
+        require(stableIds(withSoul.lights()).contains(soulStableId),
+                "dense bright emitters still displaced a nearby lower-emission source");
+        require(new HashSet<>(stableIds(withSoul.lights())).equals(new HashSet<>(stableIds(
+                        registry.snapshotForFrame(200, 80, -200, 128).lights()
+                ))),
+                "camera motion changed the compacted source set without an admission overflow");
+        registry.recordBlockChange(world, DIMENSION, 77L, 0, soulStableId, null);
+        require(!stableIds(registry.snapshotForFrame(0, 0, 0, 128).lights())
+                        .contains(soulStableId),
+                "dense-section cache retained a removed source");
+    }
+
+    private static void testFullCandidatePoolCameraStability() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        long stableId = 1L;
+        for (int section = 0; section < 16; section++) {
+            for (int localIndex = 0; localIndex < 256; localIndex++) {
+                int x = section * 32 + (localIndex & 15);
+                int z = localIndex >>> 4;
+                registry.recordBlockChange(
+                        world,
+                        DIMENSION,
+                        section,
+                        localIndex,
+                        stableId,
+                        exactTemplate(
+                                1 + localIndex % 240,
+                                x + 0.5,
+                                0.5,
+                                z + 0.5,
+                                2.5F,
+                                1.0F
+                        )
+                );
+                stableId++;
+            }
+        }
+        LightFrameSnapshot origin = registry.snapshotForFrame(
+                0.0,
+                0.0,
+                0.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        LightFrameSnapshot distant = registry.snapshotForFrame(
+                1_000.0,
+                250.0,
+                -1_000.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(origin.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && origin.droppedLightCount() == 0
+                        && origin.lights().equals(distant.lights()),
+                "full 4096-source candidate pool changed or dropped lights after camera motion");
+        registry.recordBlockChange(
+                world,
+                DIMENSION,
+                16L,
+                0,
+                stableId,
+                exactTemplate(240, 10_000.5, 0.5, 0.5, 2.5F, 1.0F)
+        );
+        LightFrameSnapshot overflowOrigin = registry.snapshotForFrame(
+                        0.0,
+                        0.0,
+                        0.0,
+                        AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                        AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                );
+        LightFrameSnapshot overflowDistant = registry.snapshotForFrame(
+                -2_000.0,
+                400.0,
+                2_000.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(overflowOrigin.droppedLightCount() == 1
+                        && overflowDistant.droppedLightCount() == 1
+                        && overflowOrigin.lights().equals(overflowDistant.lights()),
+                "4097th independent source did not produce one explicit bounded overflow");
     }
 
     private static void testExactStaticScanAndSectionCap() {
@@ -69,7 +435,7 @@ public final class AdvancedLightRegistryTests {
                 "full section was not scanned exactly once");
         require(candidate.emittedLightCount() == 4096
                         && candidate.entries().size() == AdvancedLightRegistry.MAX_LIGHTS_PER_SECTION
-                        && candidate.droppedLightCount() == 4096 - AdvancedLightRegistry.MAX_LIGHTS_PER_SECTION,
+                        && candidate.droppedLightCount() == 0,
                 "static section cap/overflow mismatch");
         require(registry.publishAccepted(candidate), "exact static candidate was not accepted");
         LightFrameSnapshot snapshot = registry.snapshotForFrame(0.0, 0.0, 0.0, 4096);
@@ -78,7 +444,7 @@ public final class AdvancedLightRegistryTests {
         LightRegistryTelemetry telemetry = registry.telemetry();
         require(telemetry.staticSectionsScanned() == 1L
                         && telemetry.staticStatesScanned() == 4096L
-                        && telemetry.sectionLightOverflows() == candidate.droppedLightCount(),
+                        && telemetry.sectionLightOverflows() == 0L,
                 "static scan telemetry mismatch: " + telemetry);
     }
 
@@ -877,6 +1243,73 @@ public final class AdvancedLightRegistryTests {
         );
     }
 
+    private static AdvancedLight lavaLike(
+            final long stableId,
+            final int blockX,
+            final int blockY,
+            final int blockZ
+    ) {
+        return new AdvancedLight(
+                stableId,
+                1L,
+                LightSourceKind.BLOCK,
+                blockX + 0.5,
+                blockY + 0.5,
+                blockZ + 0.5,
+                12.75F,
+                1.0F,
+                0.08F,
+                0.004F,
+                3.15F,
+                240,
+                true
+        );
+    }
+
+    private static AdvancedLight exactBlockLight(
+            final long stableId,
+            final double x,
+            final double y,
+            final double z
+    ) {
+        return new AdvancedLight(
+                stableId,
+                1L,
+                LightSourceKind.BLOCK,
+                x,
+                y,
+                z,
+                12.75F,
+                1.0F,
+                0.08F,
+                0.004F,
+                3.15F,
+                240
+        );
+    }
+
+    private static double radialContribution(
+            final AdvancedLight light,
+            final double x,
+            final double y,
+            final double z
+    ) {
+        double dx = light.x() - x;
+        double dy = light.y() - y;
+        double dz = light.z() - z;
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        double range = Math.max(1.0 - distance / light.radius(), 0.0);
+        return light.intensity() * range * range;
+    }
+
+    private static double integratedRadialEnergy(final AdvancedLight light) {
+        return light.intensity() * light.radius() * light.radius() * light.radius();
+    }
+
+    private static double relativeError(final double actual, final double expected) {
+        return Math.abs(actual - expected) / Math.max(Math.abs(expected), 1.0e-12);
+    }
+
     private static LightTemplate template(
             final int priority,
             final double x,
@@ -899,6 +1332,10 @@ public final class AdvancedLightRegistryTests {
 
     private static List<Long> stableIds(final List<AdvancedLight> lights) {
         return lights.stream().map(AdvancedLight::stableId).toList();
+    }
+
+    private static boolean close(final float actual, final float expected) {
+        return Math.abs(actual - expected) <= 1.0e-6F;
     }
 
     private static void require(final boolean condition, final String message) {

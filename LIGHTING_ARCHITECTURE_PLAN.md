@@ -1616,10 +1616,10 @@ Diagnostic overlays:
 
 #### Результат выполнения
 
-- Static и dynamic emitters сведены в bounded registry; один versioned upload обслуживает общий terrain/entity direct-light shader. Реальный layout: tiles `64×64` render pixels, `6` logarithmic Z-slices, лимиты Performance/Balanced/Ultra `32/64/128` lights на кадр и cluster.
-- Native count/prefix/fill строит детерминированные membership masks; Metal Validation, randomized overflow/OOB tests и SDR/HDR contract tests прошли. Vanilla сохраняет нулевые Advanced resources/work, light-only изменения не требуют geometry rebuild/upload.
-- M1 Pro, Balanced HDR + Spatial Quality: полный GPU p95 не выше `12.66 ms`, cluster upload/build p50 `0.13–0.34 ms`, p95 `0.99–1.67 ms`, `0` overflow/dropped indices/admission rejects/ring rejects. Исходная гипотеза `0.25 ms` p95 не достигнута; эмпирический L3 budget обновлён до `1.7 ms` p95 и принят при соблюдении полного Balanced frame gate.
-- Ручной прогон подтвердил стабильный свет без cluster seams и исчезновения вблизи лавы; причиной последнего была зависимая от экранного масштаба нормаль, теперь нормализуемая scale-invariant. Морской фонарь имеет cyan scene-linear профиль; contiguous lava пока представлена отдельным аддитивным point light на каждый emitting block, без area-emitter aggregation.
+- Static и dynamic emitters сведены в bounded registry; один versioned upload обслуживает общий terrain/entity direct-light shader. Реальный layout: tiles `64×64`, `6` logarithmic Z-slices, до `4096` camera-independent candidates на кадр и `256` lights на cluster во всех presets; overflow детерминирован и телеметрируется.
+- Источники извлекаются из фактической emission каждого `BlockState`/`FluidState`, поэтому слабые и модовые emitters не требуют allowlist; неизвестные модовые источники получают нейтральный цвет. Advanced Lighting не использует vanilla block-light fallback.
+- Плотные emissive fluids до GPU сводятся в cached world-aligned proxies с сохранением support и интегральной энергии; обычные block emitters не объединяются. Native parallel prepare + compact count/prefix/fill, Metal Validation, randomized overflow/OOB и SDR/HDR contract tests прошли.
+- M1 Pro, Balanced HDR Native, `2194` lights: `105.20 FPS`, полный GPU p95 `12.44 ms`; cluster upload/build p50/p95/p99 `0.43/0.52/1.26 ms`, `0` overflow/dropped indices/admission/index/ring rejects. Визуальную перепроверку слабых источников, дистанции и dense-fluid transitions пользователь отложил.
 
 ### Этап 4. Sun/sky и первые тени
 

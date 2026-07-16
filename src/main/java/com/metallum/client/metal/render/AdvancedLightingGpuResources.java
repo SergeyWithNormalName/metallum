@@ -28,7 +28,6 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
 
     private static final int BATCH_MAGIC = 0x31424c4d;
     private static final int ORDERED_BATCH_FLAG = 1;
-    private static final int CLUSTER_MASK_BATCH_FLAG = 1 << 1;
     private static final int NATIVE_LAYOUT_BYTES = 128;
     private static final int COMPLETED_STATS_BYTES = 128;
 
@@ -49,13 +48,13 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
     record Bindings(
             MemorySegment params,
             MemorySegment lights,
-            MemorySegment masks,
+            MemorySegment headers,
             MemorySegment indices
     ) {
         Bindings {
             requireHandle(params, "lighting params");
             requireHandle(lights, "GPU lights");
-            requireHandle(masks, "cluster membership masks");
+            requireHandle(headers, "compact cluster headers");
             requireHandle(indices, "cluster indices");
         }
     }
@@ -153,7 +152,7 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
             Bindings bindings = new Bindings(
                     buffer(context, BUFFER_PARAMS),
                     buffer(context, BUFFER_LIGHTS),
-                    buffer(context, BUFFER_SCRATCH),
+                    buffer(context, BUFFER_HEADERS),
                     buffer(context, BUFFER_INDICES)
             );
             arena = Arena.ofShared();
@@ -223,7 +222,7 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
         putInt(packet, 16, AdvancedLightingLayout.GPU_LIGHT_STRIDE);
         putInt(packet, 20, lightCount);
         putInt(packet, 24, frame.inFlightSlot());
-        putInt(packet, 28, ORDERED_BATCH_FLAG | CLUSTER_MASK_BATCH_FLAG);
+        putInt(packet, 28, ORDERED_BATCH_FLAG);
         putLong(packet, 32, frame.frameId());
         putLong(packet, 40, frame.submitIndex());
         putLong(packet, 48, frame.lightingGenerationId());
@@ -254,7 +253,7 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
         if (lightCount < 0) {
             throw new IllegalArgumentException("Light count must be non-negative");
         }
-        return lightCount == 0 ? 1 : 3;
+        return lightCount == 0 ? 1 : 6;
     }
 
     int uploadAndBuild(final MTLCommandBuffer commandBuffer, final FrameUpload upload) {
@@ -308,7 +307,7 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
                 AdvancedLightingBindingAbi.PARAMS_RESERVED2_OFFSET,
                 AdvancedLightingBindingAbi.PARAMS_SLOT,
                 AdvancedLightingBindingAbi.LIGHTS_SLOT,
-                AdvancedLightingBindingAbi.CLUSTER_MASKS_SLOT,
+                AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
                 AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
                 AdvancedLightingLayout.NATIVE_BUFFER_GUARD_BYTES
         };

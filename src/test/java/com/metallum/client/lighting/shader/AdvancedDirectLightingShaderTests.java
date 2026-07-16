@@ -66,11 +66,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "f913b8ea289baab7cdf380f6d24607ff6b5b08323401211286946e1b301fc175",
-            "sodium-solid-fsh", "c845722d94efc1bb462d198e70ef2529766e199604a681a6515e72b915374483",
+            "sodium-solid-fsh", "cef7f65096c7cded542d3f6f1d1d96dce711edf0c41d18f4dadc675c79f1bf46",
             "sodium-cutout-vsh", "74b70909ad3131e8bb1c0f4a14634c9563ff6dc83d0f83679c0d1daef5a892ea",
-            "sodium-cutout-fsh", "54513289a76471df3c60619b6b4556f9bccfda991a0417991516e03292d8c9cb",
+            "sodium-cutout-fsh", "57bf111bd3fa82035f4ea07c1b39cb03c35d4029baaae6d387774f065a8b23a9",
             "minecraft-entity-vsh", "e3e387d53246ebab5353ef062370d5b9e3e1fea37ae0529d288406f6b600acd4",
-            "minecraft-entity-fsh", "af12ac60f58099cb10c4a3a9907b6798b7b91b9042f9ab96beaa307c96a9861e"
+            "minecraft-entity-fsh", "84aaf813cb86322b1b395f3e3e890f9f7befd30f705b432edc4f139f4ee24dc0"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -91,7 +91,7 @@ public final class AdvancedDirectLightingShaderTests {
         require(AdvancedLightingBindingAbi.VERSION == 1, "Advanced binding ABI version changed");
         require(AdvancedLightingBindingAbi.PARAMS_SLOT == 27, "params slot changed");
         require(AdvancedLightingBindingAbi.LIGHTS_SLOT == 28, "lights slot changed");
-        require(AdvancedLightingBindingAbi.CLUSTER_MASKS_SLOT == 29, "masks slot changed");
+        require(AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT == 29, "headers slot changed");
         require(AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT == 30, "indices slot changed");
         require(AdvancedLightingBindingAbi.PARAMS_BYTES == 256, "params block is not 256 bytes");
         require(AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE == 48, "GpuLight is not 48 bytes");
@@ -112,7 +112,7 @@ public final class AdvancedDirectLightingShaderTests {
                 "params member offsets diverged from the native 256-byte ABI");
         require(AdvancedLightingLayout.TILE_SIZE == 64
                         && AdvancedLightingLayout.DEPTH_SLICES == 6
-                        && AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER == 128,
+                        && AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER == 256,
                 "shader cluster constants diverged from generation layout");
 
         AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4);
@@ -246,13 +246,18 @@ public final class AdvancedDirectLightingShaderTests {
                         && !sodiumFormula.contains("normalLengthSquared <= 0.00000001"),
                 "direct-light normal normalization depends on projected pixel footprint");
         require(sodiumFormula.contains(
-                        "uint countLimit = min(metallumLighting.extentAndClusterCap.z, 128u);"),
+                        "min(header.count, metallumLighting.extentAndClusterCap.z)"),
                 "fragment loop lost its hard per-cluster bound");
-        require(sodiumFormula.contains("min((activeLightCount + 31u) / 32u, 8u)"),
-                "fragment loop can read beyond the fixed membership-mask stride");
-        require(sodiumFormula.contains("uint bit = uint(findLSB(membership));")
-                        && sodiumFormula.contains("membership &= membership - 1u;"),
-                "tile-local membership enumeration is not deterministic");
+        require(sodiumFormula.contains("MetallumClusterHeaderV1 header =")
+                        && sodiumFormula.contains(
+                        "metallumClusterHeaderBuffer.headers[cluster]")
+                        && sodiumFormula.contains("header.offset > indexCapacity")
+                        && sodiumFormula.contains(
+                        "header.count > indexCapacity - header.offset"),
+                "fragment loop can read outside the compact header/index allocation");
+        require(sodiumFormula.contains("metallumClusterIndexBuffer.indices[")
+                        && sodiumFormula.contains("header.offset + candidate]"),
+                "tile-local compact index enumeration is missing");
         require(countOccurrences(sodiumFormula, "evaluated += 1u;") == 1
                         && before(sodiumFormula,
                         "distanceSquared >= radius * radius",
@@ -261,8 +266,8 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFormula.contains("lightIndex >= activeLightCount"),
                 "fragment loop can read beyond the uploaded light count");
         require(before(sodiumFormula, "activeLightCount == 0u",
-                        "metallumClusterMaskBuffer.membership["),
-                "zero-light frames can read intentionally stale cluster masks");
+                        "metallumClusterHeaderBuffer.headers["),
+                "zero-light frames can read intentionally stale cluster headers");
         require(countOccurrences(sodiumFormula, "uint activeLightCount =") == 1,
                 "active light count is not cached once per fragment");
         require(sodiumFormula.contains(
@@ -551,8 +556,8 @@ public final class AdvancedDirectLightingShaderTests {
                             (long) AdvancedLightingBindingAbi.PARAMS_BYTES,
                             AdvancedLightingBindingAbi.LIGHTS_SLOT,
                             (long) AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE,
-                            AdvancedLightingBindingAbi.CLUSTER_MASKS_SLOT,
-                            (long) AdvancedLightingBindingAbi.CLUSTER_MASK_WORD_STRIDE,
+                            AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
+                            (long) AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE,
                             AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
                             (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE
                     )),

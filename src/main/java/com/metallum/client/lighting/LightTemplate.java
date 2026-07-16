@@ -11,8 +11,24 @@ public record LightTemplate(
         float green,
         float blue,
         float intensity,
-        int priority
+        int priority,
+        boolean denseCellEligible
 ) {
+    public LightTemplate(
+            final LightSourceKind kind,
+            final double x,
+            final double y,
+            final double z,
+            final float radius,
+            final float red,
+            final float green,
+            final float blue,
+            final float intensity,
+            final int priority
+    ) {
+        this(kind, x, y, z, radius, red, green, blue, intensity, priority, false);
+    }
+
     public LightTemplate {
         if (kind == null) {
             throw new NullPointerException("kind");
@@ -43,7 +59,8 @@ public record LightTemplate(
                 this.green,
                 this.blue,
                 this.intensity,
-                this.priority
+                this.priority,
+                this.denseCellEligible
         );
     }
 

@@ -15,18 +15,20 @@ public final class AdvancedLightingFrameGraph {
 
     private static final FrameGraph.PassId UPLOAD = new FrameGraph.PassId(0, "light_upload");
     private static final FrameGraph.PassId PREPARE = new FrameGraph.PassId(1, "cluster_prepare");
-    private static final FrameGraph.PassId MASK_BUILD = new FrameGraph.PassId(2, "cluster_masks");
+    private static final FrameGraph.PassId CLUSTER_BUILD = new FrameGraph.PassId(2, "cluster_build");
     private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(3, "direct_lighting");
 
     private static final FrameGraph.ResourceId UPLOAD_RING = resource(0, "lighting_upload_ring");
     private static final FrameGraph.ResourceId PARAMS = resource(1, "lighting_params");
     private static final FrameGraph.ResourceId LIGHTS = resource(2, "gpu_lights");
-    private static final FrameGraph.ResourceId MEMBERSHIP_MASKS = resource(
-            3, "cluster_membership_masks");
-    private static final FrameGraph.ResourceId BLOCK_STATISTICS = resource(
-            4, "cluster_block_statistics");
-    private static final FrameGraph.ResourceId STATISTICS = resource(5, "cluster_statistics");
-    private static final FrameGraph.ResourceId SCENE = resource(6, "scene_radiance");
+    private static final FrameGraph.ResourceId MEMBERSHIP_SCRATCH = resource(
+            3, "cluster_membership_scratch");
+    private static final FrameGraph.ResourceId COMPACT_HEADERS = resource(
+            4, "cluster_compact_headers");
+    private static final FrameGraph.ResourceId COMPACT_INDICES = resource(
+            5, "cluster_compact_indices");
+    private static final FrameGraph.ResourceId STATISTICS = resource(6, "cluster_statistics");
+    private static final FrameGraph.ResourceId SCENE = resource(7, "scene_radiance");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -85,11 +87,14 @@ public final class AdvancedLightingFrameGraph {
                                 "lighting_params_v1", false, whole, FrameGraph.ResourceRole.CLUSTER_DATA),
                         buffer(LIGHTS, FrameGraph.PersistenceClass.SIZE_GENERATION,
                                 "gpu_light_v1", false, whole, FrameGraph.ResourceRole.CLUSTER_DATA),
-                        buffer(MEMBERSHIP_MASKS, FrameGraph.PersistenceClass.SIZE_GENERATION,
-                                "cluster_membership_mask_v1", false, whole,
+                        buffer(MEMBERSHIP_SCRATCH, FrameGraph.PersistenceClass.SIZE_GENERATION,
+                                "cluster_membership_scratch_v1", false, whole,
                                 FrameGraph.ResourceRole.CLUSTER_DATA),
-                        buffer(BLOCK_STATISTICS, FrameGraph.PersistenceClass.SIZE_GENERATION,
-                                "cluster_block_statistics_v1", false, whole,
+                        buffer(COMPACT_HEADERS, FrameGraph.PersistenceClass.SIZE_GENERATION,
+                                "cluster_header_v1", false, whole,
+                                FrameGraph.ResourceRole.CLUSTER_DATA),
+                        buffer(COMPACT_INDICES, FrameGraph.PersistenceClass.SIZE_GENERATION,
+                                "cluster_light_index_v1", false, whole,
                                 FrameGraph.ResourceRole.CLUSTER_DATA),
                         buffer(STATISTICS, FrameGraph.PersistenceClass.READBACK,
                                 "cluster_statistics_v1", false, whole, FrameGraph.ResourceRole.CLUSTER_DATA),
@@ -134,7 +139,7 @@ public final class AdvancedLightingFrameGraph {
                                 contract
                         ),
                         new FrameGraph.PassDesc(
-                                MASK_BUILD,
+                                CLUSTER_BUILD,
                                 FrameGraph.EncoderClass.COMPUTE,
                                 List.of(PREPARE),
                                 List.of(
@@ -142,9 +147,11 @@ public final class AdvancedLightingFrameGraph {
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(LIGHTS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.COMPUTE),
-                                        access(MEMBERSHIP_MASKS, FrameGraph.AccessKind.WRITE,
+                                        access(MEMBERSHIP_SCRATCH, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE),
-                                        access(BLOCK_STATISTICS, FrameGraph.AccessKind.WRITE,
+                                        access(COMPACT_HEADERS, FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(COMPACT_INDICES, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(STATISTICS, FrameGraph.AccessKind.READ_WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE)
@@ -154,13 +161,15 @@ public final class AdvancedLightingFrameGraph {
                         new FrameGraph.PassDesc(
                                 DIRECT,
                                 FrameGraph.EncoderClass.RENDER,
-                                List.of(MASK_BUILD),
+                                List.of(CLUSTER_BUILD),
                                 List.of(
                                         access(PARAMS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         access(LIGHTS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
-                                        access(MEMBERSHIP_MASKS, FrameGraph.AccessKind.READ,
+                                        access(COMPACT_HEADERS, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(COMPACT_INDICES, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         new FrameGraph.ResourceAccess(
                                                 SCENE,

@@ -416,13 +416,11 @@ public final class RendererGenerationPlanner {
             resources.add(resource("lighting_upload_ring", domain, budget.uploadRingBytes(), false));
             resources.add(resource("gpu_lights", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(budget.gpuLightBytes()), false));
-            // Compact headers/indices remain resident as the validation oracle; production
-            // direct lighting consumes the fused membership-mask allocation.
             resources.add(resource("cluster_compact_headers", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(budget.clusterHeaderBytes()), false));
-            resources.add(resource("cluster_membership_masks", domain,
+            resources.add(resource("cluster_membership_scratch", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(budget.clusterScratchBytes()), false));
-            resources.add(resource("cluster_block_statistics", domain,
+            resources.add(resource("cluster_compact_indices", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(budget.clusterIndexBytes()), false));
             resources.add(resource("lighting_params", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(
@@ -433,7 +431,7 @@ public final class RendererGenerationPlanner {
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));
-            passes.add(pass("cluster_masks", domain));
+            passes.add(pass("cluster_build", domain));
             passes.add(pass("direct_lighting", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "light_upload_blit_encoder", domain));

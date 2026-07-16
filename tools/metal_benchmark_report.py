@@ -141,7 +141,7 @@ WORKLOAD_CONTRACTS = frozenset({
 })
 L3_FRAME_GRAPH_VERSION = 4
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
-CLUSTER_CAP = 128
+CLUSTER_CAP = 256
 CLUSTER_RING_SLOTS = 3
 CLUSTER_STATISTICS_SAMPLE_INTERVAL = 32
 MAXIMUM_CLUSTER_LIGHTS = 4_096
@@ -3426,26 +3426,26 @@ def self_test() -> None:
             "window_maximum"
         ] == 0.12
 
-        l3_cap_128 = root / "l3-cluster-cap-128.jsonl"
+        l3_cap_256 = root / "l3-cluster-cap-256.jsonl"
         cap_payload = l3_line(0, advanced=True, detail=False)
-        cap_payload["renderer_generation"]["advanced_lighting_work"]["light_count"] = 128
+        cap_payload["renderer_generation"]["advanced_lighting_work"]["light_count"] = 256
         cap_payload["clustered_lighting"].update({
-            "light_count": 128,
-            "cluster_accepted_indices": 131_072,
-            "cluster_requested_indices": 131_072,
+            "light_count": 256,
+            "cluster_accepted_indices": 262_144,
+            "cluster_requested_indices": 262_144,
             "cluster_overflow_clusters": 0,
             "cluster_dropped_indices": 0,
             "cluster_index_capacity_drops": 0,
             "cluster_admission_rejected_lights": 0,
-            "cluster_occupancy_p50": 128,
-            "cluster_occupancy_p95": 128,
-            "cluster_occupancy_p99": 128,
-            "cluster_occupancy_max": 128,
+            "cluster_occupancy_p50": 256,
+            "cluster_occupancy_p95": 256,
+            "cluster_occupancy_p99": 256,
+            "cluster_occupancy_max": 256,
         })
-        l3_cap_128.write_text(json.dumps(cap_payload) + "\n", encoding="utf-8")
-        assert load_report(l3_cap_128)[0].clustered_lighting[
+        l3_cap_256.write_text(json.dumps(cap_payload) + "\n", encoding="utf-8")
+        assert load_report(l3_cap_256)[0].clustered_lighting[
             "cluster_occupancy_max"
-        ] == 128
+        ] == 256
 
         l3_advanced_basic = root / "l3-advanced-basic.jsonl"
         l3_advanced_basic.write_text(

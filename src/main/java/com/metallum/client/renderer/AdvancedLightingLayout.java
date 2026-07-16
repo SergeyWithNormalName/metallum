@@ -7,10 +7,14 @@ public final class AdvancedLightingLayout {
     public static final int ABI_VERSION = 1;
     public static final int TILE_SIZE = 64;
     public static final int DEPTH_SLICES = 6;
-    public static final int MAX_LIGHTS_PER_CLUSTER = 128;
+    public static final int MAX_GPU_CANDIDATE_LIGHTS = 4096;
+    public static final int MAX_LIGHTS_PER_CLUSTER = 256;
+    public static final int CLUSTER_MEMBERSHIP_WORDS =
+            MAX_GPU_CANDIDATE_LIGHTS / Integer.SIZE;
     public static final int GPU_LIGHT_STRIDE = 48;
     public static final int CLUSTER_HEADER_STRIDE = 8;
-    public static final int CLUSTER_SCRATCH_STRIDE = 32;
+    public static final int CLUSTER_SCRATCH_STRIDE =
+            CLUSTER_MEMBERSHIP_WORDS * Integer.BYTES;
     public static final int LIGHT_INDEX_STRIDE = Integer.BYTES;
     public static final int LIGHTING_PARAMS_BYTES = 256;
     public static final int STATISTICS_BYTES = 256;
@@ -21,6 +25,7 @@ public final class AdvancedLightingLayout {
 
     public record Budget(
             int maxLights,
+            int maxLightsPerCluster,
             int indexCapacity,
             int clustersX,
             int clustersY,
@@ -34,7 +39,9 @@ public final class AdvancedLightingLayout {
             long totalBytes
     ) {
         public Budget {
-            if (maxLights <= 0 || indexCapacity <= 0 || clustersX <= 0 || clustersY <= 0
+            if (maxLights <= 0 || maxLightsPerCluster <= 0
+                    || maxLightsPerCluster > MAX_LIGHTS_PER_CLUSTER
+                    || indexCapacity <= 0 || clustersX <= 0 || clustersY <= 0
                     || clustersZ <= 0 || clusterCount <= 0) {
                 throw new IllegalArgumentException("Advanced lighting capacities must be positive");
             }
@@ -58,23 +65,20 @@ public final class AdvancedLightingLayout {
             throw new IllegalArgumentException("Render extent must be positive");
         }
 
-        int maxLights;
-        int averageIndicesPerCluster;
+        int maxLights = MAX_GPU_CANDIDATE_LIGHTS;
+        int maxLightsPerCluster;
         int hardIndexCapacity;
         switch (preset) {
             case PERFORMANCE -> {
-                maxLights = 32;
-                averageIndicesPerCluster = 6;
+                maxLightsPerCluster = MAX_LIGHTS_PER_CLUSTER;
                 hardIndexCapacity = 2_000_000;
             }
             case BALANCED -> {
-                maxLights = 64;
-                averageIndicesPerCluster = 8;
+                maxLightsPerCluster = MAX_LIGHTS_PER_CLUSTER;
                 hardIndexCapacity = 4_000_000;
             }
             case ULTRA -> {
-                maxLights = 128;
-                averageIndicesPerCluster = 12;
+                maxLightsPerCluster = MAX_LIGHTS_PER_CLUSTER;
                 hardIndexCapacity = 8_000_000;
             }
             default -> throw new IllegalStateException("Unhandled lighting preset " + preset);
@@ -83,7 +87,7 @@ public final class AdvancedLightingLayout {
         int clustersX = divideRoundUp(renderWidth, TILE_SIZE);
         int clustersY = divideRoundUp(renderHeight, TILE_SIZE);
         int clusterCount = Math.multiplyExact(Math.multiplyExact(clustersX, clustersY), DEPTH_SLICES);
-        int desiredIndices = Math.multiplyExact(clusterCount, averageIndicesPerCluster);
+        int desiredIndices = Math.multiplyExact(clusterCount, maxLightsPerCluster);
         int indexCapacity = Math.max(maxLights, Math.min(desiredIndices, hardIndexCapacity));
 
         long uploadSlotBytes = Math.addExact(
@@ -111,6 +115,7 @@ public final class AdvancedLightingLayout {
         );
         return new Budget(
                 maxLights,
+                maxLightsPerCluster,
                 indexCapacity,
                 clustersX,
                 clustersY,

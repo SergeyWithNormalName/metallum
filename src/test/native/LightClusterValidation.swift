@@ -38,11 +38,12 @@ private let lightingMagic: UInt32 = 0x31424c4d
 private let headerBytes = 64
 private let lightBytes = 48
 private let guardBytes = 64
-private let clusterCap = 128
+private let clusterCap = 256
 private let tileSize = 64
 private let depthSlices = 6
 private let clusterMaskBatchFlag: UInt32 = 1 << 1
-private let membershipWordsPerCluster = 8
+private let maximumLightCandidates: UInt32 = 4_096
+private let membershipWordsPerCluster = 128
 
 private struct NativeApi {
     let abiVersion: NativeAbiVersion
@@ -79,19 +80,16 @@ private struct ReferenceResult: Equatable {
     let admittedLightCap: UInt32
     let perClusterCap: UInt32
     let workloadBudget: UInt32
+    let indexCapacity: UInt32
 }
 
 private struct PresetContract {
-    let admittedLightCap: Int
     let perClusterCap: Int
-    let workloadCeiling: UInt64
 }
 
 private func presetContract(_ preset: UInt32) -> PresetContract {
     switch preset {
-    case 0: return PresetContract(admittedLightCap: 32, perClusterCap: 32, workloadCeiling: 250_000)
-    case 1: return PresetContract(admittedLightCap: 64, perClusterCap: 64, workloadCeiling: 500_000)
-    case 2: return PresetContract(admittedLightCap: 128, perClusterCap: 128, workloadCeiling: 750_000)
+    case 0, 1, 2: return PresetContract(perClusterCap: 256)
     default: preconditionFailure("Unknown validation lighting preset \(preset)")
     }
 }
@@ -373,6 +371,7 @@ private func reference(
     height: Int,
     indexCapacity: Int,
     preset: UInt32 = 1,
+    candidateCapacity: UInt32 = 128,
     projectionOverride: simd_float4x4? = nil
 ) -> ReferenceResult {
     let gridX = (width + tileSize - 1) / tileSize
@@ -458,36 +457,12 @@ private func reference(
         )
     }
 
-    func coveredClusters(_ bounds: ReferenceBounds) -> UInt64 {
-        let extentX = bounds.upper.x - bounds.lower.x
-        let extentY = bounds.upper.y - bounds.lower.y
-        let extentZ = bounds.upper.z - bounds.lower.z
-        return UInt64(extentX) * UInt64(extentY) * UInt64(extentZ)
-    }
-
     let contract = presetContract(preset)
     let bounded = lights.map { bounds(for: $0) }
-    let configuredBudget = min(
-        UInt64(indexCapacity),
-        max(UInt64(clusterCount), contract.workloadCeiling)
-    )
-    var totalCovered: UInt64 = 0
-    var admittedBounds: [ReferenceBounds] = []
-    var admissionRejectedLights = 0
-    for index in bounded.indices {
-        guard let lightBounds = bounded[index] else { continue }
-        let prospectiveCovered = totalCovered + coveredClusters(lightBounds)
-        if admittedBounds.count < contract.admittedLightCap
-                && prospectiveCovered <= configuredBudget {
-            totalCovered = prospectiveCovered
-            admittedBounds.append(lightBounds)
-        } else {
-            admissionRejectedLights += 1
-        }
-    }
 
     var raw = [[UInt32]](repeating: [], count: clusterCount)
-    for (lightIndex, lightBounds) in admittedBounds.enumerated() {
+    for (lightIndex, optionalBounds) in bounded.enumerated() {
+        guard let lightBounds = optionalBounds else { continue }
         for z in lightBounds.lower.z..<lightBounds.upper.z {
             for y in lightBounds.lower.y..<lightBounds.upper.y {
                 for x in lightBounds.lower.x..<lightBounds.upper.x {
@@ -522,12 +497,13 @@ private func reference(
         overflowClusters: UInt32(overflowClusters),
         perClusterDrops: UInt32(perClusterDrops),
         indexCapacityDrops: UInt32(max(0, requested - indexCapacity)),
-        admissionRejectedLights: UInt32(admissionRejectedLights),
+        admissionRejectedLights: 0,
         uploadedLightCount: UInt32(lights.count),
-        admittedLightCount: UInt32(admittedBounds.count),
-        admittedLightCap: UInt32(contract.admittedLightCap),
+        admittedLightCount: UInt32(lights.count),
+        admittedLightCap: candidateCapacity,
         perClusterCap: UInt32(contract.perClusterCap),
-        workloadBudget: UInt32(configuredBudget)
+        workloadBudget: 0,
+        indexCapacity: UInt32(indexCapacity)
     )
 }
 
@@ -619,14 +595,27 @@ private func runGpu(
     let headers = (0..<clusterCount).map {
         SIMD2(headerValues[$0 * 2], headerValues[$0 * 2 + 1])
     }
-    // Empty submissions intentionally skip count/prefix/fill. Their previous private header
-    // contents are therefore not part of the zero-light contract and must never drive a readback.
-    let maskPath = batchFlags & clusterMaskBatchFlag != 0
-    let accepted = lights.isEmpty || maskPath
-        ? 0
-        : headers.reduce(0) { max($0, Int($1.x + $1.y)) }
-    let indexValues = readbacks[2].contents().bindMemory(to: UInt32.self, capacity: max(accepted, 1))
-    let indices = (0..<accepted).map { indexValues[$0] }
+    let indexCapacity = api.contextBufferBytes(context, 2) / UInt64(MemoryLayout<UInt32>.stride)
+    var accepted: UInt64 = 0
+    for (cluster, header) in headers.enumerated() {
+        let offset = UInt64(header.x)
+        let count = UInt64(header.y)
+        try require(offset <= indexCapacity,
+                    "GPU cluster header \(cluster) offset exceeds index-buffer capacity")
+        let remaining = indexCapacity - offset
+        try require(count <= remaining,
+                    "GPU cluster header \(cluster) count exceeds remaining index capacity")
+        accepted = max(accepted, offset + count)
+    }
+    // Empty submissions clear every header, so their bounded readback remains zero.
+    try require(!lights.isEmpty || accepted == 0,
+                "Empty submission exposed a non-zero bounded compact-index range")
+    let acceptedCount = Int(accepted)
+    let indexValues = readbacks[2].contents().bindMemory(
+        to: UInt32.self,
+        capacity: max(acceptedCount, 1)
+    )
+    let indices = (0..<acceptedCount).map { indexValues[$0] }
     let maskWordCount = Int(api.contextBufferBytes(context, 5) / 4)
     let maskValues = readbacks[5].contents().bindMemory(
         to: UInt32.self,
@@ -683,7 +672,7 @@ private func requireMaskMatches(
                     "\(context): deterministic mask prefix differs in cluster \(cluster)")
     }
     try require(readUInt32(gpu.params, at: 140) == reference.admittedLightCount,
-                "\(context): compute/direct-shader compact light count mismatch")
+                "\(context): compute/direct-shader candidate light count mismatch")
     try require(readUInt32(gpu.stats, at: 24) == reference.uploadedLightCount,
                 "\(context): original uploaded-light telemetry mismatch")
     try require(readUInt32(gpu.stats, at: 32) == reference.requestedIndices,
@@ -695,7 +684,7 @@ private func requireMaskMatches(
     try require(readUInt32(gpu.stats, at: 44) == reference.perClusterDrops,
                 "\(context): per-cluster-drop telemetry mismatch")
     try require(readUInt32(gpu.stats, at: 48) == 0,
-                "\(context): mask path reported an impossible index-capacity drop")
+                "\(context): full-capacity scratch oracle reported an index-capacity drop")
     try require(readUInt32(gpu.stats, at: 52) == reference.admissionRejectedLights,
                 "\(context): deterministic workload-admission telemetry mismatch")
 }
@@ -720,16 +709,30 @@ private func requireMatches(
 ) throws {
     try require(gpu.headers == reference.headers, "\(context): cluster headers differ from CPU reference")
     try require(gpu.indices == reference.indices, "\(context): compact indices differ from CPU reference")
+    for (cluster, header) in gpu.headers.enumerated() {
+        try require(header.x <= reference.indexCapacity,
+                    "\(context): cluster \(cluster) offset exceeds index capacity")
+        try require(header.y <= reference.perClusterCap,
+                    "\(context): cluster \(cluster) count exceeds preset cap")
+        try require(header.y <= reference.indexCapacity - header.x,
+                    "\(context): cluster \(cluster) range exceeds index capacity")
+        let start = Int(header.x)
+        let end = start + Int(header.y)
+        try require(end <= gpu.indices.count,
+                    "\(context): cluster \(cluster) range exceeds compact readback")
+        try require(gpu.indices[start..<end].allSatisfy { $0 < reference.admittedLightCount },
+                    "\(context): cluster \(cluster) references a non-candidate light")
+    }
     try require(readUInt32(gpu.params, at: 140) == reference.admittedLightCount,
-                "\(context): compute/direct-shader compact light count mismatch")
+                "\(context): compute/direct-shader candidate count mismatch")
     try require(readUInt32(gpu.params, at: 152) == reference.perClusterCap,
                 "\(context): preset per-cluster cap parameter mismatch")
     try require(readUInt32(gpu.params, at: 208) == reference.workloadBudget,
-                "\(context): workload budget parameter mismatch")
+                "\(context): removed global workload budget was reintroduced")
     try require(readUInt32(gpu.params, at: 224) == reference.uploadedLightCount,
                 "\(context): original uploaded count was not retained in params")
     try require(readUInt32(gpu.params, at: 228) == reference.admittedLightCap,
-                "\(context): admitted-light hard cap parameter mismatch")
+                "\(context): total candidate-cap parameter mismatch")
     try require(readUInt32(gpu.stats, at: 24) == reference.uploadedLightCount,
                 "\(context): original uploaded-light telemetry mismatch")
     try require(readUInt32(gpu.stats, at: 32) == UInt32(reference.indices.count),
@@ -743,7 +746,7 @@ private func requireMatches(
     try require(readUInt32(gpu.stats, at: 48) == reference.indexCapacityDrops,
                 "\(context): index-capacity telemetry mismatch")
     try require(readUInt32(gpu.stats, at: 52) == reference.admissionRejectedLights,
-                "\(context): deterministic workload-admission telemetry mismatch")
+                "\(context): global candidate admission rejected a valid upload")
     try require(readUInt32(gpu.stats, at: 52) <= reference.uploadedLightCount,
                 "\(context): workload rejections exceed the original upload count")
     try require(readUInt32(gpu.stats, at: 68) <= reference.perClusterCap
@@ -836,8 +839,8 @@ private enum LightClusterValidationMain {
                 api.layout($0.baseAddress, UInt64($0.count))
             } == 1, "Native lighting layout descriptor is unavailable")
             let expectedLayout: [UInt32] = [
-                1, 128, 64, 48, 256, 8, 32, 4, 256, 3,
-                UInt32(tileSize), UInt32(depthSlices), 128,
+                1, 128, 64, 48, 256, 8, 512, 4, 256, 3,
+                UInt32(tileSize), UInt32(depthSlices), 256,
                 0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
                 27, 28, 29, 30, 64
             ]
@@ -1007,8 +1010,8 @@ private enum LightClusterValidationMain {
             try require(cameraPlaneOutsideCpu.requestedIndices == 0,
                         "Off-axis camera-plane light was expanded to a full-screen bound")
 
-            // Rejected/invalid uploads leave no holes: the next accepted record becomes
-            // compact light zero, which is exactly the index consumed by the direct shader.
+            // View-invalid candidates retain their camera-stable upload index. Compact cluster
+            // lists omit them without renumbering the visible candidates that follow.
             let compactionLights = cameraPlaneOutside + [Light(
                 position: SIMD3(0, 0, -8),
                 radius: 1,
@@ -1027,15 +1030,16 @@ private enum LightClusterValidationMain {
                 lights: compactionLights, width: width, height: height,
                 indexCapacity: Int(fullIndexCapacity)
             )
-            try requireMatches(compactionGpu, compactionCpu, context: "stable light compaction")
-            try require(compactionCpu.admittedLightCount == 1
-                            && Set(compactionGpu.indices) == Set([UInt32(0)]),
-                        "Stable compaction did not remap the accepted light to compact index zero")
-            try require(readFloat(compactionGpu.lights, at: 0) == 0
-                            && readFloat(compactionGpu.lights, at: 4) == 0
-                            && readFloat(compactionGpu.lights, at: 8) == -8
-                            && readFloat(compactionGpu.lights, at: 12) == 1,
-                        "Stable compaction did not move the accepted payload to gpuLights[0]")
+            try requireMatches(compactionGpu, compactionCpu, context: "stable candidate indices")
+            try require(compactionCpu.admittedLightCount == 2
+                            && Set(compactionGpu.indices) == Set([UInt32(1)]),
+                        "Cluster compaction renumbered the visible candidate after an invalid one")
+            let visibleOffset = lightBytes
+            try require(readFloat(compactionGpu.lights, at: visibleOffset) == 0
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 4) == 0
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 8) == -8
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 12) == 1,
+                        "Stable candidate payload moved away from gpuLights[1]")
 
             // A perspective sphere bound must include tangent edge tiles. The old
             // center +/- radius/depth approximation omitted both outer X tiles here.
@@ -1149,7 +1153,6 @@ private enum LightClusterValidationMain {
                         height: bobHeight,
                         lights: [nearEyeLight],
                         hdr: iteration.isMultiple(of: 2),
-                        batchFlags: 1 | clusterMaskBatchFlag,
                         projectionOverride: projection
                     )
                     let cpu = reference(
@@ -1157,9 +1160,10 @@ private enum LightClusterValidationMain {
                         width: bobWidth,
                         height: bobHeight,
                         indexCapacity: bobClusterCount * clusterCap,
+                        candidateCapacity: 8,
                         projectionOverride: projection
                     )
-                    try requireMaskMatches(gpu, cpu, context: "view-bob angle \(angle)")
+                    try requireMatches(gpu, cpu, context: "view-bob angle \(angle)")
 
                     let fragmentClip = projection * SIMD4(inSphereFragment, 1)
                     try require(fragmentClip.w > 0 && fragmentClip.w.isFinite,
@@ -1175,8 +1179,11 @@ private enum LightClusterValidationMain {
                     let fragmentY = min(Int(floor(fragmentPixel.y / Float(tileSize))), bobClustersY - 1)
                     let fragmentZ = depthSlice(-inSphereFragment.z, near: 0.1, far: 100)
                     let fragmentCluster = (fragmentZ * bobClustersY + fragmentY) * bobClustersX + fragmentX
+                    let fragmentHeader = gpu.headers[fragmentCluster]
+                    let fragmentStart = Int(fragmentHeader.x)
+                    let fragmentEnd = fragmentStart + Int(fragmentHeader.y)
                     try require(
-                        gpu.masks[fragmentCluster * membershipWordsPerCluster] & 1 == 1,
+                        gpu.indices[fragmentStart..<fragmentEnd].contains(0),
                         "View-bob angle \(angle) dropped the light from an in-sphere fragment cluster"
                     )
                 }
@@ -1214,8 +1221,9 @@ private enum LightClusterValidationMain {
                 }
             }
 
-            // Dense membership retains every admitted light; local prefix truncation would
-            // reintroduce camera-dependent light swaps at cluster boundaries.
+            // Dense membership retains every uploaded candidate globally. This base context
+            // fits exactly inside Balanced's local cap; the 256-light preset matrix below
+            // exercises deterministic local truncation independently.
             let denseLights = clusterOverflowLights(count: Int(maxLights))
             submit += 1
             let denseGpu = try runGpu(
@@ -1230,12 +1238,13 @@ private enum LightClusterValidationMain {
                 indexCapacity: Int(fullIndexCapacity)
             )
             try requireMatches(denseGpu, denseCpu, context: "max/dense batch")
-            try require(denseCpu.overflowClusters == 0 && denseCpu.perClusterDrops == 0,
-                        "Dense Balanced membership dropped an admitted light")
             try require(
-                denseCpu.admittedLightCount
-                    == UInt32(presetContract(1).admittedLightCap),
-                        "Balanced admission did not retain its full hard light cap")
+                denseCpu.admittedLightCount == maxLights
+                    && denseCpu.admissionRejectedLights == 0
+                    && denseCpu.overflowClusters == 0
+                    && denseCpu.perClusterDrops == 0,
+                "Balanced dropped candidates that fit its per-cluster cap"
+            )
             for header in denseGpu.headers where header.y == denseCpu.perClusterCap {
                 let start = Int(header.x)
                 let count = Int(denseCpu.perClusterCap)
@@ -1262,11 +1271,10 @@ private enum LightClusterValidationMain {
                             "Low clustered occupancy \(occupancy) was under-reported")
             }
 
-            // P/B/U independently enforce 32/64/128 admitted lights and retain all of them
-            // per cluster. Bounded global admission is the only light-count overflow policy.
+            // P/B/U share one global candidate pool and one correctness-preserving local cap.
             do {
                 let presetGeneration: UInt64 = 703
-                let presetMaxLights: UInt32 = 256
+                let presetMaxLights: UInt32 = 512
                 guard let presetContext = api.createContext(
                     objectPointer(device as AnyObject), presetGeneration, presetMaxLights,
                     fullIndexCapacity, clustersX, clustersY, UInt32(depthSlices)
@@ -1285,22 +1293,21 @@ private enum LightClusterValidationMain {
                     )
                     let cpu = reference(
                         lights: capLights, width: width, height: height,
-                        indexCapacity: Int(fullIndexCapacity), preset: preset
+                        indexCapacity: Int(fullIndexCapacity), preset: preset,
+                        candidateCapacity: presetMaxLights
                     )
                     try requireMatches(gpu, cpu, context: "preset \(preset) membership caps")
                     let contract = presetContract(preset)
-                    try require(cpu.admittedLightCount == UInt32(contract.admittedLightCap),
-                                "Preset \(preset) admitted-light cap changed")
-                    try require(cpu.admissionRejectedLights
-                                    == presetMaxLights - UInt32(contract.admittedLightCap),
-                                "Preset \(preset) admission-rejection count changed")
-                    try require(cpu.overflowClusters == 0 && cpu.perClusterDrops == 0,
-                                "Preset \(preset) dropped an admitted cluster member")
+                    try require(cpu.admittedLightCount == presetMaxLights
+                                    && cpu.admissionRejectedLights == 0,
+                                "Preset \(preset) changed the shared global candidate pool")
+                    try require(cpu.overflowClusters > 0 && cpu.perClusterDrops > 0,
+                                "Preset \(preset) did not enforce its local cluster cap")
                     if preset == 2 {
-                        try require(readUInt32(gpu.stats, at: 60) == 128
-                                        && readUInt32(gpu.stats, at: 64) == 128
-                                        && readUInt32(gpu.stats, at: 68) == 128,
-                                    "Ultra dense occupancy telemetry saturated below 128")
+                        try require(readUInt32(gpu.stats, at: 60) == 256
+                                        && readUInt32(gpu.stats, at: 64) == 256
+                                        && readUInt32(gpu.stats, at: 68) == 256,
+                                    "Ultra dense occupancy telemetry saturated below 256")
                     }
                     let cappedHeaders = gpu.headers.filter { $0.y == UInt32(contract.perClusterCap) }
                     try require(!cappedHeaders.isEmpty,
@@ -1317,15 +1324,71 @@ private enum LightClusterValidationMain {
                 }
             }
 
-            // Production consumes the deterministic membership masks directly and skips
-            // compact prefix/fill. Keep the initial compact path above as a validation oracle.
+            // The 128-word ABI must reach candidate #4095, not merely enlarge allocation
+            // metadata. Keep the first 4095 candidates view-invalid so every preset's compact
+            // list must recover the sole visible source from membership word 127.
+            do {
+                let fullPoolGeneration: UInt64 = 704
+                guard let fullPoolContext = api.createContext(
+                    objectPointer(device as AnyObject), fullPoolGeneration,
+                    maximumLightCandidates, fullIndexCapacity,
+                    clustersX, clustersY, UInt32(depthSlices)
+                ) else {
+                    throw ValidationFailure.message("Could not create 4096-candidate context")
+                }
+                defer { api.releaseContext(fullPoolContext) }
+                let visibleLast = Light(
+                    position: SIMD3(0, 0, -8),
+                    radius: 1,
+                    color: SIMD3(0.4, 0.8, 1),
+                    intensity: 2,
+                    stableId: UInt64(maximumLightCandidates),
+                    flags: 0
+                )
+                let fullPoolLights = Array(
+                    repeating: cameraPlaneOutside[0],
+                    count: Int(maximumLightCandidates) - 1
+                ) + [visibleLast]
+                for preset in UInt32(0)...UInt32(2) {
+                    submit += 1
+                    let gpu = try runGpu(
+                        api: api, context: fullPoolContext, queue: queue,
+                        generation: fullPoolGeneration,
+                        frameId: UInt64(61 + preset), submitIndex: submit,
+                        width: width, height: height, lights: fullPoolLights,
+                        hdr: preset == 2, preset: preset
+                    )
+                    let cpu = reference(
+                        lights: fullPoolLights, width: width, height: height,
+                        indexCapacity: Int(fullIndexCapacity), preset: preset,
+                        candidateCapacity: maximumLightCandidates
+                    )
+                    try requireMatches(
+                        gpu,
+                        cpu,
+                        context: "preset \(preset) candidate #4095"
+                    )
+                    try require(Set(gpu.indices) == Set([maximumLightCandidates - 1]),
+                                "Preset \(preset) could not address membership word 127")
+                }
+                let oversized = api.createContext(
+                    objectPointer(device as AnyObject), 705,
+                    maximumLightCandidates + 1, fullIndexCapacity,
+                    clustersX, clustersY, UInt32(depthSlices)
+                )
+                if let oversized { api.releaseContext(oversized) }
+                try require(oversized == nil, "ABI v1 admitted more than 4096 candidates")
+            }
+
+            // The legacy mask flag remains packet-compatible but production must ignore it
+            // and still build compact headers plus indices.
             do {
                 let maskGeneration: UInt64 = 699
                 guard let maskContext = api.createContext(
                     objectPointer(device as AnyObject), maskGeneration, maxLights,
                     fullIndexCapacity, clustersX, clustersY, UInt32(depthSlices)
                 ) else {
-                    throw ValidationFailure.message("Could not create tile-local mask context")
+                    throw ValidationFailure.message("Could not create legacy-flag context")
                 }
                 defer { api.releaseContext(maskContext) }
                 submit += 1
@@ -1348,11 +1411,11 @@ private enum LightClusterValidationMain {
                     height: height,
                     indexCapacity: Int(fullIndexCapacity)
                 )
-                try requireMaskMatches(maskGpu, maskCpu, context: "tile-local production mask")
+                try requireMatches(maskGpu, maskCpu, context: "legacy flag compact output")
+                try requireMaskMatches(maskGpu, maskCpu, context: "legacy flag scratch oracle")
 
-                // Repeating the same mask build across SDR/HDR must preserve the exact active
-                // words and all cluster-work counters. Unused mask words are intentionally not
-                // cleared and are outside the direct-shader contract.
+                // Repeating the same compact build across SDR/HDR must preserve exact output
+                // and all cluster-work counters even when old Java still sends the flag.
                 let firstMaskPayload = activeMaskPayload(
                     maskGpu,
                     admittedLightCount: maskCpu.admittedLightCount
@@ -1375,7 +1438,12 @@ private enum LightClusterValidationMain {
                     try requireMaskMatches(
                         repeated,
                         maskCpu,
-                        context: "repeated production mask \(iteration)"
+                        context: "repeated legacy-flag scratch \(iteration)"
+                    )
+                    try requireMatches(
+                        repeated,
+                        maskCpu,
+                        context: "repeated legacy-flag compact output \(iteration)"
                     )
                     try require(
                         activeMaskPayload(
@@ -1393,8 +1461,7 @@ private enum LightClusterValidationMain {
                     )
                 }
 
-                // Every preset must use the production mask path while independently enforcing
-                // its admitted-light and per-cluster caps.
+                // Every preset keeps the same candidate pool and changes only its local cap.
                 for preset in UInt32(0)...UInt32(2) {
                     submit += 1
                     let presetMask = try runGpu(
@@ -1423,10 +1490,15 @@ private enum LightClusterValidationMain {
                         presetMaskCpu,
                         context: "preset \(preset) production mask"
                     )
+                    try requireMatches(
+                        presetMask,
+                        presetMaskCpu,
+                        context: "preset \(preset) legacy-flag compact output"
+                    )
                     try require(
-                        presetMaskCpu.admittedLightCount
-                            == UInt32(presetContract(preset).admittedLightCap),
-                        "Preset \(preset) production mask changed its admitted-light cap"
+                        presetMaskCpu.admittedLightCount == maxLights
+                            && presetMaskCpu.admissionRejectedLights == 0,
+                        "Preset \(preset) legacy flag changed the shared candidate pool"
                     )
                 }
 
@@ -1442,6 +1514,12 @@ private enum LightClusterValidationMain {
                     flags: 0
                 )
                 let retainedPrefix = cameraPlaneOutside + [retainedVisible]
+                let retainedReference = reference(
+                    lights: retainedPrefix,
+                    width: width,
+                    height: height,
+                    indexCapacity: Int(fullIndexCapacity)
+                )
                 let visibleReference = reference(
                     lights: [retainedVisible],
                     width: width,
@@ -1453,8 +1531,9 @@ private enum LightClusterValidationMain {
                     _ gpu: GpuResult,
                     context: String
                 ) throws {
+                    try requireMatches(gpu, retainedReference, context: "\(context) compact output")
                     try require(readUInt32(gpu.params, at: 140) == 2,
-                                "\(context): retained prefix was compacted")
+                                "\(context): candidate prefix count changed")
                     try require(readUInt32(gpu.params, at: 224) == 2,
                                 "\(context): original retained-prefix count changed")
                     try require(readUInt32(gpu.stats, at: 24) == 2,
@@ -1562,9 +1641,8 @@ private enum LightClusterValidationMain {
                 )
             }
 
-            // Capacity-derived workload admission prevents a partial global index cutoff.
-            // This fixture has one prefix block and needs 160 bytes of aliased summary
-            // scratch. Reject 39 UInt32 indices, which provide only 156 bytes.
+            // Prefix telemetry aliases the compact-index buffer before fill. This fixture has
+            // one prefix block and needs 160 bytes; reject 39 UInt32 indices (156 bytes).
             let undersizedPrefixScratch = api.createContext(
                 objectPointer(device as AnyObject), 700, maxLights, 39,
                 clustersX, clustersY, UInt32(depthSlices)
@@ -1577,7 +1655,7 @@ private enum LightClusterValidationMain {
 
             let clippedGeneration: UInt64 = 701
             guard let clippedContext = api.createContext(
-                objectPointer(device as AnyObject), clippedGeneration, maxLights, 97,
+                objectPointer(device as AnyObject), clippedGeneration, maxLights, 40,
                 clustersX, clustersY, UInt32(depthSlices)
             ) else {
                 throw ValidationFailure.message("Could not create clipped-capacity context")
@@ -1588,23 +1666,23 @@ private enum LightClusterValidationMain {
                 frameId: 50, submitIndex: submit, width: width, height: height,
                 lights: denseLights, hdr: true
             )
-            let clippedCpu = reference(lights: denseLights, width: width, height: height, indexCapacity: 97)
-            try requireMatches(clippedGpu, clippedCpu, context: "capacity-derived workload admission")
-            try require(clippedCpu.admissionRejectedLights > 0,
-                        "Small-capacity scene did not exercise workload admission")
-            try require(clippedCpu.indexCapacityDrops == 0,
-                        "Workload admission allowed a partial global index cutoff")
+            let clippedCpu = reference(lights: denseLights, width: width, height: height, indexCapacity: 40)
+            try requireMatches(clippedGpu, clippedCpu, context: "diagnosed index-capacity clipping")
+            try require(clippedCpu.admissionRejectedLights == 0,
+                        "Small index capacity rejected global light candidates")
+            try require(clippedCpu.indexCapacityDrops > 0,
+                        "Small index capacity did not report deterministic clipping")
             api.releaseContext(clippedContext)
 
-            // Retina-scale pathological overlap must be admitted in a bounded stable upload
-            // prefix, preserve the first camera-containing light, and complete deterministically.
+            // Retina-scale pathological overlap keeps the full candidate pool, applies only
+            // the local Balanced cap, and completes deterministically.
             do {
                 let retinaWidth = 3024
                 let retinaHeight = 1964
                 let retinaClustersX = UInt32((retinaWidth + tileSize - 1) / tileSize)
                 let retinaClustersY = UInt32((retinaHeight + tileSize - 1) / tileSize)
                 let retinaGeneration: UInt64 = 702
-                let retinaMaxLights: UInt32 = 1_024
+                let retinaMaxLights = maximumLightCandidates
                 let retinaIndexCapacity: UInt32 = 4_000_000
                 guard let retinaContext = api.createContext(
                     objectPointer(device as AnyObject),
@@ -1624,18 +1702,17 @@ private enum LightClusterValidationMain {
                     lights: retinaDense,
                     width: retinaWidth,
                     height: retinaHeight,
-                    indexCapacity: Int(retinaIndexCapacity)
+                    indexCapacity: Int(retinaIndexCapacity),
+                    candidateCapacity: retinaMaxLights
                 )
-                try require(retinaCpu.admissionRejectedLights > 0,
-                            "Retina dense scene did not exercise workload admission")
                 try require(
-                    retinaCpu.admittedLightCount > 0
-                        && retinaCpu.admittedLightCount
-                        <= UInt32(presetContract(1).admittedLightCap),
-                    "Retina full-grid workload admission was not a bounded prefix"
+                    retinaCpu.admittedLightCount == retinaMaxLights
+                        && retinaCpu.admissionRejectedLights == 0
+                        && retinaCpu.perClusterDrops > 0,
+                    "Retina scene changed the global pool instead of the local cluster cap"
                 )
                 try require(retinaCpu.indexCapacityDrops == 0,
-                            "Retina workload admission allowed a partial global index cutoff")
+                            "Retina compact index capacity was unexpectedly exhausted")
                 var firstRetina: GpuResult?
                 for iteration in 0..<3 {
                     submit += 1
@@ -1654,20 +1731,20 @@ private enum LightClusterValidationMain {
                     )
                     let elapsed = ProcessInfo.processInfo.systemUptime - start
                     try require(elapsed < 10,
-                                "Retina workload admission exceeded its finite-time budget")
-                    try requireMatches(gpu, retinaCpu, context: "Retina workload iteration \(iteration)")
+                                "Retina compact build exceeded its finite-time budget")
+                    try requireMatches(gpu, retinaCpu, context: "Retina compact iteration \(iteration)")
                     try require(gpu.indices.contains(0),
                                 "Workload admission dropped the first camera-containing light")
                     if let firstRetina {
                         try require(
                             gpu.headers == firstRetina.headers && gpu.indices == firstRetina.indices,
-                            "Retina workload admission was not bit-deterministic"
+                            "Retina compact build was not bit-deterministic"
                         )
                         try require(
                             (32...68).allSatisfy {
                                 readUInt32(gpu.stats, at: $0) == readUInt32(firstRetina.stats, at: $0)
                             },
-                            "SDR/HDR changed Retina workload-admission counters"
+                            "SDR/HDR changed Retina compact-build counters"
                         )
                     } else {
                         firstRetina = gpu
@@ -1753,8 +1830,8 @@ private enum LightClusterValidationMain {
                         "Rejected upload calls were not separated from completed calls")
             print(
                 "Native clustered-lighting ABI v1 validation passed on \(device.name) "
-                    + "(12 CPU/GPU properties, production masks, max/empty/overflow/OOB guards, "
-                    + "ring and teardown)"
+                    + "(compact lists, candidate #4095, P/B/U caps, Retina maximum-pool bound, "
+                    + "empty/overflow/OOB guards, ring and teardown)"
             )
         } catch {
             fputs("Native clustered-lighting validation FAILED: \(error)\n", stderr)

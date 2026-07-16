@@ -15,8 +15,27 @@ public record AdvancedLight(
         float green,
         float blue,
         float intensity,
-        int priority
+        int priority,
+        boolean denseCellEligible
 ) {
+    public AdvancedLight(
+            final long stableId,
+            final long generation,
+            final LightSourceKind kind,
+            final double x,
+            final double y,
+            final double z,
+            final float radius,
+            final float red,
+            final float green,
+            final float blue,
+            final float intensity,
+            final int priority
+    ) {
+        this(stableId, generation, kind, x, y, z, radius, red, green, blue,
+                intensity, priority, false);
+    }
+
     /** Camera-independent section order and final stable-id tie-break. */
     public static final Comparator<AdvancedLight> PRIORITY_ORDER = (left, right) -> {
         int priorityOrder = Integer.compare(right.priority, left.priority);
@@ -51,7 +70,8 @@ public record AdvancedLight(
             throw new IllegalArgumentException("generation must be positive");
         }
         // Reuse the exact parameter validation used before materialization.
-        new LightTemplate(kind, x, y, z, radius, red, green, blue, intensity, priority);
+        new LightTemplate(kind, x, y, z, radius, red, green, blue, intensity, priority,
+                denseCellEligible);
     }
 
     public AdvancedLight withGeneration(final long nextGeneration) {
@@ -67,7 +87,8 @@ public record AdvancedLight(
                 this.green,
                 this.blue,
                 this.intensity,
-                this.priority
+                this.priority,
+                this.denseCellEligible
         );
     }
 }

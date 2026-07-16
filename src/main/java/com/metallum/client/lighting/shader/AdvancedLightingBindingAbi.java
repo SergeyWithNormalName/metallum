@@ -10,13 +10,12 @@ public final class AdvancedLightingBindingAbi {
 
     public static final int PARAMS_SLOT = 27;
     public static final int LIGHTS_SLOT = 28;
-    public static final int CLUSTER_MASKS_SLOT = 29;
+    public static final int CLUSTER_HEADERS_SLOT = 29;
     public static final int CLUSTER_INDICES_SLOT = 30;
 
     public static final int PARAMS_BYTES = AdvancedLightingLayout.LIGHTING_PARAMS_BYTES;
     public static final int GPU_LIGHT_STRIDE = AdvancedLightingLayout.GPU_LIGHT_STRIDE;
     public static final int CLUSTER_HEADER_STRIDE = AdvancedLightingLayout.CLUSTER_HEADER_STRIDE;
-    public static final int CLUSTER_MASK_WORD_STRIDE = Integer.BYTES;
     public static final int CLUSTER_INDEX_STRIDE = AdvancedLightingLayout.LIGHT_INDEX_STRIDE;
 
     public static final int PARAMS_VIEW_ROTATION_OFFSET = 0;
@@ -37,7 +36,7 @@ public final class AdvancedLightingBindingAbi {
     private static final int[] FRAGMENT_SLOTS = {
             PARAMS_SLOT,
             LIGHTS_SLOT,
-            CLUSTER_MASKS_SLOT,
+            CLUSTER_HEADERS_SLOT,
             CLUSTER_INDICES_SLOT
     };
 

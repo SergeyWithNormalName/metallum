@@ -8,6 +8,7 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 
 /** Deterministic L3 point-light defaults expressed directly in scene-linear RGB. */
 public final class MinecraftLightPolicy {
@@ -20,13 +21,16 @@ public final class MinecraftLightPolicy {
             final int blockY,
             final int blockZ
     ) {
-        int emission = state.getLightEmission();
+        if (state == null) {
+            throw new NullPointerException("state");
+        }
+        EmissiveCell cell = emissiveCell(state);
+        int emission = cell.emission();
         if (emission <= 0) {
             return null;
         }
-        Identifier id = BuiltInRegistries.BLOCK.getKey(state.getBlock());
-        String path = id == null ? "unknown" : id.getPath();
-        float[] color = blockLinearColor(path);
+        Identifier id = BuiltInRegistries.BLOCK.getKey(cell.colorState().getBlock());
+        float[] color = linearColorForIdentifier(id);
         float normalized = emission / 15.0F;
         float radius = 1.5F + 0.75F * emission;
         float intensity = 0.15F + 3.0F * normalized * (float) Math.sqrt(normalized);
@@ -40,7 +44,8 @@ public final class MinecraftLightPolicy {
                 color[1],
                 color[2],
                 intensity,
-                emission * 16
+                priorityForEmission(emission),
+                cell.denseCellEligible()
         );
     }
 
@@ -79,11 +84,42 @@ public final class MinecraftLightPolicy {
         );
     }
 
-    private static float[] blockLinearColor(final String path) {
+    static int effectiveEmission(final BlockState state) {
+        return emissiveCell(state).emission();
+    }
+
+    static int priorityForEmission(final int emission) {
+        return clampEmission(emission) * 16;
+    }
+
+    private static EmissiveCell emissiveCell(final BlockState state) {
+        int blockEmission = clampEmission(state.getLightEmission());
+        FluidState fluid = state.getFluidState();
+        if (fluid.isEmpty()) {
+            return new EmissiveCell(blockEmission, state, false);
+        }
+        BlockState fluidState = fluid.createLegacyBlock();
+        int fluidEmission = clampEmission(fluidState.getLightEmission());
+        return fluidEmission >= blockEmission && fluidEmission > 0
+                ? new EmissiveCell(fluidEmission, fluidState, true)
+                : new EmissiveCell(blockEmission, state, false);
+    }
+
+    private static int clampEmission(final int emission) {
+        return Math.max(0, Math.min(15, emission));
+    }
+
+    static float[] linearColorForIdentifier(final Identifier id) {
+        if (id == null || !"minecraft".equals(id.getNamespace())) {
+            // Vanilla exposes intensity but no emitted chromaticity. Unknown mod sources must
+            // still illuminate, and neutral is the only deterministic non-misleading fallback.
+            return new float[]{1.0F, 1.0F, 1.0F};
+        }
+        String path = id.getPath();
         if (path.contains("soul_")) {
             return new float[]{0.035F, 0.34F, 1.0F};
         }
-        if (path.contains("redstone_torch")) {
+        if (path.equals("redstone_torch") || path.equals("redstone_wall_torch")) {
             return new float[]{1.0F, 0.012F, 0.003F};
         }
         if (path.contains("ochre_froglight")) {
@@ -101,7 +137,7 @@ public final class MinecraftLightPolicy {
         if (path.contains("end_rod")) {
             return new float[]{0.78F, 0.64F, 1.0F};
         }
-        if (path.contains("lava") || path.contains("magma") || path.contains("fire")) {
+        if (path.contains("lava") || path.contains("magma") || path.endsWith("fire")) {
             return new float[]{1.0F, 0.08F, 0.004F};
         }
         if (path.contains("glow_lichen")) {
@@ -163,8 +199,7 @@ public final class MinecraftLightPolicy {
             return null;
         }
         Identifier id = BuiltInRegistries.BLOCK.getKey(blockItem.getBlock());
-        String path = id == null ? "unknown" : id.getPath();
-        float[] color = blockLinearColor(path);
+        float[] color = linearColorForIdentifier(id);
         float normalized = emission / 15.0F;
         return new EntityProfile(
                 1.5F + 0.75F * emission,
@@ -172,7 +207,7 @@ public final class MinecraftLightPolicy {
                 color[1],
                 color[2],
                 0.15F + 3.0F * normalized * (float) Math.sqrt(normalized),
-                256 + emission * 8
+                priorityForEmission(emission)
         );
     }
 
@@ -198,6 +233,13 @@ public final class MinecraftLightPolicy {
             float blue,
             float intensity,
             int priority
+    ) {
+    }
+
+    private record EmissiveCell(
+            int emission,
+            BlockState colorState,
+            boolean denseCellEligible
     ) {
     }
 }
