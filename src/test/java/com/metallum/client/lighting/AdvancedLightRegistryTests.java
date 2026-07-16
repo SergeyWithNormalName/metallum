@@ -42,6 +42,7 @@ public final class AdvancedLightRegistryTests {
         testMinecraftEmitterPolicy();
         testDenseBlockCompaction();
         testDirectLightFrustumClassification();
+        testDirectFrameCompactsBackgroundGpuWork();
         testFullCandidatePoolCameraStability();
         testExactStaticScanAndSectionCap();
         testOverrideRacePermutations();
@@ -453,8 +454,23 @@ public final class AdvancedLightRegistryTests {
         );
         require(forwardComplete.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
                         && forwardComplete.droppedLightCount() == 0
-                        && forwardComplete.lights().equals(backwardComplete.lights()),
-                "complete 4096-source pool changed when no overflow required selection");
+                        && backwardComplete.lights().isEmpty()
+                        && backwardComplete.droppedLightCount() == 0
+                        && registry.telemetry().directVisibilityCulls()
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && registry.telemetry().frameLightOverflows() == 0L,
+                "background-only direct frame was uploaded or reported as overflow");
+
+        LightFrameSnapshot legacyComplete = registry.snapshotForFrame(
+                0.0,
+                0.0,
+                0.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(legacyComplete.lights().equals(forwardComplete.lights())
+                        && legacyComplete.droppedLightCount() == 0,
+                "direct visibility filtering leaked into the camera-independent snapshot API");
 
         long brightBehindId = dimVisibleId + 1L;
         registry.recordBlockChange(
@@ -470,9 +486,12 @@ public final class AdvancedLightRegistryTests {
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        require(forwardOverflow.droppedLightCount() == 1
+        require(forwardOverflow.droppedLightCount() == 0
                         && stableIds(forwardOverflow.lights()).contains(dimVisibleId)
                         && !stableIds(forwardOverflow.lights()).contains(brightBehindId)
+                        && registry.telemetry().directVisibilityCulls()
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS + 1L
+                        && registry.telemetry().frameLightOverflows() == 0L
                         && registry.telemetry().protectedFrameLightOverflows() == 0L,
                 "bright background light displaced a dim visible influence sphere");
 
@@ -481,9 +500,13 @@ public final class AdvancedLightRegistryTests {
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        require(backwardOverflow.droppedLightCount() == 1
+        require(backwardOverflow.lights().size() == 1
+                        && backwardOverflow.droppedLightCount() == 0
                         && stableIds(backwardOverflow.lights()).contains(brightBehindId)
                         && !stableIds(backwardOverflow.lights()).contains(dimVisibleId)
+                        && registry.telemetry().directVisibilityCulls()
+                        == 2L * AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS + 1L
+                        && registry.telemetry().frameLightOverflows() == 0L
                         && registry.telemetry().protectedFrameLightOverflows() == 0L,
                 "camera rotation did not refresh direct-light visibility admission");
 
@@ -495,13 +518,164 @@ public final class AdvancedLightRegistryTests {
                 brightBehindId + 1L,
                 exactTemplate(240, 0.0, 0.0, -10.0, 2.5F, 10.0F)
         );
-        registry.snapshotForFrame(
+        LightFrameSnapshot protectedOverflow = registry.snapshotForFrame(
                 forward,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
                 AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
         );
-        require(registry.telemetry().protectedFrameLightOverflows() == 1L,
+        require(protectedOverflow.lights().size()
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && protectedOverflow.droppedLightCount() == 1
+                        && registry.telemetry().frameLightOverflows() == 1L
+                        && registry.telemetry().protectedFrameLightOverflows() == 1L,
                 "overflow of more than 4096 potentially visible influence spheres was hidden");
+    }
+
+    private static void testDirectFrameCompactsBackgroundGpuWork() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        LightWorldToken token = registry.openWorld(world, DIMENSION);
+        int staticBackgroundCount = AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS - 1;
+        for (int index = 0; index < staticBackgroundCount; index++) {
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    index / 256,
+                    index & 255,
+                    index + 1L,
+                    exactTemplate(240, 0.0, 0.0, 10.0, 1.0F, 10.0F)
+            );
+        }
+
+        List<Long> eligibleIds = new ArrayList<>();
+        for (int index = 0; index < 9; index++) {
+            long stableId = 10_000L + index;
+            eligibleIds.add(stableId);
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    16L,
+                    index,
+                    stableId,
+                    exactTemplate(1, index - 4.0, 0.0, -10.0, 0.5F, 0.01F)
+            );
+        }
+        long staticGuardId = 10_009L;
+        eligibleIds.add(staticGuardId);
+        registry.recordBlockChange(
+                world,
+                DIMENSION,
+                16L,
+                9,
+                staticGuardId,
+                exactTemplate(1, 11.5, 0.0, -10.0, 1.0F, 0.01F)
+        );
+
+        AdvancedLight dynamicVisible = new AdvancedLight(
+                20_000L,
+                token.generation(),
+                LightSourceKind.ENTITY,
+                0.0,
+                0.0,
+                -10.0,
+                0.5F,
+                1.0F,
+                0.25F,
+                0.05F,
+                0.01F,
+                1
+        );
+        AdvancedLight dynamicGuard = new AdvancedLight(
+                20_001L,
+                token.generation(),
+                LightSourceKind.ENTITY,
+                -11.5,
+                0.0,
+                -10.0,
+                1.0F,
+                1.0F,
+                0.25F,
+                0.05F,
+                0.01F,
+                1
+        );
+        AdvancedLight dynamicBackground = new AdvancedLight(
+                20_002L,
+                token.generation(),
+                LightSourceKind.ENTITY,
+                0.0,
+                0.0,
+                10.0,
+                1.0F,
+                1.0F,
+                0.25F,
+                0.05F,
+                10.0F,
+                240
+        );
+        eligibleIds.add(dynamicVisible.stableId());
+        eligibleIds.add(dynamicGuard.stableId());
+        registry.publishDynamicFrame(
+                token,
+                List.of(dynamicVisible, dynamicGuard, dynamicBackground),
+                3
+        );
+
+        DirectLightFrustum forward = directLightFrustum(Matrix4.identity());
+        require(forward.classify(dynamicVisible) == DirectLightFrustum.Tier.INTERSECTING
+                        && forward.classify(dynamicGuard) == DirectLightFrustum.Tier.GUARD_BAND
+                        && forward.classify(dynamicBackground) == DirectLightFrustum.Tier.BACKGROUND,
+                "mixed direct-light compaction fixture has invalid frustum tiers");
+        LightFrameSnapshot compact = registry.snapshotForFrame(
+                forward,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(compact.lights().size() == 12
+                        && compact.staticLightCount() == 10
+                        && compact.dynamicLightCount() == 2
+                        && compact.droppedLightCount() == 0
+                        && new HashSet<>(stableIds(compact.lights()))
+                        .equals(new HashSet<>(eligibleIds))
+                        && compact.lights().stream().noneMatch(
+                                light -> forward.classify(light)
+                                == DirectLightFrustum.Tier.BACKGROUND
+                        )
+                        && registry.telemetry().directVisibilityCulls()
+                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && registry.telemetry().frameLightOverflows() == 0L,
+                "direct frame did not compact static and dynamic background GPU work");
+
+        List<Long> firstUploadOrder = stableIds(compact.lights());
+        LightFrameSnapshot backward = registry.snapshotForFrame(
+                directLightFrustum(yaw180View()),
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        LightFrameSnapshot forwardAgain = registry.snapshotForFrame(
+                forward,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(backward.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && backward.staticLightCount() == staticBackgroundCount
+                        && backward.dynamicLightCount() == 1
+                        && firstUploadOrder.equals(stableIds(forwardAgain.lights())),
+                "camera turn did not restore compacted registry candidates and upload order");
+
+        long cullsBeforeLegacySnapshot = registry.telemetry().directVisibilityCulls();
+        LightFrameSnapshot legacy = registry.snapshotForFrame(
+                0.0,
+                0.0,
+                0.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(legacy.lights().size() == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        && legacy.droppedLightCount() == 12
+                        && registry.telemetry().directVisibilityCulls()
+                        == cullsBeforeLegacySnapshot,
+                "legacy snapshot API unexpectedly applied direct visibility compaction");
     }
 
     private static void testExactStaticScanAndSectionCap() {

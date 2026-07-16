@@ -1620,6 +1620,7 @@ Diagnostic overlays:
 - Источники извлекаются из фактической emission каждого `BlockState`/`FluidState`, поэтому слабые и модовые emitters не требуют allowlist; неизвестные модовые источники получают нейтральный цвет. Advanced Lighting не использует vanilla block-light fallback.
 - Плотные emissive fluids до GPU сводятся в cached world-aligned proxies с сохранением support и интегральной энергии; обычные block emitters не объединяются. Native parallel prepare + compact count/prefix/fill, Metal Validation, randomized overflow/OOB и SDR/HDR contract tests прошли.
 - M1 Pro, Balanced HDR Native, `2194` lights: `105.20 FPS`, полный GPU p95 `12.44 ms`; cluster upload/build p50/p95/p99 `0.43/0.52/1.26 ms`, `0` overflow/dropped indices/admission/index/ring rejects. Визуальную перепроверку слабых источников, дистанции и dense-fluid transitions пользователь отложил.
+- Дополнение L3: camera-independent registry сохранён, но direct-light upload теперь содержит только influence spheres из frustum и guard band; background остаётся доступен будущим L4–L8 consumers.
 
 ### Этап 4. Sun/sky и первые тени
 

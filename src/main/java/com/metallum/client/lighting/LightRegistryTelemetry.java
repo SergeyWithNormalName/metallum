@@ -17,6 +17,7 @@ public record LightRegistryTelemetry(
         long residentSectionCapacityDrops,
         long sectionLightOverflows,
         long frameLightOverflows,
+        long directVisibilityCulls,
         long protectedFrameLightOverflows,
         long registryFailures,
         int residentSections,

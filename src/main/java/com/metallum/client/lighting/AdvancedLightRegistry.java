@@ -73,6 +73,7 @@ public final class AdvancedLightRegistry {
     private long residentSectionCapacityDrops;
     private long sectionLightOverflows;
     private long frameLightOverflows;
+    private long directVisibilityCulls;
     private long protectedFrameLightOverflows;
     private long registryFailures;
     private long admissionGeneration;
@@ -582,18 +583,23 @@ public final class AdvancedLightRegistry {
                 Math.max(1, maxLights),
                 selectionOrder.reversed()
         );
-        int total = 0;
+        int eligibleTotal = 0;
+        int visibilityCulled = 0;
         int protectedCandidates = 0;
         for (SectionState section : world.sections.values()) {
             List<AdvancedLight> staticLights = section.compactedLights(
                     world.token.dimensionId()
             );
-            total += staticLights.size();
             for (AdvancedLight light : staticLights) {
                 DirectLightFrustum.Tier tier = frustum == null
                         ? DirectLightFrustum.Tier.INTERSECTING
                         : frustum.classify(light);
-                if (frustum != null && tier == DirectLightFrustum.Tier.INTERSECTING) {
+                if (directVisibility && tier == DirectLightFrustum.Tier.BACKGROUND) {
+                    visibilityCulled++;
+                    continue;
+                }
+                eligibleTotal++;
+                if (directVisibility && tier == DirectLightFrustum.Tier.INTERSECTING) {
                     protectedCandidates++;
                 }
                 offerTopK(
@@ -602,15 +608,21 @@ public final class AdvancedLightRegistry {
                         maxLights,
                         selectionOrder
                 );
-                captureRetainedLight(currentRetained, previousRetainedIds, light);
+                if (!directVisibility) {
+                    captureRetainedLight(currentRetained, previousRetainedIds, light);
+                }
             }
         }
         for (AdvancedLight light : world.dynamicLights) {
-            total++;
             DirectLightFrustum.Tier tier = frustum == null
                     ? DirectLightFrustum.Tier.INTERSECTING
                     : frustum.classify(light);
-            if (frustum != null && tier == DirectLightFrustum.Tier.INTERSECTING) {
+            if (directVisibility && tier == DirectLightFrustum.Tier.BACKGROUND) {
+                visibilityCulled++;
+                continue;
+            }
+            eligibleTotal++;
+            if (directVisibility && tier == DirectLightFrustum.Tier.INTERSECTING) {
                 protectedCandidates++;
             }
             offerTopK(
@@ -619,7 +631,9 @@ public final class AdvancedLightRegistry {
                     maxLights,
                     selectionOrder
             );
-            captureRetainedLight(currentRetained, previousRetainedIds, light);
+            if (!directVisibility) {
+                captureRetainedLight(currentRetained, previousRetainedIds, light);
+            }
         }
 
         List<FrameCandidate> selectedCandidates = new ArrayList<>(selected);
@@ -646,9 +660,10 @@ public final class AdvancedLightRegistry {
                     .count();
             return snapshot(
                     world,
-                    total,
+                    eligibleTotal,
                     ordered,
-                    protectedCandidates - selectedProtected
+                    protectedCandidates - selectedProtected,
+                    visibilityCulled
             );
         }
         List<AdvancedLight> retainedPrefix = retainAdmissionPrefix(
@@ -686,14 +701,15 @@ public final class AdvancedLightRegistry {
                 retainedPrefix.stream().map(AdvancedLight::stableId).toList()
         );
 
-        return snapshot(world, total, ordered, 0);
+        return snapshot(world, eligibleTotal, ordered, 0, 0);
     }
 
     private LightFrameSnapshot snapshot(
             final WorldState world,
             final int total,
             final List<AdvancedLight> ordered,
-            final int protectedDropped
+            final int protectedDropped,
+            final int visibilityCulled
     ) {
         int staticCount = 0;
         for (AdvancedLight light : ordered) {
@@ -703,6 +719,7 @@ public final class AdvancedLightRegistry {
         }
         int dropped = total - ordered.size();
         this.frameLightOverflows += dropped;
+        this.directVisibilityCulls += visibilityCulled;
         this.protectedFrameLightOverflows += protectedDropped;
         return new LightFrameSnapshot(
                 LightFrameSnapshot.CURRENT_VERSION,
@@ -860,6 +877,7 @@ public final class AdvancedLightRegistry {
                 this.residentSectionCapacityDrops,
                 this.sectionLightOverflows,
                 this.frameLightOverflows,
+                this.directVisibilityCulls,
                 this.protectedFrameLightOverflows,
                 this.registryFailures,
                 sections,
