@@ -822,6 +822,8 @@ jar {
 		rename { "${it}_${project.name}"}
 	}
 
+	outputs.file(layout.projectDirectory.file("HRDMetal.jar"))
+
 	doLast {
 		copy {
 			from archiveFile
