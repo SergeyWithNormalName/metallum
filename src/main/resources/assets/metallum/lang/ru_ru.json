@@ -1,8 +1,8 @@
 {
   "metallum.options.page": "Metallum",
   "metallum.options.group.lighting": "Освещение",
-  "metallum.options.improved_lighting.name": "Улучшенное освещение",
-  "metallum.options.improved_lighting.tooltip": "Включает scene-linear освещение Metallum. Изменение применяется после перезапуска игры.",
+  "metallum.options.improved_lighting.name": "Продвинутое освещение",
+  "metallum.options.improved_lighting.tooltip": "Запрашивает Advanced Lighting. L2-рендерер материалов включается автоматически; до появления допуска L3 активной остаётся модель Vanilla. Требуется перезапуск.",
   "metallum.options.group.metalfx": "MetalFX",
   "metallum.options.metalfx_spatial_scaling.name": "MetalFX Spatial Scaling",
   "metallum.options.metalfx_spatial_scaling.off": "Выкл.",

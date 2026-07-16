@@ -3,7 +3,7 @@ package com.metallum.client.renderer;
 import java.util.List;
 import java.util.Objects;
 
-/** Exact resource/pass and scene-storage declaration for one resolved generation. */
+/** Exact resource/work and scene-storage declaration for one resolved generation. */
 public record RendererGenerationManifest(
         int version,
         RendererGenerationConfig config,
@@ -12,9 +12,12 @@ public record RendererGenerationManifest(
         boolean executable,
         List<Resource> resources,
         List<Pass> passes,
+        List<Encoder> encoders,
+        List<Pipeline> pipelines,
+        List<WorkQueue> workQueues,
         String admissionBlocker
 ) {
-    public static final int CURRENT_VERSION = 2;
+    public static final int CURRENT_VERSION = 3;
 
     /** Storage and transfer contract of the external main-color target. */
     public enum SceneStorageContract {
@@ -53,7 +56,7 @@ public record RendererGenerationManifest(
         }
     }
 
-    /** Meaning of HDR extraction/display work for the resolved lighting path. */
+    /** Meaning of HDR extraction/display work for the resolved render-contract path. */
     public enum HdrPipelineContract {
         NONE,
         LEGACY_SEMANTIC_RECONSTRUCTION,
@@ -63,7 +66,8 @@ public record RendererGenerationManifest(
     public enum Domain {
         BASE,
         HDR_ONLY,
-        LIGHTING_ONLY,
+        MATERIAL_ONLY,
+        ADVANCED_LIGHTING_ONLY,
         UPSCALE_ONLY,
         INTERPOLATION_ONLY,
         DIAGNOSTIC_ONLY
@@ -89,6 +93,27 @@ public record RendererGenerationManifest(
         }
     }
 
+    public record Encoder(String name, Domain domain) {
+        public Encoder {
+            name = requireName(name);
+            Objects.requireNonNull(domain, "domain");
+        }
+    }
+
+    public record Pipeline(String name, Domain domain) {
+        public Pipeline {
+            name = requireName(name);
+            Objects.requireNonNull(domain, "domain");
+        }
+    }
+
+    public record WorkQueue(String name, Domain domain) {
+        public WorkQueue {
+            name = requireName(name);
+            Objects.requireNonNull(domain, "domain");
+        }
+    }
+
     public RendererGenerationManifest {
         if (version <= 0) {
             throw new IllegalArgumentException("Manifest version must be positive");
@@ -98,6 +123,9 @@ public record RendererGenerationManifest(
         Objects.requireNonNull(hdrPipelineContract, "hdrPipelineContract");
         resources = List.copyOf(resources);
         passes = List.copyOf(passes);
+        encoders = List.copyOf(encoders);
+        pipelines = List.copyOf(pipelines);
+        workQueues = List.copyOf(workQueues);
         if (executable && admissionBlocker != null) {
             throw new IllegalArgumentException("Executable manifest cannot have an admission blocker");
         }
@@ -106,14 +134,24 @@ public record RendererGenerationManifest(
         }
         if (!matchesSceneStorage(config, sceneStorageContract)) {
             throw new IllegalArgumentException(
-                    "Scene storage contract does not match the resolved lighting/output modes"
+                    "Scene storage contract does not match the resolved contract/output modes"
             );
         }
         HdrPipelineContract expectedHdr = expectedHdrPipeline(config);
         if (hdrPipelineContract != expectedHdr) {
             throw new IllegalArgumentException(
-                    "HDR pipeline contract does not match the resolved lighting/output modes"
+                    "HDR pipeline contract does not match the resolved contract/output modes"
             );
+        }
+        if (config.renderContractMode() == RenderContractMode.LEGACY
+                && domainHasWork(Domain.MATERIAL_ONLY, resources, passes, encoders, pipelines,
+                workQueues)) {
+            throw new IllegalArgumentException("Legacy generations cannot declare material work");
+        }
+        if (config.lightingModel() == LightingModel.VANILLA
+                && domainHasWork(Domain.ADVANCED_LIGHTING_ONLY, resources, passes, encoders,
+                pipelines, workQueues)) {
+            throw new IllegalArgumentException("Vanilla lighting cannot declare Advanced work");
         }
     }
 
@@ -130,11 +168,26 @@ public record RendererGenerationManifest(
         return this.passes.stream().filter(pass -> pass.domain() == domain).count();
     }
 
+    public long encoderCount(final Domain domain) {
+        Objects.requireNonNull(domain, "domain");
+        return this.encoders.stream().filter(encoder -> encoder.domain() == domain).count();
+    }
+
+    public long pipelineCount(final Domain domain) {
+        Objects.requireNonNull(domain, "domain");
+        return this.pipelines.stream().filter(pipeline -> pipeline.domain() == domain).count();
+    }
+
+    public long workQueueCount(final Domain domain) {
+        Objects.requireNonNull(domain, "domain");
+        return this.workQueues.stream().filter(queue -> queue.domain() == domain).count();
+    }
+
     private static boolean matchesSceneStorage(
             final RendererGenerationConfig config,
             final SceneStorageContract sceneStorageContract
     ) {
-        if (config.lightingMode() == LightingMode.METALLUM) {
+        if (config.renderContractMode() == RenderContractMode.METALLUM) {
             if (config.outputMode() == DisplayOutputMode.HDR) {
                 return sceneStorageContract
                         == SceneStorageContract.METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F;
@@ -159,9 +212,24 @@ public record RendererGenerationManifest(
         if (config.outputMode() == DisplayOutputMode.SDR) {
             return HdrPipelineContract.NONE;
         }
-        return config.lightingMode() == LightingMode.METALLUM
+        return config.renderContractMode() == RenderContractMode.METALLUM
                 ? HdrPipelineContract.ACTUAL_RADIANCE_EXPOSURE_BLOOM
                 : HdrPipelineContract.LEGACY_SEMANTIC_RECONSTRUCTION;
+    }
+
+    private static boolean domainHasWork(
+            final Domain domain,
+            final List<Resource> resources,
+            final List<Pass> passes,
+            final List<Encoder> encoders,
+            final List<Pipeline> pipelines,
+            final List<WorkQueue> workQueues
+    ) {
+        return resources.stream().anyMatch(resource -> resource.domain() == domain)
+                || passes.stream().anyMatch(pass -> pass.domain() == domain)
+                || encoders.stream().anyMatch(encoder -> encoder.domain() == domain)
+                || pipelines.stream().anyMatch(pipeline -> pipeline.domain() == domain)
+                || workQueues.stream().anyMatch(queue -> queue.domain() == domain);
     }
 
     private static String requireName(final String value) {

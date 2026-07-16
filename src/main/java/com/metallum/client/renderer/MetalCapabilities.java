@@ -29,7 +29,8 @@ public final class MetalCapabilities {
         DISPLAY_REFRESH,
         DISPLAY_HEADROOM,
         HDR_OUTPUT,
-        METALLUM_LIGHTING
+        METALLUM_MATERIAL_CONTRACT,
+        ADVANCED_LIGHTING
     }
 
     public enum Evidence {
@@ -166,7 +167,7 @@ public final class MetalCapabilities {
         );
     }
 
-    /** Current production baseline. Improved lighting is intentionally not advertised yet. */
+    /** Current production baseline. Material and Advanced admission are added by runtime gates. */
     public static MetalCapabilities productionMetal3(final boolean hdrOutputAvailable) {
         return hdrOutputAvailable
                 ? of(Feature.METAL3_BASE, Feature.HDR_OUTPUT)
@@ -300,10 +301,17 @@ public final class MetalCapabilities {
         );
     }
 
-    public boolean supports(final LightingMode mode) {
+    public boolean supports(final RenderContractMode mode) {
         return switch (Objects.requireNonNull(mode, "mode")) {
             case LEGACY -> true;
-            case METALLUM -> supports(Feature.METALLUM_LIGHTING);
+            case METALLUM -> supports(Feature.METALLUM_MATERIAL_CONTRACT);
+        };
+    }
+
+    public boolean supports(final LightingModel model) {
+        return switch (Objects.requireNonNull(model, "model")) {
+            case VANILLA -> true;
+            case ADVANCED -> supports(Feature.ADVANCED_LIGHTING);
         };
     }
 

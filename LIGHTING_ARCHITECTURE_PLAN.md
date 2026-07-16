@@ -12,7 +12,7 @@ Iris: намеренно не является целью совместимос
 
 Этот документ — источник правды для разработки нового освещения. Он описывает не только желаемые эффекты, но и контракты данных, frame graph, порядок миграции, ограничения по памяти и GPU-времени, тестовые сцены, fallback и критерии завершения каждого этапа.
 
-Существующий [`recomendationsForUpscaler.md`](recomendationsForUpscaler.md) остаётся полезной исторической заметкой о spatial scaling, но решения о temporal pipeline, HDR и порядке постобработки определяются этим документом.
+Историческая заметка `recomendationsForUpscaler.md` удалена после переноса актуальных решений о spatial scaling, temporal pipeline, HDR и порядке постобработки в этот документ.
 
 Обязательный предшествующий документ: [`METAL_RENDERER_OPTIMIZATION_PLAN.md`](METAL_RENDERER_OPTIMIZATION_PLAN.md). Новое освещение использует созданные там frame graph, resource ABI, upload rings, lifetime/synchronization model, shader packaging и work-budget controller. Оно не создаёт второй параллельный фундамент.
 
@@ -34,7 +34,7 @@ Iris: намеренно не является целью совместимос
 Этот checklist фиксирует только фактически готовые контракты. Он не означает, что новое освещение, temporal processing или production Metal 4 renderer уже реализованы.
 
 - [x] O0–O6 подтверждены кодом, targeted validation, full `clean check` и имеющимся runtime evidence.
-- [x] `LightingMode` и `DisplayOutputMode` независимы; renderer generation при failure возвращает Legacy/Metal 3 и сохраняет безопасный current output, если он поддержан, иначе SDR.
+- [x] `RenderContractMode`, `LightingModel` и `DisplayOutputMode` независимы; renderer generation раздельно отклоняет material, Advanced и output, сохраняя поддержанные оси.
 - [x] Immutable versioned `FrameState`/`FrameContract` готовы; production jitter остаётся нулевым, motion/reactive inputs обозначены как unavailable.
 - [x] History-reset contract покрывает first frame, resize, world/dimension transitions, teleport/camera cut, projection/FOV, renderer/lighting/output generation, internal scale и reload.
 - [x] Один immutable capability snapshot собирается при создании `MetalDevice`; MetalFX capabilities не привязаны к выбору Metal 3/Metal 4 executor.
@@ -76,8 +76,8 @@ Metallum должен развиваться как собственный rende
 6. Солнце и движущиеся сущности используют отдельную cached/clipmapped shadow-систему.
 7. Объёмный воздух считается во froxel grid с temporal reprojection.
 8. Освещение и материалы всегда вычисляются в scene-linear пространстве, но физический формат `sceneColor` выбирается по активным потребителям: HDR требует FP16 radiance, SDR не обязан платить за полноразмерный HDR target.
-9. HDR получает реальную рассчитанную яркость, а не восстанавливает её из SDR-подобного финального цвета; legacy lighting при этом сохраняет нынешний semantic HDR path.
-10. Lighting mode и display-output mode являются независимыми осями. Обязательны четыре комбинации: legacy+SDR, legacy+HDR, Metallum lighting+SDR и Metallum lighting+HDR.
+9. HDR получает реальную рассчитанную яркость, а не восстанавливает её из SDR-подобного финального цвета; Legacy material contract при этом сохраняет нынешний semantic HDR path.
+10. Material contract, lighting model и display-output являются независимыми осями. Обязательны шесть допустимых combinations; `Legacy + Advanced` запрещён.
 11. Архитектура заранее определяет depth/motion/jitter/reactive/history-reset contracts, но соответствующие attachments и passes создаются только когда включён их реальный потребитель.
 12. В будущем MetalFX Temporal и Frame Interpolation подключаются независимо от HDR и не требуют перестройки освещения, GI и volumetrics.
 
@@ -179,7 +179,7 @@ linear albedo × (direct light × shadow visibility + indirect irradiance)
 - lightmap excess patch больше не участвует в новом lighting path;
 - значения выше `1.0` возникают в освещении и emission до HDR compositor.
 
-Это также оптимизация: после полного coverage gate новый lighting mode вообще не выделяет, не очищает, не заполняет и не читает legacy semantic HDR attachment и не запускает highlight reconstruction PSO. При Metallum+HDR единственная достоверная информация переходит из lighting/material shaders прямо в FP16 `sceneColor`. При Metallum+SDR используется отдельный доказанно достаточный scene format/path без HDR histogram, reconstruction, EDR headroom processing и HDR bloom. Auxiliary buffers остаются только там, где нужны включённым temporal/shadow/material algorithms и доказаны capture-ом.
+Это также оптимизация: после полного coverage gate Metallum material contract вообще не выделяет, не очищает, не заполняет и не читает legacy semantic HDR attachment и не запускает highlight reconstruction PSO. При Metallum+HDR единственная достоверная информация переходит из material/emission shaders прямо в FP16 `sceneColor`. При Metallum+SDR используется отдельный доказанно достаточный scene format/path без HDR histogram, reconstruction, EDR headroom processing и HDR bloom. Auxiliary buffers остаются только там, где нужны включённым temporal/Advanced/material algorithms и доказаны capture-ом.
 
 ### 3.3. Ограничение текущего shader binding
 
@@ -230,30 +230,34 @@ linear albedo × (direct light × shadow visibility + indirect irradiance)
 - минимальному числу store/load;
 - отсутствию полных копий scene/depth без доказанной необходимости.
 
-### 4.6. Lighting и display output — независимые оси
+### 4.6. Material contract, lighting model и display output — независимые оси
 
 На старте renderer generation независимо выбирает:
 
-- `LightingMode.LEGACY` или `LightingMode.METALLUM`;
+- `RenderContractMode.LEGACY` или `RenderContractMode.METALLUM`;
+- `LightingModel.VANILLA` или `LightingModel.ADVANCED`;
 - `DisplayOutputMode.SDR` или `DisplayOutputMode.HDR`;
 - отдельно — `UpscaleMode`, Frame Interpolation и optional execution capabilities.
 
 Обязательная матрица поведения:
 
-| Lighting | Output | Поведение |
-|---|---|---|
-| Legacy | SDR | Текущий быстрый SDR pipeline без HDR-only работы |
-| Legacy | HDR | Нынешний semantic attachment, reconstruction, HDR bloom и EDR mapping |
-| Metallum | SDR | Новые direct/GI/shadow/volume вычисления, но SDR scene/output path без semantic HDR, HDR histogram, EDR processing и обязательного полноразмерного FP16 target |
-| Metallum | HDR | Новое освещение пишет actual FP16 radiance; exposure, HDR bloom и EDR mapping работают без legacy reconstruction |
+| Render contract | Lighting model | Output | Поведение |
+|---|---|---|---|
+| Legacy | Vanilla | SDR | Текущий быстрый SDR pipeline без material/HDR/Advanced работы |
+| Legacy | Vanilla | HDR | Semantic attachment, reconstruction, HDR bloom и EDR mapping |
+| Metallum | Vanilla | SDR | Автоматический L2 scene-linear material path с ванильной lightmap, без HDR и Advanced работы |
+| Metallum | Vanilla | HDR | L2 actual FP16 radiance, exposure и bloom без semantic/reconstruction; модель света остаётся Vanilla |
+| Metallum | Advanced | SDR | Будущий L3+ direct/GI/shadow/volume workload поверх L2 material path, SDR output |
+| Metallum | Advanced | HDR | Тот же будущий Advanced workload и L2 actual-radiance HDR output |
 
-Если coverage нового lighting contract не пройден, атомарно откатывается только ось lighting. Запрос HDR при этом сохраняется и продолжает работать через legacy HDR. Если HDR capability/headroom недоступны, атомарно откатывается только output в SDR, не отключая новый свет. Частично новый и legacy lighting contract внутри одного кадра недопустим.
+`Legacy + Advanced` запрещён конструкторами generation. Failure Advanced admission откатывает только lighting model в `Metallum + Vanilla`, сохраняя output. Failure material coverage откатывает contract в `Legacy + Vanilla`, также сохраняя HDR-запрос. Если HDR capability/headroom недоступны, меняется только output на SDR. Частично новый и legacy material contract внутри одного кадра недопустим.
 
 Жёсткие инварианты:
 
 - `HDR=off` означает отсутствие allocation, clear, write, encode и sampling всех HDR-only ресурсов и PSO;
-- `LightingMode.LEGACY` означает отсутствие light registry, clusters, lighting shadow caches, voxel/GI/froxel resources и их очередей;
-- `LightingMode.METALLUM + HDR` запрещает semantic-strength markers, inferred-highlight reconstruction и любые попытки выводить HDR-яркость из уже готового SDR-подобного цвета: значения выше reference white обязаны появляться в lighting/material/emission math и сохраняться в FP16 scene radiance;
+- `RenderContractMode.LEGACY` означает отсутствие L2 material resources/passes;
+- `LightingModel.VANILLA` означает отсутствие light registry, clusters, advanced shadow caches, voxel/GI/froxel resources, PSO и очередей;
+- `RenderContractMode.METALLUM + HDR` запрещает semantic-strength markers, inferred-highlight reconstruction и любые попытки выводить HDR-яркость из уже готового SDR-подобного цвета: значения выше reference white обязаны появляться в material/emission math и сохраняться в FP16 scene radiance;
 - переключение одной оси не должно молча переключать другую;
 - смена attachment formats выполняется через новую renderer generation; если live switch нельзя сделать безопасно, UI честно требует перезапуск renderer/игры;
 - линейная математика не равна обязательному FP16-хранению: SDR format выбирается отдельной numeric/capture validation и может быть compact float или UNORM, если сохраняет требуемое качество.
@@ -389,9 +393,12 @@ Java и native стороны должны обмениваться versioned fr
 - текущий/потенциальный EDR headroom, только для HDR output policy;
 - world/dimension identity;
 - camera cut/teleport/resize/reset flags;
+- resolved `RenderContractMode`, `LightingModel`, `DisplayOutputMode` и их независимые generation IDs;
+- раздельные material/HDR/Advanced/upscale/interpolation/diagnostic resource bytes;
+- Advanced counters для lights, passes, encoders, PSO, queues, dispatches и uploads;
 - quality preset и feature mask.
 
-`FrameState` становится immutable после начала encoding. Изменение настроек откладывается до границы следующего кадра, как сейчас откладывается resize MetalFX.
+`FrameState` ABI v3 является единым Java/Swift packet contract и становится immutable после начала encoding. Изменение настроек откладывается до границы следующего кадра, как сейчас откладывается resize MetalFX.
 
 ### 6.2. Координаты и точность
 
@@ -1236,6 +1243,7 @@ com.metallum.client.metal.render.bridge
 Минимальные пользовательские настройки после соответствующих coverage gates:
 
 ```properties
+schemaVersion=2
 improvedLighting=false
 hdr=auto
 lightingPreset=balanced
@@ -1244,13 +1252,15 @@ frameInterpolation=false
 dynamicResolution=false
 ```
 
-- `improvedLighting` меняет только `LightingMode` и никогда не включает/выключает HDR.
+- В schema 2 `improvedLighting` только запрашивает `LightingModel.ADVANCED` и никогда не включает/выключает L2 material contract или HDR.
+- Конфиг без `schemaVersion` считается v1: оба старых значения `improvedLighting` мигрируют в `false`, сохраняя preset и Frame Interpolation. Повреждённая/неизвестная версия не перезаписывается и fail-closed использует Advanced Off.
+- L2 `RenderContractMode.METALLUM` выбирается автоматически после material admission; `-Dmetallum.renderer.contract=legacy` является скрытым compatibility override и принудительно даёт `Legacy + Vanilla`.
 - `hdr=off/auto/on` меняет только output policy. `auto` выбирает HDR лишь при доступном и разрешённом EDR display; resolved SDR не запускает HDR-only работу.
 - `lightingPreset` управляет качеством shadows/GI/volumetrics внутри нового света, но не HDR.
 - `upscaler` и Frame Interpolation независимы от обеих осей; unsupported/failure даёт native/Spatial fallback, а не отключает свет или HDR.
 - недоступные функции скрываются или объясняются одной причиной; advanced diagnostic overrides не входят в обычный экран настроек.
 
-По умолчанию до завершения всех coverage gates остаётся `improvedLighting=false`. Текущая пользовательская HDR-настройка и её миграция сохраняются отдельно.
+До готовности L3 по умолчанию остаётся `improvedLighting=false`; запрос `true` явно разрешается обратно в Vanilla с причиной admission fallback. Текущий отдельный HDR-файл не читается и не изменяется миграцией renderer config.
 
 ### 19.1. Предварительные presets
 
@@ -1279,7 +1289,7 @@ dynamicResolution=false
 
 Это цели всего кадра, а не отдельных новых эффектов.
 
-120 FPS с direct lights, shadows, GI, volumetrics, scaler, HDR и UI на M1 Pro является best effort, а не гарантией для любого мира. Продуктовая цель Performance — прежде всего ровные 90 FPS и хорошие `1% low`. Режим Metallum+SDR измеряется отдельно от Metallum+HDR: цена HDR не маскируется в общем lighting budget, а выключенный HDR обязан заметно убирать собственные passes/bandwidth, даже если итоговый выигрыш зависит от bottleneck конкретной сцены.
+120 FPS с direct lights, shadows, GI, volumetrics, scaler, HDR и UI на M1 Pro является best effort, а не гарантией для любого мира. Продуктовая цель Performance — прежде всего ровные 90 FPS и хорошие `1% low`. Metallum render contract в SDR измеряется отдельно от HDR: цена output не маскируется в общем Advanced lighting budget, а выключенный HDR обязан заметно убирать собственные passes/bandwidth, даже если итоговый выигрыш зависит от bottleneck конкретной сцены.
 
 ### 20.2. Первичные stage budgets
 
@@ -1437,9 +1447,9 @@ Diagnostic overlays:
 
 - [x] Импортировать итоговые native-resolution и MetalFX Spatial timings из optimization baseline.
 - [x] Рассчитать фактический остаток GPU/CPU frame budget под каждый lighting preset.
-- [x] Добавить независимые `LightingMode.LEGACY/METALLUM`, `DisplayOutputMode.SDR/HDR` и отдельный upscale/interpolation feature mask без изменения картинки.
+- [x] Добавить независимые render-contract/output axes и отдельный upscale/interpolation feature mask без изменения картинки; в L2.5 contract и lighting model окончательно разнесены типами.
 - [x] Реализовать generation planner для всех четырёх lighting/output комбинаций и описать точный resource/pass manifest каждой.
-- [x] Добавить validation, доказывающую отсутствие HDR-only ресурсов/passes в SDR и lighting-only ресурсов/passes в legacy lighting.
+- [x] Добавить validation, доказывающую отсутствие HDR-only ресурсов/passes в SDR, material work в Legacy и Advanced work в Vanilla.
 - [x] Расширить общий versioned `FrameState`/native ABI lighting полями и unit tests, не создавая второй ABI.
 - [x] Создать набор ручных test worlds/scenes.
 - [x] Зафиксировать screenshots и HDR numeric probes.
@@ -1454,7 +1464,7 @@ Diagnostic overlays:
 - [x] Performance/Balanced/Ultra не превышают полный frame budget уже на бумаге при сумме утверждённых stage caps.
 - [x] Новый mode безопасно отказывает и возвращается в legacy.
 - [x] Каждая из четырёх комбинаций создаётся независимо; failure одной оси не меняет другую.
-- [x] При SDR HDR-only resource/pass counters равны нулю; при legacy lighting lighting-work counters равны нулю.
+- [x] При SDR HDR-only resource/pass counters равны нулю; при Legacy material counters равны нулю, при Vanilla Advanced counters равны нулю.
 
 #### Rollback
 
@@ -1508,7 +1518,7 @@ Diagnostic overlays:
 - [x] Перевести emission на явную линейную шкалу.
 - [x] Перестроить HDR histogram как exposure-only и извлекать HDR bloom из actual radiance.
 - [x] Отключить inferred reconstruction только в Metallum+HDR.
-- [x] После полного shader-role coverage не выделять/очищать/писать legacy semantic attachment и не создавать reconstruction PSO ни в одной `LightingMode.METALLUM` generation.
+- [x] После полного shader-role coverage не выделять/очищать/писать legacy semantic attachment и не создавать reconstruction PSO ни в одной `RenderContractMode.METALLUM` generation.
 - [x] Передавать HDR FP16 `sceneColor` scaler/present без дублирующего scene snapshot, если lifetime graph разрешает прямое чтение.
 - [x] Сохранить текущий semantic HDR целиком только в Legacy+HDR.
 - [x] В обоих SDR-режимах исключить semantic attachment, HDR histogram, reconstruction, EDR mapping, HDR bloom и HDR-only PSO/resources.
@@ -1520,7 +1530,7 @@ Diagnostic overlays:
 - [x] Нет double decode/encode.
 - [x] Metallum+SDR и Metallum+HDR дают эквивалентное lighting solution до output boundary, но вправе использовать разные storage formats.
 - [x] UI остаётся SDR и визуально совпадает с legacy.
-- [x] Unsupported shader role атомарно блокирует только новый lighting mode, сохраняя независимо выбранный SDR/HDR output через legacy lighting.
+- [x] Unsupported shader role атомарно блокирует только новый material contract, сохраняя независимо выбранный SDR/HDR output через `Legacy + Vanilla`.
 - [x] HDR off подтверждён timing/resource telemetry как отсутствие работы, а не нулевая интенсивность внутри всё ещё запущенных passes.
 - [x] Metallum+HDR numeric probes доказывают, что radiance выше `1.0` присутствует до histogram/bloom/display mapping; отключение reconstruction не меняет эти значения.
 - [x] При одинаковом разрешении отдельно измерена цена Legacy+HDR и Metallum+HDR; новый native-HDR path не принимается при необъяснённой регрессии и должен показать, какие legacy reconstruction/semantic costs он устранил.
@@ -1528,51 +1538,58 @@ Diagnostic overlays:
 #### Результат выполнения
 
 - Реализованы четыре изолированных generation-контракта: Legacy+SDR `RGBA8`, Legacy+HDR semantic с фактическим startup storage, Metallum+SDR scene-linear `RGBA8`, Metallum+HDR actual-radiance `RGBA16F`. Для атомарной смены output добавлены только необходимые compatibility generations.
-- `METALLUM` покрывает реальные shader roles Minecraft 26.2 и Sodium; texture/albedo/tint/fog/blending и emission линейны. Неизвестный role инвалидирует текущий кадр и на следующей generation оставляет тот же SDR/HDR output с Legacy lighting.
+- `METALLUM` покрывает реальные shader roles Minecraft 26.2 и Sodium; texture/albedo/tint/fog/blending и emission линейны. Неизвестный role инвалидирует текущий кадр и на следующей generation оставляет тот же SDR/HDR output с `Legacy + Vanilla`.
 - В Metallum+HDR histogram управляет только exposure, bloom берётся из actual radiance; semantic/depth/reconstruction отсутствуют. Оба SDR generation имеют `0` HDR bytes/passes/PSO. SDR UI остаётся отдельным `RGBA8` target; title/loading UI обрабатывается без запуска HDR effects.
 - GPU numeric validation: radiance `1.640` сохраняется до display mapping и даёт `2.799`; `hdrStrength` и Legacy reconstruction на неё не влияют; sRGB `0.5 → 0.214`, UI-only `0.5 → 0.216`, 50% alpha white → `0.5` linear.
 - M1 Pro, Native 3024×1964, EDR headroom `8`, 3000 кадров: Legacy+HDR `137.316 FPS / 7.402 ms GPU p95`, Metallum+HDR `158.362 FPS / 6.454 ms`; verdict `IMPROVEMENT`. HDR resources уменьшены с `148,478,688` до `100,965,600` bytes за счёт удаления semantic/depth/reconstruction.
 - Legacy+EDR остаётся display-only режимом с SDR/RGBA8 generation; semantic `ENHANCED` поддерживает исходный RGBA8 MainTarget, а scene-wide Legacy HDR и Metallum actual-radiance используют startup FP16. Переходы EDR → Enhanced и startup EDR закрыты отдельными регрессионными проверками.
-- Переключатель `Улучшенное освещение` добавлен на страницу Metallum в Sodium и сохраняет только ось `improvedLighting`; изменение применяется после перезапуска.
+- Переключатель `Продвинутое освещение` на странице Metallum в Sodium сохраняет только запрос `improvedLighting`; L2 material contract выбирается автоматически, а изменение запроса применяется после перезапуска.
 - Live output generation публикуется только после успешной перенастройки `CAMetalLayer`, поэтому отклонённая native-смена не меняет активный Java generation.
 - Финальная L2-регрессия ограничила material flavor реальным world pass, восстановила fence-цепочку SDR UI seed, откалибровала legacy lightmap для linear multiplication и ограничила Actual bloom доступным headroom. FP16 loading overlay сохраняет белый логотип Mojang. На встроенном дисплее подтверждены нормальная ночь, HDR-пики и отсутствие menu/world артефактов.
 
-### Этап 2.5. Отделить Metallum material renderer от улучшенного освещения
+### Этап 2.5. Отделить Metallum material renderer от Advanced Lighting — ✅ ВЫПОЛНЕН 16 июля 2026
 
 Этот этап обязателен до L3. L2 уже является самостоятельным полезным renderer/material/HDR path и не должен впоследствии выключаться вместе с clustered lighting, shadows, voxel GI или volumetrics.
 
 #### Пользовательский результат
 
-- `Улучшенное освещение = Off` сохраняет Metallum material contract L2, scene-linear SDR и actual-radiance HDR, но использует ванильную lightmap/модель света и не запускает ни одной подсистемы L3+.
-- `Улучшенное освещение = On` запрашивает advanced lighting L3+ поверх того же L2 contract.
+- `Продвинутое освещение = Off` сохраняет Metallum material contract L2, scene-linear SDR и actual-radiance HDR, но использует ванильную lightmap/модель света и не запускает ни одной подсистемы L3+.
+- `Продвинутое освещение = On` запрашивает Advanced Lighting L3+ поверх того же L2 contract.
 - HDR остаётся независимым `Off/On`: при Metallum material contract используется L2 actual-radiance path, при автоматическом Legacy fallback — legacy reconstruction.
 - Обычному игроку не добавляется отдельная настройка renderer contract: Metallum выбирается автоматически при полном shader-role coverage, а принудительный Legacy разрешён только как скрытый compatibility/developer override.
 
 #### Работы
 
-- Разделить нынешнюю перегруженную ось `LightingMode.LEGACY/METALLUM` минимум на `RenderContractMode.LEGACY/METALLUM` и `LightingModel.VANILLA/ADVANCED` либо эквивалентные типизированные сущности с теми же semantics.
-- Сделать L2 Metallum material renderer автоматическим основным contract при успешном coverage/admission независимо от настройки advanced lighting.
-- Перепривязать пользовательский `improvedLighting` только к `LightingModel.ADVANCED`, то есть только к L3 и последующим lighting subsystems.
-- Зафиксировать допустимые resolved combinations: Legacy+Vanilla+SDR/HDR, Metallum+Vanilla+SDR/HDR и Metallum+Advanced+SDR/HDR. Advanced lighting без Metallum material contract недопустим.
-- Сохранить для Metallum+Vanilla+HDR `METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F` и `ACTUAL_RADIANCE_EXPOSURE_BLOOM`; semantic attachment и inferred reconstruction там запрещены.
-- Разделить frame-graph/resource domains L2 material path и L3+ lighting work. При Vanilla lighting должны отсутствовать light registry, cluster buffers/passes, advanced shadow caches, voxel/GI/froxel resources и их очереди.
-- Сделать fallback независимым: failure advanced-lighting admission возвращает Metallum+Vanilla с тем же SDR/HDR output; только failure L2 material coverage возвращает Legacy+Vanilla, также сохраняя запрос HDR.
-- Добавить schema-versioned migration текущего `improvedLighting`: старое значение означало включение L2 и не должно молча включить будущую дорогую L3-систему. После миграции L2 выбирается автоматически, а запрос Advanced по умолчанию остаётся `Off`, пока L3 не реализован и не прошёл admission.
-- До готовности L3 не показывать advanced lighting как фактически активный: requested `On` обязан fail-closed разрешаться в Vanilla/Unavailable и явно отражаться в diagnostics.
-- Обновить окружающие архитектурные разделы, matrix, telemetry и terminology плана, если после реализации они всё ещё смешивают material renderer и lighting model.
-- Не реализовывать light extraction, clustered forward+, цветные источники, новые тени, voxels, GI или volumetrics в этом этапе.
+- [x] Заменить прежнюю перегруженную ось `LightingMode.LEGACY/METALLUM` на `RenderContractMode.LEGACY/METALLUM` и `LightingModel.VANILLA/ADVANCED`.
+- [x] Сделать L2 Metallum material renderer автоматическим основным contract при успешном coverage/admission независимо от настройки advanced lighting.
+- [x] Перепривязать пользовательский `improvedLighting` только к `LightingModel.ADVANCED`, то есть только к L3 и последующим lighting subsystems.
+- [x] Зафиксировать допустимые resolved combinations: Legacy+Vanilla+SDR/HDR, Metallum+Vanilla+SDR/HDR и Metallum+Advanced+SDR/HDR. Advanced lighting без Metallum material contract недопустим.
+- [x] Сохранить для Metallum+Vanilla+HDR `METALLUM_HDR_ACTUAL_RADIANCE_RGBA16F` и `ACTUAL_RADIANCE_EXPOSURE_BLOOM`; semantic attachment и inferred reconstruction там запрещены.
+- [x] Разделить frame-graph/resource domains L2 material path и L3+ lighting work. При Vanilla lighting должны отсутствовать light registry, cluster buffers/passes, advanced shadow caches, voxel/GI/froxel resources и их очереди.
+- [x] Сделать fallback независимым: failure advanced-lighting admission возвращает Metallum+Vanilla с тем же SDR/HDR output; только failure L2 material coverage возвращает Legacy+Vanilla, также сохраняя запрос HDR.
+- [x] Добавить schema-versioned migration текущего `improvedLighting`: старое значение означало включение L2 и не должно молча включить будущую дорогую L3-систему. После миграции L2 выбирается автоматически, а запрос Advanced по умолчанию остаётся `Off`, пока L3 не реализован и не прошёл admission.
+- [x] До готовности L3 не показывать advanced lighting как фактически активный: requested `On` обязан fail-closed разрешаться в Vanilla/Unavailable и явно отражаться в diagnostics.
+- [x] Обновить окружающие архитектурные разделы, matrix, telemetry и terminology плана, если после реализации они всё ещё смешивают material renderer и lighting model.
+- [x] Не реализовывать light extraction, clustered forward+, цветные источники, новые тени, voxels, GI или volumetrics в этом этапе.
 
 #### Exit criteria
 
-- С `improvedLighting=Off` активен и полностью работоспособен L2 Metallum material renderer в SDR и HDR; визуальные/numeric результаты L2 не регрессировали.
-- Metallum+Vanilla+HDR сохраняет actual radiance выше `1.0` до histogram/bloom/display mapping и не имеет legacy semantic/reconstruction resources или PSO.
-- Manifest/telemetry доказывают нулевые bytes, passes, encoders, PSO и work queues всех L3+ domains при Vanilla lighting.
-- Artificial failure Advanced admission оставляет Metallum+Vanilla и текущий SDR/HDR output; artificial failure material coverage атомарно даёт Legacy+Vanilla с сохранением HDR-запроса.
-- Config migration детерминирована, покрыта тестами и не включает Advanced lighting пользователям только из-за старого L2 opt-in.
-- Native, Spatial Quality и Spatial Performance работают с Metallum+Vanilla в SDR/HDR; UI остаётся полноразмерным SDR.
-- L2 build, HDR numeric validations, resource/generation matrix, Metal validation и runtime smoke проходят без новых ошибок.
-- На M1 Pro отсутствует необъяснённая CPU/GPU p95 или memory-регрессия относительно завершённого L2 при одинаковых settings.
-- В production frame graph по-прежнему нет ни одной фактической работы L3.
+- [x] С `improvedLighting=Off` активен и полностью работоспособен L2 Metallum material renderer в SDR и HDR; визуальные/numeric результаты L2 не регрессировали.
+- [x] Metallum+Vanilla+HDR сохраняет actual radiance выше `1.0` до histogram/bloom/display mapping и не имеет legacy semantic/reconstruction resources или PSO.
+- [x] Manifest/telemetry доказывают нулевые bytes, passes, encoders, PSO и work queues всех L3+ domains при Vanilla lighting.
+- [x] Artificial failure Advanced admission оставляет Metallum+Vanilla и текущий SDR/HDR output; artificial failure material coverage атомарно даёт Legacy+Vanilla с сохранением HDR-запроса.
+- [x] Config migration детерминирована, покрыта тестами и не включает Advanced lighting пользователям только из-за старого L2 opt-in.
+- [x] Native, Spatial Quality и Spatial Performance работают с Metallum+Vanilla в SDR/HDR; UI остаётся полноразмерным SDR.
+- [x] L2 build, HDR numeric validations, resource/generation matrix, Metal validation и runtime smoke проходят без новых ошибок.
+- [x] На M1 Pro отсутствует необъяснённая CPU/GPU p95 или memory-регрессия относительно завершённого L2 при одинаковых settings.
+- [x] В production frame graph по-прежнему нет ни одной фактической работы L3.
+
+#### Результат выполнения
+
+- `RenderContractMode`, `LightingModel` и output стали независимыми generation axes; schema 2 мигрирует прежний L2 opt-in в безопасный Advanced Off, а L2 material contract выбирается автоматически.
+- Единый `FrameState` ABI v3 и timing report публикуют resolved axes, generation IDs, раздельные resource bytes и Advanced work counters; при Vanilla все L3+ counters равны нулю.
+- M1 Pro, встроенный Retina, 3000 кадров: SDR Native/Quality/Performance GPU p95 `5.783/5.537/5.007 ms`, без регрессии к L2 `5.787/5.549/5.040 ms`; HDR-матрица также прошла с `0` dropped events.
+- Metal validation и искусственный запрос Advanced подтвердили fail-closed `Metallum + Vanilla` с сохранением output и без Advanced ресурсов/работы. L3 должен заменить этот отказ только после полного admission registry/cluster/direct-light pipeline.
 
 ### Этап 3. Light registry и clustered forward+
 
@@ -1586,7 +1603,7 @@ Diagnostic overlays:
 - Добавить цветные block lights.
 - Добавить cluster telemetry/overflow fallback.
 - Подтвердить, что light-only churn не увеличивает geometry rebuild/upload counters.
-- Исполнять registry/upload/cluster/direct-light passes только при `LightingMode.METALLUM`; output SDR/HDR не меняет списки и формулу света.
+- Исполнять registry/upload/cluster/direct-light passes только при `RenderContractMode.METALLUM + LightingModel.ADVANCED`; output SDR/HDR не меняет списки и формулу света.
 
 #### Exit criteria
 
@@ -1594,8 +1611,8 @@ Diagnostic overlays:
 - Нет visible discontinuity между соседними clusters.
 - Overflow детерминирован и не повреждает память.
 - Cluster stage укладывается в обновлённый budget.
-- Legacy lightmap path не затронут при выключенном improved lighting.
-- Metallum+SDR и Metallum+HDR имеют одинаковые cluster/light counters в одной сцене.
+- Vanilla lightmap path не затронут при выключенном Advanced Lighting.
+- Metallum+Advanced+SDR и Metallum+Advanced+HDR имеют одинаковые cluster/light counters в одной сцене.
 
 ### Этап 4. Sun/sky и первые тени
 
@@ -1607,7 +1624,7 @@ Diagnostic overlays:
 - Terrain и entities участвуют в одном shadow contract.
 - Стабилизировать cascades относительно camera.
 - Добавить PCF/bias controls и shadow timings.
-- Не связывать shadow quality с HDR output; все shadow resources отсутствуют при legacy lighting.
+- Не связывать shadow quality с HDR output; все Advanced shadow resources отсутствуют при `LightingModel.VANILLA`.
 
 #### Exit criteria
 
@@ -1629,7 +1646,7 @@ Diagnostic overlays:
 - Передавать coalesced dirty bricks через lighting upload ring.
 - Строить indirect dispatch по фактическому числу dirty bricks.
 - Ограничить upload/update budget и возраст очереди.
-- Не создавать clipmap и dirty queues при legacy lighting; HDR не влияет на occupancy representation.
+- Не создавать clipmap и dirty queues при `LightingModel.VANILLA`; HDR не влияет на occupancy representation.
 
 #### Exit criteria
 
@@ -1752,7 +1769,7 @@ Frame Interpolation — отдельная продуктовая функция
 - Использовать validated color/depth/motion contracts и отдельную history lifecycle; не создавать interpolator/resources, пока функция выключена.
 - Отделить world image от SDR UI/cursor: UI композится на реальном present и не интерполируется как часть мира.
 - Реализовать безопасный present pacing, reset при camera cut/resize/display change и fallback к обычному present.
-- Проверить четыре lighting/output комбинации, native/Temporal inputs и доступные display refresh rates.
+- Проверить шесть contract/lighting/output combinations, native/Temporal inputs и доступные display refresh rates.
 - В telemetry раздельно показывать rendered FPS, generated FPS, latency и interpolation cost.
 
 #### Exit criteria
@@ -1769,7 +1786,7 @@ Frame Interpolation — отдельная продуктовая функция
 
 - Покрыть все известные vanilla/Sodium render roles.
 - Проверить resource reload, world reload, resize, fullscreen, display move и shutdown.
-- Прогнать все четыре lighting/output комбинации с native, поддерживаемыми scaler modes и включённой/выключенной Frame Interpolation.
+- Прогнать все шесть допустимых contract/lighting/output combinations с native, поддерживаемыми scaler modes и включённой/выключенной Frame Interpolation.
 - Оптимизировать реальные hotspots.
 - Рассмотреть tile shaders/sparse residency только по evidence.
 - Обновить README/config migration.
@@ -1783,7 +1800,7 @@ Frame Interpolation — отдельная продуктовая функция
 - Memory budget соблюдён.
 - Fallback проверен искусственными failure injections.
 - Новый renderer визуально и по производительности превосходит legacy на M1 Pro.
-- Отключённые HDR, improved lighting, Temporal и Frame Interpolation подтверждены нулевыми собственными resources/passes.
+- Отключённые HDR, Advanced Lighting, Temporal и Frame Interpolation подтверждены нулевыми собственными resources/passes.
 
 ---
 
@@ -1849,8 +1866,8 @@ Frame Interpolation — отдельная продуктовая функция
 13. Быстрый полёт, teleport и смена FOV.
 14. Resize/fullscreen и перенос окна между SDR/EDR дисплеями.
 15. Низкий render scale с motion/reactive diagnostic views.
-16. Все четыре lighting/output комбинации в одной и той же сцене.
-17. Unknown/custom render role: корректный adapter/default либо атомарный lighting fallback при сохранении HDR-настройки.
+16. Все шесть допустимых contract/lighting/output combinations в одной и той же сцене.
+17. Unknown/custom render role: корректный adapter/default либо атомарный material-contract fallback в `Legacy + Vanilla` при сохранении HDR-запроса.
 18. Frame Interpolation: движение камеры, GUI, cursor, pause/menu и camera cut.
 
 ### 23.3. Численные проверки HDR
@@ -1861,12 +1878,12 @@ Frame Interpolation — отдельная продуктовая функция
 - Headroom clamp без hue shift.
 - SDR mapping не меняет lighting solution.
 - Histogram не создаёт radiance.
-- В Metallum+HDR значения выше reference white уже существуют до histogram, bloom и display mapping; semantic reconstruction PSO/attachment отсутствуют.
+- В `RenderContractMode.METALLUM + HDR` значения выше reference white уже существуют до histogram, bloom и display mapping; semantic reconstruction PSO/attachment отсутствуют.
 - Bloom energy bounded и coverage weighted.
 - No NaN/Inf/negative runaway.
 - Temporal preExposure round-trip.
 - SDR generation не содержит HDR histogram/reconstruction/bloom/EDR passes и ресурсов.
-- Legacy lighting generation не содержит cluster/voxel/GI/froxel passes и ресурсов.
+- `LightingModel.VANILLA` generation не содержит cluster/voxel/GI/froxel passes, encoders, PSO, queues и ресурсов.
 
 ### 23.4. Runtime proof каждого крупного этапа
 
@@ -1894,7 +1911,7 @@ Frame Interpolation — отдельная продуктовая функция
 | Shadow acne/popping | Нестабильные тени | Stable cascades, bias tests, cached generation |
 | Слишком много lights в cluster | Длинный fragment loop | Priority, caps, overflow telemetry |
 | Full-resolution MRT bandwidth | Потеря FPS на TBDR | Forward+, compact aux, optional normal buffer |
-| Выключенная функция оставляет скрытые ресурсы/passes | HDR off или lighting off почти не возвращает FPS | Generation manifest и zero-resource/zero-dispatch validation |
+| Выключенная функция оставляет скрытые ресурсы/passes | HDR Off или Advanced Off почти не возвращает FPS | Generation manifest и zero-resource/zero-dispatch validation |
 | Runtime shader compilation | Первый кадр тормозит | Generated metallib и PSO prewarm |
 | Lighting создаёт второй allocator/sync model | Дублирование и hazards | Общий frame graph, rings, heaps и executor foundation |
 | Один `supportsMetal4` включает неподдерживаемую extended feature | Crash/validation failure на M1 | Capability matrix по OS и GPU family |
@@ -1922,10 +1939,10 @@ Frame Interpolation — отдельная продуктовая функция
 - `VoxelShape` влияет на local shadows и GI с configurable resolution.
 - Один цветной indirect bounce работает без критического leaking.
 - Froxel volumetrics работают в воздухе и специальных средах.
-- Все четыре комбинации Legacy+SDR, Legacy+HDR, Metallum+SDR и Metallum+HDR проходят correctness/performance matrix.
-- HDR получает actual scene radiance в Metallum lighting; reconstruction отключён в Metallum+HDR.
+- Все шесть допустимых комбинаций Legacy+Vanilla+SDR/HDR, Metallum+Vanilla+SDR/HDR и Metallum+Advanced+SDR/HDR проходят correctness/performance matrix.
+- HDR получает actual scene radiance в Metallum material contract; reconstruction отключён в `RenderContractMode.METALLUM + HDR`.
 - Legacy semantic attachment/reconstruction resources полностью отсутствуют в обеих Metallum generations после coverage gate.
-- В SDR отсутствуют HDR histogram/reconstruction/bloom/EDR resources и passes; в Legacy lighting отсутствуют новые lighting resources и work queues.
+- В SDR отсутствуют HDR histogram/reconstruction/bloom/EDR resources и passes; при `LightingModel.VANILLA` отсутствуют Advanced lighting resources и work queues.
 - HDR bloom основан на actual radiance; SDR не обязан выполнять bloom.
 - SDR и EDR отображают эквивалентное lighting solution через независимые output paths и не обязаны использовать один framebuffer format.
 - Motion/depth/reactive/exposure contracts проверены, а неиспользуемые attachments отсутствуют.
@@ -1937,7 +1954,7 @@ Frame Interpolation — отдельная продуктовая функция
 - Metal 3 и Metal 4 Core дают эквивалентную radiance/HDR картинку; различается только измеренно более эффективное исполнение.
 - Metal 4 capabilities включаются независимо; отсутствие extended функции не отключает основной Metal 4 Core path.
 - Все автоматические и runtime validation gates проходят.
-- Legacy lighting mode остаётся безопасным или удаляется только отдельным осознанным решением после стабилизации; до этого Legacy+HDR обеспечивает текущую совместимую HDR-реконструкцию.
+- `RenderContractMode.LEGACY` остаётся безопасным compatibility fallback или удаляется только отдельным осознанным решением после стабилизации; до этого `Legacy + Vanilla + HDR` обеспечивает текущую совместимую HDR-реконструкцию.
 
 ---
 
@@ -1949,7 +1966,7 @@ Frame Interpolation — отдельная продуктовая функция
 4. Voxel clipmaps отвечают за статическую occupancy, local visibility и indirect light.
 5. Sun shadows не заменяются исключительно voxel traversal.
 6. Полноразмерный deferred G-buffer не является базовым path.
-7. Lighting math всегда scene-linear; FP16 scene storage обязателен для Metallum+HDR, а SDR использует минимальный формат, прошедший numeric/capture validation.
+7. Material/emission math всегда scene-linear; FP16 scene storage обязателен для `RenderContractMode.METALLUM + HDR`, а SDR использует минимальный формат, прошедший numeric/capture validation.
 8. HDR reconstruction остаётся только Legacy+HDR-механизмом; оба SDR-режима не запускают HDR pipeline.
 9. Temporal ABI/data contract реализуется раньше Temporal scaler, но production attachments создаются только для активного temporal consumer.
 10. UI рендерится после upscale в display resolution.

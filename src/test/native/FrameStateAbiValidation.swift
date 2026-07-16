@@ -50,9 +50,9 @@ private func writeDouble(_ value: Double, at offset: Int, into bytes: inout [UIn
 }
 
 private func validPacket() -> [UInt8] {
-    var bytes = [UInt8](repeating: 0, count: 816)
-    writeUInt32(2, at: 0, into: &bytes)
-    writeUInt32(816, at: 4, into: &bytes)
+    var bytes = [UInt8](repeating: 0, count: 848)
+    writeUInt32(3, at: 0, into: &bytes)
+    writeUInt32(848, at: 4, into: &bytes)
     writeUInt32(1, at: 8, into: &bytes)
     writeUInt32(2, at: 12, into: &bytes)
     writeUInt64(42, at: 16, into: &bytes)
@@ -63,30 +63,32 @@ private func validPacket() -> [UInt8] {
     writeUInt64(11, at: 56, into: &bytes)
     writeUInt64(12, at: 64, into: &bytes)
     writeUInt64(13, at: 72, into: &bytes)
-    writeUInt64(1, at: 80, into: &bytes) // first frame reset
-    writeUInt64(1, at: 88, into: &bytes) // Spatial
-    writeUInt32(0, at: 96, into: &bytes) // legacy
-    writeUInt32(1, at: 100, into: &bytes) // HDR
-    writeUInt32(0, at: 104, into: &bytes) // Metal 3
-    writeUInt32(1, at: 108, into: &bytes) // Balanced
-    writeUInt32(1280, at: 112, into: &bytes)
-    writeUInt32(720, at: 116, into: &bytes)
-    writeUInt32(2560, at: 120, into: &bytes)
-    writeUInt32(1440, at: 124, into: &bytes)
-    writeUInt32(1, at: 128, into: &bytes)
-    writeFloat(1.0 / 60.0, at: 136, into: &bytes)
-    writeFloat(0.05, at: 140, into: &bytes)
-    writeFloat(1024, at: 144, into: &bytes)
-    writeFloat(1, at: 156, into: &bytes)
-    writeFloat(1, at: 160, into: &bytes)
-    writeFloat(1, at: 164, into: &bytes)
+    writeUInt64(14, at: 80, into: &bytes)
+    writeUInt64(1, at: 88, into: &bytes) // first frame reset
+    writeUInt64(1, at: 96, into: &bytes) // Spatial
+    writeUInt32(0, at: 104, into: &bytes) // Legacy contract
+    writeUInt32(0, at: 108, into: &bytes) // Vanilla lighting
+    writeUInt32(1, at: 112, into: &bytes) // HDR
+    writeUInt32(0, at: 116, into: &bytes) // Metal 3
+    writeUInt32(1, at: 120, into: &bytes) // Balanced
+    writeUInt32(1280, at: 124, into: &bytes)
+    writeUInt32(720, at: 128, into: &bytes)
+    writeUInt32(2560, at: 132, into: &bytes)
+    writeUInt32(1440, at: 136, into: &bytes)
+    writeUInt32(1, at: 140, into: &bytes)
+    writeFloat(1.0 / 60.0, at: 148, into: &bytes)
+    writeFloat(0.05, at: 152, into: &bytes)
+    writeFloat(1024, at: 156, into: &bytes)
     writeFloat(1, at: 168, into: &bytes)
-    writeUInt64(64, at: 184, into: &bytes) // HDR resources
-    writeUInt64(128, at: 200, into: &bytes) // upscale resources
-    for index in 0..<6 { writeDouble(Double(index), at: 248 + index * 8, into: &bytes) }
+    writeFloat(1, at: 172, into: &bytes)
+    writeFloat(1, at: 176, into: &bytes)
+    writeFloat(1, at: 180, into: &bytes)
+    writeUInt64(64, at: 208, into: &bytes) // HDR resources
+    writeUInt64(128, at: 224, into: &bytes) // upscale resources
+    for index in 0..<6 { writeDouble(Double(index), at: 280 + index * 8, into: &bytes) }
     for matrix in 0..<8 {
         for diagonal in 0..<4 {
-            writeFloat(1, at: 296 + matrix * 64 + diagonal * 20, into: &bytes)
+            writeFloat(1, at: 328 + matrix * 64 + diagonal * 20, into: &bytes)
         }
     }
     return bytes
@@ -99,7 +101,7 @@ private func validate(_ function: NativeValidateFunction, _ bytes: [UInt8]) -> I
 private func generationPacket(
     _ source: [UInt8],
     generation: UInt64,
-    lightingMode: UInt32,
+    renderContractMode: UInt32,
     outputMode: UInt32,
     spatial: Bool
 ) -> [UInt8] {
@@ -107,11 +109,14 @@ private func generationPacket(
     writeUInt64(generation, at: 32, into: &bytes)
     writeUInt64(generation, at: 48, into: &bytes)
     writeUInt64(generation, at: 56, into: &bytes)
-    writeUInt32(lightingMode, at: 96, into: &bytes)
-    writeUInt32(outputMode, at: 100, into: &bytes)
-    writeUInt64(spatial ? 1 : 0, at: 88, into: &bytes)
-    writeUInt64(outputMode == 0 ? 0 : 64, at: 184, into: &bytes)
-    writeUInt64(spatial ? 128 : 0, at: 200, into: &bytes)
+    writeUInt64(generation, at: 64, into: &bytes)
+    writeUInt32(renderContractMode, at: 104, into: &bytes)
+    writeUInt32(0, at: 108, into: &bytes)
+    writeUInt32(outputMode, at: 112, into: &bytes)
+    writeUInt64(spatial ? 1 : 0, at: 96, into: &bytes)
+    writeUInt64(renderContractMode == 0 ? 0 : 32, at: 200, into: &bytes)
+    writeUInt64(outputMode == 0 ? 0 : 64, at: 208, into: &bytes)
+    writeUInt64(spatial ? 128 : 0, at: 224, into: &bytes)
     return bytes
 }
 
@@ -125,8 +130,8 @@ private enum FrameStateAbiValidationMain {
                 throw ValidationFailure.message("Could not load native library")
             }
             defer { dlclose(handle) }
-            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v2"),
-                  let setSymbol = dlsym(handle, "metallum_set_frame_state_v2"),
+            guard let symbol = dlsym(handle, "metallum_validate_frame_state_v3"),
+                  let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
                   let initSymbol = dlsym(handle, "metallum_init_pipelines"),
                   let contractSymbol = dlsym(
                     handle,
@@ -147,27 +152,41 @@ private enum FrameStateAbiValidationMain {
             var invalidVersion = valid
             writeUInt32(1, at: 0, into: &invalidVersion)
             try require(validate(nativeValidate, invalidVersion) == -2, "Version mismatch was accepted")
-            var lightingLeak = valid
-            writeUInt64(1, at: 192, into: &lightingLeak)
-            try require(validate(nativeValidate, lightingLeak) == -5, "Legacy lighting bytes were accepted")
+            var materialLeak = valid
+            writeUInt64(1, at: 200, into: &materialLeak)
+            try require(validate(nativeValidate, materialLeak) == -5, "Legacy material bytes were accepted")
+            var legacyAdvanced = valid
+            writeUInt32(1, at: 108, into: &legacyAdvanced)
+            try require(validate(nativeValidate, legacyAdvanced) == -5, "Legacy + Advanced was accepted")
+            var advancedLeak = valid
+            writeUInt32(1, at: 104, into: &advancedLeak)
+            writeUInt64(1, at: 216, into: &advancedLeak)
+            try require(validate(nativeValidate, advancedLeak) == -5, "Vanilla Advanced bytes were accepted")
             var sdrHdrLeak = valid
-            writeUInt32(0, at: 100, into: &sdrHdrLeak)
+            writeUInt32(0, at: 112, into: &sdrHdrLeak)
             try require(validate(nativeValidate, sdrHdrLeak) == -6, "SDR HDR bytes were accepted")
             var nativeUpscaleLeak = valid
-            writeUInt64(0, at: 88, into: &nativeUpscaleLeak)
+            writeUInt64(0, at: 96, into: &nativeUpscaleLeak)
             try require(validate(nativeValidate, nativeUpscaleLeak) == -7,
                         "Native-resolution upscale bytes were accepted")
             var interpolationLeak = valid
-            writeUInt64(1, at: 208, into: &interpolationLeak)
+            writeUInt64(1, at: 232, into: &interpolationLeak)
             try require(validate(nativeValidate, interpolationLeak) == -8,
                         "Disabled interpolation bytes were accepted")
             var badSlot = valid
-            writeUInt32(2, at: 128, into: &badSlot)
+            writeUInt32(2, at: 140, into: &badSlot)
             try require(validate(nativeValidate, badSlot) == -4, "Mismatched in-flight slot was accepted")
+            var invalidJitter = valid
+            writeFloat(0.75, at: 160, into: &invalidJitter)
+            try require(validate(nativeValidate, invalidJitter) == -4, "Out-of-range jitter was accepted")
+            var negativeJavaLong = valid
+            writeUInt64(UInt64.max, at: 192, into: &negativeJavaLong)
+            try require(validate(nativeValidate, negativeJavaLong) == -4,
+                        "Negative Java resource bytes were accepted as unsigned")
             var nonFiniteMatrix = valid
-            writeFloat(.nan, at: 296, into: &nonFiniteMatrix)
+            writeFloat(.nan, at: 328, into: &nonFiniteMatrix)
             try require(validate(nativeValidate, nonFiniteMatrix) == -4, "NaN transform was accepted")
-            let truncated = valid.withUnsafeBytes { nativeValidate($0.baseAddress, 815) }
+            let truncated = valid.withUnsafeBytes { nativeValidate($0.baseAddress, 847) }
             try require(truncated == -1, "Truncated FrameState packet was accepted")
 
             guard let device = MTLCreateSystemDefaultDevice() else {
@@ -180,7 +199,7 @@ private enum FrameStateAbiValidationMain {
             let legacyHdr = generationPacket(
                 valid,
                 generation: 100,
-                lightingMode: 0,
+                renderContractMode: 0,
                 outputMode: 1,
                 spatial: true
             )
@@ -199,7 +218,7 @@ private enum FrameStateAbiValidationMain {
             let actualHdr = generationPacket(
                 valid,
                 generation: 101,
-                lightingMode: 1,
+                renderContractMode: 1,
                 outputMode: 1,
                 spatial: true
             )
@@ -217,7 +236,7 @@ private enum FrameStateAbiValidationMain {
             let actualSdr = generationPacket(
                 valid,
                 generation: 102,
-                lightingMode: 1,
+                renderContractMode: 1,
                 outputMode: 0,
                 spatial: false
             )
@@ -230,7 +249,7 @@ private enum FrameStateAbiValidationMain {
             let legacySdr = generationPacket(
                 valid,
                 generation: 103,
-                lightingMode: 0,
+                renderContractMode: 0,
                 outputMode: 0,
                 spatial: false
             )
@@ -239,7 +258,7 @@ private enum FrameStateAbiValidationMain {
                 nativeContract(devicePointer) == 1,
                 "Legacy SDR generation retained HDR/UI-seed PSOs or resources"
             )
-            print("Native FrameState ABI v2 validation passed (8 negative cases + 4 exact native generations)")
+            print("Native FrameState ABI v3 validation passed (12 negative cases + 4 exact native generations)")
         } catch {
             fputs("Native FrameState ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

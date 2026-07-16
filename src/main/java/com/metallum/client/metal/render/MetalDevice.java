@@ -23,8 +23,9 @@ import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.RendererFeatureMask;
 import com.metallum.client.renderer.RendererGenerationConfig;
@@ -114,6 +115,18 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
     }
 
+    private record RendererAdmissionLogState(
+            Set<RendererGenerationConfig.RejectionReason> rejectionReasons,
+            RenderContractMode renderContractMode,
+            LightingModel lightingModel,
+            DisplayOutputMode outputMode,
+            boolean spatialActive
+    ) {
+        RendererAdmissionLogState {
+            rejectionReasons = Set.copyOf(rejectionReasons);
+        }
+    }
+
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
     private static volatile MetalDevice INSTANCE;
@@ -125,6 +138,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final GpuDebugOptions debugOptions;
     private final MetalCapabilities rendererCapabilities;
     private final RendererConfig rendererConfig;
+    private final RenderContractMode requestedRenderContract;
     private final boolean spatialScalingSupported;
     private final boolean temporalDiagnosticsConfigured;
     private boolean temporalDiagnosticsActive;
@@ -176,7 +190,12 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private RendererGenerationKey publishedRendererGeneration;
     private long rendererGenerationId;
-    private boolean rendererAdmissionLogged;
+    private long renderContractGenerationId;
+    private long lightingGenerationId;
+    private long outputGenerationId;
+    @Nullable
+    private RendererAdmissionLogState loggedRendererAdmission;
+    private boolean frameInterpolationAdmissionLogged;
     private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
     private final FrameStateTracker frameStateTracker = new FrameStateTracker();
     @Nullable
@@ -204,12 +223,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
-        // These policies are process-global only because Minecraft constructs
-        // one render backend. Clear stale state before any fallible native
-        // initialization so another backend can never inherit Metal policy.
         HdrSemanticState.reset();
         HdrSceneState.reset();
         MetallumMaterialState.reset();
+        this.rendererConfig = RendererConfig.load();
         this.hdrConfig = HdrConfig.load();
         HdrMode configuredHdrMode = this.hdrConfig.mode();
         this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
@@ -244,7 +261,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             );
         }
         this.rendererCapabilities = discoveredCapabilities;
-        this.rendererConfig = RendererConfig.load();
+        this.requestedRenderContract = requestedRenderContract();
         this.temporalDiagnosticsConfigured = TemporalDiagnostics.configured();
         this.temporalDiagnosticsActive = this.temporalDiagnosticsConfigured
                 && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
@@ -272,7 +289,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
         HdrSceneState.configure(this.hdrConfig, initialEdrCapabilities);
         MetallumMaterialState.configure(
-                this.rendererConfig.improvedLighting(),
+                this.requestedRenderContract == RenderContractMode.METALLUM,
                 configuredHdrMode.resolve(initialEdrCapabilities) != HdrOutputMode.SDR
         );
         Metallum.LOGGER.info(
@@ -292,8 +309,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.temporalDiagnosticsActive ? "enabled (camera/static-depth only)" : "disabled"
         );
         Metallum.LOGGER.info(
-                "Renderer generation request: lighting={}, preset={}, frameInterpolation={} (production executor Metal 3)",
-                this.rendererConfig.improvedLighting() ? "METALLUM" : "LEGACY",
+                "Renderer generation request: contract={}, lighting={}, preset={}, frameInterpolation={} (production executor Metal 3)",
+                this.requestedRenderContract,
+                this.requestedRenderContract == RenderContractMode.METALLUM
+                        && this.rendererConfig.improvedLighting() ? "ADVANCED" : "VANILLA",
                 this.rendererConfig.lightingPreset(),
                 this.rendererConfig.frameInterpolation()
         );
@@ -619,12 +638,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean materialStorageCompatible = MetallumMaterialState.isSceneStorageCompatible(
                 storageCompatibleOutput != HdrOutputMode.SDR
         );
-        boolean materialGenerationAvailable = this.rendererConfig.improvedLighting()
+        boolean materialGenerationAvailable = this.requestedRenderContract == RenderContractMode.METALLUM
                 && materialAdmission.active()
                 && materialStorageCompatible;
         DisplayOutputMode requestedOutput = resolveRendererOutputMode(
-                storageCompatibleOutput,
-                materialGenerationAvailable
+                storageCompatibleOutput
         );
         RendererGenerationKey currentKey = this.publishedRendererGeneration;
         if (currentKey != null
@@ -647,9 +665,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 materialCoverageEpoch
         );
 
-        LightingMode requestedLighting = this.rendererConfig.improvedLighting()
-                ? LightingMode.METALLUM
-                : LightingMode.LEGACY;
+        LightingModel requestedLighting = this.requestedRenderContract == RenderContractMode.METALLUM
+                && this.rendererConfig.improvedLighting()
+                ? LightingModel.ADVANCED
+                : LightingModel.VANILLA;
         RendererFeatureMask activeFeatures = spatialActive
                 ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
                 : RendererFeatureMask.NONE;
@@ -659,10 +678,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
         MetalCapabilities generationCapabilities = materialGenerationAvailable
                 ? this.rendererCapabilities.withRuntimeFeature(
-                        MetalCapabilities.Feature.METALLUM_LIGHTING
+                        MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT
                 )
                 : this.rendererCapabilities;
         RendererGenerationPlanner.Plan plan = RendererGenerationPlanner.plan(
+                this.requestedRenderContract,
                 requestedLighting,
                 requestedOutput,
                 MetalExecutorKind.METAL3,
@@ -696,6 +716,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                     );
                 }
                 plan = RendererGenerationPlanner.plan(
+                        this.requestedRenderContract,
                         requestedLighting,
                         requestedOutput,
                         MetalExecutorKind.METAL3,
@@ -716,19 +737,32 @@ public final class MetalDevice implements GpuDeviceBackend {
         RendererGenerationManifest manifest = plan.manifest();
         FrameState.ResourceBytes resourceBytes = new FrameState.ResourceBytes(
                 manifest.resourceBytes(RendererGenerationManifest.Domain.BASE),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.MATERIAL_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.LIGHTING_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY)
         );
+        RendererGenerationConfig previousGeneration = this.activeRendererGeneration;
         long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
         this.rendererGenerationId = nextGeneration;
+        if (previousGeneration == null
+                || previousGeneration.renderContractMode() != resolved.renderContractMode()) {
+            this.renderContractGenerationId = Math.addExact(this.renderContractGenerationId, 1L);
+        }
+        if (previousGeneration == null
+                || previousGeneration.lightingModel() != resolved.lightingModel()) {
+            this.lightingGenerationId = Math.addExact(this.lightingGenerationId, 1L);
+        }
+        if (previousGeneration == null || previousGeneration.outputMode() != resolved.outputMode()) {
+            this.outputGenerationId = Math.addExact(this.outputGenerationId, 1L);
+        }
         this.activeRendererGeneration = resolved;
         MetallumMaterialState.publishGeneration(
-                resolved.lightingMode() == LightingMode.METALLUM
+                resolved.renderContractMode() == RenderContractMode.METALLUM
         );
-        if (!usesLegacyHdrSemanticAttachment(resolved.lightingMode(), resolved.outputMode())) {
+        if (!usesLegacyHdrSemanticAttachment(resolved.renderContractMode(), resolved.outputMode())) {
             this.releaseLegacyHdrGenerationResources();
         }
         this.activeRendererResourceBytes = resourceBytes;
@@ -744,29 +778,39 @@ public final class MetalDevice implements GpuDeviceBackend {
             previousDiagnostics.close();
         }
         this.publishedRendererGeneration = key;
-        if (!this.rendererAdmissionLogged) {
-            this.rendererAdmissionLogged = true;
+        RendererAdmissionLogState admissionLogState = new RendererAdmissionLogState(
+                plan.resolution().rejectionReasons(),
+                resolved.renderContractMode(),
+                resolved.lightingModel(),
+                resolved.outputMode(),
+                spatialActive
+        );
+        if (!admissionLogState.equals(this.loggedRendererAdmission)) {
+            this.loggedRendererAdmission = admissionLogState;
             if (plan.resolution().fellBack()) {
                 Metallum.LOGGER.warn(
-                        "Renderer generation request resolved with fallback {}: lighting={}, output={}, upscale={}, interpolation=OFF",
+                        "Renderer generation request resolved with fallback {}: contract={}, lighting={}, output={}, upscale={}, interpolation=OFF",
                         plan.resolution().rejectionReasons(),
-                        resolved.lightingMode(),
+                        resolved.renderContractMode(),
+                        resolved.lightingModel(),
                         resolved.outputMode(),
                         spatialActive ? "SPATIAL" : "NATIVE"
                 );
             } else {
                 Metallum.LOGGER.info(
-                        "Renderer generation admitted: lighting={}, output={}, upscale={}, interpolation=OFF",
-                        resolved.lightingMode(),
+                        "Renderer generation admitted: contract={}, lighting={}, output={}, upscale={}, interpolation=OFF",
+                        resolved.renderContractMode(),
+                        resolved.lightingModel(),
                         resolved.outputMode(),
                         spatialActive ? "SPATIAL" : "NATIVE"
                 );
             }
-            if (this.rendererConfig.frameInterpolation()) {
-                Metallum.LOGGER.warn(
-                        "Frame Interpolation was requested but remains disabled until its production admission stage"
-                );
-            }
+        }
+        if (this.rendererConfig.frameInterpolation() && !this.frameInterpolationAdmissionLogged) {
+            this.frameInterpolationAdmissionLogged = true;
+            Metallum.LOGGER.warn(
+                    "Frame Interpolation was requested but remains disabled until its production admission stage"
+            );
         }
     }
 
@@ -787,16 +831,18 @@ public final class MetalDevice implements GpuDeviceBackend {
                 0L,
                 this.rendererGenerationId,
                 0L,
-                this.rendererGenerationId,
-                this.rendererGenerationId,
-                generation.lightingMode(),
+                this.renderContractGenerationId,
+                this.lightingGenerationId,
+                this.outputGenerationId,
+                generation.renderContractMode(),
+                generation.lightingModel(),
                 generation.outputMode(),
                 generation.lightingPreset(),
                 generation.featureMask(),
                 generation.executorKind(),
                 generation.frameResourceContractVersion(),
                 this.activeRendererResourceBytes,
-                FrameState.LightingWork.NONE,
+                FrameState.AdvancedLightingWork.NONE,
                 capture.transforms(),
                 capture.transforms(),
                 renderExtent,
@@ -822,9 +868,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
         FrameState published = this.frameStateTracker.prepare(candidate, TemporalResetEvents.consume());
         MemorySegment packet = this.frameStatePackets.encode(published);
-        int status = MetalNativeBridge.metallum_set_frame_state_v2(packet);
+        int status = MetalNativeBridge.metallum_set_frame_state_v3(packet);
         if (status != 1) {
-            throw new IllegalStateException("Native FrameState v2 admission failed with status " + status);
+            throw new IllegalStateException("Native FrameState v3 admission failed with status " + status);
         }
         this.frameStateTracker.commit(published);
         return published;
@@ -924,20 +970,34 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     /**
-     * Resolves the scene-generation output axis independently from the exact
-     * CAMetalLayer output mode. Legacy EDR is display-only and keeps its SDR
-     * scene contract; only semantic ENHANCED or admitted material radiance
-     * needs an HDR scene generation.
+     * Resolves the scene-generation output axis independently from material
+     * and lighting admission. Any HDR request remains HDR after either fails.
      */
     static DisplayOutputMode resolveRendererOutputMode(
-            final HdrOutputMode outputMode,
-            final boolean materialGenerationAvailable
+            final HdrOutputMode outputMode
     ) {
         Objects.requireNonNull(outputMode, "outputMode");
-        return outputMode == HdrOutputMode.ENHANCED
-                || (outputMode == HdrOutputMode.EDR && materialGenerationAvailable)
+        return outputMode != HdrOutputMode.SDR
                 ? DisplayOutputMode.HDR
                 : DisplayOutputMode.SDR;
+    }
+
+    static RenderContractMode requestedRenderContract() {
+        String override = System.getProperty("metallum.renderer.contract");
+        if (override == null || override.isBlank()) {
+            return RenderContractMode.METALLUM;
+        }
+        if ("legacy".equalsIgnoreCase(override.strip())) {
+            Metallum.LOGGER.warn(
+                    "Compatibility override metallum.renderer.contract=legacy is active; forcing LEGACY + VANILLA"
+            );
+            return RenderContractMode.LEGACY;
+        }
+        Metallum.LOGGER.warn(
+                "Ignoring unknown metallum.renderer.contract='{}'; requesting the automatic METALLUM contract",
+                override
+        );
+        return RenderContractMode.METALLUM;
     }
 
     static RendererGenerationPlanner.MaterialSceneStorage resolveMainSceneStorage(
@@ -960,7 +1020,8 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     boolean isMaterialGenerationActive() {
         RendererGenerationConfig generation = this.activeRendererGeneration;
-        return generation != null && generation.lightingMode() == LightingMode.METALLUM;
+        return generation != null
+                && generation.renderContractMode() == RenderContractMode.METALLUM;
     }
 
     boolean isMaterialWorldPassActive() {
@@ -993,7 +1054,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     boolean isMaterialHdrGenerationActive() {
         RendererGenerationConfig generation = this.activeRendererGeneration;
         return generation != null
-                && generation.lightingMode() == LightingMode.METALLUM
+                && generation.renderContractMode() == RenderContractMode.METALLUM
                 && generation.outputMode() == DisplayOutputMode.HDR;
     }
 
@@ -1001,7 +1062,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         RendererGenerationConfig generation = this.activeRendererGeneration;
         return generation != null
                 && usesLegacyHdrSemanticAttachment(
-                        generation.lightingMode(), generation.outputMode()
+                        generation.renderContractMode(), generation.outputMode()
                 );
     }
 
@@ -1015,17 +1076,18 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     static boolean usesLegacyHdrSemanticAttachment(
-            final LightingMode lightingMode,
+            final RenderContractMode renderContractMode,
             final DisplayOutputMode outputMode
     ) {
-        return lightingMode == LightingMode.LEGACY && outputMode == DisplayOutputMode.HDR;
+        return renderContractMode == RenderContractMode.LEGACY
+                && outputMode == DisplayOutputMode.HDR;
     }
 
     static boolean usesLegacyHdrDepthSnapshot(
-            final LightingMode lightingMode,
+            final RenderContractMode renderContractMode,
             final boolean legacyHdrEnhancementActive
     ) {
-        return lightingMode == LightingMode.LEGACY && legacyHdrEnhancementActive;
+        return renderContractMode == RenderContractMode.LEGACY && legacyHdrEnhancementActive;
     }
 
     private boolean isSceneRoutingActive() {
@@ -1123,7 +1185,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean materialScene = this.isMaterialGenerationActive();
         RendererGenerationConfig generation = this.activeRendererGeneration;
         boolean legacyHdrScene = generation != null && usesLegacyHdrDepthSnapshot(
-                generation.lightingMode(), this.hdrEnhancedActive
+                generation.renderContractMode(), this.hdrEnhancedActive
         );
         if ((!materialScene && !legacyHdrScene) || source.isClosed()) {
             return;

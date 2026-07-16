@@ -1,9 +1,10 @@
 package com.metallum.client.renderer.temporal;
 
 import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.LightingPreset;
-import com.metallum.client.renderer.LightingMode;
 import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererFeatureMask;
 
 import java.util.Collections;
@@ -17,16 +18,18 @@ public record FrameState(
         long frameId,
         long rendererGenerationId,
         long historyGeneration,
+        long renderContractGenerationId,
         long lightingGenerationId,
         long outputGenerationId,
-        LightingMode lightingMode,
+        RenderContractMode renderContractMode,
+        LightingModel lightingModel,
         DisplayOutputMode outputMode,
         LightingPreset lightingPreset,
         RendererFeatureMask featureMask,
         MetalExecutorKind executorKind,
         int frameGraphVersion,
         ResourceBytes resourceBytes,
-        LightingWork lightingWork,
+        AdvancedLightingWork advancedLightingWork,
         Transforms currentTransforms,
         Transforms previousTransforms,
         Extent renderExtent,
@@ -56,7 +59,8 @@ public record FrameState(
         CAMERA_CUT,
         FOV_PROJECTION_CHANGE,
         RENDERER_GENERATION_CHANGE,
-        LIGHTING_MODE_CHANGE,
+        RENDER_CONTRACT_CHANGE,
+        LIGHTING_MODEL_CHANGE,
         OUTPUT_MODE_CHANGE,
         INTERNAL_RENDER_SCALE_CHANGE,
         RESOURCE_PACK_SHADER_RELOAD
@@ -96,18 +100,22 @@ public record FrameState(
     /** Owned resource estimates for the active generation, split by independent feature axis. */
     public record ResourceBytes(
             long base,
+            long material,
             long hdr,
-            long lighting,
+            long advancedLighting,
             long upscale,
             long interpolation,
             long diagnostic
     ) {
-        public static final ResourceBytes NONE = new ResourceBytes(0L, 0L, 0L, 0L, 0L, 0L);
+        public static final ResourceBytes NONE = new ResourceBytes(
+                0L, 0L, 0L, 0L, 0L, 0L, 0L
+        );
 
         public ResourceBytes {
             requireNonNegative(base, "base resource bytes");
+            requireNonNegative(material, "material resource bytes");
             requireNonNegative(hdr, "HDR resource bytes");
-            requireNonNegative(lighting, "lighting resource bytes");
+            requireNonNegative(advancedLighting, "Advanced-lighting resource bytes");
             requireNonNegative(upscale, "upscale resource bytes");
             requireNonNegative(interpolation, "interpolation resource bytes");
             requireNonNegative(diagnostic, "diagnostic resource bytes");
@@ -115,33 +123,44 @@ public record FrameState(
 
         public ResourceBytes(
                 final long base,
+                final long material,
                 final long hdr,
-                final long lighting,
+                final long advancedLighting,
                 final long upscale,
                 final long interpolation
         ) {
-            this(base, hdr, lighting, upscale, interpolation, 0L);
+            this(base, material, hdr, advancedLighting, upscale, interpolation, 0L);
         }
     }
 
-    /** Per-frame light work. L0 keeps every field exactly zero in Legacy generations. */
-    public record LightingWork(
+    /** Per-frame Advanced work. L2.5 keeps every field exactly zero for Vanilla. */
+    public record AdvancedLightingWork(
             int lightCount,
             int passCount,
+            int encoderCount,
+            int psoCount,
+            int workQueueCount,
             int dispatchCount,
             long uploadBytes
     ) {
-        public static final LightingWork NONE = new LightingWork(0, 0, 0, 0L);
+        public static final AdvancedLightingWork NONE = new AdvancedLightingWork(
+                0, 0, 0, 0, 0, 0, 0L
+        );
 
-        public LightingWork {
+        public AdvancedLightingWork {
             requireNonNegative(lightCount, "light count");
-            requireNonNegative(passCount, "lighting pass count");
-            requireNonNegative(dispatchCount, "lighting dispatch count");
-            requireNonNegative(uploadBytes, "lighting upload bytes");
+            requireNonNegative(passCount, "Advanced pass count");
+            requireNonNegative(encoderCount, "Advanced encoder count");
+            requireNonNegative(psoCount, "Advanced PSO count");
+            requireNonNegative(workQueueCount, "Advanced work-queue count");
+            requireNonNegative(dispatchCount, "Advanced dispatch count");
+            requireNonNegative(uploadBytes, "Advanced upload bytes");
         }
 
         public boolean isEmpty() {
             return this.lightCount == 0 && this.passCount == 0
+                    && this.encoderCount == 0 && this.psoCount == 0
+                    && this.workQueueCount == 0
                     && this.dispatchCount == 0 && this.uploadBytes == 0L;
         }
     }
@@ -174,9 +193,11 @@ public record FrameState(
         requireNonNegative(frameId, "frame ID");
         requireNonNegative(rendererGenerationId, "renderer generation ID");
         requireNonNegative(historyGeneration, "history generation");
+        requireNonNegative(renderContractGenerationId, "render-contract generation ID");
         requireNonNegative(lightingGenerationId, "lighting generation ID");
         requireNonNegative(outputGenerationId, "output generation ID");
-        Objects.requireNonNull(lightingMode, "lightingMode");
+        Objects.requireNonNull(renderContractMode, "renderContractMode");
+        Objects.requireNonNull(lightingModel, "lightingModel");
         Objects.requireNonNull(outputMode, "outputMode");
         Objects.requireNonNull(lightingPreset, "lightingPreset");
         Objects.requireNonNull(featureMask, "featureMask");
@@ -185,10 +206,19 @@ public record FrameState(
             throw new IllegalArgumentException("Frame graph version must be positive");
         }
         Objects.requireNonNull(resourceBytes, "resourceBytes");
-        Objects.requireNonNull(lightingWork, "lightingWork");
-        if (lightingMode == LightingMode.LEGACY
-                && (resourceBytes.lighting() != 0L || !lightingWork.isEmpty())) {
-            throw new IllegalArgumentException("Legacy frames must contain zero lighting work/resources");
+        Objects.requireNonNull(advancedLightingWork, "advancedLightingWork");
+        if (renderContractMode == RenderContractMode.LEGACY && resourceBytes.material() != 0L) {
+            throw new IllegalArgumentException("Legacy frames must contain zero material resources");
+        }
+        if (renderContractMode == RenderContractMode.LEGACY
+                && lightingModel == LightingModel.ADVANCED) {
+            throw new IllegalArgumentException("Legacy frames cannot use Advanced lighting");
+        }
+        if (lightingModel == LightingModel.VANILLA
+                && (resourceBytes.advancedLighting() != 0L || !advancedLightingWork.isEmpty())) {
+            throw new IllegalArgumentException(
+                    "Vanilla frames must contain zero Advanced work/resources"
+            );
         }
         if (outputMode == DisplayOutputMode.SDR && resourceBytes.hdr() != 0L) {
             throw new IllegalArgumentException("SDR frames must contain zero HDR resource bytes");
@@ -234,22 +264,24 @@ public record FrameState(
         }
     }
 
-    /** Compatibility constructor for L0 callers while production migrates to the v2 frame ABI. */
+    /** Compact constructor for callers that use default presentation metadata. */
     public FrameState(
             final FrameContract contract,
             final long frameId,
             final long rendererGenerationId,
             final long historyGeneration,
+            final long renderContractGenerationId,
             final long lightingGenerationId,
             final long outputGenerationId,
-            final LightingMode lightingMode,
+            final RenderContractMode renderContractMode,
+            final LightingModel lightingModel,
             final DisplayOutputMode outputMode,
             final LightingPreset lightingPreset,
             final RendererFeatureMask featureMask,
             final MetalExecutorKind executorKind,
             final int frameGraphVersion,
             final ResourceBytes resourceBytes,
-            final LightingWork lightingWork,
+            final AdvancedLightingWork advancedLightingWork,
             final Transforms currentTransforms,
             final Transforms previousTransforms,
             final Extent renderExtent,
@@ -264,16 +296,18 @@ public record FrameState(
                 frameId,
                 rendererGenerationId,
                 historyGeneration,
+                renderContractGenerationId,
                 lightingGenerationId,
                 outputGenerationId,
-                lightingMode,
+                renderContractMode,
+                lightingModel,
                 outputMode,
                 lightingPreset,
                 featureMask,
                 executorKind,
                 frameGraphVersion,
                 resourceBytes,
-                lightingWork,
+                advancedLightingWork,
                 currentTransforms,
                 previousTransforms,
                 renderExtent,
@@ -296,15 +330,17 @@ public record FrameState(
         );
     }
 
-    /** Compatibility constructor for preparation callers that do not yet own a generation manifest. */
+    /** Compact preparation constructor for callers without a generation manifest. */
     public FrameState(
             final FrameContract contract,
             final long frameId,
             final long rendererGenerationId,
             final long historyGeneration,
+            final long renderContractGenerationId,
             final long lightingGenerationId,
             final long outputGenerationId,
-            final LightingMode lightingMode,
+            final RenderContractMode renderContractMode,
+            final LightingModel lightingModel,
             final DisplayOutputMode outputMode,
             final Transforms currentTransforms,
             final Transforms previousTransforms,
@@ -320,16 +356,18 @@ public record FrameState(
                 frameId,
                 rendererGenerationId,
                 historyGeneration,
+                renderContractGenerationId,
                 lightingGenerationId,
                 outputGenerationId,
-                lightingMode,
+                renderContractMode,
+                lightingModel,
                 outputMode,
                 LightingPreset.BALANCED,
                 RendererFeatureMask.NONE,
                 MetalExecutorKind.METAL3,
                 1,
                 ResourceBytes.NONE,
-                LightingWork.NONE,
+                AdvancedLightingWork.NONE,
                 currentTransforms,
                 previousTransforms,
                 renderExtent,
@@ -382,10 +420,15 @@ public record FrameState(
             if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
             reasons.add(HistoryResetReason.RENDERER_GENERATION_CHANGE);
         }
-        if (previous.lightingGenerationId != current.lightingGenerationId
-                || previous.lightingMode != current.lightingMode) {
+        if (previous.renderContractGenerationId != current.renderContractGenerationId
+                || previous.renderContractMode != current.renderContractMode) {
             if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
-            reasons.add(HistoryResetReason.LIGHTING_MODE_CHANGE);
+            reasons.add(HistoryResetReason.RENDER_CONTRACT_CHANGE);
+        }
+        if (previous.lightingGenerationId != current.lightingGenerationId
+                || previous.lightingModel != current.lightingModel) {
+            if (reasons == null) reasons = EnumSet.noneOf(HistoryResetReason.class);
+            reasons.add(HistoryResetReason.LIGHTING_MODEL_CHANGE);
         }
         if (previous.outputGenerationId != current.outputGenerationId
                 || previous.outputMode != current.outputMode) {

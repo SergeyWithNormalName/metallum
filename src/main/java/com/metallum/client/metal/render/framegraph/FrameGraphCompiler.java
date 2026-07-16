@@ -1,7 +1,8 @@
 package com.metallum.client.metal.render.framegraph;
 
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
@@ -116,13 +117,24 @@ public final class FrameGraphCompiler {
             throw invalid(pass, "output applicability does not match " + generation.outputMode());
         }
 
-        boolean lightingMatches = switch (contract.lightingApplicability()) {
+        boolean contractMatches = switch (contract.renderContractApplicability()) {
             case ANY -> true;
-            case LEGACY_ONLY -> generation.lightingMode() == LightingMode.LEGACY;
-            case METALLUM_ONLY -> generation.lightingMode() == LightingMode.METALLUM;
+            case LEGACY_ONLY -> generation.renderContractMode() == RenderContractMode.LEGACY;
+            case METALLUM_ONLY -> generation.renderContractMode() == RenderContractMode.METALLUM;
+        };
+        if (!contractMatches) {
+            throw invalid(pass, "render-contract applicability does not match "
+                    + generation.renderContractMode());
+        }
+
+        boolean lightingMatches = switch (contract.lightingModelApplicability()) {
+            case ANY -> true;
+            case VANILLA_ONLY -> generation.lightingModel() == LightingModel.VANILLA;
+            case ADVANCED_ONLY -> generation.lightingModel() == LightingModel.ADVANCED;
         };
         if (!lightingMatches) {
-            throw invalid(pass, "lighting applicability does not match " + generation.lightingMode());
+            throw invalid(pass, "lighting-model applicability does not match "
+                    + generation.lightingModel());
         }
 
         boolean uiMatches = switch (contract.presentationUiContract()) {

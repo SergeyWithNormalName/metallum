@@ -46,9 +46,9 @@ private func framePacket(
     previousCameraX: Double,
     previousProjectionScaleX: Float = 1
 ) -> [UInt8] {
-    var bytes = [UInt8](repeating: 0, count: 816)
-    writeUInt32(2, at: 0, into: &bytes)
-    writeUInt32(816, at: 4, into: &bytes)
+    var bytes = [UInt8](repeating: 0, count: 848)
+    writeUInt32(3, at: 0, into: &bytes)
+    writeUInt32(848, at: 4, into: &bytes)
     writeUInt32(1, at: 8, into: &bytes)
     writeUInt32(2, at: 12, into: &bytes)
     writeUInt64(1, at: 16, into: &bytes)
@@ -59,25 +59,26 @@ private func framePacket(
     writeUInt64(1, at: 56, into: &bytes)
     writeUInt64(1, at: 64, into: &bytes)
     writeUInt64(1, at: 72, into: &bytes)
-    writeUInt64(resetMask, at: 80, into: &bytes)
-    writeUInt32(UInt32(width), at: 112, into: &bytes)
-    writeUInt32(UInt32(height), at: 116, into: &bytes)
-    writeUInt32(UInt32(width), at: 120, into: &bytes)
-    writeUInt32(UInt32(height), at: 124, into: &bytes)
-    writeFloat(1 / 60, at: 136, into: &bytes)
-    writeFloat(0.05, at: 140, into: &bytes)
-    writeFloat(1024, at: 144, into: &bytes)
-    writeFloat(1, at: 156, into: &bytes)
-    writeFloat(1, at: 160, into: &bytes)
-    writeFloat(1, at: 164, into: &bytes)
+    writeUInt64(1, at: 80, into: &bytes)
+    writeUInt64(resetMask, at: 88, into: &bytes)
+    writeUInt32(UInt32(width), at: 124, into: &bytes)
+    writeUInt32(UInt32(height), at: 128, into: &bytes)
+    writeUInt32(UInt32(width), at: 132, into: &bytes)
+    writeUInt32(UInt32(height), at: 136, into: &bytes)
+    writeFloat(1 / 60, at: 148, into: &bytes)
+    writeFloat(0.05, at: 152, into: &bytes)
+    writeFloat(1024, at: 156, into: &bytes)
     writeFloat(1, at: 168, into: &bytes)
-    writeUInt64(UInt64(width * height * 5 * 3), at: 216, into: &bytes)
-    writeDouble(currentCameraX, at: 248, into: &bytes)
-    writeDouble(previousCameraX, at: 272, into: &bytes)
+    writeFloat(1, at: 172, into: &bytes)
+    writeFloat(1, at: 176, into: &bytes)
+    writeFloat(1, at: 180, into: &bytes)
+    writeUInt64(UInt64(width * height * 5 * 3), at: 240, into: &bytes)
+    writeDouble(currentCameraX, at: 280, into: &bytes)
+    writeDouble(previousCameraX, at: 304, into: &bytes)
     for matrix in 0..<8 {
         for diagonal in 0..<4 {
             let value: Float = matrix == 5 && diagonal == 0 ? previousProjectionScaleX : 1
-            writeFloat(value, at: 296 + matrix * 64 + diagonal * 20, into: &bytes)
+            writeFloat(value, at: 328 + matrix * 64 + diagonal * 20, into: &bytes)
         }
     }
     return bytes
@@ -170,7 +171,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(CommandLine.arguments.count == 2,
                         "Usage: TemporalDiagnosticRuntimeValidation <libmetallum.dylib>")
             guard let handle = dlopen(CommandLine.arguments[1], RTLD_NOW | RTLD_LOCAL),
-                  let setSymbol = dlsym(handle, "metallum_set_frame_state_v2"),
+                  let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
                   let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v1") else {
                 throw ValidationFailure.message("Native temporal diagnostic symbols are unavailable")
             }

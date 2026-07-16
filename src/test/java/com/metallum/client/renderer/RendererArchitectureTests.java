@@ -13,6 +13,7 @@ import com.metallum.client.renderer.temporal.FrameStateAbi;
 import com.metallum.client.renderer.temporal.Matrix4;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -44,7 +45,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2/P4/L0/L2 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -52,73 +53,118 @@ public final class RendererArchitectureTests {
                 MetalCapabilities.Feature.METAL3_BASE,
                 MetalCapabilities.Feature.METAL4_CORE,
                 MetalCapabilities.Feature.HDR_OUTPUT,
-                MetalCapabilities.Feature.METALLUM_LIGHTING
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
+                MetalCapabilities.Feature.ADVANCED_LIGHTING
         );
-        for (LightingMode lighting : LightingMode.values()) {
-            for (DisplayOutputMode output : DisplayOutputMode.values()) {
-                for (MetalExecutorKind executor : MetalExecutorKind.values()) {
+        int admittedCombinations = 0;
+        for (RenderContractMode contract : RenderContractMode.values()) {
+            for (LightingModel lighting : LightingModel.values()) {
+                if (contract == RenderContractMode.LEGACY
+                        && lighting == LightingModel.ADVANCED) {
+                    continue;
+                }
+                for (DisplayOutputMode output : DisplayOutputMode.values()) {
                     RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
+                            contract,
                             lighting,
                             output,
-                            executor,
+                            MetalExecutorKind.METAL3,
                             DisplayOutputMode.SDR,
                             all,
                             RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
                     );
                     require(!resolution.fellBack(), "supported matrix entry fell back");
-                    require(resolution.config().lightingMode() == lighting, "lighting/output coupling");
+                    require(resolution.config().renderContractMode() == contract,
+                            "contract/output coupling");
+                    require(resolution.config().lightingModel() == lighting,
+                            "lighting/output coupling");
                     require(resolution.config().outputMode() == output, "output/lighting coupling");
-                    require(resolution.config().executorKind() == executor, "executor selection changed");
+                    admittedCombinations++;
                 }
             }
         }
+        require(admittedCombinations == 6, "resolved mode matrix does not contain six entries");
+        expectIllegalArgument(() -> new RendererGenerationConfig(
+                RenderContractMode.LEGACY,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                all,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        ));
 
         RendererGenerationConfig.Resolution metallumSdr = RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 DisplayOutputMode.SDR,
                 all,
                 1
         );
-        require(metallumSdr.config().lightingMode() == LightingMode.METALLUM,
+        require(metallumSdr.config().renderContractMode() == RenderContractMode.METALLUM,
                 "HDR off incorrectly forced legacy lighting");
+
+        MetalCapabilities materialOnly = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE,
+                MetalCapabilities.Feature.HDR_OUTPUT,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT
+        );
+        RendererGenerationConfig.Resolution advancedFallback = RendererGenerationConfig.resolve(
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                DisplayOutputMode.HDR,
+                materialOnly,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        require(advancedFallback.rejectionReasons().equals(EnumSet.of(
+                        RendererGenerationConfig.RejectionReason.ADVANCED_LIGHTING_UNAVAILABLE))
+                        && advancedFallback.config().renderContractMode()
+                        == RenderContractMode.METALLUM
+                        && advancedFallback.config().lightingModel() == LightingModel.VANILLA
+                        && advancedFallback.config().outputMode() == DisplayOutputMode.HDR,
+                "Advanced rejection changed material or output axes");
     }
 
     private static void testProductionMetallumRejection() {
         MetalCapabilities production = MetalCapabilities.productionMetal3(true);
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 DisplayOutputMode.HDR,
                 production,
                 1
         );
-        require(resolution.fellBack(), "unimplemented Metallum lighting was accepted");
+        require(resolution.fellBack(), "unavailable material contract was accepted");
         require(resolution.rejectionReasons().equals(EnumSet.of(
-                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE)),
+                        RendererGenerationConfig.RejectionReason.MATERIAL_CONTRACT_UNAVAILABLE)),
                 "unexpected production fallback reason");
-        require(resolution.config().lightingMode() == LightingMode.LEGACY,
-                "unimplemented lighting did not fail closed");
+        require(resolution.config().renderContractMode() == RenderContractMode.LEGACY
+                        && resolution.config().lightingModel() == LightingModel.VANILLA,
+                "material admission failure did not fail closed");
         require(resolution.config().outputMode() == DisplayOutputMode.HDR,
-                "lighting fallback changed the current safe HDR output");
+                "material fallback changed the current safe HDR output");
     }
 
     private static void testRuntimeMaterialCapabilityAdmission() {
         MetalCapabilities discovered = MetalCapabilities.productionMetal3(true);
         MetalCapabilities admitted = discovered.withRuntimeFeature(
-                MetalCapabilities.Feature.METALLUM_LIGHTING
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT
         );
-        require(!discovered.supports(MetalCapabilities.Feature.METALLUM_LIGHTING),
+        require(!discovered.supports(MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT),
                 "runtime material admission mutated the discovery snapshot");
-        require(admitted.supports(MetalCapabilities.Feature.METALLUM_LIGHTING)
-                        && admitted.evidenceFor(MetalCapabilities.Feature.METALLUM_LIGHTING)
+        require(admitted.supports(MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT)
+                        && admitted.evidenceFor(MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT)
                         == MetalCapabilities.Evidence.RUNTIME_PROBE,
                 "runtime material admission lost its capability evidence");
 
         RendererGenerationConfig.Resolution admittedHdr = RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 DisplayOutputMode.HDR,
@@ -126,12 +172,13 @@ public final class RendererArchitectureTests {
                 RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
         );
         require(!admittedHdr.fellBack()
-                        && admittedHdr.config().lightingMode() == LightingMode.METALLUM
+                        && admittedHdr.config().renderContractMode() == RenderContractMode.METALLUM
                         && admittedHdr.config().outputMode() == DisplayOutputMode.HDR,
                 "runtime material capability did not admit METALLUM HDR atomically");
 
         RendererGenerationConfig.Resolution rejectedHdr = RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 DisplayOutputMode.HDR,
@@ -139,7 +186,7 @@ public final class RendererArchitectureTests {
                 RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
         );
         require(rejectedHdr.fellBack()
-                        && rejectedHdr.config().lightingMode() == LightingMode.LEGACY
+                        && rejectedHdr.config().renderContractMode() == RenderContractMode.LEGACY
                         && rejectedHdr.config().outputMode() == DisplayOutputMode.HDR,
                 "material rejection changed the independently supported HDR output");
     }
@@ -201,7 +248,8 @@ public final class RendererArchitectureTests {
     private static void testFailClosedSelection() {
         MetalCapabilities sdrMetal3 = MetalCapabilities.productionMetal3(false);
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL4,
                 DisplayOutputMode.HDR,
@@ -209,11 +257,11 @@ public final class RendererArchitectureTests {
                 1
         );
         require(resolution.rejectionReasons().equals(EnumSet.of(
-                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE,
+                        RendererGenerationConfig.RejectionReason.MATERIAL_CONTRACT_UNAVAILABLE,
                         RendererGenerationConfig.RejectionReason.OUTPUT_UNAVAILABLE,
                         RendererGenerationConfig.RejectionReason.EXECUTOR_UNAVAILABLE)),
                 "unsupported combination did not report every rejection");
-        require(resolution.config().lightingMode() == LightingMode.LEGACY
+        require(resolution.config().renderContractMode() == RenderContractMode.LEGACY
                         && resolution.config().outputMode() == DisplayOutputMode.SDR
                         && resolution.config().executorKind() == MetalExecutorKind.METAL3,
                 "unsupported combination did not fail closed to Legacy + safe output + Metal 3");
@@ -226,7 +274,8 @@ public final class RendererArchitectureTests {
                 RendererFeatureMask.FRAME_INTERPOLATION
         );
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.ULTRA,
@@ -239,7 +288,7 @@ public final class RendererArchitectureTests {
                         RendererGenerationConfig.RejectionReason.UPSCALER_UNAVAILABLE,
                         RendererGenerationConfig.RejectionReason.INTERPOLATION_UNAVAILABLE)),
                 "optional feature rejection reasons were coupled");
-        require(resolution.config().lightingMode() == LightingMode.LEGACY
+        require(resolution.config().renderContractMode() == RenderContractMode.LEGACY
                         && resolution.config().outputMode() == DisplayOutputMode.HDR
                         && resolution.config().executorKind() == MetalExecutorKind.METAL3
                         && resolution.config().lightingPreset() == LightingPreset.ULTRA
@@ -252,7 +301,8 @@ public final class RendererArchitectureTests {
                 MetalCapabilities.Feature.METALFX_SPATIAL
         );
         RendererGenerationConfig.Resolution partial = RendererGenerationConfig.resolve(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -283,6 +333,33 @@ public final class RendererArchitectureTests {
         try {
             temporaryDirectory = Files.createTempDirectory("metallum-renderer-config-");
             Path configPath = temporaryDirectory.resolve("metallum-renderer.properties");
+            Path hdrPath = temporaryDirectory.resolve("metallum-hdr.properties");
+            String hdrSentinel = "mode=scene\nhdrStrength=1.37\n";
+            Files.writeString(hdrPath, hdrSentinel);
+
+            for (boolean legacyLighting : new boolean[]{false, true}) {
+                Files.writeString(
+                        configPath,
+                        "improvedLighting=" + legacyLighting
+                                + "\nlightingPreset=ultra\nframeInterpolation=true\n"
+                );
+                RendererConfig migrated = RendererConfig.load(configPath);
+                require(!migrated.improvedLighting()
+                                && migrated.lightingPreset() == LightingPreset.ULTRA
+                                && migrated.frameInterpolation(),
+                        "v1 renderer config did not migrate Advanced to Off");
+                String firstMigration = Files.readString(configPath);
+                require(firstMigration.contains("schemaVersion=2")
+                                && firstMigration.contains("improvedLighting=false"),
+                        "v1 renderer config was not persisted as schema 2");
+                RendererConfig repeated = RendererConfig.load(configPath);
+                require(repeated.equals(migrated)
+                                && Files.readString(configPath).equals(firstMigration),
+                        "schema-2 reload rewrote or changed the migrated config");
+                require(Files.readString(hdrPath).equals(hdrSentinel),
+                        "renderer migration read or changed the separate HDR file");
+            }
+
             RendererConfig original = new RendererConfig(false, LightingPreset.ULTRA, true);
             original.save(configPath);
             original.withImprovedLighting(true).save(configPath);
@@ -291,7 +368,22 @@ public final class RendererArchitectureTests {
                             && persisted.lightingPreset() == LightingPreset.ULTRA
                             && persisted.frameInterpolation(),
                     "persisted lighting toggle lost another renderer config axis");
+
+            for (String invalid : new String[]{
+                    "schemaVersion=99\nimprovedLighting=true\n",
+                    "schemaVersion=broken\nimprovedLighting=true\n",
+                    "schemaVersion=2\nimprovedLighting=maybe\n"
+            }) {
+                Files.writeString(configPath, invalid);
+                require(RendererConfig.load(configPath).equals(RendererConfig.defaults()),
+                        "invalid renderer schema did not fail closed");
+                require(Files.readString(configPath).equals(invalid),
+                        "invalid renderer schema was overwritten");
+                require(Files.readString(hdrPath).equals(hdrSentinel),
+                        "invalid renderer config changed the separate HDR file");
+            }
             Files.delete(configPath);
+            Files.delete(hdrPath);
             Files.delete(temporaryDirectory);
             temporaryDirectory = null;
         } catch (IOException exception) {
@@ -302,6 +394,9 @@ public final class RendererArchitectureTests {
                     Files.deleteIfExists(temporaryDirectory.resolve(
                             "metallum-renderer.properties"
                     ));
+                    Files.deleteIfExists(temporaryDirectory.resolve(
+                            "metallum-hdr.properties"
+                    ));
                     Files.deleteIfExists(temporaryDirectory);
                 } catch (IOException ignored) {
                     // The assertion above already carries the original failure.
@@ -309,6 +404,7 @@ public final class RendererArchitectureTests {
             }
         }
         Properties configured = new Properties();
+        configured.setProperty("schemaVersion", "2");
         configured.setProperty("improvedLighting", "true");
         configured.setProperty("lightingPreset", "ultra");
         configured.setProperty("frameInterpolation", "true");
@@ -318,8 +414,8 @@ public final class RendererArchitectureTests {
                         && parsed.frameInterpolation(),
                 "renderer config axes were not parsed independently");
         configured.setProperty("lightingPreset", "unknown");
-        require(RendererConfig.from(configured).lightingPreset() == LightingPreset.BALANCED,
-                "invalid preset did not use the balanced default");
+        require(RendererConfig.from(configured).equals(RendererConfig.defaults()),
+                "invalid schema-2 preset did not fail closed");
         expectIllegalArgument(() -> RendererFeatureMask.of(
                 RendererFeatureMask.SPATIAL_UPSCALING,
                 RendererFeatureMask.TEMPORAL_UPSCALING
@@ -330,7 +426,7 @@ public final class RendererArchitectureTests {
         MetalCapabilities all = MetalCapabilities.of(
                 MetalCapabilities.Feature.METAL3_BASE,
                 MetalCapabilities.Feature.HDR_OUTPUT,
-                MetalCapabilities.Feature.METALLUM_LIGHTING,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
                 MetalCapabilities.Feature.METALFX_SPATIAL
         );
         RendererGenerationPlanner.Extent render = new RendererGenerationPlanner.Extent(1280, 720);
@@ -339,10 +435,11 @@ public final class RendererArchitectureTests {
         long displayPixels = 2560L * 1440L;
         long quarterPixels = 320L * 180L;
 
-        for (LightingMode lighting : LightingMode.values()) {
+        for (RenderContractMode renderContract : RenderContractMode.values()) {
             for (DisplayOutputMode output : DisplayOutputMode.values()) {
                 RendererGenerationPlanner.Plan plan = RendererGenerationPlanner.plan(
-                        lighting,
+                        renderContract,
+                        LightingModel.VANILLA,
                         output,
                         MetalExecutorKind.METAL3,
                         LightingPreset.BALANCED,
@@ -352,7 +449,7 @@ public final class RendererArchitectureTests {
                         render,
                         display
                 );
-                require(plan.resolution().config().lightingMode() == lighting
+                require(plan.resolution().config().renderContractMode() == renderContract
                                 && plan.resolution().config().outputMode() == output,
                         "one of the four declarative combinations failed to compile");
                 require(plan.manifest().executable(),
@@ -368,7 +465,8 @@ public final class RendererArchitectureTests {
         }
 
         RendererGenerationPlanner.Plan legacySdr = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -389,14 +487,15 @@ public final class RendererArchitectureTests {
                         "world_render", "ui_render", "present"
                 )),
                 "Legacy + SDR retained optional work");
-        require(legacySdr.manifest().resourceBytes(RendererGenerationManifest.Domain.LIGHTING_ONLY)
+        require(legacySdr.manifest().resourceBytes(RendererGenerationManifest.Domain.MATERIAL_ONLY)
                         == 0L
                         && legacySdr.manifest().passCount(
-                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == 0L,
-                "Legacy + SDR retained lighting work");
+                        RendererGenerationManifest.Domain.MATERIAL_ONLY) == 0L,
+                "Legacy + SDR retained material work");
 
         RendererGenerationPlanner.Plan legacyHdr = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -440,7 +539,8 @@ public final class RendererArchitectureTests {
                 "Legacy + HDR owned resource sizes changed");
 
         RendererGenerationPlanner.Plan legacyHdrStartup = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -452,7 +552,7 @@ public final class RendererArchitectureTests {
                 false,
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
         );
-        require(legacyHdrStartup.resolution().config().lightingMode() == LightingMode.LEGACY
+        require(legacyHdrStartup.resolution().config().renderContractMode() == RenderContractMode.LEGACY
                         && legacyHdrStartup.resolution().config().outputMode()
                         == DisplayOutputMode.HDR
                         && legacyHdrStartup.manifest().sceneStorageContract()
@@ -461,7 +561,8 @@ public final class RendererArchitectureTests {
                 "startup Legacy HDR FP16 storage was rejected as an RGBA8 MainTarget");
 
         RendererGenerationPlanner.Plan legacyEnhancedStartup = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -473,8 +574,8 @@ public final class RendererArchitectureTests {
                 false,
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8
         );
-        require(legacyEnhancedStartup.resolution().config().lightingMode()
-                        == LightingMode.LEGACY
+        require(legacyEnhancedStartup.resolution().config().renderContractMode()
+                        == RenderContractMode.LEGACY
                         && legacyEnhancedStartup.resolution().config().outputMode()
                         == DisplayOutputMode.HDR
                         && legacyEnhancedStartup.manifest().sceneStorageContract()
@@ -516,7 +617,8 @@ public final class RendererArchitectureTests {
                 "Legacy Enhanced RGBA8 manifest diverged from its fallback frame graph");
 
         RendererGenerationPlanner.Plan legacyLiveEnhanced = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -539,7 +641,8 @@ public final class RendererArchitectureTests {
                 "live EDR-to-Enhanced manifest retained an unavailable semantic attachment");
 
         RendererGenerationPlanner.Plan legacyHdrStorageToSdr = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -551,8 +654,8 @@ public final class RendererArchitectureTests {
                 false,
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
         );
-        require(legacyHdrStorageToSdr.resolution().config().lightingMode()
-                        == LightingMode.LEGACY
+        require(legacyHdrStorageToSdr.resolution().config().renderContractMode()
+                        == RenderContractMode.LEGACY
                         && legacyHdrStorageToSdr.resolution().config().outputMode()
                         == DisplayOutputMode.SDR
                         && legacyHdrStorageToSdr.manifest().sceneStorageContract()
@@ -574,7 +677,8 @@ public final class RendererArchitectureTests {
                 "Legacy HDR-to-SDR transition mismatched its fixed FP16 backing or retained HDR work");
 
         RendererGenerationPlanner.Plan metallumSdr = RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -601,13 +705,14 @@ public final class RendererArchitectureTests {
                 )),
                 "Metallum + SDR retained HDR or reconstruction passes");
         require(metallumSdr.manifest().resourceBytes(
-                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == displayPixels * 8L
+                        RendererGenerationManifest.Domain.MATERIAL_ONLY) == displayPixels * 8L
                         && metallumSdr.manifest().passCount(
-                        RendererGenerationManifest.Domain.LIGHTING_ONLY) == 1L,
+                        RendererGenerationManifest.Domain.MATERIAL_ONLY) == 1L,
                 "Metallum + SDR UI isolation estimate changed");
 
         RendererGenerationPlanner.Plan metallumHdrStorageToSdr = RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -619,8 +724,8 @@ public final class RendererArchitectureTests {
                 false,
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
         );
-        require(metallumHdrStorageToSdr.resolution().config().lightingMode()
-                        == LightingMode.METALLUM
+        require(metallumHdrStorageToSdr.resolution().config().renderContractMode()
+                        == RenderContractMode.METALLUM
                         && metallumHdrStorageToSdr.resolution().config().outputMode()
                         == DisplayOutputMode.SDR
                         && metallumHdrStorageToSdr.manifest().sceneStorageContract()
@@ -645,7 +750,8 @@ public final class RendererArchitectureTests {
                 "METALLUM FP16-compatible SDR generation retained HDR resources or work");
 
         RendererGenerationPlanner.Plan metallumHdr = RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -688,7 +794,8 @@ public final class RendererArchitectureTests {
                         == expectedMetallumHdrBytes,
                 "Metallum + HDR resource estimate retained semantic/depth allocations");
         expectIllegalArgument(() -> RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -703,7 +810,8 @@ public final class RendererArchitectureTests {
 
         MetalCapabilities noMaterialShaders = MetalCapabilities.productionMetal3(true);
         RendererGenerationPlanner.Plan shaderRoleFallback = RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -716,9 +824,9 @@ public final class RendererArchitectureTests {
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
         );
         require(shaderRoleFallback.resolution().rejectionReasons().equals(EnumSet.of(
-                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE))
-                        && shaderRoleFallback.resolution().config().lightingMode()
-                        == LightingMode.LEGACY
+                        RendererGenerationConfig.RejectionReason.MATERIAL_CONTRACT_UNAVAILABLE))
+                        && shaderRoleFallback.resolution().config().renderContractMode()
+                        == RenderContractMode.LEGACY
                         && shaderRoleFallback.resolution().config().outputMode()
                         == DisplayOutputMode.HDR
                         && shaderRoleFallback.manifest().sceneStorageContract()
@@ -727,7 +835,8 @@ public final class RendererArchitectureTests {
                 "material shader-role fallback changed the independently safe HDR output axis");
 
         RendererGenerationPlanner.Plan shaderRoleFallbackSdr = RendererGenerationPlanner.plan(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.BALANCED,
@@ -740,9 +849,9 @@ public final class RendererArchitectureTests {
                 RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA16F
         );
         require(shaderRoleFallbackSdr.resolution().rejectionReasons().equals(EnumSet.of(
-                        RendererGenerationConfig.RejectionReason.LIGHTING_UNAVAILABLE))
-                        && shaderRoleFallbackSdr.resolution().config().lightingMode()
-                        == LightingMode.LEGACY
+                        RendererGenerationConfig.RejectionReason.MATERIAL_CONTRACT_UNAVAILABLE))
+                        && shaderRoleFallbackSdr.resolution().config().renderContractMode()
+                        == RenderContractMode.LEGACY
                         && shaderRoleFallbackSdr.resolution().config().outputMode()
                         == DisplayOutputMode.SDR
                         && shaderRoleFallbackSdr.manifest().sceneStorageContract()
@@ -762,7 +871,8 @@ public final class RendererArchitectureTests {
                 "material shader-role fallback mismatched the safe SDR FP16 backing contract");
 
         RendererGenerationPlanner.Plan spatial = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.PERFORMANCE,
@@ -797,7 +907,8 @@ public final class RendererArchitectureTests {
                 "Spatial HDR manifest topology diverged from the executable frame graph");
 
         RendererGenerationPlanner.Plan nativeHdr = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.PERFORMANCE,
@@ -816,7 +927,8 @@ public final class RendererArchitectureTests {
                 "Native HDR manifest topology diverged from the executable frame graph");
 
         RendererGenerationPlanner.Plan spatialSdr = RendererGenerationPlanner.plan(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 LightingPreset.PERFORMANCE,
@@ -855,18 +967,33 @@ public final class RendererArchitectureTests {
     }
 
     private static void requireNoL3Work(final RendererGenerationManifest manifest) {
-        Set<String> allowedLightingResources = Set.of("sdr_ui_color", "sdr_ui_depth");
-        Set<String> allowedLightingPasses = Set.of("scene_linear_ui_seed");
+        Set<String> allowedMaterialResources = Set.of("sdr_ui_color", "sdr_ui_depth");
+        Set<String> allowedMaterialPasses = Set.of("scene_linear_ui_seed");
         require(manifest.resources().stream()
                         .filter(resource -> resource.domain()
-                                == RendererGenerationManifest.Domain.LIGHTING_ONLY)
-                        .allMatch(resource -> allowedLightingResources.contains(resource.name())),
-                "L2 manifest declared an L3 lighting resource");
+                                == RendererGenerationManifest.Domain.MATERIAL_ONLY)
+                        .allMatch(resource -> allowedMaterialResources.contains(resource.name())),
+                "L2 manifest declared an unexpected material resource");
         require(manifest.passes().stream()
                         .filter(pass -> pass.domain()
-                                == RendererGenerationManifest.Domain.LIGHTING_ONLY)
-                        .allMatch(pass -> allowedLightingPasses.contains(pass.name())),
-                "L2 manifest scheduled an L3 lighting pass");
+                                == RendererGenerationManifest.Domain.MATERIAL_ONLY)
+                        .allMatch(pass -> allowedMaterialPasses.contains(pass.name())),
+                "L2 manifest scheduled an unexpected material pass");
+        require(manifest.resourceBytes(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 0L
+                        && manifest.passCount(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 0L
+                        && manifest.encoderCount(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 0L
+                        && manifest.pipelineCount(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 0L
+                        && manifest.workQueueCount(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 0L,
+                "L2.5 manifest declared Advanced resources or work");
+        require(manifest.encoders().size() == manifest.passes().size()
+                        && manifest.pipelines().size() == manifest.passes().size()
+                        && manifest.workQueues().size() == manifest.passes().size(),
+                "manifest did not explicitly declare encoder/PSO/queue work");
     }
 
     private static void testImmutableCapabilitySnapshot() {
@@ -931,15 +1058,16 @@ public final class RendererArchitectureTests {
                         MetalCapabilities.Feature.REQUIRED_TEXTURE_FORMATS_USAGES)
                         == MetalCapabilities.Evidence.FORMAT_USAGE_PROBE,
                 "capability evidence sources were lost");
-        require(!capabilities.supports(MetalCapabilities.Feature.METALLUM_LIGHTING),
+        require(!capabilities.supports(MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT),
                 "native discovery accidentally enabled unimplemented lighting");
         expectUnsupported(() -> capabilities.evidence().put(
-                MetalCapabilities.Feature.METALLUM_LIGHTING,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
                 MetalCapabilities.Evidence.DECLARED
         ));
 
         RendererGenerationConfig metal3WithTemporalAvailable = new RendererGenerationConfig(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 MetalExecutorKind.METAL3,
                 capabilities,
@@ -966,21 +1094,24 @@ public final class RendererArchitectureTests {
     private static void testInvalidConfigsAreRejected() {
         MetalCapabilities production = MetalCapabilities.productionMetal3(false);
         expectIllegalArgument(() -> new RendererGenerationConfig(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 production,
                 1
         ));
         expectIllegalArgument(() -> new RendererGenerationConfig(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 production,
                 0
         ));
         expectIllegalState(() -> RendererGenerationConfig.resolve(
-                LightingMode.METALLUM,
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL4,
                 DisplayOutputMode.SDR,
@@ -1017,12 +1148,12 @@ public final class RendererArchitectureTests {
     private static void testFrameStateGenerationTransitions() {
         FrameState base = frame(
                 1L, 2L, 3L, 4L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.SDR,
                 new FrameState.Extent(1280, 720), new FrameState.Extent(2560, 1440), Set.of()
         );
         FrameState changed = frame(
                 2L, 3L, 4L, 5L,
-                LightingMode.METALLUM, DisplayOutputMode.HDR,
+                RenderContractMode.METALLUM, DisplayOutputMode.HDR,
                 new FrameState.Extent(1920, 1080), new FrameState.Extent(2560, 1440), Set.of()
         );
         Set<FrameState.HistoryResetReason> resets = FrameState.transitionResetReasons(
@@ -1034,16 +1165,29 @@ public final class RendererArchitectureTests {
                         FrameState.HistoryResetReason.DIMENSION_CHANGE,
                         FrameState.HistoryResetReason.INTERNAL_RENDER_SCALE_CHANGE,
                         FrameState.HistoryResetReason.RENDERER_GENERATION_CHANGE,
-                        FrameState.HistoryResetReason.LIGHTING_MODE_CHANGE,
+                        FrameState.HistoryResetReason.RENDER_CONTRACT_CHANGE,
                         FrameState.HistoryResetReason.OUTPUT_MODE_CHANGE)),
                 "generation transition reset policy mismatch: " + resets);
         require(FrameState.transitionResetReasons(null, base, Set.of()).equals(
                         EnumSet.of(FrameState.HistoryResetReason.FIRST_FRAME)),
                 "first frame did not invalidate history");
 
+        FrameState.Transforms transforms = FrameState.Transforms.identity();
+        FrameState advanced = new FrameState(
+                changed.contract(), changed.frameId(), changed.rendererGenerationId(),
+                changed.historyGeneration(), changed.renderContractGenerationId(),
+                changed.lightingGenerationId() + 1L, changed.outputGenerationId(),
+                RenderContractMode.METALLUM, LightingModel.ADVANCED, changed.outputMode(),
+                transforms, transforms, changed.renderExtent(), changed.displayExtent(),
+                1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of()
+        );
+        require(FrameState.transitionResetReasons(changed, advanced, Set.of()).equals(
+                        EnumSet.of(FrameState.HistoryResetReason.LIGHTING_MODEL_CHANGE)),
+                "lighting-model transition did not independently reset history");
+
         FrameState resized = frame(
                 1L, 2L, 3L, 4L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.SDR,
                 new FrameState.Extent(1600, 900), new FrameState.Extent(3200, 1800), Set.of()
         );
         Set<FrameState.HistoryResetReason> resizeResets = FrameState.transitionResetReasons(
@@ -1057,7 +1201,7 @@ public final class RendererArchitectureTests {
                 FrameState.HistoryResetReason.class);
         FrameState state = frame(
                 1L, 1L, 1L, 1L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.SDR,
                 new FrameState.Extent(640, 360), new FrameState.Extent(1280, 720), everyReason
         );
         require(state.historyResetReasons().equals(everyReason),
@@ -1067,21 +1211,21 @@ public final class RendererArchitectureTests {
     private static void testFrameStateNumericContracts() {
         FrameState sdr = frame(
                 7L, 11L, 13L, 17L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.SDR,
                 new FrameState.Extent(1280, 720), new FrameState.Extent(2560, 1440), Set.of()
         );
         FrameState hdr = frame(
                 7L, 11L, 13L, 18L,
-                LightingMode.LEGACY, DisplayOutputMode.HDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.HDR,
                 sdr.renderExtent(), sdr.displayExtent(), Set.of()
         );
         require(sdr.renderExtent().width() == 1280 && sdr.renderExtent().height() == 720
                         && sdr.displayExtent().width() == 2560 && sdr.displayExtent().height() == 1440,
                 "render/display extents were coupled or reordered");
         require(sdr.lightingGenerationId() == hdr.lightingGenerationId()
-                        && sdr.lightingMode() == hdr.lightingMode()
+                        && sdr.renderContractMode() == hdr.renderContractMode()
                         && hdr.outputMode() == DisplayOutputMode.HDR,
-                "changing SDR/HDR output changed the lighting contract");
+                "changing SDR/HDR output changed the render or lighting axes");
         require(Double.doubleToLongBits(sdr.jitterOffset().x()) == Double.doubleToLongBits(0.0)
                         && Double.doubleToLongBits(sdr.jitterOffset().y())
                         == Double.doubleToLongBits(0.0),
@@ -1105,7 +1249,7 @@ public final class RendererArchitectureTests {
                 FrameState.HistoryResetReason.CAMERA_CUT);
         FrameState state = frame(
                 1L, 1L, 1L, 1L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                RenderContractMode.LEGACY, DisplayOutputMode.SDR,
                 new FrameState.Extent(640, 360), new FrameState.Extent(1280, 720), reasons
         );
         reasons.add(FrameState.HistoryResetReason.TELEPORT);
@@ -1124,14 +1268,16 @@ public final class RendererArchitectureTests {
                 8L,
                 9L,
                 10L,
-                LightingMode.LEGACY,
+                11L,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 LightingPreset.PERFORMANCE,
                 RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING),
                 MetalExecutorKind.METAL3,
                 RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION,
-                new FrameState.ResourceBytes(0L, 32L, 0L, 64L, 0L),
-                FrameState.LightingWork.NONE,
+                new FrameState.ResourceBytes(0L, 0L, 32L, 0L, 64L, 0L),
+                FrameState.AdvancedLightingWork.NONE,
                 transforms,
                 transforms,
                 new FrameState.Extent(1280, 720),
@@ -1148,25 +1294,50 @@ public final class RendererArchitectureTests {
             FrameStateAbi.validatePacket(packet);
             packet.set(ValueLayout.JAVA_INT, 0L, FrameStateAbi.CURRENT_VERSION + 1);
             expectIllegalArgument(() -> FrameStateAbi.validatePacket(packet));
+            MemorySegment invalidJitter = FrameStateAbi.encode(spatialHdr, arena);
+            invalidJitter.set(ValueLayout.JAVA_FLOAT, 160L, 0.75f);
+            expectIllegalArgument(() -> FrameStateAbi.validatePacket(invalidJitter));
+            MemorySegment negativeResourceBytes = FrameStateAbi.encode(spatialHdr, arena);
+            negativeResourceBytes.set(ValueLayout.JAVA_LONG, 192L, -1L);
+            expectIllegalArgument(() -> FrameStateAbi.validatePacket(negativeResourceBytes));
         }
 
-        expectIllegalArgument(() -> new FrameState.ResourceBytes(-1L, 0L, 0L, 0L, 0L));
+        expectIllegalArgument(() -> new FrameState.ResourceBytes(-1L, 0L, 0L, 0L, 0L, 0L));
         expectIllegalArgument(() -> new FrameState(
-                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L, 1L,
+                RenderContractMode.LEGACY, LightingModel.VANILLA, DisplayOutputMode.SDR,
                 LightingPreset.BALANCED, RendererFeatureMask.NONE, MetalExecutorKind.METAL3, 2,
-                new FrameState.ResourceBytes(0L, 0L, 1L, 0L, 0L),
-                FrameState.LightingWork.NONE,
+                new FrameState.ResourceBytes(0L, 0L, 1L, 0L, 0L, 0L),
+                FrameState.AdvancedLightingWork.NONE,
                 transforms, transforms,
                 new FrameState.Extent(1, 1), new FrameState.Extent(1, 1),
                 1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of()
         ));
         expectIllegalArgument(() -> new FrameState(
-                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR,
+                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L, 1L,
+                RenderContractMode.LEGACY, LightingModel.ADVANCED, DisplayOutputMode.SDR,
+                LightingPreset.BALANCED, RendererFeatureMask.NONE, MetalExecutorKind.METAL3, 3,
+                FrameState.ResourceBytes.NONE, FrameState.AdvancedLightingWork.NONE,
+                transforms, transforms,
+                new FrameState.Extent(1, 1), new FrameState.Extent(1, 1),
+                1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of()
+        ));
+        expectIllegalArgument(() -> new FrameState(
+                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L, 1L,
+                RenderContractMode.METALLUM, LightingModel.VANILLA, DisplayOutputMode.SDR,
+                LightingPreset.BALANCED, RendererFeatureMask.NONE, MetalExecutorKind.METAL3, 3,
+                new FrameState.ResourceBytes(0L, 1L, 0L, 1L, 0L, 0L),
+                new FrameState.AdvancedLightingWork(1, 1, 1, 1, 1, 1, 16L),
+                transforms, transforms,
+                new FrameState.Extent(1, 1), new FrameState.Extent(1, 1),
+                1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of()
+        ));
+        expectIllegalArgument(() -> new FrameState(
+                FrameContract.temporalPreparationV1(), 1L, 1L, 1L, 1L, 1L, 1L,
+                RenderContractMode.LEGACY, LightingModel.VANILLA, DisplayOutputMode.SDR,
                 LightingPreset.BALANCED, RendererFeatureMask.NONE, MetalExecutorKind.METAL3, 2,
-                new FrameState.ResourceBytes(0L, 1L, 0L, 0L, 0L),
-                FrameState.LightingWork.NONE,
+                new FrameState.ResourceBytes(0L, 1L, 0L, 0L, 0L, 0L),
+                FrameState.AdvancedLightingWork.NONE,
                 transforms, transforms,
                 new FrameState.Extent(1, 1), new FrameState.Extent(1, 1),
                 1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of()
@@ -1178,7 +1349,7 @@ public final class RendererArchitectureTests {
             final long historyGeneration,
             final long lightingGeneration,
             final long outputGeneration,
-            final LightingMode lighting,
+            final RenderContractMode lighting,
             final DisplayOutputMode output,
             final FrameState.Extent renderExtent,
             final FrameState.Extent displayExtent,
@@ -1191,8 +1362,10 @@ public final class RendererArchitectureTests {
                 rendererGeneration,
                 historyGeneration,
                 lightingGeneration,
+                1L,
                 outputGeneration,
                 lighting,
+                LightingModel.VANILLA,
                 output,
                 transforms,
                 transforms,

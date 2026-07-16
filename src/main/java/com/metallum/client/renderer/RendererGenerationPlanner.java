@@ -26,13 +26,15 @@ public final class RendererGenerationPlanner {
     }
 
     public record Plan(
-            LightingMode requestedLighting,
+            RenderContractMode requestedContract,
+            LightingModel requestedLighting,
             DisplayOutputMode requestedOutput,
             RendererFeatureMask requestedFeatures,
             RendererGenerationConfig.Resolution resolution,
             RendererGenerationManifest manifest
     ) {
         public Plan {
+            Objects.requireNonNull(requestedContract, "requestedContract");
             Objects.requireNonNull(requestedLighting, "requestedLighting");
             Objects.requireNonNull(requestedOutput, "requestedOutput");
             Objects.requireNonNull(requestedFeatures, "requestedFeatures");
@@ -48,7 +50,8 @@ public final class RendererGenerationPlanner {
     }
 
     public static Plan plan(
-            final LightingMode requestedLighting,
+            final RenderContractMode requestedContract,
+            final LightingModel requestedLighting,
             final DisplayOutputMode requestedOutput,
             final MetalExecutorKind requestedExecutor,
             final LightingPreset requestedPreset,
@@ -59,6 +62,7 @@ public final class RendererGenerationPlanner {
             final Extent displayExtent
     ) {
         return plan(
+                requestedContract,
                 requestedLighting,
                 requestedOutput,
                 requestedExecutor,
@@ -73,7 +77,8 @@ public final class RendererGenerationPlanner {
     }
 
     public static Plan plan(
-            final LightingMode requestedLighting,
+            final RenderContractMode requestedContract,
+            final LightingModel requestedLighting,
             final DisplayOutputMode requestedOutput,
             final MetalExecutorKind requestedExecutor,
             final LightingPreset requestedPreset,
@@ -85,6 +90,7 @@ public final class RendererGenerationPlanner {
             final boolean temporalDiagnostics
     ) {
         return plan(
+                requestedContract,
                 requestedLighting,
                 requestedOutput,
                 requestedExecutor,
@@ -100,7 +106,8 @@ public final class RendererGenerationPlanner {
     }
 
     public static Plan plan(
-            final LightingMode requestedLighting,
+            final RenderContractMode requestedContract,
+            final LightingModel requestedLighting,
             final DisplayOutputMode requestedOutput,
             final MetalExecutorKind requestedExecutor,
             final LightingPreset requestedPreset,
@@ -113,6 +120,7 @@ public final class RendererGenerationPlanner {
             final MaterialSceneStorage materialSceneStorage
     ) {
         return plan(
+                requestedContract,
                 requestedLighting,
                 requestedOutput,
                 requestedExecutor,
@@ -129,7 +137,8 @@ public final class RendererGenerationPlanner {
     }
 
     public static Plan plan(
-            final LightingMode requestedLighting,
+            final RenderContractMode requestedContract,
+            final LightingModel requestedLighting,
             final DisplayOutputMode requestedOutput,
             final MetalExecutorKind requestedExecutor,
             final LightingPreset requestedPreset,
@@ -144,6 +153,7 @@ public final class RendererGenerationPlanner {
     ) {
         Objects.requireNonNull(materialSceneStorage, "materialSceneStorage");
         RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
+                requestedContract,
                 requestedLighting,
                 requestedOutput,
                 requestedExecutor,
@@ -154,6 +164,7 @@ public final class RendererGenerationPlanner {
                 RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
         );
         return new Plan(
+                requestedContract,
                 requestedLighting,
                 requestedOutput,
                 requestedFeatures,
@@ -224,7 +235,7 @@ public final class RendererGenerationPlanner {
 
         List<RendererGenerationManifest.Resource> resources = new ArrayList<>();
         List<RendererGenerationManifest.Pass> passes = new ArrayList<>();
-        boolean metallum = config.lightingMode() == LightingMode.METALLUM;
+        boolean metallum = config.renderContractMode() == RenderContractMode.METALLUM;
         boolean spatial = config.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING);
         RendererGenerationManifest.SceneStorageContract sceneStorage = sceneStorage(
                 config,
@@ -242,7 +253,7 @@ public final class RendererGenerationPlanner {
         passes.add(pass("world_render", RendererGenerationManifest.Domain.BASE));
         if (metallum && config.outputMode() == DisplayOutputMode.SDR) {
             passes.add(pass("scene_linear_ui_seed",
-                    RendererGenerationManifest.Domain.LIGHTING_ONLY));
+                    RendererGenerationManifest.Domain.MATERIAL_ONLY));
         }
         passes.add(pass(spatial ? "ui_render_with_seed" : "ui_render",
                 RendererGenerationManifest.Domain.BASE));
@@ -324,9 +335,9 @@ public final class RendererGenerationPlanner {
             }
         } else if (metallum) {
             long displayPixels = displayExtent.pixels();
-            resources.add(resource("sdr_ui_color", RendererGenerationManifest.Domain.LIGHTING_ONLY,
+            resources.add(resource("sdr_ui_color", RendererGenerationManifest.Domain.MATERIAL_ONLY,
                     multiply(displayPixels, 4L), false));
-            resources.add(resource("sdr_ui_depth", RendererGenerationManifest.Domain.LIGHTING_ONLY,
+            resources.add(resource("sdr_ui_depth", RendererGenerationManifest.Domain.MATERIAL_ONLY,
                     multiply(displayPixels, 4L), false));
         }
 
@@ -382,6 +393,18 @@ public final class RendererGenerationPlanner {
             passes.add(pass("temporal_camera_motion_diagnostic",
                     RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY));
         }
+        List<RendererGenerationManifest.Encoder> encoders = passes.stream()
+                .map(pass -> new RendererGenerationManifest.Encoder(
+                        pass.name() + "_encoder", pass.domain()))
+                .toList();
+        List<RendererGenerationManifest.Pipeline> pipelines = passes.stream()
+                .map(pass -> new RendererGenerationManifest.Pipeline(
+                        pass.name() + "_pso", pass.domain()))
+                .toList();
+        List<RendererGenerationManifest.WorkQueue> workQueues = passes.stream()
+                .map(pass -> new RendererGenerationManifest.WorkQueue(
+                        pass.name() + "_queue", pass.domain()))
+                .toList();
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,
                 config,
@@ -390,6 +413,9 @@ public final class RendererGenerationPlanner {
                 true,
                 resources,
                 passes,
+                encoders,
+                pipelines,
+                workQueues,
                 null
         );
     }
@@ -398,7 +424,7 @@ public final class RendererGenerationPlanner {
             final RendererGenerationConfig config,
             final MaterialSceneStorage materialSceneStorage
     ) {
-        if (config.lightingMode() == LightingMode.METALLUM) {
+        if (config.renderContractMode() == RenderContractMode.METALLUM) {
             if (config.outputMode() == DisplayOutputMode.HDR) {
                 if (materialSceneStorage == MaterialSceneStorage.FIXED_LINEAR_RGBA8) {
                     throw new IllegalArgumentException(
@@ -431,7 +457,7 @@ public final class RendererGenerationPlanner {
         if (config.outputMode() == DisplayOutputMode.SDR) {
             return RendererGenerationManifest.HdrPipelineContract.NONE;
         }
-        return config.lightingMode() == LightingMode.METALLUM
+        return config.renderContractMode() == RenderContractMode.METALLUM
                 ? RendererGenerationManifest.HdrPipelineContract
                 .ACTUAL_RADIANCE_EXPOSURE_BLOOM
                 : RendererGenerationManifest.HdrPipelineContract.LEGACY_SEMANTIC_RECONSTRUCTION;

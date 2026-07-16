@@ -69,7 +69,7 @@ public final class MetallumMaterialPreflightGate {
                 candidate = pending.reject(checkedReason);
                 installCurrent(new Evaluation(false, checkedReason));
                 Metallum.LOGGER.warn(
-                        "METALLUM material candidate rejected; preserving the selected output with Legacy lighting: {}",
+                        "METALLUM material candidate rejected; preserving output with LEGACY + VANILLA: {}",
                         checkedReason
                 );
             }
@@ -78,7 +78,7 @@ public final class MetallumMaterialPreflightGate {
         if (current.active()) {
             installCurrent(new Evaluation(false, checkedReason));
             Metallum.LOGGER.warn(
-                    "METALLUM material generation disabled; preserving the selected output with Legacy lighting: {}",
+                    "METALLUM material generation disabled; preserving output with LEGACY + VANILLA: {}",
                     checkedReason
             );
         }
@@ -107,7 +107,7 @@ public final class MetallumMaterialPreflightGate {
     ) {
         Objects.requireNonNull(sources, "sources");
         if (!materialRequested) {
-            return new Evaluation(false, "improved lighting is not requested");
+            return new Evaluation(false, "METALLUM material contract is not requested");
         }
         if (irisLoaded) {
             return new Evaluation(false, "Iris shader output contracts are not supported");

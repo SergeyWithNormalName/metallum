@@ -1,9 +1,10 @@
 package com.metallum.client.renderer.temporal;
 
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererFeatureMask;
 
 import java.lang.foreign.Arena;
@@ -11,10 +12,10 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Objects;
 
-/** Fixed-width v2 packet; this remains the only Java/native frame-state ABI. */
+/** Fixed-width v3 packet; this remains the only Java/native frame-state ABI. */
 public final class FrameStateAbi {
-    public static final int CURRENT_VERSION = 2;
-    public static final int PACKET_BYTES = 816;
+    public static final int CURRENT_VERSION = 3;
+    public static final int PACKET_BYTES = 848;
 
     private static final long ABI_VERSION = 0L;
     private static final long BYTE_SIZE = 4L;
@@ -24,53 +25,58 @@ public final class FrameStateAbi {
     private static final long SUBMIT_INDEX = 24L;
     private static final long RENDERER_GENERATION_ID = 32L;
     private static final long HISTORY_GENERATION = 40L;
-    private static final long LIGHTING_GENERATION_ID = 48L;
-    private static final long OUTPUT_GENERATION_ID = 56L;
-    private static final long WORLD_IDENTITY = 64L;
-    private static final long DIMENSION_IDENTITY = 72L;
-    private static final long RESET_MASK = 80L;
-    private static final long FEATURE_MASK = 88L;
-    private static final long LIGHTING_MODE = 96L;
-    private static final long OUTPUT_MODE = 100L;
-    private static final long EXECUTOR_KIND = 104L;
-    private static final long LIGHTING_PRESET = 108L;
-    private static final long RENDER_WIDTH = 112L;
-    private static final long RENDER_HEIGHT = 116L;
-    private static final long DISPLAY_WIDTH = 120L;
-    private static final long DISPLAY_HEIGHT = 124L;
-    private static final long IN_FLIGHT_SLOT = 128L;
-    private static final long RESERVED_FLAGS = 132L;
-    private static final long DELTA_SECONDS = 136L;
-    private static final long NEAR_PLANE = 140L;
-    private static final long FAR_PLANE = 144L;
-    private static final long JITTER_X = 148L;
-    private static final long JITTER_Y = 152L;
-    private static final long EXPOSURE = 156L;
-    private static final long PRE_EXPOSURE = 160L;
-    private static final long CURRENT_HEADROOM = 164L;
-    private static final long POTENTIAL_HEADROOM = 168L;
-    private static final long RESERVED_FLOAT = 172L;
-    private static final long BASE_RESOURCE_BYTES = 176L;
-    private static final long HDR_RESOURCE_BYTES = 184L;
-    private static final long LIGHTING_RESOURCE_BYTES = 192L;
-    private static final long UPSCALE_RESOURCE_BYTES = 200L;
-    private static final long INTERPOLATION_RESOURCE_BYTES = 208L;
-    private static final long DIAGNOSTIC_RESOURCE_BYTES = 216L;
-    private static final long LIGHT_COUNT = 224L;
-    private static final long LIGHTING_PASS_COUNT = 228L;
-    private static final long LIGHTING_DISPATCH_COUNT = 232L;
-    private static final long RESERVED_WORK = 236L;
-    private static final long LIGHTING_UPLOAD_BYTES = 240L;
-    private static final long CURRENT_CAMERA_POSITION = 248L;
-    private static final long PREVIOUS_CAMERA_POSITION = 272L;
-    private static final long CURRENT_VIEW = 296L;
-    private static final long CURRENT_PROJECTION = 360L;
-    private static final long CURRENT_UNJITTERED_VIEW = 424L;
-    private static final long CURRENT_UNJITTERED_PROJECTION = 488L;
-    private static final long PREVIOUS_VIEW = 552L;
-    private static final long PREVIOUS_PROJECTION = 616L;
-    private static final long PREVIOUS_UNJITTERED_VIEW = 680L;
-    private static final long PREVIOUS_UNJITTERED_PROJECTION = 744L;
+    private static final long RENDER_CONTRACT_GENERATION_ID = 48L;
+    private static final long LIGHTING_GENERATION_ID = 56L;
+    private static final long OUTPUT_GENERATION_ID = 64L;
+    private static final long WORLD_IDENTITY = 72L;
+    private static final long DIMENSION_IDENTITY = 80L;
+    private static final long RESET_MASK = 88L;
+    private static final long FEATURE_MASK = 96L;
+    private static final long RENDER_CONTRACT_MODE = 104L;
+    private static final long LIGHTING_MODEL = 108L;
+    private static final long OUTPUT_MODE = 112L;
+    private static final long EXECUTOR_KIND = 116L;
+    private static final long LIGHTING_PRESET = 120L;
+    private static final long RENDER_WIDTH = 124L;
+    private static final long RENDER_HEIGHT = 128L;
+    private static final long DISPLAY_WIDTH = 132L;
+    private static final long DISPLAY_HEIGHT = 136L;
+    private static final long IN_FLIGHT_SLOT = 140L;
+    private static final long RESERVED_FLAGS = 144L;
+    private static final long DELTA_SECONDS = 148L;
+    private static final long NEAR_PLANE = 152L;
+    private static final long FAR_PLANE = 156L;
+    private static final long JITTER_X = 160L;
+    private static final long JITTER_Y = 164L;
+    private static final long EXPOSURE = 168L;
+    private static final long PRE_EXPOSURE = 172L;
+    private static final long CURRENT_HEADROOM = 176L;
+    private static final long POTENTIAL_HEADROOM = 180L;
+    private static final long RESERVED_FLOAT = 184L;
+    private static final long BASE_RESOURCE_BYTES = 192L;
+    private static final long MATERIAL_RESOURCE_BYTES = 200L;
+    private static final long HDR_RESOURCE_BYTES = 208L;
+    private static final long ADVANCED_LIGHTING_RESOURCE_BYTES = 216L;
+    private static final long UPSCALE_RESOURCE_BYTES = 224L;
+    private static final long INTERPOLATION_RESOURCE_BYTES = 232L;
+    private static final long DIAGNOSTIC_RESOURCE_BYTES = 240L;
+    private static final long ADVANCED_LIGHT_COUNT = 248L;
+    private static final long ADVANCED_PASS_COUNT = 252L;
+    private static final long ADVANCED_ENCODER_COUNT = 256L;
+    private static final long ADVANCED_PSO_COUNT = 260L;
+    private static final long ADVANCED_WORK_QUEUE_COUNT = 264L;
+    private static final long ADVANCED_DISPATCH_COUNT = 268L;
+    private static final long ADVANCED_UPLOAD_BYTES = 272L;
+    private static final long CURRENT_CAMERA_POSITION = 280L;
+    private static final long PREVIOUS_CAMERA_POSITION = 304L;
+    private static final long CURRENT_VIEW = 328L;
+    private static final long CURRENT_PROJECTION = 392L;
+    private static final long CURRENT_UNJITTERED_VIEW = 456L;
+    private static final long CURRENT_UNJITTERED_PROJECTION = 520L;
+    private static final long PREVIOUS_VIEW = 584L;
+    private static final long PREVIOUS_PROJECTION = 648L;
+    private static final long PREVIOUS_UNJITTERED_VIEW = 712L;
+    private static final long PREVIOUS_UNJITTERED_PROJECTION = 776L;
 
     private FrameStateAbi() {
     }
@@ -99,13 +105,15 @@ public final class FrameStateAbi {
         putLong(packet, SUBMIT_INDEX, state.submitIndex());
         putLong(packet, RENDERER_GENERATION_ID, state.rendererGenerationId());
         putLong(packet, HISTORY_GENERATION, state.historyGeneration());
+        putLong(packet, RENDER_CONTRACT_GENERATION_ID, state.renderContractGenerationId());
         putLong(packet, LIGHTING_GENERATION_ID, state.lightingGenerationId());
         putLong(packet, OUTPUT_GENERATION_ID, state.outputGenerationId());
         putLong(packet, WORLD_IDENTITY, state.worldIdentity());
         putLong(packet, DIMENSION_IDENTITY, state.dimensionIdentity());
         putLong(packet, RESET_MASK, resetMask(state));
         putLong(packet, FEATURE_MASK, state.featureMask().bits());
-        putInt(packet, LIGHTING_MODE, lightingModeCode(state.lightingMode()));
+        putInt(packet, RENDER_CONTRACT_MODE, renderContractModeCode(state.renderContractMode()));
+        putInt(packet, LIGHTING_MODEL, lightingModelCode(state.lightingModel()));
         putInt(packet, OUTPUT_MODE, outputModeCode(state.outputMode()));
         putInt(packet, EXECUTOR_KIND, executorCode(state.executorKind()));
         putInt(packet, LIGHTING_PRESET, presetCode(state.lightingPreset()));
@@ -124,15 +132,21 @@ public final class FrameStateAbi {
         putFloat(packet, CURRENT_HEADROOM, state.currentDisplayHeadroom());
         putFloat(packet, POTENTIAL_HEADROOM, state.potentialDisplayHeadroom());
         putLong(packet, BASE_RESOURCE_BYTES, state.resourceBytes().base());
+        putLong(packet, MATERIAL_RESOURCE_BYTES, state.resourceBytes().material());
         putLong(packet, HDR_RESOURCE_BYTES, state.resourceBytes().hdr());
-        putLong(packet, LIGHTING_RESOURCE_BYTES, state.resourceBytes().lighting());
+        putLong(packet, ADVANCED_LIGHTING_RESOURCE_BYTES,
+                state.resourceBytes().advancedLighting());
         putLong(packet, UPSCALE_RESOURCE_BYTES, state.resourceBytes().upscale());
         putLong(packet, INTERPOLATION_RESOURCE_BYTES, state.resourceBytes().interpolation());
         putLong(packet, DIAGNOSTIC_RESOURCE_BYTES, state.resourceBytes().diagnostic());
-        putInt(packet, LIGHT_COUNT, state.lightingWork().lightCount());
-        putInt(packet, LIGHTING_PASS_COUNT, state.lightingWork().passCount());
-        putInt(packet, LIGHTING_DISPATCH_COUNT, state.lightingWork().dispatchCount());
-        putLong(packet, LIGHTING_UPLOAD_BYTES, state.lightingWork().uploadBytes());
+        putInt(packet, ADVANCED_LIGHT_COUNT, state.advancedLightingWork().lightCount());
+        putInt(packet, ADVANCED_PASS_COUNT, state.advancedLightingWork().passCount());
+        putInt(packet, ADVANCED_ENCODER_COUNT, state.advancedLightingWork().encoderCount());
+        putInt(packet, ADVANCED_PSO_COUNT, state.advancedLightingWork().psoCount());
+        putInt(packet, ADVANCED_WORK_QUEUE_COUNT,
+                state.advancedLightingWork().workQueueCount());
+        putInt(packet, ADVANCED_DISPATCH_COUNT, state.advancedLightingWork().dispatchCount());
+        putLong(packet, ADVANCED_UPLOAD_BYTES, state.advancedLightingWork().uploadBytes());
         putPosition(packet, CURRENT_CAMERA_POSITION, state.currentCameraPosition());
         putPosition(packet, PREVIOUS_CAMERA_POSITION, state.previousCameraPosition());
         putMatrix(packet, CURRENT_VIEW, state.currentTransforms().view());
@@ -157,16 +171,17 @@ public final class FrameStateAbi {
         if (getInt(packet, FRAME_CONTRACT_VERSION) <= 0 || getInt(packet, FRAME_GRAPH_VERSION) <= 0) {
             throw new IllegalArgumentException("FrameState contract versions must be positive");
         }
-        int lighting = getInt(packet, LIGHTING_MODE);
+        int renderContract = getInt(packet, RENDER_CONTRACT_MODE);
+        int lighting = getInt(packet, LIGHTING_MODEL);
         int output = getInt(packet, OUTPUT_MODE);
         int executor = getInt(packet, EXECUTOR_KIND);
         int preset = getInt(packet, LIGHTING_PRESET);
-        if (lighting < 0 || lighting > 1 || output < 0 || output > 1
+        if (renderContract < 0 || renderContract > 1 || lighting < 0 || lighting > 1
+                || output < 0 || output > 1
                 || executor < 0 || executor > 1 || preset < 0 || preset > 2) {
             throw new IllegalArgumentException("FrameState ABI enum value is invalid");
         }
-        if (getInt(packet, RESERVED_FLAGS) != 0 || getFloat(packet, RESERVED_FLOAT) != 0.0f
-                || getInt(packet, RESERVED_WORK) != 0) {
+        if (getInt(packet, RESERVED_FLAGS) != 0 || getFloat(packet, RESERVED_FLOAT) != 0.0f) {
             throw new IllegalArgumentException("FrameState ABI reserved fields are non-zero");
         }
         RendererFeatureMask mask = RendererFeatureMask.of(getLong(packet, FEATURE_MASK));
@@ -188,6 +203,12 @@ public final class FrameStateAbi {
         }
         requirePositive(getFloat(packet, EXPOSURE), "exposure");
         requirePositive(getFloat(packet, PRE_EXPOSURE), "pre-exposure");
+        float jitterX = getFloat(packet, JITTER_X);
+        float jitterY = getFloat(packet, JITTER_Y);
+        if (!Float.isFinite(jitterX) || !Float.isFinite(jitterY)
+                || Math.abs(jitterX) > 0.5f || Math.abs(jitterY) > 0.5f) {
+            throw new IllegalArgumentException("FrameState ABI jitter is invalid");
+        }
         float currentHeadroom = getFloat(packet, CURRENT_HEADROOM);
         float potentialHeadroom = getFloat(packet, POTENTIAL_HEADROOM);
         if (!Float.isFinite(currentHeadroom) || currentHeadroom < 1.0f
@@ -198,14 +219,52 @@ public final class FrameStateAbi {
         if ((getLong(packet, RESET_MASK) & ~knownResetBits) != 0L) {
             throw new IllegalArgumentException("FrameState ABI reset mask contains unknown bits");
         }
+        requireNonNegativeLongs(
+                packet,
+                FRAME_ID,
+                SUBMIT_INDEX,
+                RENDERER_GENERATION_ID,
+                HISTORY_GENERATION,
+                RENDER_CONTRACT_GENERATION_ID,
+                LIGHTING_GENERATION_ID,
+                OUTPUT_GENERATION_ID,
+                WORLD_IDENTITY,
+                DIMENSION_IDENTITY,
+                BASE_RESOURCE_BYTES,
+                MATERIAL_RESOURCE_BYTES,
+                HDR_RESOURCE_BYTES,
+                ADVANCED_LIGHTING_RESOURCE_BYTES,
+                UPSCALE_RESOURCE_BYTES,
+                INTERPOLATION_RESOURCE_BYTES,
+                DIAGNOSTIC_RESOURCE_BYTES,
+                ADVANCED_UPLOAD_BYTES
+        );
+        requireNonNegativeInts(
+                packet,
+                ADVANCED_LIGHT_COUNT,
+                ADVANCED_PASS_COUNT,
+                ADVANCED_ENCODER_COUNT,
+                ADVANCED_PSO_COUNT,
+                ADVANCED_WORK_QUEUE_COUNT,
+                ADVANCED_DISPATCH_COUNT
+        );
         validateFiniteRange(packet, CURRENT_CAMERA_POSITION, 6, ValueLayout.JAVA_DOUBLE.byteSize());
         validateFiniteRange(packet, CURRENT_VIEW, 128, ValueLayout.JAVA_FLOAT.byteSize());
-        if (lighting == 0 && (getLong(packet, LIGHTING_RESOURCE_BYTES) != 0L
-                || getInt(packet, LIGHT_COUNT) != 0
-                || getInt(packet, LIGHTING_PASS_COUNT) != 0
-                || getInt(packet, LIGHTING_DISPATCH_COUNT) != 0
-                || getLong(packet, LIGHTING_UPLOAD_BYTES) != 0L)) {
-            throw new IllegalArgumentException("Legacy FrameState ABI contains lighting work");
+        if (renderContract == 0 && lighting == 1) {
+            throw new IllegalArgumentException("Legacy FrameState ABI requests Advanced lighting");
+        }
+        if (renderContract == 0 && getLong(packet, MATERIAL_RESOURCE_BYTES) != 0L) {
+            throw new IllegalArgumentException("Legacy FrameState ABI contains material resources");
+        }
+        if (lighting == 0 && (getLong(packet, ADVANCED_LIGHTING_RESOURCE_BYTES) != 0L
+                || getInt(packet, ADVANCED_LIGHT_COUNT) != 0
+                || getInt(packet, ADVANCED_PASS_COUNT) != 0
+                || getInt(packet, ADVANCED_ENCODER_COUNT) != 0
+                || getInt(packet, ADVANCED_PSO_COUNT) != 0
+                || getInt(packet, ADVANCED_WORK_QUEUE_COUNT) != 0
+                || getInt(packet, ADVANCED_DISPATCH_COUNT) != 0
+                || getLong(packet, ADVANCED_UPLOAD_BYTES) != 0L)) {
+            throw new IllegalArgumentException("Vanilla FrameState ABI contains Advanced work");
         }
         if (output == 0 && getLong(packet, HDR_RESOURCE_BYTES) != 0L) {
             throw new IllegalArgumentException("SDR FrameState ABI contains HDR resources");
@@ -274,8 +333,34 @@ public final class FrameStateAbi {
         }
     }
 
-    private static int lightingModeCode(final LightingMode mode) {
-        return mode == LightingMode.LEGACY ? 0 : 1;
+    private static void requireNonNegativeLongs(
+            final MemorySegment packet,
+            final long... offsets
+    ) {
+        for (long offset : offsets) {
+            if (getLong(packet, offset) < 0L) {
+                throw new IllegalArgumentException("FrameState ABI contains a negative long");
+            }
+        }
+    }
+
+    private static void requireNonNegativeInts(
+            final MemorySegment packet,
+            final long... offsets
+    ) {
+        for (long offset : offsets) {
+            if (getInt(packet, offset) < 0) {
+                throw new IllegalArgumentException("FrameState ABI contains a negative counter");
+            }
+        }
+    }
+
+    private static int renderContractModeCode(final RenderContractMode mode) {
+        return mode == RenderContractMode.LEGACY ? 0 : 1;
+    }
+
+    private static int lightingModelCode(final LightingModel model) {
+        return model == LightingModel.VANILLA ? 0 : 1;
     }
 
     private static int outputModeCode(final DisplayOutputMode mode) {

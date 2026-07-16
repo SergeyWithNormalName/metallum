@@ -90,7 +90,8 @@ public final class TemporalContractTests {
     private static void testDiagnosticManifestIsolation() {
         MetalCapabilities capabilities = MetalCapabilities.productionMetal3(false);
         RendererGenerationConfig config = new RendererGenerationConfig(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 capabilities,
@@ -145,11 +146,12 @@ public final class TemporalContractTests {
         );
         return new FrameState(
                 FrameContract.temporalPreparationV1(),
-                0L, 1L, 0L, 1L, 1L,
-                LightingMode.LEGACY, DisplayOutputMode.SDR, LightingPreset.BALANCED,
+                0L, 1L, 0L, 1L, 1L, 1L,
+                RenderContractMode.LEGACY, LightingModel.VANILLA,
+                DisplayOutputMode.SDR, LightingPreset.BALANCED,
                 RendererFeatureMask.NONE, MetalExecutorKind.METAL3,
                 RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION,
-                FrameState.ResourceBytes.NONE, FrameState.LightingWork.NONE,
+                FrameState.ResourceBytes.NONE, FrameState.AdvancedLightingWork.NONE,
                 transforms, transforms,
                 new FrameState.Extent(width, height), new FrameState.Extent(width, height),
                 1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of(),

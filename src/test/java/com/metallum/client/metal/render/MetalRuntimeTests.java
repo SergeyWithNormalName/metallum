@@ -1,7 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererGenerationPlanner;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrPipelinePolicy;
@@ -62,6 +62,29 @@ public final class MetalRuntimeTests {
         testHdrSceneColorRouting();
         testL2GenerationResourceRouting();
         testL2AtomicMaterialFallback();
+        testAutomaticMaterialContractAndCompatibilityOverride();
+    }
+
+    private static void testAutomaticMaterialContractAndCompatibilityOverride() {
+        String key = "metallum.renderer.contract";
+        String previous = System.getProperty(key);
+        try {
+            System.clearProperty(key);
+            require(MetalDevice.requestedRenderContract() == RenderContractMode.METALLUM,
+                    "normal startup did not automatically request the METALLUM contract");
+            System.setProperty(key, "legacy");
+            require(MetalDevice.requestedRenderContract() == RenderContractMode.LEGACY,
+                    "hidden compatibility override did not force Legacy");
+            System.setProperty(key, "unknown");
+            require(MetalDevice.requestedRenderContract() == RenderContractMode.METALLUM,
+                    "unknown compatibility override did not fail to the automatic contract");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(key);
+            } else {
+                System.setProperty(key, previous);
+            }
+        }
     }
 
     private static void testDestructionQueueDefersReentrantAdds() {
@@ -715,23 +738,23 @@ public final class MetalRuntimeTests {
 
     private static void testL2GenerationResourceRouting() {
         require(MetalDevice.usesLegacyHdrSemanticAttachment(
-                        LightingMode.LEGACY, DisplayOutputMode.HDR
+                        RenderContractMode.LEGACY, DisplayOutputMode.HDR
                 ), "Legacy HDR lost its semantic attachment");
         require(!MetalDevice.usesLegacyHdrSemanticAttachment(
-                        LightingMode.METALLUM, DisplayOutputMode.HDR
+                        RenderContractMode.METALLUM, DisplayOutputMode.HDR
                 ), "METALLUM HDR retained the semantic attachment");
         require(!MetalDevice.usesLegacyHdrSemanticAttachment(
-                        LightingMode.LEGACY, DisplayOutputMode.SDR
+                        RenderContractMode.LEGACY, DisplayOutputMode.SDR
                 ), "Legacy SDR created a semantic attachment");
         require(!MetalDevice.usesLegacyHdrSemanticAttachment(
-                        LightingMode.METALLUM, DisplayOutputMode.SDR
+                        RenderContractMode.METALLUM, DisplayOutputMode.SDR
                 ), "METALLUM SDR created a semantic attachment");
 
-        require(MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.LEGACY, true),
+        require(MetalDevice.usesLegacyHdrDepthSnapshot(RenderContractMode.LEGACY, true),
                 "Legacy enhanced HDR lost its depth snapshot");
-        require(!MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.METALLUM, true),
+        require(!MetalDevice.usesLegacyHdrDepthSnapshot(RenderContractMode.METALLUM, true),
                 "METALLUM HDR retained inferred-reconstruction depth work");
-        require(!MetalDevice.usesLegacyHdrDepthSnapshot(LightingMode.LEGACY, false),
+        require(!MetalDevice.usesLegacyHdrDepthSnapshot(RenderContractMode.LEGACY, false),
                 "inactive Legacy enhancement created depth work");
 
         require(MetalCompiledRenderPipeline.selectLegacyGenerationFlavor(
@@ -775,15 +798,13 @@ public final class MetalRuntimeTests {
                         == RendererGenerationPlanner.MaterialSceneStorage.FIXED_LINEAR_RGBA8,
                 "MainTarget storage routing ignored a Legacy or METALLUM startup FP16 request");
 
-        require(MetalDevice.resolveRendererOutputMode(HdrOutputMode.SDR, false)
+        require(MetalDevice.resolveRendererOutputMode(HdrOutputMode.SDR)
                         == DisplayOutputMode.SDR
-                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.EDR, false)
-                        == DisplayOutputMode.SDR
-                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.ENHANCED, false)
+                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.EDR)
                         == DisplayOutputMode.HDR
-                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.EDR, true)
+                        && MetalDevice.resolveRendererOutputMode(HdrOutputMode.ENHANCED)
                         == DisplayOutputMode.HDR,
-                "Legacy EDR was confused with a semantic/material HDR scene generation");
+                "HDR scene-generation output was coupled to material admission");
 
         MetallumMaterialState.configure(true, false);
         require(MetalDevice.resolveAvailableHdrOutputMode(HdrOutputMode.EDR, false)

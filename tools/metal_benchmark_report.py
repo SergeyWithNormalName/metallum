@@ -27,6 +27,9 @@ DEFAULT_WARMUP_FRAMES = 1800
 DEFAULT_P95_GATE_MS = 0.2
 DEFAULT_P99_GATE_MS = 1.5
 DEFAULT_GPU_WORST_GATE_MS = 5.0
+DEFAULT_CPU_P50_GATE_MS = 0.2
+DEFAULT_CPU_P95_GATE_MS = 0.75
+DEFAULT_CPU_P99_GATE_MS = 1.5
 DEFAULT_FPS_REGRESSION_FRACTION = 0.03
 DEFAULT_ONE_PERCENT_LOW_REGRESSION_FRACTION = 0.07
 DEFAULT_ZERO_POINT_ONE_LOW_REGRESSION_FRACTION = 0.12
@@ -595,14 +598,16 @@ def _parse_workload(value: Any, line: int) -> dict[str, Any] | None:
     return result
 
 
-def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
+def _parse_renderer_generation(value: Any, line: int, schema: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ReportError(f"line {line}: renderer_generation must be an object")
-    integer_fields = (
+    integer_fields = [
         "frame_contract_version", "frame_graph_version", "frame_id",
         "renderer_generation_id", "lighting_generation_id", "output_generation_id",
         "feature_mask", "render_width", "render_height", "display_width", "display_height",
-    )
+    ]
+    if schema >= 4:
+        integer_fields.append("render_contract_generation_id")
     result = {
         field: _integer(value.get(field), f"renderer_generation.{field}", line,
                         1 if field in {"frame_contract_version", "frame_graph_version",
@@ -611,13 +616,19 @@ def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
         for field in integer_fields
     }
     enum_values = {
-        "resolved_lighting_mode": {"legacy", "metallum"},
         "resolved_output_mode": {"sdr", "hdr"},
         "resolved_upscale_mode": {"native", "spatial", "temporal"},
         "resolved_interpolation_mode": {"off", "frame_interpolation"},
         "lighting_preset": {"performance", "balanced", "ultra"},
         "executor": {"metal3", "metal4"},
     }
+    if schema >= 4:
+        enum_values.update({
+            "resolved_render_contract": {"legacy", "metallum"},
+            "resolved_lighting_model": {"vanilla", "advanced"},
+        })
+    else:
+        enum_values["resolved_lighting_mode"] = {"legacy", "metallum"}
     for field, allowed in enum_values.items():
         raw = value.get(field)
         if raw not in allowed:
@@ -628,23 +639,38 @@ def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
 
     resources = value.get("resource_bytes")
     legacy_resource_keys = {"base", "hdr", "lighting", "upscale", "interpolation"}
-    if not isinstance(resources, dict) or set(resources) not in {
-        frozenset(legacy_resource_keys),
-        frozenset(legacy_resource_keys | {"diagnostic"}),
-    }:
+    schema4_resource_keys = {
+        "base", "material", "hdr", "advanced_lighting", "upscale",
+        "interpolation", "diagnostic",
+    }
+    valid_resource_keys = (
+        {frozenset(schema4_resource_keys)}
+        if schema >= 4 else {
+            frozenset(legacy_resource_keys),
+            frozenset(legacy_resource_keys | {"diagnostic"}),
+        }
+    )
+    if not isinstance(resources, dict) or set(resources) not in valid_resource_keys:
         raise ReportError(f"line {line}: renderer_generation.resource_bytes has invalid keys")
     result["resource_bytes"] = {
         field: _integer(raw, f"renderer_generation.resource_bytes.{field}", line)
         for field, raw in resources.items()
     }
     result["resource_bytes"].setdefault("diagnostic", 0)
-    lighting_work = value.get("lighting_work")
-    if not isinstance(lighting_work, dict) or set(lighting_work) != {
-        "light_count", "pass_count", "dispatch_count", "upload_bytes",
-    }:
-        raise ReportError(f"line {line}: renderer_generation.lighting_work has invalid keys")
-    result["lighting_work"] = {
-        field: _integer(raw, f"renderer_generation.lighting_work.{field}", line)
+    work_field = "advanced_lighting_work" if schema >= 4 else "lighting_work"
+    lighting_work = value.get(work_field)
+    work_keys = (
+        {"light_count", "pass_count", "encoder_count", "pso_count",
+         "work_queue_count", "dispatch_count", "upload_bytes"}
+        if schema >= 4 else
+        {"light_count", "pass_count", "dispatch_count", "upload_bytes"}
+    )
+    if not isinstance(lighting_work, dict) or set(lighting_work) != work_keys:
+        raise ReportError(
+            f"line {line}: renderer_generation.{work_field} has invalid keys"
+        )
+    result[work_field] = {
+        field: _integer(raw, f"renderer_generation.{work_field}.{field}", line)
         for field, raw in lighting_work.items()
     }
     temporal = value.get("temporal_diagnostics")
@@ -688,11 +714,45 @@ def _parse_renderer_generation(value: Any, line: int) -> dict[str, Any]:
         raise ReportError(f"line {line}: renderer_generation.feature_mask has unknown bits")
     if result["feature_mask"] & 0b11 == 0b11:
         raise ReportError(f"line {line}: Spatial and Temporal upscale bits are mutually exclusive")
-    if result["resolved_lighting_mode"] == "legacy" and (
-        result["resource_bytes"]["lighting"] != 0
-        or any(result["lighting_work"].values())
-    ):
-        raise ReportError(f"line {line}: Legacy generation contains lighting work/resources")
+    if schema >= 4:
+        if (result["resolved_render_contract"] == "legacy"
+                and result["resolved_lighting_model"] == "advanced"):
+            raise ReportError(f"line {line}: Legacy generation requests Advanced lighting")
+        if (result["resolved_render_contract"] == "legacy"
+                and result["resource_bytes"]["material"] != 0):
+            raise ReportError(f"line {line}: Legacy generation contains material resources")
+        if result["resolved_lighting_model"] == "vanilla" and (
+            result["resource_bytes"]["advanced_lighting"] != 0
+            or any(result["advanced_lighting_work"].values())
+        ):
+            raise ReportError(f"line {line}: Vanilla generation contains Advanced work/resources")
+    else:
+        if result["resolved_lighting_mode"] == "legacy" and (
+            result["resource_bytes"]["lighting"] != 0
+            or any(result["lighting_work"].values())
+        ):
+            raise ReportError(f"line {line}: Legacy generation contains lighting work/resources")
+        if any(result["lighting_work"].values()):
+            raise ReportError(f"line {line}: historical L2 generation contains unmodeled lighting work")
+        result["render_contract_generation_id"] = result["lighting_generation_id"]
+        result["lighting_generation_id"] = 0
+        result["resolved_render_contract"] = result.pop("resolved_lighting_mode")
+        result["resolved_lighting_model"] = "vanilla"
+        result["resource_bytes"] = {
+            "base": result["resource_bytes"]["base"],
+            "material": result["resource_bytes"].pop("lighting"),
+            "hdr": result["resource_bytes"]["hdr"],
+            "advanced_lighting": 0,
+            "upscale": result["resource_bytes"]["upscale"],
+            "interpolation": result["resource_bytes"]["interpolation"],
+            "diagnostic": result["resource_bytes"]["diagnostic"],
+        }
+        result["advanced_lighting_work"] = {
+            "light_count": 0, "pass_count": 0, "encoder_count": 0,
+            "pso_count": 0, "work_queue_count": 0,
+            "dispatch_count": 0, "upload_bytes": 0,
+        }
+        result.pop("lighting_work")
     if result["resolved_output_mode"] == "sdr" and result["resource_bytes"]["hdr"] != 0:
         raise ReportError(f"line {line}: SDR generation contains HDR resource bytes")
     if result["resolved_upscale_mode"] == "native" and result["resource_bytes"]["upscale"] != 0:
@@ -707,7 +767,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
     if not isinstance(payload, dict):
         raise ReportError(f"line {line}: JSON value must be an object")
     schema = _integer(payload.get("schema_version"), "schema_version", line, 1)
-    if schema not in (1, 2, 3):
+    if schema not in (1, 2, 3, 4):
         raise ReportError(f"line {line}: unsupported schema_version {schema}")
     detail = payload.get("detail_enabled")
     if not isinstance(detail, bool):
@@ -773,7 +833,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         ),
         metadata=metadata,
         renderer_generation=(
-            _parse_renderer_generation(payload.get("renderer_generation"), line)
+            _parse_renderer_generation(payload.get("renderer_generation"), line, schema)
             if schema >= 3 else None
         ),
     )
@@ -1102,6 +1162,17 @@ def validate_release_contract(
         raise ReportError("release build-artifact digest must be lowercase SHA-256")
     if not SAFE_ID_RE.fullmatch(settings_id):
         raise ReportError("release settings ID is invalid")
+    output_contracts = {
+        "native-sdr-fancy-v1": ("sdr", "SDR", "LINEAR"),
+        "native-hdr-fancy-v1": ("hdr", "ENHANCED", "LINEAR"),
+    }
+    if settings_id not in output_contracts:
+        raise ReportError(
+            "release settings ID has no strict SDR/HDR output contract"
+        )
+    resolved_output, expected_hdr_output, expected_source_encoding = output_contracts[
+        settings_id
+    ]
     if not SHA256_RE.fullmatch(settings_spec_sha256):
         raise ReportError("release settings spec digest must be lowercase SHA-256")
     if not SHA256_RE.fullmatch(settings_sha256):
@@ -1142,8 +1213,10 @@ def validate_release_contract(
 
     expected_scaling = scaler != "OFF"
     for window in windows:
-        if window.schema not in (2, 3):
-            raise ReportError(f"line {window.line}: release contract requires schema v2 or v3")
+        if window.schema not in (2, 3, 4):
+            raise ReportError(
+                f"line {window.line}: release contract requires schema v2, v3 or v4"
+            )
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
         if window.low_1 is None or window.low_01 is None:
@@ -1200,8 +1273,8 @@ def validate_release_contract(
             "display_height": BUILT_IN_HEIGHT,
             "refresh_hz": 120,
             "display_sync_enabled": False,
-            "hdr_output_mode": "ENHANCED",
-            "source_encoding": "LINEAR",
+            "hdr_output_mode": expected_hdr_output,
+            "source_encoding": expected_source_encoding,
             "executor": "METAL3",
             "scaler_active": expected_scaling,
             "source_sha256": source_sha256,
@@ -1229,6 +1302,12 @@ def validate_release_contract(
                     f"line {window.line}: metadata.{key} must be {value!r} "
                     f"(found {metadata.get(key)!r})"
                 )
+        generation = window.renderer_generation
+        if generation is not None \
+                and generation.get("resolved_output_mode") != resolved_output:
+            raise ReportError(
+                f"line {window.line}: resolved output does not match {settings_id}"
+            )
         for key in (
             "resource_packs_sha256",
             "sodium_settings_sha256",
@@ -1258,8 +1337,8 @@ def validate_release_contract(
                 f"line {window.line}: persistent MetalFX mode must remain off"
             )
         for key, expected_value in (
-            ("hdr_strength", 1.0),
-            ("bloom_strength", 0.18),
+            ("hdr_strength", 1.0 if resolved_output == "hdr" else 0.0),
+            ("bloom_strength", 0.18 if resolved_output == "hdr" else 0.0),
             ("hdr_bloom_strength", 0.18),
         ):
             actual = metadata.get(key)
@@ -1282,10 +1361,21 @@ def validate_release_contract(
                 f"(found {thermal!r})"
             )
         headroom = metadata.get("current_edr_headroom")
-        if isinstance(headroom, bool) or not isinstance(headroom, (int, float)) \
-                or not math.isfinite(float(headroom)) or float(headroom) <= 1.0:
+        valid_headroom = not isinstance(headroom, bool) \
+            and isinstance(headroom, (int, float)) \
+            and math.isfinite(float(headroom))
+        if resolved_output == "hdr" and (
+                not valid_headroom or float(headroom) <= 1.0
+        ):
             raise ReportError(
                 f"line {window.line}: release HDR requires current EDR headroom > 1.0 "
+                f"(found {headroom!r})"
+            )
+        if resolved_output == "sdr" and (
+                not valid_headroom or abs(float(headroom) - 1.0) > 1e-6
+        ):
+            raise ReportError(
+                f"line {window.line}: release SDR requires current EDR headroom 1.0 "
                 f"(found {headroom!r})"
             )
 
@@ -1326,7 +1416,7 @@ def summarize(
         stable_generations = []
         for value in renderer_generations:
             stable = dict(value)
-            # ABI v2 publishes every rendered frame; frame_id is dynamic while
+            # ABI v3 publishes every rendered frame; frame_id is dynamic while
             # the renderer generation declaration remains stable.
             stable.pop("frame_id", None)
             stable_generations.append(stable)
@@ -1594,6 +1684,107 @@ def compare(
             })
 
     absolute_upper_gate("GPU p95", base_p95, candidate_p95, gate_ms)
+    cpu_metrics: dict[str, dict[str, float]] = {}
+    if "cpu_render_submission_ms" in baseline \
+            and "cpu_render_submission_ms" in candidate:
+        for key, threshold in (
+            ("p50", DEFAULT_CPU_P50_GATE_MS),
+            ("p95", DEFAULT_CPU_P95_GATE_MS),
+            ("p99", DEFAULT_CPU_P99_GATE_MS),
+        ):
+            try:
+                baseline_cpu = float(
+                    baseline["cpu_render_submission_ms"][key][
+                        "window_frame_weighted_mean"
+                    ]
+                )
+                candidate_cpu = float(
+                    candidate["cpu_render_submission_ms"][key][
+                        "window_frame_weighted_mean"
+                    ]
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ReportError(f"compare input has invalid CPU {key} summary") from error
+            if not math.isfinite(baseline_cpu) or not math.isfinite(candidate_cpu):
+                raise ReportError(f"compare input has invalid CPU {key} summary")
+            cpu_metrics[key] = {
+                "baseline": baseline_cpu,
+                "candidate": candidate_cpu,
+                "delta": candidate_cpu - baseline_cpu,
+            }
+            absolute_upper_gate(
+                f"CPU {key}", baseline_cpu, candidate_cpu, threshold
+            )
+
+    resource_metrics: dict[str, dict[str, int]] = {}
+    baseline_generation = baseline.get("renderer_generation")
+    candidate_generation = candidate.get("renderer_generation")
+    if isinstance(baseline_generation, dict) and isinstance(candidate_generation, dict):
+        baseline_resources = baseline_generation.get("resource_bytes")
+        candidate_resources = candidate_generation.get("resource_bytes")
+        if not isinstance(baseline_resources, dict) \
+                or not isinstance(candidate_resources, dict) \
+                or set(baseline_resources) != set(candidate_resources):
+            raise ReportError("compare inputs have incompatible generation resource domains")
+        for domain in sorted(baseline_resources):
+            baseline_bytes = baseline_resources[domain]
+            candidate_bytes = candidate_resources[domain]
+            if isinstance(baseline_bytes, bool) or not isinstance(baseline_bytes, int) \
+                    or isinstance(candidate_bytes, bool) \
+                    or not isinstance(candidate_bytes, int):
+                raise ReportError("compare input has invalid generation resource bytes")
+            resource_metrics[domain] = {
+                "baseline": baseline_bytes,
+                "candidate": candidate_bytes,
+                "delta": candidate_bytes - baseline_bytes,
+            }
+            absolute_upper_gate(
+                f"generation {domain} resource bytes",
+                float(baseline_bytes),
+                float(candidate_bytes),
+                0.0,
+            )
+
+    transient_metrics: dict[str, dict[str, dict[str, int]]] = {}
+    baseline_workload = baseline.get("workload")
+    candidate_workload = candidate.get("workload")
+    if isinstance(baseline_workload, dict) and isinstance(candidate_workload, dict) \
+            and "transient_memory_high_water" in baseline_workload \
+            and "transient_memory_high_water" in candidate_workload:
+        for kind in WORKLOAD_TRANSIENT_KINDS:
+            transient_metrics[kind] = {}
+            for key in sorted(WORKLOAD_TRANSIENT_HIGH_WATER_KEYS):
+                baseline_bytes = baseline_workload["transient_memory_high_water"][kind][key]
+                candidate_bytes = candidate_workload["transient_memory_high_water"][kind][key]
+                transient_metrics[kind][key] = {
+                    "baseline": baseline_bytes,
+                    "candidate": candidate_bytes,
+                    "delta": candidate_bytes - baseline_bytes,
+                }
+                absolute_upper_gate(
+                    f"transient {kind} {key}",
+                    float(baseline_bytes),
+                    float(candidate_bytes),
+                    0.0,
+                )
+
+    allocation_metrics: dict[str, dict[str, int]] = {}
+    if isinstance(baseline_workload, dict) and isinstance(candidate_workload, dict):
+        try:
+            for kind in WORKLOAD_RESOURCE_KINDS:
+                baseline_bytes = baseline_workload["aggregate_totals"][
+                    "resource_allocations"
+                ][kind]["bytes"]
+                candidate_bytes = candidate_workload["aggregate_totals"][
+                    "resource_allocations"
+                ][kind]["bytes"]
+                allocation_metrics[kind] = {
+                    "baseline": baseline_bytes,
+                    "candidate": candidate_bytes,
+                    "delta": candidate_bytes - baseline_bytes,
+                }
+        except (KeyError, TypeError):
+            allocation_metrics = {}
     if require_stability:
         for summary, label in ((baseline, "baseline"), (candidate, "candidate")):
             if "fps_low_window_summaries" not in summary:
@@ -1682,6 +1873,10 @@ def compare(
             }
             for key in ("p50", "p95", "p99")
         },
+        "cpu_metrics": cpu_metrics,
+        "generation_resource_bytes": resource_metrics,
+        "transient_memory_bytes": transient_metrics,
+        "instrumented_resource_allocation_bytes": allocation_metrics,
         "baseline": baseline,
         "candidate": candidate,
     }
@@ -1766,8 +1961,8 @@ def _derive_release_summary(
     workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
-    if any(window.schema not in (2, 3) for window in windows):
-        raise ReportError("accepted raw report must contain schema-v2/v3 windows only")
+    if any(window.schema not in (2, 3, 4) for window in windows):
+        raise ReportError("accepted raw report must contain schema-v2/v3/v4 windows only")
     measure_windows = [window for window in windows if window.phase == "measure"]
     if not measure_windows:
         raise ReportError("accepted raw report contains no measurement windows")
@@ -2086,6 +2281,34 @@ def _validate_release_bundle(
                 "pso_count": 0,
             })
             normalized_summary["renderer_generation"] = generation
+    generation = normalized_summary.get("renderer_generation")
+    if isinstance(generation, dict) and "resolved_lighting_mode" in generation:
+        generation = dict(generation)
+        generation["render_contract_generation_id"] = generation.get(
+            "lighting_generation_id", 0
+        )
+        generation["lighting_generation_id"] = 0
+        generation["resolved_render_contract"] = generation.pop("resolved_lighting_mode")
+        generation["resolved_lighting_model"] = "vanilla"
+        resources = generation.get("resource_bytes")
+        if isinstance(resources, dict):
+            resources = dict(resources)
+            generation["resource_bytes"] = {
+                "base": resources.get("base", 0),
+                "material": resources.get("lighting", 0),
+                "hdr": resources.get("hdr", 0),
+                "advanced_lighting": 0,
+                "upscale": resources.get("upscale", 0),
+                "interpolation": resources.get("interpolation", 0),
+                "diagnostic": resources.get("diagnostic", 0),
+            }
+        generation.pop("lighting_work", None)
+        generation["advanced_lighting_work"] = {
+            "light_count": 0, "pass_count": 0, "encoder_count": 0,
+            "pso_count": 0, "work_queue_count": 0,
+            "dispatch_count": 0, "upload_bytes": 0,
+        }
+        normalized_summary["renderer_generation"] = generation
     normalized_summary["report"] = str(supplied_report)
     expected_summary = dict(recomputed_summary)
     expected_summary["report"] = str(raw_report)
@@ -2357,6 +2580,27 @@ def _print_comparison(result: dict[str, Any]) -> None:
             f"  {key}: {values['baseline']:.4f} -> {values['candidate']:.4f} ms "
             f"({values['delta']:+.4f})"
         )
+    for key, values in result["cpu_metrics"].items():
+        print(
+            f"  CPU {key}: {values['baseline']:.4f} -> "
+            f"{values['candidate']:.4f} ms ({values['delta']:+.4f})"
+        )
+    for domain, values in result["generation_resource_bytes"].items():
+        print(
+            f"  generation bytes {domain}: {values['baseline']} -> "
+            f"{values['candidate']} ({values['delta']:+d})"
+        )
+    for kind, fields in result["transient_memory_bytes"].items():
+        for key, values in fields.items():
+            print(
+                f"  transient bytes {kind}.{key}: {values['baseline']} -> "
+                f"{values['candidate']} ({values['delta']:+d})"
+            )
+    for kind, values in result["instrumented_resource_allocation_bytes"].items():
+        print(
+            f"  instrumented allocation bytes {kind}: {values['baseline']} -> "
+            f"{values['candidate']} ({values['delta']:+d})"
+        )
     for regression in gate["regressions"]:
         if regression["limit_kind"] == "absolute increase":
             detail = (
@@ -2612,6 +2856,26 @@ def self_test() -> None:
                         "dispatch_count": 0, "upload_bytes": 0,
                     },
                 }
+                if schema >= 4:
+                    generation = payload["renderer_generation"]
+                    generation["render_contract_generation_id"] = generation[
+                        "lighting_generation_id"
+                    ]
+                    generation["lighting_generation_id"] = 1
+                    generation["resolved_render_contract"] = generation.pop(
+                        "resolved_lighting_mode"
+                    )
+                    generation["resolved_lighting_model"] = "vanilla"
+                    resources = generation["resource_bytes"]
+                    resources["material"] = resources.pop("lighting")
+                    resources["advanced_lighting"] = 0
+                    resources["diagnostic"] = 0
+                    generation.pop("lighting_work")
+                    generation["advanced_lighting_work"] = {
+                        "light_count": 0, "pass_count": 0, "encoder_count": 0,
+                        "pso_count": 0, "work_queue_count": 0,
+                        "dispatch_count": 0, "upload_bytes": 0,
+                    }
         return payload
 
     def report_text(
@@ -2678,7 +2942,9 @@ def self_test() -> None:
             encoding="utf-8",
         )
         schema3_summary = summarize(schema3, 3000, 0, "OFF")
-        assert schema3_summary["renderer_generation"]["resolved_lighting_mode"] == "legacy"
+        assert schema3_summary["renderer_generation"]["resolved_render_contract"] == "legacy"
+        assert schema3_summary["renderer_generation"]["resolved_lighting_model"] == "vanilla"
+        assert schema3_summary["renderer_generation"]["resource_bytes"]["material"] == 0
         invalid_schema3 = line(3, 1)
         invalid_schema3["renderer_generation"]["resource_bytes"]["lighting"] = 1
         invalid_schema3_path = root / "invalid-schema3.jsonl"
@@ -2687,6 +2953,55 @@ def self_test() -> None:
             lambda: load_report(invalid_schema3_path),
             "Legacy generation contains lighting work/resources",
         )
+        historical_metallum = line(3, 1)
+        historical_metallum["renderer_generation"]["resolved_lighting_mode"] = "metallum"
+        historical_metallum["renderer_generation"]["resource_bytes"]["lighting"] = 32
+        historical_path = root / "historical-metallum.jsonl"
+        historical_path.write_text(json.dumps(historical_metallum) + "\n", encoding="utf-8")
+        historical_generation = load_report(historical_path)[0].renderer_generation
+        assert historical_generation is not None
+        assert historical_generation["resolved_render_contract"] == "metallum"
+        assert historical_generation["resolved_lighting_model"] == "vanilla"
+        assert historical_generation["resource_bytes"]["material"] == 32
+        assert historical_generation["resource_bytes"]["advanced_lighting"] == 0
+
+        schema4 = root / "schema4.jsonl"
+        schema4.write_text(
+            "\n".join(json.dumps(line(4, i)) for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        schema4_summary = summarize(schema4, 3000, 0, "OFF")
+        assert schema4_summary["renderer_generation"]["resolved_render_contract"] == "legacy"
+        assert schema4_summary["renderer_generation"]["resolved_lighting_model"] == "vanilla"
+        invalid_schema4 = line(4, 1)
+        invalid_schema4["renderer_generation"]["advanced_lighting_work"]["pass_count"] = 1
+        invalid_schema4_path = root / "invalid-schema4.jsonl"
+        invalid_schema4_path.write_text(json.dumps(invalid_schema4) + "\n", encoding="utf-8")
+        expect_error(
+            lambda: load_report(invalid_schema4_path),
+            "Vanilla generation contains Advanced work/resources",
+        )
+        schema4_sdr_release = root / "schema4-sdr-release.raw.jsonl"
+        sdr_payloads = [line(4, index) for index in range(10)]
+        for payload in sdr_payloads:
+            metadata = payload["metadata"]
+            metadata.update({
+                "settings_id": "native-sdr-fancy-v1",
+                "hdr_output_mode": "SDR",
+                "source_encoding": "LINEAR",
+                "hdr_strength": 0.0,
+                "bloom_strength": 0.0,
+                "current_edr_headroom": 1.0,
+            })
+            generation = payload["renderer_generation"]
+            generation["resolved_output_mode"] = "sdr"
+            generation["resource_bytes"]["hdr"] = 0
+        schema4_sdr_release.write_text(
+            "\n".join(json.dumps(payload) for payload in sdr_payloads) + "\n",
+            encoding="utf-8",
+        )
+        sdr_release_summary, _ = _derive_release_summary(schema4_sdr_release)
+        assert sdr_release_summary["renderer_generation"]["resolved_output_mode"] == "sdr"
 
         def make_bundle(
             stem: str,
@@ -3557,6 +3872,32 @@ def self_test() -> None:
         assert any(
             item["metric"] == "FPS 1% low"
             for item in unstable_result["gate"]["regressions"]
+        )
+        cpu_regression = json.loads(json.dumps(schema4_summary))
+        cpu_regression["cpu_render_submission_ms"]["p95"][
+            "window_frame_weighted_mean"
+        ] += 1.0
+        assert any(
+            item["metric"] == "CPU p95"
+            for item in compare(
+                schema4_summary, cpu_regression, 0.2, require_stability=False
+            )["gate"]["regressions"]
+        )
+        resource_regression = json.loads(json.dumps(schema4_summary))
+        resource_regression["renderer_generation"]["resource_bytes"]["hdr"] += 1
+        assert any(
+            item["metric"] == "generation hdr resource bytes"
+            for item in compare(
+                schema4_summary, resource_regression, 0.2, require_stability=False
+            )["gate"]["regressions"]
+        )
+        transient_regression = json.loads(json.dumps(new_attested))
+        transient_regression["workload"]["transient_memory_high_water"]["gpu_shared"][
+            "reserved_high_water_bytes"
+        ] += 1
+        assert any(
+            item["metric"] == "transient gpu_shared reserved_high_water_bytes"
+            for item in compare(new_attested, transient_regression, 0.2)["gate"]["regressions"]
         )
 
         # Heap mode is part of the strict comparison contract. Only the narrow,

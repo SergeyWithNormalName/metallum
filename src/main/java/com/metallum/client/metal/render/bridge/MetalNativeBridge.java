@@ -97,14 +97,14 @@ public final class MetalNativeBridge {
                     "metallum_validate_frame_graph_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            validateFrameStateV2 = downcallWithoutCritical(
+            validateFrameStateV3 = downcallWithoutCritical(
                     lookup,
-                    "metallum_validate_frame_state_v2",
+                    "metallum_validate_frame_state_v3",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            setFrameStateV2 = downcallWithoutCritical(
+            setFrameStateV3 = downcallWithoutCritical(
                     lookup,
-                    "metallum_set_frame_state_v2",
+                    "metallum_set_frame_state_v3",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
             encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
@@ -507,8 +507,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle recordJavaWorkload;
     private static final MethodHandle validateFrameGraphV1;
-    private static final MethodHandle validateFrameStateV2;
-    private static final MethodHandle setFrameStateV2;
+    private static final MethodHandle validateFrameStateV3;
+    private static final MethodHandle setFrameStateV3;
     private static final MethodHandle encodeTemporalDiagnosticsV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -736,12 +736,12 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static int metallum_validate_frame_state_v2(final MemorySegment packet) {
-        return invokeFrameState("metallum_validate_frame_state_v2", validateFrameStateV2, packet);
+    public static int metallum_validate_frame_state_v3(final MemorySegment packet) {
+        return invokeFrameState("metallum_validate_frame_state_v3", validateFrameStateV3, packet);
     }
 
-    public static int metallum_set_frame_state_v2(final MemorySegment packet) {
-        return invokeFrameState("metallum_set_frame_state_v2", setFrameStateV2, packet);
+    public static int metallum_set_frame_state_v3(final MemorySegment packet) {
+        return invokeFrameState("metallum_set_frame_state_v3", setFrameStateV3, packet);
     }
 
     public static int metallum_encode_temporal_diagnostics_v1(

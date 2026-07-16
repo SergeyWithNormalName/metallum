@@ -1,7 +1,8 @@
 package com.metallum.client.metal.render.framegraph;
 
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
@@ -170,7 +171,7 @@ public final class FrameGraphTests {
                 "future frame-graph resource roles are incomplete");
 
         RendererGenerationConfig sdrMetal3 = generation(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 MetalCapabilities.productionMetal3(false)
@@ -184,7 +185,7 @@ public final class FrameGraphTests {
                         FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL,
                         null,
                         FrameGraph.OutputApplicability.ANY,
-                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.RenderContractApplicability.ANY,
                         FrameGraph.PresentationUiContract.NOT_PRESENTATION
                 )),
                 sdrMetal3,
@@ -196,7 +197,7 @@ public final class FrameGraphTests {
                 graphWithContract(contract(
                         Set.of(), Set.of(), FrameGraph.ImplementationTarget.METAL4, null,
                         FrameGraph.OutputApplicability.ANY,
-                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.RenderContractApplicability.ANY,
                         FrameGraph.PresentationUiContract.NOT_PRESENTATION
                 )),
                 sdrMetal3,
@@ -208,7 +209,7 @@ public final class FrameGraphTests {
                 graphWithContract(contract(
                         Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
                         FrameGraph.OutputApplicability.HDR_ONLY,
-                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.RenderContractApplicability.ANY,
                         FrameGraph.PresentationUiContract.NOT_PRESENTATION
                 )),
                 sdrMetal3,
@@ -220,14 +221,58 @@ public final class FrameGraphTests {
                 graphWithContract(contract(
                         Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
                         FrameGraph.OutputApplicability.ANY,
-                        FrameGraph.LightingApplicability.METALLUM_ONLY,
+                        FrameGraph.RenderContractApplicability.METALLUM_ONLY,
                         FrameGraph.PresentationUiContract.NOT_PRESENTATION
                 )),
                 sdrMetal3,
                 separatedUi,
                 FrameGraphCompiler.HistoryState.invalid(),
-                "lighting applicability"
+                "render-contract applicability"
         );
+        MetalCapabilities lightingCapabilities = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
+                MetalCapabilities.Feature.ADVANCED_LIGHTING
+        );
+        RendererGenerationConfig metallumVanilla = generation(
+                RenderContractMode.METALLUM,
+                LightingModel.VANILLA,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                lightingCapabilities
+        );
+        FrameGraph advancedOnly = graphWithContract(new FrameGraph.PassContract(
+                Set.of(),
+                Set.of(),
+                new FrameGraph.PassImplementation(
+                        "advanced", FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL),
+                Optional.empty(),
+                FrameGraph.OutputApplicability.ANY,
+                FrameGraph.RenderContractApplicability.METALLUM_ONLY,
+                FrameGraph.LightingModelApplicability.ADVANCED_ONLY,
+                FrameGraph.PresentationUiContract.NOT_PRESENTATION
+        ));
+        expectGenerationFailure(
+                advancedOnly,
+                metallumVanilla,
+                separatedUi,
+                FrameGraphCompiler.HistoryState.invalid(),
+                "lighting-model applicability"
+        );
+        RendererGenerationConfig metallumAdvanced = generation(
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                lightingCapabilities
+        );
+        require(FrameGraphCompiler.compile(
+                        advancedOnly,
+                        metallumAdvanced,
+                        separatedUi,
+                        FrameGraphCompiler.HistoryState.invalid()
+                ).passes().size() == 1,
+                "METALLUM + ADVANCED pass was not admitted");
 
         FrameContract compositedUi = new FrameContract(
                 separatedUi.version(),
@@ -240,7 +285,7 @@ public final class FrameGraphTests {
                 graphWithContract(contract(
                         Set.of(), Set.of(), FrameGraph.ImplementationTarget.EXECUTOR_NEUTRAL, null,
                         FrameGraph.OutputApplicability.ANY,
-                        FrameGraph.LightingApplicability.ANY,
+                        FrameGraph.RenderContractApplicability.ANY,
                         FrameGraph.PresentationUiContract.SEPARATE_SDR_UI_REQUIRED
                 )),
                 sdrMetal3,
@@ -278,7 +323,7 @@ public final class FrameGraphTests {
                 MetalCapabilities.Feature.HDR_OUTPUT
         );
         RendererGenerationConfig fallbackGeneration = generation(
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
                 DisplayOutputMode.SDR,
                 MetalExecutorKind.METAL3,
                 fallbackCapabilities
@@ -289,7 +334,7 @@ public final class FrameGraphTests {
                 FrameGraph.ImplementationTarget.METAL4,
                 FrameGraph.ImplementationTarget.METAL3,
                 FrameGraph.OutputApplicability.ANY,
-                FrameGraph.LightingApplicability.ANY,
+                FrameGraph.RenderContractApplicability.ANY,
                 FrameGraph.PresentationUiContract.NOT_PRESENTATION
         ));
         FrameGraphCompiler.CompiledPass selected = FrameGraphCompiler.compile(
@@ -305,12 +350,24 @@ public final class FrameGraphTests {
     }
 
     private static RendererGenerationConfig generation(
-            final LightingMode lighting,
+            final RenderContractMode lighting,
             final DisplayOutputMode output,
             final MetalExecutorKind executor,
             final MetalCapabilities capabilities
     ) {
-        return new RendererGenerationConfig(lighting, output, executor, capabilities, 1);
+        return generation(lighting, LightingModel.VANILLA, output, executor, capabilities);
+    }
+
+    private static RendererGenerationConfig generation(
+            final RenderContractMode contract,
+            final LightingModel lighting,
+            final DisplayOutputMode output,
+            final MetalExecutorKind executor,
+            final MetalCapabilities capabilities
+    ) {
+        return new RendererGenerationConfig(
+                contract, lighting, output, executor, capabilities, 1
+        );
     }
 
     private static FrameGraph graphWithContract(final FrameGraph.PassContract contract) {
@@ -363,7 +420,7 @@ public final class FrameGraphTests {
             final FrameGraph.ImplementationTarget primary,
             final FrameGraph.ImplementationTarget fallback,
             final FrameGraph.OutputApplicability output,
-            final FrameGraph.LightingApplicability lighting,
+            final FrameGraph.RenderContractApplicability lighting,
             final FrameGraph.PresentationUiContract ui
     ) {
         return new FrameGraph.PassContract(
@@ -374,6 +431,7 @@ public final class FrameGraphTests {
                         new FrameGraph.PassImplementation("fallback", target)),
                 output,
                 lighting,
+                FrameGraph.LightingModelApplicability.ANY,
                 ui
         );
     }

@@ -268,9 +268,12 @@ public final class FrameSynthesisContract {
         }
         if (previous.state().rendererGenerationId() != current.state().rendererGenerationId()
                 || previous.state().historyGeneration() != current.state().historyGeneration()
+                || previous.state().renderContractGenerationId()
+                != current.state().renderContractGenerationId()
                 || previous.state().lightingGenerationId() != current.state().lightingGenerationId()
                 || previous.state().outputGenerationId() != current.state().outputGenerationId()
-                || previous.state().lightingMode() != current.state().lightingMode()
+                || previous.state().renderContractMode() != current.state().renderContractMode()
+                || previous.state().lightingModel() != current.state().lightingModel()
                 || previous.state().outputMode() != current.state().outputMode()
                 || previous.inFlightGeneration() != current.inFlightGeneration()
                 || !resourceGenerationsMatch(previous)

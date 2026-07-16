@@ -1,7 +1,8 @@
 package com.metallum.client.renderer.temporal;
 
 import com.metallum.client.renderer.DisplayOutputMode;
-import com.metallum.client.renderer.LightingMode;
+import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 
@@ -124,28 +125,28 @@ public final class FrameSynthesisTests {
                         source,
                         source.lightingGenerationId() + 1L,
                         source.outputGenerationId(),
-                        source.lightingMode(),
+                        source.renderContractMode(),
                         source.outputMode()
                 ),
                 stateWithGenerationAndModes(
                         source,
                         source.lightingGenerationId(),
                         source.outputGenerationId() + 1L,
-                        source.lightingMode(),
+                        source.renderContractMode(),
                         source.outputMode()
                 ),
                 stateWithGenerationAndModes(
                         source,
                         source.lightingGenerationId(),
                         source.outputGenerationId(),
-                        LightingMode.METALLUM,
+                        RenderContractMode.METALLUM,
                         source.outputMode()
                 ),
                 stateWithGenerationAndModes(
                         source,
                         source.lightingGenerationId(),
                         source.outputGenerationId(),
-                        source.lightingMode(),
+                        source.renderContractMode(),
                         DisplayOutputMode.SDR
                 )
         )) {
@@ -293,9 +294,11 @@ public final class FrameSynthesisTests {
                 frameId,
                 7L,
                 8L,
+                2L,
                 3L,
                 4L,
-                LightingMode.LEGACY,
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
                 DisplayOutputMode.HDR,
                 transforms,
                 transforms,
@@ -324,7 +327,7 @@ public final class FrameSynthesisTests {
             final FrameState source,
             final long lightingGeneration,
             final long outputGeneration,
-            final LightingMode lightingMode,
+            final RenderContractMode lightingMode,
             final DisplayOutputMode outputMode
     ) {
         return new FrameState(
@@ -332,9 +335,11 @@ public final class FrameSynthesisTests {
                 source.frameId(),
                 source.rendererGenerationId(),
                 source.historyGeneration(),
+                source.renderContractGenerationId(),
                 lightingGeneration,
                 outputGeneration,
                 lightingMode,
+                source.lightingModel(),
                 outputMode,
                 source.currentTransforms(),
                 source.previousTransforms(),

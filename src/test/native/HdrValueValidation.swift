@@ -198,12 +198,12 @@ private func writeFrameDouble(_ value: Double, at offset: Int, into bytes: inout
 
 private func rendererGenerationPacket(
     generation: UInt64,
-    lightingMode: UInt32,
+    renderContractMode: UInt32,
     outputMode: UInt32
 ) -> [UInt8] {
-    var bytes = [UInt8](repeating: 0, count: 816)
-    writeFrameUInt32(2, at: 0, into: &bytes)
-    writeFrameUInt32(816, at: 4, into: &bytes)
+    var bytes = [UInt8](repeating: 0, count: 848)
+    writeFrameUInt32(3, at: 0, into: &bytes)
+    writeFrameUInt32(848, at: 4, into: &bytes)
     writeFrameUInt32(1, at: 8, into: &bytes)
     writeFrameUInt32(2, at: 12, into: &bytes)
     writeFrameUInt64(42, at: 16, into: &bytes)
@@ -212,32 +212,35 @@ private func rendererGenerationPacket(
     writeFrameUInt64(9, at: 40, into: &bytes)
     writeFrameUInt64(generation, at: 48, into: &bytes)
     writeFrameUInt64(generation, at: 56, into: &bytes)
-    writeFrameUInt64(12, at: 64, into: &bytes)
-    writeFrameUInt64(13, at: 72, into: &bytes)
-    writeFrameUInt64(1, at: 80, into: &bytes)
-    writeFrameUInt32(lightingMode, at: 96, into: &bytes)
-    writeFrameUInt32(outputMode, at: 100, into: &bytes)
-    writeFrameUInt32(0, at: 104, into: &bytes)
-    writeFrameUInt32(1, at: 108, into: &bytes)
-    writeFrameUInt32(16, at: 112, into: &bytes)
-    writeFrameUInt32(16, at: 116, into: &bytes)
-    writeFrameUInt32(16, at: 120, into: &bytes)
+    writeFrameUInt64(generation, at: 64, into: &bytes)
+    writeFrameUInt64(12, at: 72, into: &bytes)
+    writeFrameUInt64(13, at: 80, into: &bytes)
+    writeFrameUInt64(1, at: 88, into: &bytes)
+    writeFrameUInt32(renderContractMode, at: 104, into: &bytes)
+    writeFrameUInt32(0, at: 108, into: &bytes)
+    writeFrameUInt32(outputMode, at: 112, into: &bytes)
+    writeFrameUInt32(0, at: 116, into: &bytes)
+    writeFrameUInt32(1, at: 120, into: &bytes)
     writeFrameUInt32(16, at: 124, into: &bytes)
-    writeFrameUInt32(1, at: 128, into: &bytes)
-    writeFrameFloat(1.0 / 60.0, at: 136, into: &bytes)
-    writeFrameFloat(0.05, at: 140, into: &bytes)
-    writeFrameFloat(1024, at: 144, into: &bytes)
-    writeFrameFloat(1, at: 156, into: &bytes)
-    writeFrameFloat(1, at: 160, into: &bytes)
-    writeFrameFloat(1, at: 164, into: &bytes)
+    writeFrameUInt32(16, at: 128, into: &bytes)
+    writeFrameUInt32(16, at: 132, into: &bytes)
+    writeFrameUInt32(16, at: 136, into: &bytes)
+    writeFrameUInt32(1, at: 140, into: &bytes)
+    writeFrameFloat(1.0 / 60.0, at: 148, into: &bytes)
+    writeFrameFloat(0.05, at: 152, into: &bytes)
+    writeFrameFloat(1024, at: 156, into: &bytes)
     writeFrameFloat(1, at: 168, into: &bytes)
-    writeFrameUInt64(outputMode == 0 ? 0 : 64, at: 184, into: &bytes)
+    writeFrameFloat(1, at: 172, into: &bytes)
+    writeFrameFloat(1, at: 176, into: &bytes)
+    writeFrameFloat(1, at: 180, into: &bytes)
+    writeFrameUInt64(renderContractMode == 0 ? 0 : 32, at: 200, into: &bytes)
+    writeFrameUInt64(outputMode == 0 ? 0 : 64, at: 208, into: &bytes)
     for index in 0..<6 {
-        writeFrameDouble(Double(index), at: 248 + index * 8, into: &bytes)
+        writeFrameDouble(Double(index), at: 280 + index * 8, into: &bytes)
     }
     for matrix in 0..<8 {
         for diagonal in 0..<4 {
-            writeFrameFloat(1, at: 296 + matrix * 64 + diagonal * 20, into: &bytes)
+            writeFrameFloat(1, at: 328 + matrix * 64 + diagonal * 20, into: &bytes)
         }
     }
     return bytes
@@ -4139,7 +4142,7 @@ private final class ValueValidation {
         }
         guard
             let initSymbol = dlsym(handle, "metallum_init_pipelines"),
-            let setFrameStateSymbol = dlsym(handle, "metallum_set_frame_state_v2"),
+            let setFrameStateSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
             let generationContractSymbol = dlsym(
                 handle,
                 "metallum_renderer_generation_native_contract_v1"
@@ -5380,7 +5383,7 @@ private final class ValueValidation {
 
         let actualHdrPacket = rendererGenerationPacket(
             generation: 200,
-            lightingMode: 1,
+            renderContractMode: 1,
             outputMode: 1
         )
         let actualSetStatus = actualHdrPacket.withUnsafeBytes {
@@ -5522,7 +5525,7 @@ private final class ValueValidation {
 
         let actualSdrPacket = rendererGenerationPacket(
             generation: 201,
-            lightingMode: 1,
+            renderContractMode: 1,
             outputMode: 0
         )
         let actualSdrSetStatus = actualSdrPacket.withUnsafeBytes {

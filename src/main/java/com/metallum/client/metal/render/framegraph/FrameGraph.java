@@ -134,10 +134,16 @@ public final class FrameGraph {
         HDR_ONLY
     }
 
-    public enum LightingApplicability {
+    public enum RenderContractApplicability {
         ANY,
         LEGACY_ONLY,
         METALLUM_ONLY
+    }
+
+    public enum LightingModelApplicability {
+        ANY,
+        VANILLA_ONLY,
+        ADVANCED_ONLY
     }
 
     public enum PresentationUiContract {
@@ -346,14 +352,15 @@ public final class FrameGraph {
         }
     }
 
-    /** Generation-level metadata; neutral defaults preserve the production graph and ABI v1. */
+    /** Generation-level metadata; neutral defaults preserve existing production graph callers. */
     public record PassContract(
             Set<MetalCapabilities.Feature> requiredCapabilities,
             Set<MetalCapabilities.Feature> optionalCapabilities,
             PassImplementation primaryImplementation,
             Optional<PassImplementation> fallbackImplementation,
             OutputApplicability outputApplicability,
-            LightingApplicability lightingApplicability,
+            RenderContractApplicability renderContractApplicability,
+            LightingModelApplicability lightingModelApplicability,
             PresentationUiContract presentationUiContract
     ) {
         private static final PassContract NEUTRAL = new PassContract(
@@ -362,7 +369,8 @@ public final class FrameGraph {
                 new PassImplementation("executor-neutral", ImplementationTarget.EXECUTOR_NEUTRAL),
                 Optional.empty(),
                 OutputApplicability.ANY,
-                LightingApplicability.ANY,
+                RenderContractApplicability.ANY,
+                LightingModelApplicability.ANY,
                 PresentationUiContract.NOT_PRESENTATION
         );
 
@@ -377,7 +385,8 @@ public final class FrameGraph {
             Objects.requireNonNull(primaryImplementation, "primaryImplementation");
             Objects.requireNonNull(fallbackImplementation, "fallbackImplementation");
             Objects.requireNonNull(outputApplicability, "outputApplicability");
-            Objects.requireNonNull(lightingApplicability, "lightingApplicability");
+            Objects.requireNonNull(renderContractApplicability, "renderContractApplicability");
+            Objects.requireNonNull(lightingModelApplicability, "lightingModelApplicability");
             Objects.requireNonNull(presentationUiContract, "presentationUiContract");
         }
 

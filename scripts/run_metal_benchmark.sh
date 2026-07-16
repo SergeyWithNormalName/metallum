@@ -815,8 +815,7 @@ complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ -s "$RAW_REPORT" ] || die "GPU timing JSONL report is missing or empty"
 
 RELEASE_ARG=""
-if [ "$HDR_MODE" = "scene" ] \
-    && [ "$TIMING_DETAIL" -eq 0 ] \
+if [ "$TIMING_DETAIL" -eq 0 ] \
     && [ "$METAL_VALIDATION" -eq 0 ] \
     && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
     RELEASE_ARG=--release-contract

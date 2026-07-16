@@ -292,7 +292,7 @@ private final class MetallumMenuBlurPipelines {
 }
 
 private final class MetallumHdrWorkspace {
-    let lightingMode: UInt32
+    let renderContractMode: UInt32
     let sourceWidth: Int
     let sourceHeight: Int
     var displayWidth: Int
@@ -311,7 +311,7 @@ private final class MetallumHdrWorkspace {
     var histogramNeedsInitialization: Bool
 
     init(
-        lightingMode: UInt32,
+        renderContractMode: UInt32,
         sourceWidth: Int,
         sourceHeight: Int,
         displayWidth: Int,
@@ -321,7 +321,7 @@ private final class MetallumHdrWorkspace {
         histogram: MTLBuffer,
         adaptiveState: MTLBuffer
     ) {
-        self.lightingMode = lightingMode
+        self.renderContractMode = renderContractMode
         self.sourceWidth = sourceWidth
         self.sourceHeight = sourceHeight
         self.displayWidth = displayWidth
@@ -2142,9 +2142,11 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 "frame_graph_version": 2,
                 "frame_id": 0,
                 "renderer_generation_id": 0,
+                "render_contract_generation_id": 0,
                 "lighting_generation_id": 0,
                 "output_generation_id": 0,
-                "resolved_lighting_mode": "legacy",
+                "resolved_render_contract": "legacy",
+                "resolved_lighting_model": "vanilla",
                 "resolved_output_mode": hdr,
                 "resolved_upscale_mode": spatial ? "spatial" : "native",
                 "resolved_interpolation_mode": "off",
@@ -2156,18 +2158,23 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 "display_width": presentation?.displayWidth ?? 1,
                 "display_height": presentation?.displayHeight ?? 1,
                 "resource_bytes": [
-                    "base": 0, "hdr": 0, "lighting": 0,
-                    "upscale": 0, "interpolation": 0
+                    "base": 0, "material": 0, "hdr": 0, "advanced_lighting": 0,
+                    "upscale": 0, "interpolation": 0, "diagnostic": 0
                 ],
-                "lighting_work": [
+                "temporal_diagnostics": [
+                    "resource_bytes": 0, "motion_bytes": 0, "reactive_bytes": 0,
+                    "pass_count": 0, "encoder_count": 0, "pso_count": 0
+                ],
+                "advanced_lighting_work": [
                     "light_count": 0, "pass_count": 0,
+                    "encoder_count": 0, "pso_count": 0, "work_queue_count": 0,
                     "dispatch_count": 0, "upload_bytes": 0
                 ]
             ]
         }
 
         writer.write([
-            "schema_version": 3,
+            "schema_version": 4,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
             "detail_enabled": NativeState.gpuTimingDetailEnabled,
             "presented_frames": window.sampleCount,
@@ -3387,7 +3394,7 @@ private func ensureHdrFallbackDepthTexture(device: MTLDevice) -> MTLTexture? {
 
 private func ensureHdrWorkspace(
     device: MTLDevice,
-    lightingMode: UInt32 = 0,
+    renderContractMode: UInt32 = 0,
     sourceWidth: Int,
     sourceHeight: Int,
     displayWidth: Int,
@@ -3395,7 +3402,7 @@ private func ensureHdrWorkspace(
 ) -> MetallumHdrWorkspace? {
     let key = objectAddress(device)
     if let cached = NativeState.hdrWorkspaces[key],
-       cached.lightingMode == lightingMode,
+       cached.renderContractMode == renderContractMode,
        cached.sourceWidth == sourceWidth,
        cached.sourceHeight == sourceHeight {
         if cached.displayWidth != displayWidth || cached.displayHeight != displayHeight {
@@ -3455,10 +3462,10 @@ private func ensureHdrWorkspace(
         ),
         let adaptiveState = makeHdrAdaptiveStateBuffer(
             device: device,
-            label: lightingMode == 0
+            label: renderContractMode == 0
                 ? "Metallum legacy HDR adaptive state"
                 : "Metallum actual HDR exposure state",
-            actualRadiance: lightingMode != 0
+            actualRadiance: renderContractMode != 0
         )
     else {
         NSLog("[metallum] Failed to allocate HDR workspace for %dx%d", sourceWidth, sourceHeight)
@@ -3466,7 +3473,7 @@ private func ensureHdrWorkspace(
     }
 
     let workspace = MetallumHdrWorkspace(
-        lightingMode: lightingMode,
+        renderContractMode: renderContractMode,
         sourceWidth: sourceWidth,
         sourceHeight: sourceHeight,
         displayWidth: displayWidth,
@@ -3476,7 +3483,7 @@ private func ensureHdrWorkspace(
         histogram: histogram,
         adaptiveState: adaptiveState
     )
-    histogram.label = lightingMode == 0
+    histogram.label = renderContractMode == 0
         ? "Metallum legacy HDR luminance histogram"
         : "Metallum actual HDR exposure histogram"
     NativeState.hdrWorkspaces[key] = workspace
@@ -4010,7 +4017,7 @@ private func encodeActualHdrWorldEffects(
           let pipelines = ensureActualHdrPipelines(device: commandBuffer.device),
           let workspace = ensureHdrWorkspace(
             device: commandBuffer.device,
-            lightingMode: 1,
+            renderContractMode: 1,
             sourceWidth: sceneTexture.width,
             sourceHeight: sceneTexture.height,
             displayWidth: displayWidth,
@@ -4269,7 +4276,7 @@ private func encodeActualHdrUiMask(
     guard let pipelines = ensureActualHdrPipelines(device: commandBuffer.device),
           let workspace = ensureHdrWorkspace(
             device: commandBuffer.device,
-            lightingMode: 1,
+            renderContractMode: 1,
             sourceWidth: sceneTexture.width,
             sourceHeight: sceneTexture.height,
             displayWidth: displayWidth,
@@ -4561,7 +4568,7 @@ private func encodeActualNativeHdrWorldUiComposite(
             displayHeight: sceneTexture.height
           ), let workspace = ensureHdrWorkspace(
             device: commandBuffer.device,
-            lightingMode: 1,
+            renderContractMode: 1,
             sourceWidth: sceneTexture.width,
             sourceHeight: sceneTexture.height,
             displayWidth: sceneTexture.width,
@@ -4763,7 +4770,7 @@ private func encodeActualSpatialHdrWorldComposite(
             displayHeight: displayHeight
           ), let workspace = ensureHdrWorkspace(
             device: commandBuffer.device,
-            lightingMode: 1,
+            renderContractMode: 1,
             sourceWidth: sceneTexture.width,
             sourceHeight: sceneTexture.height,
             displayWidth: displayWidth,
@@ -5279,7 +5286,7 @@ private func prepareRendererGeneration(
     // Resolution-dependent HDR resources never cross renderer generations.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
-    let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV2.spatialBit != 0
+    let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.spatialBit != 0
     if !spatialEnabled {
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
@@ -5292,12 +5299,12 @@ private func prepareRendererGeneration(
         purgeActualHdrGeneration(deviceAddress: key)
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
-        if snapshot.lightingMode == 0 {
+        if snapshot.renderContractMode == 0 {
             NativeState.uiBackdropPipelines.removeValue(forKey: key)
         }
         prepared = ensurePresentPipeline(device: device, colorFormat: .bgra8Unorm) != nil
-            && (snapshot.lightingMode == 0 || ensureUiBackdropPipelines(device: device) != nil)
-    } else if snapshot.lightingMode != 0 {
+            && (snapshot.renderContractMode == 0 || ensureUiBackdropPipelines(device: device) != nil)
+    } else if snapshot.renderContractMode != 0 {
         // A METALLUM generation owns no semantic/inferred-reconstruction PSO.
         purgeLegacyHdrGeneration(deviceAddress: key)
         prepared = ensureActualHdrPipelines(device: device) != nil
@@ -5333,11 +5340,11 @@ private func prepareRendererGeneration(
     return prepared
 }
 
-private enum MetallumFrameStateAbiV2 {
-    static let version: UInt32 = 2
-    static let packetBytes = 816
+private enum MetallumFrameStateAbiV3 {
+    static let version: UInt32 = 3
+    static let packetBytes = 848
     static let knownFeatureBits: UInt64 = 0b111
-    static let knownResetBits: UInt64 = 0x0fff
+    static let knownResetBits: UInt64 = 0x1fff
     static let spatialBit: UInt64 = 1
     static let temporalBit: UInt64 = 1 << 1
     static let interpolationBit: UInt64 = 1 << 2
@@ -5350,12 +5357,14 @@ private struct MetallumRendererFrameStateSnapshot {
     let submitIndex: UInt64
     let rendererGenerationId: UInt64
     let historyGeneration: UInt64
+    let renderContractGenerationId: UInt64
     let lightingGenerationId: UInt64
     let outputGenerationId: UInt64
     let worldIdentity: UInt64
     let dimensionIdentity: UInt64
     let resetMask: UInt64
-    let lightingMode: UInt32
+    let renderContractMode: UInt32
+    let lightingModel: UInt32
     let outputMode: UInt32
     let executorKind: UInt32
     let lightingPreset: UInt32
@@ -5375,15 +5384,19 @@ private struct MetallumRendererFrameStateSnapshot {
     let currentDisplayHeadroom: Float
     let potentialDisplayHeadroom: Float
     let baseResourceBytes: UInt64
+    let materialResourceBytes: UInt64
     let hdrResourceBytes: UInt64
-    let lightingResourceBytes: UInt64
+    let advancedLightingResourceBytes: UInt64
     let upscaleResourceBytes: UInt64
     let interpolationResourceBytes: UInt64
     let diagnosticResourceBytes: UInt64
     let lightCount: UInt32
-    let lightingPassCount: UInt32
-    let lightingDispatchCount: UInt32
-    let lightingUploadBytes: UInt64
+    let advancedPassCount: UInt32
+    let advancedEncoderCount: UInt32
+    let advancedPsoCount: UInt32
+    let advancedWorkQueueCount: UInt32
+    let advancedDispatchCount: UInt32
+    let advancedUploadBytes: UInt64
     let currentCameraPosition: SIMD3<Double>
     let previousCameraPosition: SIMD3<Double>
     let currentView: simd_float4x4
@@ -5397,9 +5410,9 @@ private struct MetallumRendererFrameStateSnapshot {
 
     var report: [String: Any] {
         let upscaleMode: String
-        if featureMask & MetallumFrameStateAbiV2.spatialBit != 0 {
+        if featureMask & MetallumFrameStateAbiV3.spatialBit != 0 {
             upscaleMode = "spatial"
-        } else if featureMask & MetallumFrameStateAbiV2.temporalBit != 0 {
+        } else if featureMask & MetallumFrameStateAbiV3.temporalBit != 0 {
             upscaleMode = "temporal"
         } else {
             upscaleMode = "native"
@@ -5412,15 +5425,17 @@ private struct MetallumRendererFrameStateSnapshot {
             "in_flight_slot": inFlightSlot,
             "renderer_generation_id": rendererGenerationId,
             "history_generation": historyGeneration,
+            "render_contract_generation_id": renderContractGenerationId,
             "lighting_generation_id": lightingGenerationId,
             "output_generation_id": outputGenerationId,
             "world_identity": worldIdentity,
             "dimension_identity": dimensionIdentity,
             "history_reset_mask": resetMask,
-            "resolved_lighting_mode": lightingMode == 0 ? "legacy" : "metallum",
+            "resolved_render_contract": renderContractMode == 0 ? "legacy" : "metallum",
+            "resolved_lighting_model": lightingModel == 0 ? "vanilla" : "advanced",
             "resolved_output_mode": outputMode == 0 ? "sdr" : "hdr",
             "resolved_upscale_mode": upscaleMode,
-            "resolved_interpolation_mode": featureMask & MetallumFrameStateAbiV2.interpolationBit == 0
+            "resolved_interpolation_mode": featureMask & MetallumFrameStateAbiV3.interpolationBit == 0
                 ? "off" : "frame_interpolation",
             "lighting_preset": ["performance", "balanced", "ultra"][Int(lightingPreset)],
             "executor": executorKind == 0 ? "metal3" : "metal4",
@@ -5438,8 +5453,9 @@ private struct MetallumRendererFrameStateSnapshot {
             "display_height": displayHeight,
             "resource_bytes": [
                 "base": baseResourceBytes,
+                "material": materialResourceBytes,
                 "hdr": hdrResourceBytes,
-                "lighting": lightingResourceBytes,
+                "advanced_lighting": advancedLightingResourceBytes,
                 "upscale": upscaleResourceBytes,
                 "interpolation": interpolationResourceBytes,
                 "diagnostic": diagnosticResourceBytes
@@ -5454,11 +5470,14 @@ private struct MetallumRendererFrameStateSnapshot {
                 "encoder_count": diagnosticResourceBytes == 0 ? 0 : 1,
                 "pso_count": NativeState.temporalDiagnosticPipelines.isEmpty ? 0 : 1
             ],
-            "lighting_work": [
+            "advanced_lighting_work": [
                 "light_count": lightCount,
-                "pass_count": lightingPassCount,
-                "dispatch_count": lightingDispatchCount,
-                "upload_bytes": lightingUploadBytes
+                "pass_count": advancedPassCount,
+                "encoder_count": advancedEncoderCount,
+                "pso_count": advancedPsoCount,
+                "work_queue_count": advancedWorkQueueCount,
+                "dispatch_count": advancedDispatchCount,
+                "upload_bytes": advancedUploadBytes
             ]
         ]
     }
@@ -5587,16 +5606,16 @@ public func metallum_encode_temporal_diagnostics_v1(
     }
 }
 
-private func parseFrameStateV2(
+private func parseFrameStateV3(
     _ packet: UnsafeRawPointer?,
     _ byteSize: UInt64
 ) -> (Int32, MetallumRendererFrameStateSnapshot?) {
     guard let packet,
-          byteSize == UInt64(MetallumFrameStateAbiV2.packetBytes) else {
+          byteSize == UInt64(MetallumFrameStateAbiV3.packetBytes) else {
         return (-1, nil)
     }
     let reader = MetallumFrameGraphPacketReader(
-        bytes: UnsafeRawBufferPointer(start: packet, count: MetallumFrameStateAbiV2.packetBytes)
+        bytes: UnsafeRawBufferPointer(start: packet, count: MetallumFrameStateAbiV3.packetBytes)
     )
     guard let version = reader.uint32(at: 0),
           let declaredBytes = reader.uint32(at: 4),
@@ -5604,8 +5623,8 @@ private func parseFrameStateV2(
           let frameGraphVersion = reader.uint32(at: 12) else {
         return (-1, nil)
     }
-    guard version == MetallumFrameStateAbiV2.version else { return (-2, nil) }
-    guard declaredBytes == UInt32(MetallumFrameStateAbiV2.packetBytes),
+    guard version == MetallumFrameStateAbiV3.version else { return (-2, nil) }
+    guard declaredBytes == UInt32(MetallumFrameStateAbiV3.packetBytes),
           frameContractVersion > 0, frameGraphVersion > 0 else {
         return (-3, nil)
     }
@@ -5613,51 +5632,56 @@ private func parseFrameStateV2(
           let submitIndex = reader.uint64(at: 24),
           let rendererGenerationId = reader.uint64(at: 32),
           let historyGeneration = reader.uint64(at: 40),
-          let lightingGenerationId = reader.uint64(at: 48),
-          let outputGenerationId = reader.uint64(at: 56),
-          let worldIdentity = reader.uint64(at: 64),
-          let dimensionIdentity = reader.uint64(at: 72),
-          let resetMask = reader.uint64(at: 80),
-          let featureMask = reader.uint64(at: 88),
-          let lightingMode = reader.uint32(at: 96),
-          let outputMode = reader.uint32(at: 100),
-          let executorKind = reader.uint32(at: 104),
-          let lightingPreset = reader.uint32(at: 108),
-          let renderWidth = reader.uint32(at: 112),
-          let renderHeight = reader.uint32(at: 116),
-          let displayWidth = reader.uint32(at: 120),
-          let displayHeight = reader.uint32(at: 124),
-          let inFlightSlot = reader.uint32(at: 128),
-          let reservedFlags = reader.uint32(at: 132),
-          let deltaSeconds = reader.float32(at: 136),
-          let nearPlane = reader.float32(at: 140),
-          let farPlane = reader.float32(at: 144),
-          let jitterX = reader.float32(at: 148),
-          let jitterY = reader.float32(at: 152),
-          let exposure = reader.float32(at: 156),
-          let preExposure = reader.float32(at: 160),
-          let currentDisplayHeadroom = reader.float32(at: 164),
-          let potentialDisplayHeadroom = reader.float32(at: 168),
-          let reservedFloat = reader.float32(at: 172),
-          let baseResourceBytes = reader.uint64(at: 176),
-          let hdrResourceBytes = reader.uint64(at: 184),
-          let lightingResourceBytes = reader.uint64(at: 192),
-          let upscaleResourceBytes = reader.uint64(at: 200),
-          let interpolationResourceBytes = reader.uint64(at: 208),
-          let diagnosticResourceBytes = reader.uint64(at: 216),
-          let lightCount = reader.uint32(at: 224),
-          let lightingPassCount = reader.uint32(at: 228),
-          let lightingDispatchCount = reader.uint32(at: 232),
-          let reservedWork = reader.uint32(at: 236),
-          let lightingUploadBytes = reader.uint64(at: 240) else {
+          let renderContractGenerationId = reader.uint64(at: 48),
+          let lightingGenerationId = reader.uint64(at: 56),
+          let outputGenerationId = reader.uint64(at: 64),
+          let worldIdentity = reader.uint64(at: 72),
+          let dimensionIdentity = reader.uint64(at: 80),
+          let resetMask = reader.uint64(at: 88),
+          let featureMask = reader.uint64(at: 96),
+          let renderContractMode = reader.uint32(at: 104),
+          let lightingModel = reader.uint32(at: 108),
+          let outputMode = reader.uint32(at: 112),
+          let executorKind = reader.uint32(at: 116),
+          let lightingPreset = reader.uint32(at: 120),
+          let renderWidth = reader.uint32(at: 124),
+          let renderHeight = reader.uint32(at: 128),
+          let displayWidth = reader.uint32(at: 132),
+          let displayHeight = reader.uint32(at: 136),
+          let inFlightSlot = reader.uint32(at: 140),
+          let reservedFlags = reader.uint32(at: 144),
+          let deltaSeconds = reader.float32(at: 148),
+          let nearPlane = reader.float32(at: 152),
+          let farPlane = reader.float32(at: 156),
+          let jitterX = reader.float32(at: 160),
+          let jitterY = reader.float32(at: 164),
+          let exposure = reader.float32(at: 168),
+          let preExposure = reader.float32(at: 172),
+          let currentDisplayHeadroom = reader.float32(at: 176),
+          let potentialDisplayHeadroom = reader.float32(at: 180),
+          let reservedFloat = reader.float32(at: 184),
+          let baseResourceBytes = reader.uint64(at: 192),
+          let materialResourceBytes = reader.uint64(at: 200),
+          let hdrResourceBytes = reader.uint64(at: 208),
+          let advancedLightingResourceBytes = reader.uint64(at: 216),
+          let upscaleResourceBytes = reader.uint64(at: 224),
+          let interpolationResourceBytes = reader.uint64(at: 232),
+          let diagnosticResourceBytes = reader.uint64(at: 240),
+          let lightCount = reader.uint32(at: 248),
+          let advancedPassCount = reader.uint32(at: 252),
+          let advancedEncoderCount = reader.uint32(at: 256),
+          let advancedPsoCount = reader.uint32(at: 260),
+          let advancedWorkQueueCount = reader.uint32(at: 264),
+          let advancedDispatchCount = reader.uint32(at: 268),
+          let advancedUploadBytes = reader.uint64(at: 272) else {
         return (-1, nil)
     }
-    guard lightingMode <= 1, outputMode <= 1, executorKind <= 1,
-          lightingPreset <= 2, reservedFlags == 0, reservedFloat == 0, reservedWork == 0,
-          featureMask & ~MetallumFrameStateAbiV2.knownFeatureBits == 0,
-          resetMask & ~MetallumFrameStateAbiV2.knownResetBits == 0,
-          featureMask & MetallumFrameStateAbiV2.spatialBit == 0
-            || featureMask & MetallumFrameStateAbiV2.temporalBit == 0,
+    guard renderContractMode <= 1, lightingModel <= 1, outputMode <= 1, executorKind <= 1,
+          lightingPreset <= 2, reservedFlags == 0, reservedFloat == 0,
+          featureMask & ~MetallumFrameStateAbiV3.knownFeatureBits == 0,
+          resetMask & ~MetallumFrameStateAbiV3.knownResetBits == 0,
+          featureMask & MetallumFrameStateAbiV3.spatialBit == 0
+            || featureMask & MetallumFrameStateAbiV3.temporalBit == 0,
           renderWidth > 0, renderHeight > 0, displayWidth > 0, displayHeight > 0 else {
         return (-4, nil)
     }
@@ -5669,29 +5693,47 @@ private func parseFrameStateV2(
           nearPlane > 0, farPlane > nearPlane, abs(jitterX) <= 0.5, abs(jitterY) <= 0.5,
           exposure > 0, preExposure > 0, currentDisplayHeadroom >= 1,
           potentialDisplayHeadroom >= currentDisplayHeadroom else { return (-4, nil) }
+    let signedLongMax = UInt64(Int64.max)
+    let signedIntMax = UInt32(Int32.max)
+    guard frameId <= signedLongMax, submitIndex <= signedLongMax,
+          rendererGenerationId <= signedLongMax, historyGeneration <= signedLongMax,
+          renderContractGenerationId <= signedLongMax, lightingGenerationId <= signedLongMax,
+          outputGenerationId <= signedLongMax, worldIdentity <= signedLongMax,
+          dimensionIdentity <= signedLongMax, baseResourceBytes <= signedLongMax,
+          materialResourceBytes <= signedLongMax, hdrResourceBytes <= signedLongMax,
+          advancedLightingResourceBytes <= signedLongMax, upscaleResourceBytes <= signedLongMax,
+          interpolationResourceBytes <= signedLongMax, diagnosticResourceBytes <= signedLongMax,
+          advancedUploadBytes <= signedLongMax, lightCount <= signedIntMax,
+          advancedPassCount <= signedIntMax, advancedEncoderCount <= signedIntMax,
+          advancedPsoCount <= signedIntMax, advancedWorkQueueCount <= signedIntMax,
+          advancedDispatchCount <= signedIntMax else { return (-4, nil) }
 
-    guard let currentCameraPosition = reader.float64x3(at: 248),
-          let previousCameraPosition = reader.float64x3(at: 272),
-          let currentView = reader.floatMatrix4x4(at: 296),
-          let currentProjection = reader.floatMatrix4x4(at: 360),
-          let currentUnjitteredView = reader.floatMatrix4x4(at: 424),
-          let currentUnjitteredProjection = reader.floatMatrix4x4(at: 488),
-          let previousView = reader.floatMatrix4x4(at: 552),
-          let previousProjection = reader.floatMatrix4x4(at: 616),
-          let previousUnjitteredView = reader.floatMatrix4x4(at: 680),
-          let previousUnjitteredProjection = reader.floatMatrix4x4(at: 744) else {
+    guard let currentCameraPosition = reader.float64x3(at: 280),
+          let previousCameraPosition = reader.float64x3(at: 304),
+          let currentView = reader.floatMatrix4x4(at: 328),
+          let currentProjection = reader.floatMatrix4x4(at: 392),
+          let currentUnjitteredView = reader.floatMatrix4x4(at: 456),
+          let currentUnjitteredProjection = reader.floatMatrix4x4(at: 520),
+          let previousView = reader.floatMatrix4x4(at: 584),
+          let previousProjection = reader.floatMatrix4x4(at: 648),
+          let previousUnjitteredView = reader.floatMatrix4x4(at: 712),
+          let previousUnjitteredProjection = reader.floatMatrix4x4(at: 776) else {
         return (-4, nil)
     }
-    if lightingMode == 0 && (lightingResourceBytes != 0 || lightCount != 0
-        || lightingPassCount != 0 || lightingDispatchCount != 0 || lightingUploadBytes != 0) {
+    if renderContractMode == 0 && lightingModel == 1 { return (-5, nil) }
+    if renderContractMode == 0 && materialResourceBytes != 0 { return (-5, nil) }
+    if lightingModel == 0 && (advancedLightingResourceBytes != 0 || lightCount != 0
+        || advancedPassCount != 0 || advancedEncoderCount != 0 || advancedPsoCount != 0
+        || advancedWorkQueueCount != 0 || advancedDispatchCount != 0
+        || advancedUploadBytes != 0) {
         return (-5, nil)
     }
     if outputMode == 0 && hdrResourceBytes != 0 { return (-6, nil) }
-    if featureMask & (MetallumFrameStateAbiV2.spatialBit | MetallumFrameStateAbiV2.temporalBit) == 0
+    if featureMask & (MetallumFrameStateAbiV3.spatialBit | MetallumFrameStateAbiV3.temporalBit) == 0
         && upscaleResourceBytes != 0 {
         return (-7, nil)
     }
-    if featureMask & MetallumFrameStateAbiV2.interpolationBit == 0
+    if featureMask & MetallumFrameStateAbiV3.interpolationBit == 0
         && interpolationResourceBytes != 0 {
         return (-8, nil)
     }
@@ -5702,12 +5744,14 @@ private func parseFrameStateV2(
         submitIndex: submitIndex,
         rendererGenerationId: rendererGenerationId,
         historyGeneration: historyGeneration,
+        renderContractGenerationId: renderContractGenerationId,
         lightingGenerationId: lightingGenerationId,
         outputGenerationId: outputGenerationId,
         worldIdentity: worldIdentity,
         dimensionIdentity: dimensionIdentity,
         resetMask: resetMask,
-        lightingMode: lightingMode,
+        renderContractMode: renderContractMode,
+        lightingModel: lightingModel,
         outputMode: outputMode,
         executorKind: executorKind,
         lightingPreset: lightingPreset,
@@ -5727,15 +5771,19 @@ private func parseFrameStateV2(
         currentDisplayHeadroom: currentDisplayHeadroom,
         potentialDisplayHeadroom: potentialDisplayHeadroom,
         baseResourceBytes: baseResourceBytes,
+        materialResourceBytes: materialResourceBytes,
         hdrResourceBytes: hdrResourceBytes,
-        lightingResourceBytes: lightingResourceBytes,
+        advancedLightingResourceBytes: advancedLightingResourceBytes,
         upscaleResourceBytes: upscaleResourceBytes,
         interpolationResourceBytes: interpolationResourceBytes,
         diagnosticResourceBytes: diagnosticResourceBytes,
         lightCount: lightCount,
-        lightingPassCount: lightingPassCount,
-        lightingDispatchCount: lightingDispatchCount,
-        lightingUploadBytes: lightingUploadBytes,
+        advancedPassCount: advancedPassCount,
+        advancedEncoderCount: advancedEncoderCount,
+        advancedPsoCount: advancedPsoCount,
+        advancedWorkQueueCount: advancedWorkQueueCount,
+        advancedDispatchCount: advancedDispatchCount,
+        advancedUploadBytes: advancedUploadBytes,
         currentCameraPosition: currentCameraPosition,
         previousCameraPosition: previousCameraPosition,
         currentView: currentView,
@@ -5749,20 +5797,20 @@ private func parseFrameStateV2(
     ))
 }
 
-@_cdecl("metallum_validate_frame_state_v2")
-public func metallum_validate_frame_state_v2(
+@_cdecl("metallum_validate_frame_state_v3")
+public func metallum_validate_frame_state_v3(
     _ packet: UnsafeRawPointer?,
     _ byteSize: UInt64
 ) -> Int32 {
-    parseFrameStateV2(packet, byteSize).0
+    parseFrameStateV3(packet, byteSize).0
 }
 
-@_cdecl("metallum_set_frame_state_v2")
-public func metallum_set_frame_state_v2(
+@_cdecl("metallum_set_frame_state_v3")
+public func metallum_set_frame_state_v3(
     _ packet: UnsafeRawPointer?,
     _ byteSize: UInt64
 ) -> Int32 {
-    let (status, snapshot) = parseFrameStateV2(packet, byteSize)
+    let (status, snapshot) = parseFrameStateV3(packet, byteSize)
     if status == 1, let snapshot {
         for device in NativeState.initializedDevices.values {
             guard prepareRendererGeneration(device: device, snapshot: snapshot) else {
@@ -8018,15 +8066,15 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 && semanticTexture!.width == sourceTexture.width
                 && semanticTexture!.height == sourceTexture.height
                 && semanticTexture!.pixelFormat == .rgba8Unorm)
-        let actualLighting = materialGenerationActive != 0
-        let actualHdrGeneration = actualLighting
+        let materialContractActive = materialGenerationActive != 0
+        let actualHdrGeneration = materialContractActive
             && sourceEncoding == 2
         let canPrecomposeActualHdr = hdrPrecomposeEnabled != 0
             && actualHdrGeneration
             && sourceTexture.pixelFormat == .rgba16Float
             && sourceEncoding == 2
         let canPrecomposeLegacyHdr = hdrPrecomposeEnabled != 0
-            && !actualLighting
+            && !materialContractActive
             && sourceTexture.pixelFormat == .rgba16Float
             && compatibleDepth
             && compatibleSemantic
@@ -8631,8 +8679,8 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
             8.0
         )
-        let actualLighting = materialGenerationActive != 0
-        let actualHdrGeneration = actualLighting
+        let materialContractActive = materialGenerationActive != 0
+        let actualHdrGeneration = materialContractActive
             && outputMode != 0
         let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
         let hasCompatibleDepth = sceneTexture != nil
@@ -8658,10 +8706,10 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && sceneTexture!.usage.contains(.shaderRead)
             && objectAddress(sceneTexture!.device) == objectAddress(commandBuffer.device)
             && sourceEncoding == 2
-        let hasCompatibleScene = actualLighting
+        let hasCompatibleScene = materialContractActive
             ? hasCompatibleActualScene
             : hasCompatibleLegacyScene
-        let hasCompatibleSemantic = !actualLighting
+        let hasCompatibleSemantic = !materialContractActive
             && hasCompatibleLegacyScene
             && semanticTexture != nil
             && semanticTexture!.width == sceneTexture!.width
@@ -8724,13 +8772,13 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         if hasCompatibleScene {
             let workspace = ensureHdrWorkspace(
                     device: commandBuffer.device,
-                    lightingMode: actualLighting ? 1 : 0,
+                    renderContractMode: materialContractActive ? 1 : 0,
                     sourceWidth: sceneTexture!.width,
                     sourceHeight: sceneTexture!.height,
                     displayWidth: displaySceneTexture.width,
                     displayHeight: displaySceneTexture.height
                 )
-            let pipelinesReady = actualLighting
+            let pipelinesReady = materialContractActive
                 ? ensureActualHdrPipelines(device: commandBuffer.device) != nil
                 : ensureHdrPipelines(device: commandBuffer.device) != nil
             guard pipelinesReady, workspace != nil else {
@@ -8746,7 +8794,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     ? ensureActualHdrUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
                     : actualHdrLinearUiOnly
                         ? ensureActualHdrLinearUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-                        : actualLighting
+                        : materialContractActive
                             ? ensureActualHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
                             : ensureLegacyHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
         guard let presentPipeline else {
@@ -8978,7 +9026,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         var hdrOutputs: MetallumHdrOutputs?
         var hasHdrScene = false
         if hasCompatibleScene, let sceneTexture {
-            if actualLighting {
+            if materialContractActive {
                 hdrOutputs = encodeActualHdrEffects(
                     commandBuffer: commandBuffer,
                     finalTexture: sourceTexture,
@@ -9011,7 +9059,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         let adaptiveState: MTLBuffer?
         if hasHdrScene {
             adaptiveState = hdrOutputs?.adaptiveState
-        } else if actualLighting {
+        } else if materialContractActive {
             // A METALLUM HDR generation must never silently fall through to
             // the Legacy inferred-reconstruction state.
             return -1
@@ -9023,7 +9071,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         }
 
         let presentDepthTexture: MTLTexture?
-        if actualLighting {
+        if materialContractActive {
             presentDepthTexture = nil
         } else if hasHdrScene, let sceneDepthTexture {
             presentDepthTexture = sceneDepthTexture
@@ -9056,7 +9104,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         ))
 
         encoder.setRenderPipelineState(presentPipeline)
-        if actualLighting {
+        if materialContractActive {
             encoder.setFragmentTexture(sourceTexture, index: 0)
             encoder.setFragmentTexture(sceneTexture!, index: 1)
             encoder.setFragmentTexture(hdrOutputs!.bloom, index: 2)
@@ -9075,16 +9123,16 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         var uniforms = MetallumPresentUniforms(
             mode: UInt32(clamping: max(outputMode, 0)),
-            sourceEncoding: actualLighting ? 2 : UInt32(clamping: max(sourceEncoding, 0)),
+            sourceEncoding: materialContractActive ? 2 : UInt32(clamping: max(sourceEncoding, 0)),
             diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
             currentHeadroom: effectiveHeadroom,
-            hdrStrength: actualLighting
+            hdrStrength: materialContractActive
                 ? 0.0
                 : (hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0),
             bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
             sceneAvailable: hasHdrScene ? 1 : 0,
             uiAvailable: hasCompatibleUi ? 1 : 0,
-            semanticAvailable: actualLighting ? 0 : (hasCompatibleSemantic ? 1 : 0)
+            semanticAvailable: materialContractActive ? 0 : (hasCompatibleSemantic ? 1 : 0)
         )
         withUnsafeBytes(of: &uniforms) { bytes in
             encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)

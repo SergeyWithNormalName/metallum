@@ -48,7 +48,7 @@ public final class MetallumMaterialState {
     /**
      * Clamps only the output axis when a startup RGBA8 MainTarget cannot carry
      * actual HDR radiance. A startup FP16 target remains valid for both HDR and
-     * SDR generations; changing the lighting axis is never part of this rule.
+     * SDR generations; changing the lighting model is never part of this rule.
      */
     public static HdrOutputMode resolveCompatibleOutput(final HdrOutputMode requestedOutput) {
         if (requestedOutput == null) {
@@ -60,11 +60,11 @@ public final class MetallumMaterialState {
     }
 
     public static void configure(
-            final boolean improvedLighting,
+            final boolean materialContractRequested,
             final boolean hdrOutputRequested
     ) {
-        requested = improvedLighting;
-        fp16SceneRequested = improvedLighting && hdrOutputRequested;
+        requested = materialContractRequested;
+        fp16SceneRequested = materialContractRequested && hdrOutputRequested;
         generationActive = false;
         MetallumMaterialPreflightGate.reset();
     }
