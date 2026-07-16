@@ -16,7 +16,7 @@ public record RendererGenerationConfig(
         MetalCapabilities capabilities,
         int frameResourceContractVersion
 ) {
-    public static final int CURRENT_FRAME_RESOURCE_CONTRACT_VERSION = 3;
+    public static final int CURRENT_FRAME_RESOURCE_CONTRACT_VERSION = 4;
 
     public enum RejectionReason {
         MATERIAL_CONTRACT_UNAVAILABLE,

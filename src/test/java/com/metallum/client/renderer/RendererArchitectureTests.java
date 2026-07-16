@@ -7,6 +7,8 @@ import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
+import com.metallum.client.lighting.AdvancedLightRegistry;
+import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStateAbi;
@@ -21,6 +23,10 @@ import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Dependency-free renderer architecture contract tests. */
 public final class RendererArchitectureTests {
@@ -36,6 +42,10 @@ public final class RendererArchitectureTests {
         testIndependentOptionalFeatureFallback();
         testRendererConfigDefaults();
         testGenerationManifests();
+        testAdvancedLightingManifest();
+        testAdvancedLightingRuntimeAdmission();
+        testAdvancedLightingAdmissionRace();
+        testAdvancedLightingRegistryHandoffRace();
         testImmutableCapabilitySnapshot();
         testNativeCapabilitySnapshot();
         testInvalidConfigsAreRejected();
@@ -45,7 +55,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -952,6 +962,250 @@ public final class RendererArchitectureTests {
                         && spatialSdr.manifest().passes().stream().anyMatch(pass ->
                         pass.name().equals("metalfx_perceptual_prepare")),
                 "Spatial SDR manifest diverged from its direct-output path");
+    }
+
+    private static void testAdvancedLightingManifest() {
+        MetalCapabilities all = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE,
+                MetalCapabilities.Feature.HDR_OUTPUT,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
+                MetalCapabilities.Feature.ADVANCED_LIGHTING
+        );
+        RendererGenerationPlanner.Extent extent = new RendererGenerationPlanner.Extent(3024, 1964);
+        RendererGenerationPlanner.Plan sdr = RendererGenerationPlanner.plan(
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.SDR,
+                all,
+                extent,
+                extent
+        );
+        RendererGenerationPlanner.Plan hdr = RendererGenerationPlanner.plan(
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                DisplayOutputMode.HDR,
+                all,
+                extent,
+                extent
+        );
+        AdvancedLightingLayout.Budget budget = AdvancedLightingLayout.forGeneration(
+                LightingPreset.BALANCED,
+                extent.width(),
+                extent.height()
+        );
+        Set<String> expectedResources = Set.of(
+                "lighting_upload_ring",
+                "gpu_lights",
+                "cluster_compact_headers",
+                "cluster_membership_masks",
+                "cluster_block_statistics",
+                "lighting_params",
+                "cluster_statistics"
+        );
+        Set<String> expectedPasses = Set.of(
+                "light_upload", "cluster_prepare", "cluster_masks", "direct_lighting"
+        );
+        Set<String> expectedPipelines = Set.of(
+                "cluster_prepare_pso", "cluster_masks_pso", "cluster_count_pso",
+                "cluster_prefix_blocks_pso", "cluster_prefix_groups_pso",
+                "cluster_prefix_add_pso", "cluster_fill_pso",
+                "terrain_direct_lighting_pso", "entity_direct_lighting_pso"
+        );
+        for (RendererGenerationManifest manifest : java.util.List.of(
+                sdr.manifest(), hdr.manifest())) {
+            require(manifest.config().lightingModel() == LightingModel.ADVANCED,
+                    "Advanced manifest fell back to Vanilla");
+            require(manifest.resourceBytes(
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
+                            == budget.totalBytes(),
+                    "Advanced manifest byte count diverged from its layout budget");
+            require(manifest.resources().stream()
+                            .filter(resource -> resource.domain()
+                                    == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
+                            .map(RendererGenerationManifest.Resource::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet())
+                            .equals(expectedResources),
+                    "Advanced manifest resource names diverged from the binding ABI");
+            require(manifest.passes().stream()
+                            .filter(pass -> pass.domain()
+                                    == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
+                            .map(RendererGenerationManifest.Pass::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet())
+                            .equals(expectedPasses)
+                            && manifest.encoderCount(
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 2L
+                            && manifest.pipelines().stream()
+                            .filter(pipeline -> pipeline.domain()
+                                    == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
+                            .map(RendererGenerationManifest.Pipeline::name)
+                            .collect(java.util.stream.Collectors.toUnmodifiableSet())
+                            .equals(expectedPipelines)
+                            && manifest.workQueueCount(
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 2L,
+                    "Advanced manifest work declarations are incomplete");
+        }
+        require(sdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
+                        == hdr.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY),
+                "SDR/HDR changed the clustered-lighting resource layout");
+
+        long[] memoryCaps = {192L << 20, 256L << 20, 384L << 20};
+        LightingPreset[] presets = LightingPreset.values();
+        for (int index = 0; index < presets.length; index++) {
+            AdvancedLightingLayout.Budget candidate = AdvancedLightingLayout.forGeneration(
+                    presets[index], extent.width(), extent.height());
+            require(candidate.totalBytes() <= memoryCaps[index],
+                    "L3 layout exceeded the preset persistent-memory budget");
+            require(candidate.indexCapacity() <= Math.multiplyExact(
+                            candidate.clusterCount(),
+                            AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER),
+                    "L3 index capacity exceeds the bounded per-cluster contract");
+        }
+    }
+
+    private static void testAdvancedLightingRuntimeAdmission() {
+        AdvancedLightingRuntime.reset();
+        long initialEpoch = AdvancedLightingRuntime.admission().epoch();
+        require(!AdvancedLightingRuntime.shouldCollect()
+                        && !AdvancedLightingRuntime.admission().ready()
+                        && !AdvancedLightingRuntime.isActive(),
+                "Advanced runtime did not reset fail-closed");
+        AdvancedLightingRuntime.configureRequested(true);
+        require(AdvancedLightingRuntime.shouldCollect()
+                        && !AdvancedLightingRuntime.admission().ready(),
+                "Advanced collection did not follow the request before admission");
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+        require(AdvancedLightingRuntime.admission().ready()
+                        && AdvancedLightingRuntime.admission().epoch() > initialEpoch,
+                "Advanced runtime rejected complete native/shader admission");
+        AdvancedLightingRuntime.admitGeneration(true);
+        require(AdvancedLightingRuntime.isActive(),
+                "Advanced runtime did not publish the admitted generation");
+        AdvancedLightingRuntime.reportRegistryAdmission(false, "synthetic registry failure");
+        require(!AdvancedLightingRuntime.isActive()
+                        && !AdvancedLightingRuntime.admission().ready()
+                        && !AdvancedLightingRuntime.shouldCollect(),
+                "Advanced runtime remained active after registry admission failure");
+        AdvancedLightingRuntime.reset();
+        AdvancedLightingRuntime.configureRequested(true);
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+        AdvancedLightingRuntime.admitGeneration(true);
+        AdvancedLightingRuntime.reportShaderAdmission(false, "synthetic shader failure");
+        require(!AdvancedLightingRuntime.isActive()
+                        && !AdvancedLightingRuntime.admission().ready(),
+                "Advanced runtime remained active after shader admission failure");
+        AdvancedLightingRuntime.configureRequested(false);
+        require(!AdvancedLightingRuntime.shouldCollect(),
+                "Advanced runtime kept collecting after the request was disabled");
+        AdvancedLightingRuntime.reset();
+    }
+
+    private static void testAdvancedLightingAdmissionRace() {
+        AdvancedLightingRuntime.reset();
+        AdvancedLightingRuntime.configureRequested(true);
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+
+        CountDownLatch snapshotCaptured = new CountDownLatch(1);
+        CountDownLatch failurePublished = new CountDownLatch(1);
+        AtomicBoolean committed = new AtomicBoolean(true);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread generationThread = new Thread(() -> {
+            try {
+                AdvancedLightingRuntime.Admission snapshot = AdvancedLightingRuntime.admission();
+                require(snapshot.ready(), "race test could not capture a ready admission");
+                snapshotCaptured.countDown();
+                require(failurePublished.await(5L, TimeUnit.SECONDS),
+                        "race test did not publish the registry failure");
+                committed.set(AdvancedLightingRuntime.tryAdmitGeneration(snapshot.epoch(), true));
+            } catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, "metallum-l3-admission-race");
+        generationThread.start();
+        await(snapshotCaptured, "race test did not capture its admission snapshot");
+        AdvancedLightRegistry.global().failClosed("synthetic concurrent registry failure", null);
+        failurePublished.countDown();
+        join(generationThread, "race test generation thread did not finish");
+
+        require(failure.get() == null, "atomic admission race threw: " + failure.get());
+        require(!committed.get()
+                        && !AdvancedLightingRuntime.isActive()
+                        && !AdvancedLightingRuntime.admission().ready(),
+                "stale admission committed after failClosed");
+        AdvancedLightingRuntime.reset();
+    }
+
+    private static void testAdvancedLightingRegistryHandoffRace() {
+        AdvancedLightingRuntime.reset();
+        AdvancedLightingRuntime.configureRequested(true);
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+        AdvancedLightingRuntime.Admission snapshot = AdvancedLightingRuntime.admission();
+        require(snapshot.ready(), "handoff race could not capture a ready admission");
+
+        AdvancedLightRegistry registry = AdvancedLightRegistry.global();
+        AtomicReference<Throwable> workerFailure = new AtomicReference<>();
+        Thread failureThread = new Thread(() -> {
+            try {
+                registry.failClosed("synthetic registry handoff failure", null);
+            } catch (Throwable throwable) {
+                workerFailure.set(throwable);
+            }
+        }, "metallum-l3-registry-handoff-race");
+
+        synchronized (AdvancedLightingRuntime.class) {
+            failureThread.start();
+            long deadline = System.nanoTime() + 5_000_000_000L;
+            while (registry.readiness().healthy()
+                    && failureThread.isAlive()
+                    && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            require(!registry.readiness().healthy() && failureThread.isAlive(),
+                    "registry failure did not reach the Registry-to-Runtime handoff");
+            require(registry.snapshotForFrameIfHealthy(0.0, 0.0, 0.0, 8) == null,
+                    "unhealthy registry published an empty Advanced frame snapshot");
+            require(!AdvancedLightingRuntime.tryAdmitGeneration(snapshot.epoch(), true)
+                            && !AdvancedLightingRuntime.isActive(),
+                    "registry failure committed inside the Runtime handoff window");
+        }
+        join(failureThread, "registry handoff failure worker did not finish");
+        require(workerFailure.get() == null
+                        && !AdvancedLightingRuntime.admission().ready()
+                        && !AdvancedLightingRuntime.isActive(),
+                "registry handoff failure did not finish fail-closed: " + workerFailure.get());
+        AdvancedLightingRuntime.reset();
+    }
+
+    private static void await(final CountDownLatch latch, final String failure) {
+        try {
+            require(latch.await(5L, TimeUnit.SECONDS), failure);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(failure, exception);
+        }
+    }
+
+    private static void join(final Thread thread, final String failure) {
+        try {
+            thread.join(5_000L);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(failure, exception);
+        }
+        require(!thread.isAlive(), failure);
     }
 
     private static Set<String> resourceNames(final RendererGenerationManifest manifest) {

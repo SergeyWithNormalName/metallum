@@ -4,6 +4,9 @@ import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
+import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -115,6 +118,30 @@ final class MetalCrossShaderCompiler {
                                         + ": " + failureMessage(exception)
                         );
                     }
+                }
+            }
+
+            if (AdvancedLightingPreflightGate.shouldCompileAdvancedVariants()
+                    && isAdvancedLightingPipeline(pipeline)) {
+                try {
+                    MetalCompiledRenderPipeline.ShaderVariantSource advanced = compileVariant(
+                            device,
+                            pipeline,
+                            shaderSource,
+                            HdrShaderFlavor.METALLUM_ADVANCED
+                    );
+                    validateVariantParity(
+                            pipeline,
+                            HdrShaderFlavor.METALLUM_ADVANCED,
+                            legacy,
+                            advanced
+                    );
+                    variants.put(HdrShaderFlavor.METALLUM_ADVANCED, advanced);
+                } catch (ShaderCompileException | RuntimeException exception) {
+                    AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                            "failed to compile METALLUM_ADVANCED for " + pipeline.getLocation()
+                                    + ": " + failureMessage(exception)
+                    );
                 }
             }
 
@@ -263,6 +290,7 @@ final class MetalCrossShaderCompiler {
         List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
         addToBindGroup(layoutEntries, vertexSpirv, pipeline);
         addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
+        canonicalizeLayoutEntries(layoutEntries);
         List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
         vertexSpirv.rebind(
@@ -302,14 +330,20 @@ final class MetalCrossShaderCompiler {
         if (!legacy.resources().equals(variant.resources())) {
             throw new IllegalStateException(
                     "HDR shader variants changed resource layout for pipeline " + pipeline.getLocation()
+                            + ": legacy=" + legacy.resources()
+                            + ", " + flavor + "=" + variant.resources()
             );
         }
-        if (flavor == HdrShaderFlavor.METALLUM) {
+        if (flavor == HdrShaderFlavor.METALLUM
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED) {
             if (variant.semanticOutput()) {
                 throw new IllegalStateException(
-                        "METALLUM material variant retained a semantic attachment for pipeline "
+                        flavor + " variant retained a semantic attachment for pipeline "
                                 + pipeline.getLocation()
                 );
+            }
+            if (flavor == HdrShaderFlavor.METALLUM_ADVANCED) {
+                validateAdvancedLightingBindings(pipeline, variant);
             }
         } else if (flavor != HdrShaderFlavor.LEGACY_HDR_SEMANTIC
                 && flavor != HdrShaderFlavor.SCENE_RASTER_LINEAR
@@ -319,6 +353,68 @@ final class MetalCrossShaderCompiler {
                     "HDR shader variants changed semantic attachment output for pipeline " + pipeline.getLocation()
             );
         }
+    }
+
+    /**
+     * Shader compilation is allowed to enumerate otherwise-identical resources in a different
+     * order after source patching. Rebinding must use a canonical order so every flavor retains
+     * the same numeric Metal layout.
+     */
+    static void canonicalizeLayoutEntries(final List<VulkanBindGroupLayout.Entry> entries) {
+        entries.sort(Comparator
+                .comparing((VulkanBindGroupLayout.Entry entry) -> entry.type().ordinal())
+                .thenComparing(VulkanBindGroupLayout.Entry::name));
+    }
+
+    private static void validateAdvancedLightingBindings(
+            final RenderPipeline pipeline,
+            final MetalCompiledRenderPipeline.ShaderVariantSource variant
+    ) {
+        for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
+            if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
+                    && AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())) {
+                throw new IllegalStateException(
+                        "Advanced lighting fragment slot " + binding.bindingIndex()
+                                + " collides with pipeline resource " + binding.name()
+                                + " for " + pipeline.getLocation()
+                );
+            }
+        }
+        for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
+            String marker = "[[buffer(" + slot + ")]]";
+            if (countOccurrences(variant.fragmentMsl(), marker) != 1
+                    || variant.vertexMsl().contains(marker)) {
+                throw new IllegalStateException(
+                        "Advanced lighting fragment buffer slot " + slot
+                                + " is missing, repeated, or visible to the vertex stage for pipeline "
+                                + pipeline.getLocation()
+                );
+            }
+        }
+    }
+
+    private static int countOccurrences(final String source, final String marker) {
+        int count = 0;
+        int cursor = 0;
+        while ((cursor = source.indexOf(marker, cursor)) >= 0) {
+            count++;
+            cursor += marker.length();
+        }
+        return count;
+    }
+
+    private static boolean isAdvancedLightingPipeline(final RenderPipeline pipeline) {
+        var vertex = pipeline.getVertexShader();
+        var fragment = pipeline.getFragmentShader();
+        boolean sodiumTerrain = vertex.getNamespace().equals("sodium")
+                && fragment.getNamespace().equals("sodium")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
+        boolean vanillaEntity = vertex.getNamespace().equals("minecraft")
+                && fragment.getNamespace().equals("minecraft")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_ENTITY_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_ENTITY_PATH);
+        return sodiumTerrain || vanillaEntity;
     }
 
     private static HdrPipelinePolicy.Role classifyPipeline(final RenderPipeline pipeline) {

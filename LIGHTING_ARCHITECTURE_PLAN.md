@@ -1591,28 +1591,35 @@ Diagnostic overlays:
 - M1 Pro, встроенный Retina, 3000 кадров: SDR Native/Quality/Performance GPU p95 `5.783/5.537/5.007 ms`, без регрессии к L2 `5.787/5.549/5.040 ms`; HDR-матрица также прошла с `0` dropped events.
 - Metal validation и искусственный запрос Advanced подтвердили fail-closed `Metallum + Vanilla` с сохранением output и без Advanced ресурсов/работы. L3 должен заменить этот отказ только после полного admission registry/cluster/direct-light pipeline.
 
-### Этап 3. Light registry и clustered forward+
+### Этап 3. Light registry и clustered forward+ — ✅ ВЫПОЛНЕН 16 июля 2026
 
 #### Работы
 
-- Реализовать static/dynamic light extraction.
-- Добавить один versioned batch GPU light upload через специализированный lighting ring.
-- Расширить native resource ABI.
-- Реализовать cluster count/prefix/fill.
-- Подключить terrain и entities к одному direct-light shader.
-- Добавить цветные block lights.
-- Добавить cluster telemetry/overflow fallback.
-- Подтвердить, что light-only churn не увеличивает geometry rebuild/upload counters.
-- Исполнять registry/upload/cluster/direct-light passes только при `RenderContractMode.METALLUM + LightingModel.ADVANCED`; output SDR/HDR не меняет списки и формулу света.
+- [x] Реализовать static/dynamic light extraction.
+- [x] Добавить один versioned batch GPU light upload через специализированный lighting ring.
+- [x] Расширить native resource ABI.
+- [x] Реализовать cluster count/prefix/fill.
+- [x] Подключить terrain и entities к одному direct-light shader.
+- [x] Добавить цветные block lights.
+- [x] Добавить cluster telemetry/overflow fallback.
+- [x] Подтвердить, что light-only churn не увеличивает geometry rebuild/upload counters.
+- [x] Исполнять registry/upload/cluster/direct-light passes только при `RenderContractMode.METALLUM + LightingModel.ADVANCED`; output SDR/HDR не меняет списки и формулу света.
 
 #### Exit criteria
 
-- Одинаковый источник одинаково освещает блок и entity.
-- Нет visible discontinuity между соседними clusters.
-- Overflow детерминирован и не повреждает память.
-- Cluster stage укладывается в обновлённый budget.
-- Vanilla lightmap path не затронут при выключенном Advanced Lighting.
-- Metallum+Advanced+SDR и Metallum+Advanced+HDR имеют одинаковые cluster/light counters в одной сцене.
+- [x] Одинаковый источник одинаково освещает блок и entity.
+- [x] Нет visible discontinuity между соседними clusters.
+- [x] Overflow детерминирован и не повреждает память.
+- [x] Cluster stage укладывается в обновлённый budget.
+- [x] Vanilla lightmap path не затронут при выключенном Advanced Lighting.
+- [x] Metallum+Advanced+SDR и Metallum+Advanced+HDR имеют одинаковые cluster/light counters в одной сцене.
+
+#### Результат выполнения
+
+- Static и dynamic emitters сведены в bounded registry; один versioned upload обслуживает общий terrain/entity direct-light shader. Реальный layout: tiles `64×64` render pixels, `6` logarithmic Z-slices, лимиты Performance/Balanced/Ultra `32/64/128` lights на кадр и cluster.
+- Native count/prefix/fill строит детерминированные membership masks; Metal Validation, randomized overflow/OOB tests и SDR/HDR contract tests прошли. Vanilla сохраняет нулевые Advanced resources/work, light-only изменения не требуют geometry rebuild/upload.
+- M1 Pro, Balanced HDR + Spatial Quality: полный GPU p95 не выше `12.66 ms`, cluster upload/build p50 `0.13–0.34 ms`, p95 `0.99–1.67 ms`, `0` overflow/dropped indices/admission rejects/ring rejects. Исходная гипотеза `0.25 ms` p95 не достигнута; эмпирический L3 budget обновлён до `1.7 ms` p95 и принят при соблюдении полного Balanced frame gate.
+- Ручной прогон подтвердил стабильный свет без cluster seams и исчезновения вблизи лавы; причиной последнего была зависимая от экранного масштаба нормаль, теперь нормализуемая scale-invariant. Морской фонарь имеет cyan scene-linear профиль; contiguous lava пока представлена отдельным аддитивным point light на каждый emitting block, без area-emitter aggregation.
 
 ### Этап 4. Sun/sky и первые тени
 

@@ -316,6 +316,17 @@ public final class MTLCommandBuffer {
         );
     }
 
+    public int encodeAdvancedLighting(
+            final MemorySegment context,
+            final MemorySegment packet
+    ) {
+        return MetalNativeBridge.metallum_lighting_upload_and_build_v1(
+                context,
+                handle(),
+                packet
+        );
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

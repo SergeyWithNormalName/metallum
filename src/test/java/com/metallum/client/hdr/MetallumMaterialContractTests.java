@@ -1,5 +1,7 @@
 package com.metallum.client.hdr;
 
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderTests;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -22,8 +24,9 @@ public final class MetallumMaterialContractTests {
         testNumericMaterialContracts();
         testLoadingUiContinuity();
         testFailClosedBehavior(sources);
+        AdvancedDirectLightingShaderTests.runAll();
         System.out.println(
-                "PASS L2 material adapters cover Minecraft 26.2 and Sodium 0.9.1 actual shader resources"
+                "PASS L2/L3 material and direct-light adapters cover Minecraft 26.2 and Sodium 0.9.1 actual shader resources"
         );
     }
 

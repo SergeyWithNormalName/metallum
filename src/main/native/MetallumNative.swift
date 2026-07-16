@@ -30,6 +30,11 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     case clear
     case sodiumLightPatch
     case temporalDiagnostics
+    case clusterBuild
+
+    static var startupMandatory: [Self] {
+        allCases.filter { $0 != .clusterBuild }
+    }
 
     var sourceFileName: String {
         switch self {
@@ -38,6 +43,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .clear: "MetallumClear.metal"
         case .sodiumLightPatch: "MetallumSodiumLightPatch.metal"
         case .temporalDiagnostics: "MetallumTemporalDiagnostics.metal"
+        case .clusterBuild: "MetallumClusterBuild.metal"
         }
     }
 
@@ -84,6 +90,16 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
                 "metallum_temporal_diagnostic_vs",
                 "metallum_temporal_diagnostic_fs",
                 "metallum_motion_vector_validate"
+            ]
+        case .clusterBuild:
+            [
+                "metallum_cluster_prepare_v1",
+                "metallum_cluster_count_v1",
+                "metallum_cluster_masks_v1",
+                "metallum_cluster_prefix_blocks_v1",
+                "metallum_cluster_prefix_groups_v1",
+                "metallum_cluster_prefix_add_v1",
+                "metallum_cluster_fill_v1"
             ]
         }
     }
@@ -956,6 +972,552 @@ private final class MetallumStaticGeometryHeapRegistry: @unchecked Sendable {
     }
 }
 
+private enum MetallumLightingAbiV1 {
+    static let version: UInt32 = 1
+    static let batchMagic: UInt32 = 0x31424c4d // "MLB1" in little-endian memory.
+    static let uploadHeaderBytes = 64
+    static let gpuLightBytes = 48
+    static let clusterHeaderBytes = 8
+    static let clusterScratchBytes = 32
+    static let lightIndexBytes = 4
+    static let paramsBytes = 256
+    static let statisticsBytes = 256
+    static let completedStatsBytes = 128
+    static let ringSlots = 3
+    static let clusterCap: UInt32 = 128
+    static let tileSize: UInt32 = 64
+    static let depthSlices: UInt32 = 6
+    static let prefixBlockSize: UInt32 = 256
+    static let blockStatisticsBytes = 160
+    static let guardBytes = 64
+    static let guardValue: UInt8 = 0xa5
+    static let orderedBatchFlag: UInt32 = 1
+    static let clusterMaskBatchFlag: UInt32 = 1 << 1
+    static let knownBatchFlags = orderedBatchFlag | clusterMaskBatchFlag
+    static let maximumLights: UInt32 = 4_096
+    static let maximumClusters: UInt32 = 1_048_576
+    static let maximumIndices: UInt32 = 8_000_000
+    static let statisticsSampleInterval: UInt64 = 32
+    static let validateEveryFrame: Bool = {
+        for name in ["MTL_DEBUG_LAYER", "MTL_SHADER_VALIDATION"] {
+            if let value = getenv(name), strcmp(value, "1") == 0 {
+                return true
+            }
+        }
+        return false
+    }()
+}
+
+private struct MetallumLightingParamsV1 {
+    var viewRotation: simd_float4x4
+    var projection: simd_float4x4
+    var gridAndLightCount: SIMD4<UInt32>
+    var extentAndClusterCap: SIMD4<UInt32>
+    var depth: SIMD4<Float>
+    var frameIdAndGeneration: SIMD4<UInt32>
+    var capacitiesAndFlags: SIMD4<UInt32>
+    var reserved0: SIMD4<UInt32>
+    var reserved1: SIMD4<UInt32>
+    var reserved2: SIMD4<UInt32>
+}
+
+private final class MetallumLightingPipelines {
+    let prepare: MTLComputePipelineState
+    let count: MTLComputePipelineState
+    let masks: MTLComputePipelineState
+    let prefixBlocks: MTLComputePipelineState
+    let prefixGroups: MTLComputePipelineState
+    let prefixAdd: MTLComputePipelineState
+    let fill: MTLComputePipelineState
+
+    init(
+        prepare: MTLComputePipelineState,
+        count: MTLComputePipelineState,
+        masks: MTLComputePipelineState,
+        prefixBlocks: MTLComputePipelineState,
+        prefixGroups: MTLComputePipelineState,
+        prefixAdd: MTLComputePipelineState,
+        fill: MTLComputePipelineState
+    ) {
+        self.prepare = prepare
+        self.count = count
+        self.masks = masks
+        self.prefixBlocks = prefixBlocks
+        self.prefixGroups = prefixGroups
+        self.prefixAdd = prefixAdd
+        self.fill = fill
+    }
+}
+
+private final class MetallumLightingRingSlot {
+    let staging: MTLBuffer
+    var busy = false
+
+    init(staging: MTLBuffer) {
+        self.staging = staging
+    }
+}
+
+private struct MetallumLightingCompletedStatsV1 {
+    let generation: UInt64
+    let frameId: UInt64
+    let lightCount: UInt32
+    let clusterCount: UInt32
+    let acceptedIndices: UInt32
+    let requestedIndices: UInt32
+    let overflowClusters: UInt32
+    let perClusterDrops: UInt32
+    let indexCapacityDrops: UInt32
+    let admissionRejectedLights: UInt32
+    let occupancyP50: UInt32
+    let occupancyP95: UInt32
+    let occupancyP99: UInt32
+    let maximumOccupancy: UInt32
+}
+
+private struct MetallumLightingCpuSnapshotV1 {
+    let lastCompleted: MetallumLightingCompletedStatsV1?
+    let ringHighWater: UInt32
+    let ringBusyRejects: UInt32
+    let uploadCalls: UInt64
+    let completedCalls: UInt64
+    let rejectedCalls: UInt64
+}
+
+private struct MetallumLightingTelemetrySnapshotV1 {
+    let active: Bool
+    let generation: UInt64
+    let frameId: UInt64
+    let lightCount: UInt32
+    let clusterCount: UInt32
+    let acceptedIndices: UInt32
+    let requestedIndices: UInt32
+    let overflowClusters: UInt32
+    let droppedIndices: UInt32
+    let indexCapacityDrops: UInt32
+    let admissionRejectedLights: UInt32
+    let occupancyP50: UInt32
+    let occupancyP95: UInt32
+    let occupancyP99: UInt32
+    let maximumOccupancy: UInt32
+    let ringHighWater: UInt32
+    let ringBusyRejects: UInt32
+
+    var report: [String: Any] {
+        [
+            "active": active,
+            "generation": generation,
+            "frame_id": frameId,
+            "light_count": lightCount,
+            "cluster_count": clusterCount,
+            "cluster_accepted_indices": acceptedIndices,
+            "cluster_requested_indices": requestedIndices,
+            "cluster_overflow_clusters": overflowClusters,
+            "cluster_dropped_indices": droppedIndices,
+            "cluster_index_capacity_drops": indexCapacityDrops,
+            "cluster_admission_rejected_lights": admissionRejectedLights,
+            "cluster_occupancy_p50": occupancyP50,
+            "cluster_occupancy_p95": occupancyP95,
+            "cluster_occupancy_p99": occupancyP99,
+            "cluster_occupancy_max": maximumOccupancy,
+            "lighting_ring_high_water": ringHighWater,
+            "lighting_ring_busy_rejects": ringBusyRejects,
+            "statistics_sample_interval": active
+                ? MetallumLightingAbiV1.statisticsSampleInterval : 0,
+            "output_independent": true
+        ]
+    }
+}
+
+private final class MetallumLightingTelemetryStore: @unchecked Sendable {
+    static let shared = MetallumLightingTelemetryStore()
+    private let lock = NSLock()
+    private var nextToken: UInt64 = 1
+    private var latestToken: UInt64 = 0
+    private var latest = MetallumLightingTelemetrySnapshotV1(
+        active: false,
+        generation: 0,
+        frameId: 0,
+        lightCount: 0,
+        clusterCount: 0,
+        acceptedIndices: 0,
+        requestedIndices: 0,
+        overflowClusters: 0,
+        droppedIndices: 0,
+        indexCapacityDrops: 0,
+        admissionRejectedLights: 0,
+        occupancyP50: 0,
+        occupancyP95: 0,
+        occupancyP99: 0,
+        maximumOccupancy: 0,
+        ringHighWater: 0,
+        ringBusyRejects: 0
+    )
+
+    func activate(generation: UInt64, clusterCount: UInt32) -> UInt64 {
+        lock.lock()
+        let token = nextToken
+        nextToken &+= 1
+        latestToken = token
+        latest = MetallumLightingTelemetrySnapshotV1(
+            active: true,
+            generation: generation,
+            frameId: 0,
+            lightCount: 0,
+            clusterCount: clusterCount,
+            acceptedIndices: 0,
+            requestedIndices: 0,
+            overflowClusters: 0,
+            droppedIndices: 0,
+            indexCapacityDrops: 0,
+            admissionRejectedLights: 0,
+            occupancyP50: 0,
+            occupancyP95: 0,
+            occupancyP99: 0,
+            maximumOccupancy: 0,
+            ringHighWater: 0,
+            ringBusyRejects: 0
+        )
+        lock.unlock()
+        return token
+    }
+
+    func publish(
+        token: UInt64,
+        completed: MetallumLightingCompletedStatsV1,
+        ringHighWater: UInt32,
+        ringBusyRejects: UInt32
+    ) {
+        lock.lock()
+        if latestToken == token,
+           latest.active,
+           latest.generation == completed.generation,
+           completed.frameId >= latest.frameId {
+            latest = MetallumLightingTelemetrySnapshotV1(
+                active: true,
+                generation: completed.generation,
+                frameId: completed.frameId,
+                lightCount: completed.lightCount,
+                clusterCount: completed.clusterCount,
+                acceptedIndices: completed.acceptedIndices,
+                requestedIndices: completed.requestedIndices,
+                overflowClusters: completed.overflowClusters,
+                droppedIndices: completed.perClusterDrops &+ completed.indexCapacityDrops,
+                indexCapacityDrops: completed.indexCapacityDrops,
+                admissionRejectedLights: completed.admissionRejectedLights,
+                occupancyP50: completed.occupancyP50,
+                occupancyP95: completed.occupancyP95,
+                occupancyP99: completed.occupancyP99,
+                maximumOccupancy: completed.maximumOccupancy,
+                ringHighWater: ringHighWater,
+                ringBusyRejects: ringBusyRejects
+            )
+        }
+        lock.unlock()
+    }
+
+    func deactivate(token: UInt64) {
+        lock.lock()
+        if latestToken == token {
+            latestToken = 0
+            latest = MetallumLightingTelemetrySnapshotV1(
+                active: false,
+                generation: 0,
+                frameId: 0,
+                lightCount: 0,
+                clusterCount: 0,
+                acceptedIndices: 0,
+                requestedIndices: 0,
+                overflowClusters: 0,
+                droppedIndices: 0,
+                indexCapacityDrops: 0,
+                admissionRejectedLights: 0,
+                occupancyP50: 0,
+                occupancyP95: 0,
+                occupancyP99: 0,
+                maximumOccupancy: 0,
+                ringHighWater: 0,
+                ringBusyRejects: 0
+            )
+        }
+        lock.unlock()
+    }
+
+    func snapshot() -> MetallumLightingTelemetrySnapshotV1 {
+        lock.lock()
+        let value = latest
+        lock.unlock()
+        return value
+    }
+}
+
+private final class MetallumLightingContext: @unchecked Sendable {
+    let device: MTLDevice
+    let generation: UInt64
+    let telemetryToken: UInt64
+    let maxLights: UInt32
+    let indexCapacity: UInt32
+    let clustersX: UInt32
+    let clustersY: UInt32
+    let clustersZ: UInt32
+    let clusterCount: UInt32
+    let pipelines: MetallumLightingPipelines
+    let gpuLights: MTLBuffer
+    let clusterHeaders: MTLBuffer
+    let clusterScratch: MTLBuffer
+    let lightIndices: MTLBuffer
+    let params: MTLBuffer
+    let statistics: MTLBuffer
+    let slots: [MetallumLightingRingSlot]
+
+    private let lock = NSLock()
+    private var queueAddress: UInt?
+    private var activeSlots: UInt32 = 0
+    private var ringHighWater: UInt32 = 0
+    private var ringBusyRejects: UInt32 = 0
+    private var uploadCalls: UInt64 = 0
+    private var completedCalls: UInt64 = 0
+    private var rejectedCalls: UInt64 = 0
+    private var lastCompleted: MetallumLightingCompletedStatsV1?
+    private var guardRegionsInitialized = false
+    private var retired = false
+
+    init(
+        device: MTLDevice,
+        generation: UInt64,
+        telemetryToken: UInt64,
+        maxLights: UInt32,
+        indexCapacity: UInt32,
+        clustersX: UInt32,
+        clustersY: UInt32,
+        clustersZ: UInt32,
+        clusterCount: UInt32,
+        pipelines: MetallumLightingPipelines,
+        gpuLights: MTLBuffer,
+        clusterHeaders: MTLBuffer,
+        clusterScratch: MTLBuffer,
+        lightIndices: MTLBuffer,
+        params: MTLBuffer,
+        statistics: MTLBuffer,
+        slots: [MetallumLightingRingSlot]
+    ) {
+        self.device = device
+        self.generation = generation
+        self.telemetryToken = telemetryToken
+        self.maxLights = maxLights
+        self.indexCapacity = indexCapacity
+        self.clustersX = clustersX
+        self.clustersY = clustersY
+        self.clustersZ = clustersZ
+        self.clusterCount = clusterCount
+        self.pipelines = pipelines
+        self.gpuLights = gpuLights
+        self.clusterHeaders = clusterHeaders
+        self.clusterScratch = clusterScratch
+        self.lightIndices = lightIndices
+        self.params = params
+        self.statistics = statistics
+        self.slots = slots
+    }
+
+    func noteUploadCall() {
+        lock.lock()
+        uploadCalls &+= 1
+        lock.unlock()
+    }
+
+    func noteRejectedCall() {
+        lock.lock()
+        rejectedCalls &+= 1
+        lock.unlock()
+    }
+
+    func claimGuardInitialization() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if guardRegionsInitialized {
+            return false
+        }
+        guardRegionsInitialized = true
+        return true
+    }
+
+    func shouldReadbackStatistics(frameId: UInt64) -> Bool {
+        if MetallumLightingAbiV1.validateEveryFrame {
+            return true
+        }
+        lock.lock()
+        let needsFirstSample = lastCompleted == nil
+        lock.unlock()
+        return needsFirstSample
+            || frameId.isMultiple(of: MetallumLightingAbiV1.statisticsSampleInterval)
+    }
+
+    func reserve(slot index: Int, queue: MTLCommandQueue) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        let candidateQueueAddress = objectAddress(queue)
+        if let queueAddress, queueAddress != candidateQueueAddress {
+            rejectedCalls &+= 1
+            return -10
+        }
+        if slots[index].busy {
+            ringBusyRejects &+= 1
+            rejectedCalls &+= 1
+            return -12
+        }
+        queueAddress = candidateQueueAddress
+        slots[index].busy = true
+        activeSlots &+= 1
+        ringHighWater = max(ringHighWater, activeSlots)
+        return 1
+    }
+
+    func cancel(slot index: Int) {
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+        }
+        rejectedCalls &+= 1
+        lock.unlock()
+    }
+
+    func rejectAfterEncoding(slot index: Int, commandBuffer: MTLCommandBuffer) {
+        lock.lock()
+        rejectedCalls &+= 1
+        lock.unlock()
+        // Encoded upload work can still consume this slot if the caller commits the failed
+        // frame. Keep it reserved until completion instead of exposing staging bytes to reuse.
+        commandBuffer.addCompletedHandler { [self] _ in
+            lock.lock()
+            if slots[index].busy {
+                slots[index].busy = false
+                activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+            }
+            lock.unlock()
+        }
+    }
+
+    func complete(
+        slot index: Int,
+        commandBufferSucceeded: Bool,
+        statisticsAvailable: Bool
+    ) {
+        var completed: MetallumLightingCompletedStatsV1?
+        if commandBufferSucceeded && statisticsAvailable {
+            let values = slots[index].staging.contents().bindMemory(
+                to: UInt32.self,
+                capacity: MetallumLightingAbiV1.statisticsBytes / MemoryLayout<UInt32>.stride
+            )
+            if values[0] == MetallumLightingAbiV1.version {
+                let clusterCount = values[2]
+                let emptyClusters = min(values[14], clusterCount)
+                let histogram = (0..<32).map { values[32 + $0] }
+                let maximumOccupancy = values[15]
+                completed = MetallumLightingCompletedStatsV1(
+                    generation: UInt64(values[10]) | UInt64(values[11]) << 32,
+                    frameId: UInt64(values[12]) | UInt64(values[13]) << 32,
+                    lightCount: values[1],
+                    clusterCount: clusterCount,
+                    acceptedIndices: values[3],
+                    requestedIndices: values[4],
+                    overflowClusters: values[5],
+                    perClusterDrops: values[6],
+                    indexCapacityDrops: values[7],
+                    admissionRejectedLights: values[8],
+                    occupancyP50: min(
+                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 50),
+                        maximumOccupancy
+                    ),
+                    occupancyP95: min(
+                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 95),
+                        maximumOccupancy
+                    ),
+                    occupancyP99: min(
+                        Self.quantile(histogram, emptyClusters: emptyClusters, percentile: 99),
+                        maximumOccupancy
+                    ),
+                    maximumOccupancy: maximumOccupancy
+                )
+            }
+        }
+
+        var publish: (MetallumLightingCompletedStatsV1, UInt32, UInt32)?
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+        }
+        if let completed {
+            completedCalls &+= 1
+            if lastCompleted == nil || completed.frameId >= lastCompleted!.frameId {
+                lastCompleted = completed
+            }
+            if !retired {
+                publish = (completed, ringHighWater, ringBusyRejects)
+            }
+        } else if commandBufferSucceeded && !statisticsAvailable {
+            completedCalls &+= 1
+        } else {
+            rejectedCalls &+= 1
+        }
+        lock.unlock()
+        if let publish {
+            MetallumLightingTelemetryStore.shared.publish(
+                token: telemetryToken,
+                completed: publish.0,
+                ringHighWater: publish.1,
+                ringBusyRejects: publish.2
+            )
+        }
+    }
+
+    func retire() {
+        lock.lock()
+        retired = true
+        lock.unlock()
+        MetallumLightingTelemetryStore.shared.deactivate(token: telemetryToken)
+    }
+
+    func snapshot() -> MetallumLightingCpuSnapshotV1 {
+        lock.lock()
+        defer { lock.unlock() }
+        return MetallumLightingCpuSnapshotV1(
+            lastCompleted: lastCompleted,
+            ringHighWater: ringHighWater,
+            ringBusyRejects: ringBusyRejects,
+            uploadCalls: uploadCalls,
+            completedCalls: completedCalls,
+            rejectedCalls: rejectedCalls
+        )
+    }
+
+    private static func quantile(
+        _ histogram: [UInt32],
+        emptyClusters: UInt32,
+        percentile: UInt32
+    ) -> UInt32 {
+        let total = histogram.reduce(UInt64(0)) { $0 + UInt64($1) }
+        guard total > 0 else { return 0 }
+        let target = max(UInt64(1), (total * UInt64(percentile) + 99) / 100)
+        if target <= UInt64(emptyClusters) {
+            return 0
+        }
+        var cumulative = UInt64(0)
+        for (bin, count) in histogram.enumerated() {
+            cumulative += UInt64(count)
+            if cumulative >= target {
+                if bin == 0 {
+                    return 0
+                }
+                return bin == histogram.count - 1 ? 128 : UInt32(bin * 4)
+            }
+        }
+        return 128
+    }
+}
+
 private struct MetallumHdrOutputs {
     let emission: MTLTexture
     let bloom: MTLTexture
@@ -983,6 +1545,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case ui = 10
     case present = 11
     case actualHdrDisplay = 12
+    case lightUploadClusterBuild = 13
 
     var reportName: String {
         switch self {
@@ -999,6 +1562,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .ui: "UI draw"
         case .present: "present"
         case .actualHdrDisplay: "actual-radiance HDR display mapping"
+        case .lightUploadClusterBuild: "light upload + cluster build"
         }
     }
 
@@ -1668,6 +2232,7 @@ private struct MetallumGpuTimingReportWindow {
     let stageTotals: [Double]
     let stageMaximums: [Double]
     let stageCounts: [Int]
+    let stageSamples: [[Double]]
     let waitNanoseconds: [Double]
     let maximumWaitNanoseconds: [Double]
     let waitCounts: [Int]
@@ -1690,6 +2255,10 @@ private final class MetallumGpuTimingWindow {
     var stageTotals = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
     var stageMaximums = Array(repeating: 0.0, count: MetallumGpuTimingStage.allCases.count)
     var stageCounts = Array(repeating: 0, count: MetallumGpuTimingStage.allCases.count)
+    var stageSamples = Array(
+        repeating: [Double](),
+        count: MetallumGpuTimingStage.allCases.count
+    )
     var droppedEvents = 0
     var presentation: MetallumPresentationTelemetry?
 
@@ -1713,6 +2282,7 @@ private final class MetallumGpuTimingWindow {
             stageTotals: stageTotals,
             stageMaximums: stageMaximums,
             stageCounts: stageCounts,
+            stageSamples: stageSamples,
             waitNanoseconds: cpuWaits?.nanoseconds
                 ?? Array(repeating: 0.0, count: MetallumCpuWaitKind.allCases.count),
             maximumWaitNanoseconds: cpuWaits?.maximumNanoseconds
@@ -1733,6 +2303,7 @@ private final class MetallumGpuTimingWindow {
         stageTotals = Array(repeating: 0.0, count: stageTotals.count)
         stageMaximums = Array(repeating: 0.0, count: stageMaximums.count)
         stageCounts = Array(repeating: 0, count: stageCounts.count)
+        stageSamples = Array(repeating: [Double](), count: stageSamples.count)
         droppedEvents = 0
         reportIndex += 1
         return report
@@ -2014,11 +2585,20 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         var stages: [String: Any] = [:]
         for stage in MetallumGpuTimingStage.allCases {
             let count = window.stageCounts[stage.rawValue]
-            stages[stage.reportName] = count == 0 ? NSNull() : [
-                "frames": count,
-                "average_ms": window.stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
-                "maximum_ms": window.stageMaximums[stage.rawValue] / 1_000_000.0
-            ]
+            if count == 0 {
+                stages[stage.reportName] = NSNull()
+            } else {
+                let samples = window.stageSamples[stage.rawValue].sorted()
+                stages[stage.reportName] = [
+                    "frames": count,
+                    "average_ms": window.stageTotals[stage.rawValue]
+                        / Double(count) / 1_000_000.0,
+                    "p50_ms": Self.percentile(samples, fraction: 0.50) / 1_000_000.0,
+                    "p95_ms": Self.percentile(samples, fraction: 0.95) / 1_000_000.0,
+                    "p99_ms": Self.percentile(samples, fraction: 0.99) / 1_000_000.0,
+                    "maximum_ms": window.stageMaximums[stage.rawValue] / 1_000_000.0
+                ]
+            }
         }
 
         var waits: [String: Any] = [:]
@@ -2173,6 +2753,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             ]
         }
 
+        let clusteredLightingReport = MetallumLightingTelemetryStore.shared.snapshot().report
         writer.write([
             "schema_version": 4,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
@@ -2193,6 +2774,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "benchmark": window.context.report,
             "metadata": metadata,
             "renderer_generation": rendererGenerationReport,
+            "clustered_lighting": clusteredLightingReport,
             "stages": stages,
             "cpu_waits": waits,
             "workload": workloadReport,
@@ -2240,10 +2822,12 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 if count == 0 {
                     lines.append("  \(stage.reportName): n/a")
                 } else {
+                    let samples = window.stageSamples[stage.rawValue].sorted()
                     lines.append(String(format:
-                        "  %@: %.3f ms avg / %.3f ms max (%d frames)",
+                        "  %@: %.3f ms avg / %.3f ms p95 / %.3f ms max (%d frames)",
                         stage.reportName,
                         window.stageTotals[stage.rawValue] / Double(count) / 1_000_000.0,
+                        Self.percentile(samples, fraction: 0.95) / 1_000_000.0,
                         window.stageMaximums[stage.rawValue] / 1_000_000.0,
                         count
                     ))
@@ -2355,6 +2939,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 window.stageTotals[stage.rawValue] += nanoseconds
                 window.stageMaximums[stage.rawValue] = max(window.stageMaximums[stage.rawValue], nanoseconds)
                 window.stageCounts[stage.rawValue] += 1
+                window.stageSamples[stage.rawValue].append(nanoseconds)
             }
         }
 
@@ -2926,7 +3511,10 @@ private func loadPrecompiledBuiltinShaderLibrary(device: MTLDevice) -> MTLLibrar
         do {
             let library = try device.makeLibrary(URL: libraryURL)
             state.libraryLoadMilliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1_000.0
-            let requiredNames = MetallumBuiltinShaderSet.allCases.flatMap(\.requiredFunctionNames)
+            // Clustered lighting is an optional, lazy Advanced-generation capability. A
+            // missing cluster function must not invalidate the base Metal/Vanilla device.
+            let requiredNames = MetallumBuiltinShaderSet.startupMandatory
+                .flatMap(\.requiredFunctionNames)
             let missingNames = requiredNames.filter { library.makeFunction(name: $0) == nil }
             guard missingNames.isEmpty else {
                 state.mode = .sourceFallback
@@ -2971,7 +3559,9 @@ private func resolveBuiltinShaderLibrary(
             return cached
         }
         guard let assetDirectory = nativeAssetDirectory() else {
-            state.mode = .failed
+            if shaderSet != .clusterBuild {
+                state.mode = .failed
+            }
             throw NSError(
                 domain: "MetallumBuiltinShaders",
                 code: 1,
@@ -2993,7 +3583,9 @@ private func resolveBuiltinShaderLibrary(
             return library
         } catch {
             state.sourceCompileMilliseconds += (ProcessInfo.processInfo.systemUptime - start) * 1_000.0
-            state.mode = .failed
+            if shaderSet != .clusterBuild {
+                state.mode = .failed
+            }
             throw error
         }
     }
@@ -3026,7 +3618,7 @@ private func builtinShaderInitializationStatus(_ state: MetallumBuiltinShaderSta
     switch snapshot.mode {
     case .precompiled where snapshot.sourceCompileCount == 0:
         return 1
-    case .sourceFallback where snapshot.sourceCompileCount == MetallumBuiltinShaderSet.allCases.count:
+    case .sourceFallback where snapshot.sourceCompileCount >= MetallumBuiltinShaderSet.startupMandatory.count:
         return 2
     default:
         return -1
@@ -3064,6 +3656,167 @@ private func ensureSodiumLightPatchPipeline(device: MTLDevice) -> MTLComputePipe
         NativeState.sodiumLightPatchPipelines[key] = pipeline
     }
     return pipeline
+}
+
+private func buildLightingPipelines(device: MTLDevice) -> MetallumLightingPipelines? {
+    if let forcedFailure = getenv("METALLUM_NATIVE_CLUSTER_PIPELINE_FORCE_FAILURE"),
+       strcmp(forcedFailure, "1") == 0 {
+        NSLog("[metallum] Clustered-lighting pipeline failure forced for validation")
+        return nil
+    }
+    do {
+        let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .clusterBuild)
+        let names = [
+            "metallum_cluster_prepare_v1",
+            "metallum_cluster_count_v1",
+            "metallum_cluster_masks_v1",
+            "metallum_cluster_prefix_blocks_v1",
+            "metallum_cluster_prefix_groups_v1",
+            "metallum_cluster_prefix_add_v1",
+            "metallum_cluster_fill_v1"
+        ]
+        let functions = names.compactMap { library.makeFunction(name: $0) }
+        guard functions.count == names.count else {
+            NSLog("[metallum] Cluster-build metallib is missing required ABI v1 functions")
+            return nil
+        }
+        let states = try functions.map { try device.makeComputePipelineState(function: $0) }
+        recordBuiltinPipelineCreation(device: device, count: states.count, succeeded: true)
+        return MetallumLightingPipelines(
+            prepare: states[0],
+            count: states[1],
+            masks: states[2],
+            prefixBlocks: states[3],
+            prefixGroups: states[4],
+            prefixAdd: states[5],
+            fill: states[6]
+        )
+    } catch {
+        NSLog("[metallum] Failed to create clustered-lighting pipelines: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func makeLightingContext(
+    device: MTLDevice,
+    generation: UInt64,
+    maxLights: UInt32,
+    indexCapacity: UInt32,
+    clustersX: UInt32,
+    clustersY: UInt32,
+    clustersZ: UInt32
+) -> MetallumLightingContext? {
+    guard MemoryLayout<MetallumLightingParamsV1>.size == MetallumLightingAbiV1.paramsBytes,
+          MemoryLayout<MetallumLightingParamsV1>.stride == MetallumLightingAbiV1.paramsBytes,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.viewRotation) == 0,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.projection) == 64,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.gridAndLightCount) == 128,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.extentAndClusterCap) == 144,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.depth) == 160,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.frameIdAndGeneration) == 176,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.capacitiesAndFlags) == 192,
+          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.reserved0) == 208,
+          generation > 0,
+          maxLights > 0, maxLights <= MetallumLightingAbiV1.maximumLights,
+          indexCapacity > 0, indexCapacity <= MetallumLightingAbiV1.maximumIndices,
+          clustersX > 0, clustersY > 0, clustersZ == MetallumLightingAbiV1.depthSlices else {
+        return nil
+    }
+    let clusterProduct = UInt64(clustersX) * UInt64(clustersY) * UInt64(clustersZ)
+    guard clusterProduct > 0,
+          clusterProduct <= UInt64(MetallumLightingAbiV1.maximumClusters),
+          clusterProduct <= UInt64(UInt32.max),
+          let pipelines = buildLightingPipelines(device: device),
+          pipelines.masks.maxTotalThreadsPerThreadgroup
+              >= Int(MetallumLightingAbiV1.prefixBlockSize),
+          pipelines.prefixBlocks.maxTotalThreadsPerThreadgroup
+              >= Int(MetallumLightingAbiV1.prefixBlockSize),
+          pipelines.prefixAdd.maxTotalThreadsPerThreadgroup
+              >= Int(MetallumLightingAbiV1.prefixBlockSize) else {
+        return nil
+    }
+    let clusterCount = UInt32(clusterProduct)
+    let lightPayloadBytes = Int(maxLights) * MetallumLightingAbiV1.gpuLightBytes
+    let headerPayloadBytes = Int(clusterCount) * MetallumLightingAbiV1.clusterHeaderBytes
+    let scratchPayloadBytes = Int(clusterCount) * MetallumLightingAbiV1.clusterScratchBytes
+    let indexPayloadBytes = Int(indexCapacity) * MetallumLightingAbiV1.lightIndexBytes
+    let prefixBlockCount = Int(
+        (clusterCount + MetallumLightingAbiV1.prefixBlockSize - 1)
+            / MetallumLightingAbiV1.prefixBlockSize
+    )
+    guard prefixBlockCount * MetallumLightingAbiV1.blockStatisticsBytes <= indexPayloadBytes else {
+        return nil
+    }
+    let privateOptions: MTLResourceOptions = .storageModePrivate
+    guard let gpuLights = device.makeBuffer(
+              length: lightPayloadBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ),
+          let clusterHeaders = device.makeBuffer(
+              length: headerPayloadBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ),
+          let clusterScratch = device.makeBuffer(
+              length: scratchPayloadBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ),
+          let lightIndices = device.makeBuffer(
+              length: indexPayloadBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ),
+          let params = device.makeBuffer(
+              length: MetallumLightingAbiV1.paramsBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ),
+          let statistics = device.makeBuffer(
+              length: MetallumLightingAbiV1.statisticsBytes + MetallumLightingAbiV1.guardBytes,
+              options: privateOptions
+          ) else {
+        return nil
+    }
+    let uploadSlotBytes = MetallumLightingAbiV1.uploadHeaderBytes + lightPayloadBytes
+    var slots: [MetallumLightingRingSlot] = []
+    slots.reserveCapacity(MetallumLightingAbiV1.ringSlots)
+    for slotIndex in 0..<MetallumLightingAbiV1.ringSlots {
+        guard let staging = device.makeBuffer(
+                  length: uploadSlotBytes,
+                  options: [.storageModeShared, .cpuCacheModeWriteCombined]
+              ) else {
+            return nil
+        }
+        staging.label = "Metallum lighting upload ring slot \(slotIndex)"
+        slots.append(MetallumLightingRingSlot(staging: staging))
+    }
+    gpuLights.label = "Metallum clustered lights v1"
+    clusterHeaders.label = "Metallum cluster headers v1"
+    clusterScratch.label = "Metallum cluster scratch v1"
+    lightIndices.label = "Metallum compact cluster light indices v1"
+    params.label = "Metallum clustered-lighting parameters v1"
+    statistics.label = "Metallum clustered-lighting statistics v1"
+    let telemetryToken = MetallumLightingTelemetryStore.shared.activate(
+        generation: generation,
+        clusterCount: clusterCount
+    )
+    let context = MetallumLightingContext(
+        device: device,
+        generation: generation,
+        telemetryToken: telemetryToken,
+        maxLights: maxLights,
+        indexCapacity: indexCapacity,
+        clustersX: clustersX,
+        clustersY: clustersY,
+        clustersZ: clustersZ,
+        clusterCount: clusterCount,
+        pipelines: pipelines,
+        gpuLights: gpuLights,
+        clusterHeaders: clusterHeaders,
+        clusterScratch: clusterScratch,
+        lightIndices: lightIndices,
+        params: params,
+        statistics: statistics,
+        slots: slots
+    )
+    return context
 }
 
 private func ensureTemporalDiagnosticPipeline(device: MTLDevice) -> MTLRenderPipelineState? {
@@ -5822,6 +6575,597 @@ public func metallum_set_frame_state_v3(
     return status
 }
 
+private struct MetallumLightingBatchHeaderV1 {
+    let declaredBytes: UInt32
+    let lightCount: UInt32
+    let inFlightSlot: UInt32
+    let flags: UInt32
+    let frameId: UInt64
+    let submitIndex: UInt64
+    let lightingGeneration: UInt64
+}
+
+private func parseLightingBatchV1(
+    _ packet: UnsafeRawPointer?,
+    byteSize: UInt64,
+    context: MetallumLightingContext,
+    frame: MetallumRendererFrameStateSnapshot
+) -> (Int32, MetallumLightingBatchHeaderV1?) {
+    guard let packet,
+          byteSize >= UInt64(MetallumLightingAbiV1.uploadHeaderBytes),
+          byteSize <= UInt64(Int.max) else {
+        return (-1, nil)
+    }
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: packet, count: Int(byteSize))
+    )
+    guard let magic = reader.uint32(at: 0),
+          let version = reader.uint32(at: 4),
+          let declaredBytes = reader.uint32(at: 8),
+          let headerBytes = reader.uint32(at: 12),
+          let lightStride = reader.uint32(at: 16),
+          let lightCount = reader.uint32(at: 20),
+          let inFlightSlot = reader.uint32(at: 24),
+          let flags = reader.uint32(at: 28),
+          let frameId = reader.uint64(at: 32),
+          let submitIndex = reader.uint64(at: 40),
+          let lightingGeneration = reader.uint64(at: 48),
+          let reserved = reader.uint64(at: 56) else {
+        return (-1, nil)
+    }
+    guard magic == MetallumLightingAbiV1.batchMagic,
+          version == MetallumLightingAbiV1.version else {
+        return (-2, nil)
+    }
+    guard headerBytes == UInt32(MetallumLightingAbiV1.uploadHeaderBytes),
+          lightStride == UInt32(MetallumLightingAbiV1.gpuLightBytes),
+          flags & MetallumLightingAbiV1.orderedBatchFlag != 0,
+          flags & ~MetallumLightingAbiV1.knownBatchFlags == 0,
+          reserved == 0 else {
+        return (-3, nil)
+    }
+    let expectedBytes = UInt64(MetallumLightingAbiV1.uploadHeaderBytes)
+        + UInt64(lightCount) * UInt64(MetallumLightingAbiV1.gpuLightBytes)
+    guard expectedBytes == byteSize,
+          declaredBytes == UInt32(byteSize),
+          lightCount <= context.maxLights else {
+        return (-4, nil)
+    }
+    guard inFlightSlot < UInt32(MetallumLightingAbiV1.ringSlots),
+          lightingGeneration == context.generation,
+          frameId == frame.frameId,
+          submitIndex == frame.submitIndex,
+          inFlightSlot == frame.inFlightSlot,
+          lightingGeneration == frame.lightingGenerationId,
+          lightCount == frame.lightCount else {
+        return (-9, nil)
+    }
+    let generationLow = UInt32(truncatingIfNeeded: lightingGeneration)
+    for index in 0..<Int(lightCount) {
+        let base = MetallumLightingAbiV1.uploadHeaderBytes
+            + index * MetallumLightingAbiV1.gpuLightBytes
+        guard let x = reader.float32(at: base),
+              let y = reader.float32(at: base + 4),
+              let z = reader.float32(at: base + 8),
+              let radius = reader.float32(at: base + 12),
+              let red = reader.float32(at: base + 16),
+              let green = reader.float32(at: base + 20),
+              let blue = reader.float32(at: base + 24),
+              let intensity = reader.float32(at: base + 28),
+              let recordGeneration = reader.uint32(at: base + 44),
+              x.isFinite, y.isFinite, z.isFinite, radius.isFinite,
+              red.isFinite, green.isFinite, blue.isFinite, intensity.isFinite,
+              radius > 0, red >= 0, green >= 0, blue >= 0, intensity >= 0,
+              radius <= frame.farPlane,
+              recordGeneration == generationLow else {
+            return (-8, nil)
+        }
+    }
+    return (1, MetallumLightingBatchHeaderV1(
+        declaredBytes: declaredBytes,
+        lightCount: lightCount,
+        inFlightSlot: inFlightSlot,
+        flags: flags,
+        frameId: frameId,
+        submitIndex: submitIndex,
+        lightingGeneration: lightingGeneration
+    ))
+}
+
+private func lightingParamsV1(
+    context: MetallumLightingContext,
+    frame: MetallumRendererFrameStateSnapshot,
+    batch: MetallumLightingBatchHeaderV1
+) -> MetallumLightingParamsV1 {
+    var viewRotation = frame.currentUnjitteredView
+    viewRotation.columns.3 = SIMD4<Float>(0, 0, 0, 1)
+    let logarithmicScale = Float(context.clustersZ) / log2(frame.farPlane / frame.nearPlane)
+    let logarithmicBias = -log2(frame.nearPlane) * logarithmicScale
+    let presetWorkloadCeiling: UInt64
+    let admittedLightCap: UInt32
+    let perClusterCap: UInt32
+    switch frame.lightingPreset {
+    case 0:
+        presetWorkloadCeiling = 250_000
+        admittedLightCap = 32
+        perClusterCap = 32
+    case 1:
+        presetWorkloadCeiling = 500_000
+        admittedLightCap = 64
+        perClusterCap = 64
+    case 2:
+        presetWorkloadCeiling = 750_000
+        admittedLightCap = 128
+        perClusterCap = 128
+    default:
+        preconditionFailure("FrameState admitted an unknown Advanced-lighting preset")
+    }
+    // Selected cluster membership never exceeds total covered membership. Bounding the
+    // latter by index capacity makes the compact prefix intrinsically seam-free while the
+    // cluster-count floor still admits one production full-grid light.
+    let workloadBudget = UInt32(
+        min(
+            UInt64(context.indexCapacity),
+            max(UInt64(context.clusterCount), presetWorkloadCeiling)
+        )
+    )
+    return MetallumLightingParamsV1(
+        viewRotation: viewRotation,
+        projection: frame.currentUnjitteredProjection,
+        gridAndLightCount: SIMD4(
+            context.clustersX,
+            context.clustersY,
+            context.clustersZ,
+            batch.lightCount
+        ),
+        extentAndClusterCap: SIMD4(
+            frame.renderWidth,
+            frame.renderHeight,
+            perClusterCap,
+            context.indexCapacity
+        ),
+        depth: SIMD4(frame.nearPlane, frame.farPlane, logarithmicScale, logarithmicBias),
+        frameIdAndGeneration: SIMD4(
+            UInt32(truncatingIfNeeded: batch.frameId),
+            UInt32(truncatingIfNeeded: batch.frameId >> 32),
+            UInt32(truncatingIfNeeded: batch.lightingGeneration),
+            UInt32(truncatingIfNeeded: batch.lightingGeneration >> 32)
+        ),
+        capacitiesAndFlags: SIMD4(
+            context.clusterCount,
+            context.maxLights,
+            context.indexCapacity,
+            MetallumLightingAbiV1.tileSize
+        ),
+        reserved0: SIMD4(
+            workloadBudget,
+            batch.inFlightSlot,
+            batch.flags,
+            MetallumLightingAbiV1.version
+        ),
+        reserved1: SIMD4(batch.lightCount, admittedLightCap, 0, 0),
+        reserved2: SIMD4(repeating: 0)
+    )
+}
+
+private func lightingBufferPayloadBytes(_ context: MetallumLightingContext, kind: Int32) -> Int {
+    switch kind {
+    case 0: Int(context.maxLights) * MetallumLightingAbiV1.gpuLightBytes
+    case 1: Int(context.clusterCount) * MetallumLightingAbiV1.clusterHeaderBytes
+    case 2: Int(context.indexCapacity) * MetallumLightingAbiV1.lightIndexBytes
+    case 3: MetallumLightingAbiV1.paramsBytes
+    case 4: MetallumLightingAbiV1.statisticsBytes
+    case 5: Int(context.clusterCount) * MetallumLightingAbiV1.clusterScratchBytes
+    default: 0
+    }
+}
+
+private func lightingBuffer(_ context: MetallumLightingContext, kind: Int32) -> MTLBuffer? {
+    switch kind {
+    case 0: context.gpuLights
+    case 1: context.clusterHeaders
+    case 2: context.lightIndices
+    case 3: context.params
+    case 4: context.statistics
+    case 5: context.clusterScratch
+    default: nil
+    }
+}
+
+@_cdecl("metallum_lighting_batch_abi_version_v1")
+public func metallum_lighting_batch_abi_version_v1() -> UInt32 {
+    MetallumLightingAbiV1.version
+}
+
+@_cdecl("metallum_lighting_layout_v1")
+public func metallum_lighting_layout_v1(
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let output, byteSize == 128 else { return -1 }
+    output.initializeMemory(as: UInt8.self, repeating: 0, count: 128)
+    let values: [UInt32] = [
+        MetallumLightingAbiV1.version, 128,
+        UInt32(MetallumLightingAbiV1.uploadHeaderBytes),
+        UInt32(MetallumLightingAbiV1.gpuLightBytes),
+        UInt32(MetallumLightingAbiV1.paramsBytes),
+        UInt32(MetallumLightingAbiV1.clusterHeaderBytes),
+        UInt32(MetallumLightingAbiV1.clusterScratchBytes),
+        UInt32(MetallumLightingAbiV1.lightIndexBytes),
+        UInt32(MetallumLightingAbiV1.statisticsBytes),
+        UInt32(MetallumLightingAbiV1.ringSlots),
+        MetallumLightingAbiV1.tileSize,
+        MetallumLightingAbiV1.depthSlices,
+        MetallumLightingAbiV1.clusterCap,
+        0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
+        27, 28, 29, 30,
+        UInt32(MetallumLightingAbiV1.guardBytes)
+    ]
+    for (index, value) in values.enumerated() {
+        writeLightingStatsValue(value, to: output, offset: index * 4)
+    }
+    return 1
+}
+
+@_cdecl("metallum_lighting_create_context_v1")
+public func metallum_lighting_create_context_v1(
+    _ device: MTLDevice?,
+    _ generation: UInt64,
+    _ maxLights: UInt32,
+    _ indexCapacity: UInt32,
+    _ clustersX: UInt32,
+    _ clustersY: UInt32,
+    _ clustersZ: UInt32
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let device,
+              let context = makeLightingContext(
+                device: device,
+                generation: generation,
+                maxLights: maxLights,
+                indexCapacity: indexCapacity,
+                clustersX: clustersX,
+                clustersY: clustersY,
+                clustersZ: clustersZ
+              ) else {
+            return nil
+        }
+        return Unmanaged.passRetained(context).toOpaque()
+    }
+}
+
+@_cdecl("metallum_lighting_release_context_v1")
+public func metallum_lighting_release_context_v1(_ pointer: UnsafeMutableRawPointer?) {
+    guard let pointer else { return }
+    Unmanaged<MetallumLightingContext>.fromOpaque(pointer).takeUnretainedValue().retire()
+    Unmanaged<MetallumLightingContext>.fromOpaque(pointer).release()
+}
+
+@_cdecl("metallum_lighting_context_buffer_v1")
+public func metallum_lighting_context_buffer_v1(
+    _ pointer: UnsafeMutableRawPointer?,
+    _ kind: Int32
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let context = Unmanaged<MetallumLightingContext>.fromOpaque(pointer).takeUnretainedValue()
+    return unretainedPointer(lightingBuffer(context, kind: kind))
+}
+
+@_cdecl("metallum_lighting_context_buffer_bytes_v1")
+public func metallum_lighting_context_buffer_bytes_v1(
+    _ pointer: UnsafeMutableRawPointer?,
+    _ kind: Int32
+) -> UInt64 {
+    guard let pointer else { return 0 }
+    let context = Unmanaged<MetallumLightingContext>.fromOpaque(pointer).takeUnretainedValue()
+    return UInt64(lightingBufferPayloadBytes(context, kind: kind))
+}
+
+@_cdecl("metallum_lighting_upload_and_build_v1")
+public func metallum_lighting_upload_and_build_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let contextPointer,
+              let commandBuffer else {
+            return -1
+        }
+        let context = Unmanaged<MetallumLightingContext>
+            .fromOpaque(contextPointer)
+            .takeUnretainedValue()
+        context.noteUploadCall()
+        guard objectAddress(commandBuffer.device) == objectAddress(context.device),
+              commandBuffer.status == .notEnqueued else {
+            context.noteRejectedCall()
+            return -10
+        }
+        guard let frame = NativeState.rendererFrameState.snapshot(),
+              frame.renderContractMode == 1,
+              frame.lightingModel == 1,
+              frame.renderWidth > 0,
+              frame.renderHeight > 0,
+              (frame.renderWidth + MetallumLightingAbiV1.tileSize - 1)
+                / MetallumLightingAbiV1.tileSize == context.clustersX,
+              (frame.renderHeight + MetallumLightingAbiV1.tileSize - 1)
+                / MetallumLightingAbiV1.tileSize == context.clustersY,
+              context.clustersZ == MetallumLightingAbiV1.depthSlices else {
+            context.noteRejectedCall()
+            return -9
+        }
+        let (parseStatus, parsedBatch) = parseLightingBatchV1(
+            packet,
+            byteSize: byteSize,
+            context: context,
+            frame: frame
+        )
+        guard parseStatus == 1,
+              let batch = parsedBatch,
+              let packet else {
+            context.noteRejectedCall()
+            return parseStatus
+        }
+        let slotIndex = Int(batch.inFlightSlot)
+        let reserveStatus = context.reserve(slot: slotIndex, queue: commandBuffer.commandQueue)
+        guard reserveStatus == 1 else {
+            return reserveStatus
+        }
+        let slot = context.slots[slotIndex]
+        memcpy(slot.staging.contents(), packet, Int(byteSize))
+        var params = lightingParamsV1(context: context, frame: frame, batch: batch)
+
+        let uploadPass = MTLBlitPassDescriptor()
+        attachGpuTiming(
+            uploadPass,
+            commandBuffer: commandBuffer,
+            stage: .lightUploadClusterBuild
+        )
+        guard let upload = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: uploadPass) else {
+            context.cancel(slot: slotIndex)
+            return -13
+        }
+        upload.label = "Metallum lighting upload and current-slot clear"
+        let lightPayloadBytes = lightingBufferPayloadBytes(context, kind: 0)
+        let headerPayloadBytes = lightingBufferPayloadBytes(context, kind: 1)
+        let indexPayloadBytes = lightingBufferPayloadBytes(context, kind: 2)
+        let scratchPayloadBytes = lightingBufferPayloadBytes(context, kind: 5)
+        if batch.lightCount > 0 {
+            upload.copy(
+                from: slot.staging,
+                sourceOffset: MetallumLightingAbiV1.uploadHeaderBytes,
+                to: context.gpuLights,
+                destinationOffset: 0,
+                size: Int(batch.lightCount) * MetallumLightingAbiV1.gpuLightBytes
+            )
+        }
+        if batch.lightCount > 0
+                && batch.flags & MetallumLightingAbiV1.clusterMaskBatchFlag == 0 {
+            upload.fill(buffer: context.clusterScratch, range: 0..<scratchPayloadBytes, value: 0)
+        } else if batch.lightCount == 0 {
+            // Empty frames skip prefix/fill, so retire every previous cluster membership
+            // before the direct shader observes gridAndLightCount.w == 0.
+            upload.fill(buffer: context.clusterHeaders, range: 0..<headerPayloadBytes, value: 0)
+        }
+        if context.claimGuardInitialization() {
+            for (buffer, payloadBytes) in [
+                (context.gpuLights, lightPayloadBytes),
+                (context.clusterHeaders, headerPayloadBytes),
+                (context.clusterScratch, scratchPayloadBytes),
+                (context.lightIndices, indexPayloadBytes),
+                (context.params, MetallumLightingAbiV1.paramsBytes),
+                (context.statistics, MetallumLightingAbiV1.statisticsBytes)
+            ] {
+                upload.fill(
+                    buffer: buffer,
+                    range: payloadBytes..<(payloadBytes + MetallumLightingAbiV1.guardBytes),
+                    value: MetallumLightingAbiV1.guardValue
+                )
+            }
+        }
+        upload.endEncoding()
+
+        let computePass = MTLComputePassDescriptor()
+        attachGpuTiming(
+            computePass,
+            commandBuffer: commandBuffer,
+            stage: .lightUploadClusterBuild
+        )
+        guard let compute = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: computePass) else {
+            context.rejectAfterEncoding(slot: slotIndex, commandBuffer: commandBuffer)
+            return -13
+        }
+        compute.label = "Metallum clustered forward+ build v1"
+        compute.setComputePipelineState(context.pipelines.prepare)
+        compute.setBytes(&params, length: MetallumLightingAbiV1.paramsBytes, index: 0)
+        compute.setBuffer(context.params, offset: 0, index: 1)
+        compute.setBuffer(context.statistics, offset: 0, index: 2)
+        compute.setBuffer(context.gpuLights, offset: 0, index: 3)
+        compute.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        compute.memoryBarrier(scope: .buffers)
+
+        if batch.lightCount > 0 {
+            let prefixBlockCount = Int(
+                (context.clusterCount + MetallumLightingAbiV1.prefixBlockSize - 1)
+                    / MetallumLightingAbiV1.prefixBlockSize
+            )
+            let prefixBlockWidth = Int(MetallumLightingAbiV1.prefixBlockSize)
+            let maskPath = batch.flags & MetallumLightingAbiV1.clusterMaskBatchFlag != 0
+            if maskPath {
+                compute.setComputePipelineState(context.pipelines.masks)
+                compute.setBuffer(context.gpuLights, offset: 0, index: 0)
+                compute.setBuffer(context.clusterScratch, offset: 0, index: 1)
+                compute.setBuffer(context.params, offset: 0, index: 2)
+                compute.setBuffer(context.lightIndices, offset: 0, index: 3)
+                compute.dispatchThreadgroups(
+                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: prefixBlockWidth, height: 1, depth: 1)
+                )
+            } else {
+                compute.setComputePipelineState(context.pipelines.count)
+                compute.setBuffer(context.gpuLights, offset: 0, index: 0)
+                compute.setBuffer(context.clusterScratch, offset: 0, index: 1)
+                compute.setBuffer(context.params, offset: 0, index: 2)
+                compute.setBuffer(context.statistics, offset: 0, index: 3)
+                let width = min(context.pipelines.count.maxTotalThreadsPerThreadgroup, 256)
+                let countThreadgroups = min(Int(batch.lightCount), Int(params.reserved1.y))
+                compute.dispatchThreadgroups(
+                    MTLSize(width: countThreadgroups, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
+                )
+                compute.memoryBarrier(scope: .buffers)
+
+                compute.setComputePipelineState(context.pipelines.prefixBlocks)
+                compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
+                compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
+                compute.setBuffer(context.params, offset: 0, index: 2)
+                // The index buffer is unused until fill, so prefix passes temporarily reuse
+                // its beginning for exact per-block telemetry.
+                compute.setBuffer(context.lightIndices, offset: 0, index: 3)
+                compute.dispatchThreadgroups(
+                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: prefixBlockWidth, height: 1, depth: 1)
+                )
+            }
+            compute.memoryBarrier(scope: .buffers)
+
+            compute.setComputePipelineState(context.pipelines.prefixGroups)
+            compute.setBuffer(context.clusterHeaders, offset: 0, index: 0)
+            compute.setBuffer(context.params, offset: 0, index: 1)
+            compute.setBuffer(context.statistics, offset: 0, index: 2)
+            compute.setBuffer(context.lightIndices, offset: 0, index: 3)
+            compute.dispatchThreads(
+                MTLSize(width: 1, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
+            compute.memoryBarrier(scope: .buffers)
+
+            if !maskPath {
+                compute.setComputePipelineState(context.pipelines.prefixAdd)
+                compute.setBuffer(context.clusterHeaders, offset: 0, index: 0)
+                compute.setBuffer(context.params, offset: 0, index: 1)
+                let prefixAddWidth = Int(MetallumLightingAbiV1.prefixBlockSize)
+                compute.dispatchThreadgroups(
+                    MTLSize(width: prefixBlockCount, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: prefixAddWidth, height: 1, depth: 1)
+                )
+                compute.memoryBarrier(scope: .buffers)
+
+                compute.setComputePipelineState(context.pipelines.fill)
+                compute.setBuffer(context.clusterScratch, offset: 0, index: 0)
+                compute.setBuffer(context.clusterHeaders, offset: 0, index: 1)
+                compute.setBuffer(context.lightIndices, offset: 0, index: 2)
+                compute.setBuffer(context.params, offset: 0, index: 3)
+                let fillWidth = min(context.pipelines.fill.maxTotalThreadsPerThreadgroup, 256)
+                compute.dispatchThreads(
+                    MTLSize(width: Int(context.clusterCount), height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: fillWidth, height: 1, depth: 1)
+                )
+            }
+        }
+        compute.endEncoding()
+
+        let statisticsAvailable = context.shouldReadbackStatistics(frameId: batch.frameId)
+        if statisticsAvailable {
+            let statisticsReadbackPass = MTLBlitPassDescriptor()
+            attachGpuTiming(
+                statisticsReadbackPass,
+                commandBuffer: commandBuffer,
+                stage: .lightUploadClusterBuild
+            )
+            guard let statisticsReadback = trackedMakeBlitCommandEncoder(
+                commandBuffer,
+                descriptor: statisticsReadbackPass
+            ) else {
+                context.rejectAfterEncoding(slot: slotIndex, commandBuffer: commandBuffer)
+                return -13
+            }
+            statisticsReadback.label = "Metallum sampled asynchronous cluster statistics copy"
+            statisticsReadback.copy(
+                from: context.statistics,
+                sourceOffset: 0,
+                to: slot.staging,
+                destinationOffset: 0,
+                size: MetallumLightingAbiV1.statisticsBytes
+            )
+            statisticsReadback.endEncoding()
+        }
+        commandBuffer.addCompletedHandler { [context] completed in
+            context.complete(
+                slot: slotIndex,
+                commandBufferSucceeded: completed.status == .completed,
+                statisticsAvailable: statisticsAvailable
+            )
+        }
+        return 1
+    }
+}
+
+private func writeLightingStatsValue<T>(
+    _ value: T,
+    to output: UnsafeMutableRawPointer,
+    offset: Int
+) {
+    var stored = value
+    withUnsafeBytes(of: &stored) { bytes in
+        output.advanced(by: offset).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+    }
+}
+
+@_cdecl("metallum_lighting_last_completed_stats_v1")
+public func metallum_lighting_last_completed_stats_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let contextPointer,
+          let output,
+          byteSize == UInt64(MetallumLightingAbiV1.completedStatsBytes) else {
+        return -1
+    }
+    let context = Unmanaged<MetallumLightingContext>
+        .fromOpaque(contextPointer)
+        .takeUnretainedValue()
+    let snapshot = context.snapshot()
+    output.initializeMemory(
+        as: UInt8.self,
+        repeating: 0,
+        count: MetallumLightingAbiV1.completedStatsBytes
+    )
+    let completed = snapshot.lastCompleted
+    writeLightingStatsValue(MetallumLightingAbiV1.version, to: output, offset: 0)
+    writeLightingStatsValue(UInt32(MetallumLightingAbiV1.completedStatsBytes), to: output, offset: 4)
+    writeLightingStatsValue(completed?.generation ?? context.generation, to: output, offset: 8)
+    writeLightingStatsValue(completed?.frameId ?? 0, to: output, offset: 16)
+    writeLightingStatsValue(completed?.lightCount ?? 0, to: output, offset: 24)
+    writeLightingStatsValue(completed?.clusterCount ?? context.clusterCount, to: output, offset: 28)
+    writeLightingStatsValue(completed?.acceptedIndices ?? 0, to: output, offset: 32)
+    writeLightingStatsValue(completed?.requestedIndices ?? 0, to: output, offset: 36)
+    writeLightingStatsValue(completed?.overflowClusters ?? 0, to: output, offset: 40)
+    writeLightingStatsValue(completed?.perClusterDrops ?? 0, to: output, offset: 44)
+    writeLightingStatsValue(completed?.indexCapacityDrops ?? 0, to: output, offset: 48)
+    writeLightingStatsValue(completed?.admissionRejectedLights ?? 0, to: output, offset: 52)
+    writeLightingStatsValue(completed?.occupancyP50 ?? 0, to: output, offset: 56)
+    writeLightingStatsValue(completed?.occupancyP95 ?? 0, to: output, offset: 60)
+    writeLightingStatsValue(completed?.occupancyP99 ?? 0, to: output, offset: 64)
+    writeLightingStatsValue(completed?.maximumOccupancy ?? 0, to: output, offset: 68)
+    writeLightingStatsValue(snapshot.ringHighWater, to: output, offset: 72)
+    writeLightingStatsValue(snapshot.ringBusyRejects, to: output, offset: 76)
+    writeLightingStatsValue(UInt32(1), to: output, offset: 80) // SDR/HDR-independent data contract.
+    writeLightingStatsValue(snapshot.uploadCalls, to: output, offset: 88)
+    writeLightingStatsValue(snapshot.completedCalls, to: output, offset: 96)
+    writeLightingStatsValue(snapshot.rejectedCalls, to: output, offset: 104)
+    writeLightingStatsValue(context.maxLights, to: output, offset: 112)
+    writeLightingStatsValue(context.indexCapacity, to: output, offset: 116)
+    writeLightingStatsValue(context.clustersX, to: output, offset: 120)
+    writeLightingStatsValue(context.clustersY, to: output, offset: 124)
+    return completed == nil ? 0 : 1
+}
+
 // Read-only native validation surface for the four renderer-generation
 // contracts. Bits: 0 SDR present, 1 SDR UI seed, 2 Legacy HDR effects,
 // 3 Legacy reconstruction display, 4 actual HDR effects, 5 actual HDR display,
@@ -6156,7 +7500,7 @@ public func metallum_init_pipelines(_ device: MTLDevice) -> Int32 {
         }
         NativeState.initializedDevices[deviceAddress] = device
         _ = loadPrecompiledBuiltinShaderLibrary(device: device)
-        for shaderSet in MetallumBuiltinShaderSet.allCases {
+        for shaderSet in MetallumBuiltinShaderSet.startupMandatory {
             do {
                 let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: shaderSet)
                 if shaderSet.requiredFunctionNames.contains(where: { library.makeFunction(name: $0) == nil }) {

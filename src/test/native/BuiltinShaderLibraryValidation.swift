@@ -13,6 +13,12 @@ private enum ValidationFailure: Error, CustomStringConvertible {
 }
 
 private typealias NativeInitFunction = @convention(c) (UnsafeRawPointer?) -> Int32
+private typealias NativeCreateLightingContextFunction = @convention(c) (
+    UnsafeRawPointer?, UInt64, UInt32, UInt32, UInt32, UInt32, UInt32
+) -> UnsafeMutableRawPointer?
+private typealias NativeReleaseLightingContextFunction = @convention(c) (
+    UnsafeMutableRawPointer?
+) -> Void
 
 private func objectPointer(_ object: AnyObject) -> UnsafeRawPointer {
     UnsafeRawPointer(Unmanaged.passUnretained(object).toOpaque())
@@ -33,22 +39,67 @@ private enum BuiltinShaderLibraryValidationMain {
                 throw ValidationFailure.message("Could not load native library: \(detail)")
             }
             defer { dlclose(handle) }
-            guard let symbol = dlsym(handle, "metallum_init_pipelines") else {
-                throw ValidationFailure.message("Native pipeline initializer symbol is missing")
+            guard let initSymbol = dlsym(handle, "metallum_init_pipelines"),
+                  let createLightingSymbol = dlsym(handle, "metallum_lighting_create_context_v1"),
+                  let releaseLightingSymbol = dlsym(handle, "metallum_lighting_release_context_v1") else {
+                throw ValidationFailure.message("Native pipeline validation symbols are missing")
             }
             guard let device = MTLCreateSystemDefaultDevice() else {
                 throw ValidationFailure.message("No Metal device is available")
             }
 
-            let initialize = unsafeBitCast(symbol, to: NativeInitFunction.self)
+            let initialize = unsafeBitCast(initSymbol, to: NativeInitFunction.self)
+            let createLightingContext = unsafeBitCast(
+                createLightingSymbol,
+                to: NativeCreateLightingContextFunction.self
+            )
+            let releaseLightingContext = unsafeBitCast(
+                releaseLightingSymbol,
+                to: NativeReleaseLightingContextFunction.self
+            )
             let status = initialize(objectPointer(device as AnyObject))
             guard status == expectedStatus else {
                 throw ValidationFailure.message(
                     "Native shader initialization returned \(status), expected \(expectedStatus)"
                 )
             }
+
+            // Clustered lighting is lazy and optional: its failure disables only the
+            // Advanced generation and must not poison the already-valid base Metal device.
+            do {
+                guard setenv("METALLUM_NATIVE_CLUSTER_PIPELINE_FORCE_FAILURE", "1", 1) == 0 else {
+                    throw ValidationFailure.message("Could not enable cluster-pipeline failure injection")
+                }
+                defer { unsetenv("METALLUM_NATIVE_CLUSTER_PIPELINE_FORCE_FAILURE") }
+                let rejected = createLightingContext(
+                    objectPointer(device as AnyObject), 1, 1, 64, 1, 1, 6
+                )
+                if let rejected {
+                    releaseLightingContext(rejected)
+                    throw ValidationFailure.message(
+                        "Forced optional cluster-pipeline failure created a lighting context"
+                    )
+                }
+                guard initialize(objectPointer(device as AnyObject)) == expectedStatus else {
+                    throw ValidationFailure.message(
+                        "Optional cluster-pipeline failure poisoned base Metal initialization"
+                    )
+                }
+            }
+
+            guard let lightingContext = createLightingContext(
+                objectPointer(device as AnyObject), 2, 1, 64, 1, 1, 6
+            ) else {
+                throw ValidationFailure.message("Lazy clustered-lighting recovery failed")
+            }
+            releaseLightingContext(lightingContext)
+            guard initialize(objectPointer(device as AnyObject)) == expectedStatus else {
+                throw ValidationFailure.message(
+                    "Successful lazy clustered-lighting initialization changed base status"
+                )
+            }
             let mode = status == 1 ? "PRECOMPILED" : "SOURCE_FALLBACK"
-            print("Built-in Metal shader library validation passed (\(mode))")
+            print("Built-in Metal shader library validation passed (\(mode), optional lighting isolated)")
         } catch {
             fputs("Built-in Metal shader library validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

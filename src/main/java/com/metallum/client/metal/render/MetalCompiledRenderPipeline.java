@@ -4,6 +4,7 @@ import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -94,6 +95,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private long sceneRasterColorFormatsLogged;
     private long scenePostColorFormatsLogged;
     private long materialColorFormatsLogged;
+    private long advancedMaterialColorFormatsLogged;
 
     private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
 
@@ -179,6 +181,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                     MetallumMaterialPreflightGate.rejectMaterialVariant(
                             "Metal rejected METALLUM functions for " + info.getLocation()
                     );
+                } else if (entry.getKey() == HdrShaderFlavor.METALLUM_ADVANCED) {
+                    AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                            "Metal rejected METALLUM_ADVANCED functions for " + info.getLocation()
+                    );
                 } else if (entry.getKey() == HdrShaderFlavor.LEGACY_HDR_SEMANTIC) {
                     com.metallum.Metallum.LOGGER.warn(
                             "Metal rejected Legacy HDR semantic functions for {}; output remains on the base Legacy shader",
@@ -252,6 +258,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
 
                 sidecarScenePipelinesValid = warmSceneLinearPipelines(vertexDescriptor)
                         && warmMaterialPipelines(vertexDescriptor);
+                warmAdvancedLightingPipelines(vertexDescriptor);
             }
         }
         this.isValid = allFunctionsValid
@@ -313,6 +320,41 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 );
                 if (MetalNativeBridge.isNullHandle(compileAndCache(key, materialFunctions, vertexDescriptor))) {
                     MetallumMaterialPreflightGate.rejectMaterialVariant(
+                            "Metal rejected the prewarmed " + key + " pipeline state for "
+                                    + this.info.getLocation()
+                    );
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean warmAdvancedLightingPipelines(final MTLVertexDescriptor vertexDescriptor) {
+        if (!AdvancedLightingPreflightGate.shouldCompileAdvancedVariants()) {
+            return true;
+        }
+        ShaderFunctions advancedFunctions = this.shaderFunctions.get(HdrShaderFlavor.METALLUM_ADVANCED);
+        if (advancedFunctions == null) {
+            return true;
+        }
+        if (!advancedFunctions.isValid() || advancedFunctions.semanticOutput()) {
+            AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                    "METALLUM_ADVANCED functions are unavailable or retained semantic output for "
+                            + this.info.getLocation()
+            );
+            return false;
+        }
+        for (MTLPixelFormat colorFormat : List.of(MTLPixelFormat.RGBA8Unorm, MTLPixelFormat.RGBA16Float)) {
+            for (MTLPixelFormat depthFormat : List.of(MTLPixelFormat.Invalid, MTLPixelFormat.Depth32Float)) {
+                PipelineKey key = new PipelineKey(
+                        HdrShaderFlavor.METALLUM_ADVANCED,
+                        colorFormat,
+                        depthFormat,
+                        MTLPixelFormat.Invalid
+                );
+                if (MetalNativeBridge.isNullHandle(compileAndCache(key, advancedFunctions, vertexDescriptor))) {
+                    AdvancedLightingPreflightGate.rejectAdvancedVariant(
                             "Metal rejected the prewarmed " + key + " pipeline state for "
                                     + this.info.getLocation()
                     );
@@ -544,7 +586,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     ) {
         if (materialSceneAttachment && this.device.isMaterialWorldPassActive()) {
             if (this.hdrRole.supportsSceneLinearFlavor()) {
-                return HdrShaderFlavor.METALLUM;
+                return selectMaterialWorldFlavor(
+                        this.device.isAdvancedLightingWorldPassActive(),
+                        this.shaderFunctions.containsKey(HdrShaderFlavor.METALLUM_ADVANCED)
+                );
             }
         }
         boolean rgba16Float = colorFormat == MTLPixelFormat.RGBA16Float;
@@ -566,6 +611,23 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             );
         }
         return flavor;
+    }
+
+    static HdrShaderFlavor selectMaterialWorldFlavor(
+            final boolean advancedFrameActive,
+            final boolean advancedVariantAvailable
+    ) {
+        return advancedFrameActive && advancedVariantAvailable
+                ? HdrShaderFlavor.METALLUM_ADVANCED
+                : HdrShaderFlavor.METALLUM;
+    }
+
+    boolean selectsAdvancedLighting(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        return selectFlavor(colorFormat, materialSceneAttachment)
+                == HdrShaderFlavor.METALLUM_ADVANCED;
     }
 
     static HdrShaderFlavor selectLegacyGenerationFlavor(
@@ -603,6 +665,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged;
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged;
             case METALLUM -> this.materialColorFormatsLogged;
+            case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged;
         };
         if ((loggedColorFormats & colorFormatBit) != 0L) {
             return;
@@ -614,6 +677,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_RASTER_LINEAR -> this.sceneRasterColorFormatsLogged |= colorFormatBit;
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged |= colorFormatBit;
             case METALLUM -> this.materialColorFormatsLogged |= colorFormatBit;
+            case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged |= colorFormatBit;
         }
         com.metallum.Metallum.LOGGER.debug(
                 "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",

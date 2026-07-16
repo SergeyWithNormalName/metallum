@@ -188,6 +188,46 @@ public record FrameState(
         }
     }
 
+    public FrameState withAdvancedLightingWork(final AdvancedLightingWork work) {
+        return new FrameState(
+                this.contract,
+                this.frameId,
+                this.rendererGenerationId,
+                this.historyGeneration,
+                this.renderContractGenerationId,
+                this.lightingGenerationId,
+                this.outputGenerationId,
+                this.renderContractMode,
+                this.lightingModel,
+                this.outputMode,
+                this.lightingPreset,
+                this.featureMask,
+                this.executorKind,
+                this.frameGraphVersion,
+                this.resourceBytes,
+                Objects.requireNonNull(work, "work"),
+                this.currentTransforms,
+                this.previousTransforms,
+                this.renderExtent,
+                this.displayExtent,
+                this.exposure,
+                this.preExposure,
+                this.jitterOffset,
+                this.historyResetReasons,
+                this.submitIndex,
+                this.inFlightSlot,
+                this.deltaSeconds,
+                this.nearPlane,
+                this.farPlane,
+                this.currentCameraPosition,
+                this.previousCameraPosition,
+                this.worldIdentity,
+                this.dimensionIdentity,
+                this.currentDisplayHeadroom,
+                this.potentialDisplayHeadroom
+        );
+    }
+
     public FrameState {
         Objects.requireNonNull(contract, "contract");
         requireNonNegative(frameId, "frame ID");

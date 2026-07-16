@@ -24,7 +24,8 @@ def macMetalSources = [
 	HdrEffects: layout.projectDirectory.file("src/main/metal/MetallumHdrEffects.metal"),
 	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal"),
 	SodiumLightPatch: layout.projectDirectory.file("src/main/metal/MetallumSodiumLightPatch.metal"),
-	TemporalDiagnostics: layout.projectDirectory.file("src/main/metal/MetallumTemporalDiagnostics.metal")
+	TemporalDiagnostics: layout.projectDirectory.file("src/main/metal/MetallumTemporalDiagnostics.metal"),
+	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -160,6 +161,14 @@ tasks.register("materialContractUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.hdr.MetallumMaterialContractTests")
 }
 
+tasks.register("advancedLightRegistryUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs bounded L3 static/dynamic light registry race and property tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.AdvancedLightRegistryTests")
+}
+
 tasks.register("metalRuntimeUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free Metal runtime lifecycle tests"
@@ -273,8 +282,54 @@ def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-test
 def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
 def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-tests/SodiumLightLegacyPatchValidation")
 def metal4LifecycleValidationBinary = layout.buildDirectory.file("native-tests/Metal4LifecycleValidation")
+def lightClusterValidationBinary = layout.buildDirectory.file("native-tests/LightClusterValidation")
 def metal4ValidationSupported = {
 	isAppleSiliconMac && (macOsSdkVersion.get().tokenize('.')[0] as int) >= 26
+}
+
+tasks.register("compileLightClusterValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native clustered-lighting ABI and GPU property harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/LightClusterValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(lightClusterValidationBinary)
+
+	doFirst {
+		lightClusterValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", lightClusterValidationBinary.get().asFile.absolutePath,
+		"src/test/native/LightClusterValidation.swift"
+}
+
+tasks.register("lightClusterValidation", Exec) {
+	group = "verification"
+	description = "Validates bounded deterministic clustered-lighting count/prefix/fill under Metal Validation"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileLightClusterValidation")
+	)
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file("src/main/metal/MetallumClusterBuild.metal")
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine lightClusterValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
 }
 
 tasks.register("compileMetal4LifecycleValidation", Exec) {
@@ -781,6 +836,7 @@ tasks.named("test", Test) {
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("materialContractUnitTest"))
+	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
@@ -806,6 +862,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("spatialScalingValidation"))
 	dependsOn(tasks.named("gpuTimingValidation"))
 	dependsOn(tasks.named("metal4LifecycleValidation"))
+	dependsOn(tasks.named("lightClusterValidation"))
 }
 
 java {

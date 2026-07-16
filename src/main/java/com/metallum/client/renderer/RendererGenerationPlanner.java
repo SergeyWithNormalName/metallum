@@ -396,15 +396,65 @@ public final class RendererGenerationPlanner {
         List<RendererGenerationManifest.Encoder> encoders = passes.stream()
                 .map(pass -> new RendererGenerationManifest.Encoder(
                         pass.name() + "_encoder", pass.domain()))
-                .toList();
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         List<RendererGenerationManifest.Pipeline> pipelines = passes.stream()
                 .map(pass -> new RendererGenerationManifest.Pipeline(
                         pass.name() + "_pso", pass.domain()))
-                .toList();
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         List<RendererGenerationManifest.WorkQueue> workQueues = passes.stream()
                 .map(pass -> new RendererGenerationManifest.WorkQueue(
                         pass.name() + "_queue", pass.domain()))
-                .toList();
+                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        if (config.lightingModel() == LightingModel.ADVANCED) {
+            AdvancedLightingLayout.Budget budget = AdvancedLightingLayout.forGeneration(
+                    config.lightingPreset(),
+                    renderExtent.width(),
+                    renderExtent.height()
+            );
+            RendererGenerationManifest.Domain domain = RendererGenerationManifest.Domain
+                    .ADVANCED_LIGHTING_ONLY;
+            resources.add(resource("lighting_upload_ring", domain, budget.uploadRingBytes(), false));
+            resources.add(resource("gpu_lights", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(budget.gpuLightBytes()), false));
+            // Compact headers/indices remain resident as the validation oracle; production
+            // direct lighting consumes the fused membership-mask allocation.
+            resources.add(resource("cluster_compact_headers", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(budget.clusterHeaderBytes()), false));
+            resources.add(resource("cluster_membership_masks", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(budget.clusterScratchBytes()), false));
+            resources.add(resource("cluster_block_statistics", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(budget.clusterIndexBytes()), false));
+            resources.add(resource("lighting_params", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(
+                            AdvancedLightingLayout.LIGHTING_PARAMS_BYTES), false));
+            resources.add(resource("cluster_statistics", domain,
+                    AdvancedLightingLayout.nativeAllocationBytes(
+                            AdvancedLightingLayout.STATISTICS_BYTES), false));
+
+            passes.add(pass("light_upload", domain));
+            passes.add(pass("cluster_prepare", domain));
+            passes.add(pass("cluster_masks", domain));
+            passes.add(pass("direct_lighting", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "light_upload_blit_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "cluster_build_compute_encoder", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prepare_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_masks_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_count_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prefix_blocks_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prefix_groups_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prefix_add_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("cluster_fill_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "terrain_direct_lighting_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "entity_direct_lighting_pso", domain));
+            workQueues.add(new RendererGenerationManifest.WorkQueue(
+                    "static_light_registry", domain));
+            workQueues.add(new RendererGenerationManifest.WorkQueue(
+                    "dynamic_light_snapshot", domain));
+        }
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,
                 config,

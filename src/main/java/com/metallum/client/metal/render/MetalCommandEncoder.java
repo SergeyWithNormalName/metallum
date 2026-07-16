@@ -1093,6 +1093,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return status;
     }
 
+    int encodeAdvancedLighting(
+            final AdvancedLightingGpuResources resources,
+            final AdvancedLightingGpuResources.FrameUpload upload
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return resources.uploadAndBuild(commandBuffer(), upload);
+    }
+
     void setGpuTimingStage(final MetalGpuTimingStage stage) {
         MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
         if (this.gpuTimingStage == next) {

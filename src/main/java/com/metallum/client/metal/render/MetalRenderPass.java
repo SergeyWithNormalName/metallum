@@ -68,6 +68,9 @@ final class MetalRenderPass implements RenderPassBackend {
     private boolean boundSidecarControlEnabled;
     @Nullable
     private MTLRenderCommandEncoder boundRenderEncoder;
+    @Nullable
+    private MTLRenderCommandEncoder boundAdvancedRenderEncoder;
+    private boolean advancedLightingPipeline;
 
     MetalRenderPass(
             final MetalDevice device,
@@ -679,6 +682,10 @@ final class MetalRenderPass implements RenderPassBackend {
                 throw new IllegalStateException("Native pipeline is unavailable");
             }
             enc.setRenderPipelineState(pipelineHandle);
+            this.advancedLightingPipeline = compiledPipeline.selectsAdvancedLighting(
+                    colorFormat,
+                    materialSceneAttachment
+            );
             pipelineDirty = false;
 
             if (useDepth) {
@@ -701,6 +708,11 @@ final class MetalRenderPass implements RenderPassBackend {
             // A pipeline switch can leave dirty bits from the previous numeric layout.
             // Rebinding the complete current layout supersedes that stale state.
             dirtyDescriptorMask = compiledPipeline.allResourceMask();
+        }
+
+        if (this.advancedLightingPipeline && this.boundAdvancedRenderEncoder != enc) {
+            this.device.bindAdvancedLighting(enc);
+            this.boundAdvancedRenderEncoder = enc;
         }
 
         if (scissorDirty) {
@@ -791,6 +803,7 @@ final class MetalRenderPass implements RenderPassBackend {
         this.scissorDirty = true;
         this.vertexBuffersDirty = true;
         this.boundSidecarControlSlot = -1;
+        this.boundAdvancedRenderEncoder = null;
         if (this.compiledPipeline != null) {
             this.dirtyDescriptorMask |= this.compiledPipeline.allResourceMask();
         }

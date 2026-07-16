@@ -9,6 +9,14 @@ import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
+import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.renderer.AdvancedLightingLayout;
+import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.LightingPreset;
+import com.metallum.client.renderer.MetalCapabilities;
+import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RendererGenerationConfig;
+import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -18,6 +26,8 @@ import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout;
+import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.VulkanBindGroupEntryType;
 import net.minecraft.client.renderer.RenderPipelines;
 
 import java.lang.foreign.Arena;
@@ -53,16 +63,142 @@ public final class MetalRuntimeTests {
         testResourceBindingPacketReuseAndValidation();
         testResourceBindingBatchSelector();
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
+        testCanonicalShaderResourceLayout();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testTrackedUiTextureAllocationScope();
         testWorldSceneCaptureGate();
         testMaterialWorldPassGate();
+        testAdvancedLightingAdmissionLimits();
+        testAdvancedLightingWorkDeclaration();
+        testAdvancedLightingPerSubmitLatch();
         testMojangLogoFp16BlendCompatibility();
         testHdrSceneColorRouting();
         testL2GenerationResourceRouting();
         testL2AtomicMaterialFallback();
         testAutomaticMaterialContractAndCompatibilityOverride();
+    }
+
+    private static void testCanonicalShaderResourceLayout() {
+        VulkanBindGroupLayout.Entry projection = new VulkanBindGroupLayout.Entry(
+                VulkanBindGroupEntryType.UNIFORM_BUFFER, "Projection", null);
+        VulkanBindGroupLayout.Entry transforms = new VulkanBindGroupLayout.Entry(
+                VulkanBindGroupEntryType.UNIFORM_BUFFER, "DynamicTransforms", null);
+        VulkanBindGroupLayout.Entry sampler = new VulkanBindGroupLayout.Entry(
+                VulkanBindGroupEntryType.SAMPLED_IMAGE, "Sampler0", null);
+        List<VulkanBindGroupLayout.Entry> legacy = new ArrayList<>(List.of(
+                projection, transforms, sampler));
+        List<VulkanBindGroupLayout.Entry> patched = new ArrayList<>(List.of(
+                transforms, sampler, projection));
+
+        MetalCrossShaderCompiler.canonicalizeLayoutEntries(legacy);
+        MetalCrossShaderCompiler.canonicalizeLayoutEntries(patched);
+
+        require(legacy.equals(patched),
+                "shader variants retained reflection-order-dependent resource indices");
+        require(legacy.equals(List.of(transforms, projection, sampler)),
+                "canonical shader resource ordering changed");
+    }
+
+    private static void testAdvancedLightingPerSubmitLatch() {
+        MetalCapabilities capabilities = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE,
+                MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT,
+                MetalCapabilities.Feature.ADVANCED_LIGHTING
+        );
+        RendererGenerationConfig advancedGeneration = new RendererGenerationConfig(
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                capabilities,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        long submitIndex = 41L;
+
+        AdvancedLightingRuntime.reset();
+        AdvancedLightingRuntime.configureRequested(true);
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+        AdvancedLightingRuntime.admitGeneration(true);
+        boolean beforeFailure = MetalDevice.isAdvancedLightingWorldPassActive(
+                advancedGeneration,
+                true,
+                true,
+                submitIndex,
+                submitIndex
+        );
+        HdrShaderFlavor firstFlavor = MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                beforeFailure,
+                true
+        );
+
+        AdvancedLightingRuntime.reportRegistryAdmission(false, "synthetic mid-submit failure");
+        require(!AdvancedLightingRuntime.isActive(),
+                "synthetic mid-submit failure did not reject future Advanced frames");
+        boolean afterFailure = MetalDevice.isAdvancedLightingWorldPassActive(
+                advancedGeneration,
+                true,
+                true,
+                submitIndex,
+                submitIndex
+        );
+        HdrShaderFlavor secondFlavor = MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                afterFailure,
+                true
+        );
+
+        require(beforeFailure && afterFailure
+                        && firstFlavor == HdrShaderFlavor.METALLUM_ADVANCED
+                        && secondFlavor == HdrShaderFlavor.METALLUM_ADVANCED,
+                "failClosed changed the Advanced shader flavor inside one submit");
+        require(!MetalDevice.isAdvancedLightingWorldPassActive(
+                        advancedGeneration,
+                        true,
+                        true,
+                        submitIndex,
+                        submitIndex + 1L
+                )
+                        && MetalCompiledRenderPipeline.selectMaterialWorldFlavor(false, true)
+                        == HdrShaderFlavor.METALLUM,
+                "expired Advanced frame latch leaked into the next submit");
+        AdvancedLightingRuntime.reset();
+    }
+
+    private static void testAdvancedLightingAdmissionLimits() {
+        require(MetalDevice.advancedLightingAdmissionLimit(LightingPreset.PERFORMANCE) == 32
+                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.BALANCED) == 64
+                        && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.ULTRA) == 128,
+                "Java retained-admission limits drifted from the native preset contract");
+        for (LightingPreset preset : LightingPreset.values()) {
+            require(AdvancedLightingLayout.forGeneration(preset, 1, 1).maxLights()
+                            == MetalDevice.advancedLightingAdmissionLimit(preset),
+                    "Retained admission drifted from the generation capacity for " + preset);
+        }
+    }
+
+    private static void testAdvancedLightingWorkDeclaration() {
+        FrameState.AdvancedLightingWork empty = MetalDevice.advancedLightingWork(0);
+        require(empty.lightCount() == 0
+                        && empty.passCount() == 3
+                        && empty.encoderCount() == 2
+                        && empty.psoCount() == 9
+                        && empty.workQueueCount() == 2
+                        && empty.dispatchCount() == 1
+                        && empty.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES,
+                "Empty Advanced frame does not describe upload, prepare and direct work");
+
+        FrameState.AdvancedLightingWork populated = MetalDevice.advancedLightingWork(2);
+        require(populated.lightCount() == 2
+                        && populated.passCount() == 4
+                        && populated.encoderCount() == 2
+                        && populated.psoCount() == 9
+                        && populated.workQueueCount() == 2
+                        && populated.dispatchCount() == 3
+                        && populated.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES
+                        + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE,
+                "Populated Advanced frame does not describe the fused mask pipeline");
+        expectIllegalArgument(() -> MetalDevice.advancedLightingWork(-1));
     }
 
     private static void testAutomaticMaterialContractAndCompatibilityOverride() {
@@ -262,7 +398,9 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.METAL_FX,
                 MetalGpuTimingStage.UI_SEED,
                 MetalGpuTimingStage.UI,
-                MetalGpuTimingStage.PRESENT
+                MetalGpuTimingStage.PRESENT,
+                MetalGpuTimingStage.ACTUAL_HDR_DISPLAY,
+                MetalGpuTimingStage.LIGHT_UPLOAD_CLUSTER_BUILD
         };
         require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
                 "GPU timing stage count does not match the native ABI");
@@ -994,6 +1132,15 @@ public final class MetalRuntimeTests {
     private static void require(final boolean condition, final String message) {
         if (!condition) {
             throw new AssertionError(message);
+        }
+    }
+
+    private static void expectIllegalArgument(final Runnable action) {
+        try {
+            action.run();
+            throw new AssertionError("Expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // Expected.
         }
     }
 }

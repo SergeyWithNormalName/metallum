@@ -2,7 +2,7 @@
   "metallum.options.page": "Metallum",
   "metallum.options.group.lighting": "Lighting",
   "metallum.options.improved_lighting.name": "Advanced Lighting",
-  "metallum.options.improved_lighting.tooltip": "Requests Advanced Lighting. The L2 material renderer is automatic; until L3 admission exists, the active model remains Vanilla. Changes require a restart.",
+  "metallum.options.improved_lighting.tooltip": "Enables L3 clustered colored direct lighting for terrain and entities. The L2 material renderer remains automatic; failed admission safely falls back to Vanilla lighting. Changes require a restart.",
   "metallum.options.group.metalfx": "MetalFX",
   "metallum.options.metalfx_spatial_scaling.name": "MetalFX Spatial Scaling",
   "metallum.options.metalfx_spatial_scaling.off": "Off",

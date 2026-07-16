@@ -6,6 +6,9 @@ import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
+import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.mojang.blaze3d.shaders.ShaderType;
@@ -36,6 +39,8 @@ abstract class ShaderManagerMixin {
     ) {
         Map<SceneLinearPreflightGate.ShaderKey, String> sources = new HashMap<>();
         Map<MetallumMaterialPreflightGate.ShaderKey, String> materialSources = new HashMap<>();
+        Map<AdvancedDirectLightingShaderPatcher.ShaderKey, String> advancedSources =
+                new HashMap<>();
         for (Map.Entry<?, String> entry : shaderSources(configs).entrySet()) {
             Object rawKey = entry.getKey();
             if (!(rawKey instanceof ShaderSourceKeyAccessor accessor)) {
@@ -47,6 +52,12 @@ abstract class ShaderManagerMixin {
                         false,
                         "could not inspect ShaderManager compilation-cache keys"
                 ));
+                AdvancedLightingPreflightGate.beginCandidate(
+                        new AdvancedLightingPreflightGate.Evaluation(
+                                false,
+                                "could not inspect ShaderManager compilation-cache keys"
+                        )
+                );
                 return;
             }
             Identifier id = accessor.metallum$id();
@@ -68,6 +79,16 @@ abstract class ShaderManagerMixin {
                     ),
                     entry.getValue()
             );
+            advancedSources.put(
+                    new AdvancedDirectLightingShaderPatcher.ShaderKey(
+                            id.getNamespace(),
+                            id.getPath(),
+                            shaderType == ShaderType.VERTEX
+                                    ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                                    : MetallumMaterialShaderPatcher.Stage.FRAGMENT
+                    ),
+                    entry.getValue()
+            );
         }
 
         FabricLoader loader = FabricLoader.getInstance();
@@ -77,11 +98,18 @@ abstract class ShaderManagerMixin {
                 loader.isModLoaded("iris"),
                 loader.isModLoaded("sodium")
         ));
-        MetallumMaterialPreflightGate.beginCandidate(MetallumMaterialPreflightGate.evaluate(
+        MetallumMaterialPreflightGate.Evaluation materialEvaluation =
+                MetallumMaterialPreflightGate.evaluate(
                 materialSources,
                 MetallumMaterialState.isRequested(),
                 loader.isModLoaded("iris"),
                 loader.isModLoaded("sodium")
+        );
+        MetallumMaterialPreflightGate.beginCandidate(materialEvaluation);
+        AdvancedLightingPreflightGate.beginCandidate(AdvancedLightingPreflightGate.evaluate(
+                advancedSources,
+                AdvancedLightingRuntime.isRequested(),
+                materialEvaluation.active()
         ));
     }
 
@@ -96,7 +124,15 @@ abstract class ShaderManagerMixin {
             final CallbackInfo ci
     ) {
         SceneLinearPreflightGate.commitCandidate();
-        MetallumMaterialPreflightGate.commitCandidate();
+        MetallumMaterialPreflightGate.Evaluation material =
+                MetallumMaterialPreflightGate.commitCandidate();
+        if (!material.active()) {
+            AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                    "Advanced Lighting requires the committed METALLUM material generation: "
+                            + material.reason()
+            );
+        }
+        AdvancedLightingPreflightGate.commitCandidate();
         TemporalResetEvents.signal(FrameState.HistoryResetReason.RESOURCE_PACK_SHADER_RELOAD);
     }
 

@@ -23,7 +23,8 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumPresent.metal",
             "/natives/macos/shaders/MetallumHdrEffects.metal",
             "/natives/macos/shaders/MetallumClear.metal",
-            "/natives/macos/shaders/MetallumSodiumLightPatch.metal"
+            "/natives/macos/shaders/MetallumSodiumLightPatch.metal",
+            "/natives/macos/shaders/MetallumClusterBuild.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
@@ -106,6 +107,61 @@ public final class MetalNativeBridge {
                     lookup,
                     "metallum_set_frame_state_v3",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            lightingBatchAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_batch_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            lightingLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            lightingCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_create_context_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            INT,
+                            INT,
+                            INT,
+                            INT,
+                            INT
+                    )
+            );
+            lightingReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+            lightingContextBufferV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_context_buffer_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT)
+            );
+            lightingContextBufferBytesV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_context_buffer_bytes_v1",
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS, INT)
+            );
+            lightingUploadAndBuildV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_upload_and_build_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
+            );
+            lightingLastCompletedStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_lighting_last_completed_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
             encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
                     lookup,
@@ -509,6 +565,14 @@ public final class MetalNativeBridge {
     private static final MethodHandle validateFrameGraphV1;
     private static final MethodHandle validateFrameStateV3;
     private static final MethodHandle setFrameStateV3;
+    private static final MethodHandle lightingBatchAbiVersionV1;
+    private static final MethodHandle lightingLayoutV1;
+    private static final MethodHandle lightingCreateContextV1;
+    private static final MethodHandle lightingReleaseContextV1;
+    private static final MethodHandle lightingContextBufferV1;
+    private static final MethodHandle lightingContextBufferBytesV1;
+    private static final MethodHandle lightingUploadAndBuildV1;
+    private static final MethodHandle lightingLastCompletedStatsV1;
     private static final MethodHandle encodeTemporalDiagnosticsV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -742,6 +806,117 @@ public final class MetalNativeBridge {
 
     public static int metallum_set_frame_state_v3(final MemorySegment packet) {
         return invokeFrameState("metallum_set_frame_state_v3", setFrameStateV3, packet);
+    }
+
+    public static int metallum_lighting_batch_abi_version_v1() {
+        try {
+            return (int) lightingBatchAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_batch_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_lighting_layout_v1(final MemorySegment output) {
+        if (output == null || output.byteSize() == 0L) {
+            throw new IllegalArgumentException("Lighting layout packet must not be empty");
+        }
+        try {
+            return (int) lightingLayoutV1.invokeExact(segment(output), output.byteSize());
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_lighting_create_context_v1(
+            final MemorySegment device,
+            final long generation,
+            final int maxLights,
+            final int indexCapacity,
+            final int clustersX,
+            final int clustersY,
+            final int clustersZ
+    ) {
+        try {
+            return (MemorySegment) lightingCreateContextV1.invokeExact(
+                    segment(device),
+                    generation,
+                    maxLights,
+                    indexCapacity,
+                    clustersX,
+                    clustersY,
+                    clustersZ
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_create_context_v1", throwable);
+        }
+    }
+
+    public static void metallum_lighting_release_context_v1(final MemorySegment context) {
+        try {
+            lightingReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_release_context_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_lighting_context_buffer_v1(
+            final MemorySegment context,
+            final int kind
+    ) {
+        try {
+            return (MemorySegment) lightingContextBufferV1.invokeExact(segment(context), kind);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_context_buffer_v1", throwable);
+        }
+    }
+
+    public static long metallum_lighting_context_buffer_bytes_v1(
+            final MemorySegment context,
+            final int kind
+    ) {
+        try {
+            return (long) lightingContextBufferBytesV1.invokeExact(segment(context), kind);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_context_buffer_bytes_v1", throwable);
+        }
+    }
+
+    public static int metallum_lighting_upload_and_build_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final MemorySegment packet
+    ) {
+        if (packet == null || packet.byteSize() == 0L) {
+            throw new IllegalArgumentException("Lighting upload packet must not be empty");
+        }
+        try {
+            return (int) lightingUploadAndBuildV1.invokeExact(
+                    segment(context),
+                    segment(commandBuffer),
+                    segment(packet),
+                    packet.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_upload_and_build_v1", throwable);
+        }
+    }
+
+    public static int metallum_lighting_last_completed_stats_v1(
+            final MemorySegment context,
+            final MemorySegment output
+    ) {
+        if (output == null || output.byteSize() == 0L) {
+            throw new IllegalArgumentException("Lighting statistics packet must not be empty");
+        }
+        try {
+            return (int) lightingLastCompletedStatsV1.invokeExact(
+                    segment(context),
+                    segment(output),
+                    output.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_lighting_last_completed_stats_v1", throwable);
+        }
     }
 
     public static int metallum_encode_temporal_diagnostics_v1(

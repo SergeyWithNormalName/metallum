@@ -139,6 +139,26 @@ WORKLOAD_CONTRACTS = frozenset({
     WORKLOAD_CONTRACT_EXPANDED,
     WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 })
+L3_FRAME_GRAPH_VERSION = 4
+LIGHT_CLUSTER_STAGE = "light upload + cluster build"
+CLUSTER_CAP = 128
+CLUSTER_RING_SLOTS = 3
+CLUSTER_STATISTICS_SAMPLE_INTERVAL = 32
+MAXIMUM_CLUSTER_LIGHTS = 4_096
+MAXIMUM_CLUSTERS = 1_048_576
+CLUSTERED_LIGHTING_INTEGER_KEYS = (
+    "generation", "frame_id", "light_count", "cluster_count",
+    "cluster_accepted_indices", "cluster_requested_indices",
+    "cluster_overflow_clusters", "cluster_dropped_indices",
+    "cluster_index_capacity_drops", "cluster_admission_rejected_lights",
+    "cluster_occupancy_p50", "cluster_occupancy_p95",
+    "cluster_occupancy_p99", "cluster_occupancy_max",
+    "lighting_ring_high_water", "lighting_ring_busy_rejects",
+    "statistics_sample_interval",
+)
+CLUSTERED_LIGHTING_KEYS = frozenset({
+    "active", "output_independent", *CLUSTERED_LIGHTING_INTEGER_KEYS,
+})
 STABLE_METADATA_KEYS = (
     "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
     "settings_id", "settings_spec_sha256", "settings_sha256",
@@ -201,6 +221,8 @@ class TimingWindow:
     workload: dict[str, Any] | None
     metadata: dict[str, Any]
     renderer_generation: dict[str, Any] | None
+    clustered_lighting: dict[str, Any] | None
+    light_cluster_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -227,6 +249,130 @@ def _number(
 
 def _optional_number(value: Any, field: str, line: int) -> float | None:
     return None if value is None else _number(value, field, line)
+
+
+def _parse_clustered_lighting(value: Any, line: int) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != CLUSTERED_LIGHTING_KEYS:
+        raise ReportError(f"line {line}: clustered_lighting has invalid keys")
+    active = value.get("active")
+    output_independent = value.get("output_independent")
+    if not isinstance(active, bool):
+        raise ReportError(f"line {line}: clustered_lighting.active must be a boolean")
+    if not isinstance(output_independent, bool):
+        raise ReportError(
+            f"line {line}: clustered_lighting.output_independent must be a boolean"
+        )
+    result: dict[str, Any] = {
+        "active": active,
+        "output_independent": output_independent,
+    }
+    for key in CLUSTERED_LIGHTING_INTEGER_KEYS:
+        result[key] = _integer(value.get(key), f"clustered_lighting.{key}", line)
+
+    if not (
+        result["cluster_occupancy_p50"]
+        <= result["cluster_occupancy_p95"]
+        <= result["cluster_occupancy_p99"]
+        <= result["cluster_occupancy_max"]
+    ):
+        raise ReportError(f"line {line}: clustered-lighting occupancy is not monotonic")
+    if result["cluster_occupancy_max"] > CLUSTER_CAP:
+        raise ReportError(
+            f"line {line}: clustered-lighting occupancy exceeds cluster cap {CLUSTER_CAP}"
+        )
+    if result["light_count"] > MAXIMUM_CLUSTER_LIGHTS:
+        raise ReportError(
+            f"line {line}: clustered_lighting.light_count exceeds ABI maximum"
+        )
+    if result["cluster_count"] > MAXIMUM_CLUSTERS:
+        raise ReportError(
+            f"line {line}: clustered_lighting.cluster_count exceeds ABI maximum"
+        )
+    if result["lighting_ring_high_water"] > CLUSTER_RING_SLOTS:
+        raise ReportError(
+            f"line {line}: clustered-lighting ring high-water exceeds ring capacity"
+        )
+    if result["cluster_overflow_clusters"] > result["cluster_count"]:
+        raise ReportError(
+            f"line {line}: clustered-lighting overflow clusters exceed cluster count"
+        )
+    if result["cluster_admission_rejected_lights"] > result["light_count"]:
+        raise ReportError(
+            f"line {line}: clustered-lighting admission rejects exceed light count"
+        )
+    accepted = result["cluster_accepted_indices"]
+    requested = result["cluster_requested_indices"]
+    capacity_drops = result["cluster_index_capacity_drops"]
+    if accepted > requested:
+        raise ReportError(
+            f"line {line}: clustered-lighting accepted indices exceed requested indices"
+        )
+    if requested - accepted != capacity_drops:
+        raise ReportError(
+            f"line {line}: clustered-lighting index-capacity drop algebra is invalid"
+        )
+    if result["cluster_dropped_indices"] < capacity_drops:
+        raise ReportError(
+            f"line {line}: clustered-lighting total drops are below capacity drops"
+        )
+    maximum_indices = result["cluster_count"] * CLUSTER_CAP
+    if accepted > maximum_indices or requested > maximum_indices:
+        raise ReportError(
+            f"line {line}: clustered-lighting index counters exceed cluster capacity"
+        )
+    return result
+
+
+def _parse_light_cluster_stage(value: Any, line: int) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: stages must be an object or null")
+    stage = value.get(LIGHT_CLUSTER_STAGE)
+    if stage is None:
+        return None
+    if not isinstance(stage, dict):
+        raise ReportError(
+            f"line {line}: stages.{LIGHT_CLUSTER_STAGE} must be an object or null"
+        )
+    legacy_keys = {"frames", "average_ms", "maximum_ms"}
+    percentile_keys = legacy_keys | {"p50_ms", "p95_ms", "p99_ms"}
+    if set(stage) not in (legacy_keys, percentile_keys):
+        raise ReportError(
+            f"line {line}: stages.{LIGHT_CLUSTER_STAGE} has invalid keys"
+        )
+    result: dict[str, Any] = {
+        "frames": _integer(
+            stage.get("frames"), f"stages.{LIGHT_CLUSTER_STAGE}.frames", line, 1
+        ),
+        "average_ms": _number(
+            stage.get("average_ms"), f"stages.{LIGHT_CLUSTER_STAGE}.average_ms", line
+        ),
+        "maximum_ms": _number(
+            stage.get("maximum_ms"), f"stages.{LIGHT_CLUSTER_STAGE}.maximum_ms", line
+        ),
+    }
+    if result["average_ms"] > result["maximum_ms"]:
+        raise ReportError(
+            f"line {line}: {LIGHT_CLUSTER_STAGE} average exceeds maximum"
+        )
+    for key in ("p50_ms", "p95_ms", "p99_ms"):
+        result[key] = (
+            _number(stage.get(key), f"stages.{LIGHT_CLUSTER_STAGE}.{key}", line)
+            if key in stage else None
+        )
+    if result["p50_ms"] is not None and not (
+        result["p50_ms"]
+        <= result["p95_ms"]
+        <= result["p99_ms"]
+        <= result["maximum_ms"]
+    ):
+        raise ReportError(
+            f"line {line}: {LIGHT_CLUSTER_STAGE} percentiles are not monotonic"
+        )
+    return result
 
 
 def _metric_object(payload: dict[str, Any], schema: int, line: int) -> dict[str, Any]:
@@ -836,6 +982,14 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_renderer_generation(payload.get("renderer_generation"), line, schema)
             if schema >= 3 else None
         ),
+        clustered_lighting=(
+            _parse_clustered_lighting(payload.get("clustered_lighting"), line)
+            if schema >= 4 else None
+        ),
+        light_cluster_stage=(
+            _parse_light_cluster_stage(payload.get("stages"), line)
+            if schema >= 4 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
@@ -949,6 +1103,176 @@ def _series(values: Sequence[float], windows: Sequence[TimingWindow]) -> dict[st
         "window_minimum": min(values),
         "window_maximum": max(values),
     }
+
+
+def _validate_l3_measurement(window: TimingWindow) -> None:
+    generation = window.renderer_generation
+    if generation is None or generation["frame_graph_version"] < L3_FRAME_GRAPH_VERSION:
+        return
+    clustered = window.clustered_lighting
+    if clustered is None:
+        raise ReportError(
+            f"line {window.line}: L3 measurement requires clustered_lighting telemetry"
+        )
+    if not clustered["output_independent"]:
+        raise ReportError(
+            f"line {window.line}: clustered_lighting.output_independent must be true"
+        )
+
+    model = generation["resolved_lighting_model"]
+    stage = window.light_cluster_stage
+    if model == "vanilla":
+        if clustered["active"]:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement has active clustered lighting"
+            )
+        nonzero = [
+            key for key in CLUSTERED_LIGHTING_INTEGER_KEYS if clustered[key] != 0
+        ]
+        if nonzero:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement has nonzero clustered-lighting "
+                "counter(s): " + ", ".join(nonzero)
+            )
+        if stage is not None:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement contains {LIGHT_CLUSTER_STAGE} work"
+            )
+        return
+
+    if not clustered["active"]:
+        raise ReportError(
+            f"line {window.line}: Advanced measurement has inactive clustered lighting"
+        )
+    if clustered["statistics_sample_interval"] <= 0:
+        raise ReportError(
+            f"line {window.line}: Advanced clustered-lighting sample interval must be positive"
+        )
+    if clustered["generation"] <= 0 or clustered["frame_id"] <= 0:
+        raise ReportError(
+            f"line {window.line}: Advanced clustered-lighting generation/frame must be positive"
+        )
+    if clustered["generation"] != generation["lighting_generation_id"]:
+        raise ReportError(
+            f"line {window.line}: clustered-lighting generation differs from renderer generation"
+        )
+    if clustered["frame_id"] > generation["frame_id"]:
+        raise ReportError(
+            f"line {window.line}: clustered-lighting completed frame is ahead of renderer frame"
+        )
+    maximum_lag = max(
+        CLUSTER_RING_SLOTS,
+        clustered["statistics_sample_interval"] + CLUSTER_RING_SLOTS - 1,
+    )
+    if generation["frame_id"] - clustered["frame_id"] > maximum_lag:
+        raise ReportError(
+            f"line {window.line}: clustered-lighting completed frame exceeds ring lag"
+        )
+    if clustered["cluster_count"] <= 0:
+        raise ReportError(
+            f"line {window.line}: Advanced clustered-lighting cluster count must be positive"
+        )
+    if clustered["lighting_ring_high_water"] <= 0:
+        raise ReportError(
+            f"line {window.line}: Advanced clustered-lighting ring was never used"
+        )
+    work = generation["advanced_lighting_work"]
+    if (clustered["frame_id"] == generation["frame_id"]
+            and clustered["light_count"] != work["light_count"]):
+        raise ReportError(
+            f"line {window.line}: clustered-lighting light count differs from renderer work"
+        )
+    if not all(
+        work[key] > 0
+        for key in (
+            "pass_count", "encoder_count", "pso_count", "work_queue_count",
+            "dispatch_count", "upload_bytes",
+        )
+    ):
+        raise ReportError(
+            f"line {window.line}: Advanced generation has an incomplete GPU work declaration"
+        )
+    if generation["resource_bytes"]["advanced_lighting"] <= 0:
+        raise ReportError(
+            f"line {window.line}: Advanced generation has no clustered-lighting resources"
+        )
+    if not window.detail:
+        return
+    if stage is None:
+        raise ReportError(
+            f"line {window.line}: detailed Advanced measurement requires "
+            f"{LIGHT_CLUSTER_STAGE} timing"
+        )
+    if stage["p95_ms"] is None:
+        raise ReportError(
+            f"line {window.line}: detailed Advanced measurement requires "
+            f"{LIGHT_CLUSTER_STAGE} p95_ms"
+        )
+    if stage["frames"] != window.frames:
+        raise ReportError(
+            f"line {window.line}: {LIGHT_CLUSTER_STAGE} covers {stage['frames']} of "
+            f"{window.frames} presented frames"
+        )
+
+
+def _aggregate_clustered_lighting(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    present = [window.clustered_lighting is not None for window in windows]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ReportError("selected windows mix clustered-lighting telemetry presence")
+    clustered = [window.clustered_lighting for window in windows]
+    assert all(value is not None for value in clustered)
+    values = [value for value in clustered if value is not None]
+    if len({value["active"] for value in values}) != 1:
+        raise ReportError("selected windows mix clustered-lighting active state")
+    if len({value["output_independent"] for value in values}) != 1:
+        raise ReportError("selected windows mix clustered-lighting output contract")
+    return {
+        "active": values[0]["active"],
+        "output_independent": values[0]["output_independent"],
+        "window_count": len(values),
+        "counters": {
+            key: {
+                "window_minimum": min(value[key] for value in values),
+                "window_maximum": max(value[key] for value in values),
+                "last_window": values[-1][key],
+            }
+            for key in CLUSTERED_LIGHTING_INTEGER_KEYS
+        },
+    }
+
+
+def _aggregate_light_cluster_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    present = [window.light_cluster_stage is not None for window in windows]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ReportError(f"selected windows mix {LIGHT_CLUSTER_STAGE} timing presence")
+    stages = [window.light_cluster_stage for window in windows]
+    assert all(value is not None for value in stages)
+    values = [value for value in stages if value is not None]
+    result: dict[str, Any] = {
+        "frames": sum(value["frames"] for value in values),
+        "average_ms": _series(
+            [value["average_ms"] for value in values], windows
+        ),
+        "maximum_ms": max(value["maximum_ms"] for value in values),
+    }
+    for key in ("p50_ms", "p95_ms", "p99_ms"):
+        if all(value[key] is not None for value in values):
+            result[key] = _series(
+                [float(value[key]) for value in values], windows
+            )
+        elif any(value[key] is not None for value in values):
+            raise ReportError(
+                f"selected windows mix {LIGHT_CLUSTER_STAGE} {key} presence"
+            )
+    return result
 
 
 def _aggregate_workload(
@@ -1405,6 +1729,8 @@ def summarize(
 ) -> dict[str, Any]:
     all_windows = load_report(path)
     selected, selection = select_measurement(all_windows, frames, segment, scaler)
+    for window in selected:
+        _validate_l3_measurement(window)
     if len({window.detail for window in selected}) != 1:
         raise ReportError("selected windows mix detailed and basic instrumentation")
     if selected[0].schema >= 2:
@@ -1499,6 +1825,12 @@ def summarize(
     workload = _aggregate_workload(selected)
     if workload is not None:
         result["workload"] = workload
+    clustered_lighting = _aggregate_clustered_lighting(selected)
+    if clustered_lighting is not None:
+        result["clustered_lighting"] = clustered_lighting
+    cluster_stage = _aggregate_light_cluster_stage(selected)
+    if cluster_stage is not None:
+        result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
     if selected[0].schema >= 2:
         result["metadata"] = selected[-1].metadata
     if renderer_generations and renderer_generations[0] is not None:
@@ -2878,6 +3210,67 @@ def self_test() -> None:
                     }
         return payload
 
+    def clustered_lighting(active: bool) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "active": active,
+            "output_independent": True,
+            **{key: 0 for key in CLUSTERED_LIGHTING_INTEGER_KEYS},
+        }
+        if active:
+            result.update({
+                "generation": 1,
+                "frame_id": 100,
+                "light_count": 2,
+                "cluster_count": 1_024,
+                "cluster_accepted_indices": 10,
+                "cluster_requested_indices": 12,
+                "cluster_overflow_clusters": 1,
+                "cluster_dropped_indices": 3,
+                "cluster_index_capacity_drops": 2,
+                "cluster_admission_rejected_lights": 1,
+                "cluster_occupancy_p50": 0,
+                "cluster_occupancy_p95": 1,
+                "cluster_occupancy_p99": 2,
+                "cluster_occupancy_max": 4,
+                "lighting_ring_high_water": 2,
+                "statistics_sample_interval": CLUSTER_STATISTICS_SAMPLE_INTERVAL,
+            })
+        return result
+
+    def l3_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
+        payload = line(4, index)
+        payload["detail_enabled"] = detail
+        generation = payload["renderer_generation"]
+        generation["frame_graph_version"] = L3_FRAME_GRAPH_VERSION
+        generation["frame_id"] = 100 + index
+        payload["clustered_lighting"] = clustered_lighting(advanced)
+        payload["stages"] = {LIGHT_CLUSTER_STAGE: None}
+        if advanced:
+            generation["resolved_render_contract"] = "metallum"
+            generation["resolved_lighting_model"] = "advanced"
+            generation["resource_bytes"]["material"] = 4_096
+            generation["resource_bytes"]["advanced_lighting"] = 8_192
+            generation["advanced_lighting_work"] = {
+                "light_count": 2,
+                "pass_count": 4,
+                "encoder_count": 2,
+                "pso_count": 9,
+                "work_queue_count": 2,
+                "dispatch_count": 3,
+                "upload_bytes": 160,
+            }
+            payload["clustered_lighting"]["frame_id"] += index
+            if detail:
+                payload["stages"][LIGHT_CLUSTER_STAGE] = {
+                    "frames": 300,
+                    "average_ms": 0.09,
+                    "p50_ms": 0.08,
+                    "p95_ms": 0.12,
+                    "p99_ms": 0.14,
+                    "maximum_ms": 0.16,
+                }
+        return payload
+
     def report_text(
         source_sha256: str,
         artifact_sha256: str = "5" * 64,
@@ -2981,6 +3374,214 @@ def self_test() -> None:
             lambda: load_report(invalid_schema4_path),
             "Vanilla generation contains Advanced work/resources",
         )
+
+        # L2.5 already emitted schema-v4/frame-graph-v2 reports. The strict
+        # clustered-lighting contract starts at frame-graph v4, preserving
+        # those reports while making L3 telemetry mandatory and auditable.
+        l3_vanilla = root / "l3-vanilla.jsonl"
+        l3_vanilla.write_text(
+            "\n".join(json.dumps(l3_line(i, advanced=False, detail=False))
+                      for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        l3_vanilla_summary = summarize(l3_vanilla, 3000, 0, "OFF")
+        assert l3_vanilla_summary["clustered_lighting"]["active"] is False
+        assert "stages" not in l3_vanilla_summary
+
+        l3_vanilla_missing = root / "l3-vanilla-missing.jsonl"
+        missing_payloads = [l3_line(i, advanced=False, detail=False) for i in range(10)]
+        missing_payloads[0].pop("clustered_lighting")
+        l3_vanilla_missing.write_text(
+            "\n".join(json.dumps(payload) for payload in missing_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_vanilla_missing, 3000, 0, "OFF"),
+            "L3 measurement requires clustered_lighting telemetry",
+        )
+
+        l3_vanilla_nonzero = root / "l3-vanilla-nonzero.jsonl"
+        nonzero_payloads = [l3_line(i, advanced=False, detail=False) for i in range(10)]
+        nonzero_payloads[0]["clustered_lighting"]["cluster_count"] = 1
+        l3_vanilla_nonzero.write_text(
+            "\n".join(json.dumps(payload) for payload in nonzero_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_vanilla_nonzero, 3000, 0, "OFF"),
+            "Vanilla measurement has nonzero clustered-lighting counter",
+        )
+
+        l3_advanced_detail = root / "l3-advanced-detail.jsonl"
+        l3_advanced_detail.write_text(
+            "\n".join(json.dumps(l3_line(i, advanced=True, detail=True))
+                      for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        l3_advanced_summary = summarize(l3_advanced_detail, 3000, 0, "OFF")
+        assert l3_advanced_summary["clustered_lighting"]["active"] is True
+        assert l3_advanced_summary["clustered_lighting"]["output_independent"] is True
+        assert l3_advanced_summary["stages"][LIGHT_CLUSTER_STAGE]["frames"] == 3000
+        assert l3_advanced_summary["stages"][LIGHT_CLUSTER_STAGE]["p95_ms"][
+            "window_maximum"
+        ] == 0.12
+
+        l3_cap_128 = root / "l3-cluster-cap-128.jsonl"
+        cap_payload = l3_line(0, advanced=True, detail=False)
+        cap_payload["renderer_generation"]["advanced_lighting_work"]["light_count"] = 128
+        cap_payload["clustered_lighting"].update({
+            "light_count": 128,
+            "cluster_accepted_indices": 131_072,
+            "cluster_requested_indices": 131_072,
+            "cluster_overflow_clusters": 0,
+            "cluster_dropped_indices": 0,
+            "cluster_index_capacity_drops": 0,
+            "cluster_admission_rejected_lights": 0,
+            "cluster_occupancy_p50": 128,
+            "cluster_occupancy_p95": 128,
+            "cluster_occupancy_p99": 128,
+            "cluster_occupancy_max": 128,
+        })
+        l3_cap_128.write_text(json.dumps(cap_payload) + "\n", encoding="utf-8")
+        assert load_report(l3_cap_128)[0].clustered_lighting[
+            "cluster_occupancy_max"
+        ] == 128
+
+        l3_advanced_basic = root / "l3-advanced-basic.jsonl"
+        l3_advanced_basic.write_text(
+            "\n".join(json.dumps(l3_line(i, advanced=True, detail=False))
+                      for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        basic_summary = summarize(l3_advanced_basic, 3000, 0, "OFF")
+        assert basic_summary["clustered_lighting"]["active"] is True
+        assert "stages" not in basic_summary
+
+        # Cluster statistics are sampled and published from an asynchronous
+        # command-buffer completion handler. A completed frame may therefore trail
+        # the current renderer declaration, and its scene light count need not match
+        # that newer frame's count.
+        l3_completed_lag = root / "l3-completed-two-frame-lag.jsonl"
+        lag_payloads = [l3_line(i, advanced=True, detail=False) for i in range(10)]
+        for payload in lag_payloads:
+            generation = payload["renderer_generation"]
+            payload["clustered_lighting"]["frame_id"] = generation["frame_id"] - 2
+            generation["advanced_lighting_work"]["light_count"] = 3
+        l3_completed_lag.write_text(
+            "\n".join(json.dumps(payload) for payload in lag_payloads) + "\n",
+            encoding="utf-8",
+        )
+        lag_summary = summarize(l3_completed_lag, 3000, 0, "OFF")
+        lag_frames = lag_summary["clustered_lighting"]["counters"]["frame_id"]
+        assert lag_frames["window_minimum"] == 98
+        assert lag_frames["window_maximum"] == 107
+        assert lag_summary["renderer_generation"]["advanced_lighting_work"][
+            "light_count"
+        ] == 3
+
+        l3_completed_future = root / "l3-completed-future-frame.jsonl"
+        future_payloads = [l3_line(i, advanced=True, detail=False) for i in range(10)]
+        future_payloads[0]["clustered_lighting"]["frame_id"] = (
+            future_payloads[0]["renderer_generation"]["frame_id"] + 1
+        )
+        l3_completed_future.write_text(
+            "\n".join(json.dumps(payload) for payload in future_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_completed_future, 3000, 0, "OFF"),
+            "clustered-lighting completed frame is ahead of renderer frame",
+        )
+
+        l3_completed_stale = root / "l3-completed-stale-frame.jsonl"
+        stale_payloads = [l3_line(i, advanced=True, detail=False) for i in range(10)]
+        stale_payloads[0]["clustered_lighting"]["frame_id"] = (
+            stale_payloads[0]["renderer_generation"]["frame_id"]
+            - CLUSTER_STATISTICS_SAMPLE_INTERVAL
+            - CLUSTER_RING_SLOTS
+            - 1
+        )
+        l3_completed_stale.write_text(
+            "\n".join(json.dumps(payload) for payload in stale_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_completed_stale, 3000, 0, "OFF"),
+            "clustered-lighting completed frame exceeds ring lag",
+        )
+
+        l3_same_frame_count_mismatch = root / "l3-same-frame-count-mismatch.jsonl"
+        mismatch_payloads = [l3_line(i, advanced=True, detail=False) for i in range(10)]
+        mismatch_payloads[0]["clustered_lighting"]["light_count"] = 1
+        l3_same_frame_count_mismatch.write_text(
+            "\n".join(json.dumps(payload) for payload in mismatch_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_same_frame_count_mismatch, 3000, 0, "OFF"),
+            "clustered-lighting light count differs from renderer work",
+        )
+
+        l3_missing_p95 = root / "l3-advanced-missing-p95.jsonl"
+        missing_p95 = [l3_line(i, advanced=True, detail=True) for i in range(10)]
+        for payload in missing_p95:
+            stage = payload["stages"][LIGHT_CLUSTER_STAGE]
+            payload["stages"][LIGHT_CLUSTER_STAGE] = {
+                "frames": stage["frames"],
+                "average_ms": stage["average_ms"],
+                "maximum_ms": stage["maximum_ms"],
+            }
+        l3_missing_p95.write_text(
+            "\n".join(json.dumps(payload) for payload in missing_p95) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_missing_p95, 3000, 0, "OFF"),
+            f"{LIGHT_CLUSTER_STAGE} p95_ms",
+        )
+
+        l3_not_output_independent = root / "l3-not-output-independent.jsonl"
+        output_payloads = [l3_line(i, advanced=True, detail=False) for i in range(10)]
+        output_payloads[0]["clustered_lighting"]["output_independent"] = False
+        l3_not_output_independent.write_text(
+            "\n".join(json.dumps(payload) for payload in output_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_not_output_independent, 3000, 0, "OFF"),
+            "clustered_lighting.output_independent must be true",
+        )
+
+        l3_invalid_algebra = root / "l3-invalid-algebra.jsonl"
+        invalid_algebra = l3_line(1, advanced=True, detail=False)
+        invalid_algebra["clustered_lighting"]["cluster_index_capacity_drops"] = 1
+        l3_invalid_algebra.write_text(json.dumps(invalid_algebra) + "\n", encoding="utf-8")
+        expect_error(
+            lambda: load_report(l3_invalid_algebra),
+            "index-capacity drop algebra is invalid",
+        )
+
+        l3_vanilla_stage = root / "l3-vanilla-stage.jsonl"
+        vanilla_stage_payloads = [
+            l3_line(i, advanced=False, detail=True) for i in range(10)
+        ]
+        vanilla_stage_payloads[0]["stages"][LIGHT_CLUSTER_STAGE] = {
+            "frames": 300,
+            "average_ms": 0.01,
+            "p50_ms": 0.01,
+            "p95_ms": 0.01,
+            "p99_ms": 0.01,
+            "maximum_ms": 0.01,
+        }
+        l3_vanilla_stage.write_text(
+            "\n".join(json.dumps(payload) for payload in vanilla_stage_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_vanilla_stage, 3000, 0, "OFF"),
+            f"Vanilla measurement contains {LIGHT_CLUSTER_STAGE} work",
+        )
+
         schema4_sdr_release = root / "schema4-sdr-release.raw.jsonl"
         sdr_payloads = [line(4, index) for index in range(10)]
         for payload in sdr_payloads:

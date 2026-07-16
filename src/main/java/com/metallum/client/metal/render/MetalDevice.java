@@ -16,14 +16,22 @@ import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
+import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.lighting.AdvancedLightRegistry;
+import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.renderer.MetalCapabilities;
+import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.DisplayOutputMode;
 import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererConfig;
@@ -75,7 +83,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             int displayHeight,
             DisplayOutputMode outputMode,
             boolean spatialActive,
-            long materialCoverageEpoch
+            long materialCoverageEpoch,
+            long advancedAdmissionEpoch
     ) {
     }
 
@@ -206,6 +215,11 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private TemporalDiagnosticResources temporalDiagnosticResources;
     private boolean temporalDiagnosticFailureLogged;
+    @Nullable
+    private AdvancedLightingGpuResources advancedLightingResources;
+    private boolean advancedLightingFrameReady;
+    private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+    private boolean advancedLightingTransientFallbackLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -226,6 +240,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrSemanticState.reset();
         HdrSceneState.reset();
         MetallumMaterialState.reset();
+        AdvancedLightingRuntime.reset();
         this.rendererConfig = RendererConfig.load();
         this.hdrConfig = HdrConfig.load();
         HdrMode configuredHdrMode = this.hdrConfig.mode();
@@ -262,6 +277,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.rendererCapabilities = discoveredCapabilities;
         this.requestedRenderContract = requestedRenderContract();
+        AdvancedLightingRuntime.configureRequested(
+                this.requestedRenderContract == RenderContractMode.METALLUM
+                        && this.rendererConfig.improvedLighting()
+        );
         this.temporalDiagnosticsConfigured = TemporalDiagnostics.configured();
         this.temporalDiagnosticsActive = this.temporalDiagnosticsConfigured
                 && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
@@ -283,6 +302,21 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (nativePipelineStatus == 2) {
             Metallum.LOGGER.warn("Using the built-in Metal shader source fallback; startup may be slower");
+        }
+        if (AdvancedLightingRuntime.isRequested()) {
+            try {
+                AdvancedLightingGpuResources.validateNativeAbi();
+                AdvancedLightingRuntime.reportNativeAdmission(true, "");
+            } catch (RuntimeException exception) {
+                AdvancedLightingRuntime.reportNativeAdmission(
+                        false,
+                        "native Advanced lighting ABI/preflight failed"
+                );
+                Metallum.LOGGER.warn(
+                        "Advanced Lighting native preflight failed; preserving METALLUM + VANILLA lighting",
+                        exception
+                );
+            }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
@@ -494,6 +528,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrSemanticState.reset();
         HdrSceneState.reset();
         MetallumMaterialState.reset();
+        AdvancedLightingRuntime.reset();
         if (this.hdrSceneSnapshot != null) {
             this.hdrSceneSnapshot.close();
             this.hdrSceneSnapshot = null;
@@ -515,6 +550,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         SodiumLightSidecar.releaseAll();
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
+        if (this.advancedLightingResources != null) {
+            this.advancedLightingResources.close();
+            this.advancedLightingResources = null;
+        }
         this.commandEncoder.close();
         this.frameStatePackets.close();
         this.clearPipelineCache();
@@ -635,6 +674,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
         MetallumMaterialState.Admission materialAdmission = MetallumMaterialState.admission();
         long materialCoverageEpoch = materialAdmission.coverageEpoch();
+        AdvancedLightingRuntime.Admission advancedAdmission = AdvancedLightingRuntime.admission();
         boolean materialStorageCompatible = MetallumMaterialState.isSceneStorageCompatible(
                 storageCompatibleOutput != HdrOutputMode.SDR
         );
@@ -652,19 +692,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && currentKey.displayHeight() == dimensions.displayHeight()
                 && currentKey.outputMode() == requestedOutput
                 && currentKey.spatialActive() == spatialActive
-                && currentKey.materialCoverageEpoch() == materialCoverageEpoch) {
+                && currentKey.materialCoverageEpoch() == materialCoverageEpoch
+                && currentKey.advancedAdmissionEpoch() == advancedAdmission.epoch()) {
             return;
         }
-        RendererGenerationKey key = new RendererGenerationKey(
-                dimensions.renderWidth(),
-                dimensions.renderHeight(),
-                dimensions.displayWidth(),
-                dimensions.displayHeight(),
-                requestedOutput,
-                spatialActive,
-                materialCoverageEpoch
-        );
-
         LightingModel requestedLighting = this.requestedRenderContract == RenderContractMode.METALLUM
                 && this.rendererConfig.improvedLighting()
                 ? LightingModel.ADVANCED
@@ -676,11 +707,17 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested(),
                 MetallumMaterialState.requiresFp16Scene()
         );
-        MetalCapabilities generationCapabilities = materialGenerationAvailable
+        MetalCapabilities failClosedCapabilities = materialGenerationAvailable
                 ? this.rendererCapabilities.withRuntimeFeature(
                         MetalCapabilities.Feature.METALLUM_MATERIAL_CONTRACT
                 )
                 : this.rendererCapabilities;
+        MetalCapabilities generationCapabilities = failClosedCapabilities;
+        if (advancedAdmission.ready()) {
+            generationCapabilities = generationCapabilities.withRuntimeFeature(
+                    MetalCapabilities.Feature.ADVANCED_LIGHTING
+            );
+        }
         RendererGenerationPlanner.Plan plan = RendererGenerationPlanner.plan(
                 this.requestedRenderContract,
                 requestedLighting,
@@ -733,31 +770,142 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
 
+        RendererGenerationConfig previousGeneration = this.activeRendererGeneration;
         RendererGenerationConfig resolved = plan.resolution().config();
         RendererGenerationManifest manifest = plan.manifest();
-        FrameState.ResourceBytes resourceBytes = new FrameState.ResourceBytes(
-                manifest.resourceBytes(RendererGenerationManifest.Domain.BASE),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.MATERIAL_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY),
-                manifest.resourceBytes(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY)
-        );
-        RendererGenerationConfig previousGeneration = this.activeRendererGeneration;
-        long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
-        this.rendererGenerationId = nextGeneration;
-        if (previousGeneration == null
-                || previousGeneration.renderContractMode() != resolved.renderContractMode()) {
-            this.renderContractGenerationId = Math.addExact(this.renderContractGenerationId, 1L);
-        }
+        FrameState.ResourceBytes resourceBytes = resourceBytes(manifest);
+        long plannedLightingGeneration = this.lightingGenerationId;
         if (previousGeneration == null
                 || previousGeneration.lightingModel() != resolved.lightingModel()) {
-            this.lightingGenerationId = Math.addExact(this.lightingGenerationId, 1L);
+            plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
         }
+        AdvancedLightingGpuResources nextAdvancedResources = null;
+        if (resolved.lightingModel() == LightingModel.ADVANCED) {
+            AdvancedLightingLayout.Budget lightingBudget = AdvancedLightingLayout.forGeneration(
+                    resolved.lightingPreset(),
+                    dimensions.renderWidth(),
+                    dimensions.renderHeight()
+            );
+            try {
+                if (this.advancedLightingResources != null
+                        && this.advancedLightingResources.generation() == plannedLightingGeneration
+                        && this.advancedLightingResources.budget().equals(lightingBudget)) {
+                    nextAdvancedResources = this.advancedLightingResources;
+                } else {
+                    nextAdvancedResources = AdvancedLightingGpuResources.create(
+                            this.metalDeviceHandle,
+                            plannedLightingGeneration,
+                            lightingBudget
+                    );
+                }
+            } catch (RuntimeException exception) {
+                AdvancedLightingRuntime.reportNativeAdmission(
+                        false,
+                        "native Advanced lighting context creation failed"
+                );
+                Metallum.LOGGER.warn(
+                        "Advanced Lighting generation allocation failed; preserving METALLUM + VANILLA lighting",
+                        exception
+                );
+                plan = RendererGenerationPlanner.plan(
+                        this.requestedRenderContract,
+                        requestedLighting,
+                        requestedOutput,
+                        MetalExecutorKind.METAL3,
+                        this.rendererConfig.lightingPreset(),
+                        activeFeatures,
+                        requestedOutput,
+                        failClosedCapabilities,
+                        new RendererGenerationPlanner.Extent(
+                                dimensions.renderWidth(), dimensions.renderHeight()),
+                        new RendererGenerationPlanner.Extent(
+                                dimensions.displayWidth(), dimensions.displayHeight()),
+                        this.temporalDiagnosticsActive,
+                        materialSceneStorage,
+                        HdrSemanticState.isRequested()
+                );
+                resolved = plan.resolution().config();
+                manifest = plan.manifest();
+                resourceBytes = resourceBytes(manifest);
+                plannedLightingGeneration = this.lightingGenerationId;
+                if (previousGeneration == null
+                        || previousGeneration.lightingModel() != resolved.lightingModel()) {
+                    plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
+                }
+            }
+        }
+
+        long committedAdvancedAdmissionEpoch = advancedAdmission.epoch();
+        if (resolved.lightingModel() == LightingModel.ADVANCED
+                && !AdvancedLightingRuntime.tryAdmitGeneration(
+                        committedAdvancedAdmissionEpoch,
+                        true
+                )) {
+            if (nextAdvancedResources != null
+                    && nextAdvancedResources != this.advancedLightingResources) {
+                nextAdvancedResources.close();
+            }
+            nextAdvancedResources = null;
+            plan = RendererGenerationPlanner.plan(
+                    this.requestedRenderContract,
+                    requestedLighting,
+                    requestedOutput,
+                    MetalExecutorKind.METAL3,
+                    this.rendererConfig.lightingPreset(),
+                    activeFeatures,
+                    requestedOutput,
+                    failClosedCapabilities,
+                    new RendererGenerationPlanner.Extent(
+                            dimensions.renderWidth(), dimensions.renderHeight()),
+                    new RendererGenerationPlanner.Extent(
+                            dimensions.displayWidth(), dimensions.displayHeight()),
+                    this.temporalDiagnosticsActive,
+                    materialSceneStorage,
+                    HdrSemanticState.isRequested()
+            );
+            resolved = plan.resolution().config();
+            manifest = plan.manifest();
+            resourceBytes = resourceBytes(manifest);
+            plannedLightingGeneration = this.lightingGenerationId;
+            if (previousGeneration == null
+                    || previousGeneration.lightingModel() != resolved.lightingModel()) {
+                plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
+            }
+            if (resolved.lightingModel() != LightingModel.VANILLA) {
+                throw new IllegalStateException("Fail-closed Advanced admission did not resolve Vanilla");
+            }
+        }
+        if (resolved.lightingModel() == LightingModel.VANILLA) {
+            AdvancedLightingRuntime.admitGeneration(false);
+        }
+
+        long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
+        long nextRenderContractGeneration = this.renderContractGenerationId;
+        if (previousGeneration == null
+                || previousGeneration.renderContractMode() != resolved.renderContractMode()) {
+            nextRenderContractGeneration = Math.addExact(nextRenderContractGeneration, 1L);
+        }
+        long nextLightingGeneration = this.lightingGenerationId;
+        if (previousGeneration == null
+                || previousGeneration.lightingModel() != resolved.lightingModel()) {
+            nextLightingGeneration = Math.addExact(nextLightingGeneration, 1L);
+        }
+        if (nextLightingGeneration != plannedLightingGeneration) {
+            if (nextAdvancedResources != null
+                    && nextAdvancedResources != this.advancedLightingResources) {
+                nextAdvancedResources.close();
+            }
+            throw new IllegalStateException("Advanced lighting generation prediction diverged");
+        }
+        long nextOutputGeneration = this.outputGenerationId;
         if (previousGeneration == null || previousGeneration.outputMode() != resolved.outputMode()) {
-            this.outputGenerationId = Math.addExact(this.outputGenerationId, 1L);
+            nextOutputGeneration = Math.addExact(nextOutputGeneration, 1L);
         }
+
+        this.rendererGenerationId = nextGeneration;
+        this.renderContractGenerationId = nextRenderContractGeneration;
+        this.lightingGenerationId = nextLightingGeneration;
+        this.outputGenerationId = nextOutputGeneration;
         this.activeRendererGeneration = resolved;
         MetallumMaterialState.publishGeneration(
                 resolved.renderContractMode() == RenderContractMode.METALLUM
@@ -766,6 +914,14 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.releaseLegacyHdrGenerationResources();
         }
         this.activeRendererResourceBytes = resourceBytes;
+        AdvancedLightingGpuResources previousAdvancedResources = this.advancedLightingResources;
+        this.advancedLightingResources = nextAdvancedResources;
+        this.advancedLightingFrameReady = false;
+        this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+        if (previousAdvancedResources != null
+                && previousAdvancedResources != nextAdvancedResources) {
+            previousAdvancedResources.close();
+        }
         this.activeRenderExtent = new FrameState.Extent(
                 dimensions.renderWidth(), dimensions.renderHeight()
         );
@@ -777,6 +933,16 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (previousDiagnostics != null) {
             previousDiagnostics.close();
         }
+        RendererGenerationKey key = new RendererGenerationKey(
+                dimensions.renderWidth(),
+                dimensions.renderHeight(),
+                dimensions.displayWidth(),
+                dimensions.displayHeight(),
+                requestedOutput,
+                spatialActive,
+                materialCoverageEpoch,
+                committedAdvancedAdmissionEpoch
+        );
         this.publishedRendererGeneration = key;
         RendererAdmissionLogState admissionLogState = new RendererAdmissionLogState(
                 plan.resolution().rejectionReasons(),
@@ -825,7 +991,64 @@ public final class MetalDevice implements GpuDeviceBackend {
                 || renderExtent == null || displayExtent == null) {
             throw new IllegalStateException("Renderer generation must be admitted before FrameState publication");
         }
+        if (generation.lightingModel() == LightingModel.ADVANCED
+                && !AdvancedLightingRuntime.isActive()) {
+            this.publishedRendererGeneration = null;
+            this.publishRendererGenerationState(displayExtent.width(), displayExtent.height());
+            generation = this.activeRendererGeneration;
+            generationKey = this.publishedRendererGeneration;
+            renderExtent = this.activeRenderExtent;
+            displayExtent = this.activeDisplayExtent;
+            if (generation == null || generationKey == null
+                    || renderExtent == null || displayExtent == null
+                    || (generation.lightingModel() == LightingModel.ADVANCED
+                    && !AdvancedLightingRuntime.isActive())) {
+                throw new IllegalStateException(
+                        "Advanced admission was lost before a fail-closed frame could be published"
+                );
+            }
+        }
         long submitIndex = this.commandEncoder.currentSubmitIndex();
+        this.advancedLightingFrameReady = false;
+        this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+        AdvancedLightingGpuResources lightingResources = this.advancedLightingResources;
+        LightFrameSnapshot lightSnapshot = null;
+        FrameState.AdvancedLightingWork advancedWork = FrameState.AdvancedLightingWork.NONE;
+        if (generation.lightingModel() == LightingModel.ADVANCED
+                && AdvancedLightingRuntime.isActive()
+                && lightingResources != null) {
+            lightSnapshot = AdvancedLightRegistry.global().snapshotForFrameIfHealthy(
+                    capture.cameraPosition().x(),
+                    capture.cameraPosition().y(),
+                    capture.cameraPosition().z(),
+                    lightingResources.budget().maxLights(),
+                    advancedLightingAdmissionLimit(generation.lightingPreset())
+            );
+            if (lightSnapshot == null) {
+                this.publishedRendererGeneration = null;
+                this.publishRendererGenerationState(displayExtent.width(), displayExtent.height());
+                generation = this.activeRendererGeneration;
+                generationKey = this.publishedRendererGeneration;
+                renderExtent = this.activeRenderExtent;
+                displayExtent = this.activeDisplayExtent;
+                lightingResources = null;
+                if (generation == null || generationKey == null
+                        || renderExtent == null || displayExtent == null
+                        || generation.lightingModel() == LightingModel.ADVANCED) {
+                    throw new IllegalStateException(
+                            "Unhealthy Advanced registry did not resolve a fail-closed frame"
+                    );
+                }
+            } else {
+                advancedWork = advancedLightingWork(lightSnapshot.lights().size());
+            }
+        } else if (generation.lightingModel() == LightingModel.ADVANCED) {
+            AdvancedLightingRuntime.reportNativeAdmission(
+                    false,
+                    "active Advanced generation lost its native context"
+            );
+            this.publishedRendererGeneration = null;
+        }
         FrameState candidate = new FrameState(
                 FrameContract.temporalPreparationV1(),
                 0L,
@@ -842,7 +1065,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 generation.executorKind(),
                 generation.frameResourceContractVersion(),
                 this.activeRendererResourceBytes,
-                FrameState.AdvancedLightingWork.NONE,
+                advancedWork,
                 capture.transforms(),
                 capture.transforms(),
                 renderExtent,
@@ -866,11 +1089,71 @@ public final class MetalDevice implements GpuDeviceBackend {
                         this.rendererCapabilities.displayCapabilities().potentialHeadroom()
                 )
         );
-        FrameState published = this.frameStateTracker.prepare(candidate, TemporalResetEvents.consume());
+        FrameState published = this.frameStateTracker.prepare(
+                candidate,
+                TemporalResetEvents.consume()
+        );
         MemorySegment packet = this.frameStatePackets.encode(published);
         int status = MetalNativeBridge.metallum_set_frame_state_v3(packet);
         if (status != 1) {
             throw new IllegalStateException("Native FrameState v3 admission failed with status " + status);
+        }
+        if (lightSnapshot != null && lightingResources != null) {
+            int lightingStatus;
+            try {
+                AdvancedLightingGpuResources.FrameUpload upload = lightingResources.encode(
+                        lightSnapshot,
+                        published
+                );
+                lightingStatus = this.commandEncoder.encodeAdvancedLighting(
+                        lightingResources,
+                        upload
+                );
+            } catch (RuntimeException exception) {
+                lightingStatus = Integer.MIN_VALUE;
+                Metallum.LOGGER.warn(
+                        "Advanced Lighting frame upload failed; using Vanilla lighting for this frame",
+                        exception
+                );
+            }
+            if (lightingStatus == AdvancedLightingGpuResources.STATUS_OK) {
+                this.advancedLightingFrameReady = true;
+                this.advancedLightingFrameSubmitIndex = submitIndex;
+                this.advancedLightingTransientFallbackLogged = false;
+            } else {
+                FrameState fallback = published.withAdvancedLightingWork(
+                        FrameState.AdvancedLightingWork.NONE
+                );
+                int fallbackStatus = MetalNativeBridge.metallum_set_frame_state_v3(
+                        this.frameStatePackets.encode(fallback)
+                );
+                if (fallbackStatus != 1) {
+                    throw new IllegalStateException(
+                            "Native Advanced-lighting fallback FrameState failed with status "
+                                    + fallbackStatus
+                    );
+                }
+                published = fallback;
+                if (lightingStatus == AdvancedLightingGpuResources.STATUS_RING_SLOT_BUSY) {
+                    if (!this.advancedLightingTransientFallbackLogged) {
+                        this.advancedLightingTransientFallbackLogged = true;
+                        Metallum.LOGGER.warn(
+                                "Advanced Lighting upload ring was busy; the affected frame uses Vanilla lighting"
+                        );
+                    }
+                } else {
+                    AdvancedLightingRuntime.reportNativeAdmission(
+                            false,
+                            "native Advanced lighting frame upload failed with status "
+                                    + lightingStatus
+                    );
+                    this.publishedRendererGeneration = null;
+                    Metallum.LOGGER.warn(
+                            "Advanced Lighting native upload rejected status {}; preserving METALLUM + VANILLA lighting",
+                            lightingStatus
+                    );
+                }
+            }
         }
         this.frameStateTracker.commit(published);
         return published;
@@ -1026,6 +1309,54 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     boolean isMaterialWorldPassActive() {
         return this.materialWorldPassActive && this.isMaterialGenerationActive();
+    }
+
+    static boolean isAdvancedLightingWorldPassActive(
+            final RendererGenerationConfig generation,
+            final boolean materialWorldPassActive,
+            final boolean frameReady,
+            final long frameSubmitIndex,
+            final long currentSubmitIndex
+    ) {
+        return generation != null
+                && generation.renderContractMode() == RenderContractMode.METALLUM
+                && generation.lightingModel() == LightingModel.ADVANCED
+                && materialWorldPassActive
+                && frameReady
+                && frameSubmitIndex == currentSubmitIndex;
+    }
+
+    boolean isAdvancedLightingWorldPassActive() {
+        return isAdvancedLightingWorldPassActive(
+                this.activeRendererGeneration,
+                this.materialWorldPassActive,
+                this.advancedLightingFrameReady,
+                this.advancedLightingFrameSubmitIndex,
+                this.commandEncoder.currentSubmitIndex()
+        );
+    }
+
+    void bindAdvancedLighting(final MTLRenderCommandEncoder encoder) {
+        if (!this.isAdvancedLightingWorldPassActive() || this.advancedLightingResources == null) {
+            throw new IllegalStateException("Advanced lighting bindings are not ready for this frame");
+        }
+        AdvancedLightingGpuResources.Bindings bindings = this.advancedLightingResources.bindings();
+        encoder.setBuffer(
+                bindings.params(), 0L, AdvancedLightingBindingAbi.PARAMS_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
+        encoder.setBuffer(
+                bindings.lights(), 0L, AdvancedLightingBindingAbi.LIGHTS_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
+        encoder.setBuffer(
+                bindings.masks(), 0L, AdvancedLightingBindingAbi.CLUSTER_MASKS_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
+        encoder.setBuffer(
+                bindings.indices(), 0L, AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
     }
 
     void setMaterialWorldPassActive(final boolean active) {
@@ -1642,7 +1973,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     private static String prepareFlavorSource(final ShaderCompilationKey key, final String original) {
-        if (key.flavor() == HdrShaderFlavor.METALLUM) {
+        if (key.flavor() == HdrShaderFlavor.METALLUM
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED) {
             MetallumMaterialShaderPatcher.Result material = MetallumMaterialShaderPatcher.patch(
                     key.id().getNamespace(),
                     key.id().getPath(),
@@ -1657,7 +1989,26 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 + material.failureReason()
                 );
             }
-            return material.source();
+            if (key.flavor() == HdrShaderFlavor.METALLUM) {
+                return material.source();
+            }
+            AdvancedDirectLightingShaderPatcher.Result advanced =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            key.id().getNamespace(),
+                            key.id().getPath(),
+                            key.type() == ShaderType.VERTEX
+                                    ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                                    : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                            LightingModel.ADVANCED,
+                            material.source()
+                    );
+            if (!advanced.success()) {
+                throw new IllegalStateException(
+                        "Failed to prepare METALLUM Advanced shader " + key.id() + ": "
+                                + advanced.failureReason()
+                );
+            }
+            return advanced.source();
         }
 
         String patched = original;
@@ -1713,6 +2064,49 @@ public final class MetalDevice implements GpuDeviceBackend {
         return flavor == HdrShaderFlavor.LEGACY_HDR_SEMANTIC
                 || flavor == HdrShaderFlavor.SCENE_RASTER_LINEAR
                 || flavor == HdrShaderFlavor.SCENE_POST_LINEAR;
+    }
+
+    static int advancedLightingAdmissionLimit(final LightingPreset preset) {
+        return switch (Objects.requireNonNull(preset, "preset")) {
+            case PERFORMANCE -> 32;
+            case BALANCED -> 64;
+            case ULTRA -> 128;
+        };
+    }
+
+    static FrameState.AdvancedLightingWork advancedLightingWork(final int lightCount) {
+        if (lightCount < 0) {
+            throw new IllegalArgumentException("Light count must be non-negative");
+        }
+        long uploadBytes = Math.addExact(
+                AdvancedLightingLayout.UPLOAD_HEADER_BYTES,
+                Math.multiplyExact((long) lightCount, AdvancedLightingLayout.GPU_LIGHT_STRIDE)
+        );
+        return new FrameState.AdvancedLightingWork(
+                lightCount,
+                lightCount == 0
+                        ? AdvancedLightingGpuResources.EMPTY_PRODUCTION_PASS_COUNT
+                        : AdvancedLightingGpuResources.PRODUCTION_PASS_COUNT,
+                AdvancedLightingGpuResources.PRODUCTION_ENCODER_COUNT,
+                AdvancedLightingGpuResources.RESIDENT_PSO_COUNT,
+                AdvancedLightingGpuResources.PRODUCTION_WORK_QUEUE_COUNT,
+                AdvancedLightingGpuResources.productionDispatchCount(lightCount),
+                uploadBytes
+        );
+    }
+
+    private static FrameState.ResourceBytes resourceBytes(
+            final RendererGenerationManifest manifest
+    ) {
+        return new FrameState.ResourceBytes(
+                manifest.resourceBytes(RendererGenerationManifest.Domain.BASE),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.MATERIAL_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.HDR_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY),
+                manifest.resourceBytes(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY)
+        );
     }
 
     private static String prepareShaderSource(final String source, final ShaderDefines defines) {
