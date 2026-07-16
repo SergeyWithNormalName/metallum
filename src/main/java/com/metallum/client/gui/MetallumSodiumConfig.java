@@ -68,15 +68,15 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.literal("HDR Mode & Output"))
-                    .addOption(builder.createEnumOption(Identifier.fromNamespaceAndPath("metallum", "hdr_mode"), HdrMode.class)
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "hdr_enabled"))
                         .setStorageHandler(STORAGE_HANDLER)
-                        .setName(Component.literal("HDR Mode"))
-                        .setTooltip(Component.literal("Controls HDR output. Changes to this setting require a restart."))
-                        .setElementNameProvider(MetallumSodiumConfig::formatEnumValue)
-                        .setDefaultValue(HdrMode.AUTO)
+                        .setName(Component.literal("HDR Enabled"))
+                        .setTooltip(Component.literal("Enables HDR output. Changes to this setting require a restart."))
+                        .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                        .setDefaultValue(true)
                         .setBinding(
-                            mode -> updateConfig(c -> new HdrConfig(mode, c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
-                            () -> getConfig().mode()
+                            enabled -> updateConfig(c -> new HdrConfig(enabled ? HdrMode.AUTO : HdrMode.OFF, c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), c.experimentalFp16())),
+                            () -> getConfig().mode() != HdrMode.OFF
                         )
                     )
                     .addOption(builder.createEnumOption(Identifier.fromNamespaceAndPath("metallum", "source_encoding"), HdrSourceEncoding.class)

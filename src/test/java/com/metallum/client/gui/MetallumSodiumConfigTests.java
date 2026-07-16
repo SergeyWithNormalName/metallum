@@ -36,7 +36,7 @@ public final class MetallumSodiumConfigTests {
         require(!page.groups().isEmpty(), "Metallum Sodium page has no option groups");
         OptionGroup lighting = page.groups().getFirst();
         require(lighting.options().size() == 1,
-                "Metallum Lighting group must expose only the lighting-mode gate at L2");
+                "Metallum Lighting group must expose only the Advanced request at L2.5");
 
         Option option = lighting.options().getFirst();
         Field idField = Option.class.getDeclaredField("id");
@@ -49,7 +49,29 @@ public final class MetallumSodiumConfigTests {
                 "Metallum improved-lighting Sodium option is missing or has the wrong type/id");
         require(option.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum improved-lighting option must require a full game restart");
+
+        Option hdrOption = findOption(page, idField, "hdr_enabled");
+        require(hdrOption instanceof BooleanOption,
+                "Metallum HDR-enabled Sodium option is missing or has the wrong type");
+        require(hdrOption.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum HDR-enabled option must require a full game restart");
         System.out.println("Metallum Sodium config registration tests passed");
+    }
+
+    private static Option findOption(
+            final OptionPage page,
+            final Field idField,
+            final String path
+    ) throws IllegalAccessException {
+        Identifier expected = Identifier.fromNamespaceAndPath("metallum", path);
+        for (OptionGroup group : page.groups()) {
+            for (Option candidate : group.options()) {
+                if (expected.equals(idField.get(candidate))) {
+                    return candidate;
+                }
+            }
+        }
+        throw new AssertionError("Missing Metallum Sodium option " + expected);
     }
 
     private static void require(final boolean condition, final String message) {
