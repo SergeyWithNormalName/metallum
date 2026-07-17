@@ -12,6 +12,7 @@ import java.util.Objects;
 /** Immutable camera-relative CSM state for one submitted Advanced-lighting frame. */
 public final class SunShadowFrame {
     private static final float CASCADE_PADDING = 1.06f;
+    static final float CAMERA_GRID_TEXEL_FRACTION = 0.25f;
 
     private final EnvironmentDescriptor environment;
     private final SunShadowLayout.Budget budget;
@@ -266,9 +267,9 @@ public final class SunShadowFrame {
                 tangentY,
                 viewToWorld
         );
-        Vector3f up = Math.abs(toLightWorld.y) > 0.94f
-                ? new Vector3f(0.0f, 0.0f, 1.0f)
-                : new Vector3f(0.0f, 1.0f, 0.0f);
+        // Celestial directions are constrained to the world XY plane. A fixed Z up axis keeps
+        // the light basis continuous through noon instead of switching the cascade roll by 90°.
+        Vector3f up = new Vector3f(0.0f, 0.0f, 1.0f);
         Matrix4f lightView = new Matrix4f().lookAlong(
                 new Vector3f(toLightWorld).negate(),
                 up
@@ -296,23 +297,25 @@ public final class SunShadowFrame {
         Vector3f sliceCenter = viewToWorld.transformDirection(
                 new Vector3f(0.0f, 0.0f, -centerDepth)
         );
+        float worldUnitsPerTexel = (2.0f * halfExtent) / budget.resolution();
+        double cameraGridStep = worldUnitsPerTexel * CAMERA_GRID_TEXEL_FRACTION;
+        if (!Double.isFinite(cameraGridStep) || cameraGridStep <= 0.0) {
+            throw new IllegalArgumentException("Invalid camera-local shadow grid step");
+        }
+        // Keep the anchor close to the camera before rotating it into light space. This avoids
+        // a whole-texel sawtooth when a slowly rotating sun projects large world coordinates.
+        // Quarter-texel world cells bound an ordinary single-axis rebase to 0.25 map texel.
+        sliceCenter.add(
+                (float) (Math.rint(cameraPosition.x() / cameraGridStep)
+                        * cameraGridStep - cameraPosition.x()),
+                (float) (Math.rint(cameraPosition.y() / cameraGridStep)
+                        * cameraGridStep - cameraPosition.y()),
+                (float) (Math.rint(cameraPosition.z() / cameraGridStep)
+                        * cameraGridStep - cameraPosition.z())
+        );
         Vector3f lightCenter = lightView.transformPosition(sliceCenter);
         float centerX = lightCenter.x;
         float centerY = lightCenter.y;
-        float worldUnitsPerTexel = (2.0f * halfExtent) / budget.resolution();
-
-        double cameraLightX = lightView.m00() * cameraPosition.x()
-                + lightView.m10() * cameraPosition.y()
-                + lightView.m20() * cameraPosition.z();
-        double cameraLightY = lightView.m01() * cameraPosition.x()
-                + lightView.m11() * cameraPosition.y()
-                + lightView.m21() * cameraPosition.z();
-        double absoluteCenterX = centerX + cameraLightX;
-        double absoluteCenterY = centerY + cameraLightY;
-        centerX = (float) (Math.rint(absoluteCenterX / worldUnitsPerTexel)
-                * worldUnitsPerTexel - cameraLightX);
-        centerY = (float) (Math.rint(absoluteCenterY / worldUnitsPerTexel)
-                * worldUnitsPerTexel - cameraLightY);
 
         float casterMargin = casterExtrusion(budget);
         float nearDistance = 1.0f;

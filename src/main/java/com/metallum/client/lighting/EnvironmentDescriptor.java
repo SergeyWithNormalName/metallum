@@ -82,6 +82,11 @@ public record EnvironmentDescriptor(
             if (!(directionLengthSquared > 0.999f && directionLengthSquared < 1.001f)) {
                 throw new IllegalArgumentException("Celestial light direction must be normalized");
             }
+            if (toLightZ != 0.0f) {
+                throw new IllegalArgumentException(
+                        "The current celestial shadow contract requires a world-XY orbit"
+                );
+            }
         } else if (directionLengthSquared != 0.0f || sunShadowEligible || moon) {
             throw new IllegalArgumentException(
                     "Non-celestial environments cannot retain directional shadow state"
