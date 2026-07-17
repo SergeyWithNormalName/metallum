@@ -255,16 +255,21 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float hemisphere = 0.30 + 0.70 * max(
                         dot(normal, normalize(metallumEnvironment.worldUpAndMedium.xyz)),
                         0.0);
-                vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
-                diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
-                        * (skyOcclusion * hemisphere);
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
                 float nDotL = max(dot(normal, toLight), 0.0);
                 float directionalWeight = skyOcclusion * nDotL;
+                float sunVisibility = 1.0;
+                if (directionalWeight > 0.0) {
+                    sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                }
+                const float shadowedSkyVisibility = 0.42;
+                float skyShadow = mix(shadowedSkyVisibility, 1.0, sunVisibility);
+                vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
+                        * (skyOcclusion * hemisphere * skyShadow);
                 if (directionalWeight > 0.0) {
                     diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                            * (directionalWeight
-                                    * metallumSunVisibilityV1(viewPosition, normal));
+                            * (directionalWeight * sunVisibility);
                 }
                 return albedo * diffuse * 0.31830988618;
             }

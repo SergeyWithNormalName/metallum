@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "bf3ced585e43d5677e1138ce4af17c7cd942cc213d8c91ce1d9f6ab94ae322d8",
+            "sodium-solid-fsh", "3da857e3a7c5b623ed45f2666c980c0141a02d4f7ab32e82e17d4b30b79b6ea0",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "427cf6a8867c3f9c863cba951e8d5e516ac3475f1d1487ec4b6b2966eaad09b7",
+            "sodium-cutout-fsh", "91e1517022e11d0287acd2a41f9654eb0ff2d2a023fce69e68f66639c0d5fbd4",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "b0b8339264168e0d733ef225a44fdf795c23b39691633aafbc61f3205b254151"
+            "minecraft-entity-fsh", "7331880e9471be0df68a5b4958270dfa8c02620ba54afa94af929778c77bb28d"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -333,9 +333,15 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "texture(shadowMap, vec3(uv, receiverDepth))")
                         && !sodiumFragment.contains("float storedDepth =")
-                        && sodiumEnvironment.contains("skyOcclusion * hemisphere")
+                        && sodiumEnvironment.contains("const float shadowedSkyVisibility = 0.42;")
+                        && sodiumEnvironment.contains(
+                        "float skyShadow = mix(shadowedSkyVisibility, 1.0, sunVisibility);")
+                        && sodiumEnvironment.contains(
+                        "skyOcclusion * hemisphere * skyShadow")
                         && sodiumEnvironment.contains(
                         "float directionalWeight = skyOcclusion * nDotL;")
+                        && sodiumEnvironment.contains(
+                        "directionalWeight * sunVisibility")
                         && sodiumFragment.contains(
                         "visibility = mix(visibility, 1.0, blend);")
                         && sodiumFragment.contains("for (int y = -1; y <= 1; ++y)")

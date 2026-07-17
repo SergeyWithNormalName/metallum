@@ -127,6 +127,12 @@ public final class SunShadowContractTests {
                 + noon.directionalRed()) * inversePi;
         require(noonUpwardDiffuse >= 0.68f && noonUpwardDiffuse <= 0.75f,
                 "daylight terrain calibration clips or under-lights diffuse albedo");
+        float noonUpwardFullShadow = (noon.ambientRed() + noon.skyRed() * 0.42f)
+                * inversePi;
+        require(noonUpwardFullShadow >= 0.09f && noonUpwardFullShadow <= 0.11f,
+                "full sun shadow no longer preserves the calibrated dark sky/ambient floor");
+        require(noonUpwardFullShadow < noonUpwardDiffuse * 0.16f,
+                "full sun shadow is too bright relative to directly lit terrain");
         require(!lava.sunShadowEligible() && lava.directionalRed() == 0.0f,
                 "opaque lava medium retained an external celestial shadow");
         require(end.profile() == EnvironmentDescriptor.Profile.END
