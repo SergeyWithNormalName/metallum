@@ -34,10 +34,13 @@ public final class SunShadowContractTests {
         EnvironmentDescriptor noon = EnvironmentDescriptor.celestial(
                 EnvironmentDescriptor.Medium.AIR,
                 0.0f,
-                0.48f,
-                0.64f,
                 1.0f,
-                0.0f,
+                1.0f,
+                1.0f,
+                1.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
                 0.0f,
                 0.0f,
                 1.0f
@@ -45,24 +48,30 @@ public final class SunShadowContractTests {
         EnvironmentDescriptor storm = EnvironmentDescriptor.celestial(
                 EnvironmentDescriptor.Medium.AIR,
                 0.0f,
-                0.48f,
-                0.64f,
                 1.0f,
+                1.0f,
+                1.0f,
+                1.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
                 0.0f,
-                1.0f,
                 1.0f,
                 1.0f
         );
         EnvironmentDescriptor midnight = EnvironmentDescriptor.celestial(
                 EnvironmentDescriptor.Medium.AIR,
                 (float) Math.PI,
-                0.20f,
-                0.28f,
-                0.55f,
+                122.0f / 255.0f,
+                122.0f / 255.0f,
+                1.0f,
+                0.24f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
                 0.0f,
                 0.0f,
-                0.0f,
-                0.5f
+                0.75f
         );
         EnvironmentDescriptor lava = EnvironmentDescriptor.celestial(
                 EnvironmentDescriptor.Medium.LAVA,
@@ -70,6 +79,9 @@ public final class SunShadowContractTests {
                 1.0f,
                 0.4f,
                 0.1f,
+                1.0f,
+                0.0f,
+                0.0f,
                 0.0f,
                 0.0f,
                 0.0f,
@@ -91,6 +103,21 @@ public final class SunShadowContractTests {
         require(midnight.sunShadowEligible() && midnight.moon()
                         && midnight.directionalBlue() > midnight.directionalRed(),
                 "night descriptor lost its blue moon directional light");
+        float inversePi = 0.31830988618f;
+        float expectedNightSkyIrradiance = 0.46f * (float) Math.sqrt(0.24f);
+        require(close(midnight.skyBlue(), expectedNightSkyIrradiance)
+                        && close(midnight.skyRed(), expectedNightSkyIrradiance * 122.0f / 255.0f)
+                        && close(midnight.ambientRed() * inversePi, 10.0f / 255.0f),
+                "data-driven night sky/ambient calibration changed");
+        require((midnight.ambientRed() + midnight.skyRed() * 0.30f) * inversePi
+                        >= 0.0494f
+                        && (midnight.ambientBlue() + midnight.skyBlue() * 0.30f) * inversePi
+                        >= 0.0606f,
+                "night side-face irradiance regressed below the visible terrain floor");
+        float noonUpwardDiffuse = (noon.ambientRed() + noon.skyRed()
+                + noon.directionalRed()) * inversePi;
+        require(noonUpwardDiffuse >= 0.68f && noonUpwardDiffuse <= 0.75f,
+                "daylight terrain calibration clips or under-lights diffuse albedo");
         require(!lava.sunShadowEligible() && lava.directionalRed() == 0.0f,
                 "opaque lava medium retained an external celestial shadow");
         require(end.profile() == EnvironmentDescriptor.Profile.END
@@ -154,10 +181,13 @@ public final class SunShadowContractTests {
         EnvironmentDescriptor environment = EnvironmentDescriptor.celestial(
                 EnvironmentDescriptor.Medium.AIR,
                 0.35f,
-                0.48f,
-                0.64f,
                 1.0f,
-                0.0f,
+                1.0f,
+                1.0f,
+                1.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
+                10.0f / 255.0f,
                 0.0f,
                 0.0f,
                 1.0f
@@ -249,6 +279,10 @@ public final class SunShadowContractTests {
         } catch (IllegalArgumentException expected) {
             // Expected.
         }
+    }
+
+    private static boolean close(final float left, final float right) {
+        return Math.abs(left - right) <= 1.0e-6f;
     }
 
     private static void require(final boolean condition, final String message) {

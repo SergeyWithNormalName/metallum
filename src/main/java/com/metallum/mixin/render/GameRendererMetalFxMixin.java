@@ -18,14 +18,15 @@ import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 import net.minecraft.client.renderer.state.GameRenderState;
+import net.minecraft.client.renderer.state.LightmapRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.SkyRenderState;
-import net.minecraft.util.ARGB;
 import net.minecraft.world.level.MoonPhase;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Vector3fc;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -220,6 +221,12 @@ abstract class GameRendererMetalFxMixin {
             float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
             float rain = this.minecraft.level.getRainLevel(partialTick);
             float thunder = this.minecraft.level.getThunderLevel(partialTick);
+            // Minecraft 26.2 publishes data-driven sky intensity, tint, and ambient separately.
+            // Keep the raw coefficients: EnvironmentDescriptor converts the reflected-diffuse
+            // scale to the irradiance units consumed by the L4 Lambert shader.
+            LightmapRenderState lightmap = this.gameRenderState.lightmapRenderState;
+            Vector3fc skyLightTint = lightmap.skyLightColor;
+            Vector3fc ambientLight = lightmap.ambientColor;
             MoonPhase phase = sky.moonPhase;
             float phaseBrightness = phase == null
                     ? 1.0f
@@ -233,10 +240,13 @@ abstract class GameRendererMetalFxMixin {
             return EnvironmentDescriptor.celestial(
                     medium,
                     sky.sunAngle,
-                    ARGB.srgbToLinearChannel(ARGB.red(sky.skyColor)),
-                    ARGB.srgbToLinearChannel(ARGB.green(sky.skyColor)),
-                    ARGB.srgbToLinearChannel(ARGB.blue(sky.skyColor)),
-                    ambient,
+                    skyLightTint.x(),
+                    skyLightTint.y(),
+                    skyLightTint.z(),
+                    lightmap.skyFactor,
+                    ambientLight.x(),
+                    ambientLight.y(),
+                    ambientLight.z(),
                     rain,
                     thunder,
                     phaseBrightness

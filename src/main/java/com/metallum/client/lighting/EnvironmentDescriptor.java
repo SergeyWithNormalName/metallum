@@ -98,7 +98,10 @@ public record EnvironmentDescriptor(
             final float skyRed,
             final float skyGreen,
             final float skyBlue,
-            final float dimensionAmbient,
+            final float skyFactor,
+            final float ambientRed,
+            final float ambientGreen,
+            final float ambientBlue,
             final float rain,
             final float thunder,
             final float moonPhaseBrightness
@@ -108,7 +111,10 @@ public record EnvironmentDescriptor(
         requireNonNegative(skyRed, "sky red");
         requireNonNegative(skyGreen, "sky green");
         requireNonNegative(skyBlue, "sky blue");
-        requireNonNegative(dimensionAmbient, "dimension ambient");
+        requireNonNegative(skyFactor, "sky factor");
+        requireNonNegative(ambientRed, "ambient red");
+        requireNonNegative(ambientGreen, "ambient green");
+        requireNonNegative(ambientBlue, "ambient blue");
         float safeRain = clampUnit(rain, "rain");
         float safeThunder = clampUnit(thunder, "thunder");
         float safeMoonPhase = clampUnit(moonPhaseBrightness, "moon phase brightness");
@@ -138,10 +144,15 @@ public record EnvironmentDescriptor(
         float directionalRed = directionalScale * (moon ? 0.50f : 1.00f);
         float directionalGreen = directionalScale * (moon ? 0.62f : 0.93f);
         float directionalBlue = directionalScale * (moon ? 0.90f : 0.78f);
-        float daylight = moon ? 0.06f : 0.46f * (0.20f + 0.80f * horizon);
         float diffuseWeather = 1.0f - safeThunder * 0.45f;
-        float skyScale = daylight * diffuseWeather * Math.max(mediumTransmission, 0.12f);
-        float ambientScale = Math.max(dimensionAmbient, moon ? 0.025f : 0.035f);
+        // Minecraft 26.2 authors skyFactor for its encoded lightmap. Use it for the data-driven
+        // day/night curve, but keep L4's scene-linear reference scale: copying skyFactor through
+        // pi clips daytime HDR terrain, while the old fixed moon value made night terrain black.
+        // The square-root remap preserves the accepted 0.46 daytime irradiance and lifts the
+        // 0.24 night plateau enough for side faces to retain readable diffuse color.
+        float diffuseToIrradiance = (float) Math.PI;
+        float skyScale = 0.46f * (float) Math.sqrt(skyFactor) * diffuseWeather
+                * Math.max(mediumTransmission, 0.12f);
 
         return new EnvironmentDescriptor(
                 VERSION,
@@ -156,9 +167,9 @@ public record EnvironmentDescriptor(
                 skyRed * skyScale,
                 skyGreen * skyScale,
                 skyBlue * skyScale,
-                skyRed * ambientScale,
-                skyGreen * ambientScale,
-                skyBlue * ambientScale,
+                ambientRed * diffuseToIrradiance,
+                ambientGreen * diffuseToIrradiance,
+                ambientBlue * diffuseToIrradiance,
                 safeRain,
                 safeThunder,
                 safeMoonPhase,

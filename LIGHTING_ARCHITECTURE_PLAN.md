@@ -1647,6 +1647,8 @@ Diagnostic overlays:
 - Terrain и solid entities повторно используют свою точную геометрию в одном caster contract; отдельный `SUN_SHADOW` shader сохраняет alpha-cutout/dissolve, но исключает lightmap/fog/material/Advanced работу. Visibility использует bounded 3×3 PCF, cascade blending и preset bias controls.
 - Advanced allocation fail-closed атомарно возвращает Vanilla; при `LightingModel.VANILLA` environment/shadow resources и passes отсутствуют. `clean check`, shadow numeric/ABI tests и 300 кадров Metal API/GPU Validation прошли без новых ошибок.
 - M1 Pro, Balanced HDR Native, 3000 кадров: `106.34 FPS`, полный GPU p95 `11.47 ms` против L3 `105.20 FPS`/`12.44 ms`; sun-shadow avg/p95/worst `3.36/3.93/4.66 ms`, `0` dropped timing events, crash/fault/fallback после admission отсутствуют.
+- После live-проверки исправлена L4-регрессия terrain: вместо уже затемнённого `skyColor` используются data-driven `LightmapRenderState.skyFactor/skyLightColor/ambientColor`, а их scene-linear шкала ограничена дневным irradiance `0.46` и тестируемым ночным floor. Это важно сохранять при добавлении L5–L8 indirect light: legacy skylight в Advanced path не возвращён.
+- После исправления `clean check` и ночной 3000-кадровый benchmark снова прошли: `0` dropped events, native pipeline failures и cluster overflow; повторная ручная приёмка финальной дневной/ночной кривой остаётся открытой.
 - Важное отличие для L6: L4 пока полностью перерисовывает каскады каждый кадр; его `3.93 ms` не является budget для будущего cached update (`0.80 ms`). Ручная визуальная приёмка acne/peter-panning и границ каскадов без Computer Use/screenshots не выполнялась и остаётся отдельным live signoff.
 
 ### Этап 5. Sub-block voxel occupancy
