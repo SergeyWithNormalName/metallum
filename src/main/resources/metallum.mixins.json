@@ -19,6 +19,7 @@
     "render.RenderTargetAccessor",
     "render.RenderPassMixin",
     "render.LevelRendererMixin",
+    "render.QuadParticleFeatureRendererShadowMixin",
     "render.PostChainMixin",
     "render.LightmapMixin",
     "render.ScreenshotMixin",

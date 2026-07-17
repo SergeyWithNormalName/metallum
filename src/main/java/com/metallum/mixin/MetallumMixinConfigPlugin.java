@@ -56,6 +56,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.SectionRenderDataStorageTerrainAccessMixin"
     );
     private static final Set<String> SODIUM_SHADOW_MIXINS = Set.of(
+            "com.metallum.mixin.render.QuadParticleFeatureRendererShadowMixin",
             "com.metallum.mixin.sodium.DefaultChunkRendererShadowMixin",
             "com.metallum.mixin.sodium.RenderRegionShadowBatchMixin",
             "com.metallum.mixin.sodium.RenderSectionManagerShadowAccess",
