@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "de9ae171e8fe806befeb716478a479d63cb03a6d750ce0209f1b4341501edb9b",
+            "sodium-solid-fsh", "4fb68ec147597ddb137c6e3e382878d50ec8da7f6769412811798af4ac78d8bd",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "92ef0ef6258bd3e17ec9f828874219321cc34fc7d2a9c260f2402f5d3c20e3de",
+            "sodium-cutout-fsh", "c93c5097cb6c6cf43773bc0275c945728259fd1afa84999b7818c28ee724fca8",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "450bf60de8f9d79f7a20e98e79575c4d623be5438722451c23bb8ebb2e57ce63"
+            "minecraft-entity-fsh", "bf01160bfb0aa27b3fce6b4f65b430b4c5f2b0264b0358d33d67115b2d660933"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -302,6 +302,10 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumEnvironment.equals(entityEnvironment)
                         && sodiumEnvironment.contains("metallumSunVisibilityV1")
                         && sodiumEnvironment.contains("skyOcclusion * hemisphere")
+                        && sodiumEnvironment.contains(
+                        "float directionalWeight = skyOcclusion * nDotL;")
+                        && sodiumFragment.contains(
+                        "visibility = mix(visibility, 1.0, blend);")
                         && sodiumFragment.contains("for (int y = -1; y <= 1; ++y)")
                         && sodiumFragment.contains("for (int x = -1; x <= 1; ++x)")
                         && sodiumFragment.contains("smoothstep(split - blendWidth, split, viewDepth)"),

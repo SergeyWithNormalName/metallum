@@ -18,7 +18,10 @@ public final class SunShadowFrame {
     private final long lightingGeneration;
     private final long submitIndex;
     private final Matrix4f[] shadowFromView;
+    private final Matrix4f[] shadowFromWorldRelative;
     private final float[] cascadeSplits;
+    private final FrameState.CameraPosition cameraPosition;
+    private final Vector3f toLightWorld;
     private final Vector3f toLightView;
     private final Vector3f worldUpView;
     private final long descriptorHash;
@@ -29,7 +32,10 @@ public final class SunShadowFrame {
             final long lightingGeneration,
             final long submitIndex,
             final Matrix4f[] shadowFromView,
+            final Matrix4f[] shadowFromWorldRelative,
             final float[] cascadeSplits,
+            final FrameState.CameraPosition cameraPosition,
+            final Vector3f toLightWorld,
             final Vector3f toLightView,
             final Vector3f worldUpView,
             final long descriptorHash
@@ -39,7 +45,10 @@ public final class SunShadowFrame {
         this.lightingGeneration = lightingGeneration;
         this.submitIndex = submitIndex;
         this.shadowFromView = shadowFromView;
+        this.shadowFromWorldRelative = shadowFromWorldRelative;
         this.cascadeSplits = cascadeSplits;
+        this.cameraPosition = cameraPosition;
+        this.toLightWorld = toLightWorld;
         this.toLightView = toLightView;
         this.worldUpView = worldUpView;
         this.descriptorHash = descriptorHash;
@@ -69,12 +78,14 @@ public final class SunShadowFrame {
                 : new Vector3f();
         Vector3f worldUpView = view.transformDirection(new Vector3f(0.0f, 1.0f, 0.0f)).normalize();
         Matrix4f[] matrices = new Matrix4f[SunShadowLayout.MAX_CASCADES];
+        Matrix4f[] worldRelativeMatrices = new Matrix4f[SunShadowLayout.MAX_CASCADES];
         Arrays.setAll(matrices, ignored -> new Matrix4f());
+        Arrays.setAll(worldRelativeMatrices, ignored -> new Matrix4f());
 
         if (environment.sunShadowEligible()) {
             float previousSplit = nearPlane;
             for (int cascade = 0; cascade < budget.cascadeCount(); cascade++) {
-                matrices[cascade].set(planCascade(
+                CascadePlan planned = planCascade(
                         previousSplit,
                         splits[cascade],
                         budget,
@@ -82,7 +93,9 @@ public final class SunShadowFrame {
                         camera,
                         toLightWorld,
                         frame.currentCameraPosition()
-                ));
+                );
+                matrices[cascade].set(planned.shadowFromView());
+                worldRelativeMatrices[cascade].set(planned.shadowFromWorldRelative());
                 previousSplit = splits[cascade];
             }
         }
@@ -93,7 +106,10 @@ public final class SunShadowFrame {
                 frame.lightingGenerationId(),
                 frame.submitIndex(),
                 matrices,
+                worldRelativeMatrices,
                 splits,
+                frame.currentCameraPosition(),
+                toLightWorld,
                 toLightView,
                 worldUpView,
                 hash
@@ -131,11 +147,27 @@ public final class SunShadowFrame {
         return new Matrix4f(this.shadowFromView[cascade]);
     }
 
+    /** Orthographic caster volume accepting camera-relative world coordinates. */
+    public Matrix4f shadowFromWorldRelative(final int cascade) {
+        if (cascade < 0 || cascade >= SunShadowLayout.MAX_CASCADES) {
+            throw new IllegalArgumentException("Invalid cascade " + cascade);
+        }
+        return new Matrix4f(this.shadowFromWorldRelative[cascade]);
+    }
+
     public float cascadeSplit(final int cascade) {
         if (cascade < 0 || cascade >= SunShadowLayout.MAX_CASCADES) {
             throw new IllegalArgumentException("Invalid cascade " + cascade);
         }
         return this.cascadeSplits[cascade];
+    }
+
+    public FrameState.CameraPosition cameraPosition() {
+        return this.cameraPosition;
+    }
+
+    public Vector3f toLightWorld() {
+        return new Vector3f(this.toLightWorld);
     }
 
     public Vector3f toLightView() {
@@ -150,7 +182,11 @@ public final class SunShadowFrame {
         return this.descriptorHash;
     }
 
-    private static Matrix4f planCascade(
+    static float casterExtrusion(final SunShadowLayout.Budget budget) {
+        return Math.max(24.0f, budget.maximumDistance());
+    }
+
+    private static CascadePlan planCascade(
             final float nearDepth,
             final float farDepth,
             final SunShadowLayout.Budget budget,
@@ -180,26 +216,31 @@ public final class SunShadowFrame {
                 up
         );
 
-        float minimumX = Float.POSITIVE_INFINITY;
-        float maximumX = Float.NEGATIVE_INFINITY;
-        float minimumY = Float.POSITIVE_INFINITY;
-        float maximumY = Float.NEGATIVE_INFINITY;
         float minimumZ = Float.POSITIVE_INFINITY;
         float maximumZ = Float.NEGATIVE_INFINITY;
         for (Vector3f corner : corners) {
             Vector3f light = lightView.transformPosition(new Vector3f(corner));
-            minimumX = Math.min(minimumX, light.x);
-            maximumX = Math.max(maximumX, light.x);
-            minimumY = Math.min(minimumY, light.y);
-            maximumY = Math.max(maximumY, light.y);
             minimumZ = Math.min(minimumZ, light.z);
             maximumZ = Math.max(maximumZ, light.z);
         }
-        float halfExtent = Math.max(maximumX - minimumX, maximumY - minimumY)
-                * 0.5f * CASCADE_PADDING;
+        float centerDepth = (nearDepth + farDepth) * 0.5f;
+        float nearX = nearDepth * tangentX;
+        float nearY = nearDepth * tangentY;
+        float farX = farDepth * tangentX;
+        float farY = farDepth * tangentY;
+        float nearZ = centerDepth - nearDepth;
+        float farZ = farDepth - centerDepth;
+        float nearRadiusSquared = nearX * nearX + nearY * nearY + nearZ * nearZ;
+        float farRadiusSquared = farX * farX + farY * farY + farZ * farZ;
+        float halfExtent = (float) Math.sqrt(Math.max(nearRadiusSquared, farRadiusSquared))
+                * CASCADE_PADDING;
         halfExtent = Math.max(halfExtent, 1.0f);
-        float centerX = (minimumX + maximumX) * 0.5f;
-        float centerY = (minimumY + maximumY) * 0.5f;
+        Vector3f sliceCenter = viewToWorld.transformDirection(
+                new Vector3f(0.0f, 0.0f, -centerDepth)
+        );
+        Vector3f lightCenter = lightView.transformPosition(sliceCenter);
+        float centerX = lightCenter.x;
+        float centerY = lightCenter.y;
         float worldUnitsPerTexel = (2.0f * halfExtent) / budget.resolution();
 
         double cameraLightX = lightView.m00() * cameraPosition.x()
@@ -215,10 +256,10 @@ public final class SunShadowFrame {
         centerY = (float) (Math.rint(absoluteCenterY / worldUnitsPerTexel)
                 * worldUnitsPerTexel - cameraLightY);
 
-        float casterMargin = Math.max(24.0f, farDepth * 0.55f);
-        float nearDistance = casterMargin;
-        float farDistance = (maximumZ - minimumZ) + 2.0f * casterMargin;
-        lightView.m32(-maximumZ - casterMargin);
+        float casterMargin = casterExtrusion(budget);
+        float nearDistance = 1.0f;
+        float farDistance = (maximumZ - minimumZ) + casterMargin + nearDistance;
+        lightView.m32(-maximumZ - casterMargin - nearDistance);
         Matrix4f reversedOrtho = new Matrix4f().setOrtho(
                 centerX - halfExtent,
                 centerX + halfExtent,
@@ -229,11 +270,11 @@ public final class SunShadowFrame {
                 true
         );
         Matrix4f shadowFromWorldRelative = reversedOrtho.mul(lightView);
-        Matrix4f shadowFromView = shadowFromWorldRelative.mul(viewToWorld);
-        if (!shadowFromView.isFinite()) {
+        Matrix4f shadowFromView = new Matrix4f(shadowFromWorldRelative).mul(viewToWorld);
+        if (!shadowFromWorldRelative.isFinite() || !shadowFromView.isFinite()) {
             throw new IllegalStateException("Cascade matrix is not finite");
         }
-        return shadowFromView;
+        return new CascadePlan(shadowFromView, shadowFromWorldRelative);
     }
 
     private static Vector3f[] frustumCorners(
@@ -297,5 +338,11 @@ public final class SunShadowFrame {
 
     private static long mix(final long hash, final int value) {
         return (hash ^ Integer.toUnsignedLong(value)) * 0x100000001b3L;
+    }
+
+    private record CascadePlan(
+            Matrix4f shadowFromView,
+            Matrix4f shadowFromWorldRelative
+    ) {
     }
 }

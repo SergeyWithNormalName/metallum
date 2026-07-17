@@ -214,19 +214,21 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return 1.0;
                 }
                 float visibility = metallumCascadeVisibilityV1(cascade, viewPosition, normal);
-                if (cascade + 1 < cascadeCount) {
-                    float split = metallumEnvironment.cascadeSplits[cascade];
-                    float previous = cascade == 0 ? 0.0
-                            : metallumEnvironment.cascadeSplits[cascade - 1];
-                    float blendWidth = max(
-                            (split - previous) * metallumEnvironment.cascadeBlend[cascade],
-                            0.0001);
-                    float blend = smoothstep(split - blendWidth, split, viewDepth);
-                    if (blend > 0.0) {
+                float split = metallumEnvironment.cascadeSplits[cascade];
+                float previous = cascade == 0 ? 0.0
+                        : metallumEnvironment.cascadeSplits[cascade - 1];
+                float blendWidth = max(
+                        (split - previous) * metallumEnvironment.cascadeBlend[cascade],
+                        0.0001);
+                float blend = smoothstep(split - blendWidth, split, viewDepth);
+                if (blend > 0.0) {
+                    if (cascade + 1 < cascadeCount) {
                         visibility = mix(
                                 visibility,
                                 metallumCascadeVisibilityV1(cascade + 1, viewPosition, normal),
                                 blend);
+                    } else {
+                        visibility = mix(visibility, 1.0, blend);
                     }
                 }
                 return visibility;
@@ -254,9 +256,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * (skyOcclusion * hemisphere);
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
                 float nDotL = max(dot(normal, toLight), 0.0);
-                if (nDotL > 0.0) {
+                float directionalWeight = skyOcclusion * nDotL;
+                if (directionalWeight > 0.0) {
                     diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                            * (nDotL * metallumSunVisibilityV1(viewPosition, normal));
+                            * (directionalWeight
+                                    * metallumSunVisibilityV1(viewPosition, normal));
                 }
                 return albedo * diffuse * 0.31830988618;
             }

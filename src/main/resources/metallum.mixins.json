@@ -45,6 +45,7 @@
     "sodium.ChunkBuilderMeshingTaskAdvancedLightMixin",
     "sodium.ChunkMeshBufferBuilderHdrMixin",
     "sodium.ChunkVertexEncoderVertexHdrMixin",
+    "sodium.DefaultChunkRendererShadowMixin",
     "sodium.DefaultFluidRendererHdrMixin",
     "sodium.ClientChunkCacheRelightCauseMixin",
     "sodium.ClientPacketListenerRelightCauseMixin",
@@ -57,6 +58,8 @@
     "sodium.RenderRegionManagerAdvancedLightMixin",
     "sodium.RenderRegionManagerRelightLifecycleMixin",
     "sodium.RenderRegionManagerTerrainRefreshMixin",
+    "sodium.RenderRegionShadowBatchMixin",
+    "sodium.RenderSectionManagerShadowAccess",
     "sodium.RenderSectionManagerRelightCauseMixin",
     "sodium.RenderSectionManagerRelightOutputGuardMixin",
     "sodium.RenderSectionManagerAdvancedLightMixin",
@@ -67,6 +70,9 @@
     "sodium.SectionRenderDataStorageTerrainAccessMixin",
     "sodium.SodiumRelightBlockContextAccess",
     "sodium.SodiumPreferredGraphicsApiMixin",
+    "sodium.SodiumWorldRendererShadowMixin",
+    "sodium.TerrainRenderPassShadowMixin",
+    "sodium.UniformBufferManagerShadowMixin",
     "sodium.VanillaBlockModelPartEncoderRelightOracleMixin"
   ],
   "injectors": {

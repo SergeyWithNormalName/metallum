@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.client.sodium.SodiumShadowCompatibility;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
@@ -54,6 +55,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.RenderSectionTerrainBaselineMixin",
             "com.metallum.mixin.sodium.SectionRenderDataStorageTerrainAccessMixin"
     );
+    private static final Set<String> SODIUM_SHADOW_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.DefaultChunkRendererShadowMixin",
+            "com.metallum.mixin.sodium.RenderRegionShadowBatchMixin",
+            "com.metallum.mixin.sodium.RenderSectionManagerShadowAccess",
+            "com.metallum.mixin.sodium.SodiumWorldRendererShadowMixin",
+            "com.metallum.mixin.sodium.TerrainRenderPassShadowMixin",
+            "com.metallum.mixin.sodium.UniformBufferManagerShadowMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -63,6 +72,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean sodiumLightSidecarEnabled;
     private boolean sodiumRelightOracleEnabled;
     private boolean sodiumRelightFastPathEnabled;
+    private boolean sodiumShadowCompatible;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -71,6 +81,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.isDefaultGraphicsApi = isDefaultGraphicsApiSelected();
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
+        this.sodiumShadowCompatible = SodiumShadowCompatibility.supportsInstalledRenderer();
         boolean exactRelightVersions = hasExactRelightOracleVersions();
         boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
         this.sodiumRelightFastPathEnabled = !relightOracleRequested
@@ -111,6 +122,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             return this.sodiumLightSidecarEnabled
                     && this.isDefaultGraphicsApi
                     && FabricLoader.getInstance().isModLoaded("sodium");
+        }
+        if (SODIUM_SHADOW_MIXINS.contains(mixinClassName)) {
+            return this.sodiumShadowCompatible && FabricLoader.getInstance().isModLoaded("sodium");
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");

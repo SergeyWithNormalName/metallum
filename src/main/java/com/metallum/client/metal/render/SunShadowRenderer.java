@@ -1,6 +1,8 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.lighting.SunShadowFrame;
+import com.metallum.client.sodium.SodiumShadowCompatibility;
+import com.metallum.client.renderer.temporal.FrameState.CameraPosition;
 import com.mojang.blaze3d.ProjectionType;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import com.mojang.blaze3d.framegraph.FramePass;
@@ -13,6 +15,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayerGroup;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import net.minecraft.client.renderer.feature.FeatureRenderDispatcher;
+import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
+import org.joml.Vector3f;
+import org.joml.Vector3fc;
 import org.joml.Vector4f;
 import org.jspecify.annotations.Nullable;
 
@@ -20,6 +26,17 @@ import org.jspecify.annotations.Nullable;
 public final class SunShadowRenderer {
     @Nullable
     private static RenderTarget activeTarget;
+    @Nullable
+    private static Matrix4f activeTerrainProjection;
+    @Nullable
+    private static Matrix4f activeTerrainCasterProjection;
+    @Nullable
+    private static CameraPosition activeCameraPosition;
+    @Nullable
+    private static Vector3f activeTerrainToLightWorld;
+    @Nullable
+    private static Runnable activeTerrainCleanup;
+    private static long activeCascadeToken;
     private static float activeRasterDepthBias;
     private static float activeRasterSlopeBias;
 
@@ -31,6 +48,9 @@ public final class SunShadowRenderer {
             final FeatureRenderDispatcher.PreparedFrame featureFrame,
             final ChunkSectionsToRender terrain
     ) {
+        if (!SodiumShadowCompatibility.supportsInstalledRenderer()) {
+            return null;
+        }
         MetalDevice device = MetalDevice.getInstance();
         if (device == null) {
             return null;
@@ -55,6 +75,39 @@ public final class SunShadowRenderer {
 
     public static @Nullable RenderTarget activeTarget() {
         return activeTarget;
+    }
+
+    /** Sodium keeps terrain matrices in its own per-frame uniform buffer. */
+    public static @Nullable Matrix4fc activeTerrainProjection() {
+        return activeTerrainProjection;
+    }
+
+    /** Camera-relative world projection used to collect off-camera terrain casters. */
+    public static @Nullable Matrix4fc activeTerrainCasterProjection() {
+        return activeTerrainCasterProjection;
+    }
+
+    public static @Nullable CameraPosition activeCameraPosition() {
+        return activeCameraPosition;
+    }
+
+    public static @Nullable Vector3fc activeTerrainToLightWorld() {
+        return activeTerrainToLightWorld;
+    }
+
+    /** Identifies one cascade so Sodium uploads once for its SOLID+CUTOUT pair. */
+    public static long activeCascadeToken() {
+        return activeCascadeToken;
+    }
+
+    /** Lets an exact-version renderer bridge restore its mutable terrain draw caches. */
+    public static void registerTerrainCleanup(final Runnable cleanup) {
+        if (!isRendering()) {
+            throw new IllegalStateException("Terrain cleanup registered outside a shadow pass");
+        }
+        if (activeTerrainCleanup == null) {
+            activeTerrainCleanup = cleanup;
+        }
     }
 
     static float activeRasterDepthBias() {
@@ -88,44 +141,78 @@ public final class SunShadowRenderer {
             minecraft.gameRenderer.lighting().setupFor(Lighting.Entry.LEVEL);
             for (int cascade = 0; cascade < frame.cascadeCount(); cascade++) {
                 RenderTarget target = resources.target(cascade);
+                Matrix4f shadowFromView = frame.shadowFromView(cascade);
+                Matrix4f shadowFromWorldRelative = frame.shadowFromWorldRelative(cascade);
                 activeTarget = target;
+                activeTerrainProjection = shadowFromView;
+                activeTerrainCasterProjection = shadowFromWorldRelative;
+                activeCameraPosition = frame.cameraPosition();
+                activeTerrainToLightWorld = frame.toLightWorld();
+                activeCascadeToken = frame.submitIndex() * 8L + cascade + 1L;
                 activeRasterDepthBias = frame.budget().rasterDepthBias();
                 activeRasterSlopeBias = frame.budget().rasterSlopeBias();
-                RenderSystem.getDevice()
-                        .createCommandEncoder()
-                        .clearColorAndDepthTextures(
-                                target.getColorTexture(),
-                                new Vector4f(),
-                                target.getDepthTexture(),
-                                0.0
+                try {
+                    RenderSystem.getDevice()
+                            .createCommandEncoder()
+                            .clearColorAndDepthTextures(
+                                    target.getColorTexture(),
+                                    new Vector4f(),
+                                    target.getDepthTexture(),
+                                    0.0
+                            );
+                    RenderSystem.setProjectionMatrix(
+                            resources.projectionBuffer().getBuffer(shadowFromView),
+                            ProjectionType.ORTHOGRAPHIC
+                    );
+                    try {
+                        terrain.renderGroup(
+                                ChunkSectionLayerGroup.OPAQUE,
+                                RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
                         );
-                RenderSystem.setProjectionMatrix(
-                        resources.projectionBuffer().getBuffer(frame.shadowFromView(cascade)),
-                        ProjectionType.ORTHOGRAPHIC
-                );
-                terrain.renderGroup(
-                        ChunkSectionLayerGroup.OPAQUE,
-                        RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
-                );
-                RenderSystem.outputColorTextureOverride = target.getColorTextureView();
-                RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
-                featureFrame.executeSolid();
-                RenderSystem.outputColorTextureOverride = previousColorOverride;
-                RenderSystem.outputDepthTextureOverride = previousDepthOverride;
-                activeTarget = null;
+                    } finally {
+                        cleanupTerrainDrawState();
+                    }
+                    RenderSystem.outputColorTextureOverride = target.getColorTextureView();
+                    RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
+                    featureFrame.executeSolid();
+                } finally {
+                    cleanupTerrainDrawState();
+                    RenderSystem.outputColorTextureOverride = previousColorOverride;
+                    RenderSystem.outputDepthTextureOverride = previousDepthOverride;
+                    activeTarget = null;
+                    activeTerrainProjection = null;
+                    activeTerrainCasterProjection = null;
+                    activeCameraPosition = null;
+                    activeTerrainToLightWorld = null;
+                    activeCascadeToken = 0L;
+                }
             }
             resources.markRendered(frame.submitIndex());
             device.completeSunShadowFrame(frame.submitIndex());
         } catch (RuntimeException failure) {
             device.failSunShadowFrame(failure);
         } finally {
+            cleanupTerrainDrawState();
             activeTarget = null;
+            activeTerrainProjection = null;
+            activeTerrainCasterProjection = null;
+            activeCameraPosition = null;
+            activeTerrainToLightWorld = null;
+            activeCascadeToken = 0L;
             activeRasterDepthBias = 0.0f;
             activeRasterSlopeBias = 0.0f;
             RenderSystem.outputColorTextureOverride = previousColorOverride;
             RenderSystem.outputDepthTextureOverride = previousDepthOverride;
             RenderSystem.restoreProjectionMatrix();
             MetalGpuTiming.end();
+        }
+    }
+
+    private static void cleanupTerrainDrawState() {
+        Runnable cleanup = activeTerrainCleanup;
+        activeTerrainCleanup = null;
+        if (cleanup != null) {
+            cleanup.run();
         }
     }
 }
