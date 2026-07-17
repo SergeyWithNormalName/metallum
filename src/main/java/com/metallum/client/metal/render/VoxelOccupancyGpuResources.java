@@ -69,6 +69,33 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
     ) {
     }
 
+    /** Read-only L6 views of the persistent private clipmap resources. */
+    record ShadowBindings(
+            List<MemorySegment> occupancy,
+            List<MemorySegment> optical,
+            List<MemorySegment> metadata
+    ) {
+        ShadowBindings {
+            occupancy = List.copyOf(occupancy);
+            optical = List.copyOf(optical);
+            metadata = List.copyOf(metadata);
+            if (occupancy.isEmpty() || occupancy.size() != optical.size()
+                    || occupancy.size() != metadata.size()
+                    || occupancy.size() > 3) {
+                throw new IllegalArgumentException("Invalid L6 voxel shadow bindings");
+            }
+            for (int index = 0; index < occupancy.size(); index++) {
+                requireHandle(occupancy.get(index), "L6 occupancy level " + index);
+                requireHandle(optical.get(index), "L6 optical level " + index);
+                requireHandle(metadata.get(index), "L6 metadata level " + index);
+            }
+        }
+
+        int levelCount() {
+            return this.occupancy.size();
+        }
+    }
+
     private final long lightingGeneration;
     private final long clipmapGeneration;
     private final long worldGeneration;
@@ -404,6 +431,31 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return this.budget;
     }
 
+    long clipmapGeneration() {
+        return this.clipmapGeneration;
+    }
+
+    long worldGeneration() {
+        return this.worldGeneration;
+    }
+
+    List<VoxelClipmapSnapshot.Level> levels() {
+        return this.levels;
+    }
+
+    ShadowBindings shadowBindings() {
+        ensureOpen();
+        List<MemorySegment> occupancy = new ArrayList<>(this.levels.size());
+        List<MemorySegment> optical = new ArrayList<>(this.levels.size());
+        List<MemorySegment> metadata = new ArrayList<>(this.levels.size());
+        for (int index = 0; index < this.levels.size(); index++) {
+            occupancy.add(buffer(this.context, BUFFER_OCCUPANCY, index));
+            optical.add(buffer(this.context, BUFFER_OPTICAL, index));
+            metadata.add(buffer(this.context, BUFFER_METADATA, index));
+        }
+        return new ShadowBindings(occupancy, optical, metadata);
+    }
+
     @Override
     public void close() {
         if (MetalNativeBridge.isNullHandle(this.context)) {
@@ -493,8 +545,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             final long expectedBytes,
             final String name
     ) {
-        MemorySegment handle = MetalNativeBridge.metallum_voxel_context_buffer_v1(
-                context, kind, index);
+        MemorySegment handle = buffer(context, kind, index);
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("Native L5 " + name + " buffer is unavailable");
         }
@@ -505,6 +556,20 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                     "Native L5 " + name + " buffer size mismatch: expected "
                             + expectedBytes + ", got " + actual
             );
+        }
+    }
+
+    private static MemorySegment buffer(
+            final MemorySegment context,
+            final int kind,
+            final int index
+    ) {
+        return MetalNativeBridge.metallum_voxel_context_buffer_v1(context, kind, index);
+    }
+
+    private static void requireHandle(final MemorySegment handle, final String name) {
+        if (MetalNativeBridge.isNullHandle(handle)) {
+            throw new IllegalStateException("Native " + name + " buffer is unavailable");
         }
     }
 

@@ -137,6 +137,68 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint indices[];
             } metallumClusterIndexBuffer;
 
+            struct MetallumVoxelProxyV1 {
+                vec4 minWorldRelative;
+                vec4 maxWorldRelative;
+            };
+
+            struct MetallumVoxelLevelV1 {
+                ivec4 originAndSpan;
+                uvec4 levelLayout;
+            };
+
+            layout(std430, binding = 15) readonly buffer MetallumVoxelProxiesV1 {
+                MetallumVoxelProxyV1 proxies[];
+            } metallumVoxelProxyBuffer;
+
+            layout(std430, binding = 16) readonly buffer MetallumVoxelShadowParamsV1 {
+                mat4 worldFromView;
+                ivec4 cameraBlockAndFlags;
+                vec4 cameraFractionAndMinTrans;
+                uvec4 caps;
+                uvec4 proxyAndFrame;
+                ivec4 levelOriginAndSpan0;
+                uvec4 levelLayout0;
+                ivec4 levelOriginAndSpan1;
+                uvec4 levelLayout1;
+                ivec4 levelOriginAndSpan2;
+                uvec4 levelLayout2;
+                uvec4 contract;
+                uvec4 worldAndFlags;
+            } metallumVoxelShadow;
+
+            layout(std430, binding = 17) readonly buffer MetallumVoxelOccupancy0V1 {
+                uint words[];
+            } metallumVoxelOccupancy0;
+            layout(std430, binding = 18) readonly buffer MetallumVoxelOccupancy1V1 {
+                uint words[];
+            } metallumVoxelOccupancy1;
+            layout(std430, binding = 19) readonly buffer MetallumVoxelOccupancy2V1 {
+                uint words[];
+            } metallumVoxelOccupancy2;
+
+            // L5 stores optical/material data as raw bytes. Reading uint words here and
+            // extracting little-endian lanes keeps GLSL 430 accesses naturally aligned.
+            layout(std430, binding = 20) readonly buffer MetallumVoxelOptical0V1 {
+                uint words[];
+            } metallumVoxelOptical0;
+            layout(std430, binding = 21) readonly buffer MetallumVoxelOptical1V1 {
+                uint words[];
+            } metallumVoxelOptical1;
+            layout(std430, binding = 22) readonly buffer MetallumVoxelOptical2V1 {
+                uint words[];
+            } metallumVoxelOptical2;
+
+            layout(std430, binding = 23) readonly buffer MetallumVoxelMetadata0V1 {
+                uvec4 tags[];
+            } metallumVoxelMetadata0;
+            layout(std430, binding = 24) readonly buffer MetallumVoxelMetadata1V1 {
+                uvec4 tags[];
+            } metallumVoxelMetadata1;
+            layout(std430, binding = 25) readonly buffer MetallumVoxelMetadata2V1 {
+                uvec4 tags[];
+            } metallumVoxelMetadata2;
+
             vec3 metallumSafeNormalV1(vec3 surfaceNormal) {
                 float normalScale = max(
                         abs(surfaceNormal.x),
@@ -274,6 +336,536 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return albedo * diffuse * 0.31830988618;
             }
 
+            bool metallumFiniteVec3V1(vec3 value) {
+                return !any(isnan(value)) && !any(isinf(value));
+            }
+
+            int metallumPositiveModV1(int value, int modulus) {
+                int remainder = value % modulus;
+                return remainder < 0 ? remainder + modulus : remainder;
+            }
+
+            int metallumFloorDivV1(int value, int divisor) {
+                int quotient = value / divisor;
+                int remainder = value % divisor;
+                return remainder < 0 ? quotient - 1 : quotient;
+            }
+
+            bool metallumPowerOfTwoV1(int value) {
+                return value > 0 && (value & (value - 1)) == 0;
+            }
+
+            ivec3 metallumShiftRightV1(ivec3 value, int shift) {
+                return ivec3(
+                        value.x >> shift,
+                        value.y >> shift,
+                        value.z >> shift);
+            }
+
+            ivec3 metallumPowerOfTwoModV1(ivec3 value, int mask) {
+                return value & ivec3(mask);
+            }
+
+            MetallumVoxelLevelV1 metallumVoxelLevelV1(uint level) {
+                if (level == 0u) {
+                    return MetallumVoxelLevelV1(
+                            metallumVoxelShadow.levelOriginAndSpan0,
+                            metallumVoxelShadow.levelLayout0);
+                }
+                if (level == 1u) {
+                    return MetallumVoxelLevelV1(
+                            metallumVoxelShadow.levelOriginAndSpan1,
+                            metallumVoxelShadow.levelLayout1);
+                }
+                return MetallumVoxelLevelV1(
+                        metallumVoxelShadow.levelOriginAndSpan2,
+                        metallumVoxelShadow.levelLayout2);
+            }
+
+            bool metallumVoxelLevelValidV1(MetallumVoxelLevelV1 level) {
+                uint subdivision = level.levelLayout.x;
+                uint logicalEdge = level.levelLayout.y;
+                uint brickDimension = level.levelLayout.z;
+                uint brickBlockEdge = level.levelLayout.w;
+                return (subdivision == 1u || subdivision == 2u || subdivision == 4u)
+                        && logicalEdge >= 32u && logicalEdge <= 384u
+                        && (logicalEdge & 31u) == 0u
+                        && brickDimension == logicalEdge / 32u
+                        && brickDimension > 0u
+                        && brickBlockEdge == 32u / subdivision
+                        && level.originAndSpan.w > 0
+                        && level.originAndSpan.w <= 384
+                        && all(greaterThanEqual(
+                        level.originAndSpan.xyz, ivec3(-500000000)))
+                        && all(lessThanEqual(
+                        level.originAndSpan.xyz, ivec3(500000000)))
+                        && uint(level.originAndSpan.w) == logicalEdge / subdivision;
+            }
+
+            bool metallumVoxelLevelContainsV1(
+                    MetallumVoxelLevelV1 level,
+                    vec3 startWorldRelative,
+                    vec3 endWorldRelative) {
+                vec3 relativeOrigin = vec3(
+                        level.originAndSpan.xyz
+                                - metallumVoxelShadow.cameraBlockAndFlags.xyz);
+                vec3 relativeEnd = relativeOrigin + vec3(level.originAndSpan.w);
+                return all(greaterThanEqual(startWorldRelative, relativeOrigin))
+                        && all(lessThan(startWorldRelative, relativeEnd))
+                        && all(greaterThanEqual(endWorldRelative, relativeOrigin))
+                        && all(lessThan(endWorldRelative, relativeEnd));
+            }
+
+            uint metallumVoxelOccupancyWordV1(uint level, uint index) {
+                if (level == 0u) {
+                    return metallumVoxelOccupancy0.words[index];
+                }
+                if (level == 1u) {
+                    return metallumVoxelOccupancy1.words[index];
+                }
+                return metallumVoxelOccupancy2.words[index];
+            }
+
+            uint metallumVoxelOpticalWordV1(uint level, uint index) {
+                if (level == 0u) {
+                    return metallumVoxelOptical0.words[index];
+                }
+                if (level == 1u) {
+                    return metallumVoxelOptical1.words[index];
+                }
+                return metallumVoxelOptical2.words[index];
+            }
+
+            uvec4 metallumVoxelMetadataV1(uint level, uint index) {
+                if (level == 0u) {
+                    return metallumVoxelMetadata0.tags[index];
+                }
+                if (level == 1u) {
+                    return metallumVoxelMetadata1.tags[index];
+                }
+                return metallumVoxelMetadata2.tags[index];
+            }
+
+            bool metallumSegmentIntersectsProxyV1(
+                    vec3 startWorldRelative,
+                    vec3 endWorldRelative,
+                    vec3 minimum,
+                    vec3 maximum) {
+                if (all(greaterThanEqual(startWorldRelative, minimum))
+                        && all(lessThanEqual(startWorldRelative, maximum))) {
+                    return false;
+                }
+                // An entity-emitted light terminates inside its own proxy. Treat either
+                // endpoint as ownership rather than letting the proxy extinguish that light.
+                if (all(greaterThanEqual(endWorldRelative, minimum))
+                        && all(lessThanEqual(endWorldRelative, maximum))) {
+                    return false;
+                }
+                vec3 delta = endWorldRelative - startWorldRelative;
+                float entry = 0.0;
+                float exit = 1.0;
+                for (int axis = 0; axis < 3; ++axis) {
+                    if (abs(delta[axis]) <= 0.000001) {
+                        if (startWorldRelative[axis] < minimum[axis]
+                                || startWorldRelative[axis] > maximum[axis]) {
+                            return false;
+                        }
+                        continue;
+                    }
+                    float inverse = 1.0 / delta[axis];
+                    float first = (minimum[axis] - startWorldRelative[axis]) * inverse;
+                    float second = (maximum[axis] - startWorldRelative[axis]) * inverse;
+                    if (first > second) {
+                        float swap = first;
+                        first = second;
+                        second = swap;
+                    }
+                    entry = max(entry, first);
+                    exit = min(exit, second);
+                    if (entry > exit) {
+                        return false;
+                    }
+                }
+                return exit >= 0.0 && entry < 1.0;
+            }
+
+            // Returns false only for a valid, bounded proxy test with no hit. Invalid proxy
+            // data sets failOpen so the caller can discard the entire shadow result.
+            bool metallumProxyVisibilityV1(
+                    vec3 startWorldRelative,
+                    vec3 endWorldRelative,
+                    out bool failOpen) {
+                failOpen = false;
+                uint proxyCount = metallumVoxelShadow.proxyAndFrame.x;
+                uint proxyCapacity = metallumVoxelShadow.proxyAndFrame.y;
+                if (proxyCapacity > 32u || proxyCount > proxyCapacity) {
+                    failOpen = true;
+                    return true;
+                }
+                for (uint proxyIndex = 0u; proxyIndex < 32u; ++proxyIndex) {
+                    if (proxyIndex >= proxyCount) {
+                        break;
+                    }
+                    MetallumVoxelProxyV1 proxy =
+                            metallumVoxelProxyBuffer.proxies[proxyIndex];
+                    vec3 minimum = proxy.minWorldRelative.xyz;
+                    vec3 maximum = proxy.maxWorldRelative.xyz;
+                    if (!metallumFiniteVec3V1(minimum)
+                            || !metallumFiniteVec3V1(maximum)
+                            || any(greaterThan(minimum, maximum))) {
+                        failOpen = true;
+                        return true;
+                    }
+                    if (metallumSegmentIntersectsProxyV1(
+                            startWorldRelative, endWorldRelative, minimum, maximum)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            bool metallumVoxelStepBudgetFitsV1(
+                    MetallumVoxelLevelV1 level,
+                    vec3 startWorldRelative,
+                    vec3 endWorldRelative,
+                    uint maxSteps) {
+                float subdivision = float(level.levelLayout.x);
+                vec3 startCellFloat = floor(startWorldRelative * subdivision);
+                vec3 endCellFloat = floor(endWorldRelative * subdivision);
+                if (any(lessThan(startCellFloat, vec3(-1000000.0)))
+                        || any(greaterThan(startCellFloat, vec3(1000000.0)))
+                        || any(lessThan(endCellFloat, vec3(-1000000.0)))
+                        || any(greaterThan(endCellFloat, vec3(1000000.0)))) {
+                    return false;
+                }
+                uvec3 cellDelta = uvec3(abs(
+                        ivec3(endCellFloat) - ivec3(startCellFloat)));
+                // Manhattan crossings are conservative when a corner advances multiple axes.
+                // Selecting by this bound guarantees that the hard shader loop can finish.
+                uint requiredSteps = cellDelta.x + cellDelta.y + cellDelta.z;
+                return requiredSteps <= maxSteps;
+            }
+
+            float metallumVoxelVisibilityV1(
+                    vec3 receiverViewPosition,
+                    vec3 lightViewPosition,
+                    vec3 receiverViewNormal) {
+                if (metallumVoxelShadow.caps.x != 1u
+                        || metallumVoxelShadow.worldAndFlags.z != 1u
+                        || metallumVoxelShadow.caps.y == 0u
+                        || metallumVoxelShadow.caps.y > 3u
+                        || metallumVoxelShadow.caps.z == 0u
+                        || metallumVoxelShadow.caps.z > 96u
+                        || metallumVoxelShadow.caps.w > 2u
+                        || any(notEqual(
+                        metallumVoxelShadow.contract.xy,
+                        metallumLighting.frameIdAndGeneration.zw))
+                        || any(notEqual(
+                        metallumVoxelShadow.proxyAndFrame.zw,
+                        metallumLighting.frameIdAndGeneration.xy))) {
+                    return 1.0;
+                }
+                ivec3 cameraBlock = metallumVoxelShadow.cameraBlockAndFlags.xyz;
+                if (any(lessThan(cameraBlock, ivec3(-500000000)))
+                        || any(greaterThan(cameraBlock, ivec3(500000000)))) {
+                    return 1.0;
+                }
+                if (!metallumFiniteVec3V1(receiverViewPosition)
+                        || !metallumFiniteVec3V1(lightViewPosition)
+                        || !metallumFiniteVec3V1(receiverViewNormal)
+                        || !metallumFiniteVec3V1(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz)
+                        || any(lessThan(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
+                        || any(greaterThanEqual(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))
+                        || isnan(metallumVoxelShadow.cameraFractionAndMinTrans.w)
+                        || isinf(metallumVoxelShadow.cameraFractionAndMinTrans.w)
+                        || metallumVoxelShadow.cameraFractionAndMinTrans.w < 0.0
+                        || metallumVoxelShadow.cameraFractionAndMinTrans.w > 1.0) {
+                    return 1.0;
+                }
+
+                vec3 receiverCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * receiverViewPosition;
+                vec3 lightCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * lightViewPosition;
+                vec3 receiverWorldRelative =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + receiverCameraRelative;
+                vec3 lightWorldRelative =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + lightCameraRelative;
+                vec3 worldNormal = mat3(metallumVoxelShadow.worldFromView)
+                        * receiverViewNormal;
+                if (!metallumFiniteVec3V1(receiverWorldRelative)
+                        || !metallumFiniteVec3V1(lightWorldRelative)
+                        || !metallumFiniteVec3V1(worldNormal)) {
+                    return 1.0;
+                }
+
+                vec3 unshortenedDelta = lightWorldRelative - receiverWorldRelative;
+                float segmentLength = length(unshortenedDelta);
+                if (!(segmentLength > 0.0001) || isnan(segmentLength) || isinf(segmentLength)) {
+                    return 1.0;
+                }
+                vec3 rayDirection = unshortenedDelta / segmentLength;
+
+                uint selectedLevel = 3u;
+                uint previousSubdivision = 5u;
+                MetallumVoxelLevelV1 level;
+                vec3 selectedStartWorldRelative = vec3(0.0);
+                vec3 selectedEndWorldRelative = vec3(0.0);
+                for (uint levelIndex = 0u; levelIndex < 3u; ++levelIndex) {
+                    if (levelIndex >= metallumVoxelShadow.caps.y) {
+                        break;
+                    }
+                    MetallumVoxelLevelV1 candidate = metallumVoxelLevelV1(levelIndex);
+                    if (!metallumVoxelLevelValidV1(candidate)
+                            || candidate.levelLayout.x >= previousSubdivision) {
+                        return 1.0;
+                    }
+                    previousSubdivision = candidate.levelLayout.x;
+                    if (selectedLevel == 3u && metallumVoxelLevelContainsV1(
+                            candidate, receiverWorldRelative, lightWorldRelative)) {
+                        float candidateVoxelSize = 1.0 / float(candidate.levelLayout.x);
+                        vec3 candidateStartWorldRelative = receiverWorldRelative
+                                + worldNormal * (candidateVoxelSize * 0.06)
+                                + rayDirection * (candidateVoxelSize * 0.02);
+                        vec3 candidateEndWorldRelative = lightWorldRelative
+                                - rayDirection * min(
+                                candidateVoxelSize * 0.25, segmentLength * 0.25);
+                        if (metallumFiniteVec3V1(candidateStartWorldRelative)
+                                && metallumFiniteVec3V1(candidateEndWorldRelative)
+                                && dot(candidateEndWorldRelative
+                                - candidateStartWorldRelative, rayDirection) > 0.0
+                                && metallumVoxelLevelContainsV1(
+                                candidate,
+                                candidateStartWorldRelative,
+                                candidateEndWorldRelative)
+                                && metallumVoxelStepBudgetFitsV1(
+                                candidate,
+                                candidateStartWorldRelative,
+                                candidateEndWorldRelative,
+                                metallumVoxelShadow.caps.z)) {
+                            selectedLevel = levelIndex;
+                            level = candidate;
+                            selectedStartWorldRelative = candidateStartWorldRelative;
+                            selectedEndWorldRelative = candidateEndWorldRelative;
+                        }
+                    }
+                }
+                if (selectedLevel == 3u) {
+                    return 1.0;
+                }
+
+                float subdivision = float(level.levelLayout.x);
+                vec3 startWorldRelative = selectedStartWorldRelative;
+                vec3 endWorldRelative = selectedEndWorldRelative;
+                vec3 shortenedDelta = endWorldRelative - startWorldRelative;
+                if (!metallumFiniteVec3V1(startWorldRelative)
+                        || !metallumFiniteVec3V1(endWorldRelative)
+                        || dot(shortenedDelta, rayDirection) <= 0.0
+                        || !metallumVoxelLevelContainsV1(
+                        level, startWorldRelative, endWorldRelative)) {
+                    return 1.0;
+                }
+
+                bool proxyFailOpen = false;
+                if (!metallumProxyVisibilityV1(
+                        receiverCameraRelative,
+                        endWorldRelative
+                                - metallumVoxelShadow.cameraFractionAndMinTrans.xyz,
+                        proxyFailOpen)) {
+                    return 0.0;
+                }
+                if (proxyFailOpen) {
+                    return 1.0;
+                }
+
+                vec3 startBlockOffsetFloat = floor(startWorldRelative);
+                vec3 endBlockOffsetFloat = floor(endWorldRelative);
+                if (any(lessThan(startBlockOffsetFloat, vec3(-1000000.0)))
+                        || any(greaterThan(startBlockOffsetFloat, vec3(1000000.0)))
+                        || any(lessThan(endBlockOffsetFloat, vec3(-1000000.0)))
+                        || any(greaterThan(endBlockOffsetFloat, vec3(1000000.0)))) {
+                    return 1.0;
+                }
+
+                int subdivisionInt = int(level.levelLayout.x);
+                ivec3 startBlockOffset = ivec3(startBlockOffsetFloat);
+                ivec3 endBlockOffset = ivec3(endBlockOffsetFloat);
+                vec3 startWithinBlock = startWorldRelative - startBlockOffsetFloat;
+                vec3 endWithinBlock = endWorldRelative - endBlockOffsetFloat;
+                ivec3 cell = (cameraBlock + startBlockOffset) * subdivisionInt
+                        + ivec3(floor(startWithinBlock * subdivision));
+                ivec3 endCell = (cameraBlock + endBlockOffset) * subdivisionInt
+                        + ivec3(floor(endWithinBlock * subdivision));
+                vec3 cellFraction = fract(startWithinBlock * subdivision);
+                vec3 gridDelta = shortenedDelta * subdivision;
+                ivec3 stepDirection = ivec3(sign(gridDelta));
+                vec3 absoluteDelta = abs(gridDelta);
+                vec3 tDelta = vec3(
+                        absoluteDelta.x > 0.000001 ? 1.0 / absoluteDelta.x : 1.0e30,
+                        absoluteDelta.y > 0.000001 ? 1.0 / absoluteDelta.y : 1.0e30,
+                        absoluteDelta.z > 0.000001 ? 1.0 / absoluteDelta.z : 1.0e30);
+                vec3 tMax = vec3(
+                        stepDirection.x > 0 ? (1.0 - cellFraction.x) * tDelta.x
+                                : stepDirection.x < 0 ? cellFraction.x * tDelta.x : 1.0e30,
+                        stepDirection.y > 0 ? (1.0 - cellFraction.y) * tDelta.y
+                                : stepDirection.y < 0 ? cellFraction.y * tDelta.y : 1.0e30,
+                        stepDirection.z > 0 ? (1.0 - cellFraction.z) * tDelta.z
+                                : stepDirection.z < 0 ? cellFraction.z * tDelta.z : 1.0e30);
+
+                float visibility = 1.0;
+                ivec3 lastOpticalBlock = ivec3(0);
+                bool hasLastOpticalBlock = false;
+                ivec3 lastMetadataBrick = ivec3(0);
+                bool hasLastMetadataBrick = false;
+                uint maxSteps = metallumVoxelShadow.caps.z;
+                int brickBlockEdge = int(level.levelLayout.w);
+                int brickDimension = int(level.levelLayout.z);
+                int logicalEdge = int(level.levelLayout.y);
+                int spanBlocks = level.originAndSpan.w;
+                bool powerOfTwoAddressing = metallumPowerOfTwoV1(subdivisionInt)
+                        && metallumPowerOfTwoV1(brickBlockEdge)
+                        && metallumPowerOfTwoV1(brickDimension)
+                        && metallumPowerOfTwoV1(logicalEdge)
+                        && metallumPowerOfTwoV1(spanBlocks);
+                int subdivisionShift = subdivisionInt == 4
+                        ? 2 : subdivisionInt == 2 ? 1 : 0;
+                int brickShift = brickBlockEdge == 32
+                        ? 5 : brickBlockEdge == 16 ? 4 : 3;
+                for (uint hardStep = 0u; hardStep < maxSteps; ++hardStep) {
+                    // The light endpoint cell belongs to the emitter and must not
+                    // self-occlude. It is intentionally never sampled.
+                    if (all(equal(cell, endCell))) {
+                        return visibility;
+                    }
+
+                    ivec3 worldBlock;
+                    ivec3 logicalBrick;
+                    if (powerOfTwoAddressing) {
+                        worldBlock = metallumShiftRightV1(cell, subdivisionShift);
+                        logicalBrick = metallumShiftRightV1(worldBlock, brickShift);
+                    } else {
+                        worldBlock = ivec3(
+                                metallumFloorDivV1(cell.x, subdivisionInt),
+                                metallumFloorDivV1(cell.y, subdivisionInt),
+                                metallumFloorDivV1(cell.z, subdivisionInt));
+                        logicalBrick = ivec3(
+                                metallumFloorDivV1(worldBlock.x, brickBlockEdge),
+                                metallumFloorDivV1(worldBlock.y, brickBlockEdge),
+                                metallumFloorDivV1(worldBlock.z, brickBlockEdge));
+                    }
+                    if (!hasLastMetadataBrick
+                            || any(notEqual(logicalBrick, lastMetadataBrick))) {
+                        ivec3 physicalBrick = powerOfTwoAddressing
+                                ? metallumPowerOfTwoModV1(
+                                logicalBrick, brickDimension - 1)
+                                : ivec3(
+                                metallumPositiveModV1(logicalBrick.x, brickDimension),
+                                metallumPositiveModV1(logicalBrick.y, brickDimension),
+                                metallumPositiveModV1(logicalBrick.z, brickDimension));
+                        uint metadataIndex = uint(physicalBrick.x
+                                + brickDimension * (physicalBrick.y
+                                + brickDimension * physicalBrick.z));
+                        uvec4 metadata = metallumVoxelMetadataV1(
+                                selectedLevel, metadataIndex);
+                        if (metadata.w == 0u
+                                || any(notEqual(ivec3(metadata.xyz), logicalBrick))) {
+                            return 1.0;
+                        }
+                        lastMetadataBrick = logicalBrick;
+                        hasLastMetadataBrick = true;
+                    }
+
+                    ivec3 physicalCell = powerOfTwoAddressing
+                            ? metallumPowerOfTwoModV1(cell, logicalEdge - 1)
+                            : ivec3(
+                            metallumPositiveModV1(cell.x, logicalEdge),
+                            metallumPositiveModV1(cell.y, logicalEdge),
+                            metallumPositiveModV1(cell.z, logicalEdge));
+                    uint occupancyIndex = uint((physicalCell.z * logicalEdge
+                            + physicalCell.y) * (logicalEdge >> 5)
+                            + (physicalCell.x >> 5));
+                    uint occupancyWord = metallumVoxelOccupancyWordV1(
+                            selectedLevel, occupancyIndex);
+                    bool occupied = (occupancyWord
+                            & (1u << uint(physicalCell.x & 31))) != 0u;
+                    if (occupied && (!hasLastOpticalBlock
+                            || any(notEqual(worldBlock, lastOpticalBlock)))) {
+                        ivec3 physicalBlock = powerOfTwoAddressing
+                                ? metallumPowerOfTwoModV1(worldBlock, spanBlocks - 1)
+                                : ivec3(
+                                metallumPositiveModV1(worldBlock.x, spanBlocks),
+                                metallumPositiveModV1(worldBlock.y, spanBlocks),
+                                metallumPositiveModV1(worldBlock.z, spanBlocks));
+                        uint opticalByteIndex = uint(physicalBlock.x
+                                + spanBlocks * (physicalBlock.y
+                                + spanBlocks * physicalBlock.z));
+                        uint packedWord = metallumVoxelOpticalWordV1(
+                                selectedLevel, opticalByteIndex >> 2u);
+                        uint packedOptical = (packedWord
+                                >> ((opticalByteIndex & 3u) * 8u)) & 255u;
+                        uint materialClass = packedOptical >> 5u;
+                        uint quantizedTransmittance = packedOptical & 31u;
+                        if (materialClass == 0u || materialClass > 7u) {
+                            return 1.0;
+                        }
+                        if (materialClass == 1u || materialClass == 7u
+                                || quantizedTransmittance == 0u) {
+                            return 0.0;
+                        }
+                        visibility *= float(quantizedTransmittance) * (1.0 / 31.0);
+                        if (isnan(visibility) || isinf(visibility)) {
+                            return 1.0;
+                        }
+                        float minimumTransmittance =
+                                metallumVoxelShadow.cameraFractionAndMinTrans.w;
+                        if (visibility <= minimumTransmittance) {
+                            return 0.0;
+                        }
+                        lastOpticalBlock = worldBlock;
+                        hasLastOpticalBlock = true;
+                    }
+
+                    float nextBoundary = min(tMax.x, min(tMax.y, tMax.z));
+                    if (nextBoundary > 1.0) {
+                        return 1.0;
+                    }
+                    float tieLimit = nextBoundary + 0.0000001;
+                    if (tMax.x <= tieLimit) {
+                        cell.x += stepDirection.x;
+                        tMax.x += tDelta.x;
+                    }
+                    if (tMax.y <= tieLimit) {
+                        cell.y += stepDirection.y;
+                        tMax.y += tDelta.y;
+                    }
+                    if (tMax.z <= tieLimit) {
+                        cell.z += stepDirection.z;
+                        tMax.z += tDelta.z;
+                    }
+                    if (all(equal(cell, endCell))) {
+                        return visibility;
+                    }
+                }
+                return 1.0;
+            }
+
+            bool metallumVoxelShadowLightSelectedV1(uint lightIndex) {
+                uint shadowedCap = metallumVoxelShadow.caps.w;
+                if (shadowedCap == 0u || shadowedCap > 2u) {
+                    return false;
+                }
+                uint selected0 = uint(metallumVoxelShadow.cameraBlockAndFlags.w);
+                uint selected1 = metallumVoxelShadow.worldAndFlags.w;
+                return (selected0 != uint(-1) && lightIndex == selected0)
+                        || (shadowedCap > 1u
+                        && selected1 != uint(-1) && lightIndex == selected1);
+            }
+
             uint metallumClusterIndexV1(vec3 viewPosition) {
                 uvec3 grid = max(metallumLighting.gridAndLightCount.xyz, uvec3(1u));
                 uint tileSize = max(metallumLighting.capacitiesAndFlags.w, 1u);
@@ -350,9 +942,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
                     vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
                             * max(light.linearColorIntensity.a, 0.0);
+                    float visibility = 1.0;
+                    if (nDotL > 0.0 && any(greaterThan(radiance, vec3(0.0)))
+                            && metallumVoxelShadowLightSelectedV1(lightIndex)) {
+                        visibility = metallumVoxelVisibilityV1(
+                                viewPosition, light.positionRadius.xyz, normal);
+                    }
                     direct += albedo
                             * radiance
-                            * (attenuation * nDotL * 0.31830988618);
+                            * (attenuation * nDotL * visibility * 0.31830988618);
                     evaluated += 1u;
                 }
                 return direct;
@@ -735,18 +1333,31 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return Result.failure(source, "Advanced fragment helper ABI is not canonical");
             }
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
-                if (countOccurrences(source, "binding = " + slot) != 1) {
+                if (countOccurrences(source, "layout(std430, binding = " + slot) != 1) {
                     return Result.failure(source, "Advanced fragment marker has an incomplete binding ABI");
                 }
             }
             if (countOccurrences(
                     source,
-                    "binding = " + EnvironmentShadowBindingAbi.PARAMS_SLOT
+                    "layout(std430, binding = " + EnvironmentShadowBindingAbi.PARAMS_SLOT
             ) != 1) {
                 return Result.failure(source, "Advanced fragment marker has no environment ABI");
             }
+            for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
+                 slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+                 slot++) {
+                if (countOccurrences(source, "layout(std430, binding = " + slot) != 1) {
+                    return Result.failure(
+                            source,
+                            "Advanced fragment marker has an incomplete L6 local-shadow ABI"
+                    );
+                }
+            }
             for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
-                if (countOccurrences(source, "binding = " + slot) != 1) {
+                if (countOccurrences(
+                        source,
+                        "layout(binding = " + slot + ") uniform sampler2DShadow"
+                ) != 1) {
                     return Result.failure(source, "Advanced fragment marker has an incomplete shadow ABI");
                 }
             }
@@ -815,6 +1426,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
             if (AdvancedLightingBindingAbi.ownsFragmentSlot(slot)
                     || slot == EnvironmentShadowBindingAbi.PARAMS_SLOT
+                    || VoxelShadowBindingAbi.ownsFragmentSlot(slot)
                     || EnvironmentShadowBindingAbi.ownsShadowTextureSlot(slot)) {
                 return slot;
             }
@@ -827,6 +1439,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "MetallumGpuLightV1",
                 "MetallumLightingParamsV1",
                 "MetallumEnvironmentShadowV1",
+                "MetallumVoxelProxyV1",
+                "MetallumVoxelShadowParamsV1",
                 "metallumLightingPosition",
                 "metallumLightingNormal",
                 "metallumLightingTint",
@@ -836,6 +1450,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumClusterIndexV1",
                 "metallumEvaluateClusteredDirectV1",
                 "metallumEvaluateEnvironmentV1",
+                "metallumVoxelVisibilityV1",
+                "metallumProxyVisibilityV1",
                 SHADOW_SAMPLER_0,
                 SHADOW_SAMPLER_1,
                 SHADOW_SAMPLER_2
@@ -888,6 +1504,14 @@ public final class AdvancedDirectLightingShaderPatcher {
         if (EnvironmentShadowBindingAbi.PARAMS_BYTES != SunShadowLayout.PARAMS_BYTES
                 || EnvironmentShadowBindingAbi.VERSION != SunShadowLayout.ABI_VERSION) {
             throw new ExceptionInInitializerError("Environment/shadow shader ABI does not match its layout");
+        }
+        if (VoxelShadowBindingAbi.VERSION != 1
+                || VoxelShadowBindingAbi.PARAMS_BYTES != 256
+                || VoxelShadowBindingAbi.PROXY_STRIDE_BYTES != 32
+                || VoxelShadowBindingAbi.PROXY_BUFFER_SLOT != 15
+                || VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT != 16
+                || VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT != 25) {
+            throw new ExceptionInInitializerError("L6 local-shadow shader ABI does not match its layout");
         }
     }
 }

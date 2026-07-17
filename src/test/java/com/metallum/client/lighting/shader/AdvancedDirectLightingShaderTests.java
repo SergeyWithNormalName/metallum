@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "3da857e3a7c5b623ed45f2666c980c0141a02d4f7ab32e82e17d4b30b79b6ea0",
+            "sodium-solid-fsh", "7ee1de7dad4691c2e5ff9dac01e9a677569586d5ce8b6fe34eb4c5c40afcc591",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "91e1517022e11d0287acd2a41f9654eb0ff2d2a023fce69e68f66639c0d5fbd4",
+            "sodium-cutout-fsh", "aa9edfcca2b6bdd18aa6fdfca830b6d056244c631cc1972b67f0c460f465bf60",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "7331880e9471be0df68a5b4958270dfa8c02620ba54afa94af929778c77bb28d"
+            "minecraft-entity-fsh", "c1a3cf4852df56e95431fa8543a928709a3ee6d7a16c27467b0e9db6527db76c"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -80,6 +80,7 @@ public final class AdvancedDirectLightingShaderTests {
     public static void runAll() throws IOException {
         testVersionedBindingAbi();
         testDepthSliceBoundaries();
+        testPowerOfTwoAddressingMatchesFloorArithmetic();
         testScaleInvariantSurfaceNormal();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
@@ -124,10 +125,53 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{13, 14, 15})
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
+        require(VoxelShadowBindingAbi.VERSION == 1
+                        && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
+                        && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
+                        && java.util.Arrays.equals(
+                        VoxelShadowBindingAbi.occupancyTextureSlots(),
+                        new int[]{17, 18, 19})
+                        && java.util.Arrays.equals(
+                        VoxelShadowBindingAbi.opticalTextureSlots(),
+                        new int[]{20, 21, 22})
+                        && java.util.Arrays.equals(
+                        VoxelShadowBindingAbi.metadataBufferSlots(),
+                        new int[]{23, 24, 25}),
+                "L6 local-shadow binding slots changed");
+        require(VoxelShadowBindingAbi.PARAMS_BYTES == 256
+                        && VoxelShadowBindingAbi.PROXY_STRIDE_BYTES == 32
+                        && VoxelShadowBindingAbi.WORLD_FROM_VIEW_MATRIX_OFFSET == 0
+                        && VoxelShadowBindingAbi.CAMERA_BLOCK_AND_FLAGS_OFFSET == 64
+                        && VoxelShadowBindingAbi.CAMERA_FRACTION_AND_MIN_TRANSMITTANCE_OFFSET == 80
+                        && VoxelShadowBindingAbi.CAPS_OFFSET == 96
+                        && VoxelShadowBindingAbi.PROXY_AND_FRAME_OFFSET == 112
+                        && VoxelShadowBindingAbi.levelOffset(0) == 128
+                        && VoxelShadowBindingAbi.levelOffset(1) == 160
+                        && VoxelShadowBindingAbi.levelOffset(2) == 192
+                        && VoxelShadowBindingAbi.CONTRACT_OFFSET == 224
+                        && VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET == 240,
+                "L6 local-shadow parameter packet changed");
 
         AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4);
         expectIllegalArgument(() -> AdvancedLightingBindingAbi.requireCompatibleLayout(2, 256, 48, 8, 4));
         expectIllegalArgument(() -> AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 32, 8, 4));
+    }
+
+    private static void testPowerOfTwoAddressingMatchesFloorArithmetic() {
+        int[] values = {
+                -500_000_000, -257, -256, -255, -33, -32, -31, -1,
+                0, 1, 31, 32, 33, 255, 256, 257, 500_000_000
+        };
+        for (int shift = 0; shift <= 8; shift++) {
+            int divisor = 1 << shift;
+            int mask = divisor - 1;
+            for (int value : values) {
+                require((value >> shift) == Math.floorDiv(value, divisor),
+                        "signed shift diverged from power-of-two floor division");
+                require((value & mask) == Math.floorMod(value, divisor),
+                        "power-of-two mask diverged from positive toroidal modulo");
+            }
+        }
     }
 
     private static void testDepthSliceBoundaries() {
@@ -216,6 +260,17 @@ public final class AdvancedDirectLightingShaderTests {
         String entityVertex = advancedSource(sources[2]);
         String entityFragment = advancedSource(sources[3]);
 
+        for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
+             slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+             slot++) {
+            String declaration = "layout(std430, binding = " + slot + ")";
+            require(countOccurrences(sodiumFragment, declaration) == 1
+                            && countOccurrences(entityFragment, declaration) == 1
+                            && !sodiumVertex.contains(declaration)
+                            && !entityVertex.contains(declaration),
+                    "L6 slot is not unique and fragment-only: " + slot);
+        }
+
         require(sodiumVertex.contains(
                         "metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;"),
                 "Sodium terrain does not forward view-space position");
@@ -251,8 +306,9 @@ public final class AdvancedDirectLightingShaderTests {
         String entityEnvironment = environmentHelper(entityFragment);
         require(sodiumFormula.equals(entityFormula),
                 "terrain and entities do not use one shared direct-light formula");
-        require(sodiumFormula.contains("* (attenuation * nDotL * 0.31830988618);"),
-                "direct-light formula is no longer Lambertian scene-linear radiance");
+        require(sodiumFormula.contains(
+                        "* (attenuation * nDotL * visibility * 0.31830988618);"),
+                "direct-light formula is no longer visibility-weighted Lambertian scene-linear radiance");
         require(sodiumFragment.contains("vec3 metallumSafeNormalV1(vec3 surfaceNormal)")
                         && sodiumFragment.contains("vec3 scaledNormal = surfaceNormal / normalScale;")
                         && sodiumFragment.contains(
@@ -306,6 +362,88 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFormula.contains(
                         "max(light.linearColorIntensity.rgb, vec3(0.0))"),
                 "direct-light formula collapsed colored lights to a scalar");
+        require(!sodiumFormula.contains("uint shadowed = 0u;")
+                        && sodiumFormula.contains(
+                        "metallumVoxelShadowLightSelectedV1(lightIndex)")
+                        && sodiumFragment.contains(
+                        "uint selected0 = uint(metallumVoxelShadow.cameraBlockAndFlags.w);")
+                        && sodiumFragment.contains(
+                        "uint selected1 = metallumVoxelShadow.worldAndFlags.w;")
+                        && countOccurrences(sodiumFragment, "selected0 != uint(-1)") == 1
+                        && countOccurrences(sodiumFragment, "selected1 != uint(-1)") == 1
+                        && sodiumFragment.contains(
+                        "shadowedCap == 0u || shadowedCap > 2u")
+                        && countOccurrences(sodiumFormula,
+                        "metallumVoxelVisibilityV1(") == 1
+                        && sodiumFormula.contains(
+                        "attenuation * nDotL * visibility * 0.31830988618")
+                        && before(sodiumFormula,
+                        "distanceSquared >= radius * radius",
+                        "metallumVoxelVisibilityV1("),
+                "L6 local visibility is not bounded to two explicit global upload indices");
+        require(sodiumFragment.contains(
+                        "for (uint hardStep = 0u; hardStep < maxSteps; ++hardStep)")
+                        && !sodiumFragment.contains("if (hardStep >= maxSteps)")
+                        && sodiumFragment.contains("return 1.0;")
+                        && sodiumFragment.contains(
+                        "bool powerOfTwoAddressing = metallumPowerOfTwoV1(subdivisionInt)")
+                        && sodiumFragment.contains(
+                        "worldBlock = metallumShiftRightV1(cell, subdivisionShift);")
+                        && sodiumFragment.contains(
+                        "logicalBrick = metallumShiftRightV1(worldBlock, brickShift);")
+                        && sodiumFragment.contains(
+                        "metallumPowerOfTwoModV1(cell, logicalEdge - 1)")
+                        && sodiumFragment.contains(
+                        "metallumFloorDivV1(cell.x, subdivisionInt)")
+                        && sodiumFragment.contains(
+                        "metallumPositiveModV1(logicalBrick.x, brickDimension)")
+                        && sodiumFragment.contains(
+                        "metadata.w == 0u")
+                        && sodiumFragment.contains(
+                        "any(notEqual(ivec3(metadata.xyz), logicalBrick))")
+                        && sodiumFragment.contains("opticalByteIndex >> 2u")
+                        && sodiumFragment.contains(
+                        "(opticalByteIndex & 3u) * 8u")
+                        && sodiumFragment.contains(
+                        "any(notEqual(worldBlock, lastOpticalBlock))")
+                        && sodiumFragment.contains(
+                        "materialClass == 1u || materialClass == 7u")
+                        && sodiumFragment.contains(
+                        "metallumVoxelShadow.contract.xy")
+                        && sodiumFragment.contains(
+                        "metallumLighting.frameIdAndGeneration.zw")
+                        && sodiumFragment.contains(
+                        "metallumVoxelShadow.proxyAndFrame.zw")
+                        && sodiumFragment.contains(
+                        "metallumLighting.frameIdAndGeneration.xy")
+                        && sodiumFragment.contains(
+                        "mat3(metallumVoxelShadow.worldFromView) * receiverViewPosition"),
+                "L6 DDA lost its bounded toroidal/tag/optical fail-open contract");
+        require(sodiumFragment.contains(
+                        "for (uint proxyIndex = 0u; proxyIndex < 32u; ++proxyIndex)")
+                        && sodiumFragment.contains("proxyCapacity > 32u")
+                        && sodiumFragment.contains(
+                        "vec3 receiverCameraRelative =")
+                        && sodiumFragment.contains(
+                        "- metallumVoxelShadow.cameraFractionAndMinTrans.xyz")
+                        && sodiumFragment.contains(
+                        "all(greaterThanEqual(startWorldRelative, minimum))")
+                        && sodiumFragment.contains(
+                        "all(lessThanEqual(startWorldRelative, maximum))")
+                        && sodiumFragment.contains(
+                        "all(greaterThanEqual(endWorldRelative, minimum))")
+                        && sodiumFragment.contains(
+                        "all(lessThanEqual(endWorldRelative, maximum))")
+                        && sodiumFragment.contains("return false;"),
+                "L6 bounded proxy AABB occlusion or endpoint self-exclusion is missing");
+        require(sodiumFragment.contains("metallumVoxelStepBudgetFitsV1(")
+                        && sodiumFragment.contains(
+                        "uint requiredSteps = cellDelta.x + cellDelta.y + cellDelta.z;")
+                        && sodiumFragment.contains("requiredSteps <= maxSteps")
+                        && before(sodiumFragment,
+                        "metallumVoxelStepBudgetFitsV1(",
+                        "selectedLevel = levelIndex;"),
+                "L6 finest-level selection does not coarsen before the DDA hard cap");
 
         require(before(sodiumFragment,
                         "metallumEvaluateClusteredDirectV1(",
@@ -392,6 +530,25 @@ public final class AdvancedDirectLightingShaderTests {
                 );
         require(!collision.success() && collision.failureReason().contains("slot 29"),
                 "occupied Advanced buffer slot did not fail closed");
+        for (int slot : new int[]{15, 16, 17, 22, 25}) {
+            String l6Collision = materialFragment.replace(
+                    "out vec4 fragColor;",
+                    "layout(std430, binding = " + slot
+                            + ") readonly buffer ExistingL6 { uint data[]; } existingL6;\n"
+                            + "out vec4 fragColor;"
+            );
+            AdvancedDirectLightingShaderPatcher.Result l6Result =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            l6Collision
+                    );
+            require(!l6Result.success()
+                            && l6Result.failureReason().contains("slot " + slot),
+                    "occupied L6 local-shadow buffer slot did not fail closed: " + slot);
+        }
         String environmentCollision = materialFragment.replace(
                 "out vec4 fragColor;",
                 "layout(std430, binding = 26) readonly buffer ExistingEnvironment "
@@ -405,11 +562,13 @@ public final class AdvancedDirectLightingShaderTests {
 
         for (String identifier : new String[]{
                 "metallumDirectNormal",
-                "metallumPreparedAlbedo"
+                "metallumPreparedAlbedo",
+                "metallumVoxelVisibilityV1",
+                "MetallumVoxelProxyV1"
         }) {
             String helperCollision = materialFragment.replace(
                     "out vec4 fragColor;",
-                    "vec3 " + identifier + ";\nout vec4 fragColor;"
+                    "// " + identifier + "\nout vec4 fragColor;"
             );
             AdvancedDirectLightingShaderPatcher.Result helperResult =
                     AdvancedDirectLightingShaderPatcher.patch(
@@ -715,17 +874,22 @@ public final class AdvancedDirectLightingShaderTests {
                     name + " fragment module dropped the Advanced position varying");
 
             StorageReflection storage = storageBufferLayout(fragmentModule);
-            require(storage.bytes().equals(Map.of(
-                            EnvironmentShadowBindingAbi.PARAMS_SLOT,
-                            (long) EnvironmentShadowBindingAbi.PARAMS_BYTES,
-                            AdvancedLightingBindingAbi.PARAMS_SLOT,
-                            (long) AdvancedLightingBindingAbi.PARAMS_BYTES,
-                            AdvancedLightingBindingAbi.LIGHTS_SLOT,
-                            (long) AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE,
-                            AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
-                            (long) AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE,
-                            AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
-                            (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE
+            require(storage.bytes().equals(Map.ofEntries(
+                            Map.entry(VoxelShadowBindingAbi.PROXY_BUFFER_SLOT, 32L),
+                            Map.entry(VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT, 256L),
+                            Map.entry(17, 4L), Map.entry(18, 4L), Map.entry(19, 4L),
+                            Map.entry(20, 4L), Map.entry(21, 4L), Map.entry(22, 4L),
+                            Map.entry(23, 16L), Map.entry(24, 16L), Map.entry(25, 16L),
+                            Map.entry(EnvironmentShadowBindingAbi.PARAMS_SLOT,
+                                    (long) EnvironmentShadowBindingAbi.PARAMS_BYTES),
+                            Map.entry(AdvancedLightingBindingAbi.PARAMS_SLOT,
+                                    (long) AdvancedLightingBindingAbi.PARAMS_BYTES),
+                            Map.entry(AdvancedLightingBindingAbi.LIGHTS_SLOT,
+                                    (long) AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE),
+                            Map.entry(AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
+                                    (long) AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE),
+                            Map.entry(AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
+                                    (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE)
                     )),
                     name + " compiled storage-buffer ABI changed: " + storage.bytes());
             require(storage.paramsOffsets().equals(List.of(
@@ -734,6 +898,13 @@ public final class AdvancedDirectLightingShaderTests {
             require(storage.paramsMatrixStrides().equals(List.of(16, 16)),
                     name + " compiled params matrix stride changed: "
                             + storage.paramsMatrixStrides());
+            require(storage.voxelParamsOffsets().equals(List.of(
+                            0, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240)),
+                    name + " compiled L6 params offsets changed: "
+                            + storage.voxelParamsOffsets());
+            require(storage.voxelParamsMatrixStride() == 16,
+                    name + " compiled L6 matrix stride changed: "
+                            + storage.voxelParamsMatrixStride());
             String fragmentMsl = toDecorationBoundMsl(fragmentModule);
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
                 require(fragmentMsl.contains("[[buffer(" + slot + ")]]"),
@@ -741,6 +912,12 @@ public final class AdvancedDirectLightingShaderTests {
             }
             require(fragmentMsl.contains("[[buffer(26)]]"),
                     name + " SPIRV-Cross output lost L4 environment slot");
+            for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
+                 slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+                 slot++) {
+                require(countOccurrences(fragmentMsl, "[[buffer(" + slot + ")]]") == 1,
+                        name + " SPIRV-Cross output lost or repeated L6 fragment slot " + slot);
+            }
             for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
                 require(fragmentMsl.contains("[[texture(" + slot + ")]]")
                                 && fragmentMsl.contains("[[sampler(" + slot + ")]]"),
@@ -801,6 +978,8 @@ public final class AdvancedDirectLightingShaderTests {
                 Map<Integer, Long> layout = new LinkedHashMap<>();
                 List<Integer> paramsOffsets = new ArrayList<>();
                 List<Integer> paramsMatrixStrides = new ArrayList<>();
+                List<Integer> voxelParamsOffsets = new ArrayList<>();
+                int voxelParamsMatrixStride = -1;
                 for (int index = 0; index < resourceCount; index++) {
                     SpvcReflectedResource resource = reflected.get(index);
                     int binding = Spvc.spvc_compiler_get_decoration(
@@ -835,6 +1014,31 @@ public final class AdvancedDirectLightingShaderTests {
                                 "read params block size"
                         );
                         bytes = size.get(0);
+                    } else if (binding == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT) {
+                        int members = Spvc.spvc_type_get_num_member_types(blockType);
+                        for (int member = 0; member < members; member++) {
+                            IntBuffer offset = stack.mallocInt(1);
+                            checkSpvc(
+                                    Spvc.spvc_compiler_type_struct_member_offset(
+                                            compiler, blockType, member, offset),
+                                    "read L6 params member offset " + member
+                            );
+                            voxelParamsOffsets.add(offset.get(0));
+                        }
+                        IntBuffer stride = stack.mallocInt(1);
+                        checkSpvc(
+                                Spvc.spvc_compiler_type_struct_member_matrix_stride(
+                                        compiler, blockType, 0, stride),
+                                "read L6 params worldFromView matrix stride"
+                        );
+                        voxelParamsMatrixStride = stride.get(0);
+                        PointerBuffer size = stack.mallocPointer(1);
+                        checkSpvc(
+                                Spvc.spvc_compiler_get_declared_struct_size(
+                                        compiler, blockType, size),
+                                "read L6 params block size"
+                        );
+                        bytes = size.get(0);
                     } else if (binding == EnvironmentShadowBindingAbi.PARAMS_SLOT) {
                         PointerBuffer size = stack.mallocPointer(1);
                         checkSpvc(
@@ -857,7 +1061,9 @@ public final class AdvancedDirectLightingShaderTests {
                 return new StorageReflection(
                         Map.copyOf(layout),
                         List.copyOf(paramsOffsets),
-                        List.copyOf(paramsMatrixStrides)
+                        List.copyOf(paramsMatrixStrides),
+                        List.copyOf(voxelParamsOffsets),
+                        voxelParamsMatrixStride
                 );
             } finally {
                 Spvc.spvc_context_destroy(context);
@@ -1168,7 +1374,9 @@ public final class AdvancedDirectLightingShaderTests {
     private record StorageReflection(
             Map<Integer, Long> bytes,
             List<Integer> paramsOffsets,
-            List<Integer> paramsMatrixStrides
+            List<Integer> paramsMatrixStrides,
+            List<Integer> voxelParamsOffsets,
+            int voxelParamsMatrixStride
     ) {
     }
 }

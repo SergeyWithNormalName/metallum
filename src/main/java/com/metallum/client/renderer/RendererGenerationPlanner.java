@@ -440,9 +440,15 @@ public final class RendererGenerationPlanner {
                     false
             ));
             resources.add(resource(
-                    "sun_shadow_cascades",
+                    "sun_shadow_static_cascades",
                     domain,
-                    shadowBudget.shadowTextureBytes(),
+                    shadowBudget.staticTextureBytes(),
+                    false
+            ));
+            resources.add(resource(
+                    "sun_shadow_working_cascades",
+                    domain,
+                    shadowBudget.workingTextureBytes(),
                     false
             ));
             VoxelClipmapLayout.Budget voxelBudget = VoxelClipmapLayout.forPreset(
@@ -468,13 +474,23 @@ public final class RendererGenerationPlanner {
                     voxelBudget.opticalBytes(), false));
             resources.add(resource(
                     "voxel_brick_tags", domain, voxelBudget.metadataBytes(), false));
+            LocalVoxelShadowLayout.Budget localShadowBudget =
+                    LocalVoxelShadowLayout.forPreset(config.lightingPreset());
+            resources.add(resource(
+                    "local_shadow_params_ring", domain,
+                    localShadowBudget.paramsRingBytes(), false));
+            resources.add(resource(
+                    "entity_shadow_proxies_ring", domain,
+                    localShadowBudget.proxyRingBytes(), false));
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));
             passes.add(pass("cluster_build", domain));
             passes.add(pass("voxel_upload", domain));
             passes.add(pass("voxel_update", domain));
-            passes.add(pass("sun_shadow", domain));
+            passes.add(pass("sun_shadow_static_refresh", domain));
+            passes.add(pass("sun_shadow_static_copy", domain));
+            passes.add(pass("sun_shadow_dynamic", domain));
             passes.add(pass("direct_lighting", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "light_upload_blit_encoder", domain));
@@ -485,7 +501,11 @@ public final class RendererGenerationPlanner {
             encoders.add(new RendererGenerationManifest.Encoder(
                     "voxel_update_compute_encoder", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
-                    "sun_shadow_render_encoder", domain));
+                    "sun_shadow_static_render_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "sun_shadow_copy_blit_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "sun_shadow_dynamic_render_encoder", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prepare_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_masks_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_count_pso", domain));
@@ -512,6 +532,8 @@ public final class RendererGenerationPlanner {
                     "voxel_mutation_queue", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
                     "voxel_upload_queue", domain));
+            workQueues.add(new RendererGenerationManifest.WorkQueue(
+                    "entity_shadow_proxy_snapshot", domain));
         }
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,

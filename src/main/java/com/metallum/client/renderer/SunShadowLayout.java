@@ -2,7 +2,7 @@ package com.metallum.client.renderer;
 
 import java.util.Objects;
 
-/** Pure preset and memory contract for the first non-cached cascaded sun shadow maps. */
+/** Pure preset and memory contract for cached static plus per-frame dynamic sun shadows. */
 public final class SunShadowLayout {
     public static final int ABI_VERSION = 1;
     public static final int MAX_CASCADES = 3;
@@ -10,6 +10,10 @@ public final class SunShadowLayout {
     public static final int PARAMS_RING_SLOTS = 3;
     public static final int SHADOW_COLOR_BYTES_PER_PIXEL = 1;
     public static final int SHADOW_DEPTH_BYTES_PER_PIXEL = 4;
+    /** Static terrain is refreshed at most once per bounded cache lifetime. */
+    public static final long STATIC_CACHE_MAX_AGE_SUBMITS = 120L;
+    /** About 0.36 degrees: avoids visible stale terrain while still amortizing raster work. */
+    public static final float STATIC_CACHE_MIN_SUN_DIRECTION_DOT = 0.99998f;
 
     public record Budget(
             int cascadeCount,
@@ -24,6 +28,8 @@ public final class SunShadowLayout {
             float rasterDepthBias,
             float rasterSlopeBias,
             long paramsRingBytes,
+            long staticTextureBytes,
+            long workingTextureBytes,
             long shadowTextureBytes,
             long totalBytes
     ) {
@@ -42,7 +48,9 @@ public final class SunShadowLayout {
             requirePositive(rasterDepthBias, "raster depth bias");
             requirePositive(rasterSlopeBias, "raster slope bias");
             if (paramsRingBytes != (long) PARAMS_BYTES * PARAMS_RING_SLOTS
-                    || shadowTextureBytes <= 0L
+                    || staticTextureBytes <= 0L
+                    || workingTextureBytes != staticTextureBytes
+                    || shadowTextureBytes != staticTextureBytes + workingTextureBytes
                     || totalBytes != paramsRingBytes + shadowTextureBytes) {
                 throw new IllegalArgumentException("Invalid sun-shadow byte declaration");
             }
@@ -100,10 +108,12 @@ public final class SunShadowLayout {
             default -> throw new IllegalStateException("Unhandled lighting preset " + preset);
         }
         long paramsBytes = (long) PARAMS_BYTES * PARAMS_RING_SLOTS;
-        long textureBytes = Math.multiplyExact(
+        long staticTextureBytes = Math.multiplyExact(
                 Math.multiplyExact((long) cascades, Math.multiplyExact(resolution, resolution)),
                 SHADOW_COLOR_BYTES_PER_PIXEL + SHADOW_DEPTH_BYTES_PER_PIXEL
         );
+        long workingTextureBytes = staticTextureBytes;
+        long shadowTextureBytes = Math.addExact(staticTextureBytes, workingTextureBytes);
         return new Budget(
                 cascades,
                 resolution,
@@ -117,8 +127,10 @@ public final class SunShadowLayout {
                 rasterBias,
                 slopeBias,
                 paramsBytes,
-                textureBytes,
-                Math.addExact(paramsBytes, textureBytes)
+                staticTextureBytes,
+                workingTextureBytes,
+                shadowTextureBytes,
+                Math.addExact(paramsBytes, shadowTextureBytes)
         );
     }
 

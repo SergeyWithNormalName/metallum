@@ -1689,24 +1689,33 @@ Diagnostic overlays:
 - L5 остаётся producer-only: до L6 voxel data не читается fragment lighting path, поэтому новых видимых теней/GI на этом этапе быть не должно; для проверки предусмотрены PPM slice visualization и GPU checksum.
 - Дополнение L5: в Sodium добавлен выключенный по умолчанию `L5 GPU Clipmap Checksum`. После перезапуска он раз в 120 idle-кадров Advanced без блокировки считает checksum finest clipmap и публикует его в telemetry; Vanilla и production rejection accounting не затрагиваются. Runtime-проверка дала `debug_checksum=2779096485`, `2124/2124` completed и нули remaining/age/rejected/stale/ring-busy.
 
-### Этап 6. Local voxel shadows и cached sun shadows
+### Этап 6. Local voxel shadows и cached sun shadows — ✅ ВЫПОЛНЕН 18 июля 2026
 
 #### Работы
 
-- Реализовать DDA/coarse traversal.
-- Подключить важные local shadowed lights.
-- Добавить transmittance accumulation.
-- Разделить static/dynamic sun shadow updates.
-- Добавить cache invalidation от block changes.
-- Добавить entity local-shadow atlas/proxy path.
-- Исполнять subsystem только при новом свете; SDR/HDR используют одну visibility.
+- [x] Реализовать DDA/coarse traversal.
+- [x] Подключить важные local shadowed lights.
+- [x] Добавить transmittance accumulation.
+- [x] Разделить static/dynamic sun shadow updates.
+- [x] Добавить cache invalidation от block changes.
+- [x] Добавить entity local-shadow atlas/proxy path.
+- [x] Исполнять subsystem только при новом свете; SDR/HDR используют одну visibility.
 
 #### Exit criteria
 
-- Torch shadow от fence/slab соответствует occupancy resolution.
-- Удаление блока обновляет тень в ограниченное время.
-- Static camera/world переиспользует shadow cache.
-- Local shadow count не создаёт unbounded fragment loop.
+- [x] Torch shadow от fence/slab соответствует occupancy resolution.
+- [x] Удаление блока обновляет тень в ограниченное время.
+- [x] Static camera/world переиспользует shadow cache.
+- [x] Local shadow count не создаёт unbounded fragment loop.
+
+#### Результат выполнения
+
+- Local visibility использует до `1/2/2` глобально выбранных важных lights для Performance/Balanced/Ultra, выбирает самый детальный помещающийся `4×/2×/1×` clipmap и ограничена `32/64/80` DDA-шагами; transmittance накапливается один раз на world block и не зависит от SDR/HDR output.
+- Sun shadow разделена на инвалидируемый static cache и рабочую копию с dynamic entity layer каждого кадра. Block/chunk changes, смена мира/измерения, солнца и выход камеры из реального cascade padding обновляют cache; неподвижный мир его переиспользует.
+- Осознанное отличие: entity local shadows используют bounded AABB proxy path (`8/16/24` proxies), без отдельного atlas. MSL восстанавливает DDA no-unroll contract точечным fail-closed patch, потому что SPIRV-Cross теряет исходный loop hint.
+- `clean check` прошёл (`63` задачи), включая actual GLSL→SPIR-V→MSL, CPU/numeric contracts и native Metal Validation. Отдельный 900-кадровый Metal API/GPU Validation route установил и удалил факел, закончил очереди пустыми и без `FAIL`, GPU/command-buffer errors, stale, overflow или dropped timing events.
+- M1 Pro, Balanced HDR Native: detailed 300-frame run — `76.37 FPS`, полный GPU p95 `15.58 ms`, cached sun shadow avg/p95/worst `0.153/0.114/3.565 ms`; accepted release 3000-frame run — `78.87 FPS`, GPU p95 `16.19 ms`, `0` measurement allocations и dropped events.
+- Автоматические reference-mask и shader contracts покрывают fence/slab/transmittance; ручной визуальный signoff мелких контуров и движущихся entity без Computer Use/screenshots не выполнялся и остаётся live-проверкой.
 
 ### Этап 7. Voxel indirect lighting
 

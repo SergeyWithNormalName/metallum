@@ -45,7 +45,7 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 16 && graph.passes().size() == 7,
+        require(graph.resources().size() == 19 && graph.passes().size() == 9,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
@@ -53,10 +53,12 @@ public final class FrameGraphTests {
                                 "cluster_membership_scratch", "cluster_compact_headers",
                                 "cluster_compact_indices",
                                 "cluster_statistics", "environment_shadow_params_ring",
-                                "sun_shadow_cascades", "scene_radiance",
+                                "sun_shadow_static_cascades", "sun_shadow_working_cascades",
+                                "scene_radiance",
                                 "voxel_upload_ring", "voxel_private_patch_ring",
                                 "voxel_indirect_args", "voxel_occupancy",
-                                "voxel_transmittance_material", "voxel_brick_tags"
+                                "voxel_transmittance_material", "voxel_brick_tags",
+                                "local_shadow_params_ring", "entity_shadow_proxies_ring"
                         )),
                 "Advanced lighting resources do not describe the compact index and shadow path");
         for (int index = 0; index < graph.resources().size(); index++) {
@@ -68,7 +70,8 @@ public final class FrameGraphTests {
                 .toList();
         require(passNames.equals(List.of(
                         "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",
-                        "voxel_update", "sun_shadow", "direct_lighting")),
+                        "voxel_update", "sun_shadow_static_refresh",
+                        "sun_shadow_static_copy", "sun_shadow_dynamic", "direct_lighting")),
                 "Advanced lighting pass order changed");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
@@ -84,7 +87,9 @@ public final class FrameGraphTests {
         FrameGraph.PassDesc build = graph.passes().get(2);
         FrameGraph.PassDesc voxelUpload = graph.passes().get(3);
         FrameGraph.PassDesc voxelUpdate = graph.passes().get(4);
-        FrameGraph.PassDesc shadow = graph.passes().get(5);
+        FrameGraph.PassDesc staticShadow = graph.passes().get(5);
+        FrameGraph.PassDesc staticCopy = graph.passes().get(6);
+        FrameGraph.PassDesc dynamicShadow = graph.passes().get(7);
         require(build.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_membership_scratch")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
@@ -100,16 +105,31 @@ public final class FrameGraphTests {
                         access.resource().name().equals("voxel_brick_tags")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
                 "Voxel update does not consume its private upload and publish all L5 fields");
-        require(shadow.accesses().stream().anyMatch(access ->
+        require(staticShadow.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("environment_shadow_params_ring")
                                 && access.kind() == FrameGraph.AccessKind.READ)
-                        && shadow.accesses().stream().anyMatch(access ->
-                        access.resource().name().equals("sun_shadow_cascades")
+                        && staticShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_static_cascades")
                                 && access.kind() == FrameGraph.AccessKind.WRITE
                                 && access.attachment().isAttachment()),
-                "Sun shadow pass does not declare its environment input and depth output");
+                "Static sun-shadow refresh does not declare its input and cached depth output");
+        require(staticCopy.dependencies().equals(List.of(staticShadow.id()))
+                        && staticCopy.encoder() == FrameGraph.EncoderClass.BLIT
+                        && staticCopy.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_static_cascades")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && staticCopy.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_working_cascades")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && dynamicShadow.dependencies().equals(List.of(staticCopy.id()))
+                        && dynamicShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_working_cascades")
+                                && access.kind() == FrameGraph.AccessKind.READ_WRITE
+                                && access.attachment().loadAction() == FrameGraph.LoadAction.LOAD),
+                "Cached static copy and dynamic entity shadow ordering changed");
         FrameGraph.PassDesc direct = graph.passes().getLast();
-        require(direct.dependencies().equals(List.of(build.id(), shadow.id()))
+        require(direct.dependencies().equals(List.of(
+                        build.id(), voxelUpdate.id(), dynamicShadow.id()))
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_compact_headers")
                                 && access.kind() == FrameGraph.AccessKind.READ)
@@ -120,12 +140,27 @@ public final class FrameGraphTests {
                         access.resource().name().equals("environment_shadow_params_ring")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
-                        access.resource().name().equals("sun_shadow_cascades")
+                        access.resource().name().equals("sun_shadow_working_cascades")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_occupancy")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_transmittance_material")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_brick_tags")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_params_ring")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("entity_shadow_proxies_ring")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("scene_radiance")
                                 && access.kind() == FrameGraph.AccessKind.READ_WRITE),
-                "Direct lighting is not ordered after compact cluster and sun-shadow work");
+                "Direct lighting is not ordered after cluster, voxel and cached-shadow work");
     }
 
     private static void testReadBeforeWrite() {

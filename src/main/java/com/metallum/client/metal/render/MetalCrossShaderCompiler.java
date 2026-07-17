@@ -8,6 +8,7 @@ import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
+import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -43,6 +44,10 @@ final class MetalCrossShaderCompiler {
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    private static final String VOXEL_TRAVERSAL_LOOP_MSL =
+            "    for (uint hardStep = 0u; hardStep < maxSteps; hardStep++)";
+    private static final String VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL =
+            "    #pragma clang loop unroll(disable)\n" + VOXEL_TRAVERSAL_LOOP_MSL;
 
     private MetalCrossShaderCompiler() {
     }
@@ -338,19 +343,46 @@ final class MetalCrossShaderCompiler {
         );
         MslShader fragmentMsl = spirvToMsl(fragmentSpirv.spirv(), layoutEntries.size(), Map.of());
 
+        String fragmentSource = flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                ? preserveVoxelShadowTraversalLoop(fragmentMsl.source())
+                : fragmentMsl.source();
         String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
-        String fragmentEntryPoint = extractEntryPoint(fragmentMsl.source(), FRAGMENT_ENTRY_PATTERN, "main0");
+        String fragmentEntryPoint = extractEntryPoint(fragmentSource, FRAGMENT_ENTRY_PATTERN, "main0");
         List<MetalCompiledRenderPipeline.ResourceBinding> resources = List.copyOf(
                 buildResourceBindings(layoutEntries, vertexMsl, fragmentMsl)
         );
         return new MetalCompiledRenderPipeline.ShaderVariantSource(
                 vertexMsl.source(),
-                fragmentMsl.source(),
+                fragmentSource,
                 vertexEntryPoint,
                 fragmentEntryPoint,
                 resources,
-                fragmentMsl.source().contains("[[color(1)]]")
+                fragmentSource.contains("[[color(1)]]")
         );
+    }
+
+    /**
+     * SPIRV-Cross drops the GLSL/SPIR-V no-unroll hint when emitting MSL. Restore the equivalent
+     * Clang loop pragma on the one bounded L6 traversal. Keep the post-process exact and fail
+     * closed when the generated MSL shape changes rather than silently losing the performance
+     * contract.
+     */
+    static String preserveVoxelShadowTraversalLoop(final String source) {
+        Objects.requireNonNull(source, "source");
+        if (countOccurrences(source, VOXEL_TRAVERSAL_LOOP_MSL) != 1
+                || source.contains(VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL)) {
+            throw new IllegalStateException(
+                    "Advanced MSL must expose exactly one canonical L6 traversal loop"
+            );
+        }
+        String patched = source.replace(
+                VOXEL_TRAVERSAL_LOOP_MSL,
+                VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL
+        );
+        if (countOccurrences(patched, VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL) != 1) {
+            throw new IllegalStateException("Could not preserve the L6 traversal loop");
+        }
+        return patched;
     }
 
     private static void seedCanonicalLayout(
@@ -476,7 +508,8 @@ final class MetalCrossShaderCompiler {
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
                     && (AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())
-                    || binding.bindingIndex() == EnvironmentShadowBindingAbi.PARAMS_SLOT)) {
+                    || binding.bindingIndex() == EnvironmentShadowBindingAbi.PARAMS_SLOT
+                    || VoxelShadowBindingAbi.ownsFragmentSlot(binding.bindingIndex()))) {
                 throw new IllegalStateException(
                         "Advanced lighting fragment slot " + binding.bindingIndex()
                                 + " collides with pipeline resource " + binding.name()
@@ -499,6 +532,19 @@ final class MetalCrossShaderCompiler {
                     || variant.vertexMsl().contains(marker)) {
                 throw new IllegalStateException(
                         "Advanced lighting fragment buffer slot " + slot
+                                + " is missing, repeated, or visible to the vertex stage for pipeline "
+                                + pipeline.getLocation()
+                );
+            }
+        }
+        for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
+             slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+             slot++) {
+            String marker = "[[buffer(" + slot + ")]]";
+            if (countOccurrences(variant.fragmentMsl(), marker) != 1
+                    || variant.vertexMsl().contains(marker)) {
+                throw new IllegalStateException(
+                        "L6 local-shadow fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
                                 + pipeline.getLocation()
                 );

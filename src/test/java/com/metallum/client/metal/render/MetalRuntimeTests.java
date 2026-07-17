@@ -10,9 +10,14 @@ import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.lighting.AdvancedLight;
+import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.LightSourceKind;
+import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.LightingPreset;
+import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
@@ -58,6 +63,8 @@ public final class MetalRuntimeTests {
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
         testGpuTimingDetailGate();
+        testLocalShadowDiagnosticCap();
+        testLocalShadowLightSelection();
         testJavaWorkloadTelemetryGateAndReset();
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
@@ -65,6 +72,7 @@ public final class MetalRuntimeTests {
         testResourceBindingBatchSelector();
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
         testCanonicalShaderResourceLayout();
+        testVoxelShadowTraversalMslLoopContract();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testTrackedUiTextureAllocationScope();
@@ -80,6 +88,69 @@ public final class MetalRuntimeTests {
         testL2GenerationResourceRouting();
         testL2AtomicMaterialFallback();
         testAutomaticMaterialContractAndCompatibilityOverride();
+    }
+
+    private static void testVoxelShadowTraversalMslLoopContract() {
+        String loop = "    for (uint hardStep = 0u; hardStep < maxSteps; hardStep++) {\n"
+                + "        visibility *= 0.5f;\n"
+                + "    }\n";
+        String patched = MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(loop);
+        require(patched.contains("#pragma clang loop unroll(disable)\n" + loop),
+                "L6 MSL traversal lost its no-unroll loop contract");
+        expectIllegalState(() -> MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(
+                loop + loop));
+        expectIllegalState(() -> MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(
+                "static float unrelated() { return 1.0; }"));
+    }
+
+    private static void testLocalShadowDiagnosticCap() {
+        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, false, "0") == 2,
+                "release timing accepted the diagnostic L6 light cap");
+        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, null) == 2
+                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "") == 2
+                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "broken") == 2
+                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "3") == 2,
+                "invalid diagnostic L6 light cap changed production work");
+        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "0") == 0
+                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, " 1 ") == 1
+                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "2") == 2,
+                "bounded diagnostic L6 light cap was not applied");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(
+                LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1, true, "0"));
+    }
+
+    private static void testLocalShadowLightSelection() {
+        LightWorldToken world = new LightWorldToken(1L, "minecraft:overworld");
+        List<AdvancedLight> lights = List.of(
+                new AdvancedLight(1L, 1L, LightSourceKind.BLOCK,
+                        40.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
+                new AdvancedLight(2L, 1L, LightSourceKind.BLOCK,
+                        2.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
+                new AdvancedLight(3L, 1L, LightSourceKind.BLOCK,
+                        1.0, 64.0, 0.0, 15.0f, 1.0f, 0.8f, 0.5f, 1.0f, 9)
+        );
+        LightFrameSnapshot snapshot = new LightFrameSnapshot(
+                LightFrameSnapshot.CURRENT_VERSION,
+                world,
+                1L,
+                lights,
+                lights.size(),
+                0,
+                0
+        );
+        FrameState.CameraPosition camera = new FrameState.CameraPosition(0.0, 64.0, 0.0);
+
+        int[] none = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 0);
+        int[] one = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 1);
+        int[] two = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 2);
+        require(none[0] == -1 && none[1] == -1,
+                "zero L6 cap selected an upload light");
+        require(one[0] == 1 && one[1] == -1,
+                "L6 did not select the nearest equally important upload light");
+        require(two[0] == 1 && two[1] == 0,
+                "L6 selected-light order crossed the higher-priority prefix");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.selectShadowLightIndices(
+                snapshot, camera, LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1));
     }
 
     private static void testCanonicalShaderResourceLayout() {
@@ -212,15 +283,29 @@ public final class MetalRuntimeTests {
                 "Populated Advanced frame does not describe the compact cluster pipeline");
         FrameState.AdvancedLightingWork shadowed = MetalDevice.advancedLightingWork(2, 3, true);
         require(shadowed.lightCount() == 2
-                        && shadowed.passCount() == 5
-                        && shadowed.encoderCount() == 8
+                        && shadowed.passCount() == 7
+                        && shadowed.encoderCount() == 11
                         && shadowed.psoCount() == 11
                         && shadowed.workQueueCount() == 2
                         && shadowed.dispatchCount() == 6
                         && shadowed.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES
                         + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE
                         + com.metallum.client.renderer.SunShadowLayout.PARAMS_BYTES,
-                "L4 frame does not declare its environment packet and cascade passes");
+                "L6 frame does not declare static refresh/copy/dynamic shadow work");
+        com.metallum.client.renderer.LocalVoxelShadowLayout.Budget localBudget =
+                com.metallum.client.renderer.LocalVoxelShadowLayout.forPreset(
+                        LightingPreset.BALANCED);
+        FrameState.AdvancedLightingWork localShadowed = MetalDevice.advancedLightingWork(
+                2, 3, true, localBudget);
+        require(localShadowed.passCount() == shadowed.passCount()
+                        && localShadowed.encoderCount() == shadowed.encoderCount()
+                        && localShadowed.psoCount() == shadowed.psoCount()
+                        && localShadowed.workQueueCount() == 3
+                        && localShadowed.uploadBytes() == shadowed.uploadBytes()
+                        + com.metallum.client.renderer.LocalVoxelShadowLayout.PARAMS_BYTES
+                        + (long) localBudget.maxEntityProxies()
+                        * com.metallum.client.renderer.LocalVoxelShadowLayout.PROXY_STRIDE_BYTES,
+                "L6 local-shadow packet/proxy work is not explicitly bounded");
         FrameState.AdvancedLightingWork voxel = MetalDevice.withVoxelWork(populated, 3, 4096L);
         require(voxel.lightCount() == 2
                         && voxel.passCount() == 6
@@ -1262,6 +1347,15 @@ public final class MetalRuntimeTests {
             action.run();
             throw new AssertionError("Expected IllegalArgumentException");
         } catch (IllegalArgumentException expected) {
+            // Expected.
+        }
+    }
+
+    private static void expectIllegalState(final Runnable action) {
+        try {
+            action.run();
+            throw new AssertionError("Expected IllegalStateException");
+        } catch (IllegalStateException expected) {
             // Expected.
         }
     }

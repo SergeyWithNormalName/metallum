@@ -13,6 +13,9 @@ import com.metallum.client.renderer.SunShadowLayout;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.Matrix4;
+import com.metallum.client.voxel.VoxelBrickPatch;
+import com.metallum.client.voxel.VoxelUploadBatch;
+import com.metallum.client.voxel.VoxelWorldToken;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
 import org.joml.Vector4f;
@@ -31,12 +34,14 @@ public final class SunShadowContractTests {
         testCameraRelativePlanningAndOutputIndependence();
         testSunRotationAndLightBasisContinuity();
         testTranslationPhaseLockedAndRotationStableCascades();
+        testCachedStaticDynamicSunShadows();
+        testCachedFootprintPaddingGuard();
         testRotatedCascadeCoverageAndCasterExtrusion();
         testCascadeBlendCoverageAndScaleAwareBias();
         testOuterCascadeFadeAndClosedCaveFallback();
         testSodiumCascadeUniformLifecycle();
         testBindingAbi();
-        System.out.println("PASS L4 environment and cascaded sun-shadow numeric contracts");
+        System.out.println("PASS L4/L6 environment and cached sun-shadow numeric contracts");
     }
 
     private static void testEnvironmentProfiles() {
@@ -169,7 +174,7 @@ public final class SunShadowContractTests {
         long[] memoryCaps = {192L << 20, 256L << 20, 384L << 20};
         for (int index = 0; index < presets.length; index++) {
             SunShadowLayout.Budget budget = SunShadowLayout.forPreset(presets[index]);
-            long expectedTextureBytes = (long) expectedCascades[index]
+            long expectedStaticTextureBytes = (long) expectedCascades[index]
                     * expectedResolution[index] * expectedResolution[index]
                     * (SunShadowLayout.SHADOW_COLOR_BYTES_PER_PIXEL
                     + SunShadowLayout.SHADOW_DEPTH_BYTES_PER_PIXEL);
@@ -178,7 +183,9 @@ public final class SunShadowContractTests {
                     "preset changed its declared cascade topology");
             require(budget.paramsRingBytes()
                             == (long) SunShadowLayout.PARAMS_BYTES * SunShadowLayout.PARAMS_RING_SLOTS
-                            && budget.shadowTextureBytes() == expectedTextureBytes
+                            && budget.staticTextureBytes() == expectedStaticTextureBytes
+                            && budget.workingTextureBytes() == expectedStaticTextureBytes
+                            && budget.shadowTextureBytes() == expectedStaticTextureBytes * 2L
                             && budget.totalBytes() < memoryCaps[index],
                     "shadow layout byte accounting or cap changed");
             require(budget.pcfRadiusTexels() >= 1.0f
@@ -742,6 +749,215 @@ public final class SunShadowContractTests {
         require(!state.transition(0L), "main CUTOUT duplicated the restored terrain upload");
     }
 
+    private static void testCachedStaticDynamicSunShadows() {
+        SunShadowLayout.Budget budget = SunShadowLayout.forPreset(LightingPreset.BALANCED);
+        SunShadowCache cache = new SunShadowCache(budget.totalBytes());
+        EnvironmentDescriptor environment = shadowEnvironment(0.35f);
+        SunShadowFrame first = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_000.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 10L, Set.of(), 2L, 3L)
+        );
+        SunShadowCache.Decision firstDecision = cache.prepare(first);
+        require(firstDecision.staticRefresh(), "first cached sun frame did not refresh terrain");
+        cache.complete(firstDecision);
+
+        SunShadowFrame moved = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 11L, Set.of(), 2L, 3L)
+        );
+        SunShadowCache.Decision reused = cache.prepare(moved);
+        require(!reused.staticRefresh(), "small guarded camera move unnecessarily refreshed terrain");
+        for (int cascade = 0; cascade < moved.cascadeCount(); cascade++) {
+            TexelPosition frozenPosition = shadowTexelPosition(
+                    firstDecision.staticFrame(), cascade, 30_000_004.5, 98.0, -30_000_010.0
+            );
+            TexelPosition rebasedPosition = shadowTexelPosition(
+                    reused.workingFrame(), cascade, 30_000_004.5, 98.0, -30_000_010.0
+            );
+            require(frozenPosition.distance(rebasedPosition) < 0.002f,
+                    "cached camera rebase changed a frozen terrain texel");
+        }
+        cache.complete(reused);
+
+        require(!cache.invalidateVoxelBatch(voxelBatch(1L, 0, 0, 0)),
+                "distant voxel batch invalidated a non-intersecting cached cascade");
+        SunShadowCache.Decision distantReuse = cache.prepare(SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 12L, Set.of(), 2L, 3L)
+        ));
+        require(!distantReuse.staticRefresh(), "distant voxel batch forced a static refresh");
+        cache.complete(distantReuse);
+
+        cache.invalidate();
+        SunShadowCache.Decision forcedRefresh = cache.prepare(SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 13L, Set.of(), 2L, 3L)
+        ));
+        require(forcedRefresh.staticRefresh(), "explicit dirty invalidation did not refresh terrain");
+        cache.complete(forcedRefresh);
+
+        require(cache.invalidateVoxelBatch(voxelBatch(2L, 3_750_000, 12, -3_750_000)),
+                "near voxel batch did not invalidate an intersecting cached cascade");
+        SunShadowCache.Decision nearRefresh = cache.prepare(SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 14L, Set.of(), 2L, 3L)
+        ));
+        require(nearRefresh.staticRefresh(), "near voxel invalidation did not force static terrain");
+        cache.complete(nearRefresh);
+
+        SunShadowCache.Decision sunRefresh = cache.prepare(SunShadowFrame.plan(
+                shadowEnvironment(0.45f), budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 15L, Set.of(), 2L, 3L)
+        ));
+        require(sunRefresh.staticRefresh(), "large sun rotation did not force static terrain");
+        cache.complete(sunRefresh);
+
+        SunShadowCache.Decision worldRefresh = cache.prepare(SunShadowFrame.plan(
+                shadowEnvironment(0.45f), budget,
+                frame(DisplayOutputMode.SDR, 30_000_001.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 16L, Set.of(), 99L, 3L)
+        ));
+        require(worldRefresh.staticRefresh(), "world transition reused a frozen terrain cascade");
+
+        SunShadowCache ageCache = new SunShadowCache(budget.totalBytes());
+        SunShadowCache.Decision ageFirst = ageCache.prepare(first);
+        ageCache.complete(ageFirst);
+        SunShadowCache.Decision ageRefresh = ageCache.prepare(SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_000.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 10L + SunShadowLayout.STATIC_CACHE_MAX_AGE_SUBMITS,
+                        Set.of(), 2L, 3L)
+        ));
+        require(ageRefresh.staticRefresh(), "bounded cache age did not force a terrain refresh");
+
+        SunShadowCache.Telemetry telemetry = cache.telemetry();
+        require(telemetry.staticUpdates() == 4L && telemetry.staticReuses() == 2L
+                        && telemetry.dynamicUpdates() == 6L && telemetry.blockInvalidations() == 1L
+                        && telemetry.resourceBytes() == budget.totalBytes(),
+                "cached sun telemetry lost static/dynamic or resource accounting");
+    }
+
+    private static void testCachedFootprintPaddingGuard() {
+        SunShadowLayout.Budget budget = SunShadowLayout.forPreset(LightingPreset.BALANCED);
+        EnvironmentDescriptor environment = shadowEnvironment(0.35f);
+        SunShadowFrame frozen = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_000.0, 96.0, -30_000_000.0,
+                        0.0f, 0.0f, 100L, Set.of(), 2L, 3L)
+        );
+
+        SunShadowFrame rotated = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR, 30_000_000.0, 96.0, -30_000_000.0,
+                        (float) Math.toRadians(81.0), (float) Math.toRadians(-27.0),
+                        101L, Set.of(), 2L, 3L)
+        );
+        for (int cascadeIndex = 0; cascadeIndex < frozen.cascadeCount(); cascadeIndex++) {
+            require(maximumMatrixDelta(
+                            frozen.shadowFromWorldRelative(cascadeIndex),
+                            rotated.shadowFromWorldRelative(cascadeIndex)
+                    ) < 1.0e-5f,
+                    "camera-only rotation changed a world-relative cached cascade volume");
+        }
+        require(SunShadowFrame.cachedReceiverFootprintContains(frozen, rotated),
+                "camera-only rotation escaped a rotation-independent cached receiver volume");
+
+        // Move along a frozen light-space X axis. Its available border is exactly the reserved
+        // world padding, so this tests the real static footprint instead of a magic guard.
+        Matrix4f cascade = frozen.shadowFromWorldRelative(0);
+        Vector3f lightAxisX = shadowAxisU(cascade);
+        float availableWorldPadding = frozen.cascadeCacheWorldPadding(0);
+        Vector3f acceptedDelta = new Vector3f(lightAxisX).mul(availableWorldPadding * 0.99f);
+        SunShadowFrame inside = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR,
+                        30_000_000.0 + acceptedDelta.x,
+                        96.0 + acceptedDelta.y,
+                        -30_000_000.0 + acceptedDelta.z,
+                        0.0f, 0.0f, 102L, Set.of(), 2L, 3L)
+        );
+        require(SunShadowFrame.cachedReceiverFootprintContains(frozen, inside),
+                "cached receiver rejected a translation inside the actual 1.06 padding");
+        SunShadowCache cache = new SunShadowCache(budget.totalBytes());
+        SunShadowCache.Decision first = cache.prepare(frozen);
+        cache.complete(first);
+        require(!cache.prepare(rotated).staticRefresh(),
+                "camera-only rotation unnecessarily refreshed cached terrain");
+        require(!cache.prepare(inside).staticRefresh(),
+                "cached terrain refreshed before its frozen footprint border was exhausted");
+
+        Vector3f rejectedDelta = new Vector3f(lightAxisX).mul(availableWorldPadding * 1.02f);
+        SunShadowFrame outside = SunShadowFrame.plan(
+                environment, budget,
+                frame(DisplayOutputMode.SDR,
+                        30_000_000.0 + rejectedDelta.x,
+                        96.0 + rejectedDelta.y,
+                        -30_000_000.0 + rejectedDelta.z,
+                        0.0f, 0.0f, 103L, Set.of(), 2L, 3L)
+        );
+        require(!SunShadowFrame.cachedReceiverFootprintContains(frozen, outside),
+                "cached receiver accepted a translation beyond the frozen 1.06 padding");
+        require(cache.prepare(outside).staticRefresh(),
+                "cached terrain reused a map after its frozen receiver footprint escaped");
+
+        Vector3f lightAxisZ = frozen.toLightWorld().normalize();
+        for (float sign : new float[]{-1.0f, 1.0f}) {
+            Vector3f acceptedDepthDelta = new Vector3f(lightAxisZ)
+                    .mul(sign * availableWorldPadding * 0.99f);
+            SunShadowFrame insideDepth = SunShadowFrame.plan(
+                    environment, budget,
+                    frame(DisplayOutputMode.SDR,
+                            30_000_000.0 + acceptedDepthDelta.x,
+                            96.0 + acceptedDepthDelta.y,
+                            -30_000_000.0 + acceptedDepthDelta.z,
+                            0.0f, 0.0f, sign < 0.0f ? 104L : 106L,
+                            Set.of(), 2L, 3L)
+            );
+            require(SunShadowFrame.cachedReceiverFootprintContains(frozen, insideDepth),
+                    "cached receiver rejected a translation inside its light-space Z padding");
+            require(!cache.prepare(insideDepth).staticRefresh(),
+                    "cached terrain refreshed before its light-space Z padding was exhausted");
+
+            Vector3f rejectedDepthDelta = new Vector3f(lightAxisZ)
+                    .mul(sign * availableWorldPadding * 1.02f);
+            SunShadowFrame outsideDepth = SunShadowFrame.plan(
+                    environment, budget,
+                    frame(DisplayOutputMode.SDR,
+                            30_000_000.0 + rejectedDepthDelta.x,
+                            96.0 + rejectedDepthDelta.y,
+                            -30_000_000.0 + rejectedDepthDelta.z,
+                            0.0f, 0.0f, sign < 0.0f ? 105L : 107L,
+                            Set.of(), 2L, 3L)
+            );
+            require(!SunShadowFrame.cachedReceiverFootprintContains(frozen, outsideDepth),
+                    "cached receiver accepted a translation beyond its light-space Z padding");
+            require(cache.prepare(outsideDepth).staticRefresh(),
+                    "cached terrain reused a map after its light-space Z receiver depth escaped");
+        }
+    }
+
+    private static VoxelUploadBatch voxelBatch(
+            final long batchId,
+            final int brickX,
+            final int brickY,
+            final int brickZ
+    ) {
+        VoxelBrickPatch patch = new VoxelBrickPatch(
+                0, 0, 0, 0, brickX, brickY, brickZ, 1, 1L, 1L,
+                new int[VoxelBrickPatch.OCCUPANCY_WORDS], new byte[512]
+        );
+        return new VoxelUploadBatch(
+                batchId, new VoxelWorldToken(1L, "minecraft:overworld"), 1L, batchId,
+                java.util.List.of(patch), 0, 0L, 0, 0, 0L, 0L
+        );
+    }
+
     private static FrameState frame(final DisplayOutputMode output, final double cameraX) {
         return frame(output, cameraX, 0.0f, 0.0f);
     }
@@ -906,6 +1122,18 @@ public final class SunShadowContractTests {
     private static float rowLengthY(final Matrix4f matrix) {
         return (float) Math.sqrt(matrix.m01() * matrix.m01()
                 + matrix.m11() * matrix.m11() + matrix.m21() * matrix.m21());
+    }
+
+    private static float maximumMatrixDelta(final Matrix4f left, final Matrix4f right) {
+        float[] leftValues = new float[16];
+        float[] rightValues = new float[16];
+        left.get(leftValues);
+        right.get(rightValues);
+        float maximum = 0.0f;
+        for (int index = 0; index < leftValues.length; index++) {
+            maximum = Math.max(maximum, Math.abs(leftValues[index] - rightValues[index]));
+        }
+        return maximum;
     }
 
     private static boolean validClip(final Vector4f clip, final float epsilon) {

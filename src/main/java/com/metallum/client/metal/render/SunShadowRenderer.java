@@ -139,52 +139,49 @@ public final class SunShadowRenderer {
         try {
             Minecraft minecraft = Minecraft.getInstance();
             minecraft.gameRenderer.lighting().setupFor(Lighting.Entry.LEVEL);
+            boolean staticRefresh = resources.requiresStaticRefresh(frame.submitIndex());
+            SunShadowFrame staticFrame = resources.staticFrameForSubmit(frame.submitIndex());
+            if (staticFrame == null) {
+                throw new IllegalStateException("Sun-shadow cache lost its static frame");
+            }
             for (int cascade = 0; cascade < frame.cascadeCount(); cascade++) {
-                RenderTarget target = resources.target(cascade);
-                Matrix4f shadowFromView = frame.shadowFromView(cascade);
-                Matrix4f shadowFromWorldRelative = frame.shadowFromWorldRelative(cascade);
-                activeTarget = target;
-                activeTerrainProjection = shadowFromView;
-                activeTerrainCasterProjection = shadowFromWorldRelative;
-                activeCameraPosition = frame.cameraPosition();
-                activeTerrainToLightWorld = frame.toLightWorld();
-                activeCascadeToken = frame.submitIndex() * 8L + cascade + 1L;
-                activeRasterDepthBias = frame.reverseZRasterDepthBias();
-                activeRasterSlopeBias = frame.reverseZRasterSlopeBias();
-                try {
-                    RenderSystem.getDevice()
-                            .createCommandEncoder()
-                            .clearColorAndDepthTextures(
-                                    target.getColorTexture(),
-                                    new Vector4f(),
-                                    target.getDepthTexture(),
-                                    0.0
+                if (staticRefresh) {
+                    RenderTarget target = resources.staticTarget(cascade);
+                    activateTerrain(staticFrame, target, cascade);
+                    try {
+                        RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
+                                target.getColorTexture(), new Vector4f(), target.getDepthTexture(), 0.0
+                        );
+                        RenderSystem.setProjectionMatrix(
+                                resources.projectionBuffer().getBuffer(
+                                        staticFrame.shadowFromView(cascade)
+                                ), ProjectionType.ORTHOGRAPHIC
+                        );
+                        try {
+                            terrain.renderGroup(
+                                    ChunkSectionLayerGroup.OPAQUE,
+                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
                             );
+                        } finally {
+                            cleanupTerrainDrawState();
+                        }
+                    } finally {
+                        deactivateTarget();
+                    }
+                }
+                RenderTarget working = resources.target(cascade);
+                copyStaticCascade(resources.staticTarget(cascade), working);
+                activateDynamic(frame, working);
+                try {
                     RenderSystem.setProjectionMatrix(
-                            resources.projectionBuffer().getBuffer(shadowFromView),
+                            resources.projectionBuffer().getBuffer(frame.shadowFromView(cascade)),
                             ProjectionType.ORTHOGRAPHIC
                     );
-                    try {
-                        terrain.renderGroup(
-                                ChunkSectionLayerGroup.OPAQUE,
-                                RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
-                        );
-                    } finally {
-                        cleanupTerrainDrawState();
-                    }
-                    RenderSystem.outputColorTextureOverride = target.getColorTextureView();
-                    RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
+                    RenderSystem.outputColorTextureOverride = working.getColorTextureView();
+                    RenderSystem.outputDepthTextureOverride = working.getDepthTextureView();
                     featureFrame.executeSolid();
                 } finally {
-                    cleanupTerrainDrawState();
-                    RenderSystem.outputColorTextureOverride = previousColorOverride;
-                    RenderSystem.outputDepthTextureOverride = previousDepthOverride;
-                    activeTarget = null;
-                    activeTerrainProjection = null;
-                    activeTerrainCasterProjection = null;
-                    activeCameraPosition = null;
-                    activeTerrainToLightWorld = null;
-                    activeCascadeToken = 0L;
+                    deactivateTarget();
                 }
             }
             resources.markRendered(frame.submitIndex());
@@ -192,13 +189,7 @@ public final class SunShadowRenderer {
         } catch (RuntimeException failure) {
             device.failSunShadowFrame(failure);
         } finally {
-            cleanupTerrainDrawState();
-            activeTarget = null;
-            activeTerrainProjection = null;
-            activeTerrainCasterProjection = null;
-            activeCameraPosition = null;
-            activeTerrainToLightWorld = null;
-            activeCascadeToken = 0L;
+            deactivateTarget();
             activeRasterDepthBias = 0.0f;
             activeRasterSlopeBias = 0.0f;
             RenderSystem.outputColorTextureOverride = previousColorOverride;
@@ -206,6 +197,59 @@ public final class SunShadowRenderer {
             RenderSystem.restoreProjectionMatrix();
             MetalGpuTiming.end();
         }
+    }
+
+    private static void activateTerrain(
+            final SunShadowFrame frame,
+            final RenderTarget target,
+            final int cascade
+    ) {
+        activeTarget = target;
+        activeTerrainProjection = frame.shadowFromView(cascade);
+        activeTerrainCasterProjection = frame.shadowFromWorldRelative(cascade);
+        activeCameraPosition = frame.cameraPosition();
+        activeTerrainToLightWorld = frame.toLightWorld();
+        activeCascadeToken = frame.submitIndex() * 8L + cascade + 1L;
+        activeRasterDepthBias = frame.reverseZRasterDepthBias();
+        activeRasterSlopeBias = frame.reverseZRasterSlopeBias();
+    }
+
+    private static void activateDynamic(final SunShadowFrame frame, final RenderTarget target) {
+        activeTarget = target;
+        activeTerrainProjection = null;
+        activeTerrainCasterProjection = null;
+        activeCameraPosition = frame.cameraPosition();
+        activeTerrainToLightWorld = frame.toLightWorld();
+        activeCascadeToken = 0L;
+        activeRasterDepthBias = frame.reverseZRasterDepthBias();
+        activeRasterSlopeBias = frame.reverseZRasterSlopeBias();
+    }
+
+    private static void copyStaticCascade(final RenderTarget source, final RenderTarget destination) {
+        int width = source.getColorTexture().getWidth(0);
+        int height = source.getColorTexture().getHeight(0);
+        if (width != destination.getColorTexture().getWidth(0)
+                || height != destination.getColorTexture().getHeight(0)
+                || source.getDepthTexture().getWidth(0) != destination.getDepthTexture().getWidth(0)
+                || source.getDepthTexture().getHeight(0) != destination.getDepthTexture().getHeight(0)) {
+            throw new IllegalStateException("Static and working shadow cascades have mismatched extents");
+        }
+        RenderSystem.getDevice().createCommandEncoder().copyTextureToTexture(
+                source.getColorTexture(), destination.getColorTexture(), 0, 0, 0, 0, 0, width, height
+        );
+        RenderSystem.getDevice().createCommandEncoder().copyTextureToTexture(
+                source.getDepthTexture(), destination.getDepthTexture(), 0, 0, 0, 0, 0, width, height
+        );
+    }
+
+    private static void deactivateTarget() {
+        cleanupTerrainDrawState();
+        activeTarget = null;
+        activeTerrainProjection = null;
+        activeTerrainCasterProjection = null;
+        activeCameraPosition = null;
+        activeTerrainToLightWorld = null;
+        activeCascadeToken = 0L;
     }
 
     private static void cleanupTerrainDrawState() {

@@ -6,9 +6,13 @@ import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.BoundedDynamicLightCollector;
+import com.metallum.client.lighting.BoundedEntityShadowProxyCollector;
 import com.metallum.client.lighting.DirectLightFrustum;
+import com.metallum.client.lighting.EntityShadowProxy;
+import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.MinecraftLightPolicy;
+import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.voxel.VoxelClipmapController;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
@@ -42,6 +46,10 @@ abstract class LevelExtractorAdvancedLightMixin {
     @Nullable
     private DeltaTracker metallum$dynamicLightDeltaTracker;
 
+    @Unique
+    @Nullable
+    private BoundedEntityShadowProxyCollector metallum$entityShadowProxies;
+
     @Inject(
             method = "setLevel(Lnet/minecraft/client/multiplayer/ClientLevel;)V",
             at = @At("HEAD")
@@ -52,10 +60,12 @@ abstract class LevelExtractorAdvancedLightMixin {
     ) {
         if (this.level != null && this.level != next) {
             AdvancedLightRegistry.global().closeWorld(this.level);
+            EntityShadowProxyRegistry.global().closeWorld(this.level);
             VoxelClipmapController.global().closeWorld(this.level);
         }
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
+        this.metallum$entityShadowProxies = null;
     }
 
     @Inject(
@@ -69,7 +79,8 @@ abstract class LevelExtractorAdvancedLightMixin {
         if (next != null && AdvancedLightingRuntime.shouldCollect()) {
             AdvancedLightRegistry registry = AdvancedLightRegistry.global();
             registry.observeHook(AdvancedLightRegistry.Hook.WORLD_LIFECYCLE);
-            registry.openWorld(next, metallum$dimensionId(next));
+            LightWorldToken token = registry.openWorld(next, metallum$dimensionId(next));
+            EntityShadowProxyRegistry.global().openWorld(next, token);
             VoxelClipmapController.global().openWorld(next, metallum$dimensionId(next));
         }
     }
@@ -88,10 +99,12 @@ abstract class LevelExtractorAdvancedLightMixin {
         if (AdvancedLightingRuntime.shouldCollect()) {
             AdvancedLightRegistry registry = AdvancedLightRegistry.global();
             registry.observeHook(AdvancedLightRegistry.Hook.RESOURCE_RELOAD);
-            registry.reloadWorld(this.level, metallum$dimensionId(this.level));
+            LightWorldToken token = registry.reloadWorld(this.level, metallum$dimensionId(this.level));
+            EntityShadowProxyRegistry.global().openWorld(this.level, token);
             VoxelClipmapController.global().reloadWorld(this.level, metallum$dimensionId(this.level));
         } else {
             AdvancedLightRegistry.global().closeWorld(this.level);
+            EntityShadowProxyRegistry.global().closeWorld(this.level);
             VoxelClipmapController.global().closeWorld(this.level);
         }
     }
@@ -109,6 +122,7 @@ abstract class LevelExtractorAdvancedLightMixin {
     ) {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
+        this.metallum$entityShadowProxies = null;
         if (this.level == null || !AdvancedLightingRuntime.shouldCollect()) {
             return;
         }
@@ -131,6 +145,13 @@ abstract class LevelExtractorAdvancedLightMixin {
                 }
         );
         this.metallum$dynamicLightDeltaTracker = deltaTracker;
+        this.metallum$entityShadowProxies = new BoundedEntityShadowProxyCollector(
+                token,
+                LocalVoxelShadowLayout.MAX_ENTITY_PROXIES,
+                camera.position().x,
+                camera.position().y,
+                camera.position().z
+        );
     }
 
     @WrapOperation(
@@ -170,6 +191,16 @@ abstract class LevelExtractorAdvancedLightMixin {
                 );
             }
         }
+        BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
+        if (proxyCollector != null) {
+            try {
+                proxyCollector.offer(EntityShadowProxy.fromEntity(entity));
+            } catch (Throwable ignored) {
+                // Proxy extraction is isolated from the dynamic-light admission contract.
+                EntityShadowProxyRegistry.global().failOpen(proxyCollector.world());
+                this.metallum$entityShadowProxies = null;
+            }
+        }
         return original.call(extractor, entity, frustum, cameraX, cameraY, cameraZ);
     }
 
@@ -185,24 +216,36 @@ abstract class LevelExtractorAdvancedLightMixin {
             final CallbackInfo ci
     ) {
         BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
+        BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
-        if (collector == null) {
-            return;
+        this.metallum$entityShadowProxies = null;
+        if (collector != null) {
+            try {
+                AdvancedLightRegistry.global().publishDynamicFrame(
+                        collector.world(),
+                        collector.finish(),
+                        collector.offered()
+                );
+            } catch (IllegalStateException ignored) {
+                // World/reload races deliberately drop the old dynamic frame.
+            } catch (Throwable failure) {
+                AdvancedLightRegistry.global().failClosed(
+                        "dynamic light publication failed",
+                        failure
+                );
+            }
         }
-        try {
-            AdvancedLightRegistry.global().publishDynamicFrame(
-                    collector.world(),
-                    collector.finish(),
-                    collector.offered()
-            );
-        } catch (IllegalStateException ignored) {
-            // World/reload races deliberately drop the old dynamic frame.
-        } catch (Throwable failure) {
-            AdvancedLightRegistry.global().failClosed(
-                    "dynamic light publication failed",
-                    failure
-            );
+        if (proxyCollector != null) {
+            try {
+                EntityShadowProxyRegistry.global().publish(
+                        proxyCollector.world(), proxyCollector.finish(), proxyCollector.offered()
+                );
+            } catch (IllegalStateException ignored) {
+                // World/reload races deliberately drop the old optional proxy frame.
+            } catch (Throwable ignored) {
+                EntityShadowProxyRegistry.global().failOpen(proxyCollector.world());
+            }
         }
     }
 

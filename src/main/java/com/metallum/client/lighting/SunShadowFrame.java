@@ -11,6 +11,10 @@ import java.util.Objects;
 
 /** Immutable camera-relative CSM state for one submitted Advanced-lighting frame. */
 public final class SunShadowFrame {
+    /**
+     * The static cascade allocates this factor around the camera-centred receiver sphere.
+     * L6 may only reuse a map while the current sphere remains inside that reserved border.
+     */
     private static final float CASCADE_PADDING = 1.06f;
 
     private final EnvironmentDescriptor environment;
@@ -19,10 +23,13 @@ public final class SunShadowFrame {
     private final long submitIndex;
     private final Matrix4f[] shadowFromView;
     private final Matrix4f[] shadowFromWorldRelative;
+    private final Matrix4f worldFromView;
     private final float[] cascadeSplits;
     private final float[] cascadeNearDepths;
     private final float[] cascadeWorldUnitsPerTexel;
     private final FrameState.CameraPosition cameraPosition;
+    private final long worldIdentity;
+    private final long dimensionIdentity;
     private final Vector3f toLightWorld;
     private final Vector3f toLightView;
     private final Vector3f worldUpView;
@@ -35,10 +42,13 @@ public final class SunShadowFrame {
             final long submitIndex,
             final Matrix4f[] shadowFromView,
             final Matrix4f[] shadowFromWorldRelative,
+            final Matrix4f worldFromView,
             final float[] cascadeSplits,
             final float[] cascadeNearDepths,
             final float[] cascadeWorldUnitsPerTexel,
             final FrameState.CameraPosition cameraPosition,
+            final long worldIdentity,
+            final long dimensionIdentity,
             final Vector3f toLightWorld,
             final Vector3f toLightView,
             final Vector3f worldUpView,
@@ -50,10 +60,13 @@ public final class SunShadowFrame {
         this.submitIndex = submitIndex;
         this.shadowFromView = shadowFromView;
         this.shadowFromWorldRelative = shadowFromWorldRelative;
+        this.worldFromView = worldFromView;
         this.cascadeSplits = cascadeSplits;
         this.cascadeNearDepths = cascadeNearDepths;
         this.cascadeWorldUnitsPerTexel = cascadeWorldUnitsPerTexel;
         this.cameraPosition = cameraPosition;
+        this.worldIdentity = worldIdentity;
+        this.dimensionIdentity = dimensionIdentity;
         this.toLightWorld = toLightWorld;
         this.toLightView = toLightView;
         this.worldUpView = worldUpView;
@@ -118,7 +131,6 @@ public final class SunShadowFrame {
                     );
                 }
                 CascadePlan planned = planCascade(
-                        cascadeNearDepth,
                         splits[cascade],
                         budget,
                         projection,
@@ -142,10 +154,13 @@ public final class SunShadowFrame {
                 frame.submitIndex(),
                 matrices,
                 worldRelativeMatrices,
+                camera,
                 splits,
                 cascadeNearDepths,
                 cascadeWorldUnitsPerTexel,
                 frame.currentCameraPosition(),
+                frame.worldIdentity(),
+                frame.dimensionIdentity(),
                 toLightWorld,
                 toLightView,
                 worldUpView,
@@ -192,6 +207,145 @@ public final class SunShadowFrame {
         return new Matrix4f(this.shadowFromWorldRelative[cascade]);
     }
 
+    /**
+     * Reuses a frozen terrain shadow map from the current camera. The static map was rendered
+     * with {@code frozen.cameraPosition}; translating the current camera-relative world by this
+     * exact delta makes it address the same frozen world coordinates without losing L4's
+     * integer-texel phase.
+     */
+    public static SunShadowFrame reprojectCached(
+            final SunShadowFrame frozen,
+            final SunShadowFrame current
+    ) {
+        Objects.requireNonNull(frozen, "frozen");
+        Objects.requireNonNull(current, "current");
+        if (!cacheCoverageMatches(frozen, current)) {
+            throw new IllegalArgumentException("Cached cascade coverage no longer matches");
+        }
+        double deltaX = current.cameraPosition.x() - frozen.cameraPosition.x();
+        double deltaY = current.cameraPosition.y() - frozen.cameraPosition.y();
+        double deltaZ = current.cameraPosition.z() - frozen.cameraPosition.z();
+        if (!Double.isFinite(deltaX) || !Double.isFinite(deltaY) || !Double.isFinite(deltaZ)
+                || Math.abs(deltaX) > Float.MAX_VALUE || Math.abs(deltaY) > Float.MAX_VALUE
+                || Math.abs(deltaZ) > Float.MAX_VALUE) {
+            throw new IllegalArgumentException("Cached camera rebase is not representable");
+        }
+        Matrix4f[] rebasedWorldRelative = new Matrix4f[SunShadowLayout.MAX_CASCADES];
+        Matrix4f[] rebasedView = new Matrix4f[SunShadowLayout.MAX_CASCADES];
+        for (int cascade = 0; cascade < frozen.cascadeCount(); cascade++) {
+            Matrix4f worldRelative = new Matrix4f(frozen.shadowFromWorldRelative[cascade]).translate(
+                    (float) deltaX, (float) deltaY, (float) deltaZ
+            );
+            Matrix4f view = new Matrix4f(worldRelative).mul(current.worldFromView);
+            if (!worldRelative.isFinite() || !view.isFinite()) {
+                throw new IllegalArgumentException("Cached cascade rebase is not finite");
+            }
+            rebasedWorldRelative[cascade] = worldRelative;
+            rebasedView[cascade] = view;
+        }
+        for (int cascade = frozen.cascadeCount(); cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
+            rebasedWorldRelative[cascade] = new Matrix4f();
+            rebasedView[cascade] = new Matrix4f();
+        }
+        long hash = descriptorHash(current.environment, current.budget, rebasedView,
+                frozen.cascadeSplits);
+        return new SunShadowFrame(
+                current.environment,
+                current.budget,
+                current.lightingGeneration,
+                current.submitIndex,
+                rebasedView,
+                rebasedWorldRelative,
+                new Matrix4f(current.worldFromView),
+                frozen.cascadeSplits.clone(),
+                frozen.cascadeNearDepths.clone(),
+                frozen.cascadeWorldUnitsPerTexel.clone(),
+                current.cameraPosition,
+                current.worldIdentity,
+                current.dimensionIdentity,
+                new Vector3f(current.toLightWorld),
+                new Vector3f(current.toLightView),
+                new Vector3f(current.worldUpView),
+                hash
+        );
+    }
+
+    /** True when a frozen map can cover the current receiver volume without resampling. */
+    public static boolean cacheCoverageMatches(
+            final SunShadowFrame frozen,
+            final SunShadowFrame current
+    ) {
+        Objects.requireNonNull(frozen, "frozen");
+        Objects.requireNonNull(current, "current");
+        if (frozen.lightingGeneration != current.lightingGeneration
+                || !frozen.budget.equals(current.budget)
+                || frozen.cascadeCount() != current.cascadeCount()
+                || frozen.worldIdentity != current.worldIdentity
+                || frozen.dimensionIdentity != current.dimensionIdentity) {
+            return false;
+        }
+        for (int cascade = 0; cascade < frozen.cascadeCount(); cascade++) {
+            if (!sameCoverage(frozen.cascadeSplits[cascade], current.cascadeSplits[cascade])
+                    || !sameCoverage(frozen.cascadeNearDepths[cascade], current.cascadeNearDepths[cascade])
+                    || !sameCoverage(frozen.cascadeWorldUnitsPerTexel[cascade],
+                    current.cascadeWorldUnitsPerTexel[cascade])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * True only when the camera translation leaves every current receiver sphere inside the
+     * frozen cascade's real 1.06 footprint.  The test is performed in each frozen cascade's
+     * light-space coordinates, rather than with an arbitrary world-space distance.
+     *
+     * <p>{@link #planCascade(float, SunShadowLayout.Budget, Matrix4f, Matrix4f,
+     * Vector3f, SunShadowStabilizer, int)} fits the receiver frustum into a sphere of radius
+     * {@code halfExtent / CASCADE_PADDING}; the remaining normalized map border is therefore
+     * exactly {@code 1 - 1 / CASCADE_PADDING}.  A sphere contains every yaw/pitch variant of
+     * the receiver frustum, so accepting this border proves XYZ containment for the current
+     * receiver footprint.</p>
+     */
+    static boolean cachedReceiverFootprintContains(
+            final SunShadowFrame frozen,
+            final SunShadowFrame current
+    ) {
+        if (!cacheCoverageMatches(frozen, current)) {
+            return false;
+        }
+        double deltaX = current.cameraPosition.x() - frozen.cameraPosition.x();
+        double deltaY = current.cameraPosition.y() - frozen.cameraPosition.y();
+        double deltaZ = current.cameraPosition.z() - frozen.cameraPosition.z();
+        if (!Double.isFinite(deltaX) || !Double.isFinite(deltaY) || !Double.isFinite(deltaZ)
+                || Math.abs(deltaX) > Float.MAX_VALUE || Math.abs(deltaY) > Float.MAX_VALUE
+                || Math.abs(deltaZ) > Float.MAX_VALUE) {
+            return false;
+        }
+        float normalizedBorder = 1.0f - 1.0f / CASCADE_PADDING;
+        Vector3f lightAxisZ = new Vector3f(frozen.toLightWorld).normalize();
+        double lightSpaceZ = deltaX * lightAxisZ.x
+                + deltaY * lightAxisZ.y
+                + deltaZ * lightAxisZ.z;
+        if (!Double.isFinite(lightSpaceZ)) {
+            return false;
+        }
+        for (int cascade = 0; cascade < frozen.cascadeCount(); cascade++) {
+            Vector3f translated = frozen.shadowFromWorldRelative[cascade].transformDirection(
+                    new Vector3f((float) deltaX, (float) deltaY, (float) deltaZ)
+            );
+            float worldPadding = frozen.cascadeCacheWorldPadding(cascade);
+            float paddingTolerance = Math.max(1.0e-5f, worldPadding * 1.0e-5f);
+            if (!translated.isFinite()
+                    || Math.abs(translated.x) > normalizedBorder
+                    || Math.abs(translated.y) > normalizedBorder
+                    || Math.abs(lightSpaceZ) > worldPadding + paddingTolerance) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public float cascadeSplit(final int cascade) {
         if (cascade < 0 || cascade >= SunShadowLayout.MAX_CASCADES) {
             throw new IllegalArgumentException("Invalid cascade " + cascade);
@@ -207,6 +361,17 @@ public final class SunShadowFrame {
     public float cascadeWorldUnitsPerTexel(final int cascade) {
         validateCascade(cascade);
         return this.cascadeWorldUnitsPerTexel[cascade];
+    }
+
+    float cascadeCacheWorldPadding(final int cascade) {
+        validateCascade(cascade);
+        float halfExtent = this.cascadeWorldUnitsPerTexel[cascade]
+                * this.budget.resolution() * 0.5f;
+        float padding = halfExtent * (1.0f - 1.0f / CASCADE_PADDING);
+        if (!Float.isFinite(padding) || padding <= 0.0f) {
+            throw new IllegalStateException("Cascade cache padding is not positive and finite");
+        }
+        return padding;
     }
 
     public float cascadeReceiverNormalBias(final int cascade) {
@@ -229,6 +394,14 @@ public final class SunShadowFrame {
 
     public FrameState.CameraPosition cameraPosition() {
         return this.cameraPosition;
+    }
+
+    public long worldIdentity() {
+        return this.worldIdentity;
+    }
+
+    public long dimensionIdentity() {
+        return this.dimensionIdentity;
     }
 
     public Vector3f toLightWorld() {
@@ -257,8 +430,12 @@ public final class SunShadowFrame {
         }
     }
 
+    private static boolean sameCoverage(final float left, final float right) {
+        return Float.isFinite(left) && Float.isFinite(right)
+                && Math.abs(left - right) <= Math.max(1.0e-5f, Math.abs(left) * 1.0e-5f);
+    }
+
     private static CascadePlan planCascade(
-            final float nearDepth,
             final float farDepth,
             final SunShadowLayout.Budget budget,
             final Matrix4f projection,
@@ -273,13 +450,6 @@ public final class SunShadowFrame {
                 || tangentX <= 0.0f || tangentY <= 0.0f) {
             throw new IllegalArgumentException("Invalid projection for cascade planning");
         }
-        Vector3f[] corners = frustumCorners(
-                nearDepth,
-                farDepth,
-                tangentX,
-                tangentY,
-                viewToWorld
-        );
         // Celestial directions are constrained to the world XY plane. A fixed Z up axis keeps
         // the light basis continuous through noon instead of switching the cascade roll by 90°.
         Vector3f up = new Vector3f(0.0f, 0.0f, 1.0f);
@@ -288,16 +458,10 @@ public final class SunShadowFrame {
                 up
         );
 
-        float minimumZ = Float.POSITIVE_INFINITY;
-        float maximumZ = Float.NEGATIVE_INFINITY;
-        for (Vector3f corner : corners) {
-            Vector3f light = lightView.transformPosition(new Vector3f(corner));
-            minimumZ = Math.min(minimumZ, light.z);
-            maximumZ = Math.max(maximumZ, light.z);
-        }
-        // Enclose the receiver slice in a camera-centred sphere. Its world-space XY footprint
-        // is independent of camera yaw/pitch, so looking around cannot move the shadow texel
-        // lattice. Camera translation remains continuous in camera-relative coordinates.
+        // Enclose the receiver slice in a camera-centred sphere. Its world-space footprint is
+        // independent of camera yaw/pitch, so looking around cannot move either the shadow
+        // texel lattice or its receiver depth interval. Camera translation remains continuous
+        // in camera-relative coordinates.
         float halfExtent = farDepth * (float) Math.sqrt(
                 1.0f + tangentX * tangentX + tangentY * tangentY
         ) * CASCADE_PADDING;
@@ -309,8 +473,8 @@ public final class SunShadowFrame {
 
         float casterMargin = casterExtrusion(budget);
         float nearDistance = 1.0f;
-        float farDistance = (maximumZ - minimumZ) + casterMargin + nearDistance;
-        lightView.m32(-maximumZ - casterMargin - nearDistance);
+        float farDistance = 2.0f * halfExtent + casterMargin + nearDistance;
+        lightView.m32(-halfExtent - casterMargin - nearDistance);
         Matrix4f reversedOrtho = new Matrix4f().setOrtho(
                 center.x() - halfExtent,
                 center.x() + halfExtent,
@@ -326,30 +490,6 @@ public final class SunShadowFrame {
             throw new IllegalStateException("Cascade matrix is not finite");
         }
         return new CascadePlan(shadowFromView, shadowFromWorldRelative, worldUnitsPerTexel);
-    }
-
-    private static Vector3f[] frustumCorners(
-            final float nearDepth,
-            final float farDepth,
-            final float tangentX,
-            final float tangentY,
-            final Matrix4f viewToWorld
-    ) {
-        Vector3f[] corners = new Vector3f[8];
-        int index = 0;
-        for (float depth : new float[]{nearDepth, farDepth}) {
-            for (int y = -1; y <= 1; y += 2) {
-                for (int x = -1; x <= 1; x += 2) {
-                    Vector3f viewCorner = new Vector3f(
-                            x * depth * tangentX,
-                            y * depth * tangentY,
-                            -depth
-                    );
-                    corners[index++] = viewToWorld.transformDirection(viewCorner);
-                }
-            }
-        }
-        return corners;
     }
 
     private static Matrix4f toJoml(final Matrix4 matrix) {
