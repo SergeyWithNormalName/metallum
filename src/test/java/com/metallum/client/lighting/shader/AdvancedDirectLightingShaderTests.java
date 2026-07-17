@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "371d96a3ecccec46a5aec26d0a682159bac2b2a7b70eb33e8c11f94880315b17",
+            "sodium-solid-fsh", "5dd66cd0fe1e4774f6d53ef7bd74888d26f69eef549978252649e7263bfdafeb",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "9133f37d0e0f8063b4943fcdd570b62fda57e3fec2410b8a1d20ce98e54a66e0",
+            "sodium-cutout-fsh", "c64ffe5d1c09093baf8a969db1754217697b8f2ab1a93eb4862a5f663be7b9dd",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "0446eda685705223d605d0cda4a7c99e040a4235fde061cd8ce586afc4e97a63"
+            "minecraft-entity-fsh", "e1a02eb58719d67be5dd1b71ad5dd8d641f44aa4188e439b28189f45316e1fc9"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -301,8 +301,12 @@ public final class AdvancedDirectLightingShaderTests {
         String entityEnvironment = environmentHelper(entityFragment);
         require(sodiumEnvironment.equals(entityEnvironment)
                         && sodiumEnvironment.contains("metallumSunVisibilityV1")
+                        && sodiumFragment.contains("uniform sampler2DShadow metallumSunShadow0")
                         && sodiumFragment.contains("cascadeNormalBias")
                         && sodiumFragment.contains("float receiverDepth = coordinate.z")
+                        && sodiumFragment.contains(
+                        "texture(shadowMap, vec3(uv, receiverDepth))")
+                        && !sodiumFragment.contains("float storedDepth =")
                         && sodiumEnvironment.contains("skyOcclusion * hemisphere")
                         && sodiumEnvironment.contains(
                         "float directionalWeight = skyOcclusion * nDotL;")
@@ -689,6 +693,9 @@ public final class AdvancedDirectLightingShaderTests {
                                 && fragmentMsl.contains("[[sampler(" + slot + ")]]"),
                         name + " SPIRV-Cross output lost L4 shadow slot " + slot);
             }
+            require(fragmentMsl.contains("depth2d<float>")
+                            && fragmentMsl.contains("sample_compare"),
+                    name + " lost hardware-filtered depth comparison PCF in Metal output");
         } catch (ShaderCompileException exception) {
             throw new AssertionError(name + " actual-source compile failed", exception);
         }

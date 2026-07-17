@@ -108,9 +108,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec4 reserved2;
             } metallumEnvironment;
 
-            layout(binding = 13) uniform sampler2D metallumSunShadow0;
-            layout(binding = 14) uniform sampler2D metallumSunShadow1;
-            layout(binding = 15) uniform sampler2D metallumSunShadow2;
+            layout(binding = 13) uniform sampler2DShadow metallumSunShadow0;
+            layout(binding = 14) uniform sampler2DShadow metallumSunShadow1;
+            layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
 
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
@@ -152,7 +152,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return scaledNormal * inversesqrt(lengthSquared);
             }
 
-            float metallumPcfV1(sampler2D shadowMap, vec3 coordinate) {
+            float metallumPcfV1(sampler2DShadow shadowMap, vec3 coordinate) {
                 if (any(lessThan(coordinate.xy, vec2(0.0)))
                         || any(greaterThan(coordinate.xy, vec2(1.0)))
                         || coordinate.z < 0.0 || coordinate.z > 1.0) {
@@ -168,8 +168,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         vec2 uv = clamp(
                                 coordinate.xy + vec2(float(x), float(y)) * texel,
                                 vec2(0.0), vec2(1.0));
-                        float storedDepth = texture(shadowMap, uv).r;
-                        lit += receiverDepth >= storedDepth ? 1.0 : 0.0;
+                        lit += texture(shadowMap, vec3(uv, receiverDepth));
                     }
                 }
                 return lit * (1.0 / 9.0);

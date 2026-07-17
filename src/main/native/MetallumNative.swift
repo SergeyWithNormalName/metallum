@@ -8540,6 +8540,7 @@ public func metallum_create_sampler(
     _ minFilter: MTLSamplerMinMagFilter,
     _ magFilter: MTLSamplerMinMagFilter,
     _ mipFilter: MTLSamplerMipFilter,
+    _ compareFunction: MTLCompareFunction,
     _ maxAnisotropy: Int32,
     _ lodMaxClamp: Double
 ) -> UnsafeMutableRawPointer? {
@@ -8548,6 +8549,7 @@ public func metallum_create_sampler(
         descriptor.minFilter = minFilter
         descriptor.magFilter = magFilter
         descriptor.mipFilter = mipFilter
+        descriptor.compareFunction = compareFunction
         descriptor.sAddressMode = addressModeU
         descriptor.tAddressMode = addressModeV
         descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)

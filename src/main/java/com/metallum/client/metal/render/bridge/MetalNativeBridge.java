@@ -454,7 +454,7 @@ public final class MetalNativeBridge {
             createSampler = downcall(
                     lookup,
                     "metallum_create_sampler",
-                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE)
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE)
             );
             MTLVertexDescriptorCreate = downcall(
                     lookup,
@@ -1317,6 +1317,7 @@ public final class MetalNativeBridge {
             final MTLSamplerMinMagFilter minFilter,
             final MTLSamplerMinMagFilter magFilter,
             final MTLSamplerMipFilter mipFilter,
+            final MTLCompareFunction compareFunction,
             final int maxAnisotropy,
             final double lodMaxClamp
     ) {
@@ -1328,6 +1329,7 @@ public final class MetalNativeBridge {
                     minFilter.value,
                     magFilter.value,
                     mipFilter.value,
+                    compareFunction.value,
                     maxAnisotropy,
                     lodMaxClamp
             );

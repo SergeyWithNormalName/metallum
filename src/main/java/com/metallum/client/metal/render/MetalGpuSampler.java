@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.metal.render.mtl.MTLSamplerAddressMode;
 import com.metallum.client.metal.render.mtl.MTLSamplerMinMagFilter;
 import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
@@ -35,6 +36,28 @@ final class MetalGpuSampler extends GpuSampler {
             final int maxAnisotropy,
             final OptionalDouble maxLod
     ) {
+        this(
+                device,
+                addressModeU,
+                addressModeV,
+                minFilter,
+                magFilter,
+                maxAnisotropy,
+                maxLod,
+                MTLCompareFunction.Never
+        );
+    }
+
+    MetalGpuSampler(
+            final MetalDevice device,
+            final AddressMode addressModeU,
+            final AddressMode addressModeV,
+            final FilterMode minFilter,
+            final FilterMode magFilter,
+            final int maxAnisotropy,
+            final OptionalDouble maxLod,
+            final MTLCompareFunction compareFunction
+    ) {
         this.device = device;
         this.nativeHandle = MetalNativeBridge.metallum_create_sampler(
                 device.metalDeviceHandle(),
@@ -43,6 +66,7 @@ final class MetalGpuSampler extends GpuSampler {
                 MTLSamplerMinMagFilter.from(minFilter),
                 MTLSamplerMinMagFilter.from(magFilter),
                 toMtlMipFilter(maxLod),
+                compareFunction,
                 Math.max(1, maxAnisotropy),
                 toMtlMaxLodClamp(maxLod)
         );

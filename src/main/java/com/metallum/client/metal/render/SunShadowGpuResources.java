@@ -4,13 +4,14 @@ import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.lighting.SunShadowFrame;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.renderer.SunShadowLayout;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
-import com.mojang.blaze3d.systems.RenderSystem;
+import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 import org.joml.Matrix4f;
@@ -19,6 +20,7 @@ import org.joml.Vector3f;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Objects;
+import java.util.OptionalDouble;
 
 /** Owns one Advanced generation's ordinary, non-cached L4 cascades and params ring. */
 final class SunShadowGpuResources implements AutoCloseable {
@@ -27,6 +29,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final MetalGpuBuffer paramsRing;
     private final TextureTarget[] cascades;
     private final ProjectionMatrixBuffer projectionBuffer;
+    private final MetalGpuSampler comparisonSampler;
     private SunShadowFrame frame;
     private long renderedSubmitIndex = Long.MIN_VALUE;
     private boolean closed;
@@ -36,13 +39,15 @@ final class SunShadowGpuResources implements AutoCloseable {
             final SunShadowLayout.Budget budget,
             final MetalGpuBuffer paramsRing,
             final TextureTarget[] cascades,
-            final ProjectionMatrixBuffer projectionBuffer
+            final ProjectionMatrixBuffer projectionBuffer,
+            final MetalGpuSampler comparisonSampler
     ) {
         this.generation = generation;
         this.budget = budget;
         this.paramsRing = paramsRing;
         this.cascades = cascades;
         this.projectionBuffer = projectionBuffer;
+        this.comparisonSampler = comparisonSampler;
     }
 
     static SunShadowGpuResources create(
@@ -58,6 +63,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         MetalGpuBuffer params = null;
         TextureTarget[] cascades = new TextureTarget[budget.cascadeCount()];
         ProjectionMatrixBuffer projection = null;
+        MetalGpuSampler comparisonSampler = null;
         try {
             params = new MetalGpuBuffer(
                     device,
@@ -77,14 +83,28 @@ final class SunShadowGpuResources implements AutoCloseable {
                 }
             }
             projection = new ProjectionMatrixBuffer("Metallum sun shadow projection");
+            comparisonSampler = new MetalGpuSampler(
+                    device,
+                    AddressMode.CLAMP_TO_EDGE,
+                    AddressMode.CLAMP_TO_EDGE,
+                    FilterMode.LINEAR,
+                    FilterMode.LINEAR,
+                    1,
+                    OptionalDouble.of(0.0),
+                    MTLCompareFunction.GreaterEqual
+            );
             return new SunShadowGpuResources(
                     generation,
                     budget,
                     params,
                     cascades,
-                    projection
+                    projection,
+                    comparisonSampler
             );
         } catch (RuntimeException | Error failure) {
+            if (comparisonSampler != null) {
+                comparisonSampler.close();
+            }
             if (projection != null) {
                 projection.close();
             }
@@ -224,15 +244,13 @@ final class SunShadowGpuResources implements AutoCloseable {
                 EnvironmentShadowBindingAbi.PARAMS_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
-        MetalGpuSampler sampler = (MetalGpuSampler) RenderSystem.getSamplerCache()
-                .getClampToEdge(FilterMode.NEAREST);
         int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
         for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
             TextureTarget target = this.cascades[Math.min(cascade, this.cascades.length - 1)];
             MetalGpuTexture depth = (MetalGpuTexture) target.getDepthTexture();
             encoder.setTextureAndSampler(
                     depth.nativeHandle(),
-                    sampler.nativeHandle(),
+                    this.comparisonSampler.nativeHandle(),
                     slots[cascade],
                     MetalCompiledRenderPipeline.STAGE_FRAGMENT
             );
@@ -246,6 +264,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         }
         this.closed = true;
         this.frame = null;
+        this.comparisonSampler.close();
         this.projectionBuffer.close();
         for (TextureTarget target : this.cascades) {
             target.destroyBuffers();

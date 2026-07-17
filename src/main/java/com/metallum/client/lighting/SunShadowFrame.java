@@ -12,7 +12,6 @@ import java.util.Objects;
 /** Immutable camera-relative CSM state for one submitted Advanced-lighting frame. */
 public final class SunShadowFrame {
     private static final float CASCADE_PADDING = 1.06f;
-    static final float CAMERA_GRID_TEXEL_FRACTION = 0.25f;
 
     private final EnvironmentDescriptor environment;
     private final SunShadowLayout.Budget budget;
@@ -112,8 +111,7 @@ public final class SunShadowFrame {
                         budget,
                         projection,
                         camera,
-                        toLightWorld,
-                        frame.currentCameraPosition()
+                        toLightWorld
                 );
                 matrices[cascade].set(planned.shadowFromView());
                 worldRelativeMatrices[cascade].set(planned.shadowFromWorldRelative());
@@ -251,8 +249,7 @@ public final class SunShadowFrame {
             final SunShadowLayout.Budget budget,
             final Matrix4f projection,
             final Matrix4f viewToWorld,
-            final Vector3f toLightWorld,
-            final FrameState.CameraPosition cameraPosition
+            final Vector3f toLightWorld
     ) {
         float tangentX = Math.abs(1.0f / projection.m00());
         float tangentY = Math.abs(1.0f / projection.m11());
@@ -282,50 +279,24 @@ public final class SunShadowFrame {
             minimumZ = Math.min(minimumZ, light.z);
             maximumZ = Math.max(maximumZ, light.z);
         }
-        float centerDepth = (nearDepth + farDepth) * 0.5f;
-        float nearX = nearDepth * tangentX;
-        float nearY = nearDepth * tangentY;
-        float farX = farDepth * tangentX;
-        float farY = farDepth * tangentY;
-        float nearZ = centerDepth - nearDepth;
-        float farZ = farDepth - centerDepth;
-        float nearRadiusSquared = nearX * nearX + nearY * nearY + nearZ * nearZ;
-        float farRadiusSquared = farX * farX + farY * farY + farZ * farZ;
-        float halfExtent = (float) Math.sqrt(Math.max(nearRadiusSquared, farRadiusSquared))
-                * CASCADE_PADDING;
+        // Enclose the receiver slice in a camera-centred sphere. Its world-space XY footprint
+        // is independent of camera yaw/pitch, so looking around cannot move the shadow texel
+        // lattice. Camera translation remains continuous in camera-relative coordinates.
+        float halfExtent = farDepth * (float) Math.sqrt(
+                1.0f + tangentX * tangentX + tangentY * tangentY
+        ) * CASCADE_PADDING;
         halfExtent = Math.max(halfExtent, 1.0f);
-        Vector3f sliceCenter = viewToWorld.transformDirection(
-                new Vector3f(0.0f, 0.0f, -centerDepth)
-        );
         float worldUnitsPerTexel = (2.0f * halfExtent) / budget.resolution();
-        double cameraGridStep = worldUnitsPerTexel * CAMERA_GRID_TEXEL_FRACTION;
-        if (!Double.isFinite(cameraGridStep) || cameraGridStep <= 0.0) {
-            throw new IllegalArgumentException("Invalid camera-local shadow grid step");
-        }
-        // Keep the anchor close to the camera before rotating it into light space. This avoids
-        // a whole-texel sawtooth when a slowly rotating sun projects large world coordinates.
-        // Quarter-texel world cells bound an ordinary single-axis rebase to 0.25 map texel.
-        sliceCenter.add(
-                (float) (Math.rint(cameraPosition.x() / cameraGridStep)
-                        * cameraGridStep - cameraPosition.x()),
-                (float) (Math.rint(cameraPosition.y() / cameraGridStep)
-                        * cameraGridStep - cameraPosition.y()),
-                (float) (Math.rint(cameraPosition.z() / cameraGridStep)
-                        * cameraGridStep - cameraPosition.z())
-        );
-        Vector3f lightCenter = lightView.transformPosition(sliceCenter);
-        float centerX = lightCenter.x;
-        float centerY = lightCenter.y;
 
         float casterMargin = casterExtrusion(budget);
         float nearDistance = 1.0f;
         float farDistance = (maximumZ - minimumZ) + casterMargin + nearDistance;
         lightView.m32(-maximumZ - casterMargin - nearDistance);
         Matrix4f reversedOrtho = new Matrix4f().setOrtho(
-                centerX - halfExtent,
-                centerX + halfExtent,
-                centerY - halfExtent,
-                centerY + halfExtent,
+                -halfExtent,
+                halfExtent,
+                -halfExtent,
+                halfExtent,
                 farDistance,
                 nearDistance,
                 true

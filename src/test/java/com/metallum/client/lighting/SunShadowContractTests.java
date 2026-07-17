@@ -30,7 +30,7 @@ public final class SunShadowContractTests {
         testCascadeSplits();
         testCameraRelativePlanningAndOutputIndependence();
         testSunRotationAndLightBasisContinuity();
-        testCameraLocalCascadeAnchoring();
+        testContinuousCameraAndRotationStableCascades();
         testRotatedCascadeCoverageAndCasterExtrusion();
         testCascadeBlendCoverageAndScaleAwareBias();
         testOuterCascadeFadeAndClosedCaveFallback();
@@ -307,7 +307,7 @@ public final class SunShadowContractTests {
         }
     }
 
-    private static void testCameraLocalCascadeAnchoring() {
+    private static void testContinuousCameraAndRotationStableCascades() {
         SunShadowLayout.Budget budget = SunShadowLayout.forPreset(LightingPreset.BALANCED);
         EnvironmentDescriptor environment = shadowEnvironment();
         for (double sign : new double[]{-1.0, 1.0}) {
@@ -318,93 +318,70 @@ public final class SunShadowContractTests {
                     frame(DisplayOutputMode.SDR, seed)
             );
             for (int cascade = 0; cascade < seedFrame.cascadeCount(); cascade++) {
-                double gridStep = seedFrame.cascadeWorldUnitsPerTexel(cascade)
-                        * SunShadowFrame.CAMERA_GRID_TEXEL_FRACTION;
-                double cellCenter = Math.rint(seed / gridStep) * gridStep;
-                double insideA = cellCenter - gridStep * 0.20;
-                double insideB = cellCenter + gridStep * 0.20;
-                double nextCell = cellCenter + gridStep * 0.55;
+                double formerGridStep = seedFrame.cascadeWorldUnitsPerTexel(cascade) * 0.25;
+                double cellCenter = Math.rint(seed / formerGridStep) * formerGridStep;
                 double receiverX = cellCenter + 3.25;
                 double receiverY = 97.75;
                 double receiverZ = -30_000_008.0;
+                TexelPosition previous = null;
+                float expectedDeltaX = 0.0f;
+                float expectedDeltaY = 0.0f;
+                for (int sample = 0; sample <= 16; sample++) {
+                    double cameraX = cellCenter + (sample - 8) * formerGridStep * 0.125;
+                    SunShadowFrame moved = SunShadowFrame.plan(
+                            environment,
+                            budget,
+                            frame(DisplayOutputMode.SDR, cameraX)
+                    );
+                    TexelPosition position = shadowTexelPosition(
+                            moved, cascade, receiverX, receiverY, receiverZ
+                    );
+                    if (previous != null) {
+                        float deltaX = position.x() - previous.x();
+                        float deltaY = position.y() - previous.y();
+                        if (sample == 1) {
+                            expectedDeltaX = deltaX;
+                            expectedDeltaY = deltaY;
+                            require(Math.hypot(deltaX, deltaY) > 0.005,
+                                    "sub-frame camera motion left the shadow projection frozen");
+                        } else {
+                            require(close(deltaX, expectedDeltaX, 0.002f)
+                                            && close(deltaY, expectedDeltaY, 0.002f),
+                                    "camera motion crossed a discontinuous cascade anchor");
+                        }
+                    }
+                    previous = position;
+                }
+            }
+        }
 
-                SunShadowFrame first = SunShadowFrame.plan(
-                        environment,
-                        budget,
-                        frame(DisplayOutputMode.SDR, insideA)
+        FrameState.CameraPosition camera = frame(
+                DisplayOutputMode.SDR, 29_999_900.0, 0.0f, 0.0f
+        ).currentCameraPosition();
+        Vector3f receiverRelative = new Vector3f(3.25f, 1.75f, -8.0f);
+        SunShadowFrame reference = SunShadowFrame.plan(
+                environment,
+                budget,
+                frame(DisplayOutputMode.SDR, camera.x(), 0.0f, 0.0f)
+        );
+        for (int sample = 1; sample <= 24; sample++) {
+            float yaw = (float) Math.toRadians(sample * 15.0);
+            float pitch = (float) Math.toRadians(-35.0 + sample * 2.5);
+            SunShadowFrame rotated = SunShadowFrame.plan(
+                    environment,
+                    budget,
+                    frame(DisplayOutputMode.SDR, camera.x(), yaw, pitch)
+            );
+            for (int cascade = 0; cascade < rotated.cascadeCount(); cascade++) {
+                TexelPosition expected = shadowWorldRelativeTexelPosition(
+                        reference, cascade, receiverRelative
                 );
-                SunShadowFrame second = SunShadowFrame.plan(
-                        environment,
-                        budget,
-                        frame(DisplayOutputMode.SDR, insideB)
+                TexelPosition actual = shadowWorldRelativeTexelPosition(
+                        rotated, cascade, receiverRelative
                 );
-                SunShadowFrame crossed = SunShadowFrame.plan(
-                        environment,
-                        budget,
-                        frame(DisplayOutputMode.SDR, nextCell)
-                );
-                TexelPosition firstPosition = shadowTexelPosition(
-                        first, cascade, receiverX, receiverY, receiverZ
-                );
-                TexelPosition secondPosition = shadowTexelPosition(
-                        second, cascade, receiverX, receiverY, receiverZ
-                );
-                TexelPosition crossedPosition = shadowTexelPosition(
-                        crossed, cascade, receiverX, receiverY, receiverZ
-                );
-                require(firstPosition.distance(secondPosition) < 0.01f,
-                        "camera motion inside a local stabilization cell moved the shadow grid");
-                require(secondPosition.distance(crossedPosition)
-                                <= SunShadowFrame.CAMERA_GRID_TEXEL_FRACTION + 0.01f,
-                        "single-axis local cascade rebase exceeded its fractional-texel bound");
-
-                double yCellCenter = Math.rint(96.0 / gridStep) * gridStep;
-                double zCellCenter = Math.rint(-30_000_000.0 / gridStep) * gridStep;
-                SunShadowFrame diagonalBefore = SunShadowFrame.plan(
-                        environment,
-                        budget,
-                        frame(
-                                DisplayOutputMode.SDR,
-                                cellCenter + gridStep * 0.45,
-                                yCellCenter + gridStep * 0.45,
-                                zCellCenter + gridStep * 0.45,
-                                0.0f,
-                                0.0f
-                        )
-                );
-                SunShadowFrame diagonalAfter = SunShadowFrame.plan(
-                        environment,
-                        budget,
-                        frame(
-                                DisplayOutputMode.SDR,
-                                cellCenter + gridStep * 0.55,
-                                yCellCenter + gridStep * 0.55,
-                                zCellCenter + gridStep * 0.55,
-                                0.0f,
-                                0.0f
-                        )
-                );
-                double diagonalReceiverX = cellCenter + 3.25;
-                double diagonalReceiverY = yCellCenter + 1.75;
-                double diagonalReceiverZ = zCellCenter - 8.0;
-                TexelPosition diagonalStart = shadowTexelPosition(
-                        diagonalBefore,
-                        cascade,
-                        diagonalReceiverX,
-                        diagonalReceiverY,
-                        diagonalReceiverZ
-                );
-                TexelPosition diagonalEnd = shadowTexelPosition(
-                        diagonalAfter,
-                        cascade,
-                        diagonalReceiverX,
-                        diagonalReceiverY,
-                        diagonalReceiverZ
-                );
-                require(diagonalStart.distance(diagonalEnd)
-                                <= Math.sqrt(3.0)
-                                * SunShadowFrame.CAMERA_GRID_TEXEL_FRACTION + 0.02,
-                        "three-axis local cascade rebase exceeded its geometric bound");
+                require(expected.distance(actual) < 0.002f,
+                        "camera rotation moved the world-aligned cascade by "
+                                + expected.distance(actual) + " texels");
             }
         }
     }
@@ -705,6 +682,21 @@ public final class SunShadowContractTests {
     ) {
         Vector4f clip = frame.shadowFromView(cascade).transform(
                 new Vector4f(viewPosition, 1.0f)
+        );
+        float scale = frame.budget().resolution() * 0.5f / clip.w;
+        return new TexelPosition(
+                (clip.x + clip.w) * scale,
+                (clip.y + clip.w) * scale
+        );
+    }
+
+    private static TexelPosition shadowWorldRelativeTexelPosition(
+            final SunShadowFrame frame,
+            final int cascade,
+            final Vector3f worldRelativePosition
+    ) {
+        Vector4f clip = frame.shadowFromWorldRelative(cascade).transform(
+                new Vector4f(worldRelativePosition, 1.0f)
         );
         float scale = frame.budget().resolution() * 0.5f / clip.w;
         return new TexelPosition(
