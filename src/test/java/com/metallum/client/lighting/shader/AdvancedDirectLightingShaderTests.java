@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "5dd66cd0fe1e4774f6d53ef7bd74888d26f69eef549978252649e7263bfdafeb",
+            "sodium-solid-fsh", "bf3ced585e43d5677e1138ce4af17c7cd942cc213d8c91ce1d9f6ab94ae322d8",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "c64ffe5d1c09093baf8a969db1754217697b8f2ab1a93eb4862a5f663be7b9dd",
+            "sodium-cutout-fsh", "427cf6a8867c3f9c863cba951e8d5e516ac3475f1d1487ec4b6b2966eaad09b7",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "e1a02eb58719d67be5dd1b71ad5dd8d641f44aa4188e439b28189f45316e1fc9"
+            "minecraft-entity-fsh", "b0b8339264168e0d733ef225a44fdf795c23b39691633aafbc61f3205b254151"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -247,6 +247,8 @@ public final class AdvancedDirectLightingShaderTests {
 
         String sodiumFormula = directHelper(sodiumFragment);
         String entityFormula = directHelper(entityFragment);
+        String sodiumEnvironment = environmentHelper(sodiumFragment);
+        String entityEnvironment = environmentHelper(entityFragment);
         require(sodiumFormula.equals(entityFormula),
                 "terrain and entities do not use one shared direct-light formula");
         require(sodiumFormula.contains("* (attenuation * nDotL * 0.31830988618);"),
@@ -257,6 +259,25 @@ public final class AdvancedDirectLightingShaderTests {
                         "return scaledNormal * inversesqrt(lengthSquared);")
                         && !sodiumFragment.contains("normalLengthSquared <= 0.00000001"),
                 "direct-light normal normalization depends on projected pixel footprint");
+        require(countOccurrences(sodiumFragment,
+                        "vec3 metallumDirectNormal = metallumSafeNormalV1(") == 1
+                        && countOccurrences(entityFragment,
+                        "vec3 metallumDirectNormal = metallumSafeNormalV1(") == 1
+                        && countOccurrences(sodiumFragment,
+                        "metallumSafeNormalV1(") == 2
+                        && countOccurrences(entityFragment,
+                        "metallumSafeNormalV1(") == 2,
+                "surface normal is not prepared exactly once per fragment");
+        require(!sodiumEnvironment.contains("metallumSafeNormalV1("),
+                "environment helper redundantly normalizes its prepared normal");
+        require(countOccurrences(sodiumFragment,
+                        "vec3 metallumPreparedAlbedo =") == 1
+                        && countOccurrences(entityFragment,
+                        "vec3 metallumPreparedAlbedo =") == 1,
+                "albedo is not prepared exactly once per fragment");
+        require(sodiumFormula.contains("direct += albedo")
+                        && !sodiumFormula.contains("direct += max(linearAlbedo"),
+                "clustered-light loop redundantly clamps prepared albedo");
         require(sodiumFormula.contains(
                         "min(header.count, metallumLighting.extentAndClusterCap.z)"),
                 "fragment loop lost its hard per-cluster bound");
@@ -294,11 +315,16 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumEvaluateClusteredDirectV1(",
                         "fragColor = apply_fog("),
                 "entity direct lighting moved after fog");
+        require(before(sodiumFragment,
+                        "color.rgb += metallumEvaluateEnvironmentV1(",
+                        "color.rgb += metallumEvaluateClusteredDirectV1(")
+                        && before(entityFragment,
+                        "color.rgb += metallumEvaluateEnvironmentV1(",
+                        "color.rgb += metallumEvaluateClusteredDirectV1("),
+                "environment/cluster accumulation changed floating-point order");
         require(!sodiumFormula.contains("HDR") && !sodiumFormula.contains("SDR")
                         && !sodiumFormula.contains("Edr") && !sodiumFormula.contains("Output"),
                 "display output leaked into the direct-light formula");
-        String sodiumEnvironment = environmentHelper(sodiumFragment);
-        String entityEnvironment = environmentHelper(entityFragment);
         require(sodiumEnvironment.equals(entityEnvironment)
                         && sodiumEnvironment.contains("metallumSunVisibilityV1")
                         && sodiumFragment.contains("uniform sampler2DShadow metallumSunShadow0")
@@ -370,6 +396,27 @@ public final class AdvancedDirectLightingShaderTests {
                         sodiumFragmentCase.stage(), LightingModel.ADVANCED,
                         environmentCollision).success(),
                 "occupied L4 environment buffer slot did not fail closed");
+
+        for (String identifier : new String[]{
+                "metallumDirectNormal",
+                "metallumPreparedAlbedo"
+        }) {
+            String helperCollision = materialFragment.replace(
+                    "out vec4 fragColor;",
+                    "vec3 " + identifier + ";\nout vec4 fragColor;"
+            );
+            AdvancedDirectLightingShaderPatcher.Result helperResult =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            helperCollision
+                    );
+            require(!helperResult.success()
+                            && helperResult.failureReason().contains(identifier),
+                    "injected local collision did not fail closed: " + identifier);
+        }
 
         String malformedBinding = materialFragment.replace(
                 "out vec4 fragColor;",

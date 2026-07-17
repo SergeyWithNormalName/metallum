@@ -242,17 +242,15 @@ public final class AdvancedDirectLightingShaderPatcher {
 
             vec3 metallumEvaluateEnvironmentV1(
                     vec3 viewPosition,
-                    vec3 surfaceNormal,
-                    vec3 linearAlbedo,
+                    vec3 normal,
+                    vec3 albedo,
                     float skyVisibility) {
                 if (metallumEnvironment.contract.x != 1u) {
                     return vec3(0.0);
                 }
-                vec3 normal = metallumSafeNormalV1(surfaceNormal);
                 if (dot(normal, normal) == 0.0) {
                     return vec3(0.0);
                 }
-                vec3 albedo = max(linearAlbedo, vec3(0.0));
                 float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
                 float hemisphere = 0.30 + 0.70 * max(
                         dot(normal, normalize(metallumEnvironment.worldUpAndMedium.xyz)),
@@ -288,15 +286,13 @@ public final class AdvancedDirectLightingShaderPatcher {
 
             vec3 metallumEvaluateClusteredDirectV1(
                     vec3 viewPosition,
-                    vec3 surfaceNormal,
-                    vec3 linearAlbedo) {
+                    vec3 normal,
+                    vec3 albedo) {
                 if (metallumLighting.reserved0.w != 1u
                         || metallumLighting.capacitiesAndFlags.w != 64u
                         || metallumLighting.gridAndLightCount.z != 6u) {
                     return vec3(0.0);
                 }
-
-                vec3 normal = metallumSafeNormalV1(surfaceNormal);
                 if (dot(normal, normal) == 0.0) {
                     return vec3(0.0);
                 }
@@ -349,7 +345,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
                     vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
                             * max(light.linearColorIntensity.a, 0.0);
-                    direct += max(linearAlbedo, vec3(0.0))
+                    direct += albedo
                             * radiance
                             * (attenuation * nDotL * 0.31830988618);
                     evaluated += 1u;
@@ -386,11 +382,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    if (!gl_FrontFacing) {\n"
                     + "        metallumDerivativeNormal = -metallumDerivativeNormal;\n"
                     + "    }\n"
+                    + "    vec3 metallumDirectNormal = metallumSafeNormalV1(\n"
+                    + "            metallumDerivativeNormal);\n"
+                    + "    vec3 metallumPreparedAlbedo = max(metallumUnlitBase, vec3(0.0));\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
-                    + "            metallumLightingPosition, metallumDerivativeNormal,\n"
-                    + "            metallumUnlitBase, metallumSkyVisibility);\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
-                    + "            metallumLightingPosition, metallumDerivativeNormal, metallumUnlitBase);\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n"
                     + SODIUM_FOG_ANCHOR;
 
     private static final String ENTITY_VERTEX_DECLARATION =
@@ -442,12 +442,15 @@ public final class AdvancedDirectLightingShaderPatcher {
             "    vec3 metallumEntityNormal = gl_FrontFacing\n"
                     + "            ? metallumLightingNormal\n"
                     + "            : -metallumLightingNormal;\n"
+                    + "    vec3 metallumDirectNormal = metallumSafeNormalV1(\n"
+                    + "            metallumEntityNormal);\n"
+                    + "    vec3 metallumPreparedAlbedo = max(metallumDirectAlbedo, vec3(0.0));\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
-                    + "            metallumLightingPosition, metallumEntityNormal,\n"
-                    + "            metallumDirectAlbedo, metallumSkyVisibility);\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
-                    + "            metallumLightingPosition, metallumEntityNormal, "
-                    + "metallumDirectAlbedo);\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n"
                     + ENTITY_FOG_ANCHOR;
 
     private AdvancedDirectLightingShaderPatcher() {
@@ -823,6 +826,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumLightingNormal",
                 "metallumLightingTint",
                 "metallumDirectAlbedo",
+                "metallumDirectNormal",
+                "metallumPreparedAlbedo",
                 "metallumClusterIndexV1",
                 "metallumEvaluateClusteredDirectV1",
                 "metallumEvaluateEnvironmentV1",
