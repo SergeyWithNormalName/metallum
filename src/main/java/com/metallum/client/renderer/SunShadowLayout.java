@@ -20,6 +20,7 @@ public final class SunShadowLayout {
             float pcfRadiusTexels,
             float receiverDepthBias,
             float receiverNormalBias,
+            float receiverNormalBiasTexels,
             float rasterDepthBias,
             float rasterSlopeBias,
             long paramsRingBytes,
@@ -36,6 +37,8 @@ public final class SunShadowLayout {
             requireRange(pcfRadiusTexels, 0.5f, 2.0f, "PCF radius");
             requirePositive(receiverDepthBias, "receiver depth bias");
             requirePositive(receiverNormalBias, "receiver normal bias");
+            requireRange(receiverNormalBiasTexels, 0.25f, 2.0f,
+                    "receiver normal texel bias");
             requirePositive(rasterDepthBias, "raster depth bias");
             requirePositive(rasterSlopeBias, "raster slope bias");
             if (paramsRingBytes != (long) PARAMS_BYTES * PARAMS_RING_SLOTS
@@ -57,6 +60,7 @@ public final class SunShadowLayout {
         float pcfRadius;
         float depthBias;
         float normalBias;
+        float normalBiasTexels;
         float rasterBias;
         float slopeBias;
         switch (preset) {
@@ -67,6 +71,7 @@ public final class SunShadowLayout {
                 pcfRadius = 1.0f;
                 depthBias = 0.0018f;
                 normalBias = 0.085f;
+                normalBiasTexels = 0.50f;
                 rasterBias = 1.00f;
                 slopeBias = 1.45f;
             }
@@ -77,6 +82,7 @@ public final class SunShadowLayout {
                 pcfRadius = 1.15f;
                 depthBias = 0.00135f;
                 normalBias = 0.070f;
+                normalBiasTexels = 0.50f;
                 rasterBias = 1.10f;
                 slopeBias = 1.60f;
             }
@@ -87,6 +93,7 @@ public final class SunShadowLayout {
                 pcfRadius = 1.35f;
                 depthBias = 0.0010f;
                 normalBias = 0.055f;
+                normalBiasTexels = 0.50f;
                 rasterBias = 1.15f;
                 slopeBias = 1.70f;
             }
@@ -106,6 +113,7 @@ public final class SunShadowLayout {
                 pcfRadius,
                 depthBias,
                 normalBias,
+                normalBiasTexels,
                 rasterBias,
                 slopeBias,
                 paramsBytes,
@@ -143,6 +151,20 @@ public final class SunShadowLayout {
             splits[cascade] = shadowFar;
         }
         return splits;
+    }
+
+    /** Start of the receiver overlap used when blending the next cascade. */
+    public static float cascadeBlendStart(
+            final Budget budget,
+            final float previousSplit,
+            final float split
+    ) {
+        Objects.requireNonNull(budget, "budget");
+        if (!Float.isFinite(previousSplit) || previousSplit < 0.0f
+                || !Float.isFinite(split) || split <= previousSplit) {
+            throw new IllegalArgumentException("Invalid cascade transition interval");
+        }
+        return split - (split - previousSplit) * budget.blendFraction();
     }
 
     private static void requirePositive(final float value, final String label) {

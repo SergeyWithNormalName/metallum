@@ -166,6 +166,11 @@ final class SunShadowGpuResources implements AutoCloseable {
         Vector3f worldUp = planned.worldUpView();
         putVec4(packet, EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET,
                 worldUp.x, worldUp.y, worldUp.z, environment.medium().ordinal());
+        putVec4(packet, EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET,
+                planned.cascadeReceiverNormalBias(0),
+                planned.cascadeReceiverNormalBias(1),
+                planned.cascadeReceiverNormalBias(2),
+                this.budget.receiverNormalBiasTexels());
         this.frame = planned;
         this.renderedSubmitIndex = planned.needsShadowPass()
                 ? Long.MIN_VALUE

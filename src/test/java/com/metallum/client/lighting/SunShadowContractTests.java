@@ -30,6 +30,7 @@ public final class SunShadowContractTests {
         testCascadeSplits();
         testCameraRelativePlanningAndOutputIndependence();
         testRotatedCascadeCoverageAndCasterExtrusion();
+        testCascadeBlendCoverageAndScaleAwareBias();
         testOuterCascadeFadeAndClosedCaveFallback();
         testSodiumCascadeUniformLifecycle();
         testBindingAbi();
@@ -163,7 +164,8 @@ public final class SunShadowContractTests {
                     "shadow layout byte accounting or cap changed");
             require(budget.pcfRadiusTexels() >= 1.0f
                             && budget.receiverDepthBias() > 0.0f
-                            && budget.receiverNormalBias() > 0.0f,
+                            && budget.receiverNormalBias() > 0.0f
+                            && budget.receiverNormalBiasTexels() >= 0.25f,
                     "PCF/bias controls are not usable");
         }
     }
@@ -310,6 +312,93 @@ public final class SunShadowContractTests {
                 "closed-cave sky visibility did not suppress directional sunlight");
     }
 
+    private static void testCascadeBlendCoverageAndScaleAwareBias() {
+        SunShadowLayout.Budget budget = SunShadowLayout.forPreset(LightingPreset.BALANCED);
+        float yaw = (float) Math.toRadians(57.0);
+        float pitch = (float) Math.toRadians(-21.0);
+        SunShadowFrame frame = SunShadowFrame.plan(
+                shadowEnvironment(),
+                budget,
+                frame(DisplayOutputMode.SDR, 29_999_900.0, yaw, pitch)
+        );
+        float tangentY = (float) Math.tan(Math.toRadians(70.0) * 0.5);
+        float tangentX = tangentY * (16.0f / 9.0f);
+
+        require(frame.reverseZRasterDepthBias() < 0.0f
+                        && frame.reverseZRasterSlopeBias() < 0.0f,
+                "reverse-Z shadow pass retained forward-Z raster bias signs");
+
+        float previousWorldTexel = 0.0f;
+        for (int cascade = 0; cascade < frame.cascadeCount(); cascade++) {
+            float worldTexel = frame.cascadeWorldUnitsPerTexel(cascade);
+            float normalBias = frame.cascadeReceiverNormalBias(cascade);
+            require(Float.isFinite(worldTexel) && worldTexel > previousWorldTexel,
+                    "cascade texel footprint did not grow with receiver distance");
+            require(close(normalBias, Math.max(
+                            budget.receiverNormalBias(),
+                            worldTexel * budget.receiverNormalBiasTexels()
+                    )),
+                    "receiver normal bias is not tied to the active cascade footprint");
+            previousWorldTexel = worldTexel;
+
+            if (cascade == 0) {
+                require(close(frame.cascadeNearDepth(cascade), 0.05f),
+                        "first cascade no longer starts at the camera near plane");
+                continue;
+            }
+
+            float previousSplit = frame.cascadeSplit(cascade - 1);
+            float transitionPrevious = cascade == 1
+                    ? 0.0f
+                    : frame.cascadeSplit(cascade - 2);
+            float blendStart = Math.max(
+                    0.05f,
+                    SunShadowLayout.cascadeBlendStart(
+                            budget,
+                            transitionPrevious,
+                            previousSplit
+                    )
+            );
+            require(close(frame.cascadeNearDepth(cascade), blendStart),
+                    "next cascade does not include the full receiver blend interval");
+
+            for (float depth : new float[]{
+                    blendStart,
+                    (blendStart + previousSplit) * 0.5f,
+                    previousSplit
+            }) {
+                for (int y = -1; y <= 1; y += 2) {
+                    for (int x = -1; x <= 1; x += 2) {
+                        Vector3f receiver = new Vector3f(
+                                x * depth * tangentX,
+                                y * depth * tangentY,
+                                -depth
+                        );
+                        Vector3f[] normalOffsets = {
+                                new Vector3f(),
+                                new Vector3f(normalBias, 0.0f, 0.0f),
+                                new Vector3f(-normalBias, 0.0f, 0.0f),
+                                new Vector3f(0.0f, normalBias, 0.0f),
+                                new Vector3f(0.0f, -normalBias, 0.0f),
+                                new Vector3f(0.0f, 0.0f, normalBias),
+                                new Vector3f(0.0f, 0.0f, -normalBias)
+                        };
+                        for (Vector3f normalOffset : normalOffsets) {
+                            Vector4f clip = frame.shadowFromView(cascade).transform(
+                                    new Vector4f(
+                                            new Vector3f(receiver).add(normalOffset),
+                                            1.0f
+                                    )
+                            );
+                            require(validClip(clip, 0.01f),
+                                    "biased cascade blend sampled outside the next receiver volume");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private static void testBindingAbi() {
         require(EnvironmentShadowBindingAbi.VERSION == SunShadowLayout.ABI_VERSION
                         && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
@@ -323,7 +412,8 @@ public final class SunShadowContractTests {
         require(EnvironmentShadowBindingAbi.MATRIX_0_OFFSET == 0
                         && EnvironmentShadowBindingAbi.MATRIX_2_OFFSET == 128
                         && EnvironmentShadowBindingAbi.CONTRACT_OFFSET == 304
-                        && EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET == 320,
+                        && EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET == 320
+                        && EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET == 336,
                 "environment packet offsets changed");
     }
 

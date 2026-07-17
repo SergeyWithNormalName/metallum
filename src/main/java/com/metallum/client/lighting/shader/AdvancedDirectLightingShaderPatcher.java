@@ -103,7 +103,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec4 cascadeBlend;
                 uvec4 contract;
                 vec4 worldUpAndMedium;
-                vec4 reserved0;
+                vec4 cascadeNormalBias;
                 vec4 reserved1;
                 vec4 reserved2;
             } metallumEnvironment;
@@ -176,8 +176,15 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
 
             float metallumCascadeVisibilityV1(int cascade, vec3 viewPosition, vec3 normal) {
+                float normalBias = cascade == 0
+                        ? metallumEnvironment.cascadeNormalBias.x
+                        : cascade == 1
+                                ? metallumEnvironment.cascadeNormalBias.y
+                                : metallumEnvironment.cascadeNormalBias.z;
                 vec3 offsetPosition = viewPosition
-                        + normal * max(metallumEnvironment.texelAndBias.z, 0.0);
+                        + normal * max(
+                                normalBias,
+                                max(metallumEnvironment.texelAndBias.z, 0.0));
                 vec4 clip;
                 if (cascade == 0) {
                     clip = metallumEnvironment.shadowFromView0 * vec4(offsetPosition, 1.0);

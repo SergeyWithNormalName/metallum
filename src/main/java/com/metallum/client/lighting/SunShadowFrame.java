@@ -20,6 +20,8 @@ public final class SunShadowFrame {
     private final Matrix4f[] shadowFromView;
     private final Matrix4f[] shadowFromWorldRelative;
     private final float[] cascadeSplits;
+    private final float[] cascadeNearDepths;
+    private final float[] cascadeWorldUnitsPerTexel;
     private final FrameState.CameraPosition cameraPosition;
     private final Vector3f toLightWorld;
     private final Vector3f toLightView;
@@ -34,6 +36,8 @@ public final class SunShadowFrame {
             final Matrix4f[] shadowFromView,
             final Matrix4f[] shadowFromWorldRelative,
             final float[] cascadeSplits,
+            final float[] cascadeNearDepths,
+            final float[] cascadeWorldUnitsPerTexel,
             final FrameState.CameraPosition cameraPosition,
             final Vector3f toLightWorld,
             final Vector3f toLightView,
@@ -47,6 +51,8 @@ public final class SunShadowFrame {
         this.shadowFromView = shadowFromView;
         this.shadowFromWorldRelative = shadowFromWorldRelative;
         this.cascadeSplits = cascadeSplits;
+        this.cascadeNearDepths = cascadeNearDepths;
+        this.cascadeWorldUnitsPerTexel = cascadeWorldUnitsPerTexel;
         this.cameraPosition = cameraPosition;
         this.toLightWorld = toLightWorld;
         this.toLightView = toLightView;
@@ -79,14 +85,28 @@ public final class SunShadowFrame {
         Vector3f worldUpView = view.transformDirection(new Vector3f(0.0f, 1.0f, 0.0f)).normalize();
         Matrix4f[] matrices = new Matrix4f[SunShadowLayout.MAX_CASCADES];
         Matrix4f[] worldRelativeMatrices = new Matrix4f[SunShadowLayout.MAX_CASCADES];
+        float[] cascadeNearDepths = new float[SunShadowLayout.MAX_CASCADES];
+        float[] cascadeWorldUnitsPerTexel = new float[SunShadowLayout.MAX_CASCADES];
         Arrays.setAll(matrices, ignored -> new Matrix4f());
         Arrays.setAll(worldRelativeMatrices, ignored -> new Matrix4f());
 
         if (environment.sunShadowEligible()) {
             float previousSplit = nearPlane;
             for (int cascade = 0; cascade < budget.cascadeCount(); cascade++) {
+                float cascadeNearDepth = previousSplit;
+                if (cascade > 0) {
+                    float transitionPrevious = cascade == 1 ? 0.0f : splits[cascade - 2];
+                    cascadeNearDepth = Math.max(
+                            nearPlane,
+                            SunShadowLayout.cascadeBlendStart(
+                                    budget,
+                                    transitionPrevious,
+                                    previousSplit
+                            )
+                    );
+                }
                 CascadePlan planned = planCascade(
-                        previousSplit,
+                        cascadeNearDepth,
                         splits[cascade],
                         budget,
                         projection,
@@ -96,6 +116,8 @@ public final class SunShadowFrame {
                 );
                 matrices[cascade].set(planned.shadowFromView());
                 worldRelativeMatrices[cascade].set(planned.shadowFromWorldRelative());
+                cascadeNearDepths[cascade] = cascadeNearDepth;
+                cascadeWorldUnitsPerTexel[cascade] = planned.worldUnitsPerTexel();
                 previousSplit = splits[cascade];
             }
         }
@@ -108,6 +130,8 @@ public final class SunShadowFrame {
                 matrices,
                 worldRelativeMatrices,
                 splits,
+                cascadeNearDepths,
+                cascadeWorldUnitsPerTexel,
                 frame.currentCameraPosition(),
                 toLightWorld,
                 toLightView,
@@ -162,6 +186,34 @@ public final class SunShadowFrame {
         return this.cascadeSplits[cascade];
     }
 
+    public float cascadeNearDepth(final int cascade) {
+        validateCascade(cascade);
+        return this.cascadeNearDepths[cascade];
+    }
+
+    public float cascadeWorldUnitsPerTexel(final int cascade) {
+        validateCascade(cascade);
+        return this.cascadeWorldUnitsPerTexel[cascade];
+    }
+
+    public float cascadeReceiverNormalBias(final int cascade) {
+        validateCascade(cascade);
+        return Math.max(
+                this.budget.receiverNormalBias(),
+                this.cascadeWorldUnitsPerTexel[cascade]
+                        * this.budget.receiverNormalBiasTexels()
+        );
+    }
+
+    /** Metal adds raster bias to depth; reverse-Z shadow casters must move toward zero. */
+    public float reverseZRasterDepthBias() {
+        return -this.budget.rasterDepthBias();
+    }
+
+    public float reverseZRasterSlopeBias() {
+        return -this.budget.rasterSlopeBias();
+    }
+
     public FrameState.CameraPosition cameraPosition() {
         return this.cameraPosition;
     }
@@ -184,6 +236,12 @@ public final class SunShadowFrame {
 
     static float casterExtrusion(final SunShadowLayout.Budget budget) {
         return Math.max(24.0f, budget.maximumDistance());
+    }
+
+    private static void validateCascade(final int cascade) {
+        if (cascade < 0 || cascade >= SunShadowLayout.MAX_CASCADES) {
+            throw new IllegalArgumentException("Invalid cascade " + cascade);
+        }
     }
 
     private static CascadePlan planCascade(
@@ -274,7 +332,7 @@ public final class SunShadowFrame {
         if (!shadowFromWorldRelative.isFinite() || !shadowFromView.isFinite()) {
             throw new IllegalStateException("Cascade matrix is not finite");
         }
-        return new CascadePlan(shadowFromView, shadowFromWorldRelative);
+        return new CascadePlan(shadowFromView, shadowFromWorldRelative, worldUnitsPerTexel);
     }
 
     private static Vector3f[] frustumCorners(
@@ -342,7 +400,8 @@ public final class SunShadowFrame {
 
     private record CascadePlan(
             Matrix4f shadowFromView,
-            Matrix4f shadowFromWorldRelative
+            Matrix4f shadowFromWorldRelative,
+            float worldUnitsPerTexel
     ) {
     }
 }

@@ -149,8 +149,8 @@ public final class SunShadowRenderer {
                 activeCameraPosition = frame.cameraPosition();
                 activeTerrainToLightWorld = frame.toLightWorld();
                 activeCascadeToken = frame.submitIndex() * 8L + cascade + 1L;
-                activeRasterDepthBias = frame.budget().rasterDepthBias();
-                activeRasterSlopeBias = frame.budget().rasterSlopeBias();
+                activeRasterDepthBias = frame.reverseZRasterDepthBias();
+                activeRasterSlopeBias = frame.reverseZRasterSlopeBias();
                 try {
                     RenderSystem.getDevice()
                             .createCommandEncoder()

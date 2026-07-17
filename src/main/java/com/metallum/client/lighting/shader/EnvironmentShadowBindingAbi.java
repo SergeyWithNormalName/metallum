@@ -25,6 +25,7 @@ public final class EnvironmentShadowBindingAbi {
     public static final int CASCADE_BLEND_OFFSET = 288;
     public static final int CONTRACT_OFFSET = 304;
     public static final int WORLD_UP_AND_MEDIUM_OFFSET = 320;
+    public static final int CASCADE_NORMAL_BIAS_OFFSET = 336;
 
     private static final int[] SHADOW_TEXTURE_SLOTS = {
             SHADOW_TEXTURE_0_SLOT,
