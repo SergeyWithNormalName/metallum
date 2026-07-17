@@ -49,6 +49,7 @@ public final class MetalRuntimeTests {
         testDestructionQueueToleratesReentrantRotation();
         testDestructionQueueSpreadsBurst();
         testDestructionQueueClose();
+        testClosedBufferRetainsHandleUntilDeferredRelease();
         testTexelViewCacheReuseAndInvalidation();
         testTextureBindingHolderUpdatesInPlace();
         testDynamicBackingPoolBoundsAndReuse();
@@ -351,6 +352,28 @@ public final class MetalRuntimeTests {
         require(executions[0] == 4, "destruction backlog did not continue on the next frame");
         queue.close();
         require(executions[0] == 5, "close did not drain the remaining destruction backlog");
+    }
+
+    private static void testClosedBufferRetainsHandleUntilDeferredRelease() {
+        MemorySegment handle = MemorySegment.ofAddress(0x51A7E0L);
+        MetalGpuBuffer.NativeHandleState state = new MetalGpuBuffer.NativeHandleState(handle);
+
+        require(state.requireForEncoding().address() == handle.address(),
+                "live Metal buffer did not expose its native handle");
+        require(state.beginClose() == handle && state.isClosed(),
+                "logical close did not retain the handle for an already-recorded render pass");
+        require(state.requireForEncoding().address() == handle.address(),
+                "logical close invalidated the native handle before deferred destruction");
+        require(state.beginClose() == null, "second logical close scheduled another native release");
+
+        state.markReleased(handle);
+        boolean releasedRejected = false;
+        try {
+            state.requireForEncoding();
+        } catch (IllegalStateException expected) {
+            releasedRejected = true;
+        }
+        require(releasedRejected, "physically released Metal buffer still exposed its native handle");
     }
 
     private static void testTexelViewCacheReuseAndInvalidation() {

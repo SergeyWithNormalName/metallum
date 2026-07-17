@@ -34,13 +34,10 @@ class MetalGpuBuffer extends GpuBuffer {
     private final long resourceOptions;
     private final long allocationSize;
     private final boolean staticGeometryAllocation;
-    @Nullable
-    private MemorySegment nativeHandle;
+    private final NativeHandleState nativeHandleState;
     @Nullable
     private ByteBuffer storage;
     private final TexelViewCache<MemorySegment> texelViews;
-    private boolean closed;
-
     MetalGpuBuffer(final MetalDevice device, @GpuBuffer.Usage final int usage, final long size) {
         this(device, usage, size, false);
     }
@@ -60,7 +57,7 @@ class MetalGpuBuffer extends GpuBuffer {
         this.resourceOptions = toMtlResourceOptions(usage);
         this.allocationSize = (size + 15L) & ~15L;
         this.staticGeometryAllocation = usePrivateGeometryHeap;
-        this.nativeHandle = usePrivateGeometryHeap
+        MemorySegment nativeHandle = usePrivateGeometryHeap
                 ? MetalNativeBridge.metallum_create_static_geometry_buffer(
                         device.metalDeviceHandle(),
                         this.allocationSize
@@ -70,15 +67,16 @@ class MetalGpuBuffer extends GpuBuffer {
                         this.allocationSize,
                         this.resourceOptions
                 );
-        if (MetalNativeBridge.isNullHandle(this.nativeHandle)) {
+        if (MetalNativeBridge.isNullHandle(nativeHandle)) {
             throw new IllegalStateException("Failed to create Metal buffer");
         }
+        this.nativeHandleState = new NativeHandleState(nativeHandle);
 
         if (this.cpuAccessible) {
-            MemorySegment contents = MetalNativeBridge.metallum_get_buffer_contents(this.nativeHandle);
+            MemorySegment contents = MetalNativeBridge.metallum_get_buffer_contents(nativeHandle);
             if (MetalNativeBridge.isNullHandle(contents)) {
-                MetalNativeBridge.metallum_release_object(this.nativeHandle);
-                this.nativeHandle = null;
+                MetalNativeBridge.metallum_release_object(nativeHandle);
+                this.nativeHandleState.markReleased(nativeHandle);
                 throw new IllegalStateException("MTLBuffer.contents returned null");
             }
 
@@ -97,7 +95,7 @@ class MetalGpuBuffer extends GpuBuffer {
         this.resourceOptions = 0L;
         this.allocationSize = size;
         this.staticGeometryAllocation = false;
-        this.nativeHandle = wrappedHandle;
+        this.nativeHandleState = new NativeHandleState(wrappedHandle);
         this.storage = null;
     }
 
@@ -113,10 +111,7 @@ class MetalGpuBuffer extends GpuBuffer {
     }
 
     MemorySegment nativeHandle() {
-        if (this.nativeHandle == null) {
-            throw new IllegalStateException("Native Metal buffer is closed");
-        }
-        return this.nativeHandle;
+        return this.nativeHandleState.requireForEncoding();
     }
 
     boolean isDynamic() {
@@ -142,7 +137,7 @@ class MetalGpuBuffer extends GpuBuffer {
         // A texture view retains its backing. Queue all old views before the
         // caller queues that backing for reuse by the dynamic buffer pool.
         this.releaseTexelViews();
-        this.nativeHandle = handle;
+        this.nativeHandleState.replace(handle);
         this.storage = storage;
     }
 
@@ -152,6 +147,9 @@ class MetalGpuBuffer extends GpuBuffer {
             final long texelCount,
             final long byteLength
     ) {
+        if (this.nativeHandleState.isClosed()) {
+            throw new IllegalStateException("Cannot create a texel view for a closed Metal buffer");
+        }
         TexelViewKey key = new TexelViewKey(pixelFormat, offset, texelCount, byteLength);
         MemorySegment view = this.texelViews.getOrCreate(key, ignored -> {
             MemorySegment created = MetalNativeBridge.metallum_create_buffer_texture_view(
@@ -172,25 +170,22 @@ class MetalGpuBuffer extends GpuBuffer {
 
     @Override
     public boolean isClosed() {
-        return this.closed || this.nativeHandle == null;
+        return this.nativeHandleState.isClosed();
     }
 
     @Override
     public void close() {
-        if (this.closed) {
+        MemorySegment handle = this.nativeHandleState.beginClose();
+        if (handle == null) {
             return;
         }
-        this.closed = true;
         this.storage = null;
         this.releaseTexelViews();
-        if (this.nativeHandle != null) {
-            MemorySegment handle = this.nativeHandle;
-            this.nativeHandle = null;
-            if (this.staticGeometryAllocation) {
-                this.device.queueStaticGeometryBufferRelease(handle);
-            } else {
-                this.device.queueResourceRelease(handle);
-            }
+        Runnable markReleased = () -> this.nativeHandleState.markReleased(handle);
+        if (this.staticGeometryAllocation) {
+            this.device.queueStaticGeometryBufferRelease(handle, markReleased);
+        } else {
+            this.device.queueResourceRelease(handle, markReleased);
         }
     }
 
@@ -241,6 +236,53 @@ class MetalGpuBuffer extends GpuBuffer {
 
     private void releaseTexelViews() {
         this.texelViews.drain();
+    }
+
+    /**
+     * Mirrors Blaze3D's Vulkan two-phase buffer lifetime: close rejects new public use, while an
+     * already-recorded render pass may still resolve the native handle until deferred destruction.
+     */
+    static final class NativeHandleState {
+        @Nullable
+        private MemorySegment handle;
+        private boolean closed;
+
+        NativeHandleState(final @Nullable MemorySegment handle) {
+            this.handle = handle;
+        }
+
+        MemorySegment requireForEncoding() {
+            if (this.handle == null) {
+                throw new IllegalStateException("Native Metal buffer is closed");
+            }
+            return this.handle;
+        }
+
+        boolean isClosed() {
+            return this.closed || this.handle == null;
+        }
+
+        @Nullable
+        MemorySegment beginClose() {
+            if (this.closed) {
+                return null;
+            }
+            this.closed = true;
+            return this.handle;
+        }
+
+        void replace(final MemorySegment replacement) {
+            if (this.closed) {
+                throw new IllegalStateException("Cannot replace the backing of a closed Metal buffer");
+            }
+            this.handle = replacement;
+        }
+
+        void markReleased(final MemorySegment released) {
+            if (this.handle == released) {
+                this.handle = null;
+            }
+        }
     }
 
     record TexelViewKey(long pixelFormat, long offset, long texelCount, long byteLength) {

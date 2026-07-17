@@ -2234,10 +2234,30 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
     }
 
+    void queueResourceRelease(final MemorySegment handle, final Runnable afterRelease) {
+        this.commandEncoder.queueForDestroy(() -> {
+            try {
+                MetalNativeBridge.metallum_release_object(handle);
+            } finally {
+                afterRelease.run();
+            }
+        });
+    }
+
     void queueStaticGeometryBufferRelease(final MemorySegment handle) {
         this.commandEncoder.queueForDestroy(
                 () -> MetalNativeBridge.metallum_release_static_geometry_buffer(handle)
         );
+    }
+
+    void queueStaticGeometryBufferRelease(final MemorySegment handle, final Runnable afterRelease) {
+        this.commandEncoder.queueForDestroy(() -> {
+            try {
+                MetalNativeBridge.metallum_release_static_geometry_buffer(handle);
+            } finally {
+                afterRelease.run();
+            }
+        });
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
