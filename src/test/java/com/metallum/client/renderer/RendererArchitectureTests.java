@@ -13,6 +13,7 @@ import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStateAbi;
 import com.metallum.client.renderer.temporal.Matrix4;
+import com.metallum.client.voxel.VoxelClipmapLayout;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -55,7 +56,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3/L4 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3/L4/L5 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -1004,6 +1005,9 @@ public final class RendererArchitectureTests {
         SunShadowLayout.Budget shadowBudget = SunShadowLayout.forPreset(
                 LightingPreset.BALANCED
         );
+        VoxelClipmapLayout.Budget voxelBudget = VoxelClipmapLayout.forPreset(
+                VoxelClipmapLayout.Preset.BALANCED
+        );
         Set<String> expectedResources = Set.of(
                 "lighting_upload_ring",
                 "gpu_lights",
@@ -1013,18 +1017,25 @@ public final class RendererArchitectureTests {
                 "lighting_params",
                 "cluster_statistics",
                 "environment_shadow_params_ring",
-                "sun_shadow_cascades"
+                "sun_shadow_cascades",
+                "voxel_upload_ring",
+                "voxel_private_patch_ring",
+                "voxel_indirect_args",
+                "voxel_occupancy",
+                "voxel_transmittance_material",
+                "voxel_brick_tags"
         );
         Set<String> expectedPasses = Set.of(
-                "light_upload", "cluster_prepare", "cluster_build", "sun_shadow",
-                "direct_lighting"
+                "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",
+                "voxel_update", "sun_shadow", "direct_lighting"
         );
         Set<String> expectedPipelines = Set.of(
                 "cluster_prepare_pso", "cluster_masks_pso", "cluster_count_pso",
                 "cluster_prefix_blocks_pso", "cluster_prefix_groups_pso",
                 "cluster_prefix_add_pso", "cluster_fill_pso",
                 "terrain_direct_lighting_pso", "entity_direct_lighting_pso",
-                "terrain_sun_shadow_pso", "entity_sun_shadow_pso"
+                "terrain_sun_shadow_pso", "entity_sun_shadow_pso",
+                "voxel_apply_pso", "voxel_debug_checksum_pso"
         );
         for (RendererGenerationManifest manifest : java.util.List.of(
                 sdr.manifest(), hdr.manifest())) {
@@ -1032,7 +1043,8 @@ public final class RendererArchitectureTests {
                     "Advanced manifest fell back to Vanilla");
             require(manifest.resourceBytes(
                             RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
-                            == budget.totalBytes() + shadowBudget.totalBytes(),
+                            == budget.totalBytes() + shadowBudget.totalBytes()
+                            + voxelManifestBytes(voxelBudget),
                     "Advanced manifest byte count diverged from its layout budget");
             require(manifest.resources().stream()
                             .filter(resource -> resource.domain()
@@ -1048,7 +1060,7 @@ public final class RendererArchitectureTests {
                             .collect(java.util.stream.Collectors.toUnmodifiableSet())
                             .equals(expectedPasses)
                             && manifest.encoderCount(
-                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 3L
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 5L
                             && manifest.pipelines().stream()
                             .filter(pipeline -> pipeline.domain()
                                     == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
@@ -1056,7 +1068,7 @@ public final class RendererArchitectureTests {
                             .collect(java.util.stream.Collectors.toUnmodifiableSet())
                             .equals(expectedPipelines)
                             && manifest.workQueueCount(
-                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 2L,
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 4L,
                     "Advanced manifest work declarations are incomplete");
         }
         require(sdr.manifest().resourceBytes(
@@ -1071,13 +1083,20 @@ public final class RendererArchitectureTests {
             AdvancedLightingLayout.Budget candidate = AdvancedLightingLayout.forGeneration(
                     presets[index], extent.width(), extent.height());
             SunShadowLayout.Budget shadowCandidate = SunShadowLayout.forPreset(presets[index]);
-            require(candidate.totalBytes() + shadowCandidate.totalBytes() <= memoryCaps[index],
-                    "L3/L4 layout exceeded the preset persistent-memory budget");
+            VoxelClipmapLayout.Budget voxelCandidate = VoxelClipmapLayout.forPreset(
+                    VoxelClipmapLayout.Preset.values()[index]);
+            require(candidate.totalBytes() + shadowCandidate.totalBytes()
+                            + voxelManifestBytes(voxelCandidate) <= memoryCaps[index],
+                    "L3/L4/L5 layout exceeded the preset persistent-memory budget");
             require(candidate.indexCapacity() <= Math.multiplyExact(
                             candidate.clusterCount(),
                             AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER),
                     "L3 index capacity exceeds the bounded per-cluster contract");
         }
+    }
+
+    private static long voxelManifestBytes(final VoxelClipmapLayout.Budget budget) {
+        return budget.totalDedicatedBytes();
     }
 
     private static void testAdvancedLightingRuntimeAdmission() {

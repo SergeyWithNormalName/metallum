@@ -24,7 +24,8 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumHdrEffects.metal",
             "/natives/macos/shaders/MetallumClear.metal",
             "/natives/macos/shaders/MetallumSodiumLightPatch.metal",
-            "/natives/macos/shaders/MetallumClusterBuild.metal"
+            "/natives/macos/shaders/MetallumClusterBuild.metal",
+            "/natives/macos/shaders/MetallumVoxelOccupancy.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
@@ -161,6 +162,77 @@ public final class MetalNativeBridge {
             lightingLastCompletedStatsV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_lighting_last_completed_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            voxelAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            voxelLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            voxelCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_create_context_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            LONG,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            INT,
+                            INT,
+                            LONG
+                    )
+            );
+            voxelReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+            voxelContextBufferV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_context_buffer_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, INT
+                    )
+            );
+            voxelContextBufferBytesV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_context_buffer_bytes_v1",
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS, INT, INT)
+            );
+            voxelUploadApplyV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_upload_apply_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
+            );
+            voxelLastCompletedStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_last_completed_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            voxelDebugChecksumV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_debug_checksum_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, INT
+                    )
+            );
+            voxelDebugReadbackV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_voxel_debug_readback_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
             encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
@@ -573,6 +645,16 @@ public final class MetalNativeBridge {
     private static final MethodHandle lightingContextBufferBytesV1;
     private static final MethodHandle lightingUploadAndBuildV1;
     private static final MethodHandle lightingLastCompletedStatsV1;
+    private static final MethodHandle voxelAbiVersionV1;
+    private static final MethodHandle voxelLayoutV1;
+    private static final MethodHandle voxelCreateContextV1;
+    private static final MethodHandle voxelReleaseContextV1;
+    private static final MethodHandle voxelContextBufferV1;
+    private static final MethodHandle voxelContextBufferBytesV1;
+    private static final MethodHandle voxelUploadApplyV1;
+    private static final MethodHandle voxelLastCompletedStatsV1;
+    private static final MethodHandle voxelDebugChecksumV1;
+    private static final MethodHandle voxelDebugReadbackV1;
     private static final MethodHandle encodeTemporalDiagnosticsV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -916,6 +998,155 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_lighting_last_completed_stats_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_abi_version_v1() {
+        try {
+            return (int) voxelAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_layout_v1(final MemorySegment output) {
+        if (output == null || output.byteSize() == 0L) {
+            throw new IllegalArgumentException("Voxel layout packet must not be empty");
+        }
+        try {
+            return (int) voxelLayoutV1.invokeExact(segment(output), output.byteSize());
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_voxel_create_context_v1(
+            final MemorySegment device,
+            final long lightingGeneration,
+            final long clipmapGeneration,
+            final long worldGeneration,
+            final MemorySegment layouts,
+            final int levelCount,
+            final int maxPatchCount,
+            final long stagingBytes
+    ) {
+        if (layouts == null || layouts.byteSize() == 0L) {
+            throw new IllegalArgumentException("Voxel level layouts must not be empty");
+        }
+        try {
+            return (MemorySegment) voxelCreateContextV1.invokeExact(
+                    segment(device),
+                    lightingGeneration,
+                    clipmapGeneration,
+                    worldGeneration,
+                    segment(layouts),
+                    layouts.byteSize(),
+                    levelCount,
+                    maxPatchCount,
+                    stagingBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_create_context_v1", throwable);
+        }
+    }
+
+    public static void metallum_voxel_release_context_v1(final MemorySegment context) {
+        try {
+            voxelReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_release_context_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_voxel_context_buffer_v1(
+            final MemorySegment context,
+            final int kind,
+            final int index
+    ) {
+        try {
+            return (MemorySegment) voxelContextBufferV1.invokeExact(
+                    segment(context), kind, index
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_context_buffer_v1", throwable);
+        }
+    }
+
+    public static long metallum_voxel_context_buffer_bytes_v1(
+            final MemorySegment context,
+            final int kind,
+            final int index
+    ) {
+        try {
+            return (long) voxelContextBufferBytesV1.invokeExact(
+                    segment(context), kind, index
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_context_buffer_bytes_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_upload_apply_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final MemorySegment packet
+    ) {
+        if (packet == null || packet.byteSize() == 0L) {
+            throw new IllegalArgumentException("Voxel upload packet must not be empty");
+        }
+        try {
+            return (int) voxelUploadApplyV1.invokeExact(
+                    segment(context), segment(commandBuffer), segment(packet), packet.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_upload_apply_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_last_completed_stats_v1(
+            final MemorySegment context,
+            final MemorySegment output
+    ) {
+        if (output == null || output.byteSize() == 0L) {
+            throw new IllegalArgumentException("Voxel statistics packet must not be empty");
+        }
+        try {
+            return (int) voxelLastCompletedStatsV1.invokeExact(
+                    segment(context), segment(output), output.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_last_completed_stats_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_debug_checksum_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final int level,
+            final int slot
+    ) {
+        try {
+            return (int) voxelDebugChecksumV1.invokeExact(
+                    segment(context), segment(commandBuffer), level, slot
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_debug_checksum_v1", throwable);
+        }
+    }
+
+    public static int metallum_voxel_debug_readback_v1(
+            final MemorySegment context,
+            final MemorySegment output
+    ) {
+        if (output == null || output.byteSize() == 0L) {
+            throw new IllegalArgumentException("Voxel debug readback packet must not be empty");
+        }
+        try {
+            return (int) voxelDebugReadbackV1.invokeExact(
+                    segment(context), segment(output), output.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_voxel_debug_readback_v1", throwable);
         }
     }
 

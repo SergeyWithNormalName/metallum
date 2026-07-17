@@ -143,6 +143,7 @@ L3_FRAME_GRAPH_VERSION = 4
 L4_FRAME_GRAPH_VERSION = 5
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
 SUN_SHADOW_STAGE = "sun shadow"
+VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
 L4_SHADOW_PASS_COUNT = 5
 CLUSTER_CAP = 256
 CLUSTER_RING_SLOTS = 3
@@ -162,6 +163,22 @@ CLUSTERED_LIGHTING_INTEGER_KEYS = (
 CLUSTERED_LIGHTING_KEYS = frozenset({
     "active", "output_independent", *CLUSTERED_LIGHTING_INTEGER_KEYS,
 })
+VOXEL_CLIPMAP_INTEGER_KEYS = (
+    "lighting_generation", "clipmap_generation", "world_generation", "frame_id",
+    "resource_bytes", "heap_bytes", "heap_used_bytes", "ring_staging_bytes",
+    "ring_private_bytes", "ring_high_water", "ring_busy_rejects",
+    "dirty_bricks_submitted", "dirty_bricks_completed", "dirty_bricks_remaining",
+    "oldest_dirty_age", "coalesced", "rejected", "stale", "scroll_slabs",
+    "unload_clears", "debug_checksum",
+)
+VOXEL_CLIPMAP_KEYS = frozenset({
+    "active", "output_independent", *VOXEL_CLIPMAP_INTEGER_KEYS,
+})
+VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
+    "performance": 0.15,
+    "balanced": 0.40,
+    "ultra": 0.50,
+}
 STABLE_METADATA_KEYS = (
     "commit", "dirty_worktree", "source_sha256", "artifact_sha256",
     "settings_id", "settings_spec_sha256", "settings_sha256",
@@ -225,8 +242,10 @@ class TimingWindow:
     metadata: dict[str, Any]
     renderer_generation: dict[str, Any] | None
     clustered_lighting: dict[str, Any] | None
+    voxel_clipmaps: dict[str, Any] | None
     light_cluster_stage: dict[str, Any] | None
     sun_shadow_stage: dict[str, Any] | None
+    voxel_upload_update_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -329,6 +348,30 @@ def _parse_clustered_lighting(value: Any, line: int) -> dict[str, Any] | None:
     return result
 
 
+def _parse_voxel_clipmaps(value: Any, line: int) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != VOXEL_CLIPMAP_KEYS:
+        raise ReportError(f"line {line}: voxel_clipmaps has invalid keys")
+    active = value.get("active")
+    output_independent = value.get("output_independent")
+    if not isinstance(active, bool):
+        raise ReportError(f"line {line}: voxel_clipmaps.active must be a boolean")
+    if not isinstance(output_independent, bool):
+        raise ReportError(
+            f"line {line}: voxel_clipmaps.output_independent must be a boolean"
+        )
+    result: dict[str, Any] = {
+        "active": active,
+        "output_independent": output_independent,
+    }
+    for key in VOXEL_CLIPMAP_INTEGER_KEYS:
+        result[key] = _integer(value.get(key), f"voxel_clipmaps.{key}", line)
+    if result["heap_used_bytes"] > result["heap_bytes"]:
+        raise ReportError(
+            f"line {line}: voxel_clipmaps.heap_used_bytes exceeds heap_bytes"
+        )
+    return result
+
+
 def _parse_timing_stage(
     value: Any, stage_name: str, line: int
 ) -> dict[str, Any] | None:
@@ -383,6 +426,12 @@ def _parse_timing_stage(
 
 def _parse_light_cluster_stage(value: Any, line: int) -> dict[str, Any] | None:
     return _parse_timing_stage(value, LIGHT_CLUSTER_STAGE, line)
+
+
+def _parse_voxel_upload_update_stage(
+    value: Any, line: int,
+) -> dict[str, Any] | None:
+    return _parse_timing_stage(value, VOXEL_UPLOAD_UPDATE_STAGE, line)
 
 
 def _metric_object(payload: dict[str, Any], schema: int, line: int) -> dict[str, Any]:
@@ -923,7 +972,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
     if not isinstance(payload, dict):
         raise ReportError(f"line {line}: JSON value must be an object")
     schema = _integer(payload.get("schema_version"), "schema_version", line, 1)
-    if schema not in (1, 2, 3, 4):
+    if schema not in (1, 2, 3, 4, 5):
         raise ReportError(f"line {line}: unsupported schema_version {schema}")
     detail = payload.get("detail_enabled")
     if not isinstance(detail, bool):
@@ -996,6 +1045,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_clustered_lighting(payload.get("clustered_lighting"), line)
             if schema >= 4 else None
         ),
+        voxel_clipmaps=(
+            _parse_voxel_clipmaps(payload.get("voxel_clipmaps"), line)
+            if schema >= 5 else None
+        ),
         light_cluster_stage=(
             _parse_light_cluster_stage(payload.get("stages"), line)
             if schema >= 4 else None
@@ -1003,6 +1056,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         sun_shadow_stage=(
             _parse_timing_stage(payload.get("stages"), SUN_SHADOW_STAGE, line)
             if schema >= 4 else None
+        ),
+        voxel_upload_update_stage=(
+            _parse_voxel_upload_update_stage(payload.get("stages"), line)
+            if schema >= 5 else None
         ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
@@ -1259,6 +1316,79 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
             )
 
 
+def _timing_stage_is_zero(stage: dict[str, Any]) -> bool:
+    return all(
+        stage[key] in (None, 0.0)
+        for key in (
+            "average_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms",
+        )
+    )
+
+
+def _validate_l5_measurement(window: TimingWindow) -> None:
+    if window.schema < 5:
+        return
+    generation = window.renderer_generation
+    voxel = window.voxel_clipmaps
+    if generation is None or voxel is None:
+        raise ReportError(
+            f"line {window.line}: L5 measurement requires voxel_clipmaps telemetry"
+        )
+    if not voxel["output_independent"]:
+        raise ReportError(
+            f"line {window.line}: voxel_clipmaps.output_independent must be true"
+        )
+
+    advanced = generation["resolved_lighting_model"] == "advanced"
+    stage = window.voxel_upload_update_stage
+    if not advanced:
+        if voxel["active"]:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement has active voxel clipmaps"
+            )
+        nonzero = [
+            key for key in VOXEL_CLIPMAP_INTEGER_KEYS if voxel[key] != 0
+        ]
+        if nonzero:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement has nonzero voxel-clipmap "
+                "counter(s): " + ", ".join(nonzero)
+            )
+        if stage is not None and not _timing_stage_is_zero(stage):
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement contains "
+                f"{VOXEL_UPLOAD_UPDATE_STAGE} work"
+            )
+        return
+
+    if not voxel["active"]:
+        raise ReportError(
+            f"line {window.line}: Advanced measurement has inactive voxel clipmaps"
+        )
+    if not window.detail:
+        return
+    if stage is None:
+        # L5 is dirty-driven. A static 300-frame window legitimately has no
+        # voxel encoder at all, unlike the per-frame L3 cluster stage.
+        return
+    if stage["p95_ms"] is None:
+        raise ReportError(
+            f"line {window.line}: detailed Advanced measurement requires "
+            f"{VOXEL_UPLOAD_UPDATE_STAGE} p95_ms"
+        )
+    if stage["frames"] > window.frames:
+        raise ReportError(
+            f"line {window.line}: {VOXEL_UPLOAD_UPDATE_STAGE} covers "
+            f"more frames ({stage['frames']}) than the {window.frames} presented frames"
+        )
+    budget = VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS[generation["lighting_preset"]]
+    if stage["p95_ms"] > budget:
+        raise ReportError(
+            f"line {window.line}: {VOXEL_UPLOAD_UPDATE_STAGE} p95_ms "
+            f"exceeds {generation['lighting_preset']} budget {budget:.2f} ms"
+        )
+
+
 def _aggregate_clustered_lighting(
     windows: Sequence[TimingWindow],
 ) -> dict[str, Any] | None:
@@ -1289,28 +1419,70 @@ def _aggregate_clustered_lighting(
     }
 
 
-def _aggregate_timing_stage(
-    windows: Sequence[TimingWindow], attribute: str, stage_name: str,
+def _aggregate_voxel_clipmaps(
+    windows: Sequence[TimingWindow],
 ) -> dict[str, Any] | None:
-    stages = [getattr(window, attribute) for window in windows]
-    present = [stage is not None for stage in stages]
+    present = [window.voxel_clipmaps is not None for window in windows]
     if not any(present):
         return None
     if not all(present):
-        raise ReportError(f"selected windows mix {stage_name} timing presence")
-    assert all(value is not None for value in stages)
-    values = [value for value in stages if value is not None]
+        raise ReportError("selected windows mix voxel-clipmaps telemetry presence")
+    voxels = [window.voxel_clipmaps for window in windows]
+    assert all(value is not None for value in voxels)
+    values = [value for value in voxels if value is not None]
+    if len({value["active"] for value in values}) != 1:
+        raise ReportError("selected windows mix voxel-clipmaps active state")
+    if len({value["output_independent"] for value in values}) != 1:
+        raise ReportError("selected windows mix voxel-clipmaps output contract")
+    return {
+        "active": values[0]["active"],
+        "output_independent": values[0]["output_independent"],
+        "window_count": len(values),
+        "counters": {
+            key: {
+                "window_minimum": min(value[key] for value in values),
+                "window_maximum": max(value[key] for value in values),
+                "last_window": values[-1][key],
+            }
+            for key in VOXEL_CLIPMAP_INTEGER_KEYS
+        },
+    }
+
+
+def _aggregate_timing_stage(
+    windows: Sequence[TimingWindow], attribute: str, stage_name: str,
+    *, allow_absent_or_zero: bool = False,
+) -> dict[str, Any] | None:
+    stages = [getattr(window, attribute) for window in windows]
+    if allow_absent_or_zero:
+        active = [
+            (window, stage) for window, stage in zip(windows, stages)
+            if stage is not None and not _timing_stage_is_zero(stage)
+        ]
+        if not active:
+            return None
+        aggregate_windows = [window for window, _ in active]
+        values = [stage for _, stage in active]
+    else:
+        aggregate_windows = list(windows)
+        present = [stage is not None for stage in stages]
+        if not any(present):
+            return None
+        if not all(present):
+            raise ReportError(f"selected windows mix {stage_name} timing presence")
+        assert all(value is not None for value in stages)
+        values = [value for value in stages if value is not None]
     result: dict[str, Any] = {
         "frames": sum(value["frames"] for value in values),
         "average_ms": _series(
-            [value["average_ms"] for value in values], windows
+            [value["average_ms"] for value in values], aggregate_windows
         ),
         "maximum_ms": max(value["maximum_ms"] for value in values),
     }
     for key in ("p50_ms", "p95_ms", "p99_ms"):
         if all(value[key] is not None for value in values):
             result[key] = _series(
-                [float(value[key]) for value in values], windows
+                [float(value[key]) for value in values], aggregate_windows
             )
         elif any(value[key] is not None for value in values):
             raise ReportError(
@@ -1324,6 +1496,17 @@ def _aggregate_light_cluster_stage(
 ) -> dict[str, Any] | None:
     return _aggregate_timing_stage(
         windows, "light_cluster_stage", LIGHT_CLUSTER_STAGE
+    )
+
+
+def _aggregate_voxel_upload_update_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "voxel_upload_update_stage",
+        VOXEL_UPLOAD_UPDATE_STAGE,
+        allow_absent_or_zero=True,
     )
 
 
@@ -1589,9 +1772,9 @@ def validate_release_contract(
 
     expected_scaling = scaler != "OFF"
     for window in windows:
-        if window.schema not in (2, 3, 4):
+        if window.schema not in (2, 3, 4, 5):
             raise ReportError(
-                f"line {window.line}: release contract requires schema v2, v3 or v4"
+                f"line {window.line}: release contract requires schema v2, v3, v4 or v5"
             )
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
@@ -1783,6 +1966,7 @@ def summarize(
     selected, selection = select_measurement(all_windows, frames, segment, scaler)
     for window in selected:
         _validate_l3_measurement(window)
+        _validate_l5_measurement(window)
     if len({window.detail for window in selected}) != 1:
         raise ReportError("selected windows mix detailed and basic instrumentation")
     if selected[0].schema >= 2:
@@ -1880,6 +2064,9 @@ def summarize(
     clustered_lighting = _aggregate_clustered_lighting(selected)
     if clustered_lighting is not None:
         result["clustered_lighting"] = clustered_lighting
+    voxel_clipmaps = _aggregate_voxel_clipmaps(selected)
+    if voxel_clipmaps is not None:
+        result["voxel_clipmaps"] = voxel_clipmaps
     cluster_stage = _aggregate_light_cluster_stage(selected)
     if cluster_stage is not None:
         result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
@@ -1888,6 +2075,9 @@ def summarize(
     )
     if shadow_stage is not None:
         result.setdefault("stages", {})[SUN_SHADOW_STAGE] = shadow_stage
+    voxel_stage = _aggregate_voxel_upload_update_stage(selected)
+    if voxel_stage is not None:
+        result.setdefault("stages", {})[VOXEL_UPLOAD_UPDATE_STAGE] = voxel_stage
     if selected[0].schema >= 2:
         result["metadata"] = selected[-1].metadata
     if renderer_generations and renderer_generations[0] is not None:
@@ -2350,8 +2540,10 @@ def _derive_release_summary(
     workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
-    if any(window.schema not in (2, 3, 4) for window in windows):
-        raise ReportError("accepted raw report must contain schema-v2/v3/v4 windows only")
+    if any(window.schema not in (2, 3, 4, 5) for window in windows):
+        raise ReportError(
+            "accepted raw report must contain schema-v2/v3/v4/v5 windows only"
+        )
     measure_windows = [window for window in windows if window.phase == "measure"]
     if not measure_windows:
         raise ReportError("accepted raw report contains no measurement windows")
@@ -3306,6 +3498,37 @@ def self_test() -> None:
             })
         return result
 
+    def voxel_clipmaps(active: bool) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "active": active,
+            "output_independent": True,
+            **{key: 0 for key in VOXEL_CLIPMAP_INTEGER_KEYS},
+        }
+        if active:
+            result.update({
+                "lighting_generation": 1,
+                "clipmap_generation": 2,
+                "world_generation": 3,
+                "frame_id": 100,
+                "resource_bytes": 65_536,
+                "heap_bytes": 49_152,
+                "heap_used_bytes": 32_768,
+                "ring_staging_bytes": 4_096,
+                "ring_private_bytes": 8_192,
+                "ring_high_water": 2,
+                "dirty_bricks_submitted": 24,
+                "dirty_bricks_completed": 22,
+                "dirty_bricks_remaining": 2,
+                "oldest_dirty_age": 1,
+                "coalesced": 4,
+                "rejected": 1,
+                "stale": 2,
+                "scroll_slabs": 6,
+                "unload_clears": 3,
+                "debug_checksum": 17,
+            })
+        return result
+
     def l3_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
         payload = line(4, index)
         payload["detail_enabled"] = detail
@@ -3363,6 +3586,22 @@ def self_test() -> None:
                 }
         else:
             payload["stages"][SUN_SHADOW_STAGE] = None
+        return payload
+
+    def l5_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
+        payload = l3_line(index, advanced=advanced, detail=detail)
+        payload["schema_version"] = 5
+        payload["voxel_clipmaps"] = voxel_clipmaps(advanced)
+        payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE] = None
+        if advanced and detail:
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE] = {
+                "frames": 300,
+                "average_ms": 0.08,
+                "p50_ms": 0.07,
+                "p95_ms": 0.12,
+                "p99_ms": 0.14,
+                "maximum_ms": 0.16,
+            }
         return payload
 
     def report_text(
@@ -3557,6 +3796,153 @@ def self_test() -> None:
             l4_ambient_only, 3000, 0, "OFF"
         )["stages"]
 
+        l5_advanced_detail = root / "l5-advanced-detail.jsonl"
+        l5_advanced_detail.write_text(
+            "\n".join(json.dumps(l5_line(i, advanced=True, detail=True))
+                      for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        l5_advanced_summary = summarize(l5_advanced_detail, 3000, 0, "OFF")
+        assert l5_advanced_summary["schema_versions"] == [5]
+        assert l5_advanced_summary["voxel_clipmaps"]["active"] is True
+        assert l5_advanced_summary["voxel_clipmaps"]["counters"][
+            "heap_used_bytes"
+        ]["window_maximum"] == 32_768
+        assert l5_advanced_summary["stages"][VOXEL_UPLOAD_UPDATE_STAGE][
+            "p95_ms"
+        ]["window_maximum"] == 0.12
+
+        l5_vanilla = root / "l5-vanilla.jsonl"
+        l5_vanilla.write_text(
+            "\n".join(json.dumps(l5_line(i, advanced=False, detail=False))
+                      for i in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        l5_vanilla_summary = summarize(l5_vanilla, 3000, 0, "OFF")
+        assert l5_vanilla_summary["voxel_clipmaps"]["active"] is False
+        assert "stages" not in l5_vanilla_summary
+
+        l5_vanilla_zero_stage = root / "l5-vanilla-zero-stage.jsonl"
+        zero_stage_payloads = [l5_line(i, advanced=False, detail=True) for i in range(10)]
+        for payload in zero_stage_payloads:
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE] = {
+                "frames": 300,
+                "average_ms": 0.0,
+                "p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "maximum_ms": 0.0,
+            }
+        l5_vanilla_zero_stage.write_text(
+            "\n".join(json.dumps(payload) for payload in zero_stage_payloads) + "\n",
+            encoding="utf-8",
+        )
+        assert "stages" not in summarize(
+            l5_vanilla_zero_stage, 3000, 0, "OFF"
+        )
+
+        l5_sparse_stage = root / "l5-sparse-stage.jsonl"
+        sparse_stage_payloads = [
+            l5_line(i, advanced=True, detail=True) for i in range(10)
+        ]
+        for payload in sparse_stage_payloads[5:]:
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE] = None
+        l5_sparse_stage.write_text(
+            "\n".join(json.dumps(payload) for payload in sparse_stage_payloads) + "\n",
+            encoding="utf-8",
+        )
+        sparse_summary = summarize(l5_sparse_stage, 3000, 0, "OFF")
+        assert sparse_summary["stages"][VOXEL_UPLOAD_UPDATE_STAGE]["frames"] == 1500
+
+        l5_missing_voxel = root / "l5-missing-voxel.jsonl"
+        missing_voxel_payload = l5_line(0, advanced=True, detail=False)
+        missing_voxel_payload.pop("voxel_clipmaps")
+        l5_missing_voxel.write_text(
+            json.dumps(missing_voxel_payload) + "\n", encoding="utf-8"
+        )
+        expect_error(
+            lambda: load_report(l5_missing_voxel),
+            "voxel_clipmaps has invalid keys",
+        )
+
+        l5_invalid_voxel = root / "l5-invalid-voxel.jsonl"
+        invalid_voxel_payload = l5_line(0, advanced=True, detail=False)
+        invalid_voxel_payload["voxel_clipmaps"]["heap_used_bytes"] = 49_153
+        l5_invalid_voxel.write_text(
+            json.dumps(invalid_voxel_payload) + "\n", encoding="utf-8"
+        )
+        expect_error(
+            lambda: load_report(l5_invalid_voxel),
+            "heap_used_bytes exceeds heap_bytes",
+        )
+
+        l5_advanced_inactive = root / "l5-advanced-inactive.jsonl"
+        advanced_inactive_payloads = [
+            l5_line(i, advanced=True, detail=False) for i in range(10)
+        ]
+        advanced_inactive_payloads[0]["voxel_clipmaps"]["active"] = False
+        l5_advanced_inactive.write_text(
+            "\n".join(json.dumps(payload) for payload in advanced_inactive_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l5_advanced_inactive, 3000, 0, "OFF"),
+            "Advanced measurement has inactive voxel clipmaps",
+        )
+
+        l5_vanilla_nonzero = root / "l5-vanilla-nonzero.jsonl"
+        vanilla_nonzero_payloads = [
+            l5_line(i, advanced=False, detail=False) for i in range(10)
+        ]
+        vanilla_nonzero_payloads[0]["voxel_clipmaps"]["resource_bytes"] = 1
+        l5_vanilla_nonzero.write_text(
+            "\n".join(json.dumps(payload) for payload in vanilla_nonzero_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l5_vanilla_nonzero, 3000, 0, "OFF"),
+            "Vanilla measurement has nonzero voxel-clipmap counter",
+        )
+
+        l5_vanilla_stage = root / "l5-vanilla-stage.jsonl"
+        vanilla_stage_payloads = [
+            l5_line(i, advanced=False, detail=True) for i in range(10)
+        ]
+        vanilla_stage_payloads[0]["stages"][VOXEL_UPLOAD_UPDATE_STAGE] = {
+            "frames": 300,
+            "average_ms": 0.01,
+            "p50_ms": 0.01,
+            "p95_ms": 0.01,
+            "p99_ms": 0.01,
+            "maximum_ms": 0.01,
+        }
+        l5_vanilla_stage.write_text(
+            "\n".join(json.dumps(payload) for payload in vanilla_stage_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l5_vanilla_stage, 3000, 0, "OFF"),
+            f"Vanilla measurement contains {VOXEL_UPLOAD_UPDATE_STAGE} work",
+        )
+
+        l5_over_budget = root / "l5-over-budget.jsonl"
+        over_budget_payloads = [l5_line(i, advanced=True, detail=True) for i in range(10)]
+        for payload in over_budget_payloads:
+            payload["renderer_generation"]["lighting_preset"] = "performance"
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE]["p95_ms"] = 0.16
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE]["p99_ms"] = 0.16
+            payload["stages"][VOXEL_UPLOAD_UPDATE_STAGE]["maximum_ms"] = 0.16
+        l5_over_budget.write_text(
+            "\n".join(json.dumps(payload) for payload in over_budget_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l5_over_budget, 3000, 0, "OFF"),
+            f"{VOXEL_UPLOAD_UPDATE_STAGE} p95_ms exceeds performance budget",
+        )
+
         l3_cap_256 = root / "l3-cluster-cap-256.jsonl"
         cap_payload = l3_line(0, advanced=True, detail=False)
         cap_payload["renderer_generation"]["advanced_lighting_work"]["light_count"] = 256
@@ -3734,6 +4120,16 @@ def self_test() -> None:
         )
         sdr_release_summary, _ = _derive_release_summary(schema4_sdr_release)
         assert sdr_release_summary["renderer_generation"]["resolved_output_mode"] == "sdr"
+
+        schema5_advanced_release = root / "schema5-advanced-release.raw.jsonl"
+        schema5_advanced_release.write_text(
+            "\n".join(json.dumps(l5_line(index, advanced=True, detail=False))
+                      for index in range(10)) + "\n",
+            encoding="utf-8",
+        )
+        schema5_release_summary, _ = _derive_release_summary(schema5_advanced_release)
+        assert schema5_release_summary["schema_versions"] == [5]
+        assert schema5_release_summary["voxel_clipmaps"]["active"] is True
 
         def make_bundle(
             stem: str,

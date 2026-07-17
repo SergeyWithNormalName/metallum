@@ -50,6 +50,10 @@ import com.metallum.client.renderer.temporal.FrameStateTracker;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.metallum.client.renderer.temporal.TemporalDiagnostics;
 import com.metallum.client.sodium.SodiumLightSidecar;
+import com.metallum.client.voxel.VoxelClipmapController;
+import com.metallum.client.voxel.VoxelClipmapLayout;
+import com.metallum.client.voxel.VoxelClipmapSnapshot;
+import com.metallum.client.voxel.VoxelUploadBatch;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
@@ -222,10 +226,17 @@ public final class MetalDevice implements GpuDeviceBackend {
     private AdvancedLightingGpuResources advancedLightingResources;
     @Nullable
     private SunShadowGpuResources sunShadowResources;
+    @Nullable
+    private VoxelOccupancyGpuResources voxelOccupancyResources;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
     private boolean sunShadowFailureLogged;
+    private boolean voxelTransientBusyLogged;
+    private long observedVoxelNativeRejections;
+    private boolean voxelFailureLogged;
+    private long voxelRetrySuppressedRendererGeneration = Long.MIN_VALUE;
+    private long voxelRetrySuppressedLightingGeneration = Long.MIN_VALUE;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -247,7 +258,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrSceneState.reset();
         MetallumMaterialState.reset();
         AdvancedLightingRuntime.reset();
+        VoxelClipmapController.global().clear();
         this.rendererConfig = RendererConfig.load();
+        VoxelClipmapController.global().configurePreset(
+                voxelPreset(this.rendererConfig.lightingPreset())
+        );
         this.hdrConfig = HdrConfig.load();
         HdrMode configuredHdrMode = this.hdrConfig.mode();
         this.edrMonitor = MetalNativeBridge.metallum_create_edr_monitor(cocoaWindow);
@@ -310,9 +325,11 @@ public final class MetalDevice implements GpuDeviceBackend {
             Metallum.LOGGER.warn("Using the built-in Metal shader source fallback; startup may be slower");
         }
         if (AdvancedLightingRuntime.isRequested()) {
+            boolean advancedNativePreflightSucceeded = false;
             try {
                 AdvancedLightingGpuResources.validateNativeAbi();
                 AdvancedLightingRuntime.reportNativeAdmission(true, "");
+                advancedNativePreflightSucceeded = true;
             } catch (RuntimeException exception) {
                 AdvancedLightingRuntime.reportNativeAdmission(
                         false,
@@ -322,6 +339,16 @@ public final class MetalDevice implements GpuDeviceBackend {
                         "Advanced Lighting native preflight failed; preserving METALLUM + VANILLA lighting",
                         exception
                 );
+            }
+            if (advancedNativePreflightSucceeded) {
+                try {
+                    VoxelOccupancyGpuResources.validateNativeAbi();
+                } catch (RuntimeException exception) {
+                    Metallum.LOGGER.warn(
+                            "L5 voxel ABI preflight failed; retaining the established L3/L4 admission",
+                            exception
+                    );
+                }
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
@@ -535,6 +562,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         HdrSceneState.reset();
         MetallumMaterialState.reset();
         AdvancedLightingRuntime.reset();
+        VoxelClipmapController.global().clear();
         if (this.hdrSceneSnapshot != null) {
             this.hdrSceneSnapshot.close();
             this.hdrSceneSnapshot = null;
@@ -563,6 +591,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (this.sunShadowResources != null) {
             this.sunShadowResources.close();
             this.sunShadowResources = null;
+        }
+        if (this.voxelOccupancyResources != null) {
+            this.voxelOccupancyResources.close();
+            this.voxelOccupancyResources = null;
         }
         this.commandEncoder.close();
         this.frameStatePackets.close();
@@ -834,6 +866,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         AdvancedLightingGpuResources nextAdvancedResources = null;
         SunShadowGpuResources nextSunShadowResources = null;
+        VoxelOccupancyGpuResources nextVoxelResources = null;
         if (resolved.lightingModel() == LightingModel.ADVANCED) {
             AdvancedLightingLayout.Budget lightingBudget = AdvancedLightingLayout.forGeneration(
                     resolved.lightingPreset(),
@@ -866,7 +899,49 @@ public final class MetalDevice implements GpuDeviceBackend {
                             shadowBudget
                     );
                 }
+                try {
+                    this.resetVoxelFailureForGeneration(
+                            Math.addExact(this.rendererGenerationId, 1L),
+                            plannedLightingGeneration
+                    );
+                    VoxelClipmapLayout.Budget voxelBudget = VoxelClipmapLayout.forPreset(
+                            voxelPreset(resolved.lightingPreset())
+                    );
+                    VoxelClipmapSnapshot voxelSnapshot = VoxelClipmapController.global().snapshot();
+                    if (this.voxelOccupancyResources != null
+                            && (voxelSnapshot == null
+                            ? this.voxelOccupancyResources.matchesGenerationAndBudget(
+                                    plannedLightingGeneration, voxelBudget)
+                            : this.voxelOccupancyResources.matches(
+                                    plannedLightingGeneration, voxelBudget, voxelSnapshot))) {
+                        nextVoxelResources = this.voxelOccupancyResources;
+                    } else {
+                        nextVoxelResources = VoxelOccupancyGpuResources.create(
+                                this.metalDeviceHandle,
+                                plannedLightingGeneration,
+                                voxelBudget,
+                                voxelSnapshot
+                        );
+                    }
+                } catch (RuntimeException exception) {
+                    if (nextVoxelResources != null
+                            && nextVoxelResources != this.voxelOccupancyResources) {
+                        nextVoxelResources.close();
+                    }
+                    nextVoxelResources = null;
+                    this.suppressVoxelRetryForGeneration(
+                            Math.addExact(this.rendererGenerationId, 1L),
+                            plannedLightingGeneration,
+                            "L5 voxel context creation failed; retaining the established L3/L4 generation",
+                            exception
+                    );
+                }
             } catch (RuntimeException exception) {
+                if (nextVoxelResources != null
+                        && nextVoxelResources != this.voxelOccupancyResources) {
+                    nextVoxelResources.close();
+                }
+                nextVoxelResources = null;
                 if (nextSunShadowResources != null
                         && nextSunShadowResources != this.sunShadowResources) {
                     nextSunShadowResources.close();
@@ -879,7 +954,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 nextAdvancedResources = null;
                 AdvancedLightingRuntime.reportNativeAdmission(
                         false,
-                        "Advanced lighting or L4 shadow generation creation failed"
+                        "Advanced lighting L3/L4/L5 generation creation failed"
                 );
                 Metallum.LOGGER.warn(
                         "Advanced Lighting generation allocation failed; preserving METALLUM + VANILLA lighting",
@@ -927,8 +1002,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                     && nextSunShadowResources != this.sunShadowResources) {
                 nextSunShadowResources.close();
             }
+            if (nextVoxelResources != null
+                    && nextVoxelResources != this.voxelOccupancyResources) {
+                nextVoxelResources.close();
+            }
             nextAdvancedResources = null;
             nextSunShadowResources = null;
+            nextVoxelResources = null;
             plan = RendererGenerationPlanner.plan(
                     this.requestedRenderContract,
                     requestedLighting,
@@ -960,6 +1040,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (resolved.lightingModel() == LightingModel.VANILLA) {
             AdvancedLightingRuntime.admitGeneration(false);
+            VoxelClipmapController.global().clear();
         }
 
         long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
@@ -982,6 +1063,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                     && nextSunShadowResources != this.sunShadowResources) {
                 nextSunShadowResources.close();
             }
+            if (nextVoxelResources != null
+                    && nextVoxelResources != this.voxelOccupancyResources) {
+                nextVoxelResources.close();
+            }
             throw new IllegalStateException("Advanced lighting generation prediction diverged");
         }
         long nextOutputGeneration = this.outputGenerationId;
@@ -1003,8 +1088,14 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.activeRendererResourceBytes = resourceBytes;
         AdvancedLightingGpuResources previousAdvancedResources = this.advancedLightingResources;
         SunShadowGpuResources previousSunShadowResources = this.sunShadowResources;
+        VoxelOccupancyGpuResources previousVoxelResources = this.voxelOccupancyResources;
         this.advancedLightingResources = nextAdvancedResources;
         this.sunShadowResources = nextSunShadowResources;
+        this.voxelOccupancyResources = nextVoxelResources;
+        this.resetVoxelFailureForGeneration(nextGeneration, nextLightingGeneration);
+        if (previousVoxelResources != nextVoxelResources) {
+            this.observedVoxelNativeRejections = 0L;
+        }
         this.advancedLightingFrameReady = false;
         this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
         if (previousAdvancedResources != null
@@ -1014,6 +1105,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (previousSunShadowResources != null
                 && previousSunShadowResources != nextSunShadowResources) {
             previousSunShadowResources.close();
+        }
+        if (previousVoxelResources != null
+                && previousVoxelResources != nextVoxelResources) {
+            previousVoxelResources.close();
         }
         this.activeRenderExtent = new FrameState.Extent(
                 dimensions.renderWidth(), dimensions.renderHeight()
@@ -1101,17 +1196,23 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             }
         }
+        if (generation.lightingModel() == LightingModel.ADVANCED
+                && AdvancedLightingRuntime.isActive()) {
+            this.detectAsyncVoxelFailure();
+            this.refreshVoxelOccupancyResources(generation);
+        }
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         this.advancedLightingFrameReady = false;
         this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
         AdvancedLightingGpuResources lightingResources = this.advancedLightingResources;
         SunShadowGpuResources shadowResources = this.sunShadowResources;
+        VoxelOccupancyGpuResources voxelResources = this.voxelOccupancyResources;
+        VoxelClipmapController voxelController = VoxelClipmapController.global();
         LightFrameSnapshot lightSnapshot = null;
         FrameState.AdvancedLightingWork advancedWork = FrameState.AdvancedLightingWork.NONE;
         if (generation.lightingModel() == LightingModel.ADVANCED
                 && AdvancedLightingRuntime.isActive()
-                && lightingResources != null
-                && shadowResources != null) {
+                && retainsL3L4AfterVoxelFailure(lightingResources != null, shadowResources != null)) {
             lightSnapshot = AdvancedLightRegistry.global().snapshotForFrameIfHealthy(
                     DirectLightFrustum.from(capture),
                     lightingResources.budget().maxLights(),
@@ -1190,9 +1291,34 @@ public final class MetalDevice implements GpuDeviceBackend {
                 candidate,
                 TemporalResetEvents.consume()
         );
+        VoxelUploadBatch voxelBatch = null;
+        VoxelOccupancyGpuResources.FrameUpload voxelUpload = null;
+        if (lightSnapshot != null && voxelResources != null) {
+            voxelBatch = voxelController.leaseUploadBatch(published.frameId());
+            if (voxelBatch != null) {
+                try {
+                    voxelUpload = voxelResources.encode(voxelBatch, published);
+                    published = published.withAdvancedLightingWork(withVoxelWork(
+                            published.advancedLightingWork(),
+                            voxelUpload.patchCount(),
+                            voxelUpload.uploadBytes()
+                    ));
+                } catch (RuntimeException exception) {
+                    voxelController.retryUploadBatch(voxelBatch.batchId());
+                    voxelBatch = null;
+                    Metallum.LOGGER.warn(
+                            "L5 voxel batch became stale before native submission; retaining L3/L4",
+                            exception
+                    );
+                }
+            }
+        }
         MemorySegment packet = this.frameStatePackets.encode(published);
         int status = MetalNativeBridge.metallum_set_frame_state_v3(packet);
         if (status != 1) {
+            if (voxelBatch != null) {
+                voxelController.retryUploadBatch(voxelBatch.batchId());
+            }
             throw new IllegalStateException("Native FrameState v3 admission failed with status " + status);
         }
         if (lightSnapshot != null && lightingResources != null) {
@@ -1214,6 +1340,54 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             }
             if (lightingStatus == AdvancedLightingGpuResources.STATUS_OK) {
+                if (voxelBatch != null && voxelUpload != null && voxelResources != null) {
+                    int voxelStatus;
+                    try {
+                        voxelStatus = this.commandEncoder.encodeVoxelOccupancy(
+                                voxelResources,
+                                voxelUpload
+                        );
+                    } catch (RuntimeException exception) {
+                        voxelStatus = Integer.MIN_VALUE;
+                        Metallum.LOGGER.warn(
+                                "L5 voxel upload failed; retaining the established L3/L4 frame",
+                                exception
+                        );
+                    }
+                    if (voxelStatus == VoxelOccupancyGpuResources.STATUS_OK) {
+                        voxelController.completeUploadBatch(voxelBatch.batchId());
+                        voxelBatch = null;
+                        this.acknowledgeVoxelNativeRejection(voxelResources);
+                        this.voxelTransientBusyLogged = false;
+                    } else {
+                        voxelController.retryUploadBatch(voxelBatch.batchId());
+                        voxelBatch = null;
+                        published = published.withAdvancedLightingWork(advancedWork);
+                        int voxelFallbackStatus = MetalNativeBridge.metallum_set_frame_state_v3(
+                                this.frameStatePackets.encode(published)
+                        );
+                        if (voxelFallbackStatus != 1) {
+                            throw new IllegalStateException(
+                                    "Native L5 fallback FrameState failed with status "
+                                            + voxelFallbackStatus
+                            );
+                        }
+                        if (voxelStatus == VoxelOccupancyGpuResources.STATUS_RING_SLOT_BUSY) {
+                            this.acknowledgeVoxelNativeRejection(voxelResources);
+                            if (!this.voxelTransientBusyLogged) {
+                                this.voxelTransientBusyLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "L5 voxel upload ring was busy; its batch was requeued without disabling L3/L4"
+                                );
+                            }
+                        } else {
+                            this.disableVoxelOccupancy(
+                                    "native L5 voxel upload failed with status " + voxelStatus,
+                                    null
+                            );
+                        }
+                    }
+                }
                 try {
                     if (shadowResources == null) {
                         throw new IllegalStateException("L4 shadow resources disappeared");
@@ -1233,6 +1407,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
             }
             if (lightingStatus != AdvancedLightingGpuResources.STATUS_OK) {
+                if (voxelBatch != null) {
+                    voxelController.retryUploadBatch(voxelBatch.batchId());
+                    voxelBatch = null;
+                }
                 this.advancedLightingFrameReady = false;
                 this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
                 FrameState fallback = published.withAdvancedLightingWork(
@@ -2209,6 +2387,176 @@ public final class MetalDevice implements GpuDeviceBackend {
         return AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
     }
 
+    static VoxelClipmapLayout.Preset voxelPreset(final LightingPreset preset) {
+        return switch (Objects.requireNonNull(preset, "preset")) {
+            case PERFORMANCE -> VoxelClipmapLayout.Preset.PERFORMANCE;
+            case BALANCED -> VoxelClipmapLayout.Preset.BALANCED;
+            case ULTRA -> VoxelClipmapLayout.Preset.ULTRA;
+        };
+    }
+
+    private boolean refreshVoxelOccupancyResources(
+            final RendererGenerationConfig generation
+    ) {
+        if (isVoxelRetrySuppressed(
+                this.voxelRetrySuppressedRendererGeneration,
+                this.voxelRetrySuppressedLightingGeneration,
+                this.rendererGenerationId,
+                this.lightingGenerationId
+        )) {
+            return false;
+        }
+        VoxelClipmapLayout.Budget budget = VoxelClipmapLayout.forPreset(
+                voxelPreset(generation.lightingPreset())
+        );
+        VoxelClipmapSnapshot snapshot = VoxelClipmapController.global().snapshot();
+        VoxelOccupancyGpuResources current = this.voxelOccupancyResources;
+        if (current != null && (snapshot == null
+                ? current.matchesGenerationAndBudget(this.lightingGenerationId, budget)
+                : current.matches(this.lightingGenerationId, budget, snapshot))) {
+            return true;
+        }
+        try {
+            VoxelOccupancyGpuResources replacement = VoxelOccupancyGpuResources.create(
+                    this.metalDeviceHandle,
+                    this.lightingGenerationId,
+                    budget,
+                    snapshot
+            );
+            this.voxelOccupancyResources = replacement;
+            this.observedVoxelNativeRejections = 0L;
+            this.voxelFailureLogged = false;
+            this.voxelRetrySuppressedRendererGeneration = Long.MIN_VALUE;
+            this.voxelRetrySuppressedLightingGeneration = Long.MIN_VALUE;
+            if (current != null) {
+                current.close();
+            }
+            return true;
+        } catch (RuntimeException exception) {
+            this.suppressVoxelRetryForGeneration(
+                    this.rendererGenerationId,
+                    this.lightingGenerationId,
+                    "L5 voxel context refresh failed; retaining the established L3/L4 generation",
+                    exception
+            );
+            if (current != null && current == this.voxelOccupancyResources) {
+                this.voxelOccupancyResources = null;
+                current.close();
+            }
+            return false;
+        }
+    }
+
+    /** L5 has no consumer before L6, so its failure must not revoke an established L3/L4 frame. */
+    static boolean retainsL3L4AfterVoxelFailure(
+            final boolean lightingResourcesReady,
+            final boolean shadowResourcesReady
+    ) {
+        return lightingResourcesReady && shadowResourcesReady;
+    }
+
+    private void detectAsyncVoxelFailure() {
+        VoxelOccupancyGpuResources current = this.voxelOccupancyResources;
+        if (current == null) {
+            return;
+        }
+        try {
+            VoxelOccupancyGpuResources.CompletedStats stats = current.readLastCompletedStats();
+            if (hasUnacknowledgedVoxelNativeRejection(
+                    this.observedVoxelNativeRejections, stats.rejected())) {
+                this.disableVoxelOccupancy("asynchronous L5 voxel command failed", null);
+                return;
+            }
+            this.observedVoxelNativeRejections = stats.rejected();
+        } catch (RuntimeException exception) {
+            this.disableVoxelOccupancy("L5 voxel health query failed", exception);
+        }
+    }
+
+    static boolean hasUnacknowledgedVoxelNativeRejection(
+            final long observedRejections,
+            final long currentRejections
+    ) {
+        if (observedRejections < 0L || currentRejections < 0L) {
+            throw new IllegalArgumentException("Native L5 rejection counters must be non-negative");
+        }
+        return currentRejections > observedRejections;
+    }
+
+    /** A failed L5 allocation gets one retry per renderer/lighting generation, never per frame. */
+    static boolean isVoxelRetrySuppressed(
+            final long suppressedRendererGeneration,
+            final long suppressedLightingGeneration,
+            final long rendererGeneration,
+            final long lightingGeneration
+    ) {
+        return suppressedRendererGeneration == rendererGeneration
+                && suppressedLightingGeneration == lightingGeneration;
+    }
+
+    private void acknowledgeVoxelNativeRejection(final VoxelOccupancyGpuResources resources) {
+        try {
+            this.observedVoxelNativeRejections = resources.readLastCompletedStats().rejected();
+        } catch (RuntimeException exception) {
+            this.disableVoxelOccupancy("L5 voxel rejection-baseline query failed", exception);
+        }
+    }
+
+    private void disableVoxelOccupancy(final String reason, @Nullable final RuntimeException failure) {
+        VoxelOccupancyGpuResources stale = this.voxelOccupancyResources;
+        this.voxelOccupancyResources = null;
+        this.observedVoxelNativeRejections = 0L;
+        this.voxelTransientBusyLogged = false;
+        VoxelClipmapController.global().recoverAfterGpuFailure();
+        if (stale != null) {
+            stale.close();
+        }
+        if (!this.voxelFailureLogged) {
+            this.voxelFailureLogged = true;
+            if (failure == null) {
+                Metallum.LOGGER.warn("{}; disabling only L5 and retaining L3/L4", reason);
+            } else {
+                Metallum.LOGGER.warn("{}; disabling only L5 and retaining L3/L4", reason, failure);
+            }
+        }
+    }
+
+    private void suppressVoxelRetryForGeneration(
+            final long rendererGeneration,
+            final long lightingGeneration,
+            final String reason,
+            @Nullable final RuntimeException failure
+    ) {
+        this.voxelRetrySuppressedRendererGeneration = rendererGeneration;
+        this.voxelRetrySuppressedLightingGeneration = lightingGeneration;
+        if (!this.voxelFailureLogged) {
+            this.voxelFailureLogged = true;
+            if (failure == null) {
+                Metallum.LOGGER.warn("{}; L5 retry is latched until the next generation", reason);
+            } else {
+                Metallum.LOGGER.warn(
+                        "{}; L5 retry is latched until the next generation", reason, failure
+                );
+            }
+        }
+    }
+
+    private void resetVoxelFailureForGeneration(
+            final long rendererGeneration,
+            final long lightingGeneration
+    ) {
+        if (!isVoxelRetrySuppressed(
+                this.voxelRetrySuppressedRendererGeneration,
+                this.voxelRetrySuppressedLightingGeneration,
+                rendererGeneration,
+                lightingGeneration
+        )) {
+            this.voxelRetrySuppressedRendererGeneration = Long.MIN_VALUE;
+            this.voxelRetrySuppressedLightingGeneration = Long.MIN_VALUE;
+            this.voxelFailureLogged = false;
+        }
+    }
+
     static FrameState.AdvancedLightingWork advancedLightingWork(final int lightCount) {
         return advancedLightingWork(lightCount, 0, false);
     }
@@ -2245,6 +2593,31 @@ public final class MetalDevice implements GpuDeviceBackend {
                 AdvancedLightingGpuResources.PRODUCTION_WORK_QUEUE_COUNT,
                 AdvancedLightingGpuResources.productionDispatchCount(lightCount),
                 uploadBytes
+        );
+    }
+
+    static FrameState.AdvancedLightingWork withVoxelWork(
+            final FrameState.AdvancedLightingWork base,
+            final int patchCount,
+            final long uploadBytes
+    ) {
+        Objects.requireNonNull(base, "base");
+        if (patchCount <= 0 || uploadBytes <= 0L || base.isEmpty()) {
+            throw new IllegalArgumentException("Invalid L5 per-frame work declaration");
+        }
+        return new FrameState.AdvancedLightingWork(
+                base.lightCount(),
+                Math.addExact(base.passCount(), VoxelOccupancyGpuResources.PRODUCTION_PASS_COUNT),
+                Math.addExact(
+                        base.encoderCount(),
+                        VoxelOccupancyGpuResources.PRODUCTION_ENCODER_COUNT
+                ),
+                Math.addExact(base.psoCount(), VoxelOccupancyGpuResources.RESIDENT_PSO_COUNT),
+                Math.addExact(
+                        base.workQueueCount(), VoxelOccupancyGpuResources.PRODUCTION_WORK_QUEUE_COUNT
+                ),
+                Math.addExact(base.dispatchCount(), patchCount),
+                Math.addExact(base.uploadBytes(), uploadBytes)
         );
     }
 

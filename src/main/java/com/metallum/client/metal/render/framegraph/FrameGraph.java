@@ -66,6 +66,7 @@ public final class FrameGraph {
         REACTIVE_MASK,
         SHADOW_DATA,
         CLUSTER_DATA,
+        VOXEL_DATA,
         LIGHTING_HISTORY,
         TEMPORAL_OUTPUT,
         INTERPOLATED_OUTPUT,

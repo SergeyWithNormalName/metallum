@@ -9,6 +9,7 @@ import com.metallum.client.lighting.BoundedDynamicLightCollector;
 import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.MinecraftLightPolicy;
+import com.metallum.client.voxel.VoxelClipmapController;
 import net.minecraft.client.Camera;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.multiplayer.ClientLevel;
@@ -51,6 +52,7 @@ abstract class LevelExtractorAdvancedLightMixin {
     ) {
         if (this.level != null && this.level != next) {
             AdvancedLightRegistry.global().closeWorld(this.level);
+            VoxelClipmapController.global().closeWorld(this.level);
         }
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
@@ -68,6 +70,7 @@ abstract class LevelExtractorAdvancedLightMixin {
             AdvancedLightRegistry registry = AdvancedLightRegistry.global();
             registry.observeHook(AdvancedLightRegistry.Hook.WORLD_LIFECYCLE);
             registry.openWorld(next, metallum$dimensionId(next));
+            VoxelClipmapController.global().openWorld(next, metallum$dimensionId(next));
         }
     }
 
@@ -86,8 +89,10 @@ abstract class LevelExtractorAdvancedLightMixin {
             AdvancedLightRegistry registry = AdvancedLightRegistry.global();
             registry.observeHook(AdvancedLightRegistry.Hook.RESOURCE_RELOAD);
             registry.reloadWorld(this.level, metallum$dimensionId(this.level));
+            VoxelClipmapController.global().reloadWorld(this.level, metallum$dimensionId(this.level));
         } else {
             AdvancedLightRegistry.global().closeWorld(this.level);
+            VoxelClipmapController.global().closeWorld(this.level);
         }
     }
 

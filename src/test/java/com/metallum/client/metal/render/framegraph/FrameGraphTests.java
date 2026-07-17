@@ -45,7 +45,7 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 10 && graph.passes().size() == 5,
+        require(graph.resources().size() == 16 && graph.passes().size() == 7,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
@@ -53,7 +53,10 @@ public final class FrameGraphTests {
                                 "cluster_membership_scratch", "cluster_compact_headers",
                                 "cluster_compact_indices",
                                 "cluster_statistics", "environment_shadow_params_ring",
-                                "sun_shadow_cascades", "scene_radiance"
+                                "sun_shadow_cascades", "scene_radiance",
+                                "voxel_upload_ring", "voxel_private_patch_ring",
+                                "voxel_indirect_args", "voxel_occupancy",
+                                "voxel_transmittance_material", "voxel_brick_tags"
                         )),
                 "Advanced lighting resources do not describe the compact index and shadow path");
         for (int index = 0; index < graph.resources().size(); index++) {
@@ -64,8 +67,8 @@ public final class FrameGraphTests {
                 .map(pass -> pass.id().name())
                 .toList();
         require(passNames.equals(List.of(
-                        "light_upload", "cluster_prepare", "cluster_build", "sun_shadow",
-                        "direct_lighting")),
+                        "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",
+                        "voxel_update", "sun_shadow", "direct_lighting")),
                 "Advanced lighting pass order changed");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
@@ -79,11 +82,24 @@ public final class FrameGraphTests {
                     "Advanced lighting pass is coupled to the wrong generation axes");
         }
         FrameGraph.PassDesc build = graph.passes().get(2);
-        FrameGraph.PassDesc shadow = graph.passes().get(3);
+        FrameGraph.PassDesc voxelUpload = graph.passes().get(3);
+        FrameGraph.PassDesc voxelUpdate = graph.passes().get(4);
+        FrameGraph.PassDesc shadow = graph.passes().get(5);
         require(build.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_membership_scratch")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
                 "Cluster build does not publish membership scratch");
+        require(voxelUpdate.dependencies().equals(List.of(voxelUpload.id()))
+                        && voxelUpdate.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_occupancy")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && voxelUpdate.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_transmittance_material")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && voxelUpdate.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_brick_tags")
+                                && access.kind() == FrameGraph.AccessKind.WRITE),
+                "Voxel update does not consume its private upload and publish all L5 fields");
         require(shadow.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("environment_shadow_params_ring")
                                 && access.kind() == FrameGraph.AccessKind.READ)
@@ -234,6 +250,7 @@ public final class FrameGraphTests {
                         FrameGraph.ResourceRole.REACTIVE_MASK,
                         FrameGraph.ResourceRole.SHADOW_DATA,
                         FrameGraph.ResourceRole.CLUSTER_DATA,
+                        FrameGraph.ResourceRole.VOXEL_DATA,
                         FrameGraph.ResourceRole.LIGHTING_HISTORY,
                         FrameGraph.ResourceRole.TEMPORAL_OUTPUT,
                         FrameGraph.ResourceRole.INTERPOLATED_OUTPUT,

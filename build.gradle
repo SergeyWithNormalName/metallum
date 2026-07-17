@@ -25,7 +25,8 @@ def macMetalSources = [
 	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal"),
 	SodiumLightPatch: layout.projectDirectory.file("src/main/metal/MetallumSodiumLightPatch.metal"),
 	TemporalDiagnostics: layout.projectDirectory.file("src/main/metal/MetallumTemporalDiagnostics.metal"),
-	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal")
+	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
+	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -177,6 +178,27 @@ tasks.register("shadowValueValidation", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.SunShadowContractTests")
 }
 
+tasks.register("voxelOccupancyUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates L5 sub-block masks, optical classes, toroidal scroll and bounded dirty queues"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.voxel.VoxelOccupancyTests")
+}
+
+tasks.register("voxelOccupancyBridgeValidation", JavaExec) {
+	group = "verification"
+	description = "Validates the production Java/FFM/native/Metal L5 upload bridge"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.VoxelOccupancyBridgeValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
 tasks.register("metalRuntimeUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free Metal runtime lifecycle tests"
@@ -291,6 +313,7 @@ def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-test
 def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-tests/SodiumLightLegacyPatchValidation")
 def metal4LifecycleValidationBinary = layout.buildDirectory.file("native-tests/Metal4LifecycleValidation")
 def lightClusterValidationBinary = layout.buildDirectory.file("native-tests/LightClusterValidation")
+def voxelOccupancyValidationBinary = layout.buildDirectory.file("native-tests/VoxelOccupancyValidation")
 def metal4ValidationSupported = {
 	isAppleSiliconMac && (macOsSdkVersion.get().tokenize('.')[0] as int) >= 26
 }
@@ -337,6 +360,51 @@ tasks.register("lightClusterValidation", Exec) {
 	environment "MTL_SHADER_VALIDATION", "1"
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 	commandLine lightClusterValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
+
+tasks.register("compileVoxelOccupancyValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native L5 voxel ABI, toroidal update and ring harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/VoxelOccupancyValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(voxelOccupancyValidationBinary)
+
+	doFirst {
+		voxelOccupancyValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", voxelOccupancyValidationBinary.get().asFile.absolutePath,
+		"src/test/native/VoxelOccupancyValidation.swift"
+}
+
+tasks.register("voxelOccupancyValidation", Exec) {
+	group = "verification"
+	description = "Validates L5 private heap buffers, exact patches, toroidal tags and transient ring behavior"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileVoxelOccupancyValidation")
+	)
+
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file("src/main/metal/MetallumVoxelOccupancy.metal")
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine voxelOccupancyValidationBinary.get().asFile.absolutePath,
 		macNativeLibrary.get().asFile.absolutePath
 }
 
@@ -846,6 +914,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("shadowValueValidation"))
+	dependsOn(tasks.named("voxelOccupancyUnitTest"))
+	dependsOn(tasks.named("voxelOccupancyBridgeValidation"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
@@ -872,6 +942,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("gpuTimingValidation"))
 	dependsOn(tasks.named("metal4LifecycleValidation"))
 	dependsOn(tasks.named("lightClusterValidation"))
+	dependsOn(tasks.named("voxelOccupancyValidation"))
 }
 
 java {

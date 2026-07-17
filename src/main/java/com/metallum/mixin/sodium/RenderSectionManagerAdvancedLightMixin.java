@@ -5,6 +5,12 @@ import com.metallum.client.lighting.AdvancedLightResidentSlot;
 import com.metallum.client.lighting.AdvancedLightTaskSlot;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionTask;
+import com.metallum.client.voxel.VoxelClipmapController;
+import com.metallum.client.voxel.VoxelEmptyTaskSlot;
+import com.metallum.client.voxel.VoxelResidentSlot;
+import com.metallum.client.voxel.VoxelSectionTask;
+import com.metallum.client.voxel.VoxelTaskSlot;
+import org.joml.Vector3dc;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask;
@@ -45,6 +51,7 @@ abstract class RenderSectionManagerAdvancedLightMixin {
             AdvancedLightRegistry registry = AdvancedLightRegistry.global();
             registry.observeHook(AdvancedLightRegistry.Hook.WORLD_LIFECYCLE);
             registry.openWorld(level, metallum$dimensionId(level));
+            VoxelClipmapController.global().openWorld(level, metallum$dimensionId(level));
         }
     }
 
@@ -59,21 +66,40 @@ abstract class RenderSectionManagerAdvancedLightMixin {
             final CallbackInfoReturnable<ChunkBuilderMeshingTask> cir
     ) {
         ChunkBuilderMeshingTask task = cir.getReturnValue();
-        if (task == null || !AdvancedLightingRuntime.shouldCollect()) {
+        if (!AdvancedLightingRuntime.shouldCollect()) {
             return;
         }
-        AdvancedLightRegistry registry = AdvancedLightRegistry.global();
-        registry.observeHook(AdvancedLightRegistry.Hook.STATIC_TASK);
-        LightSectionTask lightTask = registry.beginSectionTask(
+        if (task != null) {
+            AdvancedLightRegistry registry = AdvancedLightRegistry.global();
+            registry.observeHook(AdvancedLightRegistry.Hook.STATIC_TASK);
+            LightSectionTask lightTask = registry.beginSectionTask(
+                    this.level,
+                    metallum$dimensionId(this.level),
+                    section.getPosition().asLong()
+            );
+            ((AdvancedLightResidentSlot) section).metallum$bindAdvancedLightSection(
+                    this.level,
+                    section.getPosition().asLong()
+            );
+            ((AdvancedLightTaskSlot) task).metallum$setAdvancedLightTask(lightTask);
+        }
+        VoxelSectionTask voxelTask = VoxelClipmapController.global().beginSectionTask(
                 this.level,
                 metallum$dimensionId(this.level),
                 section.getPosition().asLong()
         );
-        ((AdvancedLightResidentSlot) section).metallum$bindAdvancedLightSection(
+        ((VoxelResidentSlot) section).metallum$bindVoxelSection(
                 this.level,
                 section.getPosition().asLong()
         );
-        ((AdvancedLightTaskSlot) task).metallum$setAdvancedLightTask(lightTask);
+        if (task != null) {
+            ((VoxelTaskSlot) task).metallum$setVoxelSectionTask(voxelTask);
+        } else {
+            // LevelSlice.prepare() returns null for an authoritative empty central section. Sodium
+            // immediately constructs BuiltSectionInfo.EMPTY without a worker task; retain this
+            // exact revision/owner stamp until that output is created.
+            ((VoxelEmptyTaskSlot) section).metallum$setEmptyVoxelSectionTask(voxelTask);
+        }
     }
 
     @Inject(method = "onSectionRemoved(III)V", at = @At("HEAD"))
@@ -96,11 +122,28 @@ abstract class RenderSectionManagerAdvancedLightMixin {
                 sectionKey,
                 ownerToken
         );
+        long voxelOwner = section instanceof VoxelResidentSlot resident
+                ? resident.metallum$getVoxelOwnerToken()
+                : 0L;
+        VoxelClipmapController.global().removeSectionIfOwner(this.level, sectionKey, voxelOwner);
     }
 
     @Inject(method = "destroy()V", at = @At("HEAD"))
     private void metallum$closeAdvancedLightWorld(final CallbackInfo ci) {
         AdvancedLightRegistry.global().closeWorld(this.level);
+        VoxelClipmapController.global().closeWorld(this.level);
+    }
+
+    @Inject(method = "prepareFrame(Lorg/joml/Vector3dc;)V", at = @At("HEAD"))
+    private void metallum$scrollVoxelClipmap(final Vector3dc camera, final CallbackInfo ci) {
+        if (AdvancedLightingRuntime.shouldCollect()) {
+            VoxelClipmapController.global().updateCamera(
+                    this.level,
+                    camera.x(),
+                    camera.y(),
+                    camera.z()
+            );
+        }
     }
 
     private static String metallum$dimensionId(final ClientLevel level) {

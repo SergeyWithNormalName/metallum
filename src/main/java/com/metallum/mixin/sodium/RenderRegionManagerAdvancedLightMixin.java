@@ -5,6 +5,10 @@ import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightResidentSlot;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionCandidate;
+import com.metallum.client.voxel.VoxelCandidateSlot;
+import com.metallum.client.voxel.VoxelClipmapController;
+import com.metallum.client.voxel.VoxelResidentSlot;
+import com.metallum.client.voxel.VoxelSectionCandidate;
 import net.caffeinemc.mods.sodium.client.render.chunk.UniformBufferManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.BuilderTaskOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
@@ -60,6 +64,34 @@ abstract class RenderRegionManagerAdvancedLightMixin {
                 registry.discardCandidate(candidate);
                 registry.failClosed("accepted light publication failed", failure);
                 // Sodium's successful geometry upload remains valid; lighting falls back atomically.
+            }
+        }
+        // Keep L5 publication independent from L3 fail-closed handling. Geometry already made it
+        // through Sodium's upload path; a stale/busy voxel producer can only drop/retry its own
+        // patch, never invalidate the established direct-light renderer.
+        VoxelClipmapController voxelController = VoxelClipmapController.global();
+        for (BuilderTaskOutput result : acceptedResults) {
+            if (!(result instanceof ChunkBuildOutput output)) {
+                continue;
+            }
+            VoxelSectionCandidate candidate = null;
+            try {
+                candidate = ((VoxelCandidateSlot) output).metallum$takeVoxelSectionCandidate();
+                if (candidate == null) {
+                    continue;
+                }
+                if (output.section.isDisposed()) {
+                    voxelController.discardCandidate(candidate);
+                    continue;
+                }
+                if (voxelController.publishAccepted(candidate)) {
+                    ((VoxelResidentSlot) output.section).metallum$setVoxelOwnerToken(
+                            candidate.task().ownerToken()
+                    );
+                }
+                candidate = null;
+            } catch (RuntimeException ignored) {
+                voxelController.discardCandidate(candidate);
             }
         }
     }

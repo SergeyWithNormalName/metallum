@@ -17,7 +17,7 @@ public record RendererGenerationManifest(
         List<WorkQueue> workQueues,
         String admissionBlocker
 ) {
-    public static final int CURRENT_VERSION = 5;
+    public static final int CURRENT_VERSION = 6;
 
     /** Storage and transfer contract of the external main-color target. */
     public enum SceneStorageContract {

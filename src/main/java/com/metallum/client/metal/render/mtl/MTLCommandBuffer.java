@@ -327,6 +327,30 @@ public final class MTLCommandBuffer {
         );
     }
 
+    public int encodeVoxelOccupancy(
+            final MemorySegment context,
+            final MemorySegment packet
+    ) {
+        return MetalNativeBridge.metallum_voxel_upload_apply_v1(
+                context,
+                handle(),
+                packet
+        );
+    }
+
+    public int encodeVoxelDebugChecksum(
+            final MemorySegment context,
+            final int level,
+            final int slot
+    ) {
+        return MetalNativeBridge.metallum_voxel_debug_checksum_v1(
+                context,
+                handle(),
+                level,
+                slot
+        );
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

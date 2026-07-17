@@ -71,6 +71,7 @@ public final class MetalRuntimeTests {
         testMaterialWorldPassGate();
         testAdvancedLightingAdmissionLimits();
         testAdvancedLightingWorkDeclaration();
+        testVoxelFailureIsolationPolicy();
         testAdvancedLightingPerSubmitLatch();
         testMojangLogoFp16BlendCompatibility();
         testHdrSceneColorRouting();
@@ -218,8 +219,44 @@ public final class MetalRuntimeTests {
                         + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE
                         + com.metallum.client.renderer.SunShadowLayout.PARAMS_BYTES,
                 "L4 frame does not declare its environment packet and cascade passes");
+        FrameState.AdvancedLightingWork voxel = MetalDevice.withVoxelWork(populated, 3, 4096L);
+        require(voxel.lightCount() == 2
+                        && voxel.passCount() == 6
+                        && voxel.encoderCount() == 4
+                        && voxel.psoCount() == 11
+                        && voxel.workQueueCount() == 4
+                        && voxel.dispatchCount() == 9
+                        && voxel.uploadBytes() == populated.uploadBytes() + 4096L,
+                "L5 frame does not describe its bounded upload and update work");
         expectIllegalArgument(() -> MetalDevice.advancedLightingWork(-1));
         expectIllegalArgument(() -> MetalDevice.advancedLightingWork(0, 1, true));
+        expectIllegalArgument(() -> MetalDevice.withVoxelWork(populated, 0, 4096L));
+    }
+
+    private static void testVoxelFailureIsolationPolicy() {
+        AdvancedLightingRuntime.reset();
+        AdvancedLightingRuntime.configureRequested(true);
+        AdvancedLightingRuntime.reportNativeAdmission(true, "");
+        AdvancedLightingRuntime.reportShaderAdmission(true, "");
+        AdvancedLightingRuntime.admitGeneration(true);
+
+        require(MetalDevice.retainsL3L4AfterVoxelFailure(true, true)
+                        && AdvancedLightingRuntime.isActive(),
+                "An L5-only failure revoked the established L3/L4 admission");
+        require(!MetalDevice.retainsL3L4AfterVoxelFailure(false, true)
+                        && !MetalDevice.retainsL3L4AfterVoxelFailure(true, false),
+                "L5 isolation masked a missing L3 or L4 native resource");
+        require(!MetalDevice.hasUnacknowledgedVoxelNativeRejection(8L, 8L)
+                        && MetalDevice.hasUnacknowledgedVoxelNativeRejection(8L, 9L),
+                "A successful L5 queue rejected-delta was mistaken for an async GPU failure");
+        expectIllegalArgument(() -> MetalDevice.hasUnacknowledgedVoxelNativeRejection(-1L, 0L));
+        require(MetalDevice.isVoxelRetrySuppressed(12L, 4L, 12L, 4L)
+                        && !MetalDevice.isVoxelRetrySuppressed(12L, 4L, 13L, 4L)
+                        && !MetalDevice.isVoxelRetrySuppressed(12L, 4L, 12L, 5L)
+                        && !MetalDevice.isVoxelRetrySuppressed(
+                        Long.MIN_VALUE, Long.MIN_VALUE, 12L, 4L),
+                "L5 retry latch was not scoped to exactly one renderer/lighting generation");
+        AdvancedLightingRuntime.reset();
     }
 
     private static void testAutomaticMaterialContractAndCompatibilityOverride() {
@@ -422,7 +459,8 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.PRESENT,
                 MetalGpuTimingStage.ACTUAL_HDR_DISPLAY,
                 MetalGpuTimingStage.LIGHT_UPLOAD_CLUSTER_BUILD,
-                MetalGpuTimingStage.SUN_SHADOW
+                MetalGpuTimingStage.SUN_SHADOW,
+                MetalGpuTimingStage.VOXEL_UPDATE
         };
         require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
                 "GPU timing stage count does not match the native ABI");

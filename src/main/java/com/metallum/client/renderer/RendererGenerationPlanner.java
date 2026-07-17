@@ -1,5 +1,7 @@
 package com.metallum.client.renderer;
 
+import com.metallum.client.voxel.VoxelClipmapLayout;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -443,16 +445,45 @@ public final class RendererGenerationPlanner {
                     shadowBudget.shadowTextureBytes(),
                     false
             ));
+            VoxelClipmapLayout.Budget voxelBudget = VoxelClipmapLayout.forPreset(
+                    switch (config.lightingPreset()) {
+                        case PERFORMANCE -> VoxelClipmapLayout.Preset.PERFORMANCE;
+                        case BALANCED -> VoxelClipmapLayout.Preset.BALANCED;
+                        case ULTRA -> VoxelClipmapLayout.Preset.ULTRA;
+                    }
+            );
+            resources.add(resource(
+                    "voxel_upload_ring", domain,
+                    voxelBudget.sharedUploadRingBytes(), false));
+            resources.add(resource(
+                    "voxel_private_patch_ring", domain,
+                    voxelBudget.privatePatchRingBytes(), false));
+            resources.add(resource(
+                    "voxel_indirect_args", domain,
+                    voxelBudget.indirectParamsDebugOverheadBytes(), false));
+            resources.add(resource(
+                    "voxel_occupancy", domain, voxelBudget.occupancyBytes(), false));
+            resources.add(resource(
+                    "voxel_transmittance_material", domain,
+                    voxelBudget.opticalBytes(), false));
+            resources.add(resource(
+                    "voxel_brick_tags", domain, voxelBudget.metadataBytes(), false));
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));
             passes.add(pass("cluster_build", domain));
+            passes.add(pass("voxel_upload", domain));
+            passes.add(pass("voxel_update", domain));
             passes.add(pass("sun_shadow", domain));
             passes.add(pass("direct_lighting", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "light_upload_blit_encoder", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "cluster_build_compute_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "voxel_upload_blit_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "voxel_update_compute_encoder", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "sun_shadow_render_encoder", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prepare_pso", domain));
@@ -470,10 +501,17 @@ public final class RendererGenerationPlanner {
                     "terrain_sun_shadow_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline(
                     "entity_sun_shadow_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline("voxel_apply_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "voxel_debug_checksum_pso", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
                     "static_light_registry", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
                     "dynamic_light_snapshot", domain));
+            workQueues.add(new RendererGenerationManifest.WorkQueue(
+                    "voxel_mutation_queue", domain));
+            workQueues.add(new RendererGenerationManifest.WorkQueue(
+                    "voxel_upload_queue", domain));
         }
         return new RendererGenerationManifest(
                 RendererGenerationManifest.CURRENT_VERSION,

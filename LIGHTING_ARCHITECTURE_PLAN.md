@@ -1657,28 +1657,36 @@ Diagnostic overlays:
 - ✅ Дополнение L4: оставшиеся только при ходьбе рывки и рябь листвы вызывало непрерывное sub-texel скольжение shadow raster grid по статичной геометрии. Generation-local стабилизатор накапливает только `double`-дельту камеры и сдвигает caster/receiver каждого cascade строго на целые light-space texel; абсолютные координаты в поворачивающийся sun basis не проецируются. Новых GPU resource/pass/fetch нет, CPU-работа ограничена тремя O(1) phase updates за кадр. Регрессии на `±30M`, финальный `clean check` и 300-frame Metal Validation прошли; два accepted 3000-frame run дали `86.30/86.48 FPS`, GPU p95 `14.67/14.59 ms`, `0` dropped/FAIL/fallback. Ручной signoff ходьбы у детальной листвы и sprint/FOV остаётся обязательным; L6 cached shadows должны сохранить этот integer-texel phase contract.
 - ✅ Дополнение L4: слишком светлые солнечные тени были результатом сохранения `100%` sky irradiance при нулевой видимости солнца. Полная тень теперь сохраняет ambient floor и `42%` рассеянного света неба; полностью освещённые поверхности, clustered block light и emission не изменены. Видимость PCF переиспользуется, поэтому новых pass/resource/texture fetch нет. `clean check`, 300-frame Metal Validation и accepted 3000-frame run прошли (`85.17 FPS`, GPU p95 `13.97 ms`, Advanced generation `2`, `0` dropped/FAIL); визуальная оценка контраста днём, ночью и рядом с локальными источниками остаётся ручным signoff.
 
-### Этап 5. Sub-block voxel occupancy
+### Этап 5. Sub-block voxel occupancy — ✅ ВЫПОЛНЕН 18 июля 2026
 
 #### Работы
 
-- Реализовать `VoxelShapeEncoder` для `1×/2×/4×`.
-- Добавить block/chunk dirty queues.
-- Реализовать camera-centered toroidal clipmap.
-- Добавить occupancy/transmittance/material classes.
-- Добавить debug visualization.
-- Выделить private brick resources/heaps через общий resource allocator.
-- Передавать coalesced dirty bricks через lighting upload ring.
-- Строить indirect dispatch по фактическому числу dirty bricks.
-- Ограничить upload/update budget и возраст очереди.
-- Не создавать clipmap и dirty queues при `LightingModel.VANILLA`; HDR не влияет на occupancy representation.
+- [x] Реализовать `VoxelShapeEncoder` для `1×/2×/4×`.
+- [x] Добавить block/chunk dirty queues.
+- [x] Реализовать camera-centered toroidal clipmap.
+- [x] Добавить occupancy/transmittance/material classes.
+- [x] Добавить debug visualization.
+- [x] Выделить private brick resources/heaps через общий resource allocator.
+- [x] Передавать coalesced dirty bricks через lighting upload ring.
+- [x] Строить indirect dispatch по фактическому числу dirty bricks.
+- [x] Ограничить upload/update budget и возраст очереди.
+- [x] Не создавать clipmap и dirty queues при `LightingModel.VANILLA`; HDR не влияет на occupancy representation.
 
 #### Exit criteria
 
-- Slab/stairs/fence shapes совпадают с reference masks.
-- Glass/leaves не становятся полностью opaque.
-- Camera scrolling не очищает весь clipmap.
-- Chunk load/unload не оставляет stale geometry.
-- Очередь не растёт бесконечно при быстром полёте.
+- [x] Slab/stairs/fence shapes совпадают с reference masks.
+- [x] Glass/leaves не становятся полностью opaque.
+- [x] Camera scrolling не очищает весь clipmap.
+- [x] Chunk load/unload не оставляет stale geometry.
+- [x] Очередь не растёт бесконечно при быстром полёте.
+
+#### Результат выполнения
+
+- Occupancy строится только из принятых Sodium mesh snapshots, включая authoritative empty-section path; упаковка `1×/2×/4×` вынесена с render thread в bounded пул из двух workers с очередью до 16 brick, generation/revision/owner validation и точным повтором готового batch при busy ring.
+- Осознанное отличие от текста плана: L5 использует отдельные versioned 3-slot voxel ring и context-local hazard-tracked private heap вместо общего L3 ring/allocator. Это изолирует busy/ошибки L5 от L3/L4; storage и guard ranges синхронно инициализируются один раз при создании контекста.
+- Vanilla не создаёт voxel world/queue/GPU resources. Постоянная ошибка L5 подавляет только его до следующей renderer/lighting generation; per-frame L5 work становится нулевым, хотя manifest сохраняет planned L5 capacity, а runtime telemetry честно сообщает `active=false`.
+- `clean check` (62 задачи), Java/FFM/native bridge и отдельный native harness прошли с Metal API/GPU Validation. Финальный Balanced HDR Native runtime, 300 warmup + 300 measurement: `90.13 FPS`, полный GPU p95 `13.91 ms`, voxel upload/update avg/p95/worst `0.195/0.213/1.130 ms`; `2256/2256` bricks completed, remaining/age/rejected/stale/ring-busy/dropped events — `0`.
+- L5 остаётся producer-only: до L6 voxel data не читается fragment lighting path, поэтому новых видимых теней/GI на этом этапе быть не должно; для проверки предусмотрены PPM slice visualization и GPU checksum.
 
 ### Этап 6. Local voxel shadows и cached sun shadows
 

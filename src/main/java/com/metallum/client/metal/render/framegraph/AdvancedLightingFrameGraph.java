@@ -9,15 +9,17 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-/** Versioned L3/L4 upload, cluster-build, sun-shadow and forward-lighting contract. */
+/** Versioned L3-L5 light, shadow and producer-only voxel occupancy contract. */
 public final class AdvancedLightingFrameGraph {
-    public static final String GRAPH_ID = "advanced-clustered-sun-shadow-v2";
+    public static final String GRAPH_ID = "advanced-clustered-sun-shadow-voxel-v3";
 
     private static final FrameGraph.PassId UPLOAD = new FrameGraph.PassId(0, "light_upload");
     private static final FrameGraph.PassId PREPARE = new FrameGraph.PassId(1, "cluster_prepare");
     private static final FrameGraph.PassId CLUSTER_BUILD = new FrameGraph.PassId(2, "cluster_build");
-    private static final FrameGraph.PassId SUN_SHADOW = new FrameGraph.PassId(3, "sun_shadow");
-    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(4, "direct_lighting");
+    private static final FrameGraph.PassId VOXEL_UPLOAD = new FrameGraph.PassId(3, "voxel_upload");
+    private static final FrameGraph.PassId VOXEL_UPDATE = new FrameGraph.PassId(4, "voxel_update");
+    private static final FrameGraph.PassId SUN_SHADOW = new FrameGraph.PassId(5, "sun_shadow");
+    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(6, "direct_lighting");
 
     private static final FrameGraph.ResourceId UPLOAD_RING = resource(0, "lighting_upload_ring");
     private static final FrameGraph.ResourceId PARAMS = resource(1, "lighting_params");
@@ -34,6 +36,18 @@ public final class AdvancedLightingFrameGraph {
     private static final FrameGraph.ResourceId SUN_SHADOW_DEPTH = resource(
             8, "sun_shadow_cascades");
     private static final FrameGraph.ResourceId SCENE = resource(9, "scene_radiance");
+    private static final FrameGraph.ResourceId VOXEL_UPLOAD_RING = resource(
+            10, "voxel_upload_ring");
+    private static final FrameGraph.ResourceId VOXEL_PRIVATE_PATCH_RING = resource(
+            11, "voxel_private_patch_ring");
+    private static final FrameGraph.ResourceId VOXEL_INDIRECT_ARGS = resource(
+            12, "voxel_indirect_args");
+    private static final FrameGraph.ResourceId VOXEL_OCCUPANCY = resource(
+            13, "voxel_occupancy");
+    private static final FrameGraph.ResourceId VOXEL_OPTICAL = resource(
+            14, "voxel_transmittance_material");
+    private static final FrameGraph.ResourceId VOXEL_TAGS = resource(
+            15, "voxel_brick_tags");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -134,7 +148,26 @@ public final class AdvancedLightingFrameGraph {
                                 true,
                                 whole,
                                 FrameGraph.ResourceRole.SCENE_RADIANCE
-                        )
+                        ),
+                        buffer(VOXEL_UPLOAD_RING, FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
+                                "voxel_batch_v1", true, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA),
+                        buffer(VOXEL_PRIVATE_PATCH_RING,
+                                FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
+                                "voxel_patch_v1", false, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA),
+                        buffer(VOXEL_INDIRECT_ARGS, FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
+                                "dispatch_threadgroups_indirect_v1", false, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA),
+                        buffer(VOXEL_OCCUPANCY, FrameGraph.PersistenceClass.WORLD_PERSISTENT,
+                                "voxel_occupancy_bits_v1", true, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA),
+                        buffer(VOXEL_OPTICAL, FrameGraph.PersistenceClass.WORLD_PERSISTENT,
+                                "voxel_optical_material_v1", true, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA),
+                        buffer(VOXEL_TAGS, FrameGraph.PersistenceClass.WORLD_PERSISTENT,
+                                "voxel_brick_tag_v1", true, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA)
                 ),
                 List.of(
                         new FrameGraph.PassDesc(
@@ -179,6 +212,40 @@ public final class AdvancedLightingFrameGraph {
                                         access(COMPACT_INDICES, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(STATISTICS, FrameGraph.AccessKind.READ_WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE)
+                                ),
+                                contract
+                        ),
+                        new FrameGraph.PassDesc(
+                                VOXEL_UPLOAD,
+                                FrameGraph.EncoderClass.BLIT,
+                                List.of(),
+                                List.of(
+                                        access(VOXEL_UPLOAD_RING, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.BLIT),
+                                        access(VOXEL_PRIVATE_PATCH_RING,
+                                                FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.BLIT),
+                                        access(VOXEL_INDIRECT_ARGS, FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.BLIT)
+                                ),
+                                contract
+                        ),
+                        new FrameGraph.PassDesc(
+                                VOXEL_UPDATE,
+                                FrameGraph.EncoderClass.COMPUTE,
+                                List.of(VOXEL_UPLOAD),
+                                List.of(
+                                        access(VOXEL_PRIVATE_PATCH_RING,
+                                                FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_INDIRECT_ARGS, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_OCCUPANCY, FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_OPTICAL, FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_TAGS, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE)
                                 ),
                                 contract

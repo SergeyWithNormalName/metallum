@@ -1102,6 +1102,15 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return resources.uploadAndBuild(commandBuffer(), upload);
     }
 
+    int encodeVoxelOccupancy(
+            final VoxelOccupancyGpuResources resources,
+            final VoxelOccupancyGpuResources.FrameUpload upload
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return resources.upload(commandBuffer(), upload);
+    }
+
     void setGpuTimingStage(final MetalGpuTimingStage stage) {
         MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
         if (this.gpuTimingStage == next) {

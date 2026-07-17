@@ -31,9 +31,12 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     case sodiumLightPatch
     case temporalDiagnostics
     case clusterBuild
+    // L5 is optional and deliberately does not participate in base renderer warm-up.
+    // A missing voxel metallib/source must fail context creation, never Vanilla/L3/L4.
+    case voxelOccupancy
 
     static var startupMandatory: [Self] {
-        allCases.filter { $0 != .clusterBuild }
+        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy }
     }
 
     var sourceFileName: String {
@@ -44,6 +47,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .sodiumLightPatch: "MetallumSodiumLightPatch.metal"
         case .temporalDiagnostics: "MetallumTemporalDiagnostics.metal"
         case .clusterBuild: "MetallumClusterBuild.metal"
+        case .voxelOccupancy: "MetallumVoxelOccupancy.metal"
         }
     }
 
@@ -100,6 +104,11 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
                 "metallum_cluster_prefix_groups_v1",
                 "metallum_cluster_prefix_add_v1",
                 "metallum_cluster_fill_v1"
+            ]
+        case .voxelOccupancy:
+            [
+                "metallum_voxel_apply_v1",
+                "metallum_voxel_checksum_v1"
             ]
         }
     }
@@ -1536,6 +1545,540 @@ private final class MetallumLightingContext: @unchecked Sendable {
     }
 }
 
+// MARK: - L5 voxel clipmap ABI v1
+//
+// This is intentionally self-contained.  L3/L4 neither allocate nor bind these
+// resources; an unavailable voxel library simply makes this context unavailable.
+private enum MetallumVoxelAbiV1 {
+    static let version: UInt32 = 1
+    static let magic: UInt32 = 0x3142564d // "MVB1" in little-endian memory.
+    static let headerBytes = 96
+    static let recordBytes = 56
+    static let levelLayoutBytes = 32
+    static let paramsBytes = 72
+    // Metal constant-buffer offsets are 256-byte aligned; the ABI payload itself
+    // remains compact at 72 bytes, while in-flight parameter records use this stride.
+    static let paramsStride = 256
+    static let statsBytes = 160
+    static let checksumBytes = 16
+    static let logicalBrickEdge: UInt32 = 32
+    static let occupancyWordsPerBrick: UInt32 = 1_024
+    static let occupancyBytesPerBrick: UInt32 = 4_096
+    static let guardBytes = 64
+    static let guardValue: UInt8 = 0xa5
+    static let ringSlots = 3
+    static let indirectBytes = 12
+    static let transientBusyStatus: Int32 = -22
+    static let resetFlag: UInt32 = 1 << 0
+    static let unloadFlag: UInt32 = 1 << 1
+    static let scrollFlag: UInt32 = 1 << 2
+    static let knownFlags = resetFlag | unloadFlag | scrollFlag
+    // L5 uploads its packet, per-level indirect arguments, and parameters with a
+    // blit encoder immediately before the compute encoder consumes them. Keep
+    // these private heap resources hazard-tracked so Metal orders that producer /
+    // consumer transition across encoders deterministically.
+    static let privateOptions: MTLResourceOptions = .storageModePrivate
+}
+
+private struct MetallumVoxelLevelLayoutV1 {
+    let logicalEdge: UInt32
+    let subdivision: UInt32
+    let originBrickX: UInt32
+    let originBrickY: UInt32
+    let originBrickZ: UInt32
+    let flags: UInt32
+}
+
+private struct MetallumVoxelPatchRecordV1 {
+    let level: UInt32
+    let destinationBrickX: UInt32
+    let destinationBrickY: UInt32
+    let destinationBrickZ: UInt32
+    let payloadOffset: UInt32
+    let occupancyBytes: UInt32
+    let opticalBytes: UInt32
+    let flags: UInt32
+    let brickGenerationLow: UInt32
+    let brickGenerationHigh: UInt32
+    let logicalBrickX: Int32
+    let logicalBrickY: Int32
+    let logicalBrickZ: Int32
+    let contentStamp: UInt32
+}
+
+private struct MetallumVoxelLogicalDestinationKey: Hashable {
+    let level: UInt32
+    let x: Int32
+    let y: Int32
+    let z: Int32
+}
+
+private func voxelFloorMod(_ value: Int32, _ modulus: UInt32) -> UInt32 {
+    let divisor = Int64(modulus)
+    let remainder = Int64(value) % divisor
+    return UInt32(remainder >= 0 ? remainder : remainder + divisor)
+}
+
+private struct MetallumVoxelBatchV1 {
+    let flags: UInt32
+    let patchCount: UInt32
+    let slot: UInt32
+    let frameId: UInt64
+    let lightingGeneration: UInt64
+    let clipmapGeneration: UInt64
+    let worldGeneration: UInt64
+    let queueRemaining: UInt32
+    let oldestAge: UInt32
+    let coalescedDelta: UInt32
+    let rejectedDelta: UInt32
+    let scrollSlabs: UInt32
+    let unloadClears: UInt32
+    let levelPatchCounts: [UInt32]
+    let levelRecordStarts: [UInt32]
+}
+
+private struct MetallumVoxelParamsV1 {
+    var patchCount: UInt32
+    var headerBytes: UInt32
+    var recordBytes: UInt32
+    var levelIndex: UInt32
+    var recordStart: UInt32
+    var logicalEdge: UInt32
+    var subdivision: UInt32
+    var brickDimension: UInt32
+    var occupancyWordsPerBrick: UInt32
+    var reserved0: UInt32
+    var lightingGeneration: UInt64
+    var clipmapGeneration: UInt64
+    var worldGeneration: UInt64
+    var frameId: UInt64
+}
+
+private struct MetallumVoxelChecksumParamsV1 {
+    var occupancyWords: UInt32
+    var opticalBytes: UInt32
+    var threadCount: UInt32
+    var reserved: UInt32
+}
+
+private struct MetallumVoxelPipelines {
+    let apply: MTLComputePipelineState
+    let checksum: MTLComputePipelineState
+}
+
+private final class MetallumVoxelLevelResources {
+    let layout: MetallumVoxelLevelLayoutV1
+    let brickDimension: UInt32
+    let occupancyWords: Int
+    let opticalBytes: Int
+    let brickCount: Int
+    let occupancy: MTLBuffer
+    let optical: MTLBuffer
+    let metadata: MTLBuffer
+
+    var occupancyPayloadBytes: Int { occupancyWords * 4 }
+    var metadataPayloadBytes: Int { brickCount * 16 }
+
+    init(
+        layout: MetallumVoxelLevelLayoutV1,
+        brickDimension: UInt32,
+        occupancyWords: Int,
+        opticalBytes: Int,
+        brickCount: Int,
+        occupancy: MTLBuffer,
+        optical: MTLBuffer,
+        metadata: MTLBuffer
+    ) {
+        self.layout = layout
+        self.brickDimension = brickDimension
+        self.occupancyWords = occupancyWords
+        self.opticalBytes = opticalBytes
+        self.brickCount = brickCount
+        self.occupancy = occupancy
+        self.optical = optical
+        self.metadata = metadata
+    }
+}
+
+private final class MetallumVoxelRingSlot {
+    let staging: MTLBuffer
+    let payload: MTLBuffer
+    let indirectStaging: MTLBuffer
+    let indirect: MTLBuffer
+    let paramsStaging: MTLBuffer
+    let params: MTLBuffer
+    let debugScratch: MTLBuffer
+    let debugReadback: MTLBuffer
+    var busy = false
+
+    init(
+        staging: MTLBuffer,
+        payload: MTLBuffer,
+        indirectStaging: MTLBuffer,
+        indirect: MTLBuffer,
+        paramsStaging: MTLBuffer,
+        params: MTLBuffer,
+        debugScratch: MTLBuffer,
+        debugReadback: MTLBuffer
+    ) {
+        self.staging = staging
+        self.payload = payload
+        self.indirectStaging = indirectStaging
+        self.indirect = indirect
+        self.paramsStaging = paramsStaging
+        self.params = params
+        self.debugScratch = debugScratch
+        self.debugReadback = debugReadback
+    }
+}
+
+private struct MetallumVoxelTelemetrySnapshotV1 {
+    let active: Bool
+    let lightingGeneration: UInt64
+    let clipmapGeneration: UInt64
+    let worldGeneration: UInt64
+    let lastFrameId: UInt64
+    let resourceBytes: UInt64
+    let heapBytes: UInt64
+    let heapUsedBytes: UInt64
+    let ringStagingBytes: UInt64
+    let ringPrivateBytes: UInt64
+    let ringHighWater: UInt32
+    let ringBusyRejects: UInt32
+    let submitted: UInt64
+    let completed: UInt64
+    let remaining: UInt32
+    let oldestAge: UInt32
+    let coalesced: UInt64
+    let rejected: UInt64
+    let stale: UInt64
+    let scrollSlabs: UInt64
+    let unloadClears: UInt64
+    let checksum: UInt32
+
+    var report: [String: Any] {
+        [
+            "active": active,
+            "output_independent": true,
+            "lighting_generation": lightingGeneration,
+            "clipmap_generation": clipmapGeneration,
+            "world_generation": worldGeneration,
+            "frame_id": lastFrameId,
+            "resource_bytes": resourceBytes,
+            "heap_bytes": heapBytes,
+            "heap_used_bytes": heapUsedBytes,
+            "ring_staging_bytes": ringStagingBytes,
+            "ring_private_bytes": ringPrivateBytes,
+            "ring_high_water": ringHighWater,
+            "ring_busy_rejects": ringBusyRejects,
+            "dirty_bricks_submitted": submitted,
+            "dirty_bricks_completed": completed,
+            "dirty_bricks_remaining": remaining,
+            "oldest_dirty_age": oldestAge,
+            "coalesced": coalesced,
+            "rejected": rejected,
+            "stale": stale,
+            "scroll_slabs": scrollSlabs,
+            "unload_clears": unloadClears,
+            "debug_checksum": checksum
+        ]
+    }
+}
+
+private final class MetallumVoxelTelemetryStore: @unchecked Sendable {
+    static let shared = MetallumVoxelTelemetryStore()
+    private let lock = NSLock()
+    private var nextToken: UInt64 = 1
+    private var latestToken: UInt64 = 0
+    private var latest = MetallumVoxelTelemetrySnapshotV1(
+        active: false, lightingGeneration: 0, clipmapGeneration: 0, worldGeneration: 0, lastFrameId: 0,
+        resourceBytes: 0, heapBytes: 0, heapUsedBytes: 0, ringStagingBytes: 0,
+        ringPrivateBytes: 0, ringHighWater: 0, ringBusyRejects: 0, submitted: 0,
+        completed: 0, remaining: 0, oldestAge: 0, coalesced: 0, rejected: 0,
+        stale: 0, scrollSlabs: 0, unloadClears: 0, checksum: 0
+    )
+
+    func activate(_ snapshot: MetallumVoxelTelemetrySnapshotV1) -> UInt64 {
+        lock.lock()
+        let token = nextToken
+        nextToken &+= 1
+        latestToken = token
+        latest = snapshot
+        lock.unlock()
+        return token
+    }
+
+    func publish(token: UInt64, _ snapshot: MetallumVoxelTelemetrySnapshotV1) {
+        lock.lock()
+        if latestToken == token { latest = snapshot }
+        lock.unlock()
+    }
+
+    func deactivate(token: UInt64) {
+        lock.lock()
+        if latestToken == token {
+            latestToken = 0
+            latest = MetallumVoxelTelemetrySnapshotV1(
+                active: false, lightingGeneration: 0, clipmapGeneration: 0, worldGeneration: 0, lastFrameId: 0,
+                resourceBytes: 0, heapBytes: 0, heapUsedBytes: 0, ringStagingBytes: 0,
+                ringPrivateBytes: 0, ringHighWater: 0, ringBusyRejects: 0, submitted: 0,
+                completed: 0, remaining: 0, oldestAge: 0, coalesced: 0, rejected: 0,
+                stale: 0, scrollSlabs: 0, unloadClears: 0, checksum: 0
+            )
+        }
+        lock.unlock()
+    }
+
+    func snapshot() -> MetallumVoxelTelemetrySnapshotV1 {
+        lock.lock()
+        let value = latest
+        lock.unlock()
+        return value
+    }
+}
+
+private final class MetallumVoxelContext: @unchecked Sendable {
+    let device: MTLDevice
+    let lightingGeneration: UInt64
+    let clipmapGeneration: UInt64
+    let worldGeneration: UInt64
+    let heap: MTLHeap
+    let levels: [MetallumVoxelLevelResources]
+    let slots: [MetallumVoxelRingSlot]
+    let maxPatchCount: UInt32
+    let stagingBytes: Int
+    let indirectBytesPerSlot: Int
+    let pipelines: MetallumVoxelPipelines
+    let telemetryToken: UInt64
+    let resourceBytes: UInt64
+    let ringStagingBytes: UInt64
+    let ringPrivateBytes: UInt64
+
+    private let lock = NSLock()
+    private var queueAddress: UInt?
+    private var activeSlots: UInt32 = 0
+    private var ringHighWater: UInt32 = 0
+    private var ringBusyRejects: UInt32 = 0
+    private var submitted: UInt64 = 0
+    private var completed: UInt64 = 0
+    private var remaining: UInt32 = 0
+    private var oldestAge: UInt32 = 0
+    private var coalesced: UInt64 = 0
+    private var rejected: UInt64 = 0
+    private var stale: UInt64 = 0
+    private var scrollSlabs: UInt64 = 0
+    private var unloadClears: UInt64 = 0
+    private var lastFrameId: UInt64 = 0
+    private var lastChecksum: UInt32 = 0
+    private var retired = false
+
+    init(
+        device: MTLDevice,
+        lightingGeneration: UInt64,
+        clipmapGeneration: UInt64,
+        worldGeneration: UInt64,
+        heap: MTLHeap,
+        levels: [MetallumVoxelLevelResources],
+        slots: [MetallumVoxelRingSlot],
+        maxPatchCount: UInt32,
+        stagingBytes: Int,
+        indirectBytesPerSlot: Int,
+        pipelines: MetallumVoxelPipelines,
+        resourceBytes: UInt64,
+        ringStagingBytes: UInt64,
+        ringPrivateBytes: UInt64
+    ) {
+        self.device = device
+        self.lightingGeneration = lightingGeneration
+        self.clipmapGeneration = clipmapGeneration
+        self.worldGeneration = worldGeneration
+        self.heap = heap
+        self.levels = levels
+        self.slots = slots
+        self.maxPatchCount = maxPatchCount
+        self.stagingBytes = stagingBytes
+        self.indirectBytesPerSlot = indirectBytesPerSlot
+        self.pipelines = pipelines
+        self.resourceBytes = resourceBytes
+        self.ringStagingBytes = ringStagingBytes
+        self.ringPrivateBytes = ringPrivateBytes
+        self.telemetryToken = MetallumVoxelTelemetryStore.shared.activate(
+            MetallumVoxelTelemetrySnapshotV1(
+                active: true, lightingGeneration: lightingGeneration,
+                clipmapGeneration: clipmapGeneration, worldGeneration: worldGeneration,
+                lastFrameId: 0,
+                resourceBytes: resourceBytes, heapBytes: UInt64(heap.size),
+                heapUsedBytes: UInt64(heap.usedSize), ringStagingBytes: ringStagingBytes,
+                ringPrivateBytes: ringPrivateBytes, ringHighWater: 0, ringBusyRejects: 0,
+                submitted: 0, completed: 0, remaining: 0, oldestAge: 0, coalesced: 0,
+                rejected: 0, stale: 0, scrollSlabs: 0, unloadClears: 0, checksum: 0
+            )
+        )
+    }
+
+    func reserve(slot index: Int, queue: MTLCommandQueue) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !retired else { return -10 }
+        let address = objectAddress(queue)
+        if let queueAddress, queueAddress != address {
+            rejected &+= 1
+            return -11
+        }
+        guard !slots[index].busy else {
+            ringBusyRejects &+= 1
+            rejected &+= 1
+            return MetallumVoxelAbiV1.transientBusyStatus
+        }
+        queueAddress = address
+        slots[index].busy = true
+        activeSlots &+= 1
+        ringHighWater = max(ringHighWater, activeSlots)
+        return 1
+    }
+
+    func cancel(slot index: Int) {
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+        }
+        rejected &+= 1
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func noteStale() {
+        lock.lock()
+        stale &+= 1
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func noteRejected() {
+        lock.lock()
+        rejected &+= 1
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func noteSubmission(_ batch: MetallumVoxelBatchV1) {
+        lock.lock()
+        submitted &+= UInt64(batch.patchCount)
+        remaining = batch.queueRemaining
+        oldestAge = batch.oldestAge
+        coalesced &+= UInt64(batch.coalescedDelta)
+        rejected &+= UInt64(batch.rejectedDelta)
+        scrollSlabs &+= UInt64(batch.scrollSlabs)
+        unloadClears &+= UInt64(batch.unloadClears)
+        lastFrameId = max(lastFrameId, batch.frameId)
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func complete(slot index: Int, patchCount: UInt32, succeeded: Bool) {
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+        }
+        if succeeded {
+            completed &+= UInt64(patchCount)
+        } else {
+            rejected &+= 1
+        }
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func completeDebug(slot index: Int, succeeded: Bool) {
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
+        }
+        if succeeded {
+            lastChecksum = slots[index].debugReadback.contents().load(as: UInt32.self)
+        } else {
+            rejected &+= 1
+        }
+        lock.unlock()
+        publishTelemetry()
+    }
+
+    func retire() {
+        lock.lock()
+        retired = true
+        lock.unlock()
+        MetallumVoxelTelemetryStore.shared.deactivate(token: telemetryToken)
+    }
+
+    func stats(into output: UnsafeMutableRawPointer) -> Bool {
+        lock.lock()
+        let values = snapshotLocked()
+        lock.unlock()
+        output.initializeMemory(as: UInt8.self, repeating: 0, count: MetallumVoxelAbiV1.statsBytes)
+        writeVoxelValue(MetallumVoxelAbiV1.version, to: output, offset: 0)
+        writeVoxelValue(UInt32(MetallumVoxelAbiV1.statsBytes), to: output, offset: 4)
+        writeVoxelValue(lightingGeneration, to: output, offset: 8)
+        writeVoxelValue(clipmapGeneration, to: output, offset: 16)
+        writeVoxelValue(worldGeneration, to: output, offset: 24)
+        writeVoxelValue(values.lastFrameId, to: output, offset: 32)
+        writeVoxelValue(values.submitted, to: output, offset: 40)
+        writeVoxelValue(values.completed, to: output, offset: 48)
+        writeVoxelValue(values.remaining, to: output, offset: 56)
+        writeVoxelValue(values.oldestAge, to: output, offset: 60)
+        writeVoxelValue(values.coalesced, to: output, offset: 64)
+        writeVoxelValue(values.rejected, to: output, offset: 72)
+        writeVoxelValue(values.stale, to: output, offset: 80)
+        writeVoxelValue(values.scrollSlabs, to: output, offset: 88)
+        writeVoxelValue(values.unloadClears, to: output, offset: 96)
+        writeVoxelValue(values.ringHighWater, to: output, offset: 104)
+        writeVoxelValue(values.ringBusyRejects, to: output, offset: 108)
+        writeVoxelValue(values.checksum, to: output, offset: 112)
+        writeVoxelValue(UInt32(levels.count), to: output, offset: 116)
+        writeVoxelValue(resourceBytes, to: output, offset: 120)
+        writeVoxelValue(UInt64(heap.size), to: output, offset: 128)
+        writeVoxelValue(UInt64(heap.usedSize), to: output, offset: 136)
+        writeVoxelValue(ringStagingBytes, to: output, offset: 144)
+        writeVoxelValue(ringPrivateBytes, to: output, offset: 152)
+        return values.completed > 0
+    }
+
+    func snapshot() -> MetallumVoxelTelemetrySnapshotV1 {
+        lock.lock()
+        let value = snapshotLocked()
+        lock.unlock()
+        return value
+    }
+
+    private func snapshotLocked() -> MetallumVoxelTelemetrySnapshotV1 {
+        MetallumVoxelTelemetrySnapshotV1(
+            active: !retired, lightingGeneration: lightingGeneration,
+            clipmapGeneration: clipmapGeneration, worldGeneration: worldGeneration,
+            lastFrameId: lastFrameId,
+            resourceBytes: resourceBytes, heapBytes: UInt64(heap.size),
+            heapUsedBytes: UInt64(heap.usedSize), ringStagingBytes: ringStagingBytes,
+            ringPrivateBytes: ringPrivateBytes, ringHighWater: ringHighWater,
+            ringBusyRejects: ringBusyRejects, submitted: submitted, completed: completed,
+            remaining: remaining, oldestAge: oldestAge, coalesced: coalesced,
+            rejected: rejected, stale: stale, scrollSlabs: scrollSlabs,
+            unloadClears: unloadClears, checksum: lastChecksum
+        )
+    }
+
+    private func publishTelemetry() {
+        MetallumVoxelTelemetryStore.shared.publish(token: telemetryToken, snapshot())
+    }
+}
+
+private func writeVoxelValue<T>(_ value: T, to output: UnsafeMutableRawPointer, offset: Int) {
+    var stored = value
+    withUnsafeBytes(of: &stored) { bytes in
+        output.advanced(by: offset).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+    }
+}
+
 private struct MetallumHdrOutputs {
     let emission: MTLTexture
     let bloom: MTLTexture
@@ -1565,6 +2108,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case actualHdrDisplay = 12
     case lightUploadClusterBuild = 13
     case sunShadow = 14
+    // Append-only: Java's stable timing IDs 0...14 must never be renumbered.
+    case voxelUploadUpdate = 15
 
     var reportName: String {
         switch self {
@@ -1583,6 +2128,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .actualHdrDisplay: "actual-radiance HDR display mapping"
         case .lightUploadClusterBuild: "light upload + cluster build"
         case .sunShadow: "sun shadow"
+        case .voxelUploadUpdate: "voxel upload + update"
         }
     }
 
@@ -2774,8 +3320,9 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         }
 
         let clusteredLightingReport = MetallumLightingTelemetryStore.shared.snapshot().report
+        let voxelClipmapsReport = MetallumVoxelTelemetryStore.shared.snapshot().report
         writer.write([
-            "schema_version": 4,
+            "schema_version": 5,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
             "detail_enabled": NativeState.gpuTimingDetailEnabled,
             "presented_frames": window.sampleCount,
@@ -2795,6 +3342,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "metadata": metadata,
             "renderer_generation": rendererGenerationReport,
             "clustered_lighting": clusteredLightingReport,
+            "voxel_clipmaps": voxelClipmapsReport,
             "stages": stages,
             "cpu_waits": waits,
             "workload": workloadReport,
@@ -3715,6 +4263,307 @@ private func buildLightingPipelines(device: MTLDevice) -> MetallumLightingPipeli
         NSLog("[metallum] Failed to create clustered-lighting pipelines: %@", String(describing: error))
         return nil
     }
+}
+
+private func buildVoxelPipelines(device: MTLDevice) -> MetallumVoxelPipelines? {
+    do {
+        // Voxel functions are optional. Prefer the shipped metallib, but fall back to the
+        // separately packaged source when an older metallib is paired with new native code.
+        let library: MTLLibrary
+        if let precompiled = loadPrecompiledBuiltinShaderLibrary(device: device),
+           MetallumBuiltinShaderSet.voxelOccupancy.requiredFunctionNames.allSatisfy({
+               precompiled.makeFunction(name: $0) != nil
+           }) {
+            library = precompiled
+        } else {
+            let sourceURL: URL
+            if let override = ProcessInfo.processInfo.environment["METALLUM_VOXEL_SHADER_SOURCE"],
+               !override.isEmpty {
+                // Test/developer-only source override. Shipping still resolves exclusively
+                // from the native asset directory, so no runtime working-directory contract.
+                sourceURL = URL(fileURLWithPath: override)
+            } else {
+                guard let assetDirectory = nativeAssetDirectory() else { return nil }
+                sourceURL = assetDirectory
+                    .appendingPathComponent("shaders", isDirectory: true)
+                    .appendingPathComponent(MetallumBuiltinShaderSet.voxelOccupancy.sourceFileName)
+            }
+            let source = try String(contentsOf: sourceURL, encoding: .utf8)
+            library = try device.makeLibrary(source: source, options: nil)
+        }
+        guard let apply = library.makeFunction(name: "metallum_voxel_apply_v1"),
+              let checksum = library.makeFunction(name: "metallum_voxel_checksum_v1") else {
+            return nil
+        }
+        let pipelines = try MetallumVoxelPipelines(
+            apply: device.makeComputePipelineState(function: apply),
+            checksum: device.makeComputePipelineState(function: checksum)
+        )
+        guard pipelines.apply.maxTotalThreadsPerThreadgroup >= 256,
+              pipelines.checksum.maxTotalThreadsPerThreadgroup >= 256 else {
+            return nil
+        }
+        recordBuiltinPipelineCreation(device: device, count: 2, succeeded: true)
+        return pipelines
+    } catch {
+        // This is a fail-closed optional L5 context. Do not mark base built-in pipeline
+        // initialization failed: Vanilla and existing L3/L4 paths remain valid.
+        NSLog("[metallum] Voxel occupancy pipeline unavailable: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func alignVoxelHeapBytes(_ value: Int, _ alignment: Int) -> Int? {
+    guard value >= 0, alignment > 0, alignment.nonzeroBitCount == 1 else { return nil }
+    let mask = alignment - 1
+    let (sum, overflow) = value.addingReportingOverflow(mask)
+    guard !overflow else { return nil }
+    return sum & ~mask
+}
+
+private func parseVoxelLayoutsV1(
+    _ pointer: UnsafeRawPointer?,
+    byteSize: UInt64,
+    levelCount: UInt32
+) -> [MetallumVoxelLevelLayoutV1]? {
+    guard let pointer,
+          levelCount > 0,
+          levelCount <= 8,
+          byteSize == UInt64(levelCount) * UInt64(MetallumVoxelAbiV1.levelLayoutBytes),
+          byteSize <= UInt64(Int.max) else {
+        return nil
+    }
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: pointer, count: Int(byteSize))
+    )
+    var layouts: [MetallumVoxelLevelLayoutV1] = []
+    layouts.reserveCapacity(Int(levelCount))
+    for index in 0..<Int(levelCount) {
+        let offset = index * MetallumVoxelAbiV1.levelLayoutBytes
+        guard let logicalEdge = reader.uint32(at: offset),
+              let subdivision = reader.uint32(at: offset + 4),
+              let originX = reader.uint32(at: offset + 8),
+              let originY = reader.uint32(at: offset + 12),
+              let originZ = reader.uint32(at: offset + 16),
+              let flags = reader.uint32(at: offset + 20),
+              let reserved0 = reader.uint32(at: offset + 24),
+              let reserved1 = reader.uint32(at: offset + 28),
+              flags == 0, reserved0 == 0, reserved1 == 0,
+              [UInt32(1), 2, 4].contains(subdivision),
+              logicalEdge >= MetallumVoxelAbiV1.logicalBrickEdge,
+              logicalEdge.isMultiple(of: MetallumVoxelAbiV1.logicalBrickEdge),
+              logicalEdge.isMultiple(of: subdivision) else {
+            return nil
+        }
+        let brickDimension = logicalEdge / MetallumVoxelAbiV1.logicalBrickEdge
+        guard brickDimension > 0,
+              originX < brickDimension, originY < brickDimension, originZ < brickDimension else {
+            return nil
+        }
+        let baseDimension = logicalEdge / subdivision
+        let baseEdge = MetallumVoxelAbiV1.logicalBrickEdge / subdivision
+        guard baseDimension.isMultiple(of: baseEdge) else { return nil }
+        layouts.append(MetallumVoxelLevelLayoutV1(
+            logicalEdge: logicalEdge,
+            subdivision: subdivision,
+            originBrickX: originX,
+            originBrickY: originY,
+            originBrickZ: originZ,
+            flags: flags
+        ))
+    }
+    return layouts
+}
+
+private func makeVoxelContext(
+    device: MTLDevice,
+    lightingGeneration: UInt64,
+    clipmapGeneration: UInt64,
+    worldGeneration: UInt64,
+    layouts: [MetallumVoxelLevelLayoutV1],
+    maxPatchCount: UInt32,
+    stagingBytes: UInt64
+) -> MetallumVoxelContext? {
+    guard lightingGeneration > 0,
+          clipmapGeneration > 0,
+          worldGeneration > 0,
+          maxPatchCount > 0,
+          maxPatchCount <= 65_536,
+          stagingBytes >= UInt64(MetallumVoxelAbiV1.headerBytes),
+          stagingBytes <= UInt64(Int.max),
+          MemoryLayout<MetallumVoxelParamsV1>.size == MetallumVoxelAbiV1.paramsBytes,
+          MemoryLayout<MetallumVoxelParamsV1>.stride == MetallumVoxelAbiV1.paramsBytes,
+          let pipelines = buildVoxelPipelines(device: device) else {
+        return nil
+    }
+    let stagingLength = Int(stagingBytes)
+    let parameterBytes = layouts.count * MetallumVoxelAbiV1.paramsStride
+    let indirectBytesPerSlot = layouts.count * MetallumVoxelAbiV1.indirectBytes
+    struct Request {
+        let name: String
+        let length: Int
+    }
+    var requests: [Request] = []
+    var levelSizes: [(occupancyWords: Int, opticalBytes: Int, brickCount: Int)] = []
+    for (index, layout) in layouts.enumerated() {
+        let edge = Int(layout.logicalEdge)
+        let subdivision = Int(layout.subdivision)
+        let brickDimension = edge / Int(MetallumVoxelAbiV1.logicalBrickEdge)
+        let baseDimension = edge / subdivision
+        let occupancyWords = edge * edge * edge / 32
+        let opticalBytes = baseDimension * baseDimension * baseDimension
+        let brickCount = brickDimension * brickDimension * brickDimension
+        guard occupancyWords > 0, opticalBytes > 0, brickCount > 0,
+              occupancyWords <= Int.max / 4,
+              brickCount <= Int.max / 16 else { return nil }
+        requests += [
+            Request(name: "occupancy L\(index)", length: occupancyWords * 4 + MetallumVoxelAbiV1.guardBytes),
+            Request(name: "optical L\(index)", length: opticalBytes + MetallumVoxelAbiV1.guardBytes),
+            Request(name: "metadata L\(index)", length: brickCount * 16 + MetallumVoxelAbiV1.guardBytes)
+        ]
+        levelSizes.append((occupancyWords, opticalBytes, brickCount))
+    }
+    for index in 0..<MetallumVoxelAbiV1.ringSlots {
+        requests += [
+            Request(name: "payload slot \(index)", length: stagingLength),
+            Request(name: "indirect slot \(index)", length: indirectBytesPerSlot),
+            Request(name: "params slot \(index)", length: parameterBytes),
+            Request(name: "debug slot \(index)", length: 4)
+        ]
+    }
+    var heapBytes = 0
+    for request in requests {
+        let query = device.heapBufferSizeAndAlign(
+            length: request.length,
+            options: MetallumVoxelAbiV1.privateOptions
+        )
+        guard query.size > 0,
+              query.align > 0,
+              query.align.nonzeroBitCount == 1,
+              let aligned = alignVoxelHeapBytes(heapBytes, query.align) else {
+            return nil
+        }
+        let (next, overflow) = aligned.addingReportingOverflow(query.size)
+        guard !overflow else { return nil }
+        heapBytes = next
+    }
+    let heapDescriptor = MTLHeapDescriptor()
+    heapDescriptor.size = heapBytes
+    heapDescriptor.storageMode = .private
+    heapDescriptor.cpuCacheMode = .defaultCache
+    heapDescriptor.hazardTrackingMode = .tracked
+    heapDescriptor.type = .automatic
+    guard let heap = device.makeHeap(descriptor: heapDescriptor) else { return nil }
+    heap.label = "Metallum L5 voxel clipmap persistent heap v1"
+    var nextRequest = 0
+    func allocate() -> MTLBuffer? {
+        let request = requests[nextRequest]
+        nextRequest += 1
+        guard let buffer = heap.makeBuffer(
+            length: request.length,
+            options: MetallumVoxelAbiV1.privateOptions
+        ) else { return nil }
+        buffer.label = "Metallum voxel \(request.name) v1"
+        return buffer
+    }
+    var levels: [MetallumVoxelLevelResources] = []
+    var resourceBytes: UInt64 = 0
+    for index in layouts.indices {
+        guard let occupancy = allocate(), let optical = allocate(), let metadata = allocate() else {
+            return nil
+        }
+        resourceBytes &+= UInt64(occupancy.length + optical.length + metadata.length)
+        levels.append(MetallumVoxelLevelResources(
+            layout: layouts[index],
+            brickDimension: layouts[index].logicalEdge / MetallumVoxelAbiV1.logicalBrickEdge,
+            occupancyWords: levelSizes[index].occupancyWords,
+            opticalBytes: levelSizes[index].opticalBytes,
+            brickCount: levelSizes[index].brickCount,
+            occupancy: occupancy,
+            optical: optical,
+            metadata: metadata
+        ))
+    }
+    var slots: [MetallumVoxelRingSlot] = []
+    var ringStagingBytes: UInt64 = 0
+    var ringPrivateBytes: UInt64 = 0
+    for index in 0..<MetallumVoxelAbiV1.ringSlots {
+        guard let payload = allocate(), let indirect = allocate(),
+              let params = allocate(), let debugScratch = allocate(),
+              let staging = device.makeBuffer(length: stagingLength, options: .storageModeShared),
+              let indirectStaging = device.makeBuffer(
+                  length: indirectBytesPerSlot,
+                  options: .storageModeShared
+              ),
+              let paramsStaging = device.makeBuffer(length: parameterBytes, options: .storageModeShared),
+              let debugReadback = device.makeBuffer(length: 4, options: .storageModeShared) else {
+            return nil
+        }
+        staging.label = "Metallum voxel staging slot \(index)"
+        indirectStaging.label = "Metallum voxel indirect staging slot \(index)"
+        paramsStaging.label = "Metallum voxel parameter staging slot \(index)"
+        debugReadback.label = "Metallum voxel diagnostic checksum slot \(index)"
+        ringPrivateBytes &+= UInt64(payload.length + indirect.length + params.length + debugScratch.length)
+        ringStagingBytes &+= UInt64(
+            staging.length + indirectStaging.length + paramsStaging.length + debugReadback.length
+        )
+        slots.append(MetallumVoxelRingSlot(
+            staging: staging, payload: payload, indirectStaging: indirectStaging,
+            indirect: indirect, paramsStaging: paramsStaging, params: params,
+            debugScratch: debugScratch, debugReadback: debugReadback
+        ))
+    }
+    guard nextRequest == requests.count,
+          initializeVoxelContextStorage(device: device, levels: levels) else { return nil }
+    resourceBytes &+= ringPrivateBytes
+    return MetallumVoxelContext(
+        device: device, lightingGeneration: lightingGeneration,
+        clipmapGeneration: clipmapGeneration, worldGeneration: worldGeneration,
+        heap: heap, levels: levels, slots: slots, maxPatchCount: maxPatchCount,
+        stagingBytes: stagingLength, indirectBytesPerSlot: indirectBytesPerSlot,
+        pipelines: pipelines, resourceBytes: resourceBytes,
+        ringStagingBytes: ringStagingBytes, ringPrivateBytes: ringPrivateBytes
+    )
+}
+
+/// Completes the only destructive full-clipmap clear before exposing a context. Deferring this
+/// clear to the first upload command is unsafe: several command buffers can be encoded before
+/// the first completion, and a later clear would erase an earlier patch. A context-local queue
+/// also keeps an abandoned caller command buffer from holding initialization hostage.
+private func initializeVoxelContextStorage(
+    device: MTLDevice,
+    levels: [MetallumVoxelLevelResources]
+) -> Bool {
+    guard let queue = device.makeCommandQueue(),
+          let commandBuffer = queue.makeCommandBuffer(),
+          let blit = commandBuffer.makeBlitCommandEncoder() else {
+        return false
+    }
+    blit.label = "Metallum L5 voxel context initialization v1"
+    for level in levels {
+        blit.fill(buffer: level.occupancy, range: 0..<level.occupancyPayloadBytes, value: 0)
+        blit.fill(buffer: level.optical, range: 0..<level.opticalBytes, value: 0)
+        blit.fill(buffer: level.metadata, range: 0..<level.metadataPayloadBytes, value: 0)
+        blit.fill(
+            buffer: level.occupancy,
+            range: level.occupancyPayloadBytes..<level.occupancy.length,
+            value: MetallumVoxelAbiV1.guardValue
+        )
+        blit.fill(
+            buffer: level.optical,
+            range: level.opticalBytes..<level.optical.length,
+            value: MetallumVoxelAbiV1.guardValue
+        )
+        blit.fill(
+            buffer: level.metadata,
+            range: level.metadataPayloadBytes..<level.metadata.length,
+            value: MetallumVoxelAbiV1.guardValue
+        )
+    }
+    blit.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    return commandBuffer.status == .completed
 }
 
 private func makeLightingContext(
@@ -6692,6 +7541,145 @@ private func parseLightingBatchV1(
     ))
 }
 
+private func parseVoxelBatchV1(
+    _ packet: UnsafeRawPointer?,
+    byteSize: UInt64,
+    context: MetallumVoxelContext
+) -> (Int32, MetallumVoxelBatchV1?) {
+    guard let packet,
+          byteSize >= UInt64(MetallumVoxelAbiV1.headerBytes),
+          byteSize <= UInt64(context.stagingBytes),
+          byteSize <= UInt64(UInt32.max),
+          byteSize <= UInt64(Int.max) else {
+        return (-1, nil)
+    }
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: packet, count: Int(byteSize))
+    )
+    guard let magic = reader.uint32(at: 0),
+          let version = reader.uint32(at: 4),
+          let declaredBytes = reader.uint32(at: 8),
+          let flags = reader.uint32(at: 12),
+          let recordBytes = reader.uint32(at: 16),
+          let patchCount = reader.uint32(at: 20),
+          let slot = reader.uint32(at: 24),
+          let levelCount = reader.uint32(at: 28),
+          let lightingGeneration = reader.uint64(at: 32),
+          let clipmapGeneration = reader.uint64(at: 40),
+          let worldGeneration = reader.uint64(at: 48),
+          let frameId = reader.uint64(at: 56),
+          let payloadBytes = reader.uint32(at: 64),
+          let payloadOffset = reader.uint32(at: 68),
+          let scrollSlabs = reader.uint32(at: 72),
+          let unloadClears = reader.uint32(at: 76),
+          let queueRemaining = reader.uint32(at: 80),
+          let oldestAge = reader.uint32(at: 84),
+          let coalesced = reader.uint32(at: 88),
+          let rejected = reader.uint32(at: 92) else {
+        return (-1, nil)
+    }
+    guard magic == MetallumVoxelAbiV1.magic, version == MetallumVoxelAbiV1.version else {
+        return (-2, nil)
+    }
+    guard flags & ~MetallumVoxelAbiV1.knownFlags == 0,
+          recordBytes == UInt32(MetallumVoxelAbiV1.recordBytes),
+          patchCount <= context.maxPatchCount,
+          slot < UInt32(MetallumVoxelAbiV1.ringSlots),
+          levelCount == UInt32(context.levels.count) else {
+        return (-3, nil)
+    }
+    let recordsBytes = UInt64(patchCount) * UInt64(MetallumVoxelAbiV1.recordBytes)
+    let expectedPayloadOffset = UInt64(MetallumVoxelAbiV1.headerBytes) + recordsBytes
+    guard expectedPayloadOffset <= byteSize,
+          payloadOffset == UInt32(expectedPayloadOffset),
+          payloadBytes == UInt32(byteSize - expectedPayloadOffset),
+          declaredBytes == UInt32(byteSize) else {
+        return (-4, nil)
+    }
+    guard lightingGeneration == context.lightingGeneration,
+          clipmapGeneration == context.clipmapGeneration,
+          worldGeneration == context.worldGeneration else {
+        return (-9, nil)
+    }
+    let expectedBrickGenerationLow = UInt32(truncatingIfNeeded: clipmapGeneration)
+    let expectedBrickGenerationHigh = UInt32(truncatingIfNeeded: clipmapGeneration >> 32)
+    var physicalDestinations = Set<UInt64>()
+    var logicalDestinations = Set<MetallumVoxelLogicalDestinationKey>()
+    var levelPatchCounts = Array(repeating: UInt32(0), count: context.levels.count)
+    var levelRecordStarts = Array(repeating: UInt32(0), count: context.levels.count)
+    var previousLevel: UInt32 = 0
+    for index in 0..<Int(patchCount) {
+        let offset = MetallumVoxelAbiV1.headerBytes + index * MetallumVoxelAbiV1.recordBytes
+        guard let level = reader.uint32(at: offset),
+              let destinationX = reader.uint32(at: offset + 4),
+              let destinationY = reader.uint32(at: offset + 8),
+              let destinationZ = reader.uint32(at: offset + 12),
+              let patchOffset = reader.uint32(at: offset + 16),
+              let occupancyBytes = reader.uint32(at: offset + 20),
+              let opticalBytes = reader.uint32(at: offset + 24),
+              let recordFlags = reader.uint32(at: offset + 28),
+              let brickGenerationLow = reader.uint32(at: offset + 32),
+              let brickGenerationHigh = reader.uint32(at: offset + 36),
+              let logicalX = reader.int32(at: offset + 40),
+              let logicalY = reader.int32(at: offset + 44),
+              let logicalZ = reader.int32(at: offset + 48),
+              let contentStamp = reader.uint32(at: offset + 52),
+              level < UInt32(context.levels.count),
+              recordFlags == 0, contentStamp != 0,
+              brickGenerationLow == expectedBrickGenerationLow,
+              brickGenerationHigh == expectedBrickGenerationHigh else {
+            return (-6, nil)
+        }
+        // Per-level indirect dispatches index contiguous runs of records. Rejecting an
+        // unsorted packet makes total dispatched groups exactly equal dirty patch count.
+        if index > 0, level < previousLevel { return (-6, nil) }
+        previousLevel = level
+        let resource = context.levels[Int(level)]
+        let baseEdge = Int(MetallumVoxelAbiV1.logicalBrickEdge) / Int(resource.layout.subdivision)
+        let expectedOpticalBytes = UInt32(baseEdge * baseEdge * baseEdge)
+        guard destinationX < resource.brickDimension,
+              destinationY < resource.brickDimension,
+              destinationZ < resource.brickDimension,
+              occupancyBytes == MetallumVoxelAbiV1.occupancyBytesPerBrick,
+              opticalBytes == expectedOpticalBytes,
+              patchOffset >= payloadOffset,
+              patchOffset.isMultiple(of: 4),
+              voxelFloorMod(logicalX, resource.brickDimension) == destinationX,
+              voxelFloorMod(logicalY, resource.brickDimension) == destinationY,
+              voxelFloorMod(logicalZ, resource.brickDimension) == destinationZ else {
+            return (-6, nil)
+        }
+        let length = UInt64(occupancyBytes) + UInt64(opticalBytes)
+        guard UInt64(patchOffset) <= byteSize,
+              length <= byteSize - UInt64(patchOffset) else {
+            return (-7, nil)
+        }
+        let physicalKey = UInt64(level) << 48
+            | UInt64(destinationX) << 32
+            | UInt64(destinationY) << 16
+            | UInt64(destinationZ)
+        let logicalKey = MetallumVoxelLogicalDestinationKey(
+            level: level, x: logicalX, y: logicalY, z: logicalZ
+        )
+        guard physicalDestinations.insert(physicalKey).inserted,
+              logicalDestinations.insert(logicalKey).inserted else {
+            return (-6, nil)
+        }
+        if levelPatchCounts[Int(level)] == 0 {
+            levelRecordStarts[Int(level)] = UInt32(index)
+        }
+        levelPatchCounts[Int(level)] &+= 1
+    }
+    return (1, MetallumVoxelBatchV1(
+        flags: flags, patchCount: patchCount, slot: slot, frameId: frameId,
+        lightingGeneration: lightingGeneration, clipmapGeneration: clipmapGeneration,
+        worldGeneration: worldGeneration, queueRemaining: queueRemaining, oldestAge: oldestAge,
+        coalescedDelta: coalesced, rejectedDelta: rejected, scrollSlabs: scrollSlabs,
+        unloadClears: unloadClears, levelPatchCounts: levelPatchCounts,
+        levelRecordStarts: levelRecordStarts
+    ))
+}
+
 private func lightingParamsV1(
     context: MetallumLightingContext,
     frame: MetallumRendererFrameStateSnapshot,
@@ -7156,6 +8144,346 @@ public func metallum_lighting_last_completed_stats_v1(
     writeLightingStatsValue(context.clustersX, to: output, offset: 120)
     writeLightingStatsValue(context.clustersY, to: output, offset: 124)
     return completed == nil ? 0 : 1
+}
+
+@_cdecl("metallum_voxel_abi_version_v1")
+public func metallum_voxel_abi_version_v1() -> UInt32 {
+    MetallumVoxelAbiV1.version
+}
+
+@_cdecl("metallum_voxel_layout_v1")
+public func metallum_voxel_layout_v1(
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let output, byteSize == 160 else { return -1 }
+    output.initializeMemory(as: UInt8.self, repeating: 0, count: 160)
+    let values: [UInt32] = [
+        MetallumVoxelAbiV1.version, 160, MetallumVoxelAbiV1.magic,
+        UInt32(MetallumVoxelAbiV1.headerBytes), UInt32(MetallumVoxelAbiV1.recordBytes),
+        UInt32(MetallumVoxelAbiV1.levelLayoutBytes), UInt32(MetallumVoxelAbiV1.paramsBytes),
+        UInt32(MetallumVoxelAbiV1.statsBytes), UInt32(MetallumVoxelAbiV1.ringSlots),
+        MetallumVoxelAbiV1.logicalBrickEdge, MetallumVoxelAbiV1.occupancyWordsPerBrick,
+        MetallumVoxelAbiV1.occupancyBytesPerBrick, MetallumVoxelAbiV1.resetFlag,
+        MetallumVoxelAbiV1.unloadFlag, MetallumVoxelAbiV1.scrollFlag,
+        UInt32(bitPattern: MetallumVoxelAbiV1.transientBusyStatus),
+        0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 68, 72, 76, 80, 84, 88, 92
+    ]
+    for (index, value) in values.enumerated() {
+        writeVoxelValue(value, to: output, offset: index * 4)
+    }
+    return 1
+}
+
+@_cdecl("metallum_voxel_create_context_v1")
+public func metallum_voxel_create_context_v1(
+    _ device: MTLDevice?,
+    _ lightingGeneration: UInt64,
+    _ clipmapGeneration: UInt64,
+    _ worldGeneration: UInt64,
+    _ layouts: UnsafeRawPointer?,
+    _ layoutByteSize: UInt64,
+    _ levelCount: UInt32,
+    _ maxPatchCount: UInt32,
+    _ stagingBytes: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let device,
+              let parsedLayouts = parseVoxelLayoutsV1(
+                  layouts, byteSize: layoutByteSize, levelCount: levelCount
+              ),
+              let context = makeVoxelContext(
+                  device: device, lightingGeneration: lightingGeneration,
+                  clipmapGeneration: clipmapGeneration, worldGeneration: worldGeneration,
+                  layouts: parsedLayouts, maxPatchCount: maxPatchCount, stagingBytes: stagingBytes
+              ) else {
+            return nil
+        }
+        return Unmanaged.passRetained(context).toOpaque()
+    }
+}
+
+@_cdecl("metallum_voxel_release_context_v1")
+public func metallum_voxel_release_context_v1(_ pointer: UnsafeMutableRawPointer?) {
+    guard let pointer else { return }
+    Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).takeUnretainedValue().retire()
+    Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).release()
+}
+
+private func voxelContextBuffer(
+    _ context: MetallumVoxelContext,
+    kind: Int32,
+    index: Int32
+) -> MTLBuffer? {
+    let value = Int(index)
+    switch kind {
+    case 0 where context.levels.indices.contains(value): return context.levels[value].occupancy
+    case 1 where context.levels.indices.contains(value): return context.levels[value].optical
+    case 2 where context.levels.indices.contains(value): return context.levels[value].metadata
+    case 3 where context.slots.indices.contains(value): return context.slots[value].payload
+    case 4 where context.slots.indices.contains(value): return context.slots[value].indirect
+    case 5 where context.slots.indices.contains(value): return context.slots[value].debugReadback
+    default: return nil
+    }
+}
+
+@_cdecl("metallum_voxel_context_buffer_v1")
+public func metallum_voxel_context_buffer_v1(
+    _ pointer: UnsafeMutableRawPointer?,
+    _ kind: Int32,
+    _ index: Int32
+) -> UnsafeMutableRawPointer? {
+    guard let pointer else { return nil }
+    let context = Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).takeUnretainedValue()
+    return unretainedPointer(voxelContextBuffer(context, kind: kind, index: index))
+}
+
+@_cdecl("metallum_voxel_context_buffer_bytes_v1")
+public func metallum_voxel_context_buffer_bytes_v1(
+    _ pointer: UnsafeMutableRawPointer?,
+    _ kind: Int32,
+    _ index: Int32
+) -> UInt64 {
+    guard let pointer else { return 0 }
+    let context = Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).takeUnretainedValue()
+    return UInt64(voxelContextBuffer(context, kind: kind, index: index)?.length ?? 0)
+}
+
+private func writeVoxelParameters(
+    _ context: MetallumVoxelContext,
+    slot: MetallumVoxelRingSlot,
+    batch: MetallumVoxelBatchV1
+) {
+    for index in context.levels.indices {
+        let level = context.levels[index]
+        var parameters = MetallumVoxelParamsV1(
+            patchCount: batch.levelPatchCounts[index],
+            headerBytes: UInt32(MetallumVoxelAbiV1.headerBytes),
+            recordBytes: UInt32(MetallumVoxelAbiV1.recordBytes),
+            levelIndex: UInt32(index), recordStart: batch.levelRecordStarts[index],
+            logicalEdge: level.layout.logicalEdge,
+            subdivision: level.layout.subdivision, brickDimension: level.brickDimension,
+            occupancyWordsPerBrick: MetallumVoxelAbiV1.occupancyWordsPerBrick, reserved0: 0,
+            lightingGeneration: batch.lightingGeneration,
+            clipmapGeneration: batch.clipmapGeneration,
+            worldGeneration: batch.worldGeneration,
+            frameId: batch.frameId
+        )
+        withUnsafeBytes(of: &parameters) { source in
+            slot.paramsStaging.contents().advanced(by: index * MetallumVoxelAbiV1.paramsStride)
+                .copyMemory(from: source.baseAddress!, byteCount: source.count)
+        }
+    }
+}
+
+@_cdecl("metallum_voxel_upload_apply_v1")
+public func metallum_voxel_upload_apply_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let contextPointer, let commandBuffer else { return -1 }
+        let context = Unmanaged<MetallumVoxelContext>.fromOpaque(contextPointer).takeUnretainedValue()
+        guard objectAddress(commandBuffer.device) == objectAddress(context.device),
+              commandBuffer.status == .notEnqueued else {
+            context.noteRejected()
+            return -10
+        }
+        let (parseStatus, parsed) = parseVoxelBatchV1(packet, byteSize: byteSize, context: context)
+        guard parseStatus == 1, let batch = parsed, let packet else {
+            if parseStatus == -9 { context.noteStale() } else { context.noteRejected() }
+            return parseStatus
+        }
+        let needsGpuWork = batch.patchCount > 0
+            || (batch.flags & (MetallumVoxelAbiV1.resetFlag | MetallumVoxelAbiV1.unloadFlag)) != 0
+        if !needsGpuWork {
+            // Empty queues are a true no-op: no ring claim, no encoder and no clipmap scan.
+            context.noteSubmission(batch)
+            return 1
+        }
+        let slotIndex = Int(batch.slot)
+        let reserveStatus = context.reserve(slot: slotIndex, queue: commandBuffer.commandQueue)
+        guard reserveStatus == 1 else { return reserveStatus }
+        let slot = context.slots[slotIndex]
+        context.noteSubmission(batch)
+        if batch.patchCount > 0 {
+            memcpy(slot.staging.contents(), packet, Int(byteSize))
+            writeVoxelParameters(context, slot: slot, batch: batch)
+            let arguments = slot.indirectStaging.contents().bindMemory(
+                to: UInt32.self,
+                capacity: context.levels.count * 3
+            )
+            for index in context.levels.indices {
+                arguments[index * 3] = batch.levelPatchCounts[index]
+                arguments[index * 3 + 1] = 1
+                arguments[index * 3 + 2] = 1
+            }
+        }
+        let uploadPass = MTLBlitPassDescriptor()
+        attachGpuTiming(uploadPass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
+        guard let upload = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: uploadPass) else {
+            context.cancel(slot: slotIndex)
+            return -13
+        }
+        upload.label = "Metallum L5 voxel upload/reset v1"
+        if (batch.flags & (MetallumVoxelAbiV1.resetFlag | MetallumVoxelAbiV1.unloadFlag)) != 0 {
+            for level in context.levels {
+                upload.fill(buffer: level.occupancy, range: 0..<level.occupancyPayloadBytes, value: 0)
+                upload.fill(buffer: level.optical, range: 0..<level.opticalBytes, value: 0)
+                upload.fill(buffer: level.metadata, range: 0..<level.metadataPayloadBytes, value: 0)
+            }
+        }
+        if batch.patchCount > 0 {
+            upload.copy(from: slot.staging, sourceOffset: 0, to: slot.payload,
+                        destinationOffset: 0, size: Int(byteSize))
+            upload.copy(from: slot.indirectStaging, sourceOffset: 0, to: slot.indirect,
+                        destinationOffset: 0, size: context.indirectBytesPerSlot)
+            upload.copy(from: slot.paramsStaging, sourceOffset: 0, to: slot.params,
+                        destinationOffset: 0, size: context.levels.count * MetallumVoxelAbiV1.paramsStride)
+        }
+        upload.endEncoding()
+        if batch.patchCount > 0 {
+            let computePass = MTLComputePassDescriptor()
+            attachGpuTiming(computePass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
+            guard let compute = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: computePass) else {
+                commandBuffer.addCompletedHandler { [context] completed in
+                    context.complete(
+                        slot: slotIndex,
+                        patchCount: 0,
+                        succeeded: completed.status == .completed
+                    )
+                }
+                return -13
+            }
+            compute.label = "Metallum L5 voxel apply indirect v1"
+            for index in context.levels.indices {
+                guard batch.levelPatchCounts[index] > 0 else { continue }
+                let level = context.levels[index]
+                compute.setComputePipelineState(context.pipelines.apply)
+                compute.setBuffer(slot.payload, offset: 0, index: 0)
+                compute.setBuffer(slot.params, offset: index * MetallumVoxelAbiV1.paramsStride, index: 1)
+                compute.setBuffer(level.occupancy, offset: 0, index: 2)
+                compute.setBuffer(level.optical, offset: 0, index: 3)
+                compute.setBuffer(level.metadata, offset: 0, index: 4)
+                compute.dispatchThreadgroups(
+                    indirectBuffer: slot.indirect,
+                    indirectBufferOffset: index * MetallumVoxelAbiV1.indirectBytes,
+                    threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+                )
+            }
+            compute.endEncoding()
+        }
+        commandBuffer.addCompletedHandler { [context] completed in
+            context.complete(
+                slot: slotIndex,
+                patchCount: batch.patchCount,
+                succeeded: completed.status == .completed
+            )
+        }
+        return 1
+    }
+}
+
+@_cdecl("metallum_voxel_last_completed_stats_v1")
+public func metallum_voxel_last_completed_stats_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let contextPointer, let output,
+          byteSize == UInt64(MetallumVoxelAbiV1.statsBytes) else { return -1 }
+    let context = Unmanaged<MetallumVoxelContext>.fromOpaque(contextPointer).takeUnretainedValue()
+    return context.stats(into: output) ? 1 : 0
+}
+
+@_cdecl("metallum_voxel_debug_checksum_v1")
+public func metallum_voxel_debug_checksum_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ levelIndex: UInt32,
+    _ slotIndex: UInt32
+) -> Int32 {
+    autoreleasepool {
+        guard let contextPointer, let commandBuffer else { return -1 }
+        let context = Unmanaged<MetallumVoxelContext>.fromOpaque(contextPointer).takeUnretainedValue()
+        guard levelIndex < UInt32(context.levels.count),
+              slotIndex < UInt32(MetallumVoxelAbiV1.ringSlots),
+              objectAddress(commandBuffer.device) == objectAddress(context.device),
+              commandBuffer.status == .notEnqueued else {
+            context.noteRejected()
+            return -10
+        }
+        let slot = Int(slotIndex)
+        let reserveStatus = context.reserve(slot: slot, queue: commandBuffer.commandQueue)
+        guard reserveStatus == 1 else { return reserveStatus }
+        let resource = context.levels[Int(levelIndex)]
+        let clearPass = MTLBlitPassDescriptor()
+        attachGpuTiming(clearPass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
+        guard let clear = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: clearPass) else {
+            context.cancel(slot: slot)
+            return -13
+        }
+        clear.fill(buffer: context.slots[slot].debugScratch, range: 0..<4, value: 0)
+        clear.endEncoding()
+        let computePass = MTLComputePassDescriptor()
+        attachGpuTiming(computePass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
+        guard let compute = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: computePass) else {
+            commandBuffer.addCompletedHandler { [context] completed in
+                context.completeDebug(slot: slot, succeeded: completed.status == .completed)
+            }
+            return -13
+        }
+        var parameters = MetallumVoxelChecksumParamsV1(
+            occupancyWords: UInt32(resource.occupancyWords),
+            opticalBytes: UInt32(resource.opticalBytes), threadCount: 256, reserved: 0
+        )
+        compute.label = "Metallum L5 voxel diagnostic checksum v1"
+        compute.setComputePipelineState(context.pipelines.checksum)
+        compute.setBuffer(resource.occupancy, offset: 0, index: 0)
+        compute.setBuffer(resource.optical, offset: 0, index: 1)
+        compute.setBuffer(context.slots[slot].debugScratch, offset: 0, index: 2)
+        compute.setBytes(&parameters, length: MemoryLayout<MetallumVoxelChecksumParamsV1>.size, index: 3)
+        compute.dispatchThreads(
+            MTLSize(width: 256, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
+        compute.endEncoding()
+        let readbackPass = MTLBlitPassDescriptor()
+        attachGpuTiming(readbackPass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
+        guard let readback = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: readbackPass) else {
+            commandBuffer.addCompletedHandler { [context] completed in
+                context.completeDebug(slot: slot, succeeded: completed.status == .completed)
+            }
+            return -13
+        }
+        readback.copy(from: context.slots[slot].debugScratch, sourceOffset: 0,
+                      to: context.slots[slot].debugReadback, destinationOffset: 0, size: 4)
+        readback.endEncoding()
+        commandBuffer.addCompletedHandler { [context] completed in
+            context.completeDebug(slot: slot, succeeded: completed.status == .completed)
+        }
+        return 1
+    }
+}
+
+@_cdecl("metallum_voxel_debug_readback_v1")
+public func metallum_voxel_debug_readback_v1(
+    _ contextPointer: UnsafeMutableRawPointer?,
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let contextPointer, let output,
+          byteSize == UInt64(MetallumVoxelAbiV1.checksumBytes) else { return -1 }
+    let context = Unmanaged<MetallumVoxelContext>.fromOpaque(contextPointer).takeUnretainedValue()
+    let snapshot = context.snapshot()
+    output.initializeMemory(as: UInt8.self, repeating: 0, count: MetallumVoxelAbiV1.checksumBytes)
+    writeVoxelValue(MetallumVoxelAbiV1.version, to: output, offset: 0)
+    writeVoxelValue(UInt32(MetallumVoxelAbiV1.checksumBytes), to: output, offset: 4)
+    writeVoxelValue(snapshot.checksum, to: output, offset: 8)
+    writeVoxelValue(UInt32(context.levels.count), to: output, offset: 12)
+    return 1
 }
 
 // Read-only native validation surface for the four renderer-generation
