@@ -333,13 +333,21 @@ public final class RendererArchitectureTests {
         RendererConfig defaults = RendererConfig.from(new Properties());
         require(!defaults.improvedLighting()
                         && defaults.lightingPreset() == LightingPreset.BALANCED
-                        && !defaults.frameInterpolation(),
+                        && !defaults.frameInterpolation()
+                        && !defaults.voxelDebugChecksum(),
                 "renderer config defaults are not fail-closed");
         RendererConfig lightingEnabled = defaults.withImprovedLighting(true);
         require(lightingEnabled.improvedLighting()
                         && lightingEnabled.lightingPreset() == LightingPreset.BALANCED
-                        && !lightingEnabled.frameInterpolation(),
+                        && !lightingEnabled.frameInterpolation()
+                        && !lightingEnabled.voxelDebugChecksum(),
                 "Sodium improved-lighting toggle changed another renderer policy axis");
+        RendererConfig checksumEnabled = lightingEnabled.withVoxelDebugChecksum(true);
+        require(checksumEnabled.improvedLighting()
+                        && checksumEnabled.lightingPreset() == LightingPreset.BALANCED
+                        && !checksumEnabled.frameInterpolation()
+                        && checksumEnabled.voxelDebugChecksum(),
+                "Sodium L5 checksum toggle changed another renderer policy axis");
         Path temporaryDirectory = null;
         try {
             temporaryDirectory = Files.createTempDirectory("metallum-renderer-config-");
@@ -357,33 +365,52 @@ public final class RendererArchitectureTests {
                 RendererConfig migrated = RendererConfig.load(configPath);
                 require(!migrated.improvedLighting()
                                 && migrated.lightingPreset() == LightingPreset.ULTRA
-                                && migrated.frameInterpolation(),
+                                && migrated.frameInterpolation()
+                                && !migrated.voxelDebugChecksum(),
                         "v1 renderer config did not migrate Advanced to Off");
                 String firstMigration = Files.readString(configPath);
-                require(firstMigration.contains("schemaVersion=2")
-                                && firstMigration.contains("improvedLighting=false"),
-                        "v1 renderer config was not persisted as schema 2");
+                require(firstMigration.contains("schemaVersion=3")
+                                && firstMigration.contains("improvedLighting=false")
+                                && firstMigration.contains("voxelDebugChecksum=false"),
+                        "v1 renderer config was not persisted as schema 3");
                 RendererConfig repeated = RendererConfig.load(configPath);
                 require(repeated.equals(migrated)
                                 && Files.readString(configPath).equals(firstMigration),
-                        "schema-2 reload rewrote or changed the migrated config");
+                        "schema-3 reload rewrote or changed the migrated config");
                 require(Files.readString(hdrPath).equals(hdrSentinel),
                         "renderer migration read or changed the separate HDR file");
             }
 
-            RendererConfig original = new RendererConfig(false, LightingPreset.ULTRA, true);
+            Files.writeString(
+                    configPath,
+                    "schemaVersion=2\nimprovedLighting=true\nlightingPreset=performance\n"
+                            + "frameInterpolation=true\n"
+            );
+            RendererConfig schemaTwo = RendererConfig.load(configPath);
+            require(schemaTwo.improvedLighting()
+                            && schemaTwo.lightingPreset() == LightingPreset.PERFORMANCE
+                            && schemaTwo.frameInterpolation()
+                            && !schemaTwo.voxelDebugChecksum()
+                            && Files.readString(configPath).contains("schemaVersion=3"),
+                    "schema-2 renderer config did not migrate with L5 checksum Off");
+
+            RendererConfig original = new RendererConfig(
+                    false, LightingPreset.ULTRA, true, true
+            );
             original.save(configPath);
             original.withImprovedLighting(true).save(configPath);
             RendererConfig persisted = RendererConfig.load(configPath);
             require(persisted.improvedLighting()
                             && persisted.lightingPreset() == LightingPreset.ULTRA
-                            && persisted.frameInterpolation(),
+                            && persisted.frameInterpolation()
+                            && persisted.voxelDebugChecksum(),
                     "persisted lighting toggle lost another renderer config axis");
 
             for (String invalid : new String[]{
                     "schemaVersion=99\nimprovedLighting=true\n",
                     "schemaVersion=broken\nimprovedLighting=true\n",
-                    "schemaVersion=2\nimprovedLighting=maybe\n"
+                    "schemaVersion=3\nimprovedLighting=maybe\n",
+                    "schemaVersion=3\nimprovedLighting=true\nvoxelDebugChecksum=maybe\n"
             }) {
                 Files.writeString(configPath, invalid);
                 require(RendererConfig.load(configPath).equals(RendererConfig.defaults()),
@@ -415,18 +442,20 @@ public final class RendererArchitectureTests {
             }
         }
         Properties configured = new Properties();
-        configured.setProperty("schemaVersion", "2");
+        configured.setProperty("schemaVersion", "3");
         configured.setProperty("improvedLighting", "true");
         configured.setProperty("lightingPreset", "ultra");
         configured.setProperty("frameInterpolation", "true");
+        configured.setProperty("voxelDebugChecksum", "true");
         RendererConfig parsed = RendererConfig.from(configured);
         require(parsed.improvedLighting()
                         && parsed.lightingPreset() == LightingPreset.ULTRA
-                        && parsed.frameInterpolation(),
+                        && parsed.frameInterpolation()
+                        && parsed.voxelDebugChecksum(),
                 "renderer config axes were not parsed independently");
         configured.setProperty("lightingPreset", "unknown");
         require(RendererConfig.from(configured).equals(RendererConfig.defaults()),
-                "invalid schema-2 preset did not fail closed");
+                "invalid schema-3 preset did not fail closed");
         expectIllegalArgument(() -> RendererFeatureMask.of(
                 RendererFeatureMask.SPATIAL_UPSCALING,
                 RendererFeatureMask.TEMPORAL_UPSCALING

@@ -55,6 +55,11 @@ public final class MetallumSodiumConfigTests {
                 "Metallum HDR-enabled Sodium option is missing or has the wrong type");
         require(hdrOption.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum HDR-enabled option must require a full game restart");
+        Option voxelChecksum = findOption(page, idField, "voxel_debug_checksum");
+        require(voxelChecksum instanceof BooleanOption,
+                "Metallum L5 checksum Sodium option is missing or has the wrong type");
+        require(voxelChecksum.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum L5 checksum option must require a full game restart");
         System.out.println("Metallum Sodium config registration tests passed");
     }
 

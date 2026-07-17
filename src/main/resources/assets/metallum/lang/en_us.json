@@ -13,5 +13,7 @@
   "metallum.options.metalfx_spatial_scaling.tooltip.auto_off": "Auto selected native rendering: %s×%s (100%%). Measurements favor native rendering for SDR; EDR also stays native conservatively.",
   "metallum.options.metalfx_spatial_scaling.tooltip.auto_enabled": "Auto selected %s. World: %s×%s → %s×%s. Preset: %s%% per axis; actual: %s%% × %s%%, or %s%% of native pixels. The interface remains at full resolution.",
   "metallum.options.metalfx_spatial_scaling.tooltip.unavailable": "Native rendering: %s×%s (100%%). MetalFX Spatial Scaling is unavailable or was disabled by the safe runtime fallback.",
-  "metallum.options.metalfx_spatial_scaling.tooltip.enabled": "World: %s×%s → %s×%s. Preset: %s%% per axis; actual: %s%% × %s%%, or %s%% of native pixels. The interface remains at full resolution."
+  "metallum.options.metalfx_spatial_scaling.tooltip.enabled": "World: %s×%s → %s×%s. Preset: %s%% per axis; actual: %s%% × %s%%, or %s%% of native pixels. The interface remains at full resolution.",
+  "metallum.options.voxel_debug_checksum.name": "L5 GPU Clipmap Checksum",
+  "metallum.options.voxel_debug_checksum.tooltip": "Advanced-only diagnostic. Periodically computes a non-blocking checksum of the finest GPU voxel clipmap and publishes it as voxel_clipmaps.debug_checksum in timing telemetry. It does not add an on-screen preview. Vanilla allocates and executes nothing. Changes require a restart."
 }

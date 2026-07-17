@@ -1937,6 +1937,24 @@ private final class MetallumVoxelContext: @unchecked Sendable {
         return 1
     }
 
+    /// Diagnostic commands share the physical scratch slots but never contribute to the
+    /// production rejection/high-water counters used by Java to decide whether L5 is healthy.
+    func reserveDebug(slot index: Int, queue: MTLCommandQueue) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !retired else { return -10 }
+        let address = objectAddress(queue)
+        if let queueAddress, queueAddress != address {
+            return -11
+        }
+        guard !slots[index].busy else {
+            return MetallumVoxelAbiV1.transientBusyStatus
+        }
+        queueAddress = address
+        slots[index].busy = true
+        return 1
+    }
+
     func cancel(slot index: Int) {
         lock.lock()
         if slots[index].busy {
@@ -1946,6 +1964,14 @@ private final class MetallumVoxelContext: @unchecked Sendable {
         rejected &+= 1
         lock.unlock()
         publishTelemetry()
+    }
+
+    func cancelDebug(slot index: Int) {
+        lock.lock()
+        if slots[index].busy {
+            slots[index].busy = false
+        }
+        lock.unlock()
     }
 
     func noteStale() {
@@ -1995,12 +2021,9 @@ private final class MetallumVoxelContext: @unchecked Sendable {
         lock.lock()
         if slots[index].busy {
             slots[index].busy = false
-            activeSlots = activeSlots > 0 ? activeSlots - 1 : 0
         }
         if succeeded {
             lastChecksum = slots[index].debugReadback.contents().load(as: UInt32.self)
-        } else {
-            rejected &+= 1
         }
         lock.unlock()
         publishTelemetry()
@@ -8412,20 +8435,21 @@ public func metallum_voxel_debug_checksum_v1(
               slotIndex < UInt32(MetallumVoxelAbiV1.ringSlots),
               objectAddress(commandBuffer.device) == objectAddress(context.device),
               commandBuffer.status == .notEnqueued else {
-            context.noteRejected()
             return -10
         }
         let slot = Int(slotIndex)
-        let reserveStatus = context.reserve(slot: slot, queue: commandBuffer.commandQueue)
+        let reserveStatus = context.reserveDebug(slot: slot, queue: commandBuffer.commandQueue)
         guard reserveStatus == 1 else { return reserveStatus }
         let resource = context.levels[Int(levelIndex)]
         let clearPass = MTLBlitPassDescriptor()
         attachGpuTiming(clearPass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)
         guard let clear = trackedMakeBlitCommandEncoder(commandBuffer, descriptor: clearPass) else {
-            context.cancel(slot: slot)
+            context.cancelDebug(slot: slot)
             return -13
         }
-        clear.fill(buffer: context.slots[slot].debugScratch, range: 0..<4, value: 0)
+        // A non-zero seed distinguishes a completed checksum of symmetric/empty data from the
+        // initial "diagnostic has not completed" telemetry value without touching clipmap data.
+        clear.fill(buffer: context.slots[slot].debugScratch, range: 0..<4, value: 0xa5)
         clear.endEncoding()
         let computePass = MTLComputePassDescriptor()
         attachGpuTiming(computePass, commandBuffer: commandBuffer, stage: .voxelUploadUpdate)

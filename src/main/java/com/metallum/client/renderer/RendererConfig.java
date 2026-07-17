@@ -17,9 +17,10 @@ import java.util.Properties;
 public record RendererConfig(
         boolean improvedLighting,
         LightingPreset lightingPreset,
-        boolean frameInterpolation
+        boolean frameInterpolation,
+        boolean voxelDebugChecksum
 ) {
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
     private static final String FILE_NAME = "metallum-renderer.properties";
 
     public RendererConfig {
@@ -29,7 +30,7 @@ public record RendererConfig(
     }
 
     public static RendererConfig defaults() {
-        return new RendererConfig(false, LightingPreset.BALANCED, false);
+        return new RendererConfig(false, LightingPreset.BALANCED, false, false);
     }
 
     public static RendererConfig load() {
@@ -75,7 +76,26 @@ public record RendererConfig(
             }
             return migrated;
         }
-        if (!Integer.toString(SCHEMA_VERSION).equals(rawVersion.strip())) {
+        String normalizedVersion = rawVersion.strip();
+        if ("2".equals(normalizedVersion)) {
+            RendererConfig migrated = parseV2(properties);
+            if (migrated == null) {
+                Metallum.LOGGER.warn(
+                        "Malformed renderer config schema 2 at {}; using defaults without rewriting it",
+                        path
+                );
+                return defaults();
+            }
+            if (migrated.save(path)) {
+                Metallum.LOGGER.info(
+                        "Migrated renderer config {} from schema 2 to {}; L5 GPU checksum is Off",
+                        path,
+                        SCHEMA_VERSION
+                );
+            }
+            return migrated;
+        }
+        if (!Integer.toString(SCHEMA_VERSION).equals(normalizedVersion)) {
             Metallum.LOGGER.warn(
                     "Unknown renderer config schema '{}' at {}; using defaults without rewriting it",
                     rawVersion,
@@ -83,7 +103,7 @@ public record RendererConfig(
             );
             return defaults();
         }
-        RendererConfig parsed = parseV2(properties);
+        RendererConfig parsed = parseV3(properties);
         if (parsed == null) {
             Metallum.LOGGER.warn(
                     "Malformed renderer config schema {} at {}; using defaults without rewriting it",
@@ -96,7 +116,15 @@ public record RendererConfig(
     }
 
     public RendererConfig withImprovedLighting(final boolean enabled) {
-        return new RendererConfig(enabled, this.lightingPreset, this.frameInterpolation);
+        return new RendererConfig(
+                enabled, this.lightingPreset, this.frameInterpolation, this.voxelDebugChecksum
+        );
+    }
+
+    public RendererConfig withVoxelDebugChecksum(final boolean enabled) {
+        return new RendererConfig(
+                this.improvedLighting, this.lightingPreset, this.frameInterpolation, enabled
+        );
     }
 
     public void save() {
@@ -105,16 +133,18 @@ public record RendererConfig(
     }
 
     boolean save(final Path path) {
-        return writeProperties(path, toProperties(this), "Metallum renderer settings (schema 2)");
+        return writeProperties(path, toProperties(this), "Metallum renderer settings (schema 3)");
     }
 
     static RendererConfig from(final Properties properties) {
         String version = properties.getProperty("schemaVersion");
         RendererConfig parsed = version == null
                 ? parseV1(properties)
-                : Integer.toString(SCHEMA_VERSION).equals(version.strip())
-                ? parseV2(properties)
-                : null;
+                : switch (version.strip()) {
+                    case "2" -> parseV2(properties);
+                    case "3" -> parseV3(properties);
+                    default -> null;
+                };
         return parsed != null ? parsed : defaults();
     }
 
@@ -125,7 +155,7 @@ public record RendererConfig(
         if (oldLighting == null || interpolation == null || preset == null) {
             return null;
         }
-        return new RendererConfig(false, preset, interpolation);
+        return new RendererConfig(false, preset, interpolation, false);
     }
 
     private static RendererConfig parseV2(final Properties properties) {
@@ -135,7 +165,18 @@ public record RendererConfig(
         if (advanced == null || interpolation == null || preset == null) {
             return null;
         }
-        return new RendererConfig(advanced, preset, interpolation);
+        return new RendererConfig(advanced, preset, interpolation, false);
+    }
+
+    private static RendererConfig parseV3(final Properties properties) {
+        Boolean advanced = strictBoolean(properties, "improvedLighting", false);
+        Boolean interpolation = strictBoolean(properties, "frameInterpolation", false);
+        Boolean voxelChecksum = strictBoolean(properties, "voxelDebugChecksum", false);
+        LightingPreset preset = strictPreset(properties, "lightingPreset", LightingPreset.BALANCED);
+        if (advanced == null || interpolation == null || voxelChecksum == null || preset == null) {
+            return null;
+        }
+        return new RendererConfig(advanced, preset, interpolation, voxelChecksum);
     }
 
     private static Boolean strictBoolean(
@@ -179,6 +220,7 @@ public record RendererConfig(
                 config.lightingPreset.name().toLowerCase(Locale.ROOT)
         );
         properties.setProperty("frameInterpolation", Boolean.toString(config.frameInterpolation));
+        properties.setProperty("voxelDebugChecksum", Boolean.toString(config.voxelDebugChecksum));
         return properties;
     }
 

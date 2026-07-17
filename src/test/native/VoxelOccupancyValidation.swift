@@ -440,6 +440,28 @@ private enum VoxelOccupancyValidationMain {
         try require(readUInt32(metadataRead, metadataIndex + 12) == 8,
                     "Reused toroidal slot kept a stale content stamp")
 
+        var beforeDebugBusy = [UInt8](repeating: 0, count: 160)
+        _ = beforeDebugBusy.withUnsafeMutableBytes { api.stats(context, $0.baseAddress, 160) }
+        let productionRejectedBeforeDebugBusy = readUInt64(beforeDebugBusy, 72)
+        guard let heldDebugCommand = queue.makeCommandBuffer(),
+              let busyDebugCommand = queue.makeCommandBuffer() else {
+            throw ValidationFailure.message("Could not create diagnostic busy-isolation commands")
+        }
+        try require(api.debugChecksum(context, objectPointer(busyDebugCommand), 99, 1) == -10,
+                    "Out-of-range diagnostic checksum did not fail closed")
+        try require(api.debugChecksum(context, objectPointer(heldDebugCommand), 0, 1) == 1,
+                    "Could not reserve diagnostic checksum slot")
+        try require(api.debugChecksum(context, objectPointer(busyDebugCommand), 0, 1) == -22,
+                    "Diagnostic checksum did not report its transient busy slot")
+        var afterDebugBusy = [UInt8](repeating: 0, count: 160)
+        _ = afterDebugBusy.withUnsafeMutableBytes { api.stats(context, $0.baseAddress, 160) }
+        try require(readUInt64(afterDebugBusy, 72) == productionRejectedBeforeDebugBusy,
+                    "Diagnostic ring busy polluted the production L5 rejection counter")
+        heldDebugCommand.commit()
+        heldDebugCommand.waitUntilCompleted()
+        try require(heldDebugCommand.status == .completed,
+                    "Held diagnostic checksum command did not release its isolated slot")
+
         guard let checksumCommand = queue.makeCommandBuffer() else {
             throw ValidationFailure.message("Could not create checksum command")
         }

@@ -343,10 +343,13 @@ renderer_value() {
 RENDERER_LIGHTING=$(renderer_value improvedLighting)
 RENDERER_PRESET=$(renderer_value lightingPreset)
 RENDERER_INTERPOLATION=$(renderer_value frameInterpolation)
+RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
+[ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "balanced" "renderer lightingPreset"
 require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
-RENDERER_VALUES_BEFORE="$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION"
+require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
+RENDERER_VALUES_BEFORE="$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG"
 
 mkdir -p "$OUTPUT_DIR"
 git -C "$ROOT" check-ignore -q "$OUTPUT_DIR/.metallum-benchmark-probe" \
@@ -471,7 +474,9 @@ cleanup() {
         cleanup_status=2
     fi
 
-    renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)"
+    renderer_debug_after=$(renderer_value voxelDebugChecksum)
+    [ -n "$renderer_debug_after" ] || renderer_debug_after=false
+    renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
     if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
         echo "ERROR: renderer generation settings changed during the run" >&2
         cleanup_status=2

@@ -120,6 +120,23 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.literal("Experimental & Diagnostics"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "voxel_debug_checksum"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.voxel_debug_checksum.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.voxel_debug_checksum.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setVoxelDebugChecksum,
+                                    () -> RendererConfig.load().voxelDebugChecksum()
+                            )
+                    )
                     .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "diagnostic_pattern"))
                         .setStorageHandler(STORAGE_HANDLER)
                         .setName(Component.literal("Full-Screen HDR Calibration Pattern"))
@@ -225,6 +242,10 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
 
     private static void setImprovedLighting(final boolean enabled) {
         RendererConfig.load().withImprovedLighting(enabled).save();
+    }
+
+    private static void setVoxelDebugChecksum(final boolean enabled) {
+        RendererConfig.load().withVoxelDebugChecksum(enabled).save();
     }
 
     private static void updateConfig(java.util.function.Function<HdrConfig, HdrConfig> updater) {

@@ -1111,6 +1111,16 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return resources.upload(commandBuffer(), upload);
     }
 
+    int encodeVoxelDebugChecksum(
+            final VoxelOccupancyGpuResources resources,
+            final int level,
+            final int slot
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return resources.encodeDebugChecksum(commandBuffer(), level, slot);
+    }
+
     void setGpuTimingStage(final MetalGpuTimingStage stage) {
         MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
         if (this.gpuTimingStage == next) {

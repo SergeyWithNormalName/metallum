@@ -13,5 +13,7 @@
   "metallum.options.metalfx_spatial_scaling.tooltip.auto_off": "Авторежим выбрал нативный рендер: %s×%s (100%%). Измерения показали его преимущество в SDR; для EDR он также остаётся консервативным выбором.",
   "metallum.options.metalfx_spatial_scaling.tooltip.auto_enabled": "Авторежим выбрал %s. Мир: %s×%s → %s×%s. Пресет: %s%% по каждой стороне; фактически: %s%% × %s%%, или %s%% нативных пикселей. Интерфейс выводится в полном разрешении.",
   "metallum.options.metalfx_spatial_scaling.tooltip.unavailable": "Нативный рендер: %s×%s (100%%). MetalFX Spatial Scaling недоступен или отключён защитным fallback-механизмом.",
-  "metallum.options.metalfx_spatial_scaling.tooltip.enabled": "Мир: %s×%s → %s×%s. Пресет: %s%% по каждой стороне; фактически: %s%% × %s%%, или %s%% пикселей. Интерфейс выводится в полном разрешении."
+  "metallum.options.metalfx_spatial_scaling.tooltip.enabled": "Мир: %s×%s → %s×%s. Пресет: %s%% по каждой стороне; фактически: %s%% × %s%%, или %s%% пикселей. Интерфейс выводится в полном разрешении.",
+  "metallum.options.voxel_debug_checksum.name": "L5 GPU checksum воксельного клипмапа",
+  "metallum.options.voxel_debug_checksum.tooltip": "Диагностика только для Advanced. Периодически без блокировки считает checksum самого детального GPU voxel clipmap и публикует его как voxel_clipmaps.debug_checksum в timing telemetry. Экранный preview не добавляется. В Vanilla ресурсы и команды не создаются. Требуется перезапуск."
 }

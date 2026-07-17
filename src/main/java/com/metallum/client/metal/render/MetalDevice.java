@@ -145,6 +145,7 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
+    static final long VOXEL_DEBUG_CHECKSUM_CADENCE_FRAMES = 120L;
     private static volatile MetalDevice INSTANCE;
     private final MemorySegment metalDeviceHandle;
     private final MemorySegment metalLayer;
@@ -237,6 +238,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean voxelFailureLogged;
     private long voxelRetrySuppressedRendererGeneration = Long.MIN_VALUE;
     private long voxelRetrySuppressedLightingGeneration = Long.MIN_VALUE;
+    private long lastVoxelDebugChecksumSubmitIndex = Long.MIN_VALUE;
+    private boolean voxelDebugChecksumRuntimeDisabled;
+    private boolean voxelDebugChecksumFailureLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -1095,6 +1099,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.resetVoxelFailureForGeneration(nextGeneration, nextLightingGeneration);
         if (previousVoxelResources != nextVoxelResources) {
             this.observedVoxelNativeRejections = 0L;
+            this.resetVoxelDebugChecksumState();
         }
         this.advancedLightingFrameReady = false;
         this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
@@ -1293,6 +1298,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         );
         VoxelUploadBatch voxelBatch = null;
         VoxelOccupancyGpuResources.FrameUpload voxelUpload = null;
+        boolean voxelUploadAttemptedThisFrame = false;
         if (lightSnapshot != null && voxelResources != null) {
             voxelBatch = voxelController.leaseUploadBatch(published.frameId());
             if (voxelBatch != null) {
@@ -1343,6 +1349,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 if (voxelBatch != null && voxelUpload != null && voxelResources != null) {
                     int voxelStatus;
                     try {
+                        voxelUploadAttemptedThisFrame = true;
                         voxelStatus = this.commandEncoder.encodeVoxelOccupancy(
                                 voxelResources,
                                 voxelUpload
@@ -1396,6 +1403,48 @@ public final class MetalDevice implements GpuDeviceBackend {
                     this.advancedLightingFrameSubmitIndex = submitIndex;
                     this.advancedLightingFrameReady = shadowResources.isReady(submitIndex);
                     this.advancedLightingTransientFallbackLogged = false;
+                    if (shouldScheduleVoxelDebugChecksum(
+                            this.rendererConfig.voxelDebugChecksum(),
+                            generation.lightingModel(),
+                            voxelResources != null,
+                            this.advancedLightingFrameReady,
+                            voxelUploadAttemptedThisFrame,
+                            this.voxelDebugChecksumRuntimeDisabled,
+                            submitIndex,
+                            this.lastVoxelDebugChecksumSubmitIndex
+                    )) {
+                        int debugStatus;
+                        try {
+                            debugStatus = this.commandEncoder.encodeVoxelDebugChecksum(
+                                    voxelResources,
+                                    0,
+                                    published.inFlightSlot()
+                            );
+                        } catch (RuntimeException exception) {
+                            debugStatus = Integer.MIN_VALUE;
+                            if (!this.voxelDebugChecksumFailureLogged) {
+                                this.voxelDebugChecksumFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "L5 GPU checksum diagnostic failed; disabling only the diagnostic",
+                                        exception
+                                );
+                            }
+                        }
+                        if (debugStatus == VoxelOccupancyGpuResources.STATUS_OK) {
+                            this.lastVoxelDebugChecksumSubmitIndex = submitIndex;
+                            this.voxelDebugChecksumFailureLogged = false;
+                        } else if (debugStatus
+                                != VoxelOccupancyGpuResources.STATUS_RING_SLOT_BUSY) {
+                            this.voxelDebugChecksumRuntimeDisabled = true;
+                            if (!this.voxelDebugChecksumFailureLogged) {
+                                this.voxelDebugChecksumFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "L5 GPU checksum diagnostic returned status {}; disabling only the diagnostic",
+                                        debugStatus
+                                );
+                            }
+                        }
+                    }
                 } catch (RuntimeException exception) {
                     lightingStatus = Integer.MIN_VALUE;
                     this.advancedLightingFrameReady = false;
@@ -2446,6 +2495,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.voxelOccupancyResources = replacement;
             this.observedVoxelNativeRejections = 0L;
             this.voxelFailureLogged = false;
+            this.resetVoxelDebugChecksumState();
             this.voxelRetrySuppressedRendererGeneration = Long.MIN_VALUE;
             this.voxelRetrySuppressedLightingGeneration = Long.MIN_VALUE;
             if (current != null) {
@@ -2475,6 +2525,29 @@ public final class MetalDevice implements GpuDeviceBackend {
         return lightingResourcesReady && shadowResourcesReady;
     }
 
+    static boolean shouldScheduleVoxelDebugChecksum(
+            final boolean configured,
+            final LightingModel lightingModel,
+            final boolean voxelResourcesReady,
+            final boolean advancedFrameReady,
+            final boolean voxelUploadAttemptedThisFrame,
+            final boolean runtimeDisabled,
+            final long submitIndex,
+            final long lastChecksumSubmitIndex
+    ) {
+        if (submitIndex < 0L) {
+            throw new IllegalArgumentException("submitIndex must be non-negative");
+        }
+        return configured
+                && lightingModel == LightingModel.ADVANCED
+                && voxelResourcesReady
+                && advancedFrameReady
+                && !voxelUploadAttemptedThisFrame
+                && !runtimeDisabled
+                && (lastChecksumSubmitIndex < 0L
+                || submitIndex - lastChecksumSubmitIndex >= VOXEL_DEBUG_CHECKSUM_CADENCE_FRAMES);
+    }
+
     private void detectAsyncVoxelFailure() {
         VoxelOccupancyGpuResources current = this.voxelOccupancyResources;
         if (current == null) {
@@ -2491,6 +2564,12 @@ public final class MetalDevice implements GpuDeviceBackend {
         } catch (RuntimeException exception) {
             this.disableVoxelOccupancy("L5 voxel health query failed", exception);
         }
+    }
+
+    private void resetVoxelDebugChecksumState() {
+        this.lastVoxelDebugChecksumSubmitIndex = Long.MIN_VALUE;
+        this.voxelDebugChecksumRuntimeDisabled = false;
+        this.voxelDebugChecksumFailureLogged = false;
     }
 
     static boolean hasUnacknowledgedVoxelNativeRejection(

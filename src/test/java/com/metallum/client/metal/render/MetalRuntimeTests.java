@@ -73,6 +73,7 @@ public final class MetalRuntimeTests {
         testAdvancedLightingAdmissionLimits();
         testAdvancedLightingWorkDeclaration();
         testVoxelFailureIsolationPolicy();
+        testVoxelDebugChecksumScheduling();
         testAdvancedLightingPerSubmitLatch();
         testMojangLogoFp16BlendCompatibility();
         testHdrSceneColorRouting();
@@ -258,6 +259,44 @@ public final class MetalRuntimeTests {
                         Long.MIN_VALUE, Long.MIN_VALUE, 12L, 4L),
                 "L5 retry latch was not scoped to exactly one renderer/lighting generation");
         AdvancedLightingRuntime.reset();
+    }
+
+    private static void testVoxelDebugChecksumScheduling() {
+        long cadence = MetalDevice.VOXEL_DEBUG_CHECKSUM_CADENCE_FRAMES;
+        require(MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, true, false, false,
+                        0L, Long.MIN_VALUE),
+                "enabled L5 diagnostics did not schedule their first idle checksum");
+        require(!MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        false, LightingModel.ADVANCED, true, true, false, false,
+                        cadence, Long.MIN_VALUE)
+                        && !MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.VANILLA, true, true, false, false,
+                        cadence, Long.MIN_VALUE)
+                        && !MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, false, true, false, false,
+                        cadence, Long.MIN_VALUE)
+                        && !MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, false, false, false,
+                        cadence, Long.MIN_VALUE)
+                        && !MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, true, true, false,
+                        cadence, Long.MIN_VALUE)
+                        && !MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, true, false, true,
+                        cadence, Long.MIN_VALUE),
+                "L5 diagnostics escaped their Advanced/healthy/idle isolation gate");
+        require(!MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, true, false, false,
+                        cadence - 1L, 0L)
+                        && MetalDevice.shouldScheduleVoxelDebugChecksum(
+                        true, LightingModel.ADVANCED, true, true, false, false,
+                        cadence, 0L),
+                "L5 diagnostic checksum cadence is off by one frame");
+        expectIllegalArgument(() -> MetalDevice.shouldScheduleVoxelDebugChecksum(
+                true, LightingModel.ADVANCED, true, true, false, false,
+                -1L, Long.MIN_VALUE
+        ));
     }
 
     private static void testAutomaticMaterialContractAndCompatibilityOverride() {
