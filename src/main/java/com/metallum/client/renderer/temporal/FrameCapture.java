@@ -1,5 +1,7 @@
 package com.metallum.client.renderer.temporal;
 
+import com.metallum.client.lighting.EnvironmentDescriptor;
+
 import java.util.Objects;
 
 /** Final world-camera values captured immediately before renderer publication. */
@@ -10,11 +12,13 @@ public record FrameCapture(
         double nearPlane,
         double farPlane,
         long worldIdentity,
-        long dimensionIdentity
+        long dimensionIdentity,
+        EnvironmentDescriptor environment
 ) {
     public FrameCapture {
         Objects.requireNonNull(transforms, "transforms");
         Objects.requireNonNull(cameraPosition, "cameraPosition");
+        Objects.requireNonNull(environment, "environment");
         if (deltaSeconds < 0.0 || !Double.isFinite(deltaSeconds)) {
             throw new IllegalArgumentException("Frame delta must be non-negative and finite");
         }
@@ -25,5 +29,26 @@ public record FrameCapture(
         if (worldIdentity < 0L || dimensionIdentity < 0L) {
             throw new IllegalArgumentException("World identities must be non-negative");
         }
+    }
+
+    public FrameCapture(
+            final FrameState.Transforms transforms,
+            final FrameState.CameraPosition cameraPosition,
+            final double deltaSeconds,
+            final double nearPlane,
+            final double farPlane,
+            final long worldIdentity,
+            final long dimensionIdentity
+    ) {
+        this(
+                transforms,
+                cameraPosition,
+                deltaSeconds,
+                nearPlane,
+                farPlane,
+                worldIdentity,
+                dimensionIdentity,
+                EnvironmentDescriptor.NONE
+        );
     }
 }

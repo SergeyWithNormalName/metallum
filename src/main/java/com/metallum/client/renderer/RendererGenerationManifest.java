@@ -17,7 +17,7 @@ public record RendererGenerationManifest(
         List<WorkQueue> workQueues,
         String admissionBlocker
 ) {
-    public static final int CURRENT_VERSION = 4;
+    public static final int CURRENT_VERSION = 5;
 
     /** Storage and transfer contract of the external main-color target. */
     public enum SceneStorageContract {
@@ -156,7 +156,7 @@ public record RendererGenerationManifest(
         if (config.lightingModel() == LightingModel.ADVANCED
                 && !domainHasWork(Domain.ADVANCED_LIGHTING_ONLY, resources, passes, encoders,
                 pipelines, workQueues)) {
-            throw new IllegalArgumentException("Advanced lighting requires an executable L3 domain");
+            throw new IllegalArgumentException("Advanced lighting requires an executable Advanced domain");
         }
     }
 

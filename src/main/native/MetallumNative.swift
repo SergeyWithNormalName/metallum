@@ -1564,6 +1564,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case present = 11
     case actualHdrDisplay = 12
     case lightUploadClusterBuild = 13
+    case sunShadow = 14
 
     var reportName: String {
         switch self {
@@ -1581,6 +1582,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .present: "present"
         case .actualHdrDisplay: "actual-radiance HDR display mapping"
         case .lightUploadClusterBuild: "light upload + cluster build"
+        case .sunShadow: "sun shadow"
         }
     }
 

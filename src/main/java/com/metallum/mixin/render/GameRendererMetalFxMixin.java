@@ -1,5 +1,6 @@
 package com.metallum.mixin.render;
 
+import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.renderer.temporal.FrameCapture;
@@ -18,6 +19,10 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.ProjectionMatrixBuffer;
 import net.minecraft.client.renderer.state.GameRenderState;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.SkyRenderState;
+import net.minecraft.util.ARGB;
+import net.minecraft.world.level.MoonPhase;
+import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
@@ -191,10 +196,71 @@ abstract class GameRendererMetalFxMixin {
                     0.05,
                     camera.depthFar,
                     Integer.toUnsignedLong(System.identityHashCode(this.minecraft.level)),
-                    this.metallum$dimensionIdentity
+                    this.metallum$dimensionIdentity,
+                    metallum$environmentDescriptor(camera, deltaTracker)
             ));
         }
         return projectionBuffer.getBuffer(finalProjection);
+    }
+
+    private EnvironmentDescriptor metallum$environmentDescriptor(
+            final CameraRenderState camera,
+            final DeltaTracker deltaTracker
+    ) {
+        EnvironmentDescriptor.Medium medium = switch (camera.fogType) {
+            case WATER -> EnvironmentDescriptor.Medium.WATER;
+            case LAVA -> EnvironmentDescriptor.Medium.LAVA;
+            case POWDER_SNOW -> EnvironmentDescriptor.Medium.POWDER_SNOW;
+            default -> EnvironmentDescriptor.Medium.AIR;
+        };
+        SkyRenderState sky = this.gameRenderState.levelRenderState.skyRenderState;
+        DimensionType.Skybox skybox = sky.skybox;
+        float ambient = Math.max(this.minecraft.level.dimensionType().ambientLight(), 0.0f);
+        if (skybox == DimensionType.Skybox.OVERWORLD) {
+            float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
+            float rain = this.minecraft.level.getRainLevel(partialTick);
+            float thunder = this.minecraft.level.getThunderLevel(partialTick);
+            MoonPhase phase = sky.moonPhase;
+            float phaseBrightness = phase == null
+                    ? 1.0f
+                    : switch (phase) {
+                        case FULL_MOON -> 1.0f;
+                        case WANING_GIBBOUS, WAXING_GIBBOUS -> 0.75f;
+                        case THIRD_QUARTER, FIRST_QUARTER -> 0.50f;
+                        case WANING_CRESCENT, WAXING_CRESCENT -> 0.25f;
+                        case NEW_MOON -> 0.08f;
+                    };
+            return EnvironmentDescriptor.celestial(
+                    medium,
+                    sky.sunAngle,
+                    ARGB.srgbToLinearChannel(ARGB.red(sky.skyColor)),
+                    ARGB.srgbToLinearChannel(ARGB.green(sky.skyColor)),
+                    ARGB.srgbToLinearChannel(ARGB.blue(sky.skyColor)),
+                    ambient,
+                    rain,
+                    thunder,
+                    phaseBrightness
+            );
+        }
+        if (skybox == DimensionType.Skybox.END) {
+            return EnvironmentDescriptor.ambientOnly(
+                    EnvironmentDescriptor.Profile.END,
+                    medium,
+                    0.11f + ambient * 0.35f,
+                    0.075f + ambient * 0.25f,
+                    0.16f + ambient * 0.45f
+            );
+        }
+        // Do not read the remaining SkyRenderState fields here. Minecraft only resets skybox,
+        // so those values may still describe the previous Overworld frame.
+        float neutral = Math.max(ambient, 0.055f);
+        return EnvironmentDescriptor.ambientOnly(
+                EnvironmentDescriptor.Profile.AMBIENT_ONLY,
+                medium,
+                neutral * 1.04f,
+                neutral,
+                neutral * 0.94f
+        );
     }
 
     @Redirect(

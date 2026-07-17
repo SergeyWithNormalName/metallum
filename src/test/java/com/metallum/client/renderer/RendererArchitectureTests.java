@@ -55,7 +55,7 @@ public final class RendererArchitectureTests {
         testFrameStateNumericContracts();
         testFrameStateLightingContractAndAbi();
         testFrameStateImmutability();
-        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3 tests passed");
+        System.out.println("Renderer architecture P1/P2/P4/L0/L2/L2.5/L3/L4 tests passed");
     }
 
     private static void testIndependentModeMatrix() {
@@ -1001,6 +1001,9 @@ public final class RendererArchitectureTests {
                 extent.width(),
                 extent.height()
         );
+        SunShadowLayout.Budget shadowBudget = SunShadowLayout.forPreset(
+                LightingPreset.BALANCED
+        );
         Set<String> expectedResources = Set.of(
                 "lighting_upload_ring",
                 "gpu_lights",
@@ -1008,16 +1011,20 @@ public final class RendererArchitectureTests {
                 "cluster_membership_scratch",
                 "cluster_compact_indices",
                 "lighting_params",
-                "cluster_statistics"
+                "cluster_statistics",
+                "environment_shadow_params_ring",
+                "sun_shadow_cascades"
         );
         Set<String> expectedPasses = Set.of(
-                "light_upload", "cluster_prepare", "cluster_build", "direct_lighting"
+                "light_upload", "cluster_prepare", "cluster_build", "sun_shadow",
+                "direct_lighting"
         );
         Set<String> expectedPipelines = Set.of(
                 "cluster_prepare_pso", "cluster_masks_pso", "cluster_count_pso",
                 "cluster_prefix_blocks_pso", "cluster_prefix_groups_pso",
                 "cluster_prefix_add_pso", "cluster_fill_pso",
-                "terrain_direct_lighting_pso", "entity_direct_lighting_pso"
+                "terrain_direct_lighting_pso", "entity_direct_lighting_pso",
+                "terrain_sun_shadow_pso", "entity_sun_shadow_pso"
         );
         for (RendererGenerationManifest manifest : java.util.List.of(
                 sdr.manifest(), hdr.manifest())) {
@@ -1025,7 +1032,7 @@ public final class RendererArchitectureTests {
                     "Advanced manifest fell back to Vanilla");
             require(manifest.resourceBytes(
                             RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
-                            == budget.totalBytes(),
+                            == budget.totalBytes() + shadowBudget.totalBytes(),
                     "Advanced manifest byte count diverged from its layout budget");
             require(manifest.resources().stream()
                             .filter(resource -> resource.domain()
@@ -1041,7 +1048,7 @@ public final class RendererArchitectureTests {
                             .collect(java.util.stream.Collectors.toUnmodifiableSet())
                             .equals(expectedPasses)
                             && manifest.encoderCount(
-                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 2L
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 3L
                             && manifest.pipelines().stream()
                             .filter(pipeline -> pipeline.domain()
                                     == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)
@@ -1063,8 +1070,9 @@ public final class RendererArchitectureTests {
         for (int index = 0; index < presets.length; index++) {
             AdvancedLightingLayout.Budget candidate = AdvancedLightingLayout.forGeneration(
                     presets[index], extent.width(), extent.height());
-            require(candidate.totalBytes() <= memoryCaps[index],
-                    "L3 layout exceeded the preset persistent-memory budget");
+            SunShadowLayout.Budget shadowCandidate = SunShadowLayout.forPreset(presets[index]);
+            require(candidate.totalBytes() + shadowCandidate.totalBytes() <= memoryCaps[index],
+                    "L3/L4 layout exceeded the preset persistent-memory budget");
             require(candidate.indexCapacity() <= Math.multiplyExact(
                             candidate.clusterCount(),
                             AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER),

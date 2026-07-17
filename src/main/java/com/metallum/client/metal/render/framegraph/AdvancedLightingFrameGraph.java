@@ -9,14 +9,15 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
-/** Versioned L3 upload, cluster-build and forward-lighting dependency contract. */
+/** Versioned L3/L4 upload, cluster-build, sun-shadow and forward-lighting contract. */
 public final class AdvancedLightingFrameGraph {
-    public static final String GRAPH_ID = "advanced-clustered-lighting-v1";
+    public static final String GRAPH_ID = "advanced-clustered-sun-shadow-v2";
 
     private static final FrameGraph.PassId UPLOAD = new FrameGraph.PassId(0, "light_upload");
     private static final FrameGraph.PassId PREPARE = new FrameGraph.PassId(1, "cluster_prepare");
     private static final FrameGraph.PassId CLUSTER_BUILD = new FrameGraph.PassId(2, "cluster_build");
-    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(3, "direct_lighting");
+    private static final FrameGraph.PassId SUN_SHADOW = new FrameGraph.PassId(3, "sun_shadow");
+    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(4, "direct_lighting");
 
     private static final FrameGraph.ResourceId UPLOAD_RING = resource(0, "lighting_upload_ring");
     private static final FrameGraph.ResourceId PARAMS = resource(1, "lighting_params");
@@ -28,7 +29,11 @@ public final class AdvancedLightingFrameGraph {
     private static final FrameGraph.ResourceId COMPACT_INDICES = resource(
             5, "cluster_compact_indices");
     private static final FrameGraph.ResourceId STATISTICS = resource(6, "cluster_statistics");
-    private static final FrameGraph.ResourceId SCENE = resource(7, "scene_radiance");
+    private static final FrameGraph.ResourceId ENVIRONMENT = resource(
+            7, "environment_shadow_params_ring");
+    private static final FrameGraph.ResourceId SUN_SHADOW_DEPTH = resource(
+            8, "sun_shadow_cascades");
+    private static final FrameGraph.ResourceId SCENE = resource(9, "scene_radiance");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -79,6 +84,11 @@ public final class AdvancedLightingFrameGraph {
                 FrameGraph.LoadAction.LOAD,
                 FrameGraph.StoreAction.STORE
         );
+        FrameGraph.AttachmentContract shadowAttachment = FrameGraph.AttachmentContract.clear(
+                FrameGraph.AttachmentRole.DEPTH,
+                FrameGraph.StoreAction.STORE,
+                "reverse_z_zero"
+        );
         return FrameGraph.validated(
                 List.of(
                         buffer(UPLOAD_RING, FrameGraph.PersistenceClass.SIZE_GENERATION,
@@ -98,6 +108,21 @@ public final class AdvancedLightingFrameGraph {
                                 FrameGraph.ResourceRole.CLUSTER_DATA),
                         buffer(STATISTICS, FrameGraph.PersistenceClass.READBACK,
                                 "cluster_statistics_v1", false, whole, FrameGraph.ResourceRole.CLUSTER_DATA),
+                        buffer(ENVIRONMENT, FrameGraph.PersistenceClass.SIZE_GENERATION,
+                                "environment_shadow_params_v1", true, whole,
+                                FrameGraph.ResourceRole.SHADOW_DATA),
+                        new FrameGraph.ResourceDesc(
+                                SUN_SHADOW_DEPTH,
+                                FrameGraph.PersistenceClass.SIZE_GENERATION,
+                                new FrameGraph.ResourceShape(
+                                        FrameGraph.ResourceType.TEXTURE,
+                                        "d32_float_cascades_2_3",
+                                        "lighting_preset_extent"
+                                ),
+                                false,
+                                whole,
+                                FrameGraph.ResourceRole.SHADOW_DATA
+                        ),
                         new FrameGraph.ResourceDesc(
                                 SCENE,
                                 FrameGraph.PersistenceClass.EXTERNAL_FRAME,
@@ -159,9 +184,25 @@ public final class AdvancedLightingFrameGraph {
                                 contract
                         ),
                         new FrameGraph.PassDesc(
+                                SUN_SHADOW,
+                                FrameGraph.EncoderClass.RENDER,
+                                List.of(),
+                                List.of(
+                                        access(ENVIRONMENT, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.VERTEX),
+                                        new FrameGraph.ResourceAccess(
+                                                SUN_SHADOW_DEPTH,
+                                                FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.FRAGMENT,
+                                                shadowAttachment
+                                        )
+                                ),
+                                contract
+                        ),
+                        new FrameGraph.PassDesc(
                                 DIRECT,
                                 FrameGraph.EncoderClass.RENDER,
-                                List.of(CLUSTER_BUILD),
+                                List.of(CLUSTER_BUILD, SUN_SHADOW),
                                 List.of(
                                         access(PARAMS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
@@ -170,6 +211,10 @@ public final class AdvancedLightingFrameGraph {
                                         access(COMPACT_HEADERS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         access(COMPACT_INDICES, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(ENVIRONMENT, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(SUN_SHADOW_DEPTH, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         new FrameGraph.ResourceAccess(
                                                 SCENE,

@@ -15,6 +15,7 @@
     "lighting.ClientLevelAdvancedLightMixin",
     "lighting.LevelExtractorAdvancedLightMixin",
     "render.MainTargetMixin",
+    "render.ChunkSectionLayerGroupShadowMixin",
     "render.RenderTargetAccessor",
     "render.RenderPassMixin",
     "render.LevelRendererMixin",

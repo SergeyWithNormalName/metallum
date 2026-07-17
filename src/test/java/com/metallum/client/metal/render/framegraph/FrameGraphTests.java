@@ -45,21 +45,27 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 8 && graph.passes().size() == 4,
+        require(graph.resources().size() == 10 && graph.passes().size() == 5,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
                                 "lighting_upload_ring", "lighting_params", "gpu_lights",
                                 "cluster_membership_scratch", "cluster_compact_headers",
                                 "cluster_compact_indices",
-                                "cluster_statistics", "scene_radiance"
+                                "cluster_statistics", "environment_shadow_params_ring",
+                                "sun_shadow_cascades", "scene_radiance"
                         )),
-                "Advanced lighting resources do not describe the compact index path");
+                "Advanced lighting resources do not describe the compact index and shadow path");
+        for (int index = 0; index < graph.resources().size(); index++) {
+            require(graph.resources().get(index).id().value() == index,
+                    "Advanced lighting resource IDs are not dense and ordered at " + index);
+        }
         List<String> passNames = graph.passes().stream()
                 .map(pass -> pass.id().name())
                 .toList();
         require(passNames.equals(List.of(
-                        "light_upload", "cluster_prepare", "cluster_build", "direct_lighting")),
+                        "light_upload", "cluster_prepare", "cluster_build", "sun_shadow",
+                        "direct_lighting")),
                 "Advanced lighting pass order changed");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
@@ -73,12 +79,21 @@ public final class FrameGraphTests {
                     "Advanced lighting pass is coupled to the wrong generation axes");
         }
         FrameGraph.PassDesc build = graph.passes().get(2);
+        FrameGraph.PassDesc shadow = graph.passes().get(3);
         require(build.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_membership_scratch")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
                 "Cluster build does not publish membership scratch");
+        require(shadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("environment_shadow_params_ring")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && shadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_cascades")
+                                && access.kind() == FrameGraph.AccessKind.WRITE
+                                && access.attachment().isAttachment()),
+                "Sun shadow pass does not declare its environment input and depth output");
         FrameGraph.PassDesc direct = graph.passes().getLast();
-        require(direct.dependencies().equals(List.of(build.id()))
+        require(direct.dependencies().equals(List.of(build.id(), shadow.id()))
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_compact_headers")
                                 && access.kind() == FrameGraph.AccessKind.READ)
@@ -86,9 +101,15 @@ public final class FrameGraphTests {
                         access.resource().name().equals("cluster_compact_indices")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("environment_shadow_params_ring")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("sun_shadow_cascades")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("scene_radiance")
                                 && access.kind() == FrameGraph.AccessKind.READ_WRITE),
-                "Direct lighting is not ordered after compact cluster build into scene radiance");
+                "Direct lighting is not ordered after compact cluster and sun-shadow work");
     }
 
     private static void testReadBeforeWrite() {

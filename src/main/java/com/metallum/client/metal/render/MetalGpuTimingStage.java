@@ -17,9 +17,10 @@ public enum MetalGpuTimingStage {
     PRESENT(11),
     /** Native display mapper already owns this historical slot. */
     ACTUAL_HDR_DISPLAY(12),
-    LIGHT_UPLOAD_CLUSTER_BUILD(13);
+    LIGHT_UPLOAD_CLUSTER_BUILD(13),
+    SUN_SHADOW(14);
 
-    public static final int PROFILED_STAGE_COUNT = 14;
+    public static final int PROFILED_STAGE_COUNT = 15;
 
     private final int nativeId;
 

@@ -1,0 +1,259 @@
+package com.metallum.client.lighting;
+
+import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
+import com.metallum.client.renderer.DisplayOutputMode;
+import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.LightingPreset;
+import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RenderContractMode;
+import com.metallum.client.renderer.RendererFeatureMask;
+import com.metallum.client.renderer.RendererGenerationConfig;
+import com.metallum.client.renderer.SunShadowLayout;
+import com.metallum.client.renderer.temporal.FrameContract;
+import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.renderer.temporal.Matrix4;
+import org.joml.Matrix4f;
+
+import java.util.Set;
+
+/** Dependency-free numeric and generation contracts for the L4 environment and CSM path. */
+public final class SunShadowContractTests {
+    private SunShadowContractTests() {
+    }
+
+    public static void main(final String[] args) {
+        testEnvironmentProfiles();
+        testPresetLayoutsAndMemoryCaps();
+        testCascadeSplits();
+        testCameraRelativePlanningAndOutputIndependence();
+        testBindingAbi();
+        System.out.println("PASS L4 environment and cascaded sun-shadow numeric contracts");
+    }
+
+    private static void testEnvironmentProfiles() {
+        EnvironmentDescriptor noon = EnvironmentDescriptor.celestial(
+                EnvironmentDescriptor.Medium.AIR,
+                0.0f,
+                0.48f,
+                0.64f,
+                1.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                1.0f
+        );
+        EnvironmentDescriptor storm = EnvironmentDescriptor.celestial(
+                EnvironmentDescriptor.Medium.AIR,
+                0.0f,
+                0.48f,
+                0.64f,
+                1.0f,
+                0.0f,
+                1.0f,
+                1.0f,
+                1.0f
+        );
+        EnvironmentDescriptor midnight = EnvironmentDescriptor.celestial(
+                EnvironmentDescriptor.Medium.AIR,
+                (float) Math.PI,
+                0.20f,
+                0.28f,
+                0.55f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.5f
+        );
+        EnvironmentDescriptor lava = EnvironmentDescriptor.celestial(
+                EnvironmentDescriptor.Medium.LAVA,
+                0.0f,
+                1.0f,
+                0.4f,
+                0.1f,
+                0.0f,
+                0.0f,
+                0.0f,
+                1.0f
+        );
+        EnvironmentDescriptor end = EnvironmentDescriptor.ambientOnly(
+                EnvironmentDescriptor.Profile.END,
+                EnvironmentDescriptor.Medium.AIR,
+                0.16f,
+                0.12f,
+                0.20f
+        );
+
+        require(noon.sunShadowEligible() && !noon.moon() && noon.directionalRed() > 1.0f,
+                "daylight descriptor lost its directional sun");
+        require(storm.directionalRed() < noon.directionalRed()
+                        && storm.skyBlue() < noon.skyBlue(),
+                "weather did not attenuate direct and diffuse sky radiance");
+        require(midnight.sunShadowEligible() && midnight.moon()
+                        && midnight.directionalBlue() > midnight.directionalRed(),
+                "night descriptor lost its blue moon directional light");
+        require(!lava.sunShadowEligible() && lava.directionalRed() == 0.0f,
+                "opaque lava medium retained an external celestial shadow");
+        require(end.profile() == EnvironmentDescriptor.Profile.END
+                        && !end.sunShadowEligible() && end.ambientBlue() == 0.20f,
+                "ambient-only dimension retained directional state");
+        expectIllegalArgument(() -> new EnvironmentDescriptor(
+                EnvironmentDescriptor.VERSION,
+                EnvironmentDescriptor.Profile.CELESTIAL,
+                EnvironmentDescriptor.Medium.AIR,
+                2.0f, 0.0f, 0.0f,
+                1.0f, 1.0f, 1.0f,
+                1.0f, 1.0f, 1.0f,
+                0.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, 1.0f,
+                false, true
+        ));
+    }
+
+    private static void testPresetLayoutsAndMemoryCaps() {
+        LightingPreset[] presets = LightingPreset.values();
+        int[] expectedCascades = {2, 3, 3};
+        int[] expectedResolution = {768, 1024, 1536};
+        long[] memoryCaps = {192L << 20, 256L << 20, 384L << 20};
+        for (int index = 0; index < presets.length; index++) {
+            SunShadowLayout.Budget budget = SunShadowLayout.forPreset(presets[index]);
+            long expectedTextureBytes = (long) expectedCascades[index]
+                    * expectedResolution[index] * expectedResolution[index]
+                    * (SunShadowLayout.SHADOW_COLOR_BYTES_PER_PIXEL
+                    + SunShadowLayout.SHADOW_DEPTH_BYTES_PER_PIXEL);
+            require(budget.cascadeCount() == expectedCascades[index]
+                            && budget.resolution() == expectedResolution[index],
+                    "preset changed its declared cascade topology");
+            require(budget.paramsRingBytes()
+                            == (long) SunShadowLayout.PARAMS_BYTES * SunShadowLayout.PARAMS_RING_SLOTS
+                            && budget.shadowTextureBytes() == expectedTextureBytes
+                            && budget.totalBytes() < memoryCaps[index],
+                    "shadow layout byte accounting or cap changed");
+            require(budget.pcfRadiusTexels() >= 1.0f
+                            && budget.receiverDepthBias() > 0.0f
+                            && budget.receiverNormalBias() > 0.0f,
+                    "PCF/bias controls are not usable");
+        }
+    }
+
+    private static void testCascadeSplits() {
+        for (LightingPreset preset : LightingPreset.values()) {
+            SunShadowLayout.Budget budget = SunShadowLayout.forPreset(preset);
+            float[] splits = SunShadowLayout.cascadeSplits(budget, 0.05f, 1_024.0f);
+            float previous = 0.05f;
+            for (int cascade = 0; cascade < budget.cascadeCount(); cascade++) {
+                require(Float.isFinite(splits[cascade]) && splits[cascade] > previous,
+                        "cascade splits are not strictly increasing");
+                previous = splits[cascade];
+            }
+            require(splits[budget.cascadeCount() - 1] == budget.maximumDistance(),
+                    "last cascade does not end at the preset shadow distance");
+        }
+    }
+
+    private static void testCameraRelativePlanningAndOutputIndependence() {
+        EnvironmentDescriptor environment = EnvironmentDescriptor.celestial(
+                EnvironmentDescriptor.Medium.AIR,
+                0.35f,
+                0.48f,
+                0.64f,
+                1.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                1.0f
+        );
+        SunShadowLayout.Budget budget = SunShadowLayout.forPreset(LightingPreset.BALANCED);
+        FrameState sdr = frame(DisplayOutputMode.SDR, 30_000_000.0);
+        FrameState hdr = frame(DisplayOutputMode.HDR, 30_000_000.0);
+        SunShadowFrame first = SunShadowFrame.plan(environment, budget, sdr);
+        SunShadowFrame outputVariant = SunShadowFrame.plan(environment, budget, hdr);
+        SunShadowFrame subTexelMove = SunShadowFrame.plan(
+                environment,
+                budget,
+                frame(DisplayOutputMode.SDR, 30_000_000.00001)
+        );
+
+        require(first.needsShadowPass() && first.cascadeCount() == 3,
+                "eligible environment did not plan all Balanced cascades");
+        require(first.descriptorHash() == outputVariant.descriptorHash(),
+                "SDR/HDR output mode changed the environment/shadow contract");
+        for (int cascade = 0; cascade < first.cascadeCount(); cascade++) {
+            Matrix4f matrix = first.shadowFromView(cascade);
+            Matrix4f moved = subTexelMove.shadowFromView(cascade);
+            require(matrix.isFinite() && moved.isFinite(),
+                    "large camera coordinates produced a non-finite cascade matrix");
+            float[] left = new float[16];
+            float[] right = new float[16];
+            matrix.get(left);
+            moved.get(right);
+            float maximumDelta = 0.0f;
+            for (int component = 0; component < left.length; component++) {
+                maximumDelta = Math.max(maximumDelta, Math.abs(left[component] - right[component]));
+            }
+            require(maximumDelta < 0.01f,
+                    "sub-texel camera motion destabilized a cascade projection");
+        }
+    }
+
+    private static void testBindingAbi() {
+        require(EnvironmentShadowBindingAbi.VERSION == SunShadowLayout.ABI_VERSION
+                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
+                        && EnvironmentShadowBindingAbi.PARAMS_SLOT == 26,
+                "environment parameter ABI changed");
+        require(java.util.Arrays.equals(
+                        EnvironmentShadowBindingAbi.shadowTextureSlots(),
+                        new int[]{13, 14, 15}
+                ),
+                "shadow texture ABI changed");
+        require(EnvironmentShadowBindingAbi.MATRIX_0_OFFSET == 0
+                        && EnvironmentShadowBindingAbi.MATRIX_2_OFFSET == 128
+                        && EnvironmentShadowBindingAbi.CONTRACT_OFFSET == 304
+                        && EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET == 320,
+                "environment packet offsets changed");
+    }
+
+    private static FrameState frame(final DisplayOutputMode output, final double cameraX) {
+        Matrix4 identity = Matrix4.identity();
+        Matrix4 projection = Matrix4.ofJoml(new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0),
+                16.0f / 9.0f,
+                0.05f,
+                1_024.0f,
+                true
+        ));
+        FrameState.Transforms transforms = new FrameState.Transforms(
+                identity, identity, projection, identity, identity, projection
+        );
+        double headroom = output == DisplayOutputMode.HDR ? 2.0 : 1.0;
+        return new FrameState(
+                FrameContract.temporalPreparationV1(),
+                7L, 4L, 0L, 1L, 9L, 1L,
+                RenderContractMode.METALLUM, LightingModel.ADVANCED, output,
+                LightingPreset.BALANCED, RendererFeatureMask.NONE, MetalExecutorKind.METAL3,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION,
+                FrameState.ResourceBytes.NONE, FrameState.AdvancedLightingWork.NONE,
+                transforms, transforms,
+                new FrameState.Extent(1_920, 1_080), new FrameState.Extent(1_920, 1_080),
+                1.0, 1.0, FrameState.JitterOffset.ZERO, Set.of(),
+                7L, 1, 1.0 / 60.0, 0.05, 1_024.0,
+                new FrameState.CameraPosition(cameraX, 96.0, -30_000_000.0),
+                new FrameState.CameraPosition(cameraX, 96.0, -30_000_000.0),
+                2L, 3L, headroom, headroom
+        );
+    }
+
+    private static void expectIllegalArgument(final Runnable action) {
+        try {
+            action.run();
+            throw new AssertionError("expected IllegalArgumentException");
+        } catch (IllegalArgumentException expected) {
+            // Expected.
+        }
+    }
+
+    private static void require(final boolean condition, final String message) {
+        if (!condition) {
+            throw new AssertionError(message);
+        }
+    }
+}

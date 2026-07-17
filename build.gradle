@@ -169,6 +169,14 @@ tasks.register("advancedLightRegistryUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.AdvancedLightRegistryTests")
 }
 
+tasks.register("shadowValueValidation", JavaExec) {
+	group = "verification"
+	description = "Validates L4 environment, cascade stability, preset and shadow ABI contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.SunShadowContractTests")
+}
+
 tasks.register("metalRuntimeUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free Metal runtime lifecycle tests"
@@ -837,6 +845,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
+	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))

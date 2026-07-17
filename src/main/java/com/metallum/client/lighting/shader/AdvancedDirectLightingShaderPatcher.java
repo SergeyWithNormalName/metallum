@@ -3,6 +3,7 @@ package com.metallum.client.lighting.shader;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.SunShadowLayout;
 
 import java.util.List;
 import java.util.Map;
@@ -52,6 +53,9 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     public static final String SODIUM_TERRAIN_PATH = "blocks/block_layer_opaque";
     public static final String VANILLA_ENTITY_PATH = "core/entity";
+    public static final String SHADOW_SAMPLER_0 = "metallumSunShadow0";
+    public static final String SHADOW_SAMPLER_1 = "metallumSunShadow1";
+    public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
 
     private static final String MARKER = "METALLUM_ADVANCED_DIRECT_LIGHTING_V1";
     private static final Pattern VERSION_PATTERN = Pattern.compile("(?m)^\\s*#version\\s+\\d+[^\\r\\n]*");
@@ -86,6 +90,28 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint count;
             };
 
+            layout(std430, binding = 26) readonly buffer MetallumEnvironmentShadowV1 {
+                mat4 shadowFromView0;
+                mat4 shadowFromView1;
+                mat4 shadowFromView2;
+                vec4 directionAndFlags;
+                vec4 directionalRadiance;
+                vec4 skyIrradiance;
+                vec4 ambientRadiance;
+                vec4 cascadeSplits;
+                vec4 texelAndBias;
+                vec4 cascadeBlend;
+                uvec4 contract;
+                vec4 worldUpAndMedium;
+                vec4 reserved0;
+                vec4 reserved1;
+                vec4 reserved2;
+            } metallumEnvironment;
+
+            layout(binding = 13) uniform sampler2D metallumSunShadow0;
+            layout(binding = 14) uniform sampler2D metallumSunShadow1;
+            layout(binding = 15) uniform sampler2D metallumSunShadow2;
+
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
                 mat4 projection;
@@ -110,6 +136,130 @@ public final class AdvancedDirectLightingShaderPatcher {
             layout(std430, binding = 30) readonly buffer MetallumClusterIndicesV1 {
                 uint indices[];
             } metallumClusterIndexBuffer;
+
+            vec3 metallumSafeNormalV1(vec3 surfaceNormal) {
+                float normalScale = max(
+                        abs(surfaceNormal.x),
+                        max(abs(surfaceNormal.y), abs(surfaceNormal.z)));
+                if (!(normalScale > 0.0) || isinf(normalScale)) {
+                    return vec3(0.0);
+                }
+                vec3 scaledNormal = surfaceNormal / normalScale;
+                float lengthSquared = dot(scaledNormal, scaledNormal);
+                if (!(lengthSquared > 0.0) || isnan(lengthSquared) || isinf(lengthSquared)) {
+                    return vec3(0.0);
+                }
+                return scaledNormal * inversesqrt(lengthSquared);
+            }
+
+            float metallumPcfV1(sampler2D shadowMap, vec3 coordinate) {
+                if (any(lessThan(coordinate.xy, vec2(0.0)))
+                        || any(greaterThan(coordinate.xy, vec2(1.0)))
+                        || coordinate.z < 0.0 || coordinate.z > 1.0) {
+                    return 1.0;
+                }
+                float lit = 0.0;
+                float texel = max(metallumEnvironment.texelAndBias.x, 0.000001)
+                        * max(metallumEnvironment.texelAndBias.w, 0.5);
+                float receiverDepth = coordinate.z
+                        + max(metallumEnvironment.texelAndBias.y, 0.0);
+                for (int y = -1; y <= 1; ++y) {
+                    for (int x = -1; x <= 1; ++x) {
+                        vec2 uv = clamp(
+                                coordinate.xy + vec2(float(x), float(y)) * texel,
+                                vec2(0.0), vec2(1.0));
+                        float storedDepth = texture(shadowMap, uv).r;
+                        lit += receiverDepth >= storedDepth ? 1.0 : 0.0;
+                    }
+                }
+                return lit * (1.0 / 9.0);
+            }
+
+            float metallumCascadeVisibilityV1(int cascade, vec3 viewPosition, vec3 normal) {
+                vec3 offsetPosition = viewPosition
+                        + normal * max(metallumEnvironment.texelAndBias.z, 0.0);
+                vec4 clip;
+                if (cascade == 0) {
+                    clip = metallumEnvironment.shadowFromView0 * vec4(offsetPosition, 1.0);
+                } else if (cascade == 1) {
+                    clip = metallumEnvironment.shadowFromView1 * vec4(offsetPosition, 1.0);
+                } else {
+                    clip = metallumEnvironment.shadowFromView2 * vec4(offsetPosition, 1.0);
+                }
+                if (!(abs(clip.w) > 0.000001) || isnan(clip.w) || isinf(clip.w)) {
+                    return 1.0;
+                }
+                vec3 coordinate = clip.xyz / clip.w;
+                coordinate.xy = coordinate.xy * 0.5 + 0.5;
+                if (cascade == 0) {
+                    return metallumPcfV1(metallumSunShadow0, coordinate);
+                }
+                if (cascade == 1) {
+                    return metallumPcfV1(metallumSunShadow1, coordinate);
+                }
+                return metallumPcfV1(metallumSunShadow2, coordinate);
+            }
+
+            float metallumSunVisibilityV1(vec3 viewPosition, vec3 normal) {
+                if (metallumEnvironment.contract.x != 1u
+                        || (metallumEnvironment.contract.w & 1u) == 0u) {
+                    return 1.0;
+                }
+                int cascadeCount = int(clamp(metallumEnvironment.contract.y, 2u, 3u));
+                float viewDepth = max(-viewPosition.z, 0.0);
+                int cascade = viewDepth <= metallumEnvironment.cascadeSplits.x ? 0
+                        : viewDepth <= metallumEnvironment.cascadeSplits.y ? 1 : 2;
+                if (cascade >= cascadeCount
+                        || viewDepth > metallumEnvironment.cascadeSplits[cascadeCount - 1]) {
+                    return 1.0;
+                }
+                float visibility = metallumCascadeVisibilityV1(cascade, viewPosition, normal);
+                if (cascade + 1 < cascadeCount) {
+                    float split = metallumEnvironment.cascadeSplits[cascade];
+                    float previous = cascade == 0 ? 0.0
+                            : metallumEnvironment.cascadeSplits[cascade - 1];
+                    float blendWidth = max(
+                            (split - previous) * metallumEnvironment.cascadeBlend[cascade],
+                            0.0001);
+                    float blend = smoothstep(split - blendWidth, split, viewDepth);
+                    if (blend > 0.0) {
+                        visibility = mix(
+                                visibility,
+                                metallumCascadeVisibilityV1(cascade + 1, viewPosition, normal),
+                                blend);
+                    }
+                }
+                return visibility;
+            }
+
+            vec3 metallumEvaluateEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 surfaceNormal,
+                    vec3 linearAlbedo,
+                    float skyVisibility) {
+                if (metallumEnvironment.contract.x != 1u) {
+                    return vec3(0.0);
+                }
+                vec3 normal = metallumSafeNormalV1(surfaceNormal);
+                if (dot(normal, normal) == 0.0) {
+                    return vec3(0.0);
+                }
+                vec3 albedo = max(linearAlbedo, vec3(0.0));
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                float hemisphere = 0.30 + 0.70 * max(
+                        dot(normal, normalize(metallumEnvironment.worldUpAndMedium.xyz)),
+                        0.0);
+                vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
+                        * (skyOcclusion * hemisphere);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                float nDotL = max(dot(normal, toLight), 0.0);
+                if (nDotL > 0.0) {
+                    diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                            * (nDotL * metallumSunVisibilityV1(viewPosition, normal));
+                }
+                return albedo * diffuse * 0.31830988618;
+            }
 
             uint metallumClusterIndexV1(vec3 viewPosition) {
                 uvec3 grid = max(metallumLighting.gridAndLightCount.xyz, uvec3(1u));
@@ -136,20 +286,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return vec3(0.0);
                 }
 
-                float normalScale = max(
-                        abs(surfaceNormal.x),
-                        max(abs(surfaceNormal.y), abs(surfaceNormal.z)));
-                if (!(normalScale > 0.0) || isinf(normalScale)) {
+                vec3 normal = metallumSafeNormalV1(surfaceNormal);
+                if (dot(normal, normal) == 0.0) {
                     return vec3(0.0);
                 }
-                vec3 scaledNormal = surfaceNormal / normalScale;
-                float scaledLengthSquared = dot(scaledNormal, scaledNormal);
-                if (!(scaledLengthSquared > 0.0)
-                        || isnan(scaledLengthSquared)
-                        || isinf(scaledLengthSquared)) {
-                    return vec3(0.0);
-                }
-                vec3 normal = scaledNormal * inversesqrt(scaledLengthSquared);
 
                 uint activeLightCount = min(
                         metallumLighting.gridAndLightCount.w,
@@ -209,7 +349,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             """;
 
     private static final String SODIUM_VERTEX_DECLARATION =
-            "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n// " + MARKER;
+            "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
+                    + "out float metallumSkyVisibility;\n// " + MARKER;
     private static final String SODIUM_VERTEX_ASSIGNMENT =
             "    vec3 position = _vert_position + translation;\n"
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;";
@@ -217,10 +358,13 @@ public final class AdvancedDirectLightingShaderPatcher {
             "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
                     + "texture(u_LightTex, _vert_tex_light_coord));";
     private static final String SODIUM_ADVANCED_SKY_LIGHTMAP =
-            "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
-                    + "texture(u_LightTex, vec2(8.0 / 256.0, _vert_tex_light_coord.y)));";
+            "    metallumSkyVisibility = clamp("
+                    + "(_vert_tex_light_coord.y * 256.0 - 8.0) / 240.0, 0.0, 1.0);\n"
+                    + "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
+                    + "texture(u_LightTex, vec2(8.0 / 256.0)));";
     private static final String SODIUM_FRAGMENT_INPUT =
-            "in vec2 v_TexCoord;\nin vec3 metallumLightingPosition;";
+            "in vec2 v_TexCoord;\nin vec3 metallumLightingPosition;\n"
+                    + "in float metallumSkyVisibility;";
     private static final String SODIUM_FOG_ANCHOR =
             "    fragColor = _linearFog(color, v_FragDistance, "
                     + "metallumMaterialDecodeColor(u_FogColor), u_EnvironmentFog, "
@@ -232,6 +376,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    if (!gl_FrontFacing) {\n"
                     + "        metallumDerivativeNormal = -metallumDerivativeNormal;\n"
                     + "    }\n"
+                    + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
+                    + "            metallumLightingPosition, metallumDerivativeNormal,\n"
+                    + "            metallumUnlitBase, metallumSkyVisibility);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDerivativeNormal, metallumUnlitBase);\n"
                     + SODIUM_FOG_ANCHOR;
@@ -239,7 +386,8 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static final String ENTITY_VERTEX_DECLARATION =
             "out vec2 texCoord0;\nout vec3 metallumLightingPosition;\n"
                     + "out vec3 metallumLightingNormal;\n"
-                    + "out vec4 metallumLightingTint;\n// " + MARKER;
+                    + "out vec4 metallumLightingTint;\n"
+                    + "out float metallumSkyVisibility;\n// " + MARKER;
     private static final String ENTITY_VERTEX_ASSIGNMENT =
             "    vec4 metallumViewPosition = ModelViewMat * vec4(Position, 1.0);\n"
                     + "    gl_Position = ProjMat * metallumViewPosition;\n"
@@ -250,11 +398,13 @@ public final class AdvancedDirectLightingShaderPatcher {
             "    lightMapColor = metallumMaterialDecodeLegacyLightmap("
                     + "sample_lightmap(Sampler2, UV2));";
     private static final String ENTITY_ADVANCED_SKY_LIGHTMAP =
-            "    lightMapColor = metallumMaterialDecodeLegacyLightmap("
-                    + "sample_lightmap(Sampler2, ivec2(0, UV2.y)));";
+            "    metallumSkyVisibility = clamp((float(UV2.y) - 8.0) / 240.0, 0.0, 1.0);\n"
+                    + "    lightMapColor = metallumMaterialDecodeLegacyLightmap("
+                    + "sample_lightmap(Sampler2, ivec2(0, 0)));";
     private static final String ENTITY_FRAGMENT_INPUT =
             "in vec2 texCoord0;\nin vec3 metallumLightingPosition;\n"
-                    + "in vec3 metallumLightingNormal;\nin vec4 metallumLightingTint;";
+                    + "in vec3 metallumLightingNormal;\nin vec4 metallumLightingTint;\n"
+                    + "in float metallumSkyVisibility;";
     private static final String ENTITY_COLOR_ANCHOR =
             "    color *= faceVertexColor * metallumMaterialDecodeColor(ColorModulator);";
     private static final String ENTITY_DIRECT_ALBEDO =
@@ -282,6 +432,9 @@ public final class AdvancedDirectLightingShaderPatcher {
             "    vec3 metallumEntityNormal = gl_FrontFacing\n"
                     + "            ? metallumLightingNormal\n"
                     + "            : -metallumLightingNormal;\n"
+                    + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
+                    + "            metallumLightingPosition, metallumEntityNormal,\n"
+                    + "            metallumDirectAlbedo, metallumSkyVisibility);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumEntityNormal, "
                     + "metallumDirectAlbedo);\n"
@@ -358,6 +511,25 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     public static List<ShaderKey> requiredTargets() {
         return REQUIRED_TARGETS;
+    }
+
+    public static boolean isExternalShadowSampler(final String name) {
+        return SHADOW_SAMPLER_0.equals(name)
+                || SHADOW_SAMPLER_1.equals(name)
+                || SHADOW_SAMPLER_2.equals(name);
+    }
+
+    public static int externalShadowSamplerSlot(final String name) {
+        if (SHADOW_SAMPLER_0.equals(name)) {
+            return EnvironmentShadowBindingAbi.SHADOW_TEXTURE_0_SLOT;
+        }
+        if (SHADOW_SAMPLER_1.equals(name)) {
+            return EnvironmentShadowBindingAbi.SHADOW_TEXTURE_1_SLOT;
+        }
+        if (SHADOW_SAMPLER_2.equals(name)) {
+            return EnvironmentShadowBindingAbi.SHADOW_TEXTURE_2_SLOT;
+        }
+        throw new IllegalArgumentException("Not an L4 shadow sampler: " + name);
     }
 
     /**
@@ -549,8 +721,22 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return Result.failure(source, "Advanced fragment marker has an incomplete binding ABI");
                 }
             }
+            if (countOccurrences(
+                    source,
+                    "binding = " + EnvironmentShadowBindingAbi.PARAMS_SLOT
+            ) != 1) {
+                return Result.failure(source, "Advanced fragment marker has no environment ABI");
+            }
+            for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
+                if (countOccurrences(source, "binding = " + slot) != 1) {
+                    return Result.failure(source, "Advanced fragment marker has an incomplete shadow ABI");
+                }
+            }
             if (countOccurrences(source, "metallumEvaluateClusteredDirectV1(") != 2) {
                 return Result.failure(source, "Advanced fragment marker has no direct-light helper");
+            }
+            if (countOccurrences(source, "metallumEvaluateEnvironmentV1(") != 2) {
+                return Result.failure(source, "Advanced fragment marker has no environment helper");
             }
             if (isSodiumTerrain(namespace, path)) {
                 if (!source.contains(SODIUM_FRAGMENT_INPUT)
@@ -609,7 +795,9 @@ public final class AdvancedDirectLightingShaderPatcher {
             } catch (NumberFormatException exception) {
                 return MALFORMED_SLOT;
             }
-            if (AdvancedLightingBindingAbi.ownsFragmentSlot(slot)) {
+            if (AdvancedLightingBindingAbi.ownsFragmentSlot(slot)
+                    || slot == EnvironmentShadowBindingAbi.PARAMS_SLOT
+                    || EnvironmentShadowBindingAbi.ownsShadowTextureSlot(slot)) {
                 return slot;
             }
         }
@@ -620,12 +808,17 @@ public final class AdvancedDirectLightingShaderPatcher {
         for (String helper : new String[]{
                 "MetallumGpuLightV1",
                 "MetallumLightingParamsV1",
+                "MetallumEnvironmentShadowV1",
                 "metallumLightingPosition",
                 "metallumLightingNormal",
                 "metallumLightingTint",
                 "metallumDirectAlbedo",
                 "metallumClusterIndexV1",
-                "metallumEvaluateClusteredDirectV1"
+                "metallumEvaluateClusteredDirectV1",
+                "metallumEvaluateEnvironmentV1",
+                SHADOW_SAMPLER_0,
+                SHADOW_SAMPLER_1,
+                SHADOW_SAMPLER_2
         }) {
             if (source.contains(helper)) {
                 return helper;
@@ -671,6 +864,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                 || AdvancedLightingLayout.DEPTH_SLICES != 6
                 || AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER != 256) {
             throw new ExceptionInInitializerError("Advanced shader constants do not match the generation layout");
+        }
+        if (EnvironmentShadowBindingAbi.PARAMS_BYTES != SunShadowLayout.PARAMS_BYTES
+                || EnvironmentShadowBindingAbi.VERSION != SunShadowLayout.ABI_VERSION) {
+            throw new ExceptionInInitializerError("Environment/shadow shader ABI does not match its layout");
         }
     }
 }

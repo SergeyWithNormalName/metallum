@@ -22,6 +22,7 @@ import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
+import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
@@ -40,6 +41,7 @@ import com.metallum.client.renderer.RendererFeatureMask;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.RendererGenerationManifest;
 import com.metallum.client.renderer.RendererGenerationPlanner;
+import com.metallum.client.renderer.SunShadowLayout;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -218,9 +220,12 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean temporalDiagnosticFailureLogged;
     @Nullable
     private AdvancedLightingGpuResources advancedLightingResources;
+    @Nullable
+    private SunShadowGpuResources sunShadowResources;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
+    private boolean sunShadowFailureLogged;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -555,6 +560,10 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
         }
+        if (this.sunShadowResources != null) {
+            this.sunShadowResources.close();
+            this.sunShadowResources = null;
+        }
         this.commandEncoder.close();
         this.frameStatePackets.close();
         this.clearPipelineCache();
@@ -651,6 +660,49 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     public static MetalDevice getInstance() {
         return INSTANCE;
+    }
+
+    long currentSubmitIndex() {
+        return this.commandEncoder.currentSubmitIndex();
+    }
+
+    synchronized @Nullable SunShadowGpuResources sunShadowResourcesForCurrentFrame() {
+        RendererGenerationConfig generation = this.activeRendererGeneration;
+        SunShadowGpuResources resources = this.sunShadowResources;
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        if (generation == null
+                || generation.lightingModel() != LightingModel.ADVANCED
+                || resources == null
+                || resources.frameForSubmit(submitIndex) == null) {
+            return null;
+        }
+        return resources;
+    }
+
+    synchronized void completeSunShadowFrame(final long submitIndex) {
+        SunShadowGpuResources resources = this.sunShadowResources;
+        if (resources == null
+                || submitIndex != this.commandEncoder.currentSubmitIndex()
+                || submitIndex != this.advancedLightingFrameSubmitIndex
+                || !resources.isReady(submitIndex)) {
+            throw new IllegalStateException("Completed sun-shadow frame does not match renderer state");
+        }
+        this.advancedLightingFrameReady = true;
+        this.sunShadowFailureLogged = false;
+    }
+
+    synchronized void failSunShadowFrame(final RuntimeException failure) {
+        this.advancedLightingFrameReady = false;
+        this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+        AdvancedLightingRuntime.reportNativeAdmission(false, "L4 sun-shadow render pass failed");
+        this.publishedRendererGeneration = null;
+        if (!this.sunShadowFailureLogged) {
+            this.sunShadowFailureLogged = true;
+            Metallum.LOGGER.warn(
+                    "L4 sun-shadow pass failed; preserving the METALLUM material path with Vanilla lighting",
+                    failure
+            );
+        }
     }
 
     public boolean supportsSpatialScaling() {
@@ -781,6 +833,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
         }
         AdvancedLightingGpuResources nextAdvancedResources = null;
+        SunShadowGpuResources nextSunShadowResources = null;
         if (resolved.lightingModel() == LightingModel.ADVANCED) {
             AdvancedLightingLayout.Budget lightingBudget = AdvancedLightingLayout.forGeneration(
                     resolved.lightingPreset(),
@@ -799,10 +852,34 @@ public final class MetalDevice implements GpuDeviceBackend {
                             lightingBudget
                     );
                 }
+                SunShadowLayout.Budget shadowBudget = SunShadowLayout.forPreset(
+                        resolved.lightingPreset()
+                );
+                if (this.sunShadowResources != null
+                        && this.sunShadowResources.generation() == plannedLightingGeneration
+                        && this.sunShadowResources.budget().equals(shadowBudget)) {
+                    nextSunShadowResources = this.sunShadowResources;
+                } else {
+                    nextSunShadowResources = SunShadowGpuResources.create(
+                            this,
+                            plannedLightingGeneration,
+                            shadowBudget
+                    );
+                }
             } catch (RuntimeException exception) {
+                if (nextSunShadowResources != null
+                        && nextSunShadowResources != this.sunShadowResources) {
+                    nextSunShadowResources.close();
+                }
+                nextSunShadowResources = null;
+                if (nextAdvancedResources != null
+                        && nextAdvancedResources != this.advancedLightingResources) {
+                    nextAdvancedResources.close();
+                }
+                nextAdvancedResources = null;
                 AdvancedLightingRuntime.reportNativeAdmission(
                         false,
-                        "native Advanced lighting context creation failed"
+                        "Advanced lighting or L4 shadow generation creation failed"
                 );
                 Metallum.LOGGER.warn(
                         "Advanced Lighting generation allocation failed; preserving METALLUM + VANILLA lighting",
@@ -846,7 +923,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                     && nextAdvancedResources != this.advancedLightingResources) {
                 nextAdvancedResources.close();
             }
+            if (nextSunShadowResources != null
+                    && nextSunShadowResources != this.sunShadowResources) {
+                nextSunShadowResources.close();
+            }
             nextAdvancedResources = null;
+            nextSunShadowResources = null;
             plan = RendererGenerationPlanner.plan(
                     this.requestedRenderContract,
                     requestedLighting,
@@ -896,6 +978,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                     && nextAdvancedResources != this.advancedLightingResources) {
                 nextAdvancedResources.close();
             }
+            if (nextSunShadowResources != null
+                    && nextSunShadowResources != this.sunShadowResources) {
+                nextSunShadowResources.close();
+            }
             throw new IllegalStateException("Advanced lighting generation prediction diverged");
         }
         long nextOutputGeneration = this.outputGenerationId;
@@ -916,12 +1002,18 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.activeRendererResourceBytes = resourceBytes;
         AdvancedLightingGpuResources previousAdvancedResources = this.advancedLightingResources;
+        SunShadowGpuResources previousSunShadowResources = this.sunShadowResources;
         this.advancedLightingResources = nextAdvancedResources;
+        this.sunShadowResources = nextSunShadowResources;
         this.advancedLightingFrameReady = false;
         this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
         if (previousAdvancedResources != null
                 && previousAdvancedResources != nextAdvancedResources) {
             previousAdvancedResources.close();
+        }
+        if (previousSunShadowResources != null
+                && previousSunShadowResources != nextSunShadowResources) {
+            previousSunShadowResources.close();
         }
         this.activeRenderExtent = new FrameState.Extent(
                 dimensions.renderWidth(), dimensions.renderHeight()
@@ -1013,11 +1105,13 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.advancedLightingFrameReady = false;
         this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
         AdvancedLightingGpuResources lightingResources = this.advancedLightingResources;
+        SunShadowGpuResources shadowResources = this.sunShadowResources;
         LightFrameSnapshot lightSnapshot = null;
         FrameState.AdvancedLightingWork advancedWork = FrameState.AdvancedLightingWork.NONE;
         if (generation.lightingModel() == LightingModel.ADVANCED
                 && AdvancedLightingRuntime.isActive()
-                && lightingResources != null) {
+                && lightingResources != null
+                && shadowResources != null) {
             lightSnapshot = AdvancedLightRegistry.global().snapshotForFrameIfHealthy(
                     DirectLightFrustum.from(capture),
                     lightingResources.budget().maxLights(),
@@ -1039,7 +1133,11 @@ public final class MetalDevice implements GpuDeviceBackend {
                     );
                 }
             } else {
-                advancedWork = advancedLightingWork(lightSnapshot.lights().size());
+                advancedWork = advancedLightingWork(
+                        lightSnapshot.lights().size(),
+                        shadowResources.budget().cascadeCount(),
+                        capture.environment().sunShadowEligible()
+                );
             }
         } else if (generation.lightingModel() == LightingModel.ADVANCED) {
             AdvancedLightingRuntime.reportNativeAdmission(
@@ -1116,10 +1214,27 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             }
             if (lightingStatus == AdvancedLightingGpuResources.STATUS_OK) {
-                this.advancedLightingFrameReady = true;
-                this.advancedLightingFrameSubmitIndex = submitIndex;
-                this.advancedLightingTransientFallbackLogged = false;
-            } else {
+                try {
+                    if (shadowResources == null) {
+                        throw new IllegalStateException("L4 shadow resources disappeared");
+                    }
+                    shadowResources.encode(capture.environment(), published);
+                    this.advancedLightingFrameSubmitIndex = submitIndex;
+                    this.advancedLightingFrameReady = shadowResources.isReady(submitIndex);
+                    this.advancedLightingTransientFallbackLogged = false;
+                } catch (RuntimeException exception) {
+                    lightingStatus = Integer.MIN_VALUE;
+                    this.advancedLightingFrameReady = false;
+                    this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+                    Metallum.LOGGER.warn(
+                            "L4 environment/shadow frame preparation failed; using Vanilla lighting for this frame",
+                            exception
+                    );
+                }
+            }
+            if (lightingStatus != AdvancedLightingGpuResources.STATUS_OK) {
+                this.advancedLightingFrameReady = false;
+                this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
                 FrameState fallback = published.withAdvancedLightingWork(
                         FrameState.AdvancedLightingWork.NONE
                 );
@@ -1356,6 +1471,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                 bindings.indices(), 0L, AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
+        SunShadowGpuResources shadows = this.sunShadowResources;
+        if (shadows == null) {
+            throw new IllegalStateException("L4 environment/shadow bindings are unavailable");
+        }
+        int inFlightSlot = (int) (this.commandEncoder.currentSubmitIndex()
+                % FrameStatePacketRing.SLOT_COUNT);
+        shadows.bind(encoder, inFlightSlot);
     }
 
     void setMaterialWorldPassActive(final boolean active) {
@@ -1972,6 +2094,23 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     private static String prepareFlavorSource(final ShaderCompilationKey key, final String original) {
+        if (key.flavor() == HdrShaderFlavor.SUN_SHADOW) {
+            SunShadowShaderPatcher.Result shadow = SunShadowShaderPatcher.patch(
+                    key.id().getNamespace(),
+                    key.id().getPath(),
+                    key.type() == ShaderType.VERTEX
+                            ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                            : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                    original
+            );
+            if (!shadow.success()) {
+                throw new IllegalStateException(
+                        "Failed to prepare L4 shadow shader " + key.id() + ": "
+                                + shadow.failureReason()
+                );
+            }
+            return shadow.source();
+        }
         if (key.flavor() == HdrShaderFlavor.METALLUM
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED) {
             MetallumMaterialShaderPatcher.Result material = MetallumMaterialShaderPatcher.patch(
@@ -2071,20 +2210,38 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     static FrameState.AdvancedLightingWork advancedLightingWork(final int lightCount) {
+        return advancedLightingWork(lightCount, 0, false);
+    }
+
+    static FrameState.AdvancedLightingWork advancedLightingWork(
+            final int lightCount,
+            final int cascadeCount,
+            final boolean shadowPass
+    ) {
         if (lightCount < 0) {
             throw new IllegalArgumentException("Light count must be non-negative");
+        }
+        if (cascadeCount < 0 || cascadeCount > SunShadowLayout.MAX_CASCADES
+                || (shadowPass && cascadeCount < 2)) {
+            throw new IllegalArgumentException("Invalid per-frame cascade declaration");
         }
         long uploadBytes = Math.addExact(
                 AdvancedLightingLayout.UPLOAD_HEADER_BYTES,
                 Math.multiplyExact((long) lightCount, AdvancedLightingLayout.GPU_LIGHT_STRIDE)
         );
+        if (cascadeCount > 0) {
+            uploadBytes = Math.addExact(uploadBytes, SunShadowLayout.PARAMS_BYTES);
+        }
         return new FrameState.AdvancedLightingWork(
                 lightCount,
-                lightCount == 0
+                (lightCount == 0
                         ? AdvancedLightingGpuResources.EMPTY_PRODUCTION_PASS_COUNT
-                        : AdvancedLightingGpuResources.PRODUCTION_PASS_COUNT,
-                AdvancedLightingGpuResources.PRODUCTION_ENCODER_COUNT,
-                AdvancedLightingGpuResources.RESIDENT_PSO_COUNT,
+                        : AdvancedLightingGpuResources.PRODUCTION_PASS_COUNT)
+                        + (shadowPass ? 1 : 0),
+                AdvancedLightingGpuResources.PRODUCTION_ENCODER_COUNT
+                        + (shadowPass ? cascadeCount * 2 : 0),
+                AdvancedLightingGpuResources.RESIDENT_PSO_COUNT
+                        + (cascadeCount > 0 ? 2 : 0),
                 AdvancedLightingGpuResources.PRODUCTION_WORK_QUEUE_COUNT,
                 AdvancedLightingGpuResources.productionDispatchCount(lightCount),
                 uploadBytes

@@ -140,7 +140,10 @@ WORKLOAD_CONTRACTS = frozenset({
     WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 })
 L3_FRAME_GRAPH_VERSION = 4
+L4_FRAME_GRAPH_VERSION = 5
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
+SUN_SHADOW_STAGE = "sun shadow"
+L4_SHADOW_PASS_COUNT = 5
 CLUSTER_CAP = 256
 CLUSTER_RING_SLOTS = 3
 CLUSTER_STATISTICS_SAMPLE_INTERVAL = 32
@@ -223,6 +226,7 @@ class TimingWindow:
     renderer_generation: dict[str, Any] | None
     clustered_lighting: dict[str, Any] | None
     light_cluster_stage: dict[str, Any] | None
+    sun_shadow_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -325,42 +329,44 @@ def _parse_clustered_lighting(value: Any, line: int) -> dict[str, Any] | None:
     return result
 
 
-def _parse_light_cluster_stage(value: Any, line: int) -> dict[str, Any] | None:
+def _parse_timing_stage(
+    value: Any, stage_name: str, line: int
+) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ReportError(f"line {line}: stages must be an object or null")
-    stage = value.get(LIGHT_CLUSTER_STAGE)
+    stage = value.get(stage_name)
     if stage is None:
         return None
     if not isinstance(stage, dict):
         raise ReportError(
-            f"line {line}: stages.{LIGHT_CLUSTER_STAGE} must be an object or null"
+            f"line {line}: stages.{stage_name} must be an object or null"
         )
     legacy_keys = {"frames", "average_ms", "maximum_ms"}
     percentile_keys = legacy_keys | {"p50_ms", "p95_ms", "p99_ms"}
     if set(stage) not in (legacy_keys, percentile_keys):
         raise ReportError(
-            f"line {line}: stages.{LIGHT_CLUSTER_STAGE} has invalid keys"
+            f"line {line}: stages.{stage_name} has invalid keys"
         )
     result: dict[str, Any] = {
         "frames": _integer(
-            stage.get("frames"), f"stages.{LIGHT_CLUSTER_STAGE}.frames", line, 1
+            stage.get("frames"), f"stages.{stage_name}.frames", line, 1
         ),
         "average_ms": _number(
-            stage.get("average_ms"), f"stages.{LIGHT_CLUSTER_STAGE}.average_ms", line
+            stage.get("average_ms"), f"stages.{stage_name}.average_ms", line
         ),
         "maximum_ms": _number(
-            stage.get("maximum_ms"), f"stages.{LIGHT_CLUSTER_STAGE}.maximum_ms", line
+            stage.get("maximum_ms"), f"stages.{stage_name}.maximum_ms", line
         ),
     }
     if result["average_ms"] > result["maximum_ms"]:
         raise ReportError(
-            f"line {line}: {LIGHT_CLUSTER_STAGE} average exceeds maximum"
+            f"line {line}: {stage_name} average exceeds maximum"
         )
     for key in ("p50_ms", "p95_ms", "p99_ms"):
         result[key] = (
-            _number(stage.get(key), f"stages.{LIGHT_CLUSTER_STAGE}.{key}", line)
+            _number(stage.get(key), f"stages.{stage_name}.{key}", line)
             if key in stage else None
         )
     if result["p50_ms"] is not None and not (
@@ -370,9 +376,13 @@ def _parse_light_cluster_stage(value: Any, line: int) -> dict[str, Any] | None:
         <= result["maximum_ms"]
     ):
         raise ReportError(
-            f"line {line}: {LIGHT_CLUSTER_STAGE} percentiles are not monotonic"
+            f"line {line}: {stage_name} percentiles are not monotonic"
         )
     return result
+
+
+def _parse_light_cluster_stage(value: Any, line: int) -> dict[str, Any] | None:
+    return _parse_timing_stage(value, LIGHT_CLUSTER_STAGE, line)
 
 
 def _metric_object(payload: dict[str, Any], schema: int, line: int) -> dict[str, Any]:
@@ -990,6 +1000,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_light_cluster_stage(payload.get("stages"), line)
             if schema >= 4 else None
         ),
+        sun_shadow_stage=(
+            _parse_timing_stage(payload.get("stages"), SUN_SHADOW_STAGE, line)
+            if schema >= 4 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
@@ -1121,6 +1135,7 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
 
     model = generation["resolved_lighting_model"]
     stage = window.light_cluster_stage
+    shadow_stage = window.sun_shadow_stage
     if model == "vanilla":
         if clustered["active"]:
             raise ReportError(
@@ -1137,6 +1152,10 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
         if stage is not None:
             raise ReportError(
                 f"line {window.line}: Vanilla measurement contains {LIGHT_CLUSTER_STAGE} work"
+            )
+        if shadow_stage is not None:
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement contains {SUN_SHADOW_STAGE} work"
             )
         return
 
@@ -1196,6 +1215,15 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
         raise ReportError(
             f"line {window.line}: Advanced generation has no clustered-lighting resources"
         )
+    shadow_declared = (
+        generation["frame_graph_version"] >= L4_FRAME_GRAPH_VERSION
+        and work["pass_count"] >= L4_SHADOW_PASS_COUNT
+    )
+    if not shadow_declared and shadow_stage is not None:
+        raise ReportError(
+            f"line {window.line}: Advanced generation contains undeclared "
+            f"{SUN_SHADOW_STAGE} timing"
+        )
     if not window.detail:
         return
     if stage is None:
@@ -1213,6 +1241,22 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
             f"line {window.line}: {LIGHT_CLUSTER_STAGE} covers {stage['frames']} of "
             f"{window.frames} presented frames"
         )
+    if shadow_declared:
+        if shadow_stage is None:
+            raise ReportError(
+                f"line {window.line}: detailed L4 measurement requires "
+                f"{SUN_SHADOW_STAGE} timing"
+            )
+        if shadow_stage["p95_ms"] is None:
+            raise ReportError(
+                f"line {window.line}: detailed L4 measurement requires "
+                f"{SUN_SHADOW_STAGE} p95_ms"
+            )
+        if shadow_stage["frames"] != window.frames:
+            raise ReportError(
+                f"line {window.line}: {SUN_SHADOW_STAGE} covers "
+                f"{shadow_stage['frames']} of {window.frames} presented frames"
+            )
 
 
 def _aggregate_clustered_lighting(
@@ -1245,15 +1289,15 @@ def _aggregate_clustered_lighting(
     }
 
 
-def _aggregate_light_cluster_stage(
-    windows: Sequence[TimingWindow],
+def _aggregate_timing_stage(
+    windows: Sequence[TimingWindow], attribute: str, stage_name: str,
 ) -> dict[str, Any] | None:
-    present = [window.light_cluster_stage is not None for window in windows]
+    stages = [getattr(window, attribute) for window in windows]
+    present = [stage is not None for stage in stages]
     if not any(present):
         return None
     if not all(present):
-        raise ReportError(f"selected windows mix {LIGHT_CLUSTER_STAGE} timing presence")
-    stages = [window.light_cluster_stage for window in windows]
+        raise ReportError(f"selected windows mix {stage_name} timing presence")
     assert all(value is not None for value in stages)
     values = [value for value in stages if value is not None]
     result: dict[str, Any] = {
@@ -1270,9 +1314,17 @@ def _aggregate_light_cluster_stage(
             )
         elif any(value[key] is not None for value in values):
             raise ReportError(
-                f"selected windows mix {LIGHT_CLUSTER_STAGE} {key} presence"
+                f"selected windows mix {stage_name} {key} presence"
             )
     return result
+
+
+def _aggregate_light_cluster_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows, "light_cluster_stage", LIGHT_CLUSTER_STAGE
+    )
 
 
 def _aggregate_workload(
@@ -1831,6 +1883,11 @@ def summarize(
     cluster_stage = _aggregate_light_cluster_stage(selected)
     if cluster_stage is not None:
         result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
+    shadow_stage = _aggregate_timing_stage(
+        selected, "sun_shadow_stage", SUN_SHADOW_STAGE
+    )
+    if shadow_stage is not None:
+        result.setdefault("stages", {})[SUN_SHADOW_STAGE] = shadow_stage
     if selected[0].schema >= 2:
         result["metadata"] = selected[-1].metadata
     if renderer_generations and renderer_generations[0] is not None:
@@ -2897,6 +2954,18 @@ def _print_summary(summary: dict[str, Any]) -> None:
                 f"{gauges['pages_peak']}; {totals['backing_allocations_total']}"
             )
         print("workload coverage: " + workload["observability"])
+    for name, stage in summary.get("stages", {}).items():
+        p95 = stage.get("p95_ms")
+        p95_mean = (
+            p95.get("window_frame_weighted_mean")
+            if isinstance(p95, dict) else None
+        )
+        if p95_mean is not None:
+            print(
+                f"stage {name} ms (window-weighted avg/p95, worst): "
+                f"{stage['average_ms']['window_frame_weighted_mean']:.4f}/"
+                f"{p95_mean:.4f}, {stage['maximum_ms']:.4f}"
+            )
     print("note: " + summary["interpretation"])
 
 
@@ -3271,6 +3340,31 @@ def self_test() -> None:
                 }
         return payload
 
+    def l4_line(
+        index: int, *, detail: bool, shadow: bool = True
+    ) -> dict[str, Any]:
+        payload = l3_line(index, advanced=True, detail=detail)
+        generation = payload["renderer_generation"]
+        generation["frame_graph_version"] = L4_FRAME_GRAPH_VERSION
+        if shadow:
+            generation["advanced_lighting_work"].update({
+                "pass_count": L4_SHADOW_PASS_COUNT,
+                "encoder_count": 8,
+                "pso_count": 11,
+            })
+            if detail:
+                payload["stages"][SUN_SHADOW_STAGE] = {
+                    "frames": 300,
+                    "average_ms": 0.55,
+                    "p50_ms": 0.52,
+                    "p95_ms": 0.72,
+                    "p99_ms": 0.79,
+                    "maximum_ms": 0.83,
+                }
+        else:
+            payload["stages"][SUN_SHADOW_STAGE] = None
+        return payload
+
     def report_text(
         source_sha256: str,
         artifact_sha256: str = "5" * 64,
@@ -3425,6 +3519,43 @@ def self_test() -> None:
         assert l3_advanced_summary["stages"][LIGHT_CLUSTER_STAGE]["p95_ms"][
             "window_maximum"
         ] == 0.12
+
+        l4_advanced_detail = root / "l4-advanced-detail.jsonl"
+        l4_advanced_detail.write_text(
+            "\n".join(json.dumps(l4_line(i, detail=True)) for i in range(10))
+            + "\n",
+            encoding="utf-8",
+        )
+        l4_advanced_summary = summarize(l4_advanced_detail, 3000, 0, "OFF")
+        assert l4_advanced_summary["stages"][SUN_SHADOW_STAGE]["frames"] == 3000
+        assert l4_advanced_summary["stages"][SUN_SHADOW_STAGE]["p95_ms"][
+            "window_maximum"
+        ] == 0.72
+
+        l4_missing_shadow_stage = root / "l4-missing-shadow-stage.jsonl"
+        missing_shadow_payloads = [l4_line(i, detail=True) for i in range(10)]
+        missing_shadow_payloads[0]["stages"][SUN_SHADOW_STAGE] = None
+        l4_missing_shadow_stage.write_text(
+            "\n".join(json.dumps(payload) for payload in missing_shadow_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l4_missing_shadow_stage, 3000, 0, "OFF"),
+            f"detailed L4 measurement requires {SUN_SHADOW_STAGE} timing",
+        )
+
+        l4_ambient_only = root / "l4-ambient-only.jsonl"
+        l4_ambient_only.write_text(
+            "\n".join(
+                json.dumps(l4_line(i, detail=True, shadow=False))
+                for i in range(10)
+            ) + "\n",
+            encoding="utf-8",
+        )
+        assert SUN_SHADOW_STAGE not in summarize(
+            l4_ambient_only, 3000, 0, "OFF"
+        )["stages"]
 
         l3_cap_256 = root / "l3-cluster-cap-256.jsonl"
         cap_payload = l3_line(0, advanced=True, detail=False)

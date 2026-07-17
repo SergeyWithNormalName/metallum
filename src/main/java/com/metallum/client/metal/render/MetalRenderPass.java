@@ -114,7 +114,7 @@ final class MetalRenderPass implements RenderPassBackend {
     @Override
     public void setPipeline(final @NonNull RenderPipeline pipeline) {
         MetalCompiledRenderPipeline compiled = device.getOrCompilePipeline(pipeline);
-        if (compiled.sceneColorRole()) {
+        if (compiled.sceneColorRole() && !SunShadowRenderer.isRendering()) {
             ((MetalGpuTexture) this.colorTexture.texture()).markSceneColorClearRole();
         }
         if (this.compiledPipeline != compiled) {
@@ -699,6 +699,13 @@ final class MetalRenderPass implements RenderPassBackend {
                         compiledPipeline.depthBiasScaleFactor(),
                         0.0f
                 );
+                if (SunShadowRenderer.isRendering()) {
+                    enc.setDepthBias(
+                            SunShadowRenderer.activeRasterDepthBias(),
+                            SunShadowRenderer.activeRasterSlopeBias(),
+                            0.0f
+                    );
+                }
             }
 
             enc.setFrontFacingWinding(MTLWinding.Clockwise);

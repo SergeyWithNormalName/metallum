@@ -7,6 +7,7 @@ import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
+import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.BindGroupLayout;
@@ -137,9 +138,20 @@ final class MetalCrossShaderCompiler {
                             advanced
                     );
                     variants.put(HdrShaderFlavor.METALLUM_ADVANCED, advanced);
+
+                    MetalCompiledRenderPipeline.ShaderVariantSource shadow = compileVariant(
+                            device,
+                            pipeline,
+                            shaderSource,
+                            HdrShaderFlavor.SUN_SHADOW,
+                            legacy.resources()
+                    );
+                    validateShadowVariantLayout(pipeline, legacy, shadow);
+                    variants.put(HdrShaderFlavor.SUN_SHADOW, shadow);
                 } catch (ShaderCompileException | RuntimeException exception) {
                     AdvancedLightingPreflightGate.rejectAdvancedVariant(
-                            "failed to compile METALLUM_ADVANCED for " + pipeline.getLocation()
+                            "failed to compile METALLUM_ADVANCED/L4 shadow for "
+                                    + pipeline.getLocation()
                                     + ": " + failureMessage(exception)
                     );
                 }
@@ -267,6 +279,16 @@ final class MetalCrossShaderCompiler {
             final ShaderSource shaderSource,
             final HdrShaderFlavor flavor
     ) throws ShaderCompileException {
+        return compileVariant(device, pipeline, shaderSource, flavor, null);
+    }
+
+    private static MetalCompiledRenderPipeline.ShaderVariantSource compileVariant(
+            final MetalDevice device,
+            final RenderPipeline pipeline,
+            final ShaderSource shaderSource,
+            final HdrShaderFlavor flavor,
+            @Nullable final List<MetalCompiledRenderPipeline.ResourceBinding> canonicalResources
+    ) throws ShaderCompileException {
         IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(
                 pipeline.getVertexShader(),
                 ShaderType.VERTEX,
@@ -286,10 +308,17 @@ final class MetalCrossShaderCompiler {
                     "Couldn't compile " + flavor + " shader for pipeline " + pipeline.getLocation()
             );
         }
+        IntermediaryShaderModule fragmentLayoutSpirv = withoutExternalShadowSamplers(
+                fragmentSpirv,
+                flavor
+        );
 
         List<VulkanBindGroupLayout.Entry> layoutEntries = new ArrayList<>();
+        if (canonicalResources != null) {
+            seedCanonicalLayout(layoutEntries, canonicalResources);
+        }
         addToBindGroup(layoutEntries, vertexSpirv, pipeline);
-        addToBindGroup(layoutEntries, fragmentSpirv, pipeline);
+        addToBindGroup(layoutEntries, fragmentLayoutSpirv, pipeline);
         canonicalizeLayoutEntries(layoutEntries);
         List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
@@ -303,7 +332,10 @@ final class MetalCrossShaderCompiler {
                 vertexAttributeFormats(pipeline)
         );
 
-        fragmentSpirv.rebind(tolerateUnprovidedInputs(vertexOutputs, fragmentSpirv.inputs()), layoutEntries);
+        fragmentLayoutSpirv.rebind(
+                tolerateUnprovidedInputs(vertexOutputs, fragmentLayoutSpirv.inputs()),
+                layoutEntries
+        );
         MslShader fragmentMsl = spirvToMsl(fragmentSpirv.spirv(), layoutEntries.size(), Map.of());
 
         String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
@@ -318,6 +350,77 @@ final class MetalCrossShaderCompiler {
                 fragmentEntryPoint,
                 resources,
                 fragmentMsl.source().contains("[[color(1)]]")
+        );
+    }
+
+    private static void seedCanonicalLayout(
+            final List<VulkanBindGroupLayout.Entry> entries,
+            final List<MetalCompiledRenderPipeline.ResourceBinding> resources
+    ) {
+        for (MetalCompiledRenderPipeline.ResourceBinding resource : resources) {
+            if (resource.name().equals("push_constants")) {
+                continue;
+            }
+            VulkanBindGroupEntryType type = switch (resource.kind()) {
+                case UNIFORM_BUFFER -> VulkanBindGroupEntryType.UNIFORM_BUFFER;
+                case SAMPLED_IMAGE -> VulkanBindGroupEntryType.SAMPLED_IMAGE;
+                case TEXEL_BUFFER -> VulkanBindGroupEntryType.TEXEL_BUFFER;
+            };
+            addBindingIfAbsent(entries, type, resource.name(), resource.texelBufferFormat());
+        }
+    }
+
+    private static void validateShadowVariantLayout(
+            final RenderPipeline pipeline,
+            final MetalCompiledRenderPipeline.ShaderVariantSource legacy,
+            final MetalCompiledRenderPipeline.ShaderVariantSource shadow
+    ) {
+        if (shadow.semanticOutput() || legacy.resources().size() != shadow.resources().size()) {
+            throw new IllegalStateException(
+                    "L4 shadow variant changed the canonical resource count for "
+                            + pipeline.getLocation()
+            );
+        }
+        for (int index = 0; index < legacy.resources().size(); index++) {
+            MetalCompiledRenderPipeline.ResourceBinding expected = legacy.resources().get(index);
+            MetalCompiledRenderPipeline.ResourceBinding actual = shadow.resources().get(index);
+            if (expected.kind() != actual.kind()
+                    || !expected.name().equals(actual.name())
+                    || expected.bindingIndex() != actual.bindingIndex()
+                    || !Objects.equals(expected.texelBufferFormat(), actual.texelBufferFormat())) {
+                throw new IllegalStateException(
+                        "L4 shadow variant changed canonical binding " + index + " for "
+                                + pipeline.getLocation() + ": expected=" + expected
+                                + ", actual=" + actual
+                );
+            }
+        }
+    }
+
+    private static IntermediaryShaderModule withoutExternalShadowSamplers(
+            final IntermediaryShaderModule module,
+            final HdrShaderFlavor flavor
+    ) {
+        if (flavor != HdrShaderFlavor.METALLUM_ADVANCED) {
+            return module;
+        }
+        var filtered = module.samplers().stream()
+                .filter(sampler -> !AdvancedDirectLightingShaderPatcher
+                        .isExternalShadowSampler(sampler.name()))
+                .toList();
+        int removed = module.samplers().size() - filtered.size();
+        if (removed != EnvironmentShadowBindingAbi.shadowTextureSlots().length) {
+            throw new IllegalStateException(
+                    "Advanced fragment must expose exactly three external L4 shadow samplers"
+            );
+        }
+        return new IntermediaryShaderModule(
+                module.name(),
+                module.spirv(),
+                module.uniformBuffers(),
+                filtered,
+                module.outputs(),
+                module.inputs()
         );
     }
 
@@ -372,9 +475,19 @@ final class MetalCrossShaderCompiler {
     ) {
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
-                    && AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())) {
+                    && (AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())
+                    || binding.bindingIndex() == EnvironmentShadowBindingAbi.PARAMS_SLOT)) {
                 throw new IllegalStateException(
                         "Advanced lighting fragment slot " + binding.bindingIndex()
+                                + " collides with pipeline resource " + binding.name()
+                                + " for " + pipeline.getLocation()
+                );
+            }
+            if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE
+                    && EnvironmentShadowBindingAbi.ownsShadowTextureSlot(
+                    binding.bindingIndex())) {
+                throw new IllegalStateException(
+                        "L4 shadow texture slot " + binding.bindingIndex()
                                 + " collides with pipeline resource " + binding.name()
                                 + " for " + pipeline.getLocation()
                 );
@@ -387,6 +500,29 @@ final class MetalCrossShaderCompiler {
                 throw new IllegalStateException(
                         "Advanced lighting fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
+                                + pipeline.getLocation()
+                );
+            }
+        }
+        String environmentMarker = "[[buffer("
+                + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]";
+        if (countOccurrences(variant.fragmentMsl(), environmentMarker) != 1
+                || variant.vertexMsl().contains(environmentMarker)) {
+            throw new IllegalStateException(
+                    "L4 environment buffer is missing, repeated, or visible to the vertex stage for "
+                            + pipeline.getLocation()
+            );
+        }
+        for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
+            String textureMarker = "[[texture(" + slot + ")]]";
+            String samplerMarker = "[[sampler(" + slot + ")]]";
+            if (countOccurrences(variant.fragmentMsl(), textureMarker) != 1
+                    || countOccurrences(variant.fragmentMsl(), samplerMarker) != 1
+                    || variant.vertexMsl().contains(textureMarker)
+                    || variant.vertexMsl().contains(samplerMarker)) {
+                throw new IllegalStateException(
+                        "L4 shadow texture/sampler slot " + slot
+                                + " is missing, repeated, or visible to the vertex stage for "
                                 + pipeline.getLocation()
                 );
             }

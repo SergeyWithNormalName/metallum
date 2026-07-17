@@ -96,6 +96,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
     private long scenePostColorFormatsLogged;
     private long materialColorFormatsLogged;
     private long advancedMaterialColorFormatsLogged;
+    private long sunShadowColorFormatsLogged;
 
     private final Map<PipelineKey, OwnedPipelineHandle> pipelines = new HashMap<>();
 
@@ -184,6 +185,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 } else if (entry.getKey() == HdrShaderFlavor.METALLUM_ADVANCED) {
                     AdvancedLightingPreflightGate.rejectAdvancedVariant(
                             "Metal rejected METALLUM_ADVANCED functions for " + info.getLocation()
+                    );
+                } else if (entry.getKey() == HdrShaderFlavor.SUN_SHADOW) {
+                    AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                            "Metal rejected L4 shadow functions for " + info.getLocation()
                     );
                 } else if (entry.getKey() == HdrShaderFlavor.LEGACY_HDR_SEMANTIC) {
                     com.metallum.Metallum.LOGGER.warn(
@@ -391,7 +396,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                 key.colorFormat(),
                 key.depthFormat(),
                 key.stencilFormat(),
-                functions.semanticOutput()
+                functions.semanticOutput(),
+                key.flavor() == HdrShaderFlavor.SUN_SHADOW
         );
         if (MetalNativeBridge.isNullHandle(pipeline)) {
             return MemorySegment.NULL;
@@ -417,7 +423,8 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat colorFormat,
             final MTLPixelFormat depthFormat,
             final MTLPixelFormat stencilFormat,
-            final boolean semanticOutput
+            final boolean semanticOutput,
+            final boolean shadowDepthOnly
     ) {
         if (MetalNativeBridge.isNullHandle(vertexFunction) || MetalNativeBridge.isNullHandle(fragmentFunction)) {
             return MemorySegment.NULL;
@@ -431,7 +438,11 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
                         colorFormat,
                         function
                 ));
-        long writeMask = colorTarget == null ? MTLColorWriteMask.All.value : MTLColorWriteMask.from(colorTarget.writeMask());
+        long writeMask = shadowDepthOnly
+                ? MTLColorWriteMask.None.value
+                : colorTarget == null
+                        ? MTLColorWriteMask.All.value
+                        : MTLColorWriteMask.from(colorTarget.writeMask());
 
         try (MTLRenderPipelineDescriptor pipelineDesc = new MTLRenderPipelineDescriptor()) {
             pipelineDesc.setCompiledFunctions(vertexFunction, fragmentFunction);
@@ -584,6 +595,10 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             final MTLPixelFormat colorFormat,
             final boolean materialSceneAttachment
     ) {
+        if (SunShadowRenderer.isRendering()
+                && this.shaderFunctions.containsKey(HdrShaderFlavor.SUN_SHADOW)) {
+            return HdrShaderFlavor.SUN_SHADOW;
+        }
         if (materialSceneAttachment && this.device.isMaterialWorldPassActive()) {
             if (this.hdrRole.supportsSceneLinearFlavor()) {
                 return selectMaterialWorldFlavor(
@@ -666,6 +681,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged;
             case METALLUM -> this.materialColorFormatsLogged;
             case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged;
+            case SUN_SHADOW -> this.sunShadowColorFormatsLogged;
         };
         if ((loggedColorFormats & colorFormatBit) != 0L) {
             return;
@@ -678,6 +694,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             case SCENE_POST_LINEAR -> this.scenePostColorFormatsLogged |= colorFormatBit;
             case METALLUM -> this.materialColorFormatsLogged |= colorFormatBit;
             case METALLUM_ADVANCED -> this.advancedMaterialColorFormatsLogged |= colorFormatBit;
+            case SUN_SHADOW -> this.sunShadowColorFormatsLogged |= colorFormatBit;
         }
         com.metallum.Metallum.LOGGER.debug(
                 "HDR shader flavor selected: pipeline={}, role={}, colorAttachment={}, flavor={}",

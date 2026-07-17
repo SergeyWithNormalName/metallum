@@ -4,6 +4,7 @@ import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
+import com.metallum.client.renderer.SunShadowLayout;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
@@ -65,12 +66,12 @@ public final class AdvancedDirectLightingShaderTests {
             .build();
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
-            "sodium-solid-vsh", "f913b8ea289baab7cdf380f6d24607ff6b5b08323401211286946e1b301fc175",
-            "sodium-solid-fsh", "cef7f65096c7cded542d3f6f1d1d96dce711edf0c41d18f4dadc675c79f1bf46",
-            "sodium-cutout-vsh", "74b70909ad3131e8bb1c0f4a14634c9563ff6dc83d0f83679c0d1daef5a892ea",
-            "sodium-cutout-fsh", "57bf111bd3fa82035f4ea07c1b39cb03c35d4029baaae6d387774f065a8b23a9",
-            "minecraft-entity-vsh", "e3e387d53246ebab5353ef062370d5b9e3e1fea37ae0529d288406f6b600acd4",
-            "minecraft-entity-fsh", "84aaf813cb86322b1b395f3e3e890f9f7befd30f705b432edc4f139f4ee24dc0"
+            "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
+            "sodium-solid-fsh", "de9ae171e8fe806befeb716478a479d63cb03a6d750ce0209f1b4341501edb9b",
+            "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
+            "sodium-cutout-fsh", "92ef0ef6258bd3e17ec9f828874219321cc34fc7d2a9c260f2402f5d3c20e3de",
+            "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
+            "minecraft-entity-fsh", "450bf60de8f9d79f7a20e98e79575c4d623be5438722451c23bb8ebb2e57ce63"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -85,6 +86,7 @@ public final class AdvancedDirectLightingShaderTests {
         testFailClosedSourceContracts();
         testTwoPhasePreflightGate();
         testActualSourcesCompileAndMatchGoldens();
+        testDedicatedSunShadowVariants();
     }
 
     private static void testVersionedBindingAbi() {
@@ -114,6 +116,14 @@ public final class AdvancedDirectLightingShaderTests {
                         && AdvancedLightingLayout.DEPTH_SLICES == 6
                         && AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER == 256,
                 "shader cluster constants diverged from generation layout");
+        require(EnvironmentShadowBindingAbi.VERSION == 1
+                        && EnvironmentShadowBindingAbi.PARAMS_SLOT == 26
+                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
+                        && java.util.Arrays.equals(
+                        EnvironmentShadowBindingAbi.shadowTextureSlots(),
+                        new int[]{13, 14, 15})
+                        && SunShadowLayout.MAX_CASCADES == 3,
+                "L4 environment/shadow binding ABI changed");
 
         AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4);
         expectIllegalArgument(() -> AdvancedLightingBindingAbi.requireCompatibleLayout(2, 256, 48, 8, 4));
@@ -210,8 +220,9 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;"),
                 "Sodium terrain does not forward view-space position");
         require(sodiumVertex.contains(
-                        "texture(u_LightTex, vec2(8.0 / 256.0, _vert_tex_light_coord.y))"),
-                "Advanced terrain retained the legacy block-light channel beside clustered direct light");
+                        "texture(u_LightTex, vec2(8.0 / 256.0))")
+                        && sodiumVertex.contains("metallumSkyVisibility = clamp("),
+                "Advanced terrain did not split sky visibility from physical irradiance");
         require(sodiumFragment.contains("cross(\n            dFdx(metallumLightingPosition),\n"
                         + "            dFdy(metallumLightingPosition))"),
                 "Sodium terrain does not reconstruct its flat derivative normal");
@@ -221,8 +232,9 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumLightingTint = metallumMaterialDecodeColor(Color);"),
                 "entity material tint is not separated from vanilla cardinal lighting");
         require(entityVertex.contains(
-                        "sample_lightmap(Sampler2, ivec2(0, UV2.y))"),
-                "Advanced entities retained the legacy block-light channel beside clustered direct light");
+                        "sample_lightmap(Sampler2, ivec2(0, 0))")
+                        && entityVertex.contains("metallumSkyVisibility = clamp("),
+                "Advanced entities did not split sky visibility from physical irradiance");
         require(entityFragment.contains("? metallumLightingNormal\n"
                         + "            : -metallumLightingNormal;"),
                 "entity back faces do not orient the supplied normal");
@@ -239,11 +251,11 @@ public final class AdvancedDirectLightingShaderTests {
                 "terrain and entities do not use one shared direct-light formula");
         require(sodiumFormula.contains("* (attenuation * nDotL * 0.31830988618);"),
                 "direct-light formula is no longer Lambertian scene-linear radiance");
-        require(sodiumFormula.contains("float normalScale = max(")
-                        && sodiumFormula.contains("vec3 scaledNormal = surfaceNormal / normalScale;")
-                        && sodiumFormula.contains(
-                        "vec3 normal = scaledNormal * inversesqrt(scaledLengthSquared);")
-                        && !sodiumFormula.contains("normalLengthSquared <= 0.00000001"),
+        require(sodiumFragment.contains("vec3 metallumSafeNormalV1(vec3 surfaceNormal)")
+                        && sodiumFragment.contains("vec3 scaledNormal = surfaceNormal / normalScale;")
+                        && sodiumFragment.contains(
+                        "return scaledNormal * inversesqrt(lengthSquared);")
+                        && !sodiumFragment.contains("normalLengthSquared <= 0.00000001"),
                 "direct-light normal normalization depends on projected pixel footprint");
         require(sodiumFormula.contains(
                         "min(header.count, metallumLighting.extentAndClusterCap.z)"),
@@ -285,6 +297,15 @@ public final class AdvancedDirectLightingShaderTests {
         require(!sodiumFormula.contains("HDR") && !sodiumFormula.contains("SDR")
                         && !sodiumFormula.contains("Edr") && !sodiumFormula.contains("Output"),
                 "display output leaked into the direct-light formula");
+        String sodiumEnvironment = environmentHelper(sodiumFragment);
+        String entityEnvironment = environmentHelper(entityFragment);
+        require(sodiumEnvironment.equals(entityEnvironment)
+                        && sodiumEnvironment.contains("metallumSunVisibilityV1")
+                        && sodiumEnvironment.contains("skyOcclusion * hemisphere")
+                        && sodiumFragment.contains("for (int y = -1; y <= 1; ++y)")
+                        && sodiumFragment.contains("for (int x = -1; x <= 1; ++x)")
+                        && sodiumFragment.contains("smoothstep(split - blendWidth, split, viewDepth)"),
+                "terrain/entities do not share bounded PCF environment lighting with cascade blending");
     }
 
     private static void testFailClosedSourceContracts() throws IOException {
@@ -329,6 +350,16 @@ public final class AdvancedDirectLightingShaderTests {
                 );
         require(!collision.success() && collision.failureReason().contains("slot 29"),
                 "occupied Advanced buffer slot did not fail closed");
+        String environmentCollision = materialFragment.replace(
+                "out vec4 fragColor;",
+                "layout(std430, binding = 26) readonly buffer ExistingEnvironment "
+                        + "{ uint data[]; } existingEnvironment;\nout vec4 fragColor;"
+        );
+        require(!AdvancedDirectLightingShaderPatcher.patch(
+                        sodiumFragmentCase.namespace(), sodiumFragmentCase.path(),
+                        sodiumFragmentCase.stage(), LightingModel.ADVANCED,
+                        environmentCollision).success(),
+                "occupied L4 environment buffer slot did not fail closed");
 
         String malformedBinding = materialFragment.replace(
                 "out vec4 fragColor;",
@@ -476,6 +507,76 @@ public final class AdvancedDirectLightingShaderTests {
                 "Minecraft 26.2 / Sodium 0.9.1 Advanced source golden changed: " + actual);
     }
 
+    private static void testDedicatedSunShadowVariants() throws IOException {
+        ShaderCase[] sources = actualTargetSources();
+        String sodiumVertex = sunShadowSource(sources[0]);
+        String sodiumFragment = sunShadowSource(sources[1]);
+        String entityVertex = sunShadowSource(sources[2]);
+        String entityFragment = sunShadowSource(sources[3]);
+
+        compileShadowPair("sodium-shadow-solid", sodiumVertex, sodiumFragment,
+                SODIUM_SOLID_DEFINES);
+        compileShadowPair("sodium-shadow-cutout", sodiumVertex, sodiumFragment,
+                SODIUM_CUTOUT_DEFINES);
+        compileShadowPair("entity-shadow-solid", entityVertex, entityFragment,
+                ShaderDefines.EMPTY);
+        compileShadowPair("entity-shadow-cutout", entityVertex, entityFragment,
+                ENTITY_CUTOUT_DEFINES);
+        compileShadowPair("entity-shadow-dissolve", entityVertex, entityFragment,
+                ENTITY_DISSOLVE_DEFINES);
+
+        String sodiumMain = mainBody(sodiumFragment);
+        String entityMain = mainBody(entityFragment);
+        require(sodiumMain.contains("texture(u_BlockTex, v_TexCoord).a")
+                        && !sodiumMain.contains("sampleRGSS")
+                        && !sodiumMain.contains("_linearFog"),
+                "terrain shadow fragment retained ordinary material/fog work");
+        require(entityMain.contains("texture(Sampler0, texCoord0).a")
+                        && entityMain.contains("DissolveMaskSampler")
+                        && !entityMain.contains("apply_fog")
+                        && !entityMain.contains("ColorModulator"),
+                "entity shadow fragment retained ordinary lighting/fog work");
+        require(mainBody(sodiumVertex).contains("gl_Position")
+                        && !mainBody(sodiumVertex).contains("u_LightTex")
+                        && !mainBody(sodiumVertex).contains("getFragDistance"),
+                "terrain shadow vertex retained lightmap/fog work");
+        require(mainBody(entityVertex).contains("gl_Position")
+                        && !mainBody(entityVertex).contains("sample_lightmap")
+                        && !mainBody(entityVertex).contains("fog_spherical_distance"),
+                "entity shadow vertex retained lightmap/fog work");
+
+        SunShadowShaderPatcher.Result idempotent = SunShadowShaderPatcher.patch(
+                sources[1].namespace(), sources[1].path(), sources[1].stage(), sodiumFragment);
+        require(idempotent.success() && idempotent.source().equals(sodiumFragment),
+                "sun-shadow patch is not idempotent");
+        require(!SunShadowShaderPatcher.patch(
+                        "minecraft", "core/text",
+                        MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                        entityFragment).success(),
+                "unsupported shader entered the L4 caster contract");
+    }
+
+    private static void compileShadowPair(
+            final String name,
+            final String vertex,
+            final String fragment,
+            final ShaderDefines defines
+    ) {
+        try (GlslCompiler compiler = new GlslCompiler();
+             IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                     name + ".vsh", withDefines(vertex, defines), ShaderType.VERTEX);
+             IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                     name + ".fsh", withDefines(fragment, defines), ShaderType.FRAGMENT)) {
+            require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                    name + " produced an invalid shadow SPIR-V module");
+            require(fragmentModule.uniformBuffers().stream().noneMatch(buffer ->
+                            buffer.name().startsWith("Metallum")),
+                    name + " retained Advanced lighting buffers in the caster fragment");
+        } catch (ShaderCompileException exception) {
+            throw new AssertionError(name + " shadow-source compile failed", exception);
+        }
+    }
+
     private static void testTwoPhasePreflightGate() throws IOException {
         AdvancedLightingRuntime.reset();
         AdvancedLightingPreflightGate.resetForTests();
@@ -552,6 +653,8 @@ public final class AdvancedDirectLightingShaderTests {
 
             StorageReflection storage = storageBufferLayout(fragmentModule);
             require(storage.bytes().equals(Map.of(
+                            EnvironmentShadowBindingAbi.PARAMS_SLOT,
+                            (long) EnvironmentShadowBindingAbi.PARAMS_BYTES,
                             AdvancedLightingBindingAbi.PARAMS_SLOT,
                             (long) AdvancedLightingBindingAbi.PARAMS_BYTES,
                             AdvancedLightingBindingAbi.LIGHTS_SLOT,
@@ -572,6 +675,13 @@ public final class AdvancedDirectLightingShaderTests {
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
                 require(fragmentMsl.contains("[[buffer(" + slot + ")]]"),
                         name + " SPIRV-Cross output lost Metal fragment slot " + slot);
+            }
+            require(fragmentMsl.contains("[[buffer(26)]]"),
+                    name + " SPIRV-Cross output lost L4 environment slot");
+            for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
+                require(fragmentMsl.contains("[[texture(" + slot + ")]]")
+                                && fragmentMsl.contains("[[sampler(" + slot + ")]]"),
+                        name + " SPIRV-Cross output lost L4 shadow slot " + slot);
             }
         } catch (ShaderCompileException exception) {
             throw new AssertionError(name + " actual-source compile failed", exception);
@@ -657,6 +767,14 @@ public final class AdvancedDirectLightingShaderTests {
                                 Spvc.spvc_compiler_get_declared_struct_size(
                                         compiler, blockType, size),
                                 "read params block size"
+                        );
+                        bytes = size.get(0);
+                    } else if (binding == EnvironmentShadowBindingAbi.PARAMS_SLOT) {
+                        PointerBuffer size = stack.mallocPointer(1);
+                        checkSpvc(
+                                Spvc.spvc_compiler_get_declared_struct_size(
+                                        compiler, blockType, size),
+                                "read environment block size"
                         );
                         bytes = size.get(0);
                     } else {
@@ -808,6 +926,15 @@ public final class AdvancedDirectLightingShaderTests {
         return advanced.source();
     }
 
+    private static String sunShadowSource(final ShaderCase shader) throws IOException {
+        String preprocessed = preprocess(shader.namespace(), shader.path(), shader.stage());
+        SunShadowShaderPatcher.Result shadow = SunShadowShaderPatcher.patch(
+                shader.namespace(), shader.path(), shader.stage(), preprocessed);
+        require(shadow.success(), shader.key() + " shadow patch failed: "
+                + shadow.failureReason());
+        return shadow.source();
+    }
+
     private static String materialSource(final ShaderCase shader) throws IOException {
         String preprocessed = preprocess(shader.namespace(), shader.path(), shader.stage());
         MetallumMaterialShaderPatcher.Result material = MetallumMaterialShaderPatcher.patch(
@@ -854,6 +981,29 @@ public final class AdvancedDirectLightingShaderTests {
         int end = source.indexOf("// METALLUM_MATERIAL_LINEAR_V1", start);
         require(start >= 0 && end > start, "Advanced direct helper block is missing");
         return source.substring(start, end).strip();
+    }
+
+    private static String environmentHelper(final String source) {
+        int start = source.indexOf("vec3 metallumEvaluateEnvironmentV1(");
+        int end = source.indexOf("uint metallumClusterIndexV1(", start);
+        require(start >= 0 && end > start, "L4 environment helper block is missing");
+        return source.substring(start, end).strip();
+    }
+
+    private static String mainBody(final String source) {
+        int marker = source.indexOf(SunShadowShaderPatcher.MARKER);
+        int opening = source.indexOf('{', marker);
+        require(marker >= 0 && opening >= 0, "sun-shadow main marker is missing");
+        int depth = 0;
+        for (int index = opening; index < source.length(); index++) {
+            char character = source.charAt(index);
+            if (character == '{') {
+                depth++;
+            } else if (character == '}' && --depth == 0) {
+                return source.substring(opening + 1, index);
+            }
+        }
+        throw new AssertionError("sun-shadow main body is unbalanced");
     }
 
     private static boolean before(final String source, final String first, final String second) {

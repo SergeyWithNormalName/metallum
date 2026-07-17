@@ -1622,17 +1622,17 @@ Diagnostic overlays:
 - M1 Pro, Balanced HDR Native, `2194` lights: `105.20 FPS`, полный GPU p95 `12.44 ms`; cluster upload/build p50/p95/p99 `0.43/0.52/1.26 ms`, `0` overflow/dropped indices/admission/index/ring rejects. Визуальную перепроверку слабых источников, дистанции и dense-fluid transitions пользователь отложил.
 - Дополнение L3: camera-independent registry сохранён, но direct-light upload теперь содержит только influence spheres из frustum и guard band; background остаётся доступен будущим L4–L8 consumers.
 
-### Этап 4. Sun/sky и первые тени
+### Этап 4. Sun/sky и первые тени — ✅ ВЫПОЛНЕН 17 июля 2026
 
 #### Работы
 
-- Ввести environment descriptor.
-- Реализовать directional sun/moon и sky irradiance.
-- Добавить 2–3 cascade sun shadow map.
-- Terrain и entities участвуют в одном shadow contract.
-- Стабилизировать cascades относительно camera.
-- Добавить PCF/bias controls и shadow timings.
-- Не связывать shadow quality с HDR output; все Advanced shadow resources отсутствуют при `LightingModel.VANILLA`.
+- [x] Ввести environment descriptor.
+- [x] Реализовать directional sun/moon и sky irradiance.
+- [x] Добавить 2–3 cascade sun shadow map.
+- [x] Terrain и entities участвуют в одном shadow contract.
+- [x] Стабилизировать cascades относительно camera.
+- [x] Добавить PCF/bias controls и shadow timings.
+- [x] Не связывать shadow quality с HDR output; все Advanced shadow resources отсутствуют при `LightingModel.VANILLA`.
 
 #### Exit criteria
 
@@ -1640,6 +1640,14 @@ Diagnostic overlays:
 - Плиты, ступени и заборы дают детальную sun shadow.
 - Entity self/cast shadow стабилен.
 - Cascade boundaries не заметны при обычном движении.
+
+#### Результат выполнения
+
+- Versioned environment/shadow ABI использует фактический sky state измерения; sun/moon, sky irradiance и 2/3/3 стабилизированных cascade для Performance/Balanced/Ultra не зависят от SDR/HDR output.
+- Terrain и solid entities повторно используют свою точную геометрию в одном caster contract; отдельный `SUN_SHADOW` shader сохраняет alpha-cutout/dissolve, но исключает lightmap/fog/material/Advanced работу. Visibility использует bounded 3×3 PCF, cascade blending и preset bias controls.
+- Advanced allocation fail-closed атомарно возвращает Vanilla; при `LightingModel.VANILLA` environment/shadow resources и passes отсутствуют. `clean check`, shadow numeric/ABI tests и 300 кадров Metal API/GPU Validation прошли без новых ошибок.
+- M1 Pro, Balanced HDR Native, 3000 кадров: `106.34 FPS`, полный GPU p95 `11.47 ms` против L3 `105.20 FPS`/`12.44 ms`; sun-shadow avg/p95/worst `3.36/3.93/4.66 ms`, `0` dropped timing events, crash/fault/fallback после admission отсутствуют.
+- Важное отличие для L6: L4 пока полностью перерисовывает каскады каждый кадр; его `3.93 ms` не является budget для будущего cached update (`0.80 ms`). Ручная визуальная приёмка acne/peter-panning и границ каскадов без Computer Use/screenshots не выполнялась и остаётся отдельным live signoff.
 
 ### Этап 5. Sub-block voxel occupancy
 

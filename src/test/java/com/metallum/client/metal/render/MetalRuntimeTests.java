@@ -207,7 +207,19 @@ public final class MetalRuntimeTests {
                         && populated.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES
                         + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE,
                 "Populated Advanced frame does not describe the compact cluster pipeline");
+        FrameState.AdvancedLightingWork shadowed = MetalDevice.advancedLightingWork(2, 3, true);
+        require(shadowed.lightCount() == 2
+                        && shadowed.passCount() == 5
+                        && shadowed.encoderCount() == 8
+                        && shadowed.psoCount() == 11
+                        && shadowed.workQueueCount() == 2
+                        && shadowed.dispatchCount() == 6
+                        && shadowed.uploadBytes() == AdvancedLightingLayout.UPLOAD_HEADER_BYTES
+                        + 2L * AdvancedLightingLayout.GPU_LIGHT_STRIDE
+                        + com.metallum.client.renderer.SunShadowLayout.PARAMS_BYTES,
+                "L4 frame does not declare its environment packet and cascade passes");
         expectIllegalArgument(() -> MetalDevice.advancedLightingWork(-1));
+        expectIllegalArgument(() -> MetalDevice.advancedLightingWork(0, 1, true));
     }
 
     private static void testAutomaticMaterialContractAndCompatibilityOverride() {
@@ -409,7 +421,8 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.UI,
                 MetalGpuTimingStage.PRESENT,
                 MetalGpuTimingStage.ACTUAL_HDR_DISPLAY,
-                MetalGpuTimingStage.LIGHT_UPLOAD_CLUSTER_BUILD
+                MetalGpuTimingStage.LIGHT_UPLOAD_CLUSTER_BUILD,
+                MetalGpuTimingStage.SUN_SHADOW
         };
         require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
                 "GPU timing stage count does not match the native ABI");

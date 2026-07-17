@@ -83,9 +83,9 @@ public final class SceneLinearShaderPatcher {
             case LEGACY_HDR_SEMANTIC -> Result.success(source);
             case SCENE_RASTER_LINEAR -> patchRasterBoundary(source);
             case SCENE_POST_LINEAR -> patchPost(namespace, path, source);
-            case METALLUM, METALLUM_ADVANCED -> Result.failure(
+            case METALLUM, METALLUM_ADVANCED, SUN_SHADOW -> Result.failure(
                     source,
-                    flavor + " uses the material-profile patcher"
+                    flavor + " uses a dedicated shader patcher"
             );
         };
     }

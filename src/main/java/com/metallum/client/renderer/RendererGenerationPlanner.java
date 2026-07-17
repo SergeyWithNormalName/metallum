@@ -428,15 +428,33 @@ public final class RendererGenerationPlanner {
             resources.add(resource("cluster_statistics", domain,
                     AdvancedLightingLayout.nativeAllocationBytes(
                             AdvancedLightingLayout.STATISTICS_BYTES), false));
+            SunShadowLayout.Budget shadowBudget = SunShadowLayout.forPreset(
+                    config.lightingPreset()
+            );
+            resources.add(resource(
+                    "environment_shadow_params_ring",
+                    domain,
+                    shadowBudget.paramsRingBytes(),
+                    false
+            ));
+            resources.add(resource(
+                    "sun_shadow_cascades",
+                    domain,
+                    shadowBudget.shadowTextureBytes(),
+                    false
+            ));
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));
             passes.add(pass("cluster_build", domain));
+            passes.add(pass("sun_shadow", domain));
             passes.add(pass("direct_lighting", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "light_upload_blit_encoder", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "cluster_build_compute_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "sun_shadow_render_encoder", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prepare_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_masks_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_count_pso", domain));
@@ -448,6 +466,10 @@ public final class RendererGenerationPlanner {
                     "terrain_direct_lighting_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline(
                     "entity_direct_lighting_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "terrain_sun_shadow_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "entity_sun_shadow_pso", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
                     "static_light_registry", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
