@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.lighting.SunShadowFrame;
+import com.metallum.client.lighting.SunShadowStabilizer;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
@@ -30,6 +31,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final TextureTarget[] cascades;
     private final ProjectionMatrixBuffer projectionBuffer;
     private final MetalGpuSampler comparisonSampler;
+    private final SunShadowStabilizer stabilizer;
     private SunShadowFrame frame;
     private long renderedSubmitIndex = Long.MIN_VALUE;
     private boolean closed;
@@ -48,6 +50,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         this.cascades = cascades;
         this.projectionBuffer = projectionBuffer;
         this.comparisonSampler = comparisonSampler;
+        this.stabilizer = new SunShadowStabilizer();
     }
 
     static SunShadowGpuResources create(
@@ -138,7 +141,12 @@ final class SunShadowGpuResources implements AutoCloseable {
         if (frameState.lightingGenerationId() != this.generation) {
             throw new IllegalArgumentException("Environment does not match the shadow generation");
         }
-        SunShadowFrame planned = SunShadowFrame.plan(environment, this.budget, frameState);
+        SunShadowFrame planned = SunShadowFrame.plan(
+                environment,
+                this.budget,
+                frameState,
+                this.stabilizer
+        );
         int slot = frameState.inFlightSlot();
         long offset = (long) slot * SunShadowLayout.PARAMS_BYTES;
         ByteBuffer packet = this.paramsRing.sliceStorage(offset, SunShadowLayout.PARAMS_BYTES)

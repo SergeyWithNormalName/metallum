@@ -65,9 +65,21 @@ public final class SunShadowFrame {
             final SunShadowLayout.Budget budget,
             final FrameState frame
     ) {
+        return plan(environment, budget, frame, null);
+    }
+
+    public static SunShadowFrame plan(
+            final EnvironmentDescriptor environment,
+            final SunShadowLayout.Budget budget,
+            final FrameState frame,
+            final SunShadowStabilizer stabilizer
+    ) {
         Objects.requireNonNull(environment, "environment");
         Objects.requireNonNull(budget, "budget");
         Objects.requireNonNull(frame, "frame");
+        if (stabilizer != null) {
+            stabilizer.prepare(frame, environment);
+        }
         float nearPlane = (float) frame.nearPlane();
         float farPlane = (float) frame.farPlane();
         float[] splits = SunShadowLayout.cascadeSplits(budget, nearPlane, farPlane);
@@ -111,7 +123,9 @@ public final class SunShadowFrame {
                         budget,
                         projection,
                         camera,
-                        toLightWorld
+                        toLightWorld,
+                        stabilizer,
+                        cascade
                 );
                 matrices[cascade].set(planned.shadowFromView());
                 worldRelativeMatrices[cascade].set(planned.shadowFromWorldRelative());
@@ -249,7 +263,9 @@ public final class SunShadowFrame {
             final SunShadowLayout.Budget budget,
             final Matrix4f projection,
             final Matrix4f viewToWorld,
-            final Vector3f toLightWorld
+            final Vector3f toLightWorld,
+            final SunShadowStabilizer stabilizer,
+            final int cascade
     ) {
         float tangentX = Math.abs(1.0f / projection.m00());
         float tangentY = Math.abs(1.0f / projection.m11());
@@ -287,16 +303,19 @@ public final class SunShadowFrame {
         ) * CASCADE_PADDING;
         halfExtent = Math.max(halfExtent, 1.0f);
         float worldUnitsPerTexel = (2.0f * halfExtent) / budget.resolution();
+        SunShadowStabilizer.LightSpaceCenter center = stabilizer == null
+                ? SunShadowStabilizer.LightSpaceCenter.ZERO
+                : stabilizer.center(cascade, worldUnitsPerTexel, lightView);
 
         float casterMargin = casterExtrusion(budget);
         float nearDistance = 1.0f;
         float farDistance = (maximumZ - minimumZ) + casterMargin + nearDistance;
         lightView.m32(-maximumZ - casterMargin - nearDistance);
         Matrix4f reversedOrtho = new Matrix4f().setOrtho(
-                -halfExtent,
-                halfExtent,
-                -halfExtent,
-                halfExtent,
+                center.x() - halfExtent,
+                center.x() + halfExtent,
+                center.y() - halfExtent,
+                center.y() + halfExtent,
                 farDistance,
                 nearDistance,
                 true
