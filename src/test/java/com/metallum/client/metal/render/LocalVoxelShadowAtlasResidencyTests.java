@@ -14,10 +14,11 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         testStableResidencyAndLease();
         testReplacementDefersOldPageRetirement();
         testSameEdgeReplacementNeverOverwritesInFlightPage();
+        testAbandonedReplacementKeepsOldPageActive();
         testFullAtlasRejectsSameEdgeOverwrite();
         testAbsentPageRetiresBehindSubmitFence();
         testFragmentedAtlasRejectsStagingAdmission();
-        testDdaFallbackNeverBecomesUnshadowed();
+        testApproximateDirectOverflow();
         testExpiredLeaseAndExactRangeReuse();
         System.out.println("Resident local-shadow atlas contracts passed");
     }
@@ -71,33 +72,39 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         );
         LocalVoxelShadowAtlasResidency.Page old = residency.acquire(1L, 8, 1L, 8L, 1L).page();
         residency.acquire(2L, 8, 1L, 8L, 1L);
-        LocalVoxelShadowAtlasResidency.Decision replacement = residency.acquire(
+        LocalVoxelShadowAtlasResidency.ReplacementReservation replacement =
+                residency.reserveReplacement(
                 1L, 64, 2L, 8L, 9L
         );
-        require(replacement.path() == LocalVoxelShadowAtlasResidency.VisibilityPath.CACHED
-                        && replacement.replacementAllocated()
+        require(replacement != null
                         && replacement.page().allocationId() != old.allocationId()
-                        && residency.activePage(1L).allocationId() == replacement.page().allocationId()
-                        && residency.retiredPageCount() == 1
+                        && residency.activePage(1L).allocationId() == old.allocationId()
+                        && residency.retiredPageCount() == 0
                         && residency.usedBytes() == page8 * 2L + page64,
                 "replacement did not allocate before retiring the active page");
+        LocalVoxelShadowAtlasResidency.Page committed =
+                residency.commitReplacement(replacement);
+        require(residency.activePage(1L).allocationId() == committed.allocationId()
+                        && residency.retiredPageCount() == 1,
+                "size-changing replacement did not commit atomically");
         require(residency.releaseCompleted(8L) == 0 && residency.usedBytes() == page8 * 2L + page64,
                 "resident page became reusable before its submit fence");
         require(residency.releaseCompleted(9L) == 1 && residency.usedBytes() == page8 + page64,
                 "retired resident page was not released exactly at its submit fence");
     }
 
-    private static void testDdaFallbackNeverBecomesUnshadowed() {
+    private static void testApproximateDirectOverflow() {
         long page8 = LocalVoxelShadowAtlasLayout.pageAllocationBytes(8);
         LocalVoxelShadowAtlasResidency residency = new LocalVoxelShadowAtlasResidency(page8, 1);
         require(residency.acquire(11L, 8, 1L, 1L, 1L).path()
                         == LocalVoxelShadowAtlasResidency.VisibilityPath.CACHED,
                 "single-page resident atlas could not allocate its first page");
         LocalVoxelShadowAtlasResidency.Decision overflow = residency.acquire(12L, 8, 1L, 1L, 1L);
-        require(overflow.path() == LocalVoxelShadowAtlasResidency.VisibilityPath.DDA_FALLBACK
+        require(overflow.path()
+                        == LocalVoxelShadowAtlasResidency.VisibilityPath.APPROXIMATE_DIRECT
                         && overflow.page() == null,
-                "full resident atlas did not choose exact DDA fallback");
-        require(LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_DDA_FALLBACK == 0
+                "full resident atlas did not choose approximate direct visibility");
+        require(LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT == 0
                         && LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY == 1
                         && LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED == 4,
                 "atlas descriptor states no longer express explicit shadow fallback");
@@ -109,19 +116,45 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         LocalVoxelShadowAtlasResidency.Page old = residency.acquire(
                 21L, 8, 3L, 8L, 3L
         ).page();
-        LocalVoxelShadowAtlasResidency.Decision replacement = residency.acquireReplacement(
+        LocalVoxelShadowAtlasResidency.ReplacementReservation replacement =
+                residency.reserveReplacement(
                 21L, 8, 4L, 8L, 7L
         );
-        require(replacement.replacementAllocated()
+        require(replacement != null
                         && replacement.page().allocationId() != old.allocationId()
                         && replacement.page().offsetBytes() != old.offsetBytes()
-                        && residency.retiredPageCount() == 1
+                        && residency.activePage(21L).allocationId() == old.allocationId()
+                        && residency.retiredPageCount() == 0
                         && residency.usedBytes() == page8 * 2L,
-                "same-edge rebuild overwrote an in-flight atlas page");
+                "uncommitted same-edge rebuild replaced the active atlas page");
+        LocalVoxelShadowAtlasResidency.Page committed =
+                residency.commitReplacement(replacement);
+        require(residency.activePage(21L).allocationId() == committed.allocationId()
+                        && residency.retiredPageCount() == 1,
+                "encoded same-edge replacement did not commit atomically");
         require(residency.releaseCompleted(6L) == 0
                         && residency.releaseCompleted(7L) == 1
                         && residency.usedBytes() == page8,
                 "same-edge retired page ignored its reuse fence");
+    }
+
+    private static void testAbandonedReplacementKeepsOldPageActive() {
+        long page8 = LocalVoxelShadowAtlasLayout.pageAllocationBytes(8);
+        LocalVoxelShadowAtlasResidency residency = new LocalVoxelShadowAtlasResidency(page8 * 2L);
+        LocalVoxelShadowAtlasResidency.Page old = residency.acquire(
+                23L, 8, 3L, 8L, 3L
+        ).page();
+        LocalVoxelShadowAtlasResidency.ReplacementReservation replacement =
+                residency.reserveReplacement(23L, 8, 4L, 8L, 7L);
+        require(replacement != null, "same-edge replacement could not reserve failure test page");
+        residency.abandonReplacement(replacement);
+        require(residency.activePage(23L).allocationId() == old.allocationId()
+                        && residency.retiredPageCount() == 1
+                        && residency.usedBytes() == page8 * 2L
+                        && residency.releaseCompleted(6L) == 0
+                        && residency.releaseCompleted(7L) == 1
+                        && residency.usedBytes() == page8,
+                "failed replacement discarded the old page or reused its range early");
     }
 
     private static void testFullAtlasRejectsSameEdgeOverwrite() {
@@ -130,12 +163,13 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         LocalVoxelShadowAtlasResidency.Page old = residency.acquire(
                 22L, 8, 1L, 8L, 1L
         ).page();
-        LocalVoxelShadowAtlasResidency.Decision blocked = residency.acquireReplacement(
+        LocalVoxelShadowAtlasResidency.ReplacementReservation blocked =
+                residency.reserveReplacement(
                 22L, 8, 2L, 8L, 5L
         );
-        require(!blocked.replacementAllocated()
-                        && blocked.page().allocationId() == old.allocationId()
-                        && blocked.page().offsetBytes() == old.offsetBytes()
+        require(blocked == null
+                        && residency.activePage(22L).allocationId() == old.allocationId()
+                        && residency.activePage(22L).offsetBytes() == old.offsetBytes()
                         && residency.retiredPageCount() == 0,
                 "full atlas exposed an unsafe same-edge replacement destination");
     }
@@ -190,7 +224,7 @@ public final class LocalVoxelShadowAtlasResidencyTests {
                         && residency.retiredPageCount() == 1,
                 "lease hysteresis did not defer retirement through its final submit");
         require(residency.acquire(32L, 8, 5L, 2L, 5L).path()
-                        == LocalVoxelShadowAtlasResidency.VisibilityPath.DDA_FALLBACK,
+                        == LocalVoxelShadowAtlasResidency.VisibilityPath.APPROXIMATE_DIRECT,
                 "deferred page became reusable before GPU completion");
         require(residency.releaseCompleted(7L) == 1,
                 "completed deferred page did not return to atlas free list");

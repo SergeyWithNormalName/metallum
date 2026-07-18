@@ -188,7 +188,7 @@ tasks.register("voxelOccupancyUnitTest", JavaExec) {
 
 tasks.register("localVoxelShadowUnitTest", JavaExec) {
 	group = "verification"
-	description = "Validates L6 bounded DDA, transmittance, proxy and fragment-binding contracts"
+	description = "Validates L6 cached visibility, approximate direct, transmittance and binding contracts"
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.lighting.VoxelShadowContractTests")
@@ -196,7 +196,7 @@ tasks.register("localVoxelShadowUnitTest", JavaExec) {
 
 tasks.register("localShadowAtlasUnitTest", JavaExec) {
 	group = "verification"
-	description = "Validates stable resident L6 atlas allocation, leases and fail-closed overflow"
+	description = "Validates resident L6 atlas leases, two-phase replacement and approximate overflow"
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.metal.render.LocalVoxelShadowAtlasResidencyTests")

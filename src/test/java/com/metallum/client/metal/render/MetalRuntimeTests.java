@@ -122,12 +122,22 @@ public final class MetalRuntimeTests {
                 ByteBuffer.allocateDirect(4).asReadOnlyBuffer(), new byte[4]
         ));
 
-        int lightCount = 96;
-        int descriptorCapacity = 128;
+        int lightCount = 594;
+        int descriptorCapacity = 640;
         ByteBuffer descriptors = ByteBuffer.allocate(
                 descriptorCapacity * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES
         ).order(ByteOrder.nativeOrder());
-        int ddaCap = LocalVoxelShadowGpuResources.ddaFallbackBudget(LightingPreset.BALANCED);
+        LocalVoxelShadowGpuResources.initializeDescriptorRange(
+                descriptors, lightCount
+        );
+        require(LocalVoxelShadowGpuResources.descriptorCoverage(
+                        descriptors, lightCount
+                ).failClosed() == lightCount
+                        && descriptors.getInt(
+                        lightCount * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES
+                                + LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_OFFSET
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT,
+                "L6 active descriptor range was not initialized fail-closed");
         for (int index = 0; index < lightCount; index++) {
             int state = LocalVoxelShadowGpuResources.uncachedDescriptorState(
                     true, false, false
@@ -139,11 +149,11 @@ public final class MetalRuntimeTests {
         LocalVoxelShadowGpuResources.DescriptorCoverage coverage =
                 LocalVoxelShadowGpuResources.descriptorCoverage(descriptors, lightCount);
         require(coverage.total() == lightCount
-                        && coverage.ddaFallback() == ddaCap
-                        && coverage.building() == lightCount - ddaCap
+                        && coverage.approximateDirect() == lightCount
+                        && coverage.building() == 0
                         && coverage.ready() == 0 && coverage.stale() == 0
                         && coverage.failClosed() == 0,
-                "64+ L6 upload lights lost exact bounded descriptor coverage");
+                "dense L6 upload lights disappeared while resident pages were unavailable");
         for (int offset = lightCount * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES;
              offset < descriptors.capacity(); offset++) {
             require(descriptors.get(offset) == 0,
@@ -152,22 +162,22 @@ public final class MetalRuntimeTests {
 
         require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
                         true, false, false
-                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_BUILDING,
-                "cache-eligible emitter stopped waiting for its page");
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT,
+                "cache-eligible emitter stopped contributing during page bootstrap");
         require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
                         false, false, true
-                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT
                         && LocalVoxelShadowGpuResources.uncachedDescriptorState(
                         true, false, true
-                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED,
-                "irrecoverable page failure did not fail closed");
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT,
+                "page retry state blacked out a valid direct source");
         require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
                         true, true, false
-                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT
                         && LocalVoxelShadowGpuResources.uncachedDescriptorState(
                         false, true, false
-                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED,
-                "atlas-full source escaped fail-closed policy");
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT,
+                "atlas capacity pressure blacked out a valid direct source");
 
         require(LocalVoxelShadowGpuResources.uploadBudget(LightingPreset.PERFORMANCE)
                         .equals(new LocalVoxelShadowGpuResources.UploadBudget(4, 1L << 20))
@@ -180,8 +190,45 @@ public final class MetalRuntimeTests {
                         && LocalVoxelShadowGpuResources.pendingPayloadBudget(
                         LightingPreset.BALANCED) == 16L << 20
                         && LocalVoxelShadowGpuResources.pendingPayloadBudget(
-                        LightingPreset.ULTRA) == 32L << 20,
+                        LightingPreset.ULTRA) == 32L << 20
+                        && LocalVoxelShadowGpuResources.cacheWorkerCount(
+                        LightingPreset.PERFORMANCE) == 2
+                        && LocalVoxelShadowGpuResources.cacheWorkerCount(
+                        LightingPreset.BALANCED) == 2
+                        && LocalVoxelShadowGpuResources.cacheWorkerCount(
+                        LightingPreset.ULTRA) == 3
+                        && LocalVoxelShadowGpuResources.cacheRefreshWorkerCount(
+                        LightingPreset.PERFORMANCE) == 1
+                        && LocalVoxelShadowGpuResources.cacheRefreshWorkerCount(
+                        LightingPreset.BALANCED) == 2
+                        && LocalVoxelShadowGpuResources.backgroundPendingBuildLimit(
+                        LightingPreset.BALANCED) == 4,
                 "L6 pending/upload work lost its per-frame and retained byte caps");
+        require(LocalVoxelShadowGpuResources.nextBuildEdge(0, 64, false, false) == 8
+                        && LocalVoxelShadowGpuResources.nextBuildEdge(
+                        64, 64, false, true) == 8
+                        && LocalVoxelShadowGpuResources.nextBuildEdge(
+                        8, 64, true, false) == 0
+                        && LocalVoxelShadowGpuResources.nextBuildEdge(
+                        8, 64, true, true) == 16
+                        && LocalVoxelShadowGpuResources.nextBuildEdge(
+                        16, 64, true, true) == 32
+                        && LocalVoxelShadowGpuResources.nextBuildEdge(
+                        32, 64, true, true) == 64
+                        && LocalVoxelShadowGpuResources.residentDescriptorState(
+                        false, 64, 64)
+                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED
+                        && LocalVoxelShadowGpuResources.residentDescriptorState(
+                        true, 8, 64)
+                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED
+                        && LocalVoxelShadowGpuResources.residentDescriptorState(
+                        true, 64, 64)
+                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
+                        && LocalVoxelShadowGpuResources.retryDelaySubmits(1) == 1
+                        && LocalVoxelShadowGpuResources.retryDelaySubmits(2) == 2
+                        && LocalVoxelShadowGpuResources.retryDelaySubmits(6) == 32
+                        && LocalVoxelShadowGpuResources.retryDelaySubmits(20) == 32,
+                "L6 coarse-first scheduling or bounded retry policy regressed");
         long oldOffset = 0x00000002_00000100L;
         LocalVoxelShadowGpuResources.packDescriptor(
                 descriptors, 0,
@@ -213,41 +260,63 @@ public final class MetalRuntimeTests {
                         && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 80.0, 16) == 16
                         && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 77.0, 16) == 16,
                 "stable-id source or camera guard band churned a resident page");
+        LocalVoxelShadowGpuResources.CacheLightKey stableKey =
+                LocalVoxelShadowGpuResources.CacheLightKey.of(stable);
+        List<LocalVoxelShadowGpuResources.CacheLevelKey> retryLevels = List.of(
+                new LocalVoxelShadowGpuResources.CacheLevelKey(0, 4, 64, 8)
+        );
+        LocalVoxelShadowGpuResources.BuildRequest failedRequest =
+                new LocalVoxelShadowGpuResources.BuildRequest(
+                        stableKey, 1L, 1L, 7L, 8, 64, 0, false, retryLevels
+                );
+        LocalVoxelShadowGpuResources.BuildRequest unrelatedMirrorRevision =
+                new LocalVoxelShadowGpuResources.BuildRequest(
+                        stableKey, 1L, 1L, 8L, 8, 64, 0, true, retryLevels
+                );
+        LocalVoxelShadowGpuResources.BuildRequest differentWork =
+                new LocalVoxelShadowGpuResources.BuildRequest(
+                        stableKey, 1L, 1L, 8L, 16, 64, 0, true, retryLevels
+                );
+        require(failedRequest.sameSemanticWork(unrelatedMirrorRevision)
+                        && !failedRequest.sameSemanticWork(differentWork),
+                "unrelated mirror revisions bypassed bounded L6 retry backoff");
 
         LocalVoxelShadowGpuResources.PreparedFrame prepared =
                 new LocalVoxelShadowGpuResources.PreparedFrame(
-                        true, 2, 3, 41L,
+                        true, 5, 3, 41L,
                         15, 2, 3, 1, 4, 5,
-                        0, 10, 8, 3, 16384L, 1, 2, 8192L
+                        10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L
                 );
         require(prepared.descriptorLights() == 15
                         && prepared.readyLights() == 2
                         && prepared.staleLights() == 3
-                        && prepared.ddaFallbackLights() == 1
+                        && prepared.approximateDirectLights() == 1
                         && prepared.buildingLights() == 4
                         && prepared.failClosedLights() == 5
-                        && prepared.unshadowedContributingLights() == 0
+                        && prepared.cacheCoveredLights() == 10
+                        && prepared.coverageLimitedLights() == 5
                         && prepared.pendingBuilds() == 8
                         && prepared.pendingUploads() == 3
                         && prepared.pendingPayloadBytes() == 16384L
                         && prepared.capacityBlockedLights() == 1
+                        && prepared.retryBackoffLights() == 2
                         && prepared.cacheUploads() == 2
                         && prepared.cacheUploadBytes() == 8192L,
                 "L6 prepared-frame telemetry lost a descriptor state");
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
-                true, 2, 3, 41L,
+                true, 5, 3, 41L,
                 14, 2, 3, 1, 4, 5,
-                0, 10, 8, 3, 16384L, 1, 2, 8192L
+                10, 4, 10, 8, 3, 16384L, 1, 2, 2, 8192L
         ));
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
                 true, 2, 3, 41L,
                 15, 2, 3, 1, 4, 5,
-                1, 10, 8, 3, 16384L, 1, 2, 8192L
+                10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L
         ));
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
-                true, 2, 3, 41L,
+                true, 5, 3, 41L,
                 15, 2, 3, 1, 4, 5,
-                0, 10, 8, 3, 16384L, 1, 2, -1L
+                10, 5, 10, 8, 3, 16384L, 1, 2, 2, -1L
         ));
     }
 
@@ -398,7 +467,7 @@ public final class MetalRuntimeTests {
         require(localShadowed.passCount() == shadowed.passCount()
                         && localShadowed.encoderCount() == shadowed.encoderCount()
                         && localShadowed.psoCount() == shadowed.psoCount()
-                        && localShadowed.workQueueCount() == 4
+                        && localShadowed.workQueueCount() == 5
                         && localShadowed.uploadBytes() == shadowed.uploadBytes()
                         + com.metallum.client.renderer.LocalVoxelShadowLayout.PARAMS_BYTES
                         + (long) localBudget.maxEntityProxies()

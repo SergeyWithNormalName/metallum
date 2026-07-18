@@ -106,8 +106,8 @@ public final class VoxelShadowContractTests {
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET
                         && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_PAGE_EDGE_OFFSET
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_PAGE_EDGE_OFFSET
-                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_DDA_FALLBACK
-                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_DDA_FALLBACK
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_APPROXIMATE_DIRECT
+                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT
                         && VoxelShadowBindingAbi.SHADOW_REF_STATE_READY
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
                         && VoxelShadowBindingAbi.SHADOW_REF_STATE_STALE_RETAINED
@@ -302,11 +302,13 @@ public final class VoxelShadowContractTests {
 
         VoxelBrickPatch glassPatch = cacheWallPatch(3, VoxelMaterialClass.GLASS);
         mirror.acknowledge(cacheCoverageBatch(3L, glassPatch, 1, 2));
-        VoxelShadowCacheMirror.Snapshot pendingSnapshot = mirror.snapshot(clipmap);
-        require(pendingSnapshot != null && !pendingSnapshot.current()
-                        && pendingSnapshot.revision() == restampedSnapshot.revision()
-                        && pendingSnapshot.bricks().equals(restampedSnapshot.bricks()),
-                "bounded dirty queue discarded the last complete L6 cache");
+        VoxelShadowCacheMirror.Snapshot incrementalSnapshot = mirror.snapshot(clipmap);
+        require(incrementalSnapshot != null && incrementalSnapshot.current()
+                        && incrementalSnapshot.revision() > restampedSnapshot.revision()
+                        && !incrementalSnapshot.bricks().equals(restampedSnapshot.bricks()),
+                "same-topology acknowledged L5 batch did not publish to L6 immediately");
+        require(mirror.snapshot(shiftedClipmap) == null,
+                "L6 exposed incremental cache data across a shifted toroidal window");
         mirror.acknowledge(cacheCoverageBatch(4L, glassPatch, 0, 2));
         VoxelShadowCacheMirror.Snapshot glassSnapshot = mirror.snapshot(clipmap);
         require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
@@ -478,6 +480,18 @@ public final class VoxelShadowContractTests {
         require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
                         before, missingCoverage, List.of(light)),
                 "origin-shift reuse accepted a missing relevant logical brick");
+        VoxelShadowCacheMirror.Snapshot sameMissingCoverage =
+                new VoxelShadowCacheMirror.Snapshot(
+                        afterScroll, missingCoverage.revision() + 1L,
+                        new HashMap<>(missing), true
+                );
+        require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
+                        missingCoverage, sameMissingCoverage, light, 0)
+                        && VoxelShadowCacheBuilder.relevantRetryGeometryEquals(
+                        missingCoverage, sameMissingCoverage, light, 0)
+                        && !VoxelShadowCacheBuilder.relevantRetryGeometryEquals(
+                        missingCoverage, before, light, 0),
+                "unchanged missing L5 data bypassed retry backoff or hid newly loaded data");
 
         VoxelClipmapSnapshot changedTopology = new VoxelClipmapSnapshot(
                 VOXEL_WORLD, 11L,

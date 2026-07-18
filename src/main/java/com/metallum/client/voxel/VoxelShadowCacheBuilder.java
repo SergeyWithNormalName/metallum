@@ -237,7 +237,7 @@ public final class VoxelShadowCacheBuilder {
                 VoxelClipmapSnapshot.Level rightLevel =
                         right.clipmap().levels().get(levelIndex);
                 if (!relevantGeometryEqualsAtLevel(
-                        left, right, light, leftLevel, rightLevel
+                        left, right, light, leftLevel, rightLevel, false
                 )) {
                     return false;
                 }
@@ -276,7 +276,43 @@ public final class VoxelShadowCacheBuilder {
                 right,
                 light,
                 left.clipmap().levels().get(cacheLevelIndex),
-                right.clipmap().levels().get(cacheLevelIndex)
+                right.clipmap().levels().get(cacheLevelIndex),
+                false
+        );
+    }
+
+    /**
+     * Retry identity for an incomplete page. Matching missing bricks mean the failed input is
+     * unchanged; a newly loaded or removed brick still resets backoff immediately.
+     */
+    public static boolean relevantRetryGeometryEquals(
+            final VoxelShadowCacheMirror.Snapshot left,
+            final VoxelShadowCacheMirror.Snapshot right,
+            final AdvancedLight light,
+            final int cacheLevelIndex
+    ) {
+        if (left == null || right == null || light == null
+                || !left.clipmap().world().equals(right.clipmap().world())
+                || left.clipmap().clipmapGeneration()
+                != right.clipmap().clipmapGeneration()
+                || !sameLevelTopology(
+                left.clipmap().levels(), right.clipmap().levels()
+        ) || cacheLevelIndex < 0
+                || cacheLevelIndex >= left.clipmap().levels().size()) {
+            return false;
+        }
+        double radius = light.radius();
+        if (!(radius > 0.0) || !Double.isFinite(radius)
+                || !finite(light.x(), light.y(), light.z())) {
+            return false;
+        }
+        return relevantGeometryEqualsAtLevel(
+                left,
+                right,
+                light,
+                left.clipmap().levels().get(cacheLevelIndex),
+                right.clipmap().levels().get(cacheLevelIndex),
+                true
         );
     }
 
@@ -285,7 +321,8 @@ public final class VoxelShadowCacheBuilder {
             final VoxelShadowCacheMirror.Snapshot right,
             final AdvancedLight light,
             final VoxelClipmapSnapshot.Level leftLevel,
-            final VoxelClipmapSnapshot.Level rightLevel
+            final VoxelClipmapSnapshot.Level rightLevel,
+            final boolean matchingMissingDataIsEqual
     ) {
         if (!containsSphere(leftLevel, light) || !containsSphere(rightLevel, light)) {
             return false;
@@ -324,7 +361,9 @@ public final class VoxelShadowCacheBuilder {
                     VoxelShadowCacheMirror.Brick rightBrick = resolveBrick(
                             right, rightLevel, logicalX, logicalY, logicalZ
                     );
-                    if (!sameGeometry(leftBrick, rightBrick)) {
+                    if (!sameGeometry(leftBrick, rightBrick)
+                            && !(matchingMissingDataIsEqual
+                            && leftBrick == null && rightBrick == null)) {
                         return false;
                     }
                 }

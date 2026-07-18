@@ -15,9 +15,15 @@ public final class VoxelShadowCacheMirror {
     private long clipmapGeneration;
     private long revision;
     private int queueRemaining = Integer.MAX_VALUE;
+    /**
+     * Last clipmap contract for which the native upload queue was fully drained.
+     * Incremental batches may be exposed immediately only while this exact toroidal
+     * topology is still in force: every acknowledged patch already carries its
+     * logical tag, so that publication is atomic at the patch-batch boundary.
+     */
+    private VoxelClipmapSnapshot establishedClipmap;
     private Map<Key, Brick> publishedBricks;
     private Snapshot publishedSnapshot;
-    private Snapshot pendingSnapshot;
 
     private VoxelShadowCacheMirror() {
     }
@@ -32,9 +38,9 @@ public final class VoxelShadowCacheMirror {
         this.clipmapGeneration = 0L;
         this.revision = 0L;
         this.queueRemaining = Integer.MAX_VALUE;
+        this.establishedClipmap = null;
         this.publishedBricks = null;
         this.publishedSnapshot = null;
-        this.pendingSnapshot = null;
     }
 
     public synchronized void acknowledge(final VoxelUploadBatch batch) {
@@ -45,9 +51,9 @@ public final class VoxelShadowCacheMirror {
             this.worldGeneration = batch.world().generation();
             this.clipmapGeneration = batch.clipmapGeneration();
             this.revision = 0L;
+            this.establishedClipmap = null;
             this.publishedBricks = null;
             this.publishedSnapshot = null;
-            this.pendingSnapshot = null;
         }
         for (VoxelBrickPatch patch : batch.patches()) {
             this.bricks.put(
@@ -62,11 +68,8 @@ public final class VoxelShadowCacheMirror {
         }
         this.queueRemaining = batch.queueRemaining();
         this.revision = Math.incrementExact(this.revision);
-        if (this.queueRemaining == 0) {
-            this.publishedBricks = null;
-            this.publishedSnapshot = null;
-            this.pendingSnapshot = null;
-        }
+        this.publishedBricks = null;
+        this.publishedSnapshot = null;
     }
 
     public synchronized Snapshot snapshot(final VoxelClipmapSnapshot clipmap) {
@@ -76,19 +79,19 @@ public final class VoxelShadowCacheMirror {
             return null;
         }
         if (this.queueRemaining != 0) {
-            if (this.publishedSnapshot == null
-                    || !this.publishedSnapshot.clipmap().equals(clipmap)) {
+            if (this.establishedClipmap == null
+                    || !this.establishedClipmap.equals(clipmap)) {
                 return null;
             }
-            if (this.pendingSnapshot == null) {
-                this.pendingSnapshot = new Snapshot(
-                        this.publishedSnapshot.clipmap(),
-                        this.publishedSnapshot.revision(),
-                        this.publishedSnapshot.bricks(),
-                        false
+            if (this.publishedSnapshot == null) {
+                if (this.publishedBricks == null) {
+                    this.publishedBricks = Map.copyOf(this.bricks);
+                }
+                this.publishedSnapshot = new Snapshot(
+                        this.establishedClipmap, this.revision, this.publishedBricks, true
                 );
             }
-            return this.pendingSnapshot;
+            return this.publishedSnapshot;
         }
         if (this.publishedSnapshot != null) {
             return this.publishedSnapshot.clipmap().equals(clipmap)
@@ -100,6 +103,7 @@ public final class VoxelShadowCacheMirror {
         this.publishedSnapshot = new Snapshot(
                 clipmap, this.revision, this.publishedBricks, true
         );
+        this.establishedClipmap = clipmap;
         return this.publishedSnapshot;
     }
 

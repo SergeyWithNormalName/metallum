@@ -4,7 +4,12 @@ import java.util.Objects;
 
 /** Fixed L6 local-shadow work and upload limits; no preset may exceed the compile-time caps. */
 public final class LocalVoxelShadowLayout {
-    public static final int ABI_VERSION = 2;
+    /**
+     * Version 3 makes descriptor state zero an explicit approximate-direct path rather than
+     * the retired DDA fallback. This prevents a missing resident page from blacking out a
+     * valid local light while its cache page is prepared.
+     */
+    public static final int ABI_VERSION = 3;
     /** Compatibility bound for the legacy contiguous builder; production uses atlas descriptors. */
     public static final int MAX_SHADOWED_LOCAL_LIGHTS = 2;
     public static final int MAX_SHADOW_DESCRIPTORS =

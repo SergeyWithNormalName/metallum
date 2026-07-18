@@ -37,8 +37,14 @@ public final class VoxelShadowBindingAbi {
             LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET;
     public static final int SHADOW_REF_DESCRIPTOR_PAGE_EDGE_OFFSET =
             LocalVoxelShadowAtlasLayout.DESCRIPTOR_PAGE_EDGE_OFFSET;
-    public static final int SHADOW_REF_STATE_DDA_FALLBACK =
-            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_DDA_FALLBACK;
+    /** Valid direct contribution that intentionally has no resident shadow page. */
+    public static final int SHADOW_REF_STATE_APPROXIMATE_DIRECT =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_APPROXIMATE_DIRECT;
+    /**
+     * @deprecated State zero never invokes DDA. Use {@link #SHADOW_REF_STATE_APPROXIMATE_DIRECT}.
+     */
+    @Deprecated(forRemoval = false)
+    public static final int SHADOW_REF_STATE_DDA_FALLBACK = SHADOW_REF_STATE_APPROXIMATE_DIRECT;
     public static final int SHADOW_REF_STATE_READY =
             LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY;
     public static final int SHADOW_REF_STATE_STALE_RETAINED =

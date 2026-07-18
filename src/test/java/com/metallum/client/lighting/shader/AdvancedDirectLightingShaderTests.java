@@ -71,11 +71,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "ceef1bda32193499243cbf774c006507dcb84cb38ae6359a7255d74a8221ccd3",
+            "sodium-solid-fsh", "6170be552efb8787c110d04266a596e7095425806da4990ae74e6f1ba6c4a862",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "28dc05a87ecf1f15bd2285fa573dfd08c136839a912d93801c17d4f801d7e019",
+            "sodium-cutout-fsh", "e786241dae6d39130156a63d75c3762b2455793d35c39f3ee5eaa3b156ce8d94",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "e7edc006fd8c7a4e807a6014352f6d1e923429aff068889275c5c1cde2a26001"
+            "minecraft-entity-fsh", "6aaa443a054b5731e42e80ecbb75e9a864e122797aeab167afba8e56ef9cc7e5"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -129,7 +129,7 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{13, 14, 15})
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
-        require(VoxelShadowBindingAbi.VERSION == 2
+        require(VoxelShadowBindingAbi.VERSION == 3
                         && VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT == 14
                         && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
                         && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
@@ -148,7 +148,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET == 4
                         && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET == 8
                         && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_PAGE_EDGE_OFFSET == 12
-                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_DDA_FALLBACK == 0
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_APPROXIMATE_DIRECT == 0
                         && VoxelShadowBindingAbi.SHADOW_REF_STATE_READY == 1
                         && VoxelShadowBindingAbi.SHADOW_REF_STATE_STALE_RETAINED == 2
                         && VoxelShadowBindingAbi.SHADOW_REF_STATE_BUILDING == 3
@@ -446,15 +446,16 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("if (visibility <= 0.0)")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
                 "L6 direct lighting is not sampling variable resident-atlas pages safely");
-        require(sodiumFormula.contains("visibility = 0.0;")
+        require(sodiumFormula.contains("if (shadowState == 0u)")
+                        && sodiumFormula.contains("visibility = 1.0;")
                         && sodiumFormula.contains(
                         "if (shadowState == 1u || shadowState == 2u)")
                         && before(sodiumFormula,
-                        "visibility = 0.0;",
+                        "if (shadowState == 0u)",
                         "if (shadowState == 1u || shadowState == 2u)")
                         && countOccurrences(sodiumFragment,
                         "return metallumVoxelDdaVisibilityV1(") == 0,
-                "L6 production descriptors do not keep DDA unreachable and fail closed");
+                "L6 approximate descriptors do not keep DDA unreachable or contribute directly");
         int ddaStart = sodiumFragment.indexOf("float metallumVoxelDdaVisibilityV1(");
         int ddaEnd = sodiumFragment.indexOf("float metallumVoxelCachedVisibilityV1(", ddaStart);
         require(ddaStart >= 0 && ddaEnd > ddaStart,

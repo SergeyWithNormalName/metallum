@@ -26,8 +26,16 @@ public final class LocalVoxelShadowAtlasLayout {
     public static final int DESCRIPTOR_RING_SLOTS = AdvancedLightingLayout.UPLOAD_RING_SLOTS;
     public static final int MAX_LIGHT_DESCRIPTORS = AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
 
-    /** Reserved legacy DDA code; production budget is zero and the shader treats it fail-closed. */
-    public static final int DESCRIPTOR_STATE_DDA_FALLBACK = 0;
+    /**
+     * Valid direct light without a resident page. The fragment shader contributes it with
+     * visibility one and deliberately performs neither atlas sampling nor L5/DDA traversal.
+     */
+    public static final int DESCRIPTOR_STATE_APPROXIMATE_DIRECT = 0;
+    /**
+     * @deprecated State zero is no longer a DDA path. Use {@link #DESCRIPTOR_STATE_APPROXIMATE_DIRECT}.
+     */
+    @Deprecated(forRemoval = false)
+    public static final int DESCRIPTOR_STATE_DDA_FALLBACK = DESCRIPTOR_STATE_APPROXIMATE_DIRECT;
     public static final int DESCRIPTOR_STATE_READY = 1;
     /** A prior valid page is retained while a replacement is built. */
     public static final int DESCRIPTOR_STATE_STALE_RETAINED = 2;

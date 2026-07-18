@@ -12,14 +12,13 @@ import java.util.TreeMap;
 /**
  * Pure Java residency model for a bounded, stable-id-keyed local-shadow atlas.
  *
- * <p>It intentionally exposes only cached visibility or exact-DDA fallback. There is no
- * unshadowed decision: callers that cannot acquire a page must retain exact visibility work
- * until a page becomes available.</p>
+ * <p>It exposes cached visibility or an explicit approximate-direct decision. Page replacement
+ * is two-phase so a failed Metal copy can never discard the last usable resident page.</p>
  */
 final class LocalVoxelShadowAtlasResidency {
     enum VisibilityPath {
         CACHED,
-        DDA_FALLBACK
+        APPROXIMATE_DIRECT
     }
 
     record Page(
@@ -42,19 +41,31 @@ final class LocalVoxelShadowAtlasResidency {
         }
     }
 
-    record Decision(VisibilityPath path, Page page, boolean replacementAllocated) {
+    record Decision(VisibilityPath path, Page page) {
         Decision {
             Objects.requireNonNull(path, "path");
             if ((path == VisibilityPath.CACHED) != (page != null)) {
                 throw new IllegalArgumentException("Resident atlas decision has inconsistent visibility path");
             }
-            if (replacementAllocated && path != VisibilityPath.CACHED) {
-                throw new IllegalArgumentException("Only a cached page may replace an old page");
-            }
         }
 
-        static Decision ddaFallback() {
-            return new Decision(VisibilityPath.DDA_FALLBACK, null, false);
+        static Decision approximateDirect() {
+            return new Decision(VisibilityPath.APPROXIMATE_DIRECT, null);
+        }
+    }
+
+    /** Fresh atlas range that is not visible through {@link #activePage(long)} until commit. */
+    record ReplacementReservation(
+            Page page,
+            long expectedActiveAllocationId,
+            long reusableAfterSubmitIndex
+    ) {
+        ReplacementReservation {
+            Objects.requireNonNull(page, "page");
+            if (expectedActiveAllocationId < 0L
+                    || reusableAfterSubmitIndex < 0L) {
+                throw new IllegalArgumentException("Invalid local-shadow replacement reservation");
+            }
         }
     }
 
@@ -77,6 +88,7 @@ final class LocalVoxelShadowAtlasResidency {
     private final int maximumActivePages;
     private final TreeMap<Long, Page> activeByStableId = new TreeMap<>(UNSIGNED_LONG_ORDER);
     private final TreeMap<Long, Long> freeRanges = new TreeMap<>();
+    private final TreeMap<Long, ReplacementReservation> reservations = new TreeMap<>();
     private final PriorityQueue<RetiredPage> retiredPages = new PriorityQueue<>(RETIRE_ORDER);
     private long nextAllocationId;
     private long usedBytes;
@@ -98,9 +110,8 @@ final class LocalVoxelShadowAtlasResidency {
     }
 
     /**
-     * Returns the current page for a stable source, or exact DDA when no page can fit. A changed
-     * page size first allocates its replacement and retires the old page only after the caller's
-     * submitted-work fence, so a visible source never loses its last valid cache during rebuild.
+     * Acquires a first page or only extends the lease of an existing stable source. Every content
+     * or size replacement must use the two-phase reservation API below.
      */
     Decision acquire(
             final long stableId,
@@ -114,35 +125,81 @@ final class LocalVoxelShadowAtlasResidency {
                 edge,
                 submitIndex,
                 leaseSubmitCount,
-                reusableAfterSubmitIndex,
-                false
+                reusableAfterSubmitIndex
         );
     }
 
     /**
-     * Allocates a fresh destination even when the active page has the same edge. Cached geometry
-     * updates must never overwrite a range that an earlier in-flight frame can still read.
+     * Reserves a fresh destination without changing the active stable-id mapping. The caller must
+     * commit only after the replacement blit has been encoded, or abandon it on failure.
      */
-    Decision acquireReplacement(
+    ReplacementReservation reserveReplacement(
             final long stableId,
             final int edge,
             final long submitIndex,
             final long leaseSubmitCount,
             final long reusableAfterSubmitIndex
     ) {
-        return acquireInternal(
+        requireStableId(stableId);
+        requireSubmitArguments(submitIndex, leaseSubmitCount, reusableAfterSubmitIndex);
+        long payloadBytes = LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge);
+        long allocationBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(edge);
+        Page active = this.activeByStableId.get(stableId);
+        if (active == null && this.activeByStableId.size() >= this.maximumActivePages) {
+            return null;
+        }
+        Long offset = allocateRange(allocationBytes);
+        if (offset == null) {
+            return null;
+        }
+        Page replacement = new Page(
                 stableId,
+                nextAllocationId(),
+                offset,
+                payloadBytes,
+                allocationBytes,
                 edge,
-                submitIndex,
-                leaseSubmitCount,
-                reusableAfterSubmitIndex,
-                true
+                leaseUntil(submitIndex, leaseSubmitCount)
         );
+        ReplacementReservation reservation = new ReplacementReservation(
+                replacement,
+                active == null ? 0L : active.allocationId(),
+                reusableAfterSubmitIndex
+        );
+        this.reservations.put(replacement.allocationId(), reservation);
+        return reservation;
+    }
+
+    /** Atomically publishes a successfully encoded replacement and fence-retires its predecessor. */
+    Page commitReplacement(final ReplacementReservation reservation) {
+        ReplacementReservation owned = ownedReservation(reservation);
+        Page current = this.activeByStableId.get(owned.page().stableId());
+        long currentAllocationId = current == null ? 0L : current.allocationId();
+        if (currentAllocationId != owned.expectedActiveAllocationId()) {
+            throw new IllegalStateException("Active local-shadow page changed during replacement");
+        }
+        this.reservations.remove(owned.page().allocationId());
+        this.activeByStableId.put(owned.page().stableId(), owned.page());
+        if (current != null) {
+            this.retiredPages.add(new RetiredPage(
+                    current, owned.reusableAfterSubmitIndex()
+            ));
+        }
+        return owned.page();
+    }
+
+    /** Keeps the old active page and fence-retires only the unused reserved destination. */
+    void abandonReplacement(final ReplacementReservation reservation) {
+        ReplacementReservation owned = ownedReservation(reservation);
+        this.reservations.remove(owned.page().allocationId());
+        this.retiredPages.add(new RetiredPage(
+                owned.page(), owned.reusableAfterSubmitIndex()
+        ));
     }
 
     /**
      * Non-mutating admission check used before allocating transient staging. Residency is owned
-     * by the render thread, so a following {@link #acquireReplacement} cannot race this result.
+     * by the render thread, so a following {@link #reserveReplacement} cannot race this result.
      */
     boolean canAcquireReplacement(final long stableId, final int edge) {
         requireStableId(stableId);
@@ -159,8 +216,7 @@ final class LocalVoxelShadowAtlasResidency {
             final int edge,
             final long submitIndex,
             final long leaseSubmitCount,
-            final long reusableAfterSubmitIndex,
-            final boolean forceReplacement
+            final long reusableAfterSubmitIndex
     ) {
         requireStableId(stableId);
         requireSubmitArguments(submitIndex, leaseSubmitCount, reusableAfterSubmitIndex);
@@ -168,23 +224,18 @@ final class LocalVoxelShadowAtlasResidency {
         long allocationBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(edge);
         Page active = this.activeByStableId.get(stableId);
         long leaseUntil = leaseUntil(submitIndex, leaseSubmitCount);
-        if (active != null && active.edge() == edge && !forceReplacement) {
+        if (active != null) {
             Page touched = touch(active, leaseUntil);
             this.activeByStableId.put(stableId, touched);
-            return new Decision(VisibilityPath.CACHED, touched, false);
+            return new Decision(VisibilityPath.CACHED, touched);
         }
 
         if (active == null && this.activeByStableId.size() >= this.maximumActivePages) {
-            return Decision.ddaFallback();
+            return Decision.approximateDirect();
         }
         Long offset = allocateRange(allocationBytes);
         if (offset == null) {
-            if (active == null) {
-                return Decision.ddaFallback();
-            }
-            Page touched = touch(active, leaseUntil);
-            this.activeByStableId.put(stableId, touched);
-            return new Decision(VisibilityPath.CACHED, touched, false);
+            return Decision.approximateDirect();
         }
 
         Page replacement = new Page(
@@ -197,10 +248,7 @@ final class LocalVoxelShadowAtlasResidency {
                 leaseUntil
         );
         this.activeByStableId.put(stableId, replacement);
-        if (active != null) {
-            this.retiredPages.add(new RetiredPage(active, reusableAfterSubmitIndex));
-        }
-        return new Decision(VisibilityPath.CACHED, replacement, active != null);
+        return new Decision(VisibilityPath.CACHED, replacement);
     }
 
     /** Stops leasing one source; its page remains allocated until the specified GPU submit ends. */
@@ -332,6 +380,19 @@ final class LocalVoxelShadowAtlasResidency {
             }
         }
         return null;
+    }
+
+    private ReplacementReservation ownedReservation(
+            final ReplacementReservation reservation
+    ) {
+        Objects.requireNonNull(reservation, "reservation");
+        ReplacementReservation owned = this.reservations.get(
+                reservation.page().allocationId()
+        );
+        if (owned == null || !owned.equals(reservation)) {
+            throw new IllegalStateException("Unknown local-shadow replacement reservation");
+        }
+        return owned;
     }
 
     private void freeRange(final long offset, final long length) {

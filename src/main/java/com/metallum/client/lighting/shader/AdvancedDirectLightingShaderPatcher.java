@@ -562,7 +562,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition) {
-                if (metallumVoxelShadow.caps.x != 2u
+                if (metallumVoxelShadow.caps.x != 3u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1080,7 +1080,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 // Every uploaded L3 light must have one matching L6 descriptor. Validate that
                 // contract once per fragment; a mismatch suppresses direct light fail-closed.
-                if (metallumVoxelShadow.caps.x != 2u
+                if (metallumVoxelShadow.caps.x != 3u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1171,16 +1171,20 @@ public final class AdvancedDirectLightingShaderPatcher {
                         uvec4 shadowRef =
                                 metallumVoxelShadowRefBuffer.refs[lightIndex];
                         uint shadowState = shadowRef.x;
-                        // Zero, BUILDING, FAIL_CLOSED and unknown states suppress direct light.
+                        // State zero is an explicit, valid approximation while a resident page
+                        // is unavailable. It never enters the atlas or legacy DDA path.
                         // Only completed or retained cache pages enter the heavier atlas path.
-                        visibility = 0.0;
-                        if (shadowState == 1u || shadowState == 2u) {
+                        if (shadowState == 0u) {
+                            visibility = 1.0;
+                        } else if (shadowState == 1u || shadowState == 2u) {
                             visibility = metallumVoxelVisibilityV1(
                                     receiverCameraRelative,
                                     receiverWorldRelative,
                                     receiverWorldNormal,
                                     light.positionRadius.xyz,
                                     shadowRef);
+                        } else {
+                            visibility = 0.0;
                         }
                     }
                     direct += albedo
@@ -1764,7 +1768,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 || EnvironmentShadowBindingAbi.VERSION != SunShadowLayout.ABI_VERSION) {
             throw new ExceptionInInitializerError("Environment/shadow shader ABI does not match its layout");
         }
-        if (VoxelShadowBindingAbi.VERSION != 2
+        if (VoxelShadowBindingAbi.VERSION != 3
                 || VoxelShadowBindingAbi.PARAMS_BYTES != 256
                 || VoxelShadowBindingAbi.PROXY_STRIDE_BYTES != 32
                 || VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT != 14
