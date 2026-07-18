@@ -28,21 +28,20 @@ public record EntityShadowProxy(
         if (entity == null) {
             throw new NullPointerException("entity");
         }
-        AABB bounds = entity.getBoundingBox();
         UUID id = entity.getUUID();
         long stable = id.getMostSignificantBits() ^ Long.rotateLeft(id.getLeastSignificantBits(), 17);
         if (stable == 0L) {
             stable = 1L;
         }
-        return new EntityShadowProxy(
-                stable,
-                (bounds.minX + bounds.maxX) * 0.5,
-                (bounds.minY + bounds.maxY) * 0.5,
-                (bounds.minZ + bounds.maxZ) * 0.5,
-                positiveExtent(bounds.maxX - bounds.minX),
-                positiveExtent(bounds.maxY - bounds.minY),
-                positiveExtent(bounds.maxZ - bounds.minZ)
-        );
+        return fromBounds(entity, stable);
+    }
+
+    /** Uses the exact L3 entity-light identity when an active world token is available. */
+    public static EntityShadowProxy fromEntity(final Entity entity, final LightWorldToken world) {
+        if (world == null) {
+            throw new NullPointerException("world");
+        }
+        return fromBounds(entity, StableLightIds.entity(world.dimensionId(), entity.getUUID()));
     }
 
     public double volume() {
@@ -90,6 +89,19 @@ public record EntityShadowProxy(
             throw new IllegalArgumentException("Entity bounds are non-finite");
         }
         return Math.max(0.03125f, (float) (extent * 0.5));
+    }
+
+    private static EntityShadowProxy fromBounds(final Entity entity, final long stableId) {
+        AABB bounds = entity.getBoundingBox();
+        return new EntityShadowProxy(
+                stableId,
+                (bounds.minX + bounds.maxX) * 0.5,
+                (bounds.minY + bounds.maxY) * 0.5,
+                (bounds.minZ + bounds.maxZ) * 0.5,
+                positiveExtent(bounds.maxX - bounds.minX),
+                positiveExtent(bounds.maxY - bounds.minY),
+                positiveExtent(bounds.maxZ - bounds.minZ)
+        );
     }
 
     private static boolean finitePositive(final float value) {

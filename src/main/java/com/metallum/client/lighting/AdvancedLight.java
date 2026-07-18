@@ -17,7 +17,8 @@ public record AdvancedLight(
         float intensity,
         int priority,
         boolean denseCellEligible,
-        ShadowEmitterFootprint shadowEmitterFootprint
+        ShadowEmitterFootprint shadowEmitterFootprint,
+        LocalShadowSourceClass shadowSourceClass
 ) {
     public AdvancedLight(
             final long stableId,
@@ -34,7 +35,7 @@ public record AdvancedLight(
             final int priority
     ) {
         this(stableId, generation, kind, x, y, z, radius, red, green, blue,
-                intensity, priority, false, ShadowEmitterFootprint.empty());
+                intensity, priority, false, ShadowEmitterFootprint.empty(), defaultShadowSourceClass(kind));
     }
 
     public AdvancedLight(
@@ -53,7 +54,29 @@ public record AdvancedLight(
             final boolean denseCellEligible
     ) {
         this(stableId, generation, kind, x, y, z, radius, red, green, blue,
-                intensity, priority, denseCellEligible, ShadowEmitterFootprint.empty());
+                intensity, priority, denseCellEligible, ShadowEmitterFootprint.empty(),
+                defaultShadowSourceClass(kind));
+    }
+
+    public AdvancedLight(
+            final long stableId,
+            final long generation,
+            final LightSourceKind kind,
+            final double x,
+            final double y,
+            final double z,
+            final float radius,
+            final float red,
+            final float green,
+            final float blue,
+            final float intensity,
+            final int priority,
+            final boolean denseCellEligible,
+            final ShadowEmitterFootprint shadowEmitterFootprint
+    ) {
+        this(stableId, generation, kind, x, y, z, radius, red, green, blue,
+                intensity, priority, denseCellEligible, shadowEmitterFootprint,
+                defaultShadowSourceClass(kind));
     }
 
     /** Camera-independent section order and final stable-id tie-break. */
@@ -85,6 +108,9 @@ public record AdvancedLight(
     public AdvancedLight {
         if (shadowEmitterFootprint == null) {
             throw new NullPointerException("shadowEmitterFootprint");
+        }
+        if (shadowSourceClass == null) {
+            throw new NullPointerException("shadowSourceClass");
         }
         if (stableId == 0L) {
             throw new IllegalArgumentException("stableId zero is reserved");
@@ -122,8 +148,18 @@ public record AdvancedLight(
                 this.intensity,
                 this.priority,
                 this.denseCellEligible,
-                this.shadowEmitterFootprint
+                this.shadowEmitterFootprint,
+                this.shadowSourceClass
         );
+    }
+
+    private static LocalShadowSourceClass defaultShadowSourceClass(final LightSourceKind kind) {
+        if (kind == null) {
+            throw new NullPointerException("kind");
+        }
+        return kind == LightSourceKind.BLOCK
+                ? LocalShadowSourceClass.STATIC_CACHE
+                : LocalShadowSourceClass.ENTITY_DYNAMIC;
     }
 
     private static int floorToInt(final double value) {

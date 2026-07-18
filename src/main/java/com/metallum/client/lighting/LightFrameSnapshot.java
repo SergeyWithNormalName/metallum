@@ -29,8 +29,15 @@ public record LightFrameSnapshot(
             throw new IllegalArgumentException("Snapshot source counters do not match its list");
         }
         for (int index = 1; index < lights.size(); index++) {
-            if (lights.get(index - 1).priority() < lights.get(index).priority()) {
-                throw new IllegalArgumentException("Snapshot priorities are not upload ordered");
+            AdvancedLight previous = lights.get(index - 1);
+            AdvancedLight current = lights.get(index);
+            boolean previousHeld = previous.shadowSourceClass()
+                    == LocalShadowSourceClass.CAMERA_HELD;
+            boolean currentHeld = current.shadowSourceClass()
+                    == LocalShadowSourceClass.CAMERA_HELD;
+            if ((!previousHeld && currentHeld)
+                    || (previousHeld == currentHeld && previous.priority() < current.priority())) {
+                throw new IllegalArgumentException("Snapshot lights are not upload ordered");
             }
         }
     }

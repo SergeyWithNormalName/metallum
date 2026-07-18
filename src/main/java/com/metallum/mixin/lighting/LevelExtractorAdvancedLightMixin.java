@@ -7,6 +7,7 @@ import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.BoundedDynamicLightCollector;
 import com.metallum.client.lighting.BoundedEntityShadowProxyCollector;
+import com.metallum.client.lighting.CameraHeldLightTracker;
 import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxy;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
@@ -15,7 +16,9 @@ import com.metallum.client.lighting.MinecraftLightPolicy;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.voxel.VoxelClipmapController;
 import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.extract.LevelExtractor;
@@ -23,6 +26,7 @@ import net.minecraft.client.renderer.state.level.LevelRenderState;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -50,6 +54,12 @@ abstract class LevelExtractorAdvancedLightMixin {
     @Nullable
     private BoundedEntityShadowProxyCollector metallum$entityShadowProxies;
 
+    @Unique
+    private final CameraHeldLightTracker metallum$cameraHeldLightTracker = new CameraHeldLightTracker();
+
+    @Unique
+    private long metallum$cameraHeldStableId;
+
     @Inject(
             method = "setLevel(Lnet/minecraft/client/multiplayer/ClientLevel;)V",
             at = @At("HEAD")
@@ -66,6 +76,8 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
+        this.metallum$cameraHeldStableId = 0L;
+        this.metallum$cameraHeldLightTracker.reset();
     }
 
     @Inject(
@@ -123,6 +135,7 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
+        this.metallum$cameraHeldStableId = 0L;
         if (this.level == null || !AdvancedLightingRuntime.shouldCollect()) {
             return;
         }
@@ -152,6 +165,7 @@ abstract class LevelExtractorAdvancedLightMixin {
                 camera.position().y,
                 camera.position().z
         );
+        this.metallum$offerCameraHeldLight(camera, deltaTracker, token);
     }
 
     @WrapOperation(
@@ -180,8 +194,15 @@ abstract class LevelExtractorAdvancedLightMixin {
                 float partialTick = deltaTracker.getGameTimeDeltaPartialTick(
                         !currentLevel.tickRateManager().isEntityFrozen(entity)
                 );
-                AdvancedLight light = MinecraftLightPolicy.entity(entity, partialTick, collector.world());
-                collector.offer(light);
+                if (MinecraftLightPolicy.cameraHeldStableIdMatches(
+                        entity, this.metallum$cameraHeldStableId, collector.world()
+                )) {
+                    // The local player's held item was injected before entity culling at the
+                    // camera anchor, so this body-space duplicate must not compete with it.
+                } else {
+                    AdvancedLight light = MinecraftLightPolicy.entity(entity, partialTick, collector.world());
+                    collector.offer(light);
+                }
             } catch (Throwable failure) {
                 this.metallum$dynamicLights = null;
                 this.metallum$dynamicLightDeltaTracker = null;
@@ -194,7 +215,7 @@ abstract class LevelExtractorAdvancedLightMixin {
         BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
         if (proxyCollector != null) {
             try {
-                proxyCollector.offer(EntityShadowProxy.fromEntity(entity));
+                proxyCollector.offer(EntityShadowProxy.fromEntity(entity, proxyCollector.world()));
             } catch (Throwable ignored) {
                 // Proxy extraction is isolated from the dynamic-light admission contract.
                 EntityShadowProxyRegistry.global().failOpen(proxyCollector.world());
@@ -220,6 +241,7 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
+        this.metallum$cameraHeldStableId = 0L;
         if (collector != null) {
             try {
                 AdvancedLightRegistry.global().publishDynamicFrame(
@@ -252,5 +274,77 @@ abstract class LevelExtractorAdvancedLightMixin {
     @Unique
     private static String metallum$dimensionId(final ClientLevel level) {
         return level.dimension().identifier().toString();
+    }
+
+    @Unique
+    private void metallum$offerCameraHeldLight(
+            final Camera camera,
+            final DeltaTracker deltaTracker,
+            final LightWorldToken world
+    ) {
+        BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
+        LocalPlayer player = Minecraft.getInstance().player;
+        if (collector == null || player == null || camera.entity() != player) {
+            return;
+        }
+        try {
+            float partialTick = deltaTracker.getGameTimeDeltaPartialTick(
+                    !this.level.tickRateManager().isEntityFrozen(player)
+            );
+            long stableId = com.metallum.client.lighting.StableLightIds.entity(
+                    world.dimensionId(), player.getUUID()
+            );
+            CameraHeldLightTracker.CameraPose pose = Minecraft.getInstance().options
+                    .getCameraType().isFirstPerson()
+                    ? metallum$firstPersonHeldPose(camera)
+                    : metallum$thirdPersonHeldPose(player, partialTick);
+            CameraHeldLightTracker.CameraHeldLightAnchor anchor = this.metallum$cameraHeldLightTracker
+                    .update(
+                            stableId,
+                            pose,
+                            MinecraftLightPolicy.selectedHandSideOffset(player),
+                            System.nanoTime()
+                    );
+            AdvancedLight light = MinecraftLightPolicy.cameraHeld(player, partialTick, world, anchor);
+            if (light != null) {
+                collector.offer(light);
+                this.metallum$cameraHeldStableId = light.stableId();
+            }
+        } catch (Throwable failure) {
+            this.metallum$dynamicLights = null;
+            this.metallum$dynamicLightDeltaTracker = null;
+            AdvancedLightRegistry.global().failClosed("camera-held light extraction failed", failure);
+        }
+    }
+
+    @Unique
+    private static CameraHeldLightTracker.CameraPose metallum$firstPersonHeldPose(final Camera camera) {
+        Vec3 position = camera.position();
+        return new CameraHeldLightTracker.CameraPose(
+                position.x, position.y, position.z,
+                camera.forwardVector().x(), camera.forwardVector().y(), camera.forwardVector().z(),
+                camera.upVector().x(), camera.upVector().y(), camera.upVector().z(),
+                -camera.leftVector().x(), -camera.leftVector().y(), -camera.leftVector().z()
+        );
+    }
+
+    @Unique
+    private static CameraHeldLightTracker.CameraPose metallum$thirdPersonHeldPose(
+            final LocalPlayer player,
+            final float partialTick
+    ) {
+        double x = player.xOld + (player.getX() - player.xOld) * partialTick;
+        double y = player.yOld + (player.getY() - player.yOld) * partialTick
+                + player.getBbHeight() * 0.55;
+        double z = player.zOld + (player.getZ() - player.zOld) * partialTick;
+        double yawRadians = Math.toRadians(player.getYRot(partialTick));
+        double forwardX = -Math.sin(yawRadians);
+        double forwardZ = Math.cos(yawRadians);
+        return new CameraHeldLightTracker.CameraPose(
+                x, y, z,
+                forwardX, 0.0, forwardZ,
+                0.0, 1.0, 0.0,
+                forwardZ, 0.0, -forwardX
+        );
     }
 }

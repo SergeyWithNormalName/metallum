@@ -54,7 +54,7 @@ public final class FrameLightOrder {
      * Returns true only when a challenger is materially better than a retained light.
      * Small camera motion therefore cannot churn equal emitters around a distance bisector.
      */
-    static boolean materiallyOutranks(
+    public static boolean materiallyOutranks(
             final AdvancedLight challenger,
             final AdvancedLight retained,
             final double cameraX,
@@ -64,6 +64,10 @@ public final class FrameLightOrder {
         requireFinite(cameraX, "cameraX");
         requireFinite(cameraY, "cameraY");
         requireFinite(cameraZ, "cameraZ");
+        int sourceClassOrder = compareShadowSourceClass(challenger, retained);
+        if (sourceClassOrder != 0) {
+            return sourceClassOrder < 0;
+        }
         if (challenger.priority() != retained.priority()) {
             return challenger.priority() > retained.priority();
         }
@@ -111,10 +115,28 @@ public final class FrameLightOrder {
             final AdvancedLight left,
             final AdvancedLight right
     ) {
+        int sourceClassOrder = compareShadowSourceClass(left, right);
+        if (sourceClassOrder != 0) {
+            return sourceClassOrder;
+        }
         int priorityOrder = Integer.compare(right.priority(), left.priority());
         return priorityOrder != 0
                 ? priorityOrder
                 : Double.compare(significance(right), significance(left));
+    }
+
+    private static int compareShadowSourceClass(
+            final AdvancedLight left,
+            final AdvancedLight right
+    ) {
+        return Integer.compare(
+                shadowSourceRank(left.shadowSourceClass()),
+                shadowSourceRank(right.shadowSourceClass())
+        );
+    }
+
+    private static int shadowSourceRank(final LocalShadowSourceClass sourceClass) {
+        return sourceClass == LocalShadowSourceClass.CAMERA_HELD ? 0 : 1;
     }
 
     private static int compareInfluenceDistance(

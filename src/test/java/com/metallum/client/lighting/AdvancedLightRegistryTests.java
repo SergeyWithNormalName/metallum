@@ -54,6 +54,7 @@ public final class AdvancedLightRegistryTests {
         testRetainedAdmissionEpsilonAndInsertionPermutations();
         testRetainedAdmissionResetBoundaries();
         testDynamicCollectorBoundAndOrdering();
+        testCameraHeldShadowSemantics();
         testPinnedDynamicExtractionHookDescriptor();
         testBlockOverridesDoNotStartStaticRegistryWork();
         testDisabledCollectionPathIsZeroWork();
@@ -1352,6 +1353,86 @@ public final class AdvancedLightRegistryTests {
         }
     }
 
+    private static void testCameraHeldShadowSemantics() {
+        CameraHeldLightTracker tracker = new CameraHeldLightTracker();
+        CameraHeldLightTracker.CameraPose firstPose = new CameraHeldLightTracker.CameraPose(
+                10.0, 20.0, 30.0,
+                0.0, 0.0, 1.0,
+                0.0, 1.0, 0.0,
+                1.0, 0.0, 0.0
+        );
+        CameraHeldLightTracker.CameraHeldLightAnchor main = tracker.update(
+                71L, firstPose, CameraHeldLightTracker.HAND_SIDE_OFFSET, 0L
+        );
+        require(close(main.x(), 10.22) && close(main.y(), 19.80) && close(main.z(), 30.35),
+                "first-person held anchor does not use the documented camera basis offsets");
+
+        CameraHeldLightTracker.CameraPose movedPose = new CameraHeldLightTracker.CameraPose(
+                100.0, 200.0, 300.0,
+                0.0, 0.0, 1.0,
+                0.0, 1.0, 0.0,
+                1.0, 0.0, 0.0
+        );
+        CameraHeldLightTracker.CameraHeldLightAnchor midpoint = tracker.update(
+                71L, movedPose, -CameraHeldLightTracker.HAND_SIDE_OFFSET,
+                CameraHeldLightTracker.SIDE_SMOOTHING_NANOS / 2L
+        );
+        require(close(midpoint.x(), 100.0) && close(midpoint.y(), 199.80)
+                        && close(midpoint.z(), 300.35),
+                "camera movement was smoothed instead of only the hand-side transition");
+        CameraHeldLightTracker.CameraHeldLightAnchor off = tracker.update(
+                71L, movedPose, -CameraHeldLightTracker.HAND_SIDE_OFFSET,
+                CameraHeldLightTracker.SIDE_SMOOTHING_NANOS * 2L
+        );
+        require(close(off.x(), 99.78), "off-hand side did not settle after the 100 ms blend");
+
+        AdvancedLight block = exactBlockLight(91L, 0.0, 0.0, -10.0);
+        AdvancedLight dynamic = entityLight(new LightWorldToken(1L, DIMENSION), 92L, 0.0, 1, 1.0F);
+        AdvancedLight held = new AdvancedLight(
+                93L, 1L, LightSourceKind.ENTITY,
+                0.0, 0.0, -10.0,
+                1.0F, 1.0F, 0.5F, 0.25F, 1.0F, Integer.MIN_VALUE,
+                false, ShadowEmitterFootprint.empty(), LocalShadowSourceClass.CAMERA_HELD
+        );
+        require(block.shadowSourceClass() == LocalShadowSourceClass.STATIC_CACHE
+                        && dynamic.shadowSourceClass() == LocalShadowSourceClass.ENTITY_DYNAMIC
+                        && held.shadowSourceClass() == LocalShadowSourceClass.CAMERA_HELD,
+                "light sources did not receive the required static/entity/camera shadow classes");
+        require(FrameLightOrder.materiallyOutranks(held, block, 0.0, 0.0, 0.0)
+                        && !FrameLightOrder.materiallyOutranks(block, held, 0.0, 0.0, 0.0),
+                "camera-held source class is not protected by dynamic admission hysteresis");
+
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        LightWorldToken token = registry.openWorld(world, DIMENSION);
+        int candidateCap = AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
+        for (int index = 0; index < candidateCap; index++) {
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    index / 256L,
+                    index & 255,
+                    1_000_000L + index,
+                    exactTemplate(1, index, 0.0, -10.0, 1.0F, 1.0F)
+            );
+        }
+        AdvancedLight protectedHeld = new AdvancedLight(
+                2_000_000L, token.generation(), LightSourceKind.ENTITY,
+                0.0, 0.0, -10.0,
+                1.0F, 1.0F, 0.5F, 0.25F, 1.0F, Integer.MIN_VALUE,
+                false, ShadowEmitterFootprint.empty(), LocalShadowSourceClass.CAMERA_HELD
+        );
+        registry.publishDynamicFrame(token, List.of(protectedHeld), 1);
+        LightFrameSnapshot snapshot = registry.snapshotForFrame(
+                0.0, 0.0, 0.0, candidateCap
+        );
+        require(snapshot.lights().size() == candidateCap
+                        && snapshot.lights().getFirst().stableId() == protectedHeld.stableId()
+                        && snapshot.dynamicLightCount() == 1
+                        && snapshot.droppedLightCount() == 1,
+                "camera-held light did not survive the full 4096-candidate top-K");
+    }
+
     private static void testBlockOverridesDoNotStartStaticRegistryWork() {
         AdvancedLightRegistry registry = new AdvancedLightRegistry();
         Object world = new Object();
@@ -1701,6 +1782,10 @@ public final class AdvancedLightRegistryTests {
 
     private static boolean close(final float actual, final float expected) {
         return Math.abs(actual - expected) <= 1.0e-6F;
+    }
+
+    private static boolean close(final double actual, final double expected) {
+        return Math.abs(actual - expected) <= 1.0e-9;
     }
 
     private static void require(final boolean condition, final String message) {

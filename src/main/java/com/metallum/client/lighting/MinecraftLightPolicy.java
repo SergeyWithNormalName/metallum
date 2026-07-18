@@ -5,6 +5,7 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
@@ -82,6 +83,71 @@ public final class MinecraftLightPolicy {
                 profile.intensity,
                 profile.priority
         );
+    }
+
+    /**
+     * Returns the local player's held-block light at a camera/hand anchor, or {@code null} when
+     * the ordinary entity source is stronger (for example, a player on fire).
+     */
+    public static AdvancedLight cameraHeld(
+            final LivingEntity player,
+            final float partialTick,
+            final LightWorldToken world,
+            final CameraHeldLightTracker.CameraHeldLightAnchor anchor
+    ) {
+        if (player == null || world == null || anchor == null) {
+            throw new NullPointerException("camera-held light arguments");
+        }
+        HeldLight held = heldLightProfile(player);
+        if (held == null) {
+            return null;
+        }
+        Identifier entityId = BuiltInRegistries.ENTITY_TYPE.getKey(player.getType());
+        String path = entityId == null ? "unknown" : entityId.getPath();
+        if (brighter(entityProfile(path, player.isOnFire()), held.profile) != held.profile) {
+            return null;
+        }
+        return new AdvancedLight(
+                StableLightIds.entity(world.dimensionId(), player.getUUID()),
+                world.generation(),
+                LightSourceKind.ENTITY,
+                anchor.x(),
+                anchor.y(),
+                anchor.z(),
+                held.profile.radius,
+                held.profile.red,
+                held.profile.green,
+                held.profile.blue,
+                held.profile.intensity,
+                held.profile.priority,
+                false,
+                ShadowEmitterFootprint.empty(),
+                LocalShadowSourceClass.CAMERA_HELD
+        );
+    }
+
+    /** Main hand wins exact ties, matching the ordinary carried-light policy. */
+    public static double selectedHandSideOffset(final LivingEntity player) {
+        if (player == null) {
+            throw new NullPointerException("player");
+        }
+        HeldLight held = heldLightProfile(player);
+        if (held == null) {
+            return 0.0;
+        }
+        return held.hand == InteractionHand.MAIN_HAND
+                ? CameraHeldLightTracker.HAND_SIDE_OFFSET
+                : -CameraHeldLightTracker.HAND_SIDE_OFFSET;
+    }
+
+    /** Identifies the local-player body light replaced by the separately extracted camera light. */
+    public static boolean cameraHeldStableIdMatches(
+            final Entity entity,
+            final long cameraHeldStableId,
+            final LightWorldToken world
+    ) {
+        return entity != null && cameraHeldStableId != 0L && world != null
+                && StableLightIds.entity(world.dimensionId(), entity.getUUID()) == cameraHeldStableId;
     }
 
     static int effectiveEmission(final BlockState state) {
@@ -183,13 +249,28 @@ public final class MinecraftLightPolicy {
     private static EntityProfile carriedLightProfile(final Entity entity) {
         EntityProfile profile = null;
         if (entity instanceof LivingEntity living) {
-            profile = brighter(profile, blockItemProfile(living.getMainHandItem()));
-            profile = brighter(profile, blockItemProfile(living.getOffhandItem()));
+            HeldLight held = heldLightProfile(living);
+            profile = held == null ? null : held.profile;
         }
         if (entity instanceof ItemEntity item) {
             profile = brighter(profile, blockItemProfile(item.getItem()));
         }
         return profile;
+    }
+
+    private static HeldLight heldLightProfile(final LivingEntity living) {
+        EntityProfile main = blockItemProfile(living.getMainHandItem());
+        EntityProfile off = blockItemProfile(living.getOffhandItem());
+        if (main == null && off == null) {
+            return null;
+        }
+        if (main == null) {
+            return new HeldLight(InteractionHand.OFF_HAND, off);
+        }
+        if (off == null || brighter(main, off) == main) {
+            return new HeldLight(InteractionHand.MAIN_HAND, main);
+        }
+        return new HeldLight(InteractionHand.OFF_HAND, off);
     }
 
     private static EntityProfile blockItemProfile(final ItemStack stack) {
@@ -237,6 +318,9 @@ public final class MinecraftLightPolicy {
             float intensity,
             int priority
     ) {
+    }
+
+    private record HeldLight(InteractionHand hand, EntityProfile profile) {
     }
 
     private record EmissiveCell(
