@@ -1710,12 +1710,13 @@ Diagnostic overlays:
 
 #### Результат выполнения
 
-- Local visibility использует до `1/2/2` глобально выбранных важных lights для Performance/Balanced/Ultra, выбирает самый детальный помещающийся `4×/2×/1×` clipmap и ограничена `32/64/80` DDA-шагами; transmittance накапливается один раз на world block и не зависит от SDR/HDR output.
+- Local visibility использует update-driven point-shadow cache `64×64×6`, до четырёх слоёв distance/transmittance и `1/2/2` покрытых clipmap статических block lights для Performance/Balanced/Ultra. Один `4×/2×/1×` LOD выбирается на весь куб источника, поэтому внутри тени нет направленных LOD-швов; moving entity emitters остаются без собственного cache.
+- Исправлен обнаруженный на лаве дефект: dense-fluid proxy хранит точный footprint входящих блоков, поэтому лава не затеняет собственный агрегированный свет. Footprint входит в cache key; изменения вне influence spheres не вызывают rebuild, а релевантные block changes обновляют cache асинхронно.
 - Sun shadow разделена на инвалидируемый static cache и рабочую копию с dynamic entity layer каждого кадра. Block/chunk changes, смена мира/измерения, солнца и выход камеры из реального cascade padding обновляют cache; неподвижный мир его переиспользует.
-- Осознанное отличие: entity local shadows используют bounded AABB proxy path (`8/16/24` proxies), без отдельного atlas. MSL восстанавливает DDA no-unroll contract точечным fail-closed patch, потому что SPIRV-Cross теряет исходный loop hint.
-- `clean check` прошёл (`63` задачи), включая actual GLSL→SPIR-V→MSL, CPU/numeric contracts и native Metal Validation. Отдельный 900-кадровый Metal API/GPU Validation route установил и удалил факел, закончил очереди пустыми и без `FAIL`, GPU/command-buffer errors, stale, overflow или dropped timing events.
-- M1 Pro, Balanced HDR Native: detailed 300-frame run — `76.37 FPS`, полный GPU p95 `15.58 ms`, cached sun shadow avg/p95/worst `0.153/0.114/3.565 ms`; accepted release 3000-frame run — `78.87 FPS`, GPU p95 `16.19 ms`, `0` measurement allocations и dropped events.
-- Автоматические reference-mask и shader contracts покрывают fence/slab/transmittance; ручной визуальный signoff мелких контуров и движущихся entity без Computer Use/screenshots не выполнялся и остаётся live-проверкой.
+- Осознанное отличие: entity local shadows используют bounded AABB proxy path (`8/16/24` proxies), без отдельного atlas; static entity geometry получает обычную voxel visibility, а dynamic proxies затеняют выбранные block lights.
+- `clean check` прошёл (`63` задачи), включая actual GLSL→SPIR-V→MSL, CPU/numeric contracts и native Metal Validation. Accepted 900-frame torch-toggle route сделал по одному cache update после установки и удаления факела, закончил очереди пустыми и без `FAIL`, GPU/command-buffer errors, stale, overflow или dropped timing events; отдельный 300-frame GPU Shader Validation runtime также прошёл.
+- M1 Pro, Balanced HDR Native, settled 300-frame A/B: две local shadows — `76.17 FPS`, GPU p95 `17.75 ms`; diagnostic cap `0` — `79.57 FPS`, GPU p95 `16.75 ms`. Цена L6 составила `4.3%` FPS и около `1.00 ms` GPU p95; в статическом measurement cache не перестраивался, было `0` allocations/dropped events и `36882/49152` voxel-hit rays.
+- Автоматические contracts покрывают единый cube LOD, fence/slab/transmittance и self-shadow dense lava. После исходного визуального отчёта лавовый артефакт исправлен без Computer Use/screenshots; финальный ручной live-signoff лавы и мелких контуров остаётся обязательной проверкой после перезапуска клиента.
 
 ### Этап 7. Voxel indirect lighting
 

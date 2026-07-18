@@ -11,6 +11,10 @@ public final class LocalVoxelShadowLayout {
     public static final int PARAMS_BYTES = 256;
     public static final int PARAMS_RING_SLOTS = 3;
     public static final int PROXY_STRIDE_BYTES = 32;
+    public static final int CACHE_FACE_EDGE = 64;
+    public static final int CACHE_FACE_COUNT = 6;
+    public static final int CACHE_LAYER_COUNT = 4;
+    public static final int CACHE_HIT_STRIDE_BYTES = 8;
 
     public record Budget(
             LightingPreset preset,
@@ -19,6 +23,7 @@ public final class LocalVoxelShadowLayout {
             int maxEntityProxies,
             long paramsRingBytes,
             long proxyRingBytes,
+            long visibilityCacheBytes,
             long totalDedicatedBytes
     ) {
         public Budget {
@@ -30,7 +35,9 @@ public final class LocalVoxelShadowLayout {
             }
             if (paramsRingBytes != (long) PARAMS_BYTES * PARAMS_RING_SLOTS
                     || proxyRingBytes != (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
-                    || totalDedicatedBytes != paramsRingBytes + proxyRingBytes) {
+                    || visibilityCacheBytes != cacheBytes(shadowedLocalLights)
+                    || totalDedicatedBytes != paramsRingBytes + proxyRingBytes
+                    + visibilityCacheBytes) {
                 throw new IllegalArgumentException("L6 upload-ring accounting changed");
             }
         }
@@ -61,8 +68,30 @@ public final class LocalVoxelShadowLayout {
                 maxEntityProxies,
                 (long) PARAMS_BYTES * PARAMS_RING_SLOTS,
                 (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS,
+                cacheBytes(shadowedLocalLights),
                 (long) PARAMS_BYTES * PARAMS_RING_SLOTS
                         + (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
+                        + cacheBytes(shadowedLocalLights)
+        );
+    }
+
+    public static long cacheBytes(final int shadowedLocalLights) {
+        if (shadowedLocalLights < 1
+                || shadowedLocalLights > MAX_SHADOWED_LOCAL_LIGHTS) {
+            throw new IllegalArgumentException("L6 cache light count is outside its hard cap");
+        }
+        return Math.multiplyExact(
+                Math.multiplyExact(
+                        Math.multiplyExact(
+                                Math.multiplyExact(
+                                        (long) shadowedLocalLights,
+                                        CACHE_FACE_COUNT
+                                ),
+                                (long) CACHE_FACE_EDGE * CACHE_FACE_EDGE
+                        ),
+                        CACHE_LAYER_COUNT
+                ),
+                CACHE_HIT_STRIDE_BYTES
         );
     }
 }

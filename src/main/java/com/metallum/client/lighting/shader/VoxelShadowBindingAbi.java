@@ -7,6 +7,7 @@ import java.util.Arrays;
 /** Fixed fragment-stage L6 bindings and the 256-byte local-shadow parameter packet. */
 public final class VoxelShadowBindingAbi {
     public static final int VERSION = LocalVoxelShadowLayout.ABI_VERSION;
+    public static final int VISIBILITY_CACHE_BUFFER_SLOT = 14;
     public static final int PROXY_BUFFER_SLOT = 15;
     public static final int PARAMS_BUFFER_SLOT = 16;
     public static final int OCCUPANCY_TEXTURE_0_SLOT = 17;
@@ -90,7 +91,8 @@ public final class VoxelShadowBindingAbi {
     }
 
     public static boolean ownsFragmentSlot(final int slot) {
-        return slot == PROXY_BUFFER_SLOT || slot == PARAMS_BUFFER_SLOT
+        return slot == VISIBILITY_CACHE_BUFFER_SLOT
+                || slot == PROXY_BUFFER_SLOT || slot == PARAMS_BUFFER_SLOT
                 || Arrays.stream(OCCUPANCY_TEXTURE_SLOTS).anyMatch(candidate -> candidate == slot)
                 || Arrays.stream(OPTICAL_TEXTURE_SLOTS).anyMatch(candidate -> candidate == slot)
                 || Arrays.stream(METADATA_BUFFER_SLOTS).anyMatch(candidate -> candidate == slot);

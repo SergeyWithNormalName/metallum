@@ -6,6 +6,7 @@ import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.voxel.VoxelBrickPatch;
 import com.metallum.client.voxel.VoxelClipmapLayout;
 import com.metallum.client.voxel.VoxelClipmapSnapshot;
+import com.metallum.client.voxel.VoxelShadowCacheMirror;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.metallum.client.voxel.VoxelWorldToken;
 
@@ -45,9 +46,16 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
     private static final ValueLayout.OfLong LE_LONG = ValueLayout.JAVA_LONG
             .withOrder(ByteOrder.LITTLE_ENDIAN);
 
-    record FrameUpload(long batchId, MemorySegment packet, int patchCount, long uploadBytes) {
+    record FrameUpload(
+            long batchId,
+            VoxelUploadBatch batch,
+            MemorySegment packet,
+            int patchCount,
+            long uploadBytes
+    ) {
         FrameUpload {
-            if (batchId <= 0L || packet == null || patchCount <= 0
+            if (batchId <= 0L || batch == null || batch.batchId() != batchId
+                    || packet == null || patchCount <= 0
                     || packet.byteSize() != uploadBytes || uploadBytes <= 0L) {
                 throw new IllegalArgumentException("Invalid L5 frame upload declaration");
             }
@@ -67,33 +75,6 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             long ringBusyRejects,
             long resourceBytes
     ) {
-    }
-
-    /** Read-only L6 views of the persistent private clipmap resources. */
-    record ShadowBindings(
-            List<MemorySegment> occupancy,
-            List<MemorySegment> optical,
-            List<MemorySegment> metadata
-    ) {
-        ShadowBindings {
-            occupancy = List.copyOf(occupancy);
-            optical = List.copyOf(optical);
-            metadata = List.copyOf(metadata);
-            if (occupancy.isEmpty() || occupancy.size() != optical.size()
-                    || occupancy.size() != metadata.size()
-                    || occupancy.size() > 3) {
-                throw new IllegalArgumentException("Invalid L6 voxel shadow bindings");
-            }
-            for (int index = 0; index < occupancy.size(); index++) {
-                requireHandle(occupancy.get(index), "L6 occupancy level " + index);
-                requireHandle(optical.get(index), "L6 optical level " + index);
-                requireHandle(metadata.get(index), "L6 metadata level " + index);
-            }
-        }
-
-        int levelCount() {
-            return this.occupancy.size();
-        }
     }
 
     private final long lightingGeneration;
@@ -374,14 +355,20 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             patch.copyPackedPayloadTo(packet, cursor);
             cursor += patch.packedPayloadLength();
         }
-        return new FrameUpload(batch.batchId(), packet, patches.size(), packet.byteSize());
+        return new FrameUpload(
+                batch.batchId(), batch, packet, patches.size(), packet.byteSize()
+        );
     }
 
     int upload(final MTLCommandBuffer commandBuffer, final FrameUpload upload) {
         ensureOpen();
         Objects.requireNonNull(commandBuffer, "commandBuffer");
         Objects.requireNonNull(upload, "upload");
-        return commandBuffer.encodeVoxelOccupancy(this.context, upload.packet());
+        int status = commandBuffer.encodeVoxelOccupancy(this.context, upload.packet());
+        if (status == STATUS_OK) {
+            VoxelShadowCacheMirror.global().acknowledge(upload.batch());
+        }
+        return status;
     }
 
     CompletedStats readLastCompletedStats() {
@@ -443,24 +430,12 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return this.levels;
     }
 
-    ShadowBindings shadowBindings() {
-        ensureOpen();
-        List<MemorySegment> occupancy = new ArrayList<>(this.levels.size());
-        List<MemorySegment> optical = new ArrayList<>(this.levels.size());
-        List<MemorySegment> metadata = new ArrayList<>(this.levels.size());
-        for (int index = 0; index < this.levels.size(); index++) {
-            occupancy.add(buffer(this.context, BUFFER_OCCUPANCY, index));
-            optical.add(buffer(this.context, BUFFER_OPTICAL, index));
-            metadata.add(buffer(this.context, BUFFER_METADATA, index));
-        }
-        return new ShadowBindings(occupancy, optical, metadata);
-    }
-
     @Override
     public void close() {
         if (MetalNativeBridge.isNullHandle(this.context)) {
             return;
         }
+        VoxelShadowCacheMirror.global().reset();
         MetalNativeBridge.metallum_voxel_release_context_v1(this.context);
         this.context = MemorySegment.NULL;
         this.arena.close();

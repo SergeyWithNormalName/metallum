@@ -482,6 +482,9 @@ public final class RendererGenerationPlanner {
             resources.add(resource(
                     "entity_shadow_proxies_ring", domain,
                     localShadowBudget.proxyRingBytes(), false));
+            resources.add(resource(
+                    "local_shadow_visibility_cache", domain,
+                    localShadowBudget.visibilityCacheBytes(), false));
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));

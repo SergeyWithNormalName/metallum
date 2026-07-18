@@ -1057,7 +1057,8 @@ public final class RendererArchitectureTests {
                 "voxel_transmittance_material",
                 "voxel_brick_tags",
                 "local_shadow_params_ring",
-                "entity_shadow_proxies_ring"
+                "entity_shadow_proxies_ring",
+                "local_shadow_visibility_cache"
         );
         Set<String> expectedPasses = Set.of(
                 "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",

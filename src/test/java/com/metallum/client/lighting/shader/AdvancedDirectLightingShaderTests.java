@@ -67,11 +67,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "7ee1de7dad4691c2e5ff9dac01e9a677569586d5ce8b6fe34eb4c5c40afcc591",
+            "sodium-solid-fsh", "26651bdfc1cd7eae5df54c6d049e1bcfc7146b1995f3a142e0cd9ee5c498b35d",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "aa9edfcca2b6bdd18aa6fdfca830b6d056244c631cc1972b67f0c460f465bf60",
+            "sodium-cutout-fsh", "f0c0ce21fc5144babee40f906c0cdcd8d7e1384fe92a27f292d3d8639ea3949e",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "c1a3cf4852df56e95431fa8543a928709a3ee6d7a16c27467b0e9db6527db76c"
+            "minecraft-entity-fsh", "d454f5d2005575c49ab81d345ea343f5719b3bf454ec0939e7a3a2910aeeb6b5"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -126,6 +126,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
         require(VoxelShadowBindingAbi.VERSION == 1
+                        && VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT == 14
                         && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
                         && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
                         && java.util.Arrays.equals(
@@ -260,6 +261,11 @@ public final class AdvancedDirectLightingShaderTests {
         String entityVertex = advancedSource(sources[2]);
         String entityFragment = advancedSource(sources[3]);
 
+        require(countOccurrences(sodiumFragment,
+                        "layout(std430, binding = 14)") == 1
+                        && countOccurrences(entityFragment,
+                        "layout(std430, binding = 14)") == 1,
+                "L6 visibility-cache slot is not unique and fragment-only");
         for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
              slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
              slot++) {
@@ -364,7 +370,7 @@ public final class AdvancedDirectLightingShaderTests {
                 "direct-light formula collapsed colored lights to a scalar");
         require(!sodiumFormula.contains("uint shadowed = 0u;")
                         && sodiumFormula.contains(
-                        "metallumVoxelShadowLightSelectedV1(lightIndex)")
+                        "metallumVoxelShadowLightSlotV1(lightIndex)")
                         && sodiumFragment.contains(
                         "uint selected0 = uint(metallumVoxelShadow.cameraBlockAndFlags.w);")
                         && sodiumFragment.contains(
@@ -381,6 +387,18 @@ public final class AdvancedDirectLightingShaderTests {
                         "distanceSquared >= radius * radius",
                         "metallumVoxelVisibilityV1("),
                 "L6 local visibility is not bounded to two explicit global upload indices");
+        require(sodiumFragment.contains(
+                        "layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1")
+                        && sodiumFragment.contains(
+                        "for (uint layer = 0u; layer < 4u; ++layer)")
+                        && sodiumFragment.contains(
+                        "metallumVoxelVisibilityCache.hits[firstHit + layer]")
+                        && sodiumFragment.contains(
+                        "receiverDistance <= hitDistance + 0.08")
+                        && sodiumFragment.contains("if (visibility <= 0.0)")
+                        && sodiumFormula.contains("uint(shadowSlot)")
+                        && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
+                "L6 direct lighting is not sampling the bounded cached point-shadow layers");
         require(sodiumFragment.contains(
                         "for (uint hardStep = 0u; hardStep < maxSteps; ++hardStep)")
                         && !sodiumFragment.contains("if (hardStep >= maxSteps)")
@@ -530,7 +548,7 @@ public final class AdvancedDirectLightingShaderTests {
                 );
         require(!collision.success() && collision.failureReason().contains("slot 29"),
                 "occupied Advanced buffer slot did not fail closed");
-        for (int slot : new int[]{15, 16, 17, 22, 25}) {
+        for (int slot : new int[]{14, 15, 16, 17, 22, 25}) {
             String l6Collision = materialFragment.replace(
                     "out vec4 fragColor;",
                     "layout(std430, binding = " + slot
@@ -563,7 +581,11 @@ public final class AdvancedDirectLightingShaderTests {
         for (String identifier : new String[]{
                 "metallumDirectNormal",
                 "metallumPreparedAlbedo",
+                "MetallumVoxelVisibilityCacheV1",
+                "metallumVoxelDdaVisibilityV1",
+                "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
+                "metallumVoxelShadowLightSlotV1",
                 "MetallumVoxelProxyV1"
         }) {
             String helperCollision = materialFragment.replace(
@@ -875,6 +897,7 @@ public final class AdvancedDirectLightingShaderTests {
 
             StorageReflection storage = storageBufferLayout(fragmentModule);
             require(storage.bytes().equals(Map.ofEntries(
+                            Map.entry(VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT, 8L),
                             Map.entry(VoxelShadowBindingAbi.PROXY_BUFFER_SLOT, 32L),
                             Map.entry(VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT, 256L),
                             Map.entry(17, 4L), Map.entry(18, 4L), Map.entry(19, 4L),
@@ -912,11 +935,19 @@ public final class AdvancedDirectLightingShaderTests {
             }
             require(fragmentMsl.contains("[[buffer(26)]]"),
                     name + " SPIRV-Cross output lost L4 environment slot");
+            require(countOccurrences(fragmentMsl, "[[buffer(14)]]") == 1,
+                    name + " SPIRV-Cross output lost L6 visibility-cache slot");
             for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
-                 slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+                 slot <= VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT;
                  slot++) {
                 require(countOccurrences(fragmentMsl, "[[buffer(" + slot + ")]]") == 1,
-                        name + " SPIRV-Cross output lost or repeated L6 fragment slot " + slot);
+                        name + " SPIRV-Cross output lost or repeated active L6 fragment slot " + slot);
+            }
+            for (int slot = VoxelShadowBindingAbi.OCCUPANCY_TEXTURE_0_SLOT;
+                 slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+                 slot++) {
+                require(!fragmentMsl.contains("[[buffer(" + slot + ")]]"),
+                        name + " retained dead per-fragment L6 DDA resource slot " + slot);
             }
             for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
                 require(fragmentMsl.contains("[[texture(" + slot + ")]]")

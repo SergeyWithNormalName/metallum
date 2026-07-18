@@ -192,6 +192,16 @@ public final class AdvancedLightRegistryTests {
                 DIMENSION,
                 fourSources
         ).lights().getFirst();
+        require(fourProxy.shadowEmitterFootprint().blocks().equals(List.of(
+                        new ShadowEmitterFootprint.Block(0, 0, 0),
+                        new ShadowEmitterFootprint.Block(1, 0, 0),
+                        new ShadowEmitterFootprint.Block(2, 0, 0),
+                        new ShadowEmitterFootprint.Block(3, 0, 0)
+                ))
+                        && fourProxy.emitsFromBlock(0, 0, 0)
+                        && fourProxy.emitsFromBlock(3, 0, 0)
+                        && !fourProxy.emitsFromBlock(4, 0, 0),
+                "dense proxy did not retain its exact shadow-emitter footprint");
         require(DenseBlockLightCompactor.compact(DIMENSION, threeSources).lights().size() == 3
                         && DenseBlockLightCompactor.compact(DIMENSION, fourSources).lights().size()
                         == 1,
@@ -221,6 +231,9 @@ public final class AdvancedLightRegistryTests {
         require(DenseBlockLightCompactor.compact(DIMENSION, ordinaryBlocks).lights().size()
                         == ordinaryBlocks.size(),
                 "ordinary block emitters were merged as if they were a dense fluid surface");
+        require(ordinaryBlocks.stream().allMatch(light ->
+                        light.shadowEmitterFootprint().isEmpty()),
+                "ordinary block emitters unexpectedly gained an aggregate footprint");
 
         List<AdvancedLight> reversed = new ArrayList<>(plane);
         Collections.reverse(reversed);

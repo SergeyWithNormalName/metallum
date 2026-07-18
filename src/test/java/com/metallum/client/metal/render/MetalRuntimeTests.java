@@ -14,6 +14,7 @@ import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.LightSourceKind;
 import com.metallum.client.lighting.LightWorldToken;
+import com.metallum.client.lighting.ShadowEmitterFootprint;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.LightingPreset;
@@ -22,6 +23,8 @@ import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.voxel.VoxelClipmapSnapshot;
+import com.metallum.client.voxel.VoxelWorldToken;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -99,8 +102,10 @@ public final class MetalRuntimeTests {
                 "L6 MSL traversal lost its no-unroll loop contract");
         expectIllegalState(() -> MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(
                 loop + loop));
-        expectIllegalState(() -> MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(
-                "static float unrelated() { return 1.0; }"));
+        String cachedOnly = "static float cachedVisibility() { return 1.0; }";
+        require(MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(cachedOnly)
+                        .equals(cachedOnly),
+                "cached L6 MSL unexpectedly required a dead DDA traversal loop");
     }
 
     private static void testLocalShadowDiagnosticCap() {
@@ -123,34 +128,66 @@ public final class MetalRuntimeTests {
         LightWorldToken world = new LightWorldToken(1L, "minecraft:overworld");
         List<AdvancedLight> lights = List.of(
                 new AdvancedLight(1L, 1L, LightSourceKind.BLOCK,
-                        40.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
+                        200.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 30),
+                new AdvancedLight(4L, 1L, LightSourceKind.ENTITY,
+                        1.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 20),
                 new AdvancedLight(2L, 1L, LightSourceKind.BLOCK,
-                        2.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
+                        40.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
                 new AdvancedLight(3L, 1L, LightSourceKind.BLOCK,
-                        1.0, 64.0, 0.0, 15.0f, 1.0f, 0.8f, 0.5f, 1.0f, 9)
+                        5.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10)
         );
-        LightFrameSnapshot snapshot = new LightFrameSnapshot(
+        LightFrameSnapshot lightSnapshot = new LightFrameSnapshot(
                 LightFrameSnapshot.CURRENT_VERSION,
                 world,
                 1L,
                 lights,
-                lights.size(),
-                0,
+                3,
+                1,
                 0
+        );
+        VoxelClipmapSnapshot voxelSnapshot = new VoxelClipmapSnapshot(
+                new VoxelWorldToken(1L, "minecraft:overworld"),
+                1L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 1, 256, -4, 0, -4, 8))
         );
         FrameState.CameraPosition camera = new FrameState.CameraPosition(0.0, 64.0, 0.0);
 
-        int[] none = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 0);
-        int[] one = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 1);
-        int[] two = LocalVoxelShadowGpuResources.selectShadowLightIndices(snapshot, camera, 2);
+        int[] none = LocalVoxelShadowGpuResources.selectShadowLightIndices(
+                lightSnapshot, voxelSnapshot, camera, 0);
+        int[] one = LocalVoxelShadowGpuResources.selectShadowLightIndices(
+                lightSnapshot, voxelSnapshot, camera, 1);
+        int[] two = LocalVoxelShadowGpuResources.selectShadowLightIndices(
+                lightSnapshot, voxelSnapshot, camera, 2);
         require(none[0] == -1 && none[1] == -1,
                 "zero L6 cap selected an upload light");
-        require(one[0] == 1 && one[1] == -1,
-                "L6 did not select the nearest equally important upload light");
-        require(two[0] == 1 && two[1] == 0,
-                "L6 selected-light order crossed the higher-priority prefix");
+        require(one[0] == 3 && one[1] == -1,
+                "L6 did not choose the nearest clipmap-covered light");
+        require(two[0] == 3 && two[1] == 2,
+                "L6 did not reject uncovered or moving emitters from the static cache");
+        AdvancedLight footprintA = new AdvancedLight(
+                8L, 1L, LightSourceKind.BLOCK,
+                4.0, 64.0, 0.0, 12.0f,
+                1.0f, 0.8f, 0.5f, 1.0f, 10, true,
+                ShadowEmitterFootprint.of(List.of(
+                        new ShadowEmitterFootprint.Block(3, 64, 0),
+                        new ShadowEmitterFootprint.Block(4, 64, 0)
+                ))
+        );
+        AdvancedLight footprintB = new AdvancedLight(
+                8L, 1L, LightSourceKind.BLOCK,
+                4.0, 64.0, 0.0, 12.0f,
+                1.0f, 0.8f, 0.5f, 1.0f, 10, true,
+                ShadowEmitterFootprint.of(List.of(
+                        new ShadowEmitterFootprint.Block(4, 64, 0),
+                        new ShadowEmitterFootprint.Block(5, 64, 0)
+                ))
+        );
+        require(!LocalVoxelShadowGpuResources.CacheLightKey.of(footprintA).equals(
+                        LocalVoxelShadowGpuResources.CacheLightKey.of(footprintB)),
+                "changed compacted-emitter membership reused a stale L6 visibility cache");
         expectIllegalArgument(() -> LocalVoxelShadowGpuResources.selectShadowLightIndices(
-                snapshot, camera, LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1));
+                lightSnapshot, voxelSnapshot, camera,
+                LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1));
     }
 
     private static void testCanonicalShaderResourceLayout() {

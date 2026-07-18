@@ -173,6 +173,13 @@ public final class DenseBlockLightCompactor {
                 exemplar.intensity(),
                 exemplar.priority()
         );
+        ShadowEmitterFootprint footprint = ShadowEmitterFootprint.of(
+                members.stream().map(member -> new ShadowEmitterFootprint.Block(
+                        floorToInt(member.x()),
+                        floorToInt(member.y()),
+                        floorToInt(member.z())
+                )).toList()
+        );
         return new AdvancedLight(
                 stableId,
                 generation,
@@ -186,7 +193,8 @@ public final class DenseBlockLightCompactor {
                 exemplar.blue(),
                 intensity,
                 exemplar.priority(),
-                true
+                true,
+                footprint
         );
     }
 

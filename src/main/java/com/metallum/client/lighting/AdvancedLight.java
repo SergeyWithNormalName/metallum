@@ -16,7 +16,8 @@ public record AdvancedLight(
         float blue,
         float intensity,
         int priority,
-        boolean denseCellEligible
+        boolean denseCellEligible,
+        ShadowEmitterFootprint shadowEmitterFootprint
 ) {
     public AdvancedLight(
             final long stableId,
@@ -33,7 +34,26 @@ public record AdvancedLight(
             final int priority
     ) {
         this(stableId, generation, kind, x, y, z, radius, red, green, blue,
-                intensity, priority, false);
+                intensity, priority, false, ShadowEmitterFootprint.empty());
+    }
+
+    public AdvancedLight(
+            final long stableId,
+            final long generation,
+            final LightSourceKind kind,
+            final double x,
+            final double y,
+            final double z,
+            final float radius,
+            final float red,
+            final float green,
+            final float blue,
+            final float intensity,
+            final int priority,
+            final boolean denseCellEligible
+    ) {
+        this(stableId, generation, kind, x, y, z, radius, red, green, blue,
+                intensity, priority, denseCellEligible, ShadowEmitterFootprint.empty());
     }
 
     /** Camera-independent section order and final stable-id tie-break. */
@@ -63,6 +83,9 @@ public record AdvancedLight(
     };
 
     public AdvancedLight {
+        if (shadowEmitterFootprint == null) {
+            throw new NullPointerException("shadowEmitterFootprint");
+        }
         if (stableId == 0L) {
             throw new IllegalArgumentException("stableId zero is reserved");
         }
@@ -72,6 +95,16 @@ public record AdvancedLight(
         // Reuse the exact parameter validation used before materialization.
         new LightTemplate(kind, x, y, z, radius, red, green, blue, intensity, priority,
                 denseCellEligible);
+    }
+
+    /** Compacted emitters use their exact member cells; ordinary lights use their source cell. */
+    public boolean emitsFromBlock(final int blockX, final int blockY, final int blockZ) {
+        if (!this.shadowEmitterFootprint.isEmpty()) {
+            return this.shadowEmitterFootprint.contains(blockX, blockY, blockZ);
+        }
+        return blockX == floorToInt(this.x)
+                && blockY == floorToInt(this.y)
+                && blockZ == floorToInt(this.z);
     }
 
     public AdvancedLight withGeneration(final long nextGeneration) {
@@ -88,7 +121,16 @@ public record AdvancedLight(
                 this.blue,
                 this.intensity,
                 this.priority,
-                this.denseCellEligible
+                this.denseCellEligible,
+                this.shadowEmitterFootprint
         );
+    }
+
+    private static int floorToInt(final double value) {
+        double floor = Math.floor(value);
+        if (floor < Integer.MIN_VALUE || floor > Integer.MAX_VALUE) {
+            throw new IllegalStateException("Light position left the integer world range");
+        }
+        return (int) floor;
     }
 }

@@ -362,17 +362,19 @@ final class MetalCrossShaderCompiler {
     }
 
     /**
-     * SPIRV-Cross drops the GLSL/SPIR-V no-unroll hint when emitting MSL. Restore the equivalent
-     * Clang loop pragma on the one bounded L6 traversal. Keep the post-process exact and fail
-     * closed when the generated MSL shape changes rather than silently losing the performance
-     * contract.
+     * SPIRV-Cross drops the GLSL/SPIR-V no-unroll hint when emitting MSL. Preserve the pragma when
+     * the legacy L6 DDA helper survives dead-code elimination; the cached runtime path has no
+     * fragment traversal loop, so a module without that helper is canonical too.
      */
     static String preserveVoxelShadowTraversalLoop(final String source) {
         Objects.requireNonNull(source, "source");
-        if (countOccurrences(source, VOXEL_TRAVERSAL_LOOP_MSL) != 1
-                || source.contains(VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL)) {
+        int loopCount = countOccurrences(source, VOXEL_TRAVERSAL_LOOP_MSL);
+        if (loopCount == 0 && !source.contains(VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL)) {
+            return source;
+        }
+        if (loopCount != 1 || source.contains(VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL)) {
             throw new IllegalStateException(
-                    "Advanced MSL must expose exactly one canonical L6 traversal loop"
+                    "Advanced MSL exposed a non-canonical legacy L6 traversal loop"
             );
         }
         String patched = source.replace(
@@ -537,16 +539,37 @@ final class MetalCrossShaderCompiler {
                 );
             }
         }
+        String visibilityCacheMarker = "[[buffer("
+                + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
+        if (countOccurrences(variant.fragmentMsl(), visibilityCacheMarker) != 1
+                || variant.vertexMsl().contains(visibilityCacheMarker)) {
+            throw new IllegalStateException(
+                    "L6 visibility-cache buffer is missing, repeated, or visible to the vertex stage for "
+                            + pipeline.getLocation()
+            );
+        }
         for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
-             slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+             slot <= VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
                     || variant.vertexMsl().contains(marker)) {
                 throw new IllegalStateException(
-                        "L6 local-shadow fragment buffer slot " + slot
+                        "L6 active local-shadow fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
                                 + pipeline.getLocation()
+                );
+            }
+        }
+        for (int slot = VoxelShadowBindingAbi.OCCUPANCY_TEXTURE_0_SLOT;
+             slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
+             slot++) {
+            String marker = "[[buffer(" + slot + ")]]";
+            if (variant.fragmentMsl().contains(marker)
+                    || variant.vertexMsl().contains(marker)) {
+                throw new IllegalStateException(
+                        "Cached L6 shader retained dead per-fragment DDA slot " + slot
+                                + " for " + pipeline.getLocation()
                 );
             }
         }

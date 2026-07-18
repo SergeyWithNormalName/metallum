@@ -147,6 +147,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uvec4 levelLayout;
             };
 
+            layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1 {
+                uvec2 hits[];
+            } metallumVoxelVisibilityCache;
+
             layout(std430, binding = 15) readonly buffer MetallumVoxelProxiesV1 {
                 MetallumVoxelProxyV1 proxies[];
             } metallumVoxelProxyBuffer;
@@ -546,7 +550,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return requiredSteps <= maxSteps;
             }
 
-            float metallumVoxelVisibilityV1(
+            // Retained as the exact fail-open traversal contract for source validation. The
+            // production light loop uses the update-driven cache below and never calls this.
+            float metallumVoxelDdaVisibilityV1(
                     vec3 receiverViewPosition,
                     vec3 lightViewPosition,
                     vec3 receiverViewNormal) {
@@ -854,16 +860,155 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return 1.0;
             }
 
-            bool metallumVoxelShadowLightSelectedV1(uint lightIndex) {
+            float metallumVoxelCachedVisibilityV1(
+                    uint cacheSlot,
+                    vec3 lightToReceiver,
+                    float receiverDistance) {
+                if (cacheSlot >= metallumVoxelShadow.caps.w
+                        || !metallumFiniteVec3V1(lightToReceiver)
+                        || !(receiverDistance > 0.0001)
+                        || isnan(receiverDistance) || isinf(receiverDistance)) {
+                    return 1.0;
+                }
+                vec3 magnitude = abs(lightToReceiver);
+                float major = max(magnitude.x, max(magnitude.y, magnitude.z));
+                if (!(major > 0.000001) || isnan(major) || isinf(major)) {
+                    return 1.0;
+                }
+
+                uint face;
+                vec2 uv;
+                if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+                    if (lightToReceiver.x >= 0.0) {
+                        face = 0u;
+                        uv = vec2(-lightToReceiver.z, -lightToReceiver.y) / major;
+                    } else {
+                        face = 1u;
+                        uv = vec2(lightToReceiver.z, -lightToReceiver.y) / major;
+                    }
+                } else if (magnitude.y >= magnitude.z) {
+                    if (lightToReceiver.y >= 0.0) {
+                        face = 2u;
+                        uv = vec2(lightToReceiver.x, lightToReceiver.z) / major;
+                    } else {
+                        face = 3u;
+                        uv = vec2(lightToReceiver.x, -lightToReceiver.z) / major;
+                    }
+                } else if (lightToReceiver.z >= 0.0) {
+                    face = 4u;
+                    uv = vec2(lightToReceiver.x, -lightToReceiver.y) / major;
+                } else {
+                    face = 5u;
+                    uv = vec2(-lightToReceiver.x, -lightToReceiver.y) / major;
+                }
+                ivec2 texel = clamp(
+                        ivec2(floor((uv * 0.5 + 0.5) * 64.0)),
+                        ivec2(0),
+                        ivec2(63));
+                uint texelIndex = ((cacheSlot * 6u + face) * 64u
+                        + uint(texel.y)) * 64u + uint(texel.x);
+                uint firstHit = texelIndex * 4u;
+                float visibility = 1.0;
+                for (uint layer = 0u; layer < 4u; ++layer) {
+                    uvec2 packed = metallumVoxelVisibilityCache.hits[firstHit + layer];
+                    float hitDistance = uintBitsToFloat(packed.x);
+                    float hitVisibility = uintBitsToFloat(packed.y);
+                    if (isnan(hitDistance) || hitDistance < 0.0
+                            || isnan(hitVisibility) || isinf(hitVisibility)
+                            || hitVisibility < 0.0 || hitVisibility > 1.0) {
+                        return 1.0;
+                    }
+                    if (isinf(hitDistance)
+                            || receiverDistance <= hitDistance + 0.08) {
+                        return visibility;
+                    }
+                    visibility = hitVisibility;
+                    if (visibility <= 0.0) {
+                        return 0.0;
+                    }
+                }
+                return visibility;
+            }
+
+            float metallumVoxelVisibilityV1(
+                    vec3 receiverViewPosition,
+                    vec3 lightViewPosition,
+                    vec3 receiverViewNormal,
+                    uint cacheSlot) {
+                if (metallumVoxelShadow.caps.x != 1u
+                        || metallumVoxelShadow.worldAndFlags.z != 1u
+                        || metallumVoxelShadow.caps.y == 0u
+                        || metallumVoxelShadow.caps.y > 3u
+                        || metallumVoxelShadow.caps.z == 0u
+                        || metallumVoxelShadow.caps.z > 96u
+                        || metallumVoxelShadow.caps.w == 0u
+                        || metallumVoxelShadow.caps.w > 2u
+                        || any(notEqual(
+                        metallumVoxelShadow.contract.xy,
+                        metallumLighting.frameIdAndGeneration.zw))
+                        || any(notEqual(
+                        metallumVoxelShadow.proxyAndFrame.zw,
+                        metallumLighting.frameIdAndGeneration.xy))) {
+                    return 1.0;
+                }
+                ivec3 cameraBlock = metallumVoxelShadow.cameraBlockAndFlags.xyz;
+                if (any(lessThan(cameraBlock, ivec3(-500000000)))
+                        || any(greaterThan(cameraBlock, ivec3(500000000)))
+                        || !metallumFiniteVec3V1(receiverViewPosition)
+                        || !metallumFiniteVec3V1(lightViewPosition)
+                        || !metallumFiniteVec3V1(receiverViewNormal)
+                        || !metallumFiniteVec3V1(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz)
+                        || any(lessThan(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
+                        || any(greaterThanEqual(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))) {
+                    return 1.0;
+                }
+                vec3 receiverCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * receiverViewPosition;
+                vec3 lightCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * lightViewPosition;
+                vec3 receiverWorldRelative =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + receiverCameraRelative;
+                vec3 lightWorldRelative =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + lightCameraRelative;
+                if (!metallumFiniteVec3V1(receiverCameraRelative)
+                        || !metallumFiniteVec3V1(lightCameraRelative)
+                        || !metallumFiniteVec3V1(receiverWorldRelative)
+                        || !metallumFiniteVec3V1(lightWorldRelative)) {
+                    return 1.0;
+                }
+                bool proxyFailOpen = false;
+                if (!metallumProxyVisibilityV1(
+                        receiverCameraRelative,
+                        lightCameraRelative,
+                        proxyFailOpen)) {
+                    return 0.0;
+                }
+                if (proxyFailOpen) {
+                    return 1.0;
+                }
+                vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;
+                float receiverDistance = length(lightToReceiver);
+                return metallumVoxelCachedVisibilityV1(
+                        cacheSlot, lightToReceiver, receiverDistance);
+            }
+
+            int metallumVoxelShadowLightSlotV1(uint lightIndex) {
                 uint shadowedCap = metallumVoxelShadow.caps.w;
                 if (shadowedCap == 0u || shadowedCap > 2u) {
-                    return false;
+                    return -1;
                 }
                 uint selected0 = uint(metallumVoxelShadow.cameraBlockAndFlags.w);
                 uint selected1 = metallumVoxelShadow.worldAndFlags.w;
-                return (selected0 != uint(-1) && lightIndex == selected0)
-                        || (shadowedCap > 1u
-                        && selected1 != uint(-1) && lightIndex == selected1);
+                if (selected0 != uint(-1) && lightIndex == selected0) {
+                    return 0;
+                }
+                return shadowedCap > 1u
+                        && selected1 != uint(-1) && lightIndex == selected1 ? 1 : -1;
             }
 
             uint metallumClusterIndexV1(vec3 viewPosition) {
@@ -943,10 +1088,12 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
                             * max(light.linearColorIntensity.a, 0.0);
                     float visibility = 1.0;
+                    int shadowSlot = metallumVoxelShadowLightSlotV1(lightIndex);
                     if (nDotL > 0.0 && any(greaterThan(radiance, vec3(0.0)))
-                            && metallumVoxelShadowLightSelectedV1(lightIndex)) {
+                            && shadowSlot >= 0) {
                         visibility = metallumVoxelVisibilityV1(
-                                viewPosition, light.positionRadius.xyz, normal);
+                                viewPosition, light.positionRadius.xyz, normal,
+                                uint(shadowSlot));
                     }
                     direct += albedo
                             * radiance
@@ -1343,6 +1490,16 @@ public final class AdvancedDirectLightingShaderPatcher {
             ) != 1) {
                 return Result.failure(source, "Advanced fragment marker has no environment ABI");
             }
+            if (countOccurrences(
+                    source,
+                    "layout(std430, binding = "
+                            + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT
+            ) != 1) {
+                return Result.failure(
+                        source,
+                        "Advanced fragment marker has no L6 visibility-cache ABI"
+                );
+            }
             for (int slot = VoxelShadowBindingAbi.PROXY_BUFFER_SLOT;
                  slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
                  slot++) {
@@ -1439,6 +1596,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "MetallumGpuLightV1",
                 "MetallumLightingParamsV1",
                 "MetallumEnvironmentShadowV1",
+                "MetallumVoxelVisibilityCacheV1",
                 "MetallumVoxelProxyV1",
                 "MetallumVoxelShadowParamsV1",
                 "metallumLightingPosition",
@@ -1450,7 +1608,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumClusterIndexV1",
                 "metallumEvaluateClusteredDirectV1",
                 "metallumEvaluateEnvironmentV1",
+                "metallumVoxelDdaVisibilityV1",
+                "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
+                "metallumVoxelShadowLightSlotV1",
                 "metallumProxyVisibilityV1",
                 SHADOW_SAMPLER_0,
                 SHADOW_SAMPLER_1,
@@ -1508,6 +1669,7 @@ public final class AdvancedDirectLightingShaderPatcher {
         if (VoxelShadowBindingAbi.VERSION != 1
                 || VoxelShadowBindingAbi.PARAMS_BYTES != 256
                 || VoxelShadowBindingAbi.PROXY_STRIDE_BYTES != 32
+                || VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT != 14
                 || VoxelShadowBindingAbi.PROXY_BUFFER_SLOT != 15
                 || VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT != 16
                 || VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT != 25) {
