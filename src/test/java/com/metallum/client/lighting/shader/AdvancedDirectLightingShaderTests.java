@@ -71,11 +71,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "b3efc3d6c38fd011e194fd9e85c6055408817f3c478c74f44a5771ecc21c31c5",
+            "sodium-solid-fsh", "4ce6e4000a3330881b8ab149248e1f503d05a8f22a703e1a8b44a4fc50f25df5",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "08e26386f545078015df91c059b2240b38c447eb5b65d7cf03498d5b2c693f0d",
+            "sodium-cutout-fsh", "50483b535ca414eae08a02e89046523154a364c989daece7e63751d39c8f2fae",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "5c7f4253ea1f78e8a00171da26e29c7eed0ef6f570fb073406583f9f0a6f6a4b"
+            "minecraft-entity-fsh", "dc7badafee7fdbb95226e1a9136f4b8fce6bc1831f6ddbfabeb0dae0e622f632"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -86,7 +86,7 @@ public final class AdvancedDirectLightingShaderTests {
         testDepthSliceBoundaries();
         testPowerOfTwoAddressingMatchesFloorArithmetic();
         testScaleInvariantSurfaceNormal();
-        testLowResolutionShadowFilterContinuity();
+        testDominantSoftShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
         testFailClosedSourceContracts();
@@ -244,9 +244,9 @@ public final class AdvancedDirectLightingShaderTests {
                 "invalid derivative normals did not fail closed");
     }
 
-    private static void testLowResolutionShadowFilterContinuity() {
+    private static void testDominantSoftShadowFilterContinuityAndBlur() {
         double epsilon = 1.0e-8;
-        for (int edge : new int[]{8, 16}) {
+        for (int edge : new int[]{8, 16, 32, 64}) {
             for (int face = 0; face < 6; face++) {
                 for (int cellY = 1; cellY < edge - 2; cellY++) {
                     for (int cellX = 1; cellX < edge - 2; cellX++) {
@@ -310,6 +310,27 @@ public final class AdvancedDirectLightingShaderTests {
                     }
                 }
             }
+        }
+
+        for (int edge : new int[]{32, 64}) {
+            int leftTexel = edge / 2 - 1;
+            int row = edge / 2;
+            Map<Integer, Double> weights = softShadowWeights(
+                    edge,
+                    cubeDirection(0, texelPositionUv(
+                            edge, leftTexel + 0.5, row)));
+            double softVisibility = 0.0;
+            for (Map.Entry<Integer, Double> entry : weights.entrySet()) {
+                int tapX = entry.getKey() % edge;
+                if (tapX > leftTexel) {
+                    softVisibility += entry.getValue();
+                }
+            }
+            double hardVisibility = 1.0;
+            require(softVisibility > 0.45 && softVisibility < 0.55
+                            && Math.abs(softVisibility - hardVisibility) > 0.45,
+                    "dominant soft-shadow A/B fixture did not visibly blur a hard "
+                            + edge + "-texel step: soft=" + softVisibility);
         }
     }
 
@@ -407,7 +428,9 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFormula.equals(entityFormula),
                 "terrain and entities do not use one shared direct-light formula");
         require(sodiumFormula.contains(
-                        "* (attenuation * nDotL * visibility * 0.31830988618);"),
+                        "* (attenuation * nDotL * 0.31830988618);")
+                        && sodiumFormula.contains(
+                        "direct += unshadowedContribution * visibility;"),
                 "direct-light formula is no longer visibility-weighted Lambertian scene-linear radiance");
         require(sodiumFragment.contains("vec3 metallumSafeNormalV1(vec3 surfaceNormal)")
                         && sodiumFragment.contains("vec3 scaledNormal = surfaceNormal / normalScale;")
@@ -431,7 +454,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && countOccurrences(entityFragment,
                         "vec3 metallumPreparedAlbedo =") == 1,
                 "albedo is not prepared exactly once per fragment");
-        require(sodiumFormula.contains("direct += albedo")
+        require(sodiumFormula.contains("vec3 unshadowedContribution = albedo")
                         && !sodiumFormula.contains("direct += max(linearAlbedo"),
                 "clustered-light loop redundantly clamps prepared albedo");
         require(sodiumFormula.contains(
@@ -473,12 +496,16 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("metallumVoxelShadow.caps.w > 4096u")
                         && countOccurrences(sodiumFormula,
                         "metallumVoxelVisibilityV1(") == 1
+                        && countOccurrences(sodiumFormula,
+                        "metallumVoxelSoftVisibilityV1(") == 1
                         && sodiumFormula.contains("shadowRef);")
                         && !sodiumFormula.contains("shadowSlot")
                         && sodiumFormula.contains(
                         "metallumVoxelShadow.caps.w != activeLightCount")
                         && sodiumFormula.contains(
-                        "attenuation * nDotL * visibility * 0.31830988618")
+                        "attenuation * nDotL * 0.31830988618")
+                        && sodiumFormula.contains(
+                        "direct += unshadowedContribution * visibility;")
                         && before(sodiumFormula,
                         "distanceSquared >= radius * radius",
                         "metallumVoxelVisibilityV1("),
@@ -487,21 +514,25 @@ public final class AdvancedDirectLightingShaderTests {
                         "return uvec3(sourceFace, uvec2(logicalTexel));")
                         && sodiumFragment.contains(
                         "return (tap.x * cacheFaceEdge + tap.z) * cacheFaceEdge + tap.y;")
-                        && sodiumFragment.contains("float filterHalfWidth = 0.20;")
-                        && sodiumFragment.contains("if (cacheFaceEdge >= 32u)")
-                        && before(sodiumFragment,
-                        "if (cacheFaceEdge >= 32u)",
-                        "float filterHalfWidth = 0.20;")
+                        && !sodiumFragment.contains("float filterHalfWidth")
+                        && !sodiumFragment.contains("if (cacheFaceEdge >= 32u)")
                         && sodiumFragment.contains(
                         "ivec2 lowerTexel = ivec2(floor(texelPosition));")
-                        && sodiumFragment.contains("vec2 blend = smoothstep(")
-                        && sodiumFragment.contains("if (!blendX && !blendY)")
+                        && sodiumFragment.contains(
+                        "float metallumVoxelSoftCachedVisibilityV1(")
+                        && sodiumFragment.contains(
+                        "float metallumVoxelSoftVisibilityV1(")
+                        && sodiumFragment.contains("vec4 bilinearWeight = vec4(")
+                        && sodiumFragment.contains("vec4 triangleWeight;")
                         && sodiumFragment.contains(
                         "uvec2 diagonal00And11 = uvec2(min(id00, id11), max(id00, id11));")
                         && sodiumFragment.contains(
                         "uvec2 diagonal10And01 = uvec2(min(id10, id01), max(id10, id01));")
-                        && sodiumFragment.contains("1.0 - blend.x, blend.x - blend.y, blend.y")
-                        && sodiumFragment.contains("1.0 - blend.y, 1.0 - blend.x,")
+                        && sodiumFragment.contains(
+                        "float interiorWeight = smoothstep(")
+                        && sodiumFragment.contains("0.0, 1.5, faceEdgeDistanceTexels")
+                        && sodiumFragment.contains(
+                        "triangleWeight, bilinearWeight, interiorWeight")
                         && countOccurrences(sodiumFragment,
                         "float visibility0 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && countOccurrences(sodiumFragment,
@@ -509,9 +540,18 @@ public final class AdvancedDirectLightingShaderTests {
                         && countOccurrences(sodiumFragment,
                         "float visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && sodiumFragment.contains(
-                        "return dot(vec3(visibility0, visibility1, visibility2), selectedWeight);")
+                        "float visibility = nearestVisibility * nearestWeight")
+                        && sodiumFormula.contains(
+                        "float shadowScore = dot(")
+                        && sodiumFormula.contains(
+                        "vec3(0.2126, 0.7152, 0.0722)")
+                        && sodiumFormula.contains(
+                        "softShadowVisibility - softShadowHardVisibility")
+                        && before(sodiumFormula,
+                        "for (uint candidate = 0u; candidate < countLimit; ++candidate)",
+                        "metallumVoxelSoftVisibilityV1(")
                         && !sodiumFragment.contains("bool filterAlongX"),
-                "L6 low-resolution shadow filter lost continuous canonical triangulation");
+                "L6 dominant soft-shadow filter lost bounded full-resolution blur");
         require(sodiumFragment.contains(
                         "layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1")
                         && sodiumFragment.contains(
@@ -797,9 +837,10 @@ public final class AdvancedDirectLightingShaderTests {
                 "metallumVoxelResolveTapV1",
                 "metallumVoxelTapIdV1",
                 "metallumVoxelResolvedTapVisibilityV1",
-                "metallumVoxelFilteredTapVisibilityV1",
                 "metallumVoxelCachedVisibilityV1",
+                "metallumVoxelSoftCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
+                "metallumVoxelSoftVisibilityV1",
                 "MetallumVoxelProxyV1"
         }) {
             String helperCollision = materialFragment.replace(
@@ -1585,8 +1626,8 @@ public final class AdvancedDirectLightingShaderTests {
             final double[] secondDirection,
             final String boundary
     ) {
-        Map<Integer, Double> first = lowResolutionShadowWeights(edge, firstDirection);
-        Map<Integer, Double> second = lowResolutionShadowWeights(edge, secondDirection);
+        Map<Integer, Double> first = softShadowWeights(edge, firstDirection);
+        Map<Integer, Double> second = softShadowWeights(edge, secondDirection);
         requireShadowWeightContract(edge, first, boundary + " first side");
         requireShadowWeightContract(edge, second, boundary + " second side");
         Set<Integer> ids = new HashSet<>(first.keySet());
@@ -1605,8 +1646,8 @@ public final class AdvancedDirectLightingShaderTests {
             final Map<Integer, Double> weights,
             final String location
     ) {
-        require(!weights.isEmpty() && weights.size() <= 3,
-                location + " does not use one to three taps");
+        require(!weights.isEmpty() && weights.size() <= 4,
+                location + " does not use one to four taps");
         double sum = 0.0;
         for (Map.Entry<Integer, Double> entry : weights.entrySet()) {
             require(entry.getKey() >= 0 && entry.getKey() < 6 * edge * edge,
@@ -1619,48 +1660,17 @@ public final class AdvancedDirectLightingShaderTests {
                 location + " weights do not sum to one: " + sum);
     }
 
-    private static Map<Integer, Double> lowResolutionShadowWeights(
+    private static Map<Integer, Double> softShadowWeights(
             final int edge,
             final double[] direction
     ) {
         CubeFaceUv faceUv = cubeFaceUv(direction);
         double positionX = (faceUv.u() * 0.5 + 0.5) * edge - 0.5;
         double positionY = (faceUv.v() * 0.5 + 0.5) * edge - 0.5;
-        int nearestX = clamp((int) Math.floor(positionX + 0.5), 0, edge - 1);
-        int nearestY = clamp((int) Math.floor(positionY + 0.5), 0, edge - 1);
         int lowerX = (int) Math.floor(positionX);
         int lowerY = (int) Math.floor(positionY);
-        double blendX = smoothstep(0.3, 0.7, positionX - lowerX);
-        double blendY = smoothstep(0.3, 0.7, positionY - lowerY);
-        boolean transitionX = blendX > 0.0 && blendX < 1.0;
-        boolean transitionY = blendY > 0.0 && blendY < 1.0;
-        Map<Integer, Double> weights = new LinkedHashMap<>();
-        if (!transitionX && !transitionY) {
-            addShadowWeight(weights,
-                    resolvedTapId(edge, new ResolvedTap(faceUv.face(), nearestX, nearestY)),
-                    1.0);
-            return weights;
-        }
-        if (!transitionX) {
-            int snappedX = blendX >= 0.5 ? 1 : 0;
-            addShadowWeight(weights, resolvedTapId(edge,
-                    resolveTap(edge, faceUv.face(), lowerX + snappedX, lowerY)),
-                    1.0 - blendY);
-            addShadowWeight(weights, resolvedTapId(edge,
-                    resolveTap(edge, faceUv.face(), lowerX + snappedX, lowerY + 1)),
-                    blendY);
-            return weights;
-        }
-        if (!transitionY) {
-            int snappedY = blendY >= 0.5 ? 1 : 0;
-            addShadowWeight(weights, resolvedTapId(edge,
-                    resolveTap(edge, faceUv.face(), lowerX, lowerY + snappedY)),
-                    1.0 - blendX);
-            addShadowWeight(weights, resolvedTapId(edge,
-                    resolveTap(edge, faceUv.face(), lowerX + 1, lowerY + snappedY)),
-                    blendX);
-            return weights;
-        }
+        double blendX = positionX - lowerX;
+        double blendY = positionY - lowerY;
 
         ResolvedTap tap00 = resolveTap(edge, faceUv.face(), lowerX, lowerY);
         ResolvedTap tap10 = resolveTap(edge, faceUv.face(), lowerX + 1, lowerY);
@@ -1676,22 +1686,40 @@ public final class AdvancedDirectLightingShaderTests {
         int diagonal10High = Math.max(id10, id01);
         boolean use00And11 = diagonal00Low < diagonal10Low
                 || (diagonal00Low == diagonal10Low && diagonal00High <= diagonal10High);
+        double[] bilinear = {
+                (1.0 - blendX) * (1.0 - blendY),
+                blendX * (1.0 - blendY),
+                (1.0 - blendX) * blendY,
+                blendX * blendY
+        };
+        double[] triangle = new double[4];
         if (use00And11 && blendX >= blendY) {
-            addShadowWeight(weights, id00, 1.0 - blendX);
-            addShadowWeight(weights, id10, blendX - blendY);
-            addShadowWeight(weights, id11, blendY);
+            triangle[0] = 1.0 - blendX;
+            triangle[1] = blendX - blendY;
+            triangle[3] = blendY;
         } else if (use00And11) {
-            addShadowWeight(weights, id00, 1.0 - blendY);
-            addShadowWeight(weights, id01, blendY - blendX);
-            addShadowWeight(weights, id11, blendX);
+            triangle[0] = 1.0 - blendY;
+            triangle[2] = blendY - blendX;
+            triangle[3] = blendX;
         } else if (blendX + blendY <= 1.0) {
-            addShadowWeight(weights, id00, 1.0 - blendX - blendY);
-            addShadowWeight(weights, id10, blendX);
-            addShadowWeight(weights, id01, blendY);
+            triangle[0] = 1.0 - blendX - blendY;
+            triangle[1] = blendX;
+            triangle[2] = blendY;
         } else {
-            addShadowWeight(weights, id10, 1.0 - blendY);
-            addShadowWeight(weights, id01, 1.0 - blendX);
-            addShadowWeight(weights, id11, blendX + blendY - 1.0);
+            triangle[1] = 1.0 - blendY;
+            triangle[2] = 1.0 - blendX;
+            triangle[3] = blendX + blendY - 1.0;
+        }
+        double edgeDistanceTexels = (1.0 - Math.max(
+                Math.abs(faceUv.u()), Math.abs(faceUv.v()))) * 0.5 * edge;
+        double interior = smoothstep(0.0, 1.5, edgeDistanceTexels);
+        int[] ids = {id00, id10, id01, id11};
+        Map<Integer, Double> weights = new LinkedHashMap<>();
+        for (int tap = 0; tap < ids.length; tap++) {
+            addShadowWeight(
+                    weights,
+                    ids[tap],
+                    triangle[tap] * (1.0 - interior) + bilinear[tap] * interior);
         }
         return weights;
     }
