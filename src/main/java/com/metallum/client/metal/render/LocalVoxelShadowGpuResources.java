@@ -1535,9 +1535,33 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 || residentCacheLevel < 0 || desiredCacheLevel < 0) {
             throw new IllegalArgumentException("Invalid L6 resident quality transition");
         }
-        // A formerly distant/coarse page is more distracting than unshadowed approximate direct
-        // while its close/fine replacement builds. Equal-or-better old pages remain continuous.
-        return residentEdge >= desiredEdge && residentCacheLevel <= desiredCacheLevel;
+        // Any immutable page for the same source and clipmap topology is a safer continuity
+        // approximation than state zero, which removes the shadow entirely. Edge/cache-level
+        // mismatches are published as STALE until the direct-to-target replacement commits.
+        return true;
+    }
+
+    static boolean replacementTargetStillUseful(
+            final int requestedEdge,
+            final int desiredEdge,
+            final float radius,
+            final double centerDistance
+    ) {
+        if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(requestedEdge)
+                || !LocalVoxelShadowAtlasLayout.supportsPageEdge(desiredEdge)
+                || !(radius > 0.0f) || !Float.isFinite(radius)
+                || centerDistance < 0.0 || !Double.isFinite(centerDistance)) {
+            throw new IllegalArgumentException("Invalid L6 replacement target transition");
+        }
+        if (requestedEdge == desiredEdge) {
+            return true;
+        }
+        if (requestedEdge < desiredEdge) {
+            return false;
+        }
+        double ratio = centerDistance <= radius
+                ? Double.POSITIVE_INFINITY : radius / centerDistance;
+        return ratio >= upgradeThreshold(requestedEdge) * DOWNGRADE_GUARD;
     }
 
     private long pendingPayloadBytes() {
@@ -1711,9 +1735,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         BuildRequest request = ticket.request();
         if (!frameLight.cacheEligible()
                 || !request.lightKey().equals(frameLight.lightKey())
-                || request.edge() != frameLight.desiredEdge()
-                || request.maxSteps() != frameLight.maxSteps()
-                || request.cacheLevel() != frameLight.cacheLevel()
+                || !requestMatchesFrameQuality(request, frameLight)
                 || !LocalVoxelShadowAtlasLayout.supportsPageEdge(request.edge())
                 || request.maxSteps() <= 0
                 || request.worldGeneration() != mirror.clipmap().world().generation()
@@ -1732,6 +1754,21 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 frameLight.light(),
                 request.cacheLevel()
         );
+    }
+
+    private static boolean requestMatchesFrameQuality(
+            final BuildRequest request,
+            final FrameLight frameLight
+    ) {
+        if (!replacementTargetStillUseful(
+                request.edge(), frameLight.desiredEdge(),
+                frameLight.light().radius(), frameLight.centerDistance()
+        )) {
+            return false;
+        }
+        return request.edge() != frameLight.desiredEdge()
+                || (request.maxSteps() == frameLight.maxSteps()
+                && request.cacheLevel() == frameLight.cacheLevel());
     }
 
     private static FrameLight findFrameLight(
@@ -2208,9 +2245,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             return currentMirror != null && currentMirror.current()
                     && light.cacheEligible()
                     && this.request.lightKey().equals(light.lightKey())
-                    && this.request.edge() == light.desiredEdge()
-                    && this.request.maxSteps() == light.maxSteps()
-                    && this.request.cacheLevel() == light.cacheLevel()
+                    && requestMatchesFrameQuality(this.request, light)
                     && this.result.edge() == this.request.edge()
                     && this.result.cacheLevel() == this.request.cacheLevel()
                     && (this.mirror.revision() == currentMirror.revision()

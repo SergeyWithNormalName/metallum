@@ -248,19 +248,27 @@ public final class MetalRuntimeTests {
                         && LocalVoxelShadowGpuResources.residentDescriptorState(
                         true, 64, 64)
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
-                        && !LocalVoxelShadowGpuResources.residentQualityUsable(
+                        && LocalVoxelShadowGpuResources.residentQualityUsable(
                         8, 64, 0, 0)
-                        && !LocalVoxelShadowGpuResources.residentQualityUsable(
+                        && LocalVoxelShadowGpuResources.residentQualityUsable(
                         64, 64, 1, 0)
                         && LocalVoxelShadowGpuResources.residentQualityUsable(
                         64, 16, 0, 0)
                         && LocalVoxelShadowGpuResources.residentQualityUsable(
                         64, 64, 0, 1)
+                        && LocalVoxelShadowGpuResources.replacementTargetStillUseful(
+                        64, 32, 12.0f, 28.64)
+                        && !LocalVoxelShadowGpuResources.replacementTargetStillUseful(
+                        64, 32, 12.0f, 49.1)
+                        && LocalVoxelShadowGpuResources.replacementTargetStillUseful(
+                        64, 64, 12.0f, 200.0)
+                        && !LocalVoxelShadowGpuResources.replacementTargetStillUseful(
+                        32, 64, 12.0f, 20.0)
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(1) == 1
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(2) == 2
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(6) == 32
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(20) == 32,
-                "L6 direct quality recovery or bounded retry policy regressed");
+                "L6 distance-transition continuity, upgrade latching, or retry policy regressed");
         long oldOffset = 0x00000002_00000100L;
         LocalVoxelShadowGpuResources.packDescriptor(
                 descriptors, 0,
@@ -290,8 +298,18 @@ public final class MetalRuntimeTests {
         require(LocalVoxelShadowGpuResources.CacheLightKey.of(stable).equals(
                         LocalVoxelShadowGpuResources.CacheLightKey.of(stable))
                         && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 80.0, 16) == 16
-                        && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 77.0, 16) == 16,
-                "stable-id source or camera guard band churned a resident page");
+                        && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 77.0, 16) == 16
+                        && LocalVoxelShadowGpuResources.desiredEdge(
+                        12.0f, 28.5, 32) == 64
+                        && LocalVoxelShadowGpuResources.desiredEdge(
+                        12.0f, 28.64, 32) == 32
+                        && LocalVoxelShadowGpuResources.replacementTargetStillUseful(
+                        64, 32, 12.0f, 28.64)
+                        && LocalVoxelShadowGpuResources.desiredEdge(
+                        12.0f, 28.64, 64) == 64
+                        && LocalVoxelShadowGpuResources.desiredEdge(
+                        12.0f, 49.1, 64) == 32,
+                "stable-id source or distance-transition guard band churned a resident page");
         LocalVoxelShadowGpuResources.CacheLightKey stableKey =
                 LocalVoxelShadowGpuResources.CacheLightKey.of(stable);
         List<LocalVoxelShadowGpuResources.CacheLevelKey> retryLevels = List.of(
