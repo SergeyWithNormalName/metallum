@@ -1,6 +1,7 @@
 package com.metallum.client.voxel;
 
 import com.metallum.client.lighting.AdvancedLight;
+import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 
 import java.nio.ByteBuffer;
@@ -29,6 +30,28 @@ public final class VoxelShadowCacheBuilder {
         }
     }
 
+    /** One variable-resolution cube page suitable for the resident shadow atlas. */
+    public record PageResult(
+            byte[] payload,
+            int edge,
+            int raysWithHits,
+            int totalRays,
+            int cacheLevel,
+            boolean complete
+    ) {
+        public PageResult {
+            payload = payload.clone();
+            if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(edge)
+                    || payload.length != LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge)
+                    || raysWithHits < 0 || totalRays < 0 || raysWithHits > totalRays
+                    || totalRays != Math.toIntExact(Math.multiplyExact(
+                    (long) LocalVoxelShadowAtlasLayout.FACE_COUNT, (long) edge * edge
+            )) || cacheLevel < -1 || complete && cacheLevel < 0) {
+                throw new IllegalArgumentException("Invalid resident L6 shadow page result");
+            }
+        }
+    }
+
     private VoxelShadowCacheBuilder() {
     }
 
@@ -50,44 +73,81 @@ public final class VoxelShadowCacheBuilder {
         }
 
         byte[] payload = visiblePayload(lightCapacity);
-        ByteBuffer output = ByteBuffer.wrap(payload).order(ByteOrder.nativeOrder());
         int hitRays = 0;
         int totalRays = 0;
         Integer[] selectedLevels = new Integer[capturedLights.size()];
-        int edge = LocalVoxelShadowLayout.CACHE_FACE_EDGE;
+        int pageBytes = Math.toIntExact(
+                LocalVoxelShadowAtlasLayout.pagePayloadBytes(
+                        LocalVoxelShadowLayout.CACHE_FACE_EDGE
+                )
+        );
         for (int lightIndex = 0; lightIndex < capturedLights.size(); lightIndex++) {
             AdvancedLight light = capturedLights.get(lightIndex);
-            int levelIndex = selectCacheLevel(snapshot.clipmap(), light, maxSteps);
-            selectedLevels[lightIndex] = levelIndex;
-            VoxelClipmapSnapshot.Level level = levelIndex < 0
-                    ? null : snapshot.clipmap().levels().get(levelIndex);
-            for (int face = 0; face < LocalVoxelShadowLayout.CACHE_FACE_COUNT; face++) {
-                for (int y = 0; y < edge; y++) {
-                    for (int x = 0; x < edge; x++) {
-                        Direction direction = cubeDirection(face, x, y, edge);
-                        Trace trace = trace(snapshot, light, level, direction, maxSteps);
-                        totalRays++;
-                        if (!trace.valid || trace.count == 0) {
-                            continue;
-                        }
-                        hitRays++;
-                        int base = entryOffset(lightIndex, face, x, y, 0);
-                        for (int layer = 0; layer < trace.count; layer++) {
-                            output.putFloat(
-                                    base + layer * LocalVoxelShadowLayout.CACHE_HIT_STRIDE_BYTES,
-                                    trace.distances[layer]
-                            );
-                            output.putFloat(
-                                    base + layer * LocalVoxelShadowLayout.CACHE_HIT_STRIDE_BYTES
-                                            + Float.BYTES,
-                                    trace.visibility[layer]
-                            );
-                        }
+            PageResult page = buildPage(
+                    snapshot, light, LocalVoxelShadowLayout.CACHE_FACE_EDGE, maxSteps
+            );
+            selectedLevels[lightIndex] = page.cacheLevel();
+            System.arraycopy(page.payload(), 0, payload, lightIndex * pageBytes, pageBytes);
+            hitRays += page.raysWithHits();
+            totalRays += page.totalRays();
+        }
+        return new Result(payload, hitRays, totalRays, Arrays.asList(selectedLevels));
+    }
+
+    /**
+     * Builds exactly one independent, variable-resolution cube page. Unlike {@link #build}, this
+     * API has no fixed per-light capacity: the caller owns resident-atlas allocation policy.
+     */
+    public static PageResult buildPage(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light,
+            final int edge,
+            final int maxSteps
+    ) {
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(light, "light");
+        if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(edge)
+                || maxSteps < 1 || maxSteps > LocalVoxelShadowLayout.MAX_DDA_STEPS) {
+            throw new IllegalArgumentException("Resident L6 shadow page exceeds its bounds");
+        }
+        byte[] payload = visiblePagePayload(edge);
+        ByteBuffer output = ByteBuffer.wrap(payload).order(ByteOrder.nativeOrder());
+        int hitRays = 0;
+        int totalRays = 0;
+        int levelIndex = selectCacheLevel(snapshot.clipmap(), light, maxSteps);
+        VoxelClipmapSnapshot.Level level = levelIndex < 0
+                ? null : snapshot.clipmap().levels().get(levelIndex);
+        boolean complete = level != null;
+        for (int face = 0; face < LocalVoxelShadowAtlasLayout.FACE_COUNT; face++) {
+            for (int y = 0; y < edge; y++) {
+                for (int x = 0; x < edge; x++) {
+                    Direction direction = cubeDirection(face, x, y, edge);
+                    Trace trace = trace(snapshot, light, level, direction, maxSteps);
+                    totalRays++;
+                    if (!trace.valid) {
+                        complete = false;
+                        continue;
+                    }
+                    if (trace.count == 0) {
+                        continue;
+                    }
+                    hitRays++;
+                    int base = pageEntryOffset(face, x, y, 0, edge);
+                    for (int layer = 0; layer < trace.count; layer++) {
+                        output.putFloat(
+                                base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES,
+                                trace.distances[layer]
+                        );
+                        output.putFloat(
+                                base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
+                                        + Float.BYTES,
+                                trace.visibility[layer]
+                        );
                     }
                 }
             }
         }
-        return new Result(payload, hitRays, totalRays, Arrays.asList(selectedLevels));
+        return new PageResult(payload, edge, hitRays, totalRays, levelIndex, complete);
     }
 
     /**
@@ -131,6 +191,18 @@ public final class VoxelShadowCacheBuilder {
         return payload;
     }
 
+    private static byte[] visiblePagePayload(final int edge) {
+        int bytes = Math.toIntExact(LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge));
+        byte[] payload = new byte[bytes];
+        ByteBuffer output = ByteBuffer.wrap(payload).order(ByteOrder.nativeOrder());
+        for (int offset = 0; offset < bytes;
+             offset += LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES) {
+            output.putFloat(offset, Float.POSITIVE_INFINITY);
+            output.putFloat(offset + Float.BYTES, 1.0f);
+        }
+        return payload;
+    }
+
     /**
      * Exact geometry comparison for cache invalidation. Global L5 revisions may advance for
      * unrelated clipmap bricks; only occupancy/material changes inside a selected light sphere
@@ -145,7 +217,9 @@ public final class VoxelShadowCacheBuilder {
                 || !left.clipmap().world().equals(right.clipmap().world())
                 || left.clipmap().clipmapGeneration()
                 != right.clipmap().clipmapGeneration()
-                || !left.clipmap().levels().equals(right.clipmap().levels())) {
+                || !sameLevelTopology(
+                left.clipmap().levels(), right.clipmap().levels()
+        )) {
             return false;
         }
         List<AdvancedLight> capturedLights = List.copyOf(lights);
@@ -155,46 +229,125 @@ public final class VoxelShadowCacheBuilder {
                     || !finite(light.x(), light.y(), light.z())) {
                 return false;
             }
-            for (VoxelClipmapSnapshot.Level level : left.clipmap().levels()) {
-                int brickBlockEdge = VoxelBrickPatch.LOGICAL_EDGE / level.subdivision();
-                int minimumX = floorToInt((light.x() - radius) / brickBlockEdge);
-                int minimumY = floorToInt((light.y() - radius) / brickBlockEdge);
-                int minimumZ = floorToInt((light.z() - radius) / brickBlockEdge);
-                int maximumX = floorToInt(
-                        Math.nextAfter(light.x() + radius, Double.NEGATIVE_INFINITY)
-                                / brickBlockEdge
-                );
-                int maximumY = floorToInt(
-                        Math.nextAfter(light.y() + radius, Double.NEGATIVE_INFINITY)
-                                / brickBlockEdge
-                );
-                int maximumZ = floorToInt(
-                        Math.nextAfter(light.z() + radius, Double.NEGATIVE_INFINITY)
-                                / brickBlockEdge
-                );
-                if (minimumX == Integer.MIN_VALUE || minimumY == Integer.MIN_VALUE
-                        || minimumZ == Integer.MIN_VALUE || maximumX == Integer.MIN_VALUE
-                        || maximumY == Integer.MIN_VALUE || maximumZ == Integer.MIN_VALUE
-                        || (long) maximumX - minimumX >= level.brickDimension()
-                        || (long) maximumY - minimumY >= level.brickDimension()
-                        || (long) maximumZ - minimumZ >= level.brickDimension()) {
+            for (int levelIndex = 0;
+                 levelIndex < left.clipmap().levels().size();
+                 levelIndex++) {
+                VoxelClipmapSnapshot.Level leftLevel =
+                        left.clipmap().levels().get(levelIndex);
+                VoxelClipmapSnapshot.Level rightLevel =
+                        right.clipmap().levels().get(levelIndex);
+                if (!relevantGeometryEqualsAtLevel(
+                        left, right, light, leftLevel, rightLevel
+                )) {
                     return false;
                 }
-                for (int logicalZ = minimumZ; logicalZ <= maximumZ; logicalZ++) {
-                    for (int logicalY = minimumY; logicalY <= maximumY; logicalY++) {
-                        for (int logicalX = minimumX; logicalX <= maximumX; logicalX++) {
-                            VoxelShadowCacheMirror.Brick leftBrick = resolveBrick(
-                                    left, level, logicalX, logicalY, logicalZ
-                            );
-                            VoxelShadowCacheMirror.Brick rightBrick = resolveBrick(
-                                    right, level, logicalX, logicalY, logicalZ
-                            );
-                            if (!sameGeometry(leftBrick, rightBrick)) {
-                                return false;
-                            }
-                        }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Exact invalidation check for one resident page. A page is traced from exactly one L5
+     * level, so camera-driven movement of another level must not force it through DDA/rebuild.
+     */
+    public static boolean relevantGeometryEquals(
+            final VoxelShadowCacheMirror.Snapshot left,
+            final VoxelShadowCacheMirror.Snapshot right,
+            final AdvancedLight light,
+            final int cacheLevelIndex
+    ) {
+        if (left == null || right == null || light == null
+                || !left.clipmap().world().equals(right.clipmap().world())
+                || left.clipmap().clipmapGeneration()
+                != right.clipmap().clipmapGeneration()
+                || !sameLevelTopology(
+                left.clipmap().levels(), right.clipmap().levels()
+        ) || cacheLevelIndex < 0
+                || cacheLevelIndex >= left.clipmap().levels().size()) {
+            return false;
+        }
+        double radius = light.radius();
+        if (!(radius > 0.0) || !Double.isFinite(radius)
+                || !finite(light.x(), light.y(), light.z())) {
+            return false;
+        }
+        return relevantGeometryEqualsAtLevel(
+                left,
+                right,
+                light,
+                left.clipmap().levels().get(cacheLevelIndex),
+                right.clipmap().levels().get(cacheLevelIndex)
+        );
+    }
+
+    private static boolean relevantGeometryEqualsAtLevel(
+            final VoxelShadowCacheMirror.Snapshot left,
+            final VoxelShadowCacheMirror.Snapshot right,
+            final AdvancedLight light,
+            final VoxelClipmapSnapshot.Level leftLevel,
+            final VoxelClipmapSnapshot.Level rightLevel
+    ) {
+        if (!containsSphere(leftLevel, light) || !containsSphere(rightLevel, light)) {
+            return false;
+        }
+        double radius = light.radius();
+        int brickBlockEdge = VoxelBrickPatch.LOGICAL_EDGE / leftLevel.subdivision();
+        int minimumX = floorToInt((light.x() - radius) / brickBlockEdge);
+        int minimumY = floorToInt((light.y() - radius) / brickBlockEdge);
+        int minimumZ = floorToInt((light.z() - radius) / brickBlockEdge);
+        int maximumX = floorToInt(
+                Math.nextAfter(light.x() + radius, Double.NEGATIVE_INFINITY)
+                        / brickBlockEdge
+        );
+        int maximumY = floorToInt(
+                Math.nextAfter(light.y() + radius, Double.NEGATIVE_INFINITY)
+                        / brickBlockEdge
+        );
+        int maximumZ = floorToInt(
+                Math.nextAfter(light.z() + radius, Double.NEGATIVE_INFINITY)
+                        / brickBlockEdge
+        );
+        if (minimumX == Integer.MIN_VALUE || minimumY == Integer.MIN_VALUE
+                || minimumZ == Integer.MIN_VALUE || maximumX == Integer.MIN_VALUE
+                || maximumY == Integer.MIN_VALUE || maximumZ == Integer.MIN_VALUE
+                || (long) maximumX - minimumX >= leftLevel.brickDimension()
+                || (long) maximumY - minimumY >= leftLevel.brickDimension()
+                || (long) maximumZ - minimumZ >= leftLevel.brickDimension()) {
+            return false;
+        }
+        for (int logicalZ = minimumZ; logicalZ <= maximumZ; logicalZ++) {
+            for (int logicalY = minimumY; logicalY <= maximumY; logicalY++) {
+                for (int logicalX = minimumX; logicalX <= maximumX; logicalX++) {
+                    VoxelShadowCacheMirror.Brick leftBrick = resolveBrick(
+                            left, leftLevel, logicalX, logicalY, logicalZ
+                    );
+                    VoxelShadowCacheMirror.Brick rightBrick = resolveBrick(
+                            right, rightLevel, logicalX, logicalY, logicalZ
+                    );
+                    if (!sameGeometry(leftBrick, rightBrick)) {
+                        return false;
                     }
                 }
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameLevelTopology(
+            final List<VoxelClipmapSnapshot.Level> left,
+            final List<VoxelClipmapSnapshot.Level> right
+    ) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int index = 0; index < left.size(); index++) {
+            VoxelClipmapSnapshot.Level leftLevel = left.get(index);
+            VoxelClipmapSnapshot.Level rightLevel = right.get(index);
+            if (leftLevel.level() != rightLevel.level()
+                    || leftLevel.subdivision() != rightLevel.subdivision()
+                    || leftLevel.logicalEdge() != rightLevel.logicalEdge()
+                    || leftLevel.brickDimension() != rightLevel.brickDimension()) {
+                return false;
             }
         }
         return true;
@@ -225,9 +378,10 @@ public final class VoxelShadowCacheBuilder {
             final VoxelShadowCacheMirror.Brick left,
             final VoxelShadowCacheMirror.Brick right
     ) {
-        return left == right || left != null && right != null
-                && Arrays.equals(left.occupancy(), right.occupancy())
-                && Arrays.equals(left.optical(), right.optical());
+        return left != null && right != null
+                && (left == right
+                || Arrays.equals(left.occupancy(), right.occupancy())
+                && Arrays.equals(left.optical(), right.optical()));
     }
 
     private static Trace trace(
@@ -348,6 +502,7 @@ public final class VoxelShadowCacheBuilder {
                     visibility[hitCount] = cumulativeVisibility;
                     hitCount++;
                 } else {
+                    distances[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1] = hitDistance;
                     visibility[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
                             = cumulativeVisibility;
                 }
@@ -511,18 +666,17 @@ public final class VoxelShadowCacheBuilder {
         return new Direction(rawX / length, rawY / length, rawZ / length);
     }
 
-    private static int entryOffset(
-            final int light,
+    private static int pageEntryOffset(
             final int face,
             final int x,
             final int y,
-            final int layer
+            final int layer,
+            final int edge
     ) {
-        long edge = LocalVoxelShadowLayout.CACHE_FACE_EDGE;
-        long entry = (((long) light * LocalVoxelShadowLayout.CACHE_FACE_COUNT + face)
-                * edge * edge + (long) y * edge + x)
-                * LocalVoxelShadowLayout.CACHE_LAYER_COUNT + layer;
-        return Math.toIntExact(entry * LocalVoxelShadowLayout.CACHE_HIT_STRIDE_BYTES);
+        long edgeLong = edge;
+        long entry = ((long) face * edgeLong * edgeLong + (long) y * edgeLong + x)
+                * LocalVoxelShadowAtlasLayout.LAYER_COUNT + layer;
+        return Math.toIntExact(entry * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES);
     }
 
     private static double nextBoundary(

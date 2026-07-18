@@ -376,3 +376,34 @@ FPS и улучшением среднего GPU p95 примерно на `0.22
 receiver. Радикальное уменьшение первой части должно происходить на L6 с полноценным
 cache/invalidation contract. До этого я предпочту несколько небольших доказанных
 выигрышей одному «ускорению», которое меняет качество или создаёт редкие shadow bugs.
+
+---
+
+## L6 rework — все видимые источники и устранение self-shadow rings
+
+**Статус:** завершено и проверено на Apple M1 Pro.
+
+1. Кольца около sea lantern создаёт не L5 LOD: nearest-выборка `64×64` cube cache
+   сравнивает receiver с глубиной центрального луча texel и фиксированным bias `0.08`.
+   На плоском полу чужой луч входит в сам пол заметно раньше receiver, поэтому пол
+   затеняет себя квадратными концентрическими полосами. Нужна receiver-plane проверка,
+   а не большой глобальный bias, который дал бы light leaking через стены.
+2. Исчезновение теней заложено в текущий hard cap `1/2/2`: только BLOCK lights,
+   полностью покрытые coarsest L5, сортируются по расстоянию до камеры. Повышать cap
+   при старом `64² × 6 × 4 × 8 B` формате нельзя: это `768 KiB` на источник.
+
+Реализован descriptor-driven resident atlas по `stableId` со страницами
+`8/16/32/64`, fence-safe replacement и bounded build/upload budgets. Каждый источник
+фактического L3 snapshot получает `READY/STALE/BUILDING/FAIL_CLOSED`; незатенённого
+direct-вклада нет. Production DDA отключён: достижимость 96-шагового traversal в
+обычном fragment PSO снижала короткий прогон до `53.42 FPS`, даже при двух DDA lights.
+
+Квадратные кольца исправлены сравнением cache hit с tangent plane receiver. Heap
+page payload больше не передаётся как native pointer: данные копируются прямо в
+mapped Metal staging, что устранило воспроизводимый SIGSEGV на странице `64²`.
+
+Финальный accepted Balanced HDR Native run (`1800 + 3000`) дал `70.43 FPS`, GPU p95
+`20.21 ms`, минимум окна `68.62 FPS`, `0` dropped events. Установившееся состояние:
+`594/594` descriptors, `46 READY`, `548 FAIL_CLOSED`, `DDA=0`, очереди и
+`unshadowedContributing=0`. `clean check` (64 задачи) и отдельный live Metal API +
+Shader Validation прошли без crash/fault и fallback после Advanced admission.

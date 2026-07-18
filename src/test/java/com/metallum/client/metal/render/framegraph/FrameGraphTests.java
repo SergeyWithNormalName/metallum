@@ -45,7 +45,7 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 19 && graph.passes().size() == 9,
+        require(graph.resources().size() == 21 && graph.passes().size() == 9,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
@@ -58,7 +58,8 @@ public final class FrameGraphTests {
                                 "voxel_upload_ring", "voxel_private_patch_ring",
                                 "voxel_indirect_args", "voxel_occupancy",
                                 "voxel_transmittance_material", "voxel_brick_tags",
-                                "local_shadow_params_ring", "entity_shadow_proxies_ring"
+                                "local_shadow_params_ring", "entity_shadow_proxies_ring",
+                                "local_shadow_reference_ring", "local_shadow_visibility_atlas"
                         )),
                 "Advanced lighting resources do not describe the compact index and shadow path");
         for (int index = 0; index < graph.resources().size(); index++) {
@@ -156,6 +157,12 @@ public final class FrameGraphTests {
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("entity_shadow_proxies_ring")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_reference_ring")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_visibility_atlas")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("scene_radiance")

@@ -77,11 +77,28 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
     ) {
     }
 
+    /**
+     * Native persistent L5 buffers for one logical clipmap level, already validated at context
+     * creation. They are package-private only so L6 can bind the exact same accepted resources.
+     */
+    record FragmentLevelBindings(
+            MemorySegment occupancy,
+            MemorySegment optical,
+            MemorySegment metadata
+    ) {
+        FragmentLevelBindings {
+            requireHandle(occupancy, "L5 occupancy fragment buffer");
+            requireHandle(optical, "L5 optical fragment buffer");
+            requireHandle(metadata, "L5 metadata fragment buffer");
+        }
+    }
+
     private final long lightingGeneration;
     private final long clipmapGeneration;
     private final long worldGeneration;
     private final VoxelClipmapLayout.Budget budget;
     private final List<VoxelClipmapSnapshot.Level> levels;
+    private final List<FragmentLevelBindings> fragmentLevelBindings;
     private final int stagingBytes;
     private final Arena arena;
     private final MemorySegment uploadPacket;
@@ -95,6 +112,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             final long worldGeneration,
             final VoxelClipmapLayout.Budget budget,
             final List<VoxelClipmapSnapshot.Level> levels,
+            final List<FragmentLevelBindings> fragmentLevelBindings,
             final int stagingBytes,
             final Arena arena,
             final MemorySegment uploadPacket,
@@ -107,6 +125,10 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         this.worldGeneration = worldGeneration;
         this.budget = budget;
         this.levels = List.copyOf(levels);
+        this.fragmentLevelBindings = List.copyOf(fragmentLevelBindings);
+        if (this.fragmentLevelBindings.size() != this.levels.size()) {
+            throw new IllegalArgumentException("L5 fragment bindings do not match clipmap levels");
+        }
         this.stagingBytes = stagingBytes;
         this.arena = arena;
         this.uploadPacket = uploadPacket;
@@ -226,7 +248,9 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             if (MetalNativeBridge.isNullHandle(context)) {
                 throw new IllegalStateException("Native L5 voxel context creation failed");
             }
-            validateBuffers(context, budget, snapshot.levels(), stagingBytes);
+            List<FragmentLevelBindings> fragmentLevelBindings = validateBuffers(
+                    context, budget, snapshot.levels(), stagingBytes
+            );
             MemorySegment uploadPacket = arena.allocate(stagingBytes, Long.BYTES);
             MemorySegment stats = arena.allocate(STATS_BYTES, Long.BYTES);
             MemorySegment debug = arena.allocate(DEBUG_READBACK_BYTES, Long.BYTES);
@@ -236,6 +260,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                     snapshot.world().generation(),
                     budget,
                     snapshot.levels(),
+                    fragmentLevelBindings,
                     stagingBytes,
                     arena,
                     uploadPacket,
@@ -430,6 +455,14 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return this.levels;
     }
 
+    FragmentLevelBindings fragmentLevelBindings(final int level) {
+        ensureOpen();
+        if (level < 0 || level >= this.fragmentLevelBindings.size()) {
+            throw new IndexOutOfBoundsException("L5 fragment level is outside its context");
+        }
+        return this.fragmentLevelBindings.get(level);
+    }
+
     @Override
     public void close() {
         if (MetalNativeBridge.isNullHandle(this.context)) {
@@ -484,23 +517,25 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return Math.toIntExact(bytes);
     }
 
-    private static void validateBuffers(
+    private static List<FragmentLevelBindings> validateBuffers(
             final MemorySegment context,
             final VoxelClipmapLayout.Budget budget,
             final List<VoxelClipmapSnapshot.Level> levels,
             final int stagingBytes
     ) {
+        List<FragmentLevelBindings> fragmentLevelBindings = new ArrayList<>(levels.size());
         for (int index = 0; index < levels.size(); index++) {
             VoxelClipmapLayout.Level level = budget.levels().get(index);
-            requireBuffer(context, BUFFER_OCCUPANCY, index,
+            MemorySegment occupancy = requireBuffer(context, BUFFER_OCCUPANCY, index,
                     level.occupancyBytes() + NATIVE_GUARD_BYTES, "occupancy");
-            requireBuffer(context, BUFFER_OPTICAL, index,
+            MemorySegment optical = requireBuffer(context, BUFFER_OPTICAL, index,
                     level.materialBytes() + NATIVE_GUARD_BYTES, "optical");
             long bricks = level.brickCountPerAxis();
             long metadataBytes = Math.multiplyExact(
                     Math.multiplyExact(Math.multiplyExact(bricks, bricks), bricks), 16L);
-            requireBuffer(context, BUFFER_METADATA, index,
+            MemorySegment metadata = requireBuffer(context, BUFFER_METADATA, index,
                     metadataBytes + NATIVE_GUARD_BYTES, "metadata");
+            fragmentLevelBindings.add(new FragmentLevelBindings(occupancy, optical, metadata));
         }
         for (int slot = 0; slot < budget.ringSlots(); slot++) {
             requireBuffer(context, BUFFER_PRIVATE_PAYLOAD, slot,
@@ -511,9 +546,10 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             requireBuffer(context, BUFFER_DEBUG_READBACK, slot, Integer.BYTES,
                     "debug readback");
         }
+        return List.copyOf(fragmentLevelBindings);
     }
 
-    private static void requireBuffer(
+    private static MemorySegment requireBuffer(
             final MemorySegment context,
             final int kind,
             final int index,
@@ -532,6 +568,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                             + expectedBytes + ", got " + actual
             );
         }
+        return handle;
     }
 
     private static MemorySegment buffer(

@@ -568,10 +568,20 @@ final class MetalCrossShaderCompiler {
             if (variant.fragmentMsl().contains(marker)
                     || variant.vertexMsl().contains(marker)) {
                 throw new IllegalStateException(
-                        "Cached L6 shader retained dead per-fragment DDA slot " + slot
-                                + " for " + pipeline.getLocation()
+                        "L6 unreachable exact-DDA buffer slot " + slot
+                                + " survived production compilation for pipeline "
+                                + pipeline.getLocation()
                 );
             }
+        }
+        String shadowReferenceMarker = "[[buffer("
+                + VoxelShadowBindingAbi.SHADOW_REF_BUFFER_SLOT + ")]]";
+        if (countOccurrences(variant.fragmentMsl(), shadowReferenceMarker) != 1
+                || variant.vertexMsl().contains(shadowReferenceMarker)) {
+            throw new IllegalStateException(
+                    "L6 shadow-reference buffer is missing, repeated, or visible to the vertex stage for "
+                            + pipeline.getLocation()
+            );
         }
         String environmentMarker = "[[buffer("
                 + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]";

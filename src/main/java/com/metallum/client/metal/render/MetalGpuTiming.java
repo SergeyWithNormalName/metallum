@@ -22,6 +22,11 @@ public final class MetalGpuTiming {
         return DETAIL_ENABLED;
     }
 
+    /** Lightweight report/JSONL mode; unlike {@link #isEnabled()}, this does not imply stage detail. */
+    static boolean isReportEnabled() {
+        return REPORT_ENABLED;
+    }
+
     static boolean timingEnabled(final String timing) {
         return "1".equals(timing);
     }

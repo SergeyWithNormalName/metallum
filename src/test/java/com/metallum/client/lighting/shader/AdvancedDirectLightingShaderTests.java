@@ -54,6 +54,10 @@ public final class AdvancedDirectLightingShaderTests {
     private static final ShaderDefines ENTITY_BANNER_PATTERN_DEFINES = ShaderDefines.builder()
             .define("NO_OVERLAY")
             .build();
+    private static final ShaderDefines END_CRYSTAL_BEAM_DEFINES = ShaderDefines.builder()
+            .define("ALPHA_CUTOUT", 0.1f)
+            .define("NO_OVERLAY")
+            .build();
     private static final ShaderDefines ENTITY_ENERGY_SWIRL_DEFINES = ShaderDefines.builder()
             .define("ALPHA_CUTOUT", 0.1f)
             .define("EMISSIVE")
@@ -67,11 +71,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "26651bdfc1cd7eae5df54c6d049e1bcfc7146b1995f3a142e0cd9ee5c498b35d",
+            "sodium-solid-fsh", "ceef1bda32193499243cbf774c006507dcb84cb38ae6359a7255d74a8221ccd3",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "f0c0ce21fc5144babee40f906c0cdcd8d7e1384fe92a27f292d3d8639ea3949e",
+            "sodium-cutout-fsh", "28dc05a87ecf1f15bd2285fa573dfd08c136839a912d93801c17d4f801d7e019",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "d454f5d2005575c49ab81d345ea343f5719b3bf454ec0939e7a3a2910aeeb6b5"
+            "minecraft-entity-fsh", "e7edc006fd8c7a4e807a6014352f6d1e923429aff068889275c5c1cde2a26001"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -125,7 +129,7 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{13, 14, 15})
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
-        require(VoxelShadowBindingAbi.VERSION == 1
+        require(VoxelShadowBindingAbi.VERSION == 2
                         && VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT == 14
                         && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
                         && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
@@ -137,12 +141,25 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{20, 21, 22})
                         && java.util.Arrays.equals(
                         VoxelShadowBindingAbi.metadataBufferSlots(),
-                        new int[]{23, 24, 25}),
+                        new int[]{23, 24, 25})
+                        && VoxelShadowBindingAbi.SHADOW_REF_BUFFER_SLOT == 13
+                        && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_STRIDE_BYTES == 16
+                        && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_STATE_OFFSET == 0
+                        && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET == 4
+                        && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET == 8
+                        && VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_PAGE_EDGE_OFFSET == 12
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_DDA_FALLBACK == 0
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_READY == 1
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_STALE_RETAINED == 2
+                        && VoxelShadowBindingAbi.SHADOW_REF_STATE_BUILDING == 3
+                        && VoxelShadowBindingAbi.ownsFragmentSlot(13)
+                        && !VoxelShadowBindingAbi.ownsFragmentSlot(31),
                 "L6 local-shadow binding slots changed");
         require(VoxelShadowBindingAbi.PARAMS_BYTES == 256
                         && VoxelShadowBindingAbi.PROXY_STRIDE_BYTES == 32
                         && VoxelShadowBindingAbi.WORLD_FROM_VIEW_MATRIX_OFFSET == 0
                         && VoxelShadowBindingAbi.CAMERA_BLOCK_AND_FLAGS_OFFSET == 64
+                        && VoxelShadowBindingAbi.ATLAS_HIT_CAPACITY_OFFSET == 76
                         && VoxelShadowBindingAbi.CAMERA_FRACTION_AND_MIN_TRANSMITTANCE_OFFSET == 80
                         && VoxelShadowBindingAbi.CAPS_OFFSET == 96
                         && VoxelShadowBindingAbi.PROXY_AND_FRAME_OFFSET == 112
@@ -276,6 +293,13 @@ public final class AdvancedDirectLightingShaderTests {
                             && !entityVertex.contains(declaration),
                     "L6 slot is not unique and fragment-only: " + slot);
         }
+        String shadowRefDeclaration = "layout(std430, binding = "
+                + VoxelShadowBindingAbi.SHADOW_REF_BUFFER_SLOT + ")";
+        require(countOccurrences(sodiumFragment, shadowRefDeclaration) == 1
+                        && countOccurrences(entityFragment, shadowRefDeclaration) == 1
+                        && !sodiumVertex.contains(shadowRefDeclaration)
+                        && !entityVertex.contains(shadowRefDeclaration),
+                "L6 shadow-reference slot is not unique and fragment-only");
 
         require(sodiumVertex.contains(
                         "metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;"),
@@ -368,25 +392,27 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFormula.contains(
                         "max(light.linearColorIntensity.rgb, vec3(0.0))"),
                 "direct-light formula collapsed colored lights to a scalar");
-        require(!sodiumFormula.contains("uint shadowed = 0u;")
-                        && sodiumFormula.contains(
-                        "metallumVoxelShadowLightSlotV1(lightIndex)")
+        require(!sodiumFragment.contains("metallumVoxelShadowLightSlotV1")
+                        && !sodiumFragment.contains("selected0")
+                        && !sodiumFragment.contains("selected1")
+                        && !sodiumFragment.contains("shadowedCap")
                         && sodiumFragment.contains(
-                        "uint selected0 = uint(metallumVoxelShadow.cameraBlockAndFlags.w);")
+                        "layout(std430, binding = 13) readonly buffer MetallumVoxelShadowRefsV1")
                         && sodiumFragment.contains(
-                        "uint selected1 = metallumVoxelShadow.worldAndFlags.w;")
-                        && countOccurrences(sodiumFragment, "selected0 != uint(-1)") == 1
-                        && countOccurrences(sodiumFragment, "selected1 != uint(-1)") == 1
-                        && sodiumFragment.contains(
-                        "shadowedCap == 0u || shadowedCap > 2u")
+                        "metallumVoxelShadowRefBuffer.refs[lightIndex]")
+                        && sodiumFragment.contains("metallumVoxelShadow.caps.w > 4096u")
                         && countOccurrences(sodiumFormula,
                         "metallumVoxelVisibilityV1(") == 1
+                        && sodiumFormula.contains("shadowRef);")
+                        && !sodiumFormula.contains("shadowSlot")
+                        && sodiumFormula.contains(
+                        "metallumVoxelShadow.caps.w != activeLightCount")
                         && sodiumFormula.contains(
                         "attenuation * nDotL * visibility * 0.31830988618")
                         && before(sodiumFormula,
                         "distanceSquared >= radius * radius",
                         "metallumVoxelVisibilityV1("),
-                "L6 local visibility is not bounded to two explicit global upload indices");
+                "every evaluated contributing light does not consult its all-visible shadow descriptor");
         require(sodiumFragment.contains(
                         "layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1")
                         && sodiumFragment.contains(
@@ -394,15 +420,52 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "metallumVoxelVisibilityCache.hits[firstHit + layer]")
                         && sodiumFragment.contains(
+                        "uint firstHit = baseHitIndex + texelIndex * 4u;")
+                        && sodiumFragment.contains(
+                        "float cacheFaceEdgeFloat = float(cacheFaceEdge);")
+                        && sodiumFragment.contains("atlasByteOffset >> 3u")
+                        && sodiumFragment.contains("atlasOffsetHigh != 0u")
+                        && sodiumFragment.contains("(atlasByteOffset & 255u) != 0u")
+                        && !sodiumFragment.contains("(atlasByteOffset & 7u) != 0u")
+                        && sodiumFragment.contains(
+                        "int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;")
+                        && !sodiumFragment.contains("metallumVoxelVisibilityCache.hits.length()")
+                        && !sodiumFragment.contains("metallumVoxelShadowRefBuffer.refs.length()")
+                        && sodiumFragment.contains(
                         "receiverDistance <= hitDistance + 0.08")
+                        && sodiumFragment.contains(
+                        "* (2.0 / cacheFaceEdgeFloat) - 1.0;")
+                        && sodiumFragment.contains("vec3 receiverWorldNormal =")
+                        && sodiumFragment.contains(
+                        "mat3(metallumVoxelShadow.worldFromView) * normal")
+                        && sodiumFragment.contains(
+                        "hitDistance + 0.08 >= receiverPlaneDistance")
+                        && before(sodiumFragment,
+                        "hitDistance + 0.08 >= receiverPlaneDistance",
+                        "visibility = hitVisibility;")
                         && sodiumFragment.contains("if (visibility <= 0.0)")
-                        && sodiumFormula.contains("uint(shadowSlot)")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
-                "L6 direct lighting is not sampling the bounded cached point-shadow layers");
+                "L6 direct lighting is not sampling variable resident-atlas pages safely");
+        require(sodiumFormula.contains("visibility = 0.0;")
+                        && sodiumFormula.contains(
+                        "if (shadowState == 1u || shadowState == 2u)")
+                        && before(sodiumFormula,
+                        "visibility = 0.0;",
+                        "if (shadowState == 1u || shadowState == 2u)")
+                        && countOccurrences(sodiumFragment,
+                        "return metallumVoxelDdaVisibilityV1(") == 0,
+                "L6 production descriptors do not keep DDA unreachable and fail closed");
+        int ddaStart = sodiumFragment.indexOf("float metallumVoxelDdaVisibilityV1(");
+        int ddaEnd = sodiumFragment.indexOf("float metallumVoxelCachedVisibilityV1(", ddaStart);
+        require(ddaStart >= 0 && ddaEnd > ddaStart,
+                "L6 exact DDA fallback helper is missing");
+        String ddaFormula = sodiumFragment.substring(ddaStart, ddaEnd);
         require(sodiumFragment.contains(
                         "for (uint hardStep = 0u; hardStep < maxSteps; ++hardStep)")
                         && !sodiumFragment.contains("if (hardStep >= maxSteps)")
-                        && sodiumFragment.contains("return 1.0;")
+                        && !ddaFormula.contains("return 1.0;")
+                        && ddaFormula.contains("return visibility;")
+                        && before(ddaFormula, "return visibility;", "return 0.0;")
                         && sodiumFragment.contains(
                         "bool powerOfTwoAddressing = metallumPowerOfTwoV1(subdivisionInt)")
                         && sodiumFragment.contains(
@@ -434,9 +497,47 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumVoxelShadow.proxyAndFrame.zw")
                         && sodiumFragment.contains(
                         "metallumLighting.frameIdAndGeneration.xy")
-                        && sodiumFragment.contains(
-                        "mat3(metallumVoxelShadow.worldFromView) * receiverViewPosition"),
-                "L6 DDA lost its bounded toroidal/tag/optical fail-open contract");
+                        && ddaFormula.contains("vec3 receiverCameraRelative,")
+                        && ddaFormula.contains("vec3 receiverWorldRelative,")
+                        && ddaFormula.contains("vec3 receiverWorldNormal,")
+                        && !ddaFormula.contains("receiverViewPosition")
+                        && !ddaFormula.contains("receiverViewNormal"),
+                "L6 DDA lost its bounded toroidal/tag/optical fail-closed contract");
+        int visibilityStart = sodiumFragment.indexOf("float metallumVoxelVisibilityV1(");
+        int visibilityEnd = sodiumFragment.indexOf(
+                "uint metallumClusterIndexV1(", visibilityStart);
+        require(visibilityStart >= 0 && visibilityEnd > visibilityStart,
+                "L6 atlas visibility helper is missing");
+        String visibilityFormula = sodiumFragment.substring(visibilityStart, visibilityEnd);
+        String receiverPositionTransform =
+                "mat3(metallumVoxelShadow.worldFromView) * viewPosition";
+        String receiverNormalTransform =
+                "mat3(metallumVoxelShadow.worldFromView) * normal";
+        int visibilityCallStart = sodiumFormula.indexOf(
+                "visibility = metallumVoxelVisibilityV1(");
+        int visibilityCallEnd = sodiumFormula.indexOf(");", visibilityCallStart);
+        require(visibilityCallStart >= 0 && visibilityCallEnd > visibilityCallStart,
+                "L6 per-light visibility call is missing");
+        String visibilityCall = sodiumFormula.substring(visibilityCallStart, visibilityCallEnd);
+        require(countOccurrences(sodiumFragment, receiverPositionTransform) == 1
+                        && countOccurrences(sodiumFragment, receiverNormalTransform) == 1
+                        && before(sodiumFormula,
+                        "vec3 receiverCameraRelative =",
+                        "for (uint candidate = 0u; candidate < countLimit; ++candidate)")
+                        && before(sodiumFormula,
+                        "vec3 receiverWorldNormal =",
+                        "for (uint candidate = 0u; candidate < countLimit; ++candidate)")
+                        && !visibilityFormula.contains(receiverPositionTransform)
+                        && !visibilityFormula.contains(receiverNormalTransform)
+                        && !ddaFormula.contains(receiverPositionTransform)
+                        && !ddaFormula.contains(receiverNormalTransform)
+                        && before(visibilityCall,
+                        "receiverCameraRelative,", "receiverWorldRelative,")
+                        && before(visibilityCall,
+                        "receiverWorldRelative,", "receiverWorldNormal,")
+                        && before(visibilityCall,
+                        "receiverWorldNormal,", "light.positionRadius.xyz,"),
+                "L6 receiver shadow context is not hoisted once outside the per-light loop");
         require(sodiumFragment.contains(
                         "for (uint proxyIndex = 0u; proxyIndex < 32u; ++proxyIndex)")
                         && sodiumFragment.contains("proxyCapacity > 32u")
@@ -548,7 +649,7 @@ public final class AdvancedDirectLightingShaderTests {
                 );
         require(!collision.success() && collision.failureReason().contains("slot 29"),
                 "occupied Advanced buffer slot did not fail closed");
-        for (int slot : new int[]{14, 15, 16, 17, 22, 25}) {
+        for (int slot : new int[]{13, 14, 15, 16, 17, 22, 25}) {
             String l6Collision = materialFragment.replace(
                     "out vec4 fragColor;",
                     "layout(std430, binding = " + slot
@@ -582,10 +683,10 @@ public final class AdvancedDirectLightingShaderTests {
                 "metallumDirectNormal",
                 "metallumPreparedAlbedo",
                 "MetallumVoxelVisibilityCacheV1",
+                "MetallumVoxelShadowRefsV1",
                 "metallumVoxelDdaVisibilityV1",
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
-                "metallumVoxelShadowLightSlotV1",
                 "MetallumVoxelProxyV1"
         }) {
             String helperCollision = materialFragment.replace(
@@ -735,6 +836,8 @@ public final class AdvancedDirectLightingShaderTests {
                 ENTITY_EMISSIVE_DEFINES);
         compilePair("minecraft-banner-pattern", entityVertex, entityFragment,
                 ENTITY_BANNER_PATTERN_DEFINES);
+        compilePair("minecraft-end-crystal-beam", entityVertex, entityFragment,
+                END_CRYSTAL_BEAM_DEFINES);
         compilePair("minecraft-energy-swirl", entityVertex, entityFragment,
                 ENTITY_ENERGY_SWIRL_DEFINES);
         compilePair("minecraft-entity-dissolve", entityVertex, entityFragment,
@@ -912,7 +1015,9 @@ public final class AdvancedDirectLightingShaderTests {
                             Map.entry(AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,
                                     (long) AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE),
                             Map.entry(AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
-                                    (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE)
+                                    (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE),
+                            Map.entry(VoxelShadowBindingAbi.SHADOW_REF_BUFFER_SLOT,
+                                    (long) VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_STRIDE_BYTES)
                     )),
                     name + " compiled storage-buffer ABI changed: " + storage.bytes());
             require(storage.paramsOffsets().equals(List.of(
@@ -929,6 +1034,8 @@ public final class AdvancedDirectLightingShaderTests {
                     name + " compiled L6 matrix stride changed: "
                             + storage.voxelParamsMatrixStride());
             String fragmentMsl = toDecorationBoundMsl(fragmentModule);
+            require(!fragmentMsl.contains("spvBufferSizeConstants"),
+                    name + " unexpectedly requires an unbound SPIRV-Cross size buffer");
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
                 require(fragmentMsl.contains("[[buffer(" + slot + ")]]"),
                         name + " SPIRV-Cross output lost Metal fragment slot " + slot);
@@ -946,9 +1053,13 @@ public final class AdvancedDirectLightingShaderTests {
             for (int slot = VoxelShadowBindingAbi.OCCUPANCY_TEXTURE_0_SLOT;
                  slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
                  slot++) {
-                require(!fragmentMsl.contains("[[buffer(" + slot + ")]]"),
-                        name + " retained dead per-fragment L6 DDA resource slot " + slot);
+                int occurrences = countOccurrences(fragmentMsl, "[[buffer(" + slot + ")]]");
+                require(occurrences == 0,
+                        name + " SPIRV-Cross output retained unreachable L6 DDA slot "
+                                + slot + ": occurrences=" + occurrences);
             }
+            require(fragmentMsl.contains("[[buffer(13)]]"),
+                    name + " SPIRV-Cross output lost L6 descriptor slot");
             for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
                 require(fragmentMsl.contains("[[texture(" + slot + ")]]")
                                 && fragmentMsl.contains("[[sampler(" + slot + ")]]"),

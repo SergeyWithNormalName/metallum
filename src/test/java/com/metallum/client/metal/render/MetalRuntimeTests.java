@@ -11,20 +11,17 @@ import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearClearColor;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.AdvancedLight;
-import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.LightSourceKind;
-import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.ShadowEmitterFootprint;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.LightingPreset;
+import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.temporal.FrameState;
-import com.metallum.client.voxel.VoxelClipmapSnapshot;
-import com.metallum.client.voxel.VoxelWorldToken;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -41,6 +38,7 @@ import net.minecraft.client.renderer.RenderPipelines;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -66,8 +64,7 @@ public final class MetalRuntimeTests {
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
         testGpuTimingDetailGate();
-        testLocalShadowDiagnosticCap();
-        testLocalShadowLightSelection();
+        testLocalShadowResidentAtlasContracts();
         testJavaWorkloadTelemetryGateAndReset();
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
@@ -108,63 +105,101 @@ public final class MetalRuntimeTests {
                 "cached L6 MSL unexpectedly required a dead DDA traversal loop");
     }
 
-    private static void testLocalShadowDiagnosticCap() {
-        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, false, "0") == 2,
-                "release timing accepted the diagnostic L6 light cap");
-        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, null) == 2
-                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "") == 2
-                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "broken") == 2
-                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "3") == 2,
-                "invalid diagnostic L6 light cap changed production work");
-        require(LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "0") == 0
-                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, " 1 ") == 1
-                        && LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(2, true, "2") == 2,
-                "bounded diagnostic L6 light cap was not applied");
-        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.diagnosticShadowedLocalLights(
-                LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1, true, "0"));
-    }
+    private static void testLocalShadowResidentAtlasContracts() {
+        ByteBuffer staging = ByteBuffer.allocateDirect(8);
+        staging.position(2);
+        LocalVoxelShadowGpuResources.copyPagePayload(
+                staging, new byte[]{11, 22, 33, 44}
+        );
+        require(staging.position() == 6
+                        && staging.get(2) == 11 && staging.get(3) == 22
+                        && staging.get(4) == 33 && staging.get(5) == 44,
+                "L6 heap page payload was not copied safely into mapped staging");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.copyPagePayload(
+                ByteBuffer.allocateDirect(3), new byte[4]
+        ));
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.copyPagePayload(
+                ByteBuffer.allocateDirect(4).asReadOnlyBuffer(), new byte[4]
+        ));
 
-    private static void testLocalShadowLightSelection() {
-        LightWorldToken world = new LightWorldToken(1L, "minecraft:overworld");
-        List<AdvancedLight> lights = List.of(
-                new AdvancedLight(1L, 1L, LightSourceKind.BLOCK,
-                        200.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 30),
-                new AdvancedLight(4L, 1L, LightSourceKind.ENTITY,
-                        1.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 20),
-                new AdvancedLight(2L, 1L, LightSourceKind.BLOCK,
-                        40.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10),
-                new AdvancedLight(3L, 1L, LightSourceKind.BLOCK,
-                        5.0, 64.0, 0.0, 12.0f, 1.0f, 0.8f, 0.5f, 1.0f, 10)
-        );
-        LightFrameSnapshot lightSnapshot = new LightFrameSnapshot(
-                LightFrameSnapshot.CURRENT_VERSION,
-                world,
-                1L,
-                lights,
-                3,
-                1,
-                0
-        );
-        VoxelClipmapSnapshot voxelSnapshot = new VoxelClipmapSnapshot(
-                new VoxelWorldToken(1L, "minecraft:overworld"),
-                1L,
-                List.of(new VoxelClipmapSnapshot.Level(0, 1, 256, -4, 0, -4, 8))
-        );
-        FrameState.CameraPosition camera = new FrameState.CameraPosition(0.0, 64.0, 0.0);
+        int lightCount = 96;
+        int descriptorCapacity = 128;
+        ByteBuffer descriptors = ByteBuffer.allocate(
+                descriptorCapacity * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES
+        ).order(ByteOrder.nativeOrder());
+        int ddaCap = LocalVoxelShadowGpuResources.ddaFallbackBudget(LightingPreset.BALANCED);
+        for (int index = 0; index < lightCount; index++) {
+            int state = LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                    true, false, false
+            );
+            LocalVoxelShadowGpuResources.packDescriptor(
+                    descriptors, index, state, 0L, 0
+            );
+        }
+        LocalVoxelShadowGpuResources.DescriptorCoverage coverage =
+                LocalVoxelShadowGpuResources.descriptorCoverage(descriptors, lightCount);
+        require(coverage.total() == lightCount
+                        && coverage.ddaFallback() == ddaCap
+                        && coverage.building() == lightCount - ddaCap
+                        && coverage.ready() == 0 && coverage.stale() == 0
+                        && coverage.failClosed() == 0,
+                "64+ L6 upload lights lost exact bounded descriptor coverage");
+        for (int offset = lightCount * LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES;
+             offset < descriptors.capacity(); offset++) {
+            require(descriptors.get(offset) == 0,
+                    "unused L6 descriptor tail was not zeroed");
+        }
 
-        int[] none = LocalVoxelShadowGpuResources.selectShadowLightIndices(
-                lightSnapshot, voxelSnapshot, camera, 0);
-        int[] one = LocalVoxelShadowGpuResources.selectShadowLightIndices(
-                lightSnapshot, voxelSnapshot, camera, 1);
-        int[] two = LocalVoxelShadowGpuResources.selectShadowLightIndices(
-                lightSnapshot, voxelSnapshot, camera, 2);
-        require(none[0] == -1 && none[1] == -1,
-                "zero L6 cap selected an upload light");
-        require(one[0] == 3 && one[1] == -1,
-                "L6 did not choose the nearest clipmap-covered light");
-        require(two[0] == 3 && two[1] == 2,
-                "L6 did not reject uncovered or moving emitters from the static cache");
-        AdvancedLight footprintA = new AdvancedLight(
+        require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                        true, false, false
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_BUILDING,
+                "cache-eligible emitter stopped waiting for its page");
+        require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                        false, false, true
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED
+                        && LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                        true, false, true
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED,
+                "irrecoverable page failure did not fail closed");
+        require(LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                        true, true, false
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED
+                        && LocalVoxelShadowGpuResources.uncachedDescriptorState(
+                        false, true, false
+                ) == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_FAIL_CLOSED,
+                "atlas-full source escaped fail-closed policy");
+
+        require(LocalVoxelShadowGpuResources.uploadBudget(LightingPreset.PERFORMANCE)
+                        .equals(new LocalVoxelShadowGpuResources.UploadBudget(4, 1L << 20))
+                        && LocalVoxelShadowGpuResources.uploadBudget(LightingPreset.BALANCED)
+                        .equals(new LocalVoxelShadowGpuResources.UploadBudget(8, 2L << 20))
+                        && LocalVoxelShadowGpuResources.uploadBudget(LightingPreset.ULTRA)
+                        .equals(new LocalVoxelShadowGpuResources.UploadBudget(12, 4L << 20))
+                        && LocalVoxelShadowGpuResources.pendingPayloadBudget(
+                        LightingPreset.PERFORMANCE) == 8L << 20
+                        && LocalVoxelShadowGpuResources.pendingPayloadBudget(
+                        LightingPreset.BALANCED) == 16L << 20
+                        && LocalVoxelShadowGpuResources.pendingPayloadBudget(
+                        LightingPreset.ULTRA) == 32L << 20,
+                "L6 pending/upload work lost its per-frame and retained byte caps");
+        long oldOffset = 0x00000002_00000100L;
+        LocalVoxelShadowGpuResources.packDescriptor(
+                descriptors, 0,
+                LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED,
+                oldOffset, 16
+        );
+        require(descriptors.getInt(
+                        LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET
+                ) == 0x100
+                        && descriptors.getInt(
+                        LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET
+                ) == 2
+                        && descriptors.getInt(
+                        LocalVoxelShadowAtlasLayout.DESCRIPTOR_PAGE_EDGE_OFFSET
+                ) == 16,
+                "resolution replacement stopped retaining the old 64-bit atlas reference");
+
+        AdvancedLight stable = new AdvancedLight(
                 8L, 1L, LightSourceKind.BLOCK,
                 4.0, 64.0, 0.0, 12.0f,
                 1.0f, 0.8f, 0.5f, 1.0f, 10, true,
@@ -173,21 +208,47 @@ public final class MetalRuntimeTests {
                         new ShadowEmitterFootprint.Block(4, 64, 0)
                 ))
         );
-        AdvancedLight footprintB = new AdvancedLight(
-                8L, 1L, LightSourceKind.BLOCK,
-                4.0, 64.0, 0.0, 12.0f,
-                1.0f, 0.8f, 0.5f, 1.0f, 10, true,
-                ShadowEmitterFootprint.of(List.of(
-                        new ShadowEmitterFootprint.Block(4, 64, 0),
-                        new ShadowEmitterFootprint.Block(5, 64, 0)
-                ))
-        );
-        require(!LocalVoxelShadowGpuResources.CacheLightKey.of(footprintA).equals(
-                        LocalVoxelShadowGpuResources.CacheLightKey.of(footprintB)),
-                "changed compacted-emitter membership reused a stale L6 visibility cache");
-        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.selectShadowLightIndices(
-                lightSnapshot, voxelSnapshot, camera,
-                LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS + 1));
+        require(LocalVoxelShadowGpuResources.CacheLightKey.of(stable).equals(
+                        LocalVoxelShadowGpuResources.CacheLightKey.of(stable))
+                        && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 80.0, 16) == 16
+                        && LocalVoxelShadowGpuResources.desiredEdge(12.0f, 77.0, 16) == 16,
+                "stable-id source or camera guard band churned a resident page");
+
+        LocalVoxelShadowGpuResources.PreparedFrame prepared =
+                new LocalVoxelShadowGpuResources.PreparedFrame(
+                        true, 2, 3, 41L,
+                        15, 2, 3, 1, 4, 5,
+                        0, 10, 8, 3, 16384L, 1, 2, 8192L
+                );
+        require(prepared.descriptorLights() == 15
+                        && prepared.readyLights() == 2
+                        && prepared.staleLights() == 3
+                        && prepared.ddaFallbackLights() == 1
+                        && prepared.buildingLights() == 4
+                        && prepared.failClosedLights() == 5
+                        && prepared.unshadowedContributingLights() == 0
+                        && prepared.pendingBuilds() == 8
+                        && prepared.pendingUploads() == 3
+                        && prepared.pendingPayloadBytes() == 16384L
+                        && prepared.capacityBlockedLights() == 1
+                        && prepared.cacheUploads() == 2
+                        && prepared.cacheUploadBytes() == 8192L,
+                "L6 prepared-frame telemetry lost a descriptor state");
+        expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
+                true, 2, 3, 41L,
+                14, 2, 3, 1, 4, 5,
+                0, 10, 8, 3, 16384L, 1, 2, 8192L
+        ));
+        expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
+                true, 2, 3, 41L,
+                15, 2, 3, 1, 4, 5,
+                1, 10, 8, 3, 16384L, 1, 2, 8192L
+        ));
+        expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
+                true, 2, 3, 41L,
+                15, 2, 3, 1, 4, 5,
+                0, 10, 8, 3, 16384L, 1, 2, -1L
+        ));
     }
 
     private static void testCanonicalShaderResourceLayout() {
@@ -337,12 +398,14 @@ public final class MetalRuntimeTests {
         require(localShadowed.passCount() == shadowed.passCount()
                         && localShadowed.encoderCount() == shadowed.encoderCount()
                         && localShadowed.psoCount() == shadowed.psoCount()
-                        && localShadowed.workQueueCount() == 3
+                        && localShadowed.workQueueCount() == 4
                         && localShadowed.uploadBytes() == shadowed.uploadBytes()
                         + com.metallum.client.renderer.LocalVoxelShadowLayout.PARAMS_BYTES
                         + (long) localBudget.maxEntityProxies()
-                        * com.metallum.client.renderer.LocalVoxelShadowLayout.PROXY_STRIDE_BYTES,
-                "L6 local-shadow packet/proxy work is not explicitly bounded");
+                        * com.metallum.client.renderer.LocalVoxelShadowLayout.PROXY_STRIDE_BYTES
+                        + localBudget.shadowReferenceRingBytes()
+                        / LocalVoxelShadowAtlasLayout.DESCRIPTOR_RING_SLOTS,
+                "L6 local-shadow packet/proxy/reference work is not explicitly bounded");
         FrameState.AdvancedLightingWork voxel = MetalDevice.withVoxelWork(populated, 3, 4096L);
         require(voxel.lightCount() == 2
                         && voxel.passCount() == 6
@@ -779,7 +842,6 @@ public final class MetalRuntimeTests {
         );
         Map<String, String> samplerValues = Map.of("Sampler0", "texture-sampler");
         Object[] resourceSlots = new Object[Long.SIZE];
-
         List<MetalCompiledRenderPipeline.ResourceBinding> firstLayout = List.of(
                 new MetalCompiledRenderPipeline.ResourceBinding(
                         MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER,

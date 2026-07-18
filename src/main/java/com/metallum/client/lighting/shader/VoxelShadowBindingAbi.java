@@ -1,5 +1,6 @@
 package com.metallum.client.lighting.shader;
 
+import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 
 import java.util.Arrays;
@@ -19,16 +20,37 @@ public final class VoxelShadowBindingAbi {
     public static final int METADATA_BUFFER_0_SLOT = 23;
     public static final int METADATA_BUFFER_1_SLOT = 24;
     public static final int METADATA_BUFFER_2_SLOT = 25;
+    /** Resident-atlas reference table; buffer 13 is free and Metal buffer indices stop at 30. */
+    public static final int SHADOW_REF_BUFFER_SLOT = 13;
 
     public static final int PARAMS_BYTES = LocalVoxelShadowLayout.PARAMS_BYTES;
     public static final int PROXY_STRIDE_BYTES = LocalVoxelShadowLayout.PROXY_STRIDE_BYTES;
     public static final int LEVEL_COUNT = 3;
     public static final int LEVEL_STRIDE_BYTES = 32;
+    public static final int SHADOW_REF_DESCRIPTOR_STRIDE_BYTES =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STRIDE_BYTES;
+    public static final int SHADOW_REF_DESCRIPTOR_STATE_OFFSET =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_OFFSET;
+    public static final int SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET;
+    public static final int SHADOW_REF_DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_HI_OFFSET;
+    public static final int SHADOW_REF_DESCRIPTOR_PAGE_EDGE_OFFSET =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_PAGE_EDGE_OFFSET;
+    public static final int SHADOW_REF_STATE_DDA_FALLBACK =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_DDA_FALLBACK;
+    public static final int SHADOW_REF_STATE_READY =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY;
+    public static final int SHADOW_REF_STATE_STALE_RETAINED =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED;
+    public static final int SHADOW_REF_STATE_BUILDING =
+            LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_BUILDING;
 
     // Exact 256-byte Metal packet. Absolute generation values are split into two u32 words.
     public static final int WORLD_FROM_VIEW_MATRIX_OFFSET = 0;
     public static final int CAMERA_BLOCK_AND_FLAGS_OFFSET = 64;
-    public static final int SHADOW_LIGHT_INDEX_0_OFFSET = CAMERA_BLOCK_AND_FLAGS_OFFSET + 12;
+    /** Number of eight-byte atlas hits; replaces the retired legacy shadow-light index field. */
+    public static final int ATLAS_HIT_CAPACITY_OFFSET = CAMERA_BLOCK_AND_FLAGS_OFFSET + 12;
     public static final int CAMERA_FRACTION_AND_MIN_TRANSMITTANCE_OFFSET = 80;
     public static final int CAPS_OFFSET = 96;
     public static final int PROXY_AND_FRAME_OFFSET = 112;
@@ -62,7 +84,7 @@ public final class VoxelShadowBindingAbi {
     public static final int WORLD_GENERATION_LO_OFFSET = WORLD_AND_FLAGS_OFFSET;
     public static final int WORLD_GENERATION_HI_OFFSET = WORLD_AND_FLAGS_OFFSET + 4;
     public static final int ACTIVE_OFFSET = WORLD_AND_FLAGS_OFFSET + 8;
-    public static final int SHADOW_LIGHT_INDEX_1_OFFSET = WORLD_AND_FLAGS_OFFSET + 12;
+    public static final int WORLD_RESERVED_OFFSET = WORLD_AND_FLAGS_OFFSET + 12;
 
     private static final int[] OCCUPANCY_TEXTURE_SLOTS = {17, 18, 19};
     private static final int[] OPTICAL_TEXTURE_SLOTS = {20, 21, 22};
@@ -93,6 +115,7 @@ public final class VoxelShadowBindingAbi {
     public static boolean ownsFragmentSlot(final int slot) {
         return slot == VISIBILITY_CACHE_BUFFER_SLOT
                 || slot == PROXY_BUFFER_SLOT || slot == PARAMS_BUFFER_SLOT
+                || slot == SHADOW_REF_BUFFER_SLOT
                 || Arrays.stream(OCCUPANCY_TEXTURE_SLOTS).anyMatch(candidate -> candidate == slot)
                 || Arrays.stream(OPTICAL_TEXTURE_SLOTS).anyMatch(candidate -> candidate == slot)
                 || Arrays.stream(METADATA_BUFFER_SLOTS).anyMatch(candidate -> candidate == slot);

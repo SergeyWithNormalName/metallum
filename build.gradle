@@ -194,6 +194,14 @@ tasks.register("localVoxelShadowUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.VoxelShadowContractTests")
 }
 
+tasks.register("localShadowAtlasUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates stable resident L6 atlas allocation, leases and fail-closed overflow"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.LocalVoxelShadowAtlasResidencyTests")
+}
+
 tasks.register("voxelOccupancyBridgeValidation", JavaExec) {
 	group = "verification"
 	description = "Validates the production Java/FFM/native/Metal L5 upload bridge"
@@ -924,6 +932,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))
 	dependsOn(tasks.named("localVoxelShadowUnitTest"))
+	dependsOn(tasks.named("localShadowAtlasUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyBridgeValidation"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))

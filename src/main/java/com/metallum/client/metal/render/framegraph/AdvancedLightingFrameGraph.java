@@ -11,7 +11,7 @@ import java.util.Set;
 
 /** Versioned L3-L6 clustered, cached-shadow and voxel-visibility contract. */
 public final class AdvancedLightingFrameGraph {
-    public static final String GRAPH_ID = "advanced-clustered-cached-shadow-voxel-v4";
+    public static final String GRAPH_ID = "advanced-clustered-resident-shadow-voxel-v5";
 
     private static final FrameGraph.PassId UPLOAD = new FrameGraph.PassId(0, "light_upload");
     private static final FrameGraph.PassId PREPARE = new FrameGraph.PassId(1, "cluster_prepare");
@@ -59,6 +59,10 @@ public final class AdvancedLightingFrameGraph {
             17, "local_shadow_params_ring");
     private static final FrameGraph.ResourceId ENTITY_SHADOW_PROXIES = resource(
             18, "entity_shadow_proxies_ring");
+    private static final FrameGraph.ResourceId LOCAL_SHADOW_REFERENCES = resource(
+            19, "local_shadow_reference_ring");
+    private static final FrameGraph.ResourceId LOCAL_SHADOW_ATLAS = resource(
+            20, "local_shadow_visibility_atlas");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -201,6 +205,14 @@ public final class AdvancedLightingFrameGraph {
                                 FrameGraph.ResourceRole.SHADOW_DATA),
                         buffer(ENTITY_SHADOW_PROXIES, FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
                                 "entity_shadow_proxy_v1", true, whole,
+                                FrameGraph.ResourceRole.SHADOW_DATA),
+                        buffer(LOCAL_SHADOW_REFERENCES,
+                                FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
+                                "local_shadow_reference_v1", true, whole,
+                                FrameGraph.ResourceRole.SHADOW_DATA),
+                        buffer(LOCAL_SHADOW_ATLAS,
+                                FrameGraph.PersistenceClass.WORLD_PERSISTENT,
+                                "local_shadow_atlas_hits_v1", true, whole,
                                 FrameGraph.ResourceRole.SHADOW_DATA)
                 ),
                 List.of(
@@ -354,6 +366,10 @@ public final class AdvancedLightingFrameGraph {
                                         access(LOCAL_SHADOW_PARAMS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         access(ENTITY_SHADOW_PROXIES, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(LOCAL_SHADOW_REFERENCES, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(LOCAL_SHADOW_ATLAS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         new FrameGraph.ResourceAccess(
                                                 SCENE,

@@ -1474,14 +1474,30 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     proxySnapshot,
                                     lightSnapshot
                             );
-                    if (MetalGpuTiming.isEnabled() && (submitIndex + 1L) % 300L == 0L) {
+                    localPrepared = localShadowResources.uploadPending(this.commandEncoder);
+                    if (MetalGpuTiming.isReportEnabled()
+                            && (submitIndex + 1L) % 300L == 0L) {
                         Metallum.LOGGER.info(
-                                "L6 local shadows: active={}, shadowedLights={}, maxSteps={}, proxies={}/{}",
+                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, DDA={}, BUILDING={}, FAIL_CLOSED={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, unshadowedContributing={}",
                                 localPrepared.active(),
-                                localPrepared.shadowedLocalLights(),
-                                localShadowResources.budget().maxSteps(),
+                                localPrepared.descriptorLights(),
+                                lightSnapshot.lights().size(),
+                                localPrepared.readyLights(),
+                                localPrepared.staleLights(),
+                                localPrepared.ddaFallbackLights(),
+                                localPrepared.buildingLights(),
+                                localPrepared.failClosedLights(),
+                                localPrepared.residentPages(),
+                                localPrepared.pendingBuilds(),
+                                localPrepared.pendingUploads(),
+                                localPrepared.pendingPayloadBytes(),
+                                localPrepared.capacityBlockedLights(),
+                                localPrepared.cacheUploads(),
+                                localPrepared.cacheUploadBytes(),
                                 localPrepared.proxyCount(),
-                                localShadowResources.budget().maxEntityProxies()
+                                localShadowResources.budget().maxEntityProxies(),
+                                localShadowResources.budget().maxSteps(),
+                                localPrepared.unshadowedContributingLights()
                         );
                     }
                     this.advancedLightingFrameSubmitIndex = submitIndex;
