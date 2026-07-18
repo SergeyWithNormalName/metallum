@@ -858,82 +858,69 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return 0.0;
             }
 
-            float metallumVoxelCachedVisibilityV1(
+            vec3 metallumVoxelCubeFaceUvV1(vec3 direction) {
+                vec3 magnitude = abs(direction);
+                float major = max(magnitude.x, max(magnitude.y, magnitude.z));
+                if (!metallumFiniteVec3V1(direction)
+                        || !(major > 0.000001) || isnan(major) || isinf(major)) {
+                    return vec3(-1.0);
+                }
+                if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+                    if (direction.x >= 0.0) {
+                        return vec3(0.0, vec2(-direction.z, -direction.y) / major);
+                    }
+                    return vec3(1.0, vec2(direction.z, -direction.y) / major);
+                }
+                if (magnitude.y >= magnitude.z) {
+                    if (direction.y >= 0.0) {
+                        return vec3(2.0, vec2(direction.x, direction.z) / major);
+                    }
+                    return vec3(3.0, vec2(direction.x, -direction.z) / major);
+                }
+                if (direction.z >= 0.0) {
+                    return vec3(4.0, vec2(direction.x, -direction.y) / major);
+                }
+                return vec3(5.0, vec2(-direction.x, -direction.y) / major);
+            }
+
+            vec3 metallumVoxelCubeDirectionV1(uint face, vec2 uv) {
+                if (face == 0u) {
+                    return vec3(1.0, -uv.y, -uv.x);
+                }
+                if (face == 1u) {
+                    return vec3(-1.0, -uv.y, uv.x);
+                }
+                if (face == 2u) {
+                    return vec3(uv.x, 1.0, uv.y);
+                }
+                if (face == 3u) {
+                    return vec3(uv.x, -1.0, -uv.y);
+                }
+                if (face == 4u) {
+                    return vec3(uv.x, -uv.y, 1.0);
+                }
+                if (face == 5u) {
+                    return vec3(-uv.x, -uv.y, -1.0);
+                }
+                return vec3(0.0);
+            }
+
+            float metallumVoxelCachedTexelVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
+                    uint face,
+                    ivec2 texel,
                     vec3 lightToReceiver,
                     float receiverDistance,
                     vec3 receiverWorldNormal) {
-                if (!metallumFiniteVec3V1(lightToReceiver)
-                        || !(receiverDistance > 0.0001)
-                        || isnan(receiverDistance) || isinf(receiverDistance)
-                        || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
-                        && cacheFaceEdge != 32u && cacheFaceEdge != 64u)) {
+                if (face >= 6u || any(lessThan(texel, ivec2(0)))
+                        || any(greaterThanEqual(texel, ivec2(int(cacheFaceEdge))))) {
                     return 0.0;
-                }
-                uint faceTexels = cacheFaceEdge * cacheFaceEdge;
-                uint pageHitCount = faceTexels * 6u * 4u;
-                int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;
-                if (atlasHitCountSigned <= 0) {
-                    return 0.0;
-                }
-                uint atlasHitCount = uint(atlasHitCountSigned);
-                if (baseHitIndex > atlasHitCount
-                        || pageHitCount > atlasHitCount - baseHitIndex) {
-                    return 0.0;
-                }
-                vec3 magnitude = abs(lightToReceiver);
-                float major = max(magnitude.x, max(magnitude.y, magnitude.z));
-                if (!(major > 0.000001) || isnan(major) || isinf(major)) {
-                    return 0.0;
-                }
-
-                uint face;
-                vec2 uv;
-                if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
-                    if (lightToReceiver.x >= 0.0) {
-                        face = 0u;
-                        uv = vec2(-lightToReceiver.z, -lightToReceiver.y) / major;
-                    } else {
-                        face = 1u;
-                        uv = vec2(lightToReceiver.z, -lightToReceiver.y) / major;
-                    }
-                } else if (magnitude.y >= magnitude.z) {
-                    if (lightToReceiver.y >= 0.0) {
-                        face = 2u;
-                        uv = vec2(lightToReceiver.x, lightToReceiver.z) / major;
-                    } else {
-                        face = 3u;
-                        uv = vec2(lightToReceiver.x, -lightToReceiver.z) / major;
-                    }
-                } else if (lightToReceiver.z >= 0.0) {
-                    face = 4u;
-                    uv = vec2(lightToReceiver.x, -lightToReceiver.y) / major;
-                } else {
-                    face = 5u;
-                    uv = vec2(-lightToReceiver.x, -lightToReceiver.y) / major;
                 }
                 float cacheFaceEdgeFloat = float(cacheFaceEdge);
-                ivec2 texel = clamp(
-                        ivec2(floor((uv * 0.5 + 0.5) * cacheFaceEdgeFloat)),
-                        ivec2(0),
-                        ivec2(int(cacheFaceEdge) - 1));
                 vec2 texelUv = (vec2(texel) + vec2(0.5))
                         * (2.0 / cacheFaceEdgeFloat) - 1.0;
-                vec3 cacheDirection;
-                if (face == 0u) {
-                    cacheDirection = vec3(1.0, -texelUv.y, -texelUv.x);
-                } else if (face == 1u) {
-                    cacheDirection = vec3(-1.0, -texelUv.y, texelUv.x);
-                } else if (face == 2u) {
-                    cacheDirection = vec3(texelUv.x, 1.0, texelUv.y);
-                } else if (face == 3u) {
-                    cacheDirection = vec3(texelUv.x, -1.0, -texelUv.y);
-                } else if (face == 4u) {
-                    cacheDirection = vec3(texelUv.x, -texelUv.y, 1.0);
-                } else {
-                    cacheDirection = vec3(-texelUv.x, -texelUv.y, -1.0);
-                }
+                vec3 cacheDirection = metallumVoxelCubeDirectionV1(face, texelUv);
                 float cacheDirectionLengthSquared = dot(cacheDirection, cacheDirection);
                 if (!(cacheDirectionLengthSquared > 0.000001)
                         || !metallumFiniteVec3V1(cacheDirection)) {
@@ -984,6 +971,212 @@ public final class AdvancedDirectLightingShaderPatcher {
                     }
                 }
                 return visibility;
+            }
+
+            uvec3 metallumVoxelResolveTapV1(
+                    uint cacheFaceEdge,
+                    uint sourceFace,
+                    ivec2 logicalTexel) {
+                bool tapInsideFace = all(greaterThanEqual(logicalTexel, ivec2(0)))
+                        && all(lessThan(logicalTexel, ivec2(int(cacheFaceEdge))));
+                if (tapInsideFace) {
+                    return uvec3(sourceFace, uvec2(logicalTexel));
+                }
+                float cacheFaceEdgeFloat = float(cacheFaceEdge);
+                vec2 logicalUv = (vec2(logicalTexel) + vec2(0.5))
+                        * (2.0 / cacheFaceEdgeFloat) - 1.0;
+                vec3 tapDirection = metallumVoxelCubeDirectionV1(sourceFace, logicalUv);
+                vec3 tapFaceUv = metallumVoxelCubeFaceUvV1(tapDirection);
+                if (tapFaceUv.x < 0.0 || tapFaceUv.x >= 6.0) {
+                    return uvec3(6u, 0u, 0u);
+                }
+                uint tapFace = uint(tapFaceUv.x);
+                ivec2 tapTexel = clamp(
+                        ivec2(floor((tapFaceUv.yz * 0.5 + 0.5)
+                        * cacheFaceEdgeFloat)),
+                        ivec2(0),
+                        ivec2(int(cacheFaceEdge) - 1));
+                return uvec3(tapFace, uvec2(tapTexel));
+            }
+
+            uint metallumVoxelTapIdV1(uvec3 tap, uint cacheFaceEdge) {
+                if (tap.x >= 6u || tap.y >= cacheFaceEdge || tap.z >= cacheFaceEdge) {
+                    return 0xffffffffu;
+                }
+                return (tap.x * cacheFaceEdge + tap.z) * cacheFaceEdge + tap.y;
+            }
+
+            float metallumVoxelResolvedTapVisibilityV1(
+                    uint baseHitIndex,
+                    uint cacheFaceEdge,
+                    uvec3 tap,
+                    vec3 lightToReceiver,
+                    float receiverDistance,
+                    vec3 receiverWorldNormal) {
+                if (tap.x >= 6u || tap.y >= cacheFaceEdge || tap.z >= cacheFaceEdge) {
+                    return 0.0;
+                }
+                return metallumVoxelCachedTexelVisibilityV1(
+                        baseHitIndex,
+                        cacheFaceEdge,
+                        tap.x,
+                        ivec2(tap.yz),
+                        lightToReceiver,
+                        receiverDistance,
+                        receiverWorldNormal);
+            }
+
+            float metallumVoxelFilteredTapVisibilityV1(
+                    uint baseHitIndex,
+                    uint cacheFaceEdge,
+                    uint sourceFace,
+                    ivec2 logicalTexel,
+                    vec3 lightToReceiver,
+                    float receiverDistance,
+                    vec3 receiverWorldNormal) {
+                uvec3 tap = metallumVoxelResolveTapV1(
+                        cacheFaceEdge, sourceFace, logicalTexel);
+                return metallumVoxelResolvedTapVisibilityV1(
+                        baseHitIndex, cacheFaceEdge, tap,
+                        lightToReceiver, receiverDistance, receiverWorldNormal);
+            }
+
+            float metallumVoxelCachedVisibilityV1(
+                    uint baseHitIndex,
+                    uint cacheFaceEdge,
+                    vec3 lightToReceiver,
+                    float receiverDistance,
+                    vec3 receiverWorldNormal) {
+                if (!metallumFiniteVec3V1(lightToReceiver)
+                        || !(receiverDistance > 0.0001)
+                        || isnan(receiverDistance) || isinf(receiverDistance)
+                        || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
+                        && cacheFaceEdge != 32u && cacheFaceEdge != 64u)) {
+                    return 0.0;
+                }
+                uint faceTexels = cacheFaceEdge * cacheFaceEdge;
+                uint pageHitCount = faceTexels * 6u * 4u;
+                int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;
+                if (atlasHitCountSigned <= 0) {
+                    return 0.0;
+                }
+                uint atlasHitCount = uint(atlasHitCountSigned);
+                if (baseHitIndex > atlasHitCount
+                        || pageHitCount > atlasHitCount - baseHitIndex) {
+                    return 0.0;
+                }
+                vec3 faceUv = metallumVoxelCubeFaceUvV1(lightToReceiver);
+                if (faceUv.x < 0.0 || faceUv.x >= 6.0) {
+                    return 0.0;
+                }
+                uint face = uint(faceUv.x);
+                float cacheFaceEdgeFloat = float(cacheFaceEdge);
+                vec2 texelPosition = (faceUv.yz * 0.5 + 0.5)
+                        * cacheFaceEdgeFloat - vec2(0.5);
+                ivec2 nearestTexel = clamp(
+                        ivec2(floor(texelPosition + vec2(0.5))),
+                        ivec2(0),
+                        ivec2(int(cacheFaceEdge) - 1));
+                if (cacheFaceEdge >= 32u) {
+                    return metallumVoxelCachedTexelVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face, nearestTexel,
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                }
+                float filterHalfWidth = 0.20;
+                ivec2 lowerTexel = ivec2(floor(texelPosition));
+                vec2 cellFraction = texelPosition - vec2(lowerTexel);
+                vec2 blend = smoothstep(
+                        vec2(0.5 - filterHalfWidth),
+                        vec2(0.5 + filterHalfWidth),
+                        cellFraction);
+                bool blendX = blend.x > 0.0 && blend.x < 1.0;
+                bool blendY = blend.y > 0.0 && blend.y < 1.0;
+                if (!blendX && !blendY) {
+                    return metallumVoxelCachedTexelVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face, nearestTexel,
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                }
+                if (!blendX) {
+                    int snappedX = blend.x >= 0.5 ? 1 : 0;
+                    float visibilityLower = metallumVoxelFilteredTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face,
+                            lowerTexel + ivec2(snappedX, 0),
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    float visibilityUpper = metallumVoxelFilteredTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face,
+                            lowerTexel + ivec2(snappedX, 1),
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    return mix(visibilityLower, visibilityUpper, blend.y);
+                }
+                if (!blendY) {
+                    int snappedY = blend.y >= 0.5 ? 1 : 0;
+                    float visibilityLower = metallumVoxelFilteredTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face,
+                            lowerTexel + ivec2(0, snappedY),
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    float visibilityUpper = metallumVoxelFilteredTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, face,
+                            lowerTexel + ivec2(1, snappedY),
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    return mix(visibilityLower, visibilityUpper, blend.x);
+                }
+                uvec3 tap00 = metallumVoxelResolveTapV1(
+                        cacheFaceEdge, face, lowerTexel);
+                uvec3 tap10 = metallumVoxelResolveTapV1(
+                        cacheFaceEdge, face, lowerTexel + ivec2(1, 0));
+                uvec3 tap01 = metallumVoxelResolveTapV1(
+                        cacheFaceEdge, face, lowerTexel + ivec2(0, 1));
+                uvec3 tap11 = metallumVoxelResolveTapV1(
+                        cacheFaceEdge, face, lowerTexel + ivec2(1, 1));
+                uint id00 = metallumVoxelTapIdV1(tap00, cacheFaceEdge);
+                uint id10 = metallumVoxelTapIdV1(tap10, cacheFaceEdge);
+                uint id01 = metallumVoxelTapIdV1(tap01, cacheFaceEdge);
+                uint id11 = metallumVoxelTapIdV1(tap11, cacheFaceEdge);
+                uvec2 diagonal00And11 = uvec2(min(id00, id11), max(id00, id11));
+                uvec2 diagonal10And01 = uvec2(min(id10, id01), max(id10, id01));
+                bool use00And11 = diagonal00And11.x < diagonal10And01.x
+                        || (diagonal00And11.x == diagonal10And01.x
+                        && diagonal00And11.y <= diagonal10And01.y);
+                uvec3 selectedTap0;
+                uvec3 selectedTap1;
+                uvec3 selectedTap2;
+                vec3 selectedWeight;
+                if (use00And11 && blend.x >= blend.y) {
+                    selectedTap0 = tap00;
+                    selectedTap1 = tap10;
+                    selectedTap2 = tap11;
+                    selectedWeight = vec3(
+                            1.0 - blend.x, blend.x - blend.y, blend.y);
+                } else if (use00And11) {
+                    selectedTap0 = tap00;
+                    selectedTap1 = tap01;
+                    selectedTap2 = tap11;
+                    selectedWeight = vec3(
+                            1.0 - blend.y, blend.y - blend.x, blend.x);
+                } else if (blend.x + blend.y <= 1.0) {
+                    selectedTap0 = tap00;
+                    selectedTap1 = tap10;
+                    selectedTap2 = tap01;
+                    selectedWeight = vec3(
+                            1.0 - blend.x - blend.y, blend.x, blend.y);
+                } else {
+                    selectedTap0 = tap10;
+                    selectedTap1 = tap01;
+                    selectedTap2 = tap11;
+                    selectedWeight = vec3(
+                            1.0 - blend.y, 1.0 - blend.x,
+                            blend.x + blend.y - 1.0);
+                }
+                float visibility0 = metallumVoxelResolvedTapVisibilityV1(
+                        baseHitIndex, cacheFaceEdge, selectedTap0,
+                        lightToReceiver, receiverDistance, receiverWorldNormal);
+                float visibility1 = metallumVoxelResolvedTapVisibilityV1(
+                        baseHitIndex, cacheFaceEdge, selectedTap1,
+                        lightToReceiver, receiverDistance, receiverWorldNormal);
+                float visibility2 = metallumVoxelResolvedTapVisibilityV1(
+                        baseHitIndex, cacheFaceEdge, selectedTap2,
+                        lightToReceiver, receiverDistance, receiverWorldNormal);
+                return dot(vec3(visibility0, visibility1, visibility2), selectedWeight);
             }
 
             float metallumVoxelVisibilityV1(
@@ -1712,6 +1905,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumEvaluateClusteredDirectV1",
                 "metallumEvaluateEnvironmentV1",
                 "metallumVoxelDdaVisibilityV1",
+                "metallumVoxelCubeFaceUvV1",
+                "metallumVoxelCubeDirectionV1",
+                "metallumVoxelCachedTexelVisibilityV1",
+                "metallumVoxelResolveTapV1",
+                "metallumVoxelTapIdV1",
+                "metallumVoxelResolvedTapVisibilityV1",
+                "metallumVoxelFilteredTapVisibilityV1",
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
                 "metallumProxyVisibilityV1",

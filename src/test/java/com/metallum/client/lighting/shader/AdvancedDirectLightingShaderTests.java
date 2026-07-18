@@ -71,11 +71,11 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "6170be552efb8787c110d04266a596e7095425806da4990ae74e6f1ba6c4a862",
+            "sodium-solid-fsh", "b3efc3d6c38fd011e194fd9e85c6055408817f3c478c74f44a5771ecc21c31c5",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "e786241dae6d39130156a63d75c3762b2455793d35c39f3ee5eaa3b156ce8d94",
+            "sodium-cutout-fsh", "08e26386f545078015df91c059b2240b38c447eb5b65d7cf03498d5b2c693f0d",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "6aaa443a054b5731e42e80ecbb75e9a864e122797aeab167afba8e56ef9cc7e5"
+            "minecraft-entity-fsh", "5c7f4253ea1f78e8a00171da26e29c7eed0ef6f570fb073406583f9f0a6f6a4b"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -86,6 +86,7 @@ public final class AdvancedDirectLightingShaderTests {
         testDepthSliceBoundaries();
         testPowerOfTwoAddressingMatchesFloorArithmetic();
         testScaleInvariantSurfaceNormal();
+        testLowResolutionShadowFilterContinuity();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
         testFailClosedSourceContracts();
@@ -241,6 +242,75 @@ public final class AdvancedDirectLightingShaderTests {
                         && normalizeSurfaceNormal(Float.NaN, 0.0F, 1.0F) == null
                         && normalizeSurfaceNormal(Float.POSITIVE_INFINITY, 0.0F, 1.0F) == null,
                 "invalid derivative normals did not fail closed");
+    }
+
+    private static void testLowResolutionShadowFilterContinuity() {
+        double epsilon = 1.0e-8;
+        for (int edge : new int[]{8, 16}) {
+            for (int face = 0; face < 6; face++) {
+                for (int cellY = 1; cellY < edge - 2; cellY++) {
+                    for (int cellX = 1; cellX < edge - 2; cellX++) {
+                        double cornerX = cellX + 0.5;
+                        double cornerY = cellY + 0.5;
+                        requireShadowWeightsContinuous(
+                                edge,
+                                cubeDirection(face, texelPositionUv(edge,
+                                        cornerX - epsilon, cornerY + epsilon)),
+                                cubeDirection(face, texelPositionUv(edge,
+                                        cornerX + epsilon, cornerY - epsilon)),
+                                "interior triangle diagonal");
+                        requireShadowWeightsContinuous(
+                                edge,
+                                cubeDirection(face, texelPositionUv(edge,
+                                        cornerX - epsilon, cornerY - epsilon)),
+                                cubeDirection(face, texelPositionUv(edge,
+                                        cornerX + epsilon, cornerY + epsilon)),
+                                "interior texel corner");
+                    }
+                }
+            }
+
+            for (int firstAxis = 0; firstAxis < 3; firstAxis++) {
+                for (int secondAxis = firstAxis + 1; secondAxis < 3; secondAxis++) {
+                    int remainingAxis = 3 - firstAxis - secondAxis;
+                    for (int firstSign : new int[]{-1, 1}) {
+                        for (int secondSign : new int[]{-1, 1}) {
+                            for (int sample = 0; sample <= 64; sample++) {
+                                double remaining = -0.98 + 1.96 * sample / 64.0;
+                                double[] firstSide = new double[3];
+                                double[] secondSide = new double[3];
+                                firstSide[firstAxis] = firstSign * (1.0 + epsilon);
+                                firstSide[secondAxis] = secondSign * (1.0 - epsilon);
+                                firstSide[remainingAxis] = remaining;
+                                secondSide[firstAxis] = firstSign * (1.0 - epsilon);
+                                secondSide[secondAxis] = secondSign * (1.0 + epsilon);
+                                secondSide[remainingAxis] = remaining;
+                                requireShadowWeightsContinuous(
+                                        edge, firstSide, secondSide, "cubemap seam");
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int xSign : new int[]{-1, 1}) {
+                for (int ySign : new int[]{-1, 1}) {
+                    for (int zSign : new int[]{-1, 1}) {
+                        double[][] approaches = {
+                                {xSign * (1.0 + epsilon), ySign, zSign},
+                                {xSign, ySign * (1.0 + epsilon), zSign},
+                                {xSign, ySign, zSign * (1.0 + epsilon)}
+                        };
+                        requireShadowWeightsContinuous(
+                                edge, approaches[0], approaches[1], "cubemap corner x/y");
+                        requireShadowWeightsContinuous(
+                                edge, approaches[1], approaches[2], "cubemap corner y/z");
+                        requireShadowWeightsContinuous(
+                                edge, approaches[2], approaches[0], "cubemap corner z/x");
+                    }
+                }
+            }
+        }
     }
 
     private static void testLightingModelIsAnIndependentVariantAxis() throws IOException {
@@ -414,6 +484,35 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumVoxelVisibilityV1("),
                 "every evaluated contributing light does not consult its all-visible shadow descriptor");
         require(sodiumFragment.contains(
+                        "return uvec3(sourceFace, uvec2(logicalTexel));")
+                        && sodiumFragment.contains(
+                        "return (tap.x * cacheFaceEdge + tap.z) * cacheFaceEdge + tap.y;")
+                        && sodiumFragment.contains("float filterHalfWidth = 0.20;")
+                        && sodiumFragment.contains("if (cacheFaceEdge >= 32u)")
+                        && before(sodiumFragment,
+                        "if (cacheFaceEdge >= 32u)",
+                        "float filterHalfWidth = 0.20;")
+                        && sodiumFragment.contains(
+                        "ivec2 lowerTexel = ivec2(floor(texelPosition));")
+                        && sodiumFragment.contains("vec2 blend = smoothstep(")
+                        && sodiumFragment.contains("if (!blendX && !blendY)")
+                        && sodiumFragment.contains(
+                        "uvec2 diagonal00And11 = uvec2(min(id00, id11), max(id00, id11));")
+                        && sodiumFragment.contains(
+                        "uvec2 diagonal10And01 = uvec2(min(id10, id01), max(id10, id01));")
+                        && sodiumFragment.contains("1.0 - blend.x, blend.x - blend.y, blend.y")
+                        && sodiumFragment.contains("1.0 - blend.y, 1.0 - blend.x,")
+                        && countOccurrences(sodiumFragment,
+                        "float visibility0 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        && countOccurrences(sodiumFragment,
+                        "float visibility1 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        && countOccurrences(sodiumFragment,
+                        "float visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        && sodiumFragment.contains(
+                        "return dot(vec3(visibility0, visibility1, visibility2), selectedWeight);")
+                        && !sodiumFragment.contains("bool filterAlongX"),
+                "L6 low-resolution shadow filter lost continuous canonical triangulation");
+        require(sodiumFragment.contains(
                         "layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1")
                         && sodiumFragment.contains(
                         "for (uint layer = 0u; layer < 4u; ++layer)")
@@ -423,6 +522,12 @@ public final class AdvancedDirectLightingShaderTests {
                         "uint firstHit = baseHitIndex + texelIndex * 4u;")
                         && sodiumFragment.contains(
                         "float cacheFaceEdgeFloat = float(cacheFaceEdge);")
+                        && sodiumFragment.contains(
+                        "* cacheFaceEdgeFloat - vec2(0.5);")
+                        && sodiumFragment.contains(
+                        "vec3 tapFaceUv = metallumVoxelCubeFaceUvV1(tapDirection);")
+                        && sodiumFragment.contains(
+                        "vec3 tapDirection = metallumVoxelCubeDirectionV1(sourceFace, logicalUv);")
                         && sodiumFragment.contains("atlasByteOffset >> 3u")
                         && sodiumFragment.contains("atlasOffsetHigh != 0u")
                         && sodiumFragment.contains("(atlasByteOffset & 255u) != 0u")
@@ -686,6 +791,13 @@ public final class AdvancedDirectLightingShaderTests {
                 "MetallumVoxelVisibilityCacheV1",
                 "MetallumVoxelShadowRefsV1",
                 "metallumVoxelDdaVisibilityV1",
+                "metallumVoxelCubeFaceUvV1",
+                "metallumVoxelCubeDirectionV1",
+                "metallumVoxelCachedTexelVisibilityV1",
+                "metallumVoxelResolveTapV1",
+                "metallumVoxelTapIdV1",
+                "metallumVoxelResolvedTapVisibilityV1",
+                "metallumVoxelFilteredTapVisibilityV1",
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
                 "MetallumVoxelProxyV1"
@@ -1467,6 +1579,212 @@ public final class AdvancedDirectLightingShaderTests {
         }
     }
 
+    private static void requireShadowWeightsContinuous(
+            final int edge,
+            final double[] firstDirection,
+            final double[] secondDirection,
+            final String boundary
+    ) {
+        Map<Integer, Double> first = lowResolutionShadowWeights(edge, firstDirection);
+        Map<Integer, Double> second = lowResolutionShadowWeights(edge, secondDirection);
+        requireShadowWeightContract(edge, first, boundary + " first side");
+        requireShadowWeightContract(edge, second, boundary + " second side");
+        Set<Integer> ids = new HashSet<>(first.keySet());
+        ids.addAll(second.keySet());
+        double difference = 0.0;
+        for (int id : ids) {
+            difference += Math.abs(first.getOrDefault(id, 0.0)
+                    - second.getOrDefault(id, 0.0));
+        }
+        require(difference <= 1.0e-5,
+                boundary + " is discontinuous at " + edge + " texels: L1=" + difference);
+    }
+
+    private static void requireShadowWeightContract(
+            final int edge,
+            final Map<Integer, Double> weights,
+            final String location
+    ) {
+        require(!weights.isEmpty() && weights.size() <= 3,
+                location + " does not use one to three taps");
+        double sum = 0.0;
+        for (Map.Entry<Integer, Double> entry : weights.entrySet()) {
+            require(entry.getKey() >= 0 && entry.getKey() < 6 * edge * edge,
+                    location + " resolved an out-of-range tap");
+            require(Double.isFinite(entry.getValue()) && entry.getValue() >= 0.0,
+                    location + " produced an invalid tap weight");
+            sum += entry.getValue();
+        }
+        require(Math.abs(sum - 1.0) <= 1.0e-12,
+                location + " weights do not sum to one: " + sum);
+    }
+
+    private static Map<Integer, Double> lowResolutionShadowWeights(
+            final int edge,
+            final double[] direction
+    ) {
+        CubeFaceUv faceUv = cubeFaceUv(direction);
+        double positionX = (faceUv.u() * 0.5 + 0.5) * edge - 0.5;
+        double positionY = (faceUv.v() * 0.5 + 0.5) * edge - 0.5;
+        int nearestX = clamp((int) Math.floor(positionX + 0.5), 0, edge - 1);
+        int nearestY = clamp((int) Math.floor(positionY + 0.5), 0, edge - 1);
+        int lowerX = (int) Math.floor(positionX);
+        int lowerY = (int) Math.floor(positionY);
+        double blendX = smoothstep(0.3, 0.7, positionX - lowerX);
+        double blendY = smoothstep(0.3, 0.7, positionY - lowerY);
+        boolean transitionX = blendX > 0.0 && blendX < 1.0;
+        boolean transitionY = blendY > 0.0 && blendY < 1.0;
+        Map<Integer, Double> weights = new LinkedHashMap<>();
+        if (!transitionX && !transitionY) {
+            addShadowWeight(weights,
+                    resolvedTapId(edge, new ResolvedTap(faceUv.face(), nearestX, nearestY)),
+                    1.0);
+            return weights;
+        }
+        if (!transitionX) {
+            int snappedX = blendX >= 0.5 ? 1 : 0;
+            addShadowWeight(weights, resolvedTapId(edge,
+                    resolveTap(edge, faceUv.face(), lowerX + snappedX, lowerY)),
+                    1.0 - blendY);
+            addShadowWeight(weights, resolvedTapId(edge,
+                    resolveTap(edge, faceUv.face(), lowerX + snappedX, lowerY + 1)),
+                    blendY);
+            return weights;
+        }
+        if (!transitionY) {
+            int snappedY = blendY >= 0.5 ? 1 : 0;
+            addShadowWeight(weights, resolvedTapId(edge,
+                    resolveTap(edge, faceUv.face(), lowerX, lowerY + snappedY)),
+                    1.0 - blendX);
+            addShadowWeight(weights, resolvedTapId(edge,
+                    resolveTap(edge, faceUv.face(), lowerX + 1, lowerY + snappedY)),
+                    blendX);
+            return weights;
+        }
+
+        ResolvedTap tap00 = resolveTap(edge, faceUv.face(), lowerX, lowerY);
+        ResolvedTap tap10 = resolveTap(edge, faceUv.face(), lowerX + 1, lowerY);
+        ResolvedTap tap01 = resolveTap(edge, faceUv.face(), lowerX, lowerY + 1);
+        ResolvedTap tap11 = resolveTap(edge, faceUv.face(), lowerX + 1, lowerY + 1);
+        int id00 = resolvedTapId(edge, tap00);
+        int id10 = resolvedTapId(edge, tap10);
+        int id01 = resolvedTapId(edge, tap01);
+        int id11 = resolvedTapId(edge, tap11);
+        int diagonal00Low = Math.min(id00, id11);
+        int diagonal00High = Math.max(id00, id11);
+        int diagonal10Low = Math.min(id10, id01);
+        int diagonal10High = Math.max(id10, id01);
+        boolean use00And11 = diagonal00Low < diagonal10Low
+                || (diagonal00Low == diagonal10Low && diagonal00High <= diagonal10High);
+        if (use00And11 && blendX >= blendY) {
+            addShadowWeight(weights, id00, 1.0 - blendX);
+            addShadowWeight(weights, id10, blendX - blendY);
+            addShadowWeight(weights, id11, blendY);
+        } else if (use00And11) {
+            addShadowWeight(weights, id00, 1.0 - blendY);
+            addShadowWeight(weights, id01, blendY - blendX);
+            addShadowWeight(weights, id11, blendX);
+        } else if (blendX + blendY <= 1.0) {
+            addShadowWeight(weights, id00, 1.0 - blendX - blendY);
+            addShadowWeight(weights, id10, blendX);
+            addShadowWeight(weights, id01, blendY);
+        } else {
+            addShadowWeight(weights, id10, 1.0 - blendY);
+            addShadowWeight(weights, id01, 1.0 - blendX);
+            addShadowWeight(weights, id11, blendX + blendY - 1.0);
+        }
+        return weights;
+    }
+
+    private static void addShadowWeight(
+            final Map<Integer, Double> weights,
+            final int id,
+            final double weight
+    ) {
+        if (weight > 0.0) {
+            weights.merge(id, weight, Double::sum);
+        }
+    }
+
+    private static ResolvedTap resolveTap(
+            final int edge,
+            final int sourceFace,
+            final int logicalX,
+            final int logicalY
+    ) {
+        if (logicalX >= 0 && logicalX < edge && logicalY >= 0 && logicalY < edge) {
+            return new ResolvedTap(sourceFace, logicalX, logicalY);
+        }
+        double u = (logicalX + 0.5) * (2.0 / edge) - 1.0;
+        double v = (logicalY + 0.5) * (2.0 / edge) - 1.0;
+        CubeFaceUv remapped = cubeFaceUv(cubeDirection(sourceFace, new double[]{u, v}));
+        int x = clamp((int) Math.floor((remapped.u() * 0.5 + 0.5) * edge), 0, edge - 1);
+        int y = clamp((int) Math.floor((remapped.v() * 0.5 + 0.5) * edge), 0, edge - 1);
+        return new ResolvedTap(remapped.face(), x, y);
+    }
+
+    private static int resolvedTapId(final int edge, final ResolvedTap tap) {
+        return (tap.face() * edge + tap.y()) * edge + tap.x();
+    }
+
+    private static CubeFaceUv cubeFaceUv(final double[] direction) {
+        double xMagnitude = Math.abs(direction[0]);
+        double yMagnitude = Math.abs(direction[1]);
+        double zMagnitude = Math.abs(direction[2]);
+        double major = Math.max(xMagnitude, Math.max(yMagnitude, zMagnitude));
+        require(major > 1.0e-12 && Double.isFinite(major),
+                "invalid cubemap direction in shadow-filter contract");
+        if (xMagnitude >= yMagnitude && xMagnitude >= zMagnitude) {
+            return direction[0] >= 0.0
+                    ? new CubeFaceUv(0, -direction[2] / major, -direction[1] / major)
+                    : new CubeFaceUv(1, direction[2] / major, -direction[1] / major);
+        }
+        if (yMagnitude >= zMagnitude) {
+            return direction[1] >= 0.0
+                    ? new CubeFaceUv(2, direction[0] / major, direction[2] / major)
+                    : new CubeFaceUv(3, direction[0] / major, -direction[2] / major);
+        }
+        return direction[2] >= 0.0
+                ? new CubeFaceUv(4, direction[0] / major, -direction[1] / major)
+                : new CubeFaceUv(5, -direction[0] / major, -direction[1] / major);
+    }
+
+    private static double[] cubeDirection(final int face, final double[] uv) {
+        return switch (face) {
+            case 0 -> new double[]{1.0, -uv[1], -uv[0]};
+            case 1 -> new double[]{-1.0, -uv[1], uv[0]};
+            case 2 -> new double[]{uv[0], 1.0, uv[1]};
+            case 3 -> new double[]{uv[0], -1.0, -uv[1]};
+            case 4 -> new double[]{uv[0], -uv[1], 1.0};
+            case 5 -> new double[]{-uv[0], -uv[1], -1.0};
+            default -> throw new AssertionError("invalid cubemap face " + face);
+        };
+    }
+
+    private static double[] texelPositionUv(
+            final int edge,
+            final double positionX,
+            final double positionY
+    ) {
+        return new double[]{
+                (positionX + 0.5) * (2.0 / edge) - 1.0,
+                (positionY + 0.5) * (2.0 / edge) - 1.0
+        };
+    }
+
+    private static double smoothstep(
+            final double lower,
+            final double upper,
+            final double value
+    ) {
+        double unit = Math.max(0.0, Math.min(1.0, (value - lower) / (upper - lower)));
+        return unit * unit * (3.0 - 2.0 * unit);
+    }
+
+    private static int clamp(final int value, final int lower, final int upper) {
+        return Math.max(lower, Math.min(upper, value));
+    }
+
     private static float[] normalizeSurfaceNormal(
             final float x,
             final float y,
@@ -1521,5 +1839,11 @@ public final class AdvancedDirectLightingShaderTests {
             List<Integer> voxelParamsOffsets,
             int voxelParamsMatrixStride
     ) {
+    }
+
+    private record CubeFaceUv(int face, double u, double v) {
+    }
+
+    private record ResolvedTap(int face, int x, int y) {
     }
 }
