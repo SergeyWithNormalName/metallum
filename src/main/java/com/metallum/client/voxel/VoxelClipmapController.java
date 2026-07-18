@@ -1155,7 +1155,10 @@ public final class VoxelClipmapController {
 
     private static long centeredOrigin(final long cameraBlock, final VoxelClipmapLayout.Level level) {
         int edge = brickBlockEdge(level);
-        long candidate = Math.subtractExact(cameraBlock, level.spanBlocks() / 2L);
+        long candidate = Math.addExact(
+                Math.subtractExact(cameraBlock, level.spanBlocks() / 2L),
+                VoxelClipmapLayout.scrollPhaseBlocks(level)
+        );
         return Math.multiplyExact(Math.floorDiv(candidate, edge), edge);
     }
 

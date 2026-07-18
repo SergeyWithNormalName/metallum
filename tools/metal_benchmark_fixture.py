@@ -891,15 +891,17 @@ def route_values(path: Path) -> list[str]:
         raise FixtureError(f"cannot read route {path}: {error}") from error
     route = _object(payload, "root")
     schema_version = _integer(route.get("schema_version"), "schema_version", 1)
-    if schema_version not in (1, 2, 3):
+    if schema_version not in (1, 2, 3, 4):
         raise FixtureError("unsupported route schema_version")
     root_keys = {
         "schema_version", "id", "fixture", "player", "dimension",
         "position", "rotation", "camera", "clock", "weather", "simulation",
         "readiness",
     }
-    if schema_version >= 2:
+    if schema_version in (2, 3):
         root_keys.add("torch_epoch")
+    if schema_version == 4:
+        root_keys.add("l6_dynamic_shadow")
     _exact_keys(route, "root", root_keys)
     route_id = _string(route.get("id"), "id", SAFE_ID_RE)
     fixture = _object(route.get("fixture"), "fixture")
@@ -993,6 +995,110 @@ def route_values(path: Path) -> list[str]:
     ]
     if schema_version == 1:
         return values
+
+    if schema_version == 4:
+        dynamic_shadow = _object(route.get("l6_dynamic_shadow"), "l6_dynamic_shadow")
+        _exact_keys(
+            dynamic_shadow,
+            "l6_dynamic_shadow",
+            {"held_item", "camera_orbit", "entity_probes"},
+        )
+        held_item = _string(
+            dynamic_shadow.get("held_item"), "l6_dynamic_shadow.held_item", BLOCK_ID_RE
+        )
+        if held_item != "minecraft:torch":
+            raise FixtureError("route l6_dynamic_shadow.held_item must be minecraft:torch")
+
+        camera_orbit = _object(dynamic_shadow.get("camera_orbit"), "l6_dynamic_shadow.camera_orbit")
+        _exact_keys(
+            camera_orbit,
+            "l6_dynamic_shadow.camera_orbit",
+            {"radius", "yaw_amplitude_degrees", "pitch_amplitude_degrees", "period_frames"},
+        )
+        orbit_radius = _number(
+            camera_orbit.get("radius"), "l6_dynamic_shadow.camera_orbit.radius"
+        )
+        yaw_amplitude = _number(
+            camera_orbit.get("yaw_amplitude_degrees"),
+            "l6_dynamic_shadow.camera_orbit.yaw_amplitude_degrees",
+        )
+        pitch_amplitude = _number(
+            camera_orbit.get("pitch_amplitude_degrees"),
+            "l6_dynamic_shadow.camera_orbit.pitch_amplitude_degrees",
+        )
+        orbit_period = _integer(
+            camera_orbit.get("period_frames"),
+            "l6_dynamic_shadow.camera_orbit.period_frames",
+            1,
+        )
+        if not 0.0 < orbit_radius <= 2.0:
+            raise FixtureError("route l6_dynamic_shadow.camera_orbit.radius must be in (0, 2]")
+        if not 0.0 < yaw_amplitude <= 45.0:
+            raise FixtureError(
+                "route l6_dynamic_shadow.camera_orbit.yaw_amplitude_degrees must be in (0, 45]"
+            )
+        if not 0.0 < pitch_amplitude <= 30.0:
+            raise FixtureError(
+                "route l6_dynamic_shadow.camera_orbit.pitch_amplitude_degrees must be in (0, 30]"
+            )
+        if orbit_period < 60 or orbit_period % 60 != 0:
+            raise FixtureError(
+                "route l6_dynamic_shadow.camera_orbit.period_frames must be a multiple of 60"
+            )
+
+        probes = _object(dynamic_shadow.get("entity_probes"), "l6_dynamic_shadow.entity_probes")
+        _exact_keys(
+            probes,
+            "l6_dynamic_shadow.entity_probes",
+            {"count", "origin", "radius", "vertical_amplitude", "period_frames"},
+        )
+        probe_count = _integer(probes.get("count"), "l6_dynamic_shadow.entity_probes.count", 1)
+        probe_origin = probes.get("origin")
+        if not isinstance(probe_origin, list) or len(probe_origin) != 3:
+            raise FixtureError("route l6_dynamic_shadow.entity_probes.origin must contain three numbers")
+        probe_x, probe_y, probe_z = (
+            _number(value, f"l6_dynamic_shadow.entity_probes.origin[{index}]")
+            for index, value in enumerate(probe_origin)
+        )
+        probe_radius = _number(
+            probes.get("radius"), "l6_dynamic_shadow.entity_probes.radius"
+        )
+        probe_vertical_amplitude = _number(
+            probes.get("vertical_amplitude"),
+            "l6_dynamic_shadow.entity_probes.vertical_amplitude",
+        )
+        probe_period = _integer(
+            probes.get("period_frames"),
+            "l6_dynamic_shadow.entity_probes.period_frames",
+            1,
+        )
+        if probe_count != 4:
+            raise FixtureError("route l6_dynamic_shadow.entity_probes.count must be exactly 4")
+        if not 0.5 <= probe_radius <= 8.0:
+            raise FixtureError("route l6_dynamic_shadow.entity_probes.radius must be in [0.5, 8]")
+        if not 0.05 <= probe_vertical_amplitude <= 2.0:
+            raise FixtureError(
+                "route l6_dynamic_shadow.entity_probes.vertical_amplitude must be in [0.05, 2]"
+            )
+        if probe_period < 60 or probe_period % 60 != 0:
+            raise FixtureError(
+                "route l6_dynamic_shadow.entity_probes.period_frames must be a multiple of 60"
+            )
+        return values + [
+            "L6_DYNAMIC_SHADOW",
+            held_item,
+            repr(orbit_radius),
+            repr(yaw_amplitude),
+            repr(pitch_amplitude),
+            str(orbit_period),
+            str(probe_count),
+            repr(probe_x),
+            repr(probe_y),
+            repr(probe_z),
+            repr(probe_radius),
+            repr(probe_vertical_amplitude),
+            str(probe_period),
+        ]
 
     torch_epoch = _object(route.get("torch_epoch"), "torch_epoch")
     torch_epoch_keys = {
@@ -1187,6 +1293,34 @@ def self_test() -> None:
             "minecraft:grass_block", "300", "300", "450",
         ]
 
+        l6_route_payload = json.loads(route.read_text(encoding="utf-8"))
+        l6_route_payload["schema_version"] = 4
+        l6_route_payload["id"] = "test-l6-dynamic-v1"
+        l6_route_payload["l6_dynamic_shadow"] = {
+            "held_item": "minecraft:torch",
+            "camera_orbit": {
+                "radius": 0.75,
+                "yaw_amplitude_degrees": 20.0,
+                "pitch_amplitude_degrees": 8.0,
+                "period_frames": 240,
+            },
+            "entity_probes": {
+                "count": 4,
+                "origin": [3.0, 65.0, -4.0],
+                "radius": 2.0,
+                "vertical_amplitude": 0.35,
+                "period_frames": 120,
+            },
+        }
+        l6_route = root / "l6-route.json"
+        l6_route.write_text(json.dumps(l6_route_payload), encoding="utf-8")
+        l6_values = route_values(l6_route)
+        assert l6_values[0] == "test-l6-dynamic-v1" and len(l6_values) == 32
+        assert l6_values[19:] == [
+            "L6_DYNAMIC_SHADOW", "minecraft:torch", "0.75", "20.0", "8.0", "240",
+            "4", "3.0", "65.0", "-4.0", "2.0", "0.35", "120",
+        ]
+
         invalid_route = root / "invalid-route.json"
 
         def expect_route_error(payload: dict[str, object], expected: str) -> None:
@@ -1217,6 +1351,10 @@ def self_test() -> None:
         invalid_torch_toggle_route = json.loads(json.dumps(torch_toggle_route_payload))
         invalid_torch_toggle_route["torch_epoch"]["remove_after_measured_frames"] = 449
         expect_route_error(invalid_torch_toggle_route, "exactly 450 measured frames")
+
+        invalid_l6_route = json.loads(json.dumps(l6_route_payload))
+        invalid_l6_route["l6_dynamic_shadow"]["entity_probes"]["count"] = 3
+        expect_route_error(invalid_l6_route, "exactly 4")
 
         options = root / "options.txt"
         options.write_text(

@@ -19,9 +19,11 @@ public enum MetalGpuTimingStage {
     ACTUAL_HDR_DISPLAY(12),
     LIGHT_UPLOAD_CLUSTER_BUILD(13),
     SUN_SHADOW(14),
-    VOXEL_UPDATE(15);
+    VOXEL_UPDATE(15),
+    /** Reserved for the future bounded player-attached local-shadow compute pass. */
+    DYNAMIC_LOCAL_SHADOW(16);
 
-    public static final int PROFILED_STAGE_COUNT = 16;
+    public static final int PROFILED_STAGE_COUNT = 17;
 
     private final int nativeId;
 

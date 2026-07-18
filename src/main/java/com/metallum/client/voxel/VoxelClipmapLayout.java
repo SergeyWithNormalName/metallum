@@ -281,11 +281,26 @@ public final class VoxelClipmapLayout {
     ) {
         Objects.requireNonNull(level, "level");
         long halfSpan = level.spanBlocks() / 2L;
+        long phase = scrollPhaseBlocks(level);
         return new Origin(
-                alignDown(Math.subtractExact(cameraBlockX, halfSpan), level.brickBlockEdge()),
-                alignDown(Math.subtractExact(cameraBlockY, halfSpan), level.brickBlockEdge()),
-                alignDown(Math.subtractExact(cameraBlockZ, halfSpan), level.brickBlockEdge())
+                alignDown(Math.addExact(Math.subtractExact(cameraBlockX, halfSpan), phase),
+                        level.brickBlockEdge()),
+                alignDown(Math.addExact(Math.subtractExact(cameraBlockY, halfSpan), phase),
+                        level.brickBlockEdge()),
+                alignDown(Math.addExact(Math.subtractExact(cameraBlockZ, halfSpan), phase),
+                        level.brickBlockEdge())
         );
+    }
+
+    /**
+     * Staggers nested toroidal scroll boundaries without changing their brick alignment.
+     * Fine and coarse levels otherwise cross every common world-grid boundary together,
+     * briefly leaving no complete level for a moving L6 hero light.
+     */
+    static int scrollPhaseBlocks(final Level level) {
+        Objects.requireNonNull(level, "level");
+        return level.subdivision() == VoxelSubdivision.FOUR
+                ? 0 : level.brickBlockEdge() / 2;
     }
 
     /** Plans only newly exposed whole-brick slabs; a jump spanning one whole level resets it. */

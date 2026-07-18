@@ -25,7 +25,8 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumClear.metal",
             "/natives/macos/shaders/MetallumSodiumLightPatch.metal",
             "/natives/macos/shaders/MetallumClusterBuild.metal",
-            "/natives/macos/shaders/MetallumVoxelOccupancy.metal"
+            "/natives/macos/shaders/MetallumVoxelOccupancy.metal",
+            "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
@@ -234,6 +235,42 @@ public final class MetalNativeBridge {
                     lookup,
                     "metallum_voxel_debug_readback_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            dynamicShadowAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            dynamicShadowLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            dynamicShadowCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_create_context_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG
+                    )
+            );
+            dynamicShadowReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+            dynamicShadowEncodeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_encode_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
             );
             encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
                     lookup,
@@ -655,6 +692,11 @@ public final class MetalNativeBridge {
     private static final MethodHandle voxelLastCompletedStatsV1;
     private static final MethodHandle voxelDebugChecksumV1;
     private static final MethodHandle voxelDebugReadbackV1;
+    private static final MethodHandle dynamicShadowAbiVersionV1;
+    private static final MethodHandle dynamicShadowLayoutV1;
+    private static final MethodHandle dynamicShadowCreateContextV1;
+    private static final MethodHandle dynamicShadowReleaseContextV1;
+    private static final MethodHandle dynamicShadowEncodeV1;
     private static final MethodHandle encodeTemporalDiagnosticsV1;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -1147,6 +1189,68 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_voxel_debug_readback_v1", throwable);
+        }
+    }
+
+    public static int metallum_dynamic_shadow_abi_version_v1() {
+        try {
+            return (int) dynamicShadowAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_dynamic_shadow_layout_v1(final MemorySegment output) {
+        if (output == null || output.byteSize() != 32L) {
+            throw new IllegalArgumentException("Dynamic shadow layout packet must be 32 bytes");
+        }
+        try {
+            return (int) dynamicShadowLayoutV1.invokeExact(segment(output), output.byteSize());
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_dynamic_shadow_create_context_v1(
+            final MemorySegment device,
+            final long atlasSuffixOffset,
+            final long atlasSuffixBytes
+    ) {
+        try {
+            return (MemorySegment) dynamicShadowCreateContextV1.invokeExact(
+                    segment(device), atlasSuffixOffset, atlasSuffixBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_create_context_v1", throwable);
+        }
+    }
+
+    public static void metallum_dynamic_shadow_release_context_v1(final MemorySegment context) {
+        try {
+            dynamicShadowReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_release_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_dynamic_shadow_encode_v1(
+            final MemorySegment dynamicContext,
+            final MemorySegment voxelContext,
+            final MemorySegment commandBuffer,
+            final MemorySegment atlas,
+            final MemorySegment globalFence,
+            final MemorySegment packet
+    ) {
+        if (packet == null || packet.byteSize() == 0L) {
+            throw new IllegalArgumentException("Dynamic shadow packet must not be empty");
+        }
+        try {
+            return (int) dynamicShadowEncodeV1.invokeExact(
+                    segment(dynamicContext), segment(voxelContext), segment(commandBuffer),
+                    segment(atlas), segment(globalFence), segment(packet), packet.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_encode_v1", throwable);
         }
     }
 

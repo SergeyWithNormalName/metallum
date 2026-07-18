@@ -1121,6 +1121,17 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         return resources.encodeDebugChecksum(commandBuffer(), level, slot);
     }
 
+    int encodeDynamicVoxelShadow(
+            final DynamicVoxelShadowGpuResources resources,
+            final VoxelOccupancyGpuResources voxels,
+            final MetalGpuBuffer atlas,
+            final DynamicVoxelShadowGpuResources.FrameUpload upload
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return resources.encode(commandBuffer(), voxels, atlas, this.fence, upload);
+    }
+
     void setGpuTimingStage(final MetalGpuTimingStage stage) {
         MetalGpuTimingStage next = stage == null ? MetalGpuTimingStage.NONE : stage;
         if (this.gpuTimingStage == next) {

@@ -95,6 +95,35 @@ public final class VoxelShadowCacheMirror {
         return this.publishedSnapshot;
     }
 
+    /**
+     * Returns the newest clipmap contract actually accepted by the native L5 upload ring.
+     *
+     * <p>The controller may publish a newer scroll origin one or two frames before its first
+     * incoming brick reaches Metal. L6 keeps consuming the still-valid accepted window during
+     * that gap instead of dropping every dynamic candidate.</p>
+     */
+    public synchronized Snapshot latestAcceptedSnapshot(
+            final VoxelClipmapSnapshot requestedClipmap
+    ) {
+        if (requestedClipmap == null
+                || requestedClipmap.world().generation() != this.worldGeneration
+                || requestedClipmap.clipmapGeneration() != this.clipmapGeneration
+                || this.revision <= 0L
+                || this.acceptedClipmap == null) {
+            return null;
+        }
+        if (this.publishedSnapshot != null) {
+            return this.publishedSnapshot;
+        }
+        if (this.publishedBricks == null) {
+            this.publishedBricks = Map.copyOf(this.bricks);
+        }
+        this.publishedSnapshot = new Snapshot(
+                this.acceptedClipmap, this.revision, this.publishedBricks, true
+        );
+        return this.publishedSnapshot;
+    }
+
     public static void validateBatchContract(
             final VoxelUploadBatch batch,
             final VoxelClipmapSnapshot clipmap

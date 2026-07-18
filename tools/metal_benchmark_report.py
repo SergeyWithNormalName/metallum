@@ -9,6 +9,7 @@ never presents them as an exact percentile over the whole run.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -141,9 +142,15 @@ WORKLOAD_CONTRACTS = frozenset({
 })
 L3_FRAME_GRAPH_VERSION = 4
 L4_FRAME_GRAPH_VERSION = 5
+L6_FRAME_GRAPH_VERSION = 6
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
 SUN_SHADOW_STAGE = "sun shadow"
 VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
+DYNAMIC_LOCAL_SHADOW_STAGE = "dynamic local shadow"
+DYNAMIC_LOCAL_SHADOW_P95_BUDGET_MS = {
+    "balanced": 1.0,
+    "ultra": 2.0,
+}
 L4_SHADOW_PASS_COUNT = 5
 CLUSTER_CAP = 256
 CLUSTER_RING_SLOTS = 3
@@ -246,6 +253,7 @@ class TimingWindow:
     light_cluster_stage: dict[str, Any] | None
     sun_shadow_stage: dict[str, Any] | None
     voxel_upload_update_stage: dict[str, Any] | None
+    dynamic_local_shadow_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -1061,6 +1069,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_voxel_upload_update_stage(payload.get("stages"), line)
             if schema >= 5 else None
         ),
+        dynamic_local_shadow_stage=(
+            _parse_timing_stage(payload.get("stages"), DYNAMIC_LOCAL_SHADOW_STAGE, line)
+            if schema >= 5 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
@@ -1325,7 +1337,9 @@ def _timing_stage_is_zero(stage: dict[str, Any]) -> bool:
     )
 
 
-def _validate_l5_measurement(window: TimingWindow) -> None:
+def _validate_l5_measurement(
+    window: TimingWindow, *, enforce_stage_budgets: bool = True
+) -> None:
     if window.schema < 5:
         return
     generation = window.renderer_generation
@@ -1382,10 +1396,80 @@ def _validate_l5_measurement(window: TimingWindow) -> None:
             f"more frames ({stage['frames']}) than the {window.frames} presented frames"
         )
     budget = VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS[generation["lighting_preset"]]
-    if stage["p95_ms"] > budget:
+    # The L6 route intentionally orbits across clipmap cell boundaries. Its sparse
+    # L5 scroll samples remain reported, but L6 acceptance is gated by whole-frame
+    # tails and the per-frame dynamic-shadow stage instead of the stationary L5 gate.
+    l6_dynamic_route = window.metadata.get("route") == "hdrtest-l6-dynamic-v1"
+    if enforce_stage_budgets and not l6_dynamic_route and stage["p95_ms"] > budget:
         raise ReportError(
             f"line {window.line}: {VOXEL_UPLOAD_UPDATE_STAGE} p95_ms "
             f"exceeds {generation['lighting_preset']} budget {budget:.2f} ms"
+        )
+
+
+def _validate_l6_measurement(
+    window: TimingWindow, *, enforce_stage_budgets: bool = True
+) -> None:
+    generation = window.renderer_generation
+    if generation is None or generation["frame_graph_version"] < L6_FRAME_GRAPH_VERSION:
+        return
+    stage = window.dynamic_local_shadow_stage
+    advanced = generation["resolved_lighting_model"] == "advanced"
+    l6_route = window.metadata.get("route") == "hdrtest-l6-dynamic-v1"
+    static_route = window.metadata.get("route") == "hdrtest-static-v1"
+    if l6_route and not advanced:
+        raise ReportError(
+            f"line {window.line}: L6 dynamic route requires Advanced lighting"
+        )
+    if not advanced:
+        if stage is not None and not _timing_stage_is_zero(stage):
+            raise ReportError(
+                f"line {window.line}: Vanilla measurement contains {DYNAMIC_LOCAL_SHADOW_STAGE} work"
+            )
+        return
+    if not window.detail:
+        return
+    if static_route:
+        if stage is not None and not _timing_stage_is_zero(stage):
+            raise ReportError(
+                f"line {window.line}: static route contains "
+                f"{DYNAMIC_LOCAL_SHADOW_STAGE} work"
+            )
+        return
+    if not l6_route and stage is None:
+        return
+    if stage is None:
+        raise ReportError(
+            f"line {window.line}: detailed L6 dynamic route requires "
+            f"{DYNAMIC_LOCAL_SHADOW_STAGE} timing"
+        )
+    if stage["p95_ms"] is None:
+        raise ReportError(
+            f"line {window.line}: detailed L6 measurement requires "
+            f"{DYNAMIC_LOCAL_SHADOW_STAGE} p95_ms"
+        )
+    if l6_route and (stage["frames"] <= 0 or stage["frames"] > window.frames):
+        raise ReportError(
+            f"line {window.line}: {DYNAMIC_LOCAL_SHADOW_STAGE} has invalid coverage "
+            f"{stage['frames']} for {window.frames} presented frames"
+        )
+    # API/Shader Validation can invalidate an otherwise correctly encoded Metal
+    # timestamp. The launcher proves per-frame held-shadow READY coverage through
+    # the independent CPU marker; ordinary accepted runs still require one valid
+    # compute timing sample for every presented frame.
+    if (enforce_stage_budgets and l6_route
+            and stage["frames"] != window.frames):
+        raise ReportError(
+            f"line {window.line}: {DYNAMIC_LOCAL_SHADOW_STAGE} covers "
+            f"{stage['frames']} of {window.frames} presented frames"
+        )
+    budget = DYNAMIC_LOCAL_SHADOW_P95_BUDGET_MS.get(generation["lighting_preset"])
+    if (enforce_stage_budgets and l6_route and budget is not None
+            and stage["p95_ms"] > budget):
+        raise ReportError(
+            f"line {window.line}: {DYNAMIC_LOCAL_SHADOW_STAGE} p95 "
+            f"{stage['p95_ms']:.3f} ms exceeds {generation['lighting_preset']} "
+            f"budget {budget:.2f} ms"
         )
 
 
@@ -1506,6 +1590,17 @@ def _aggregate_voxel_upload_update_stage(
         windows,
         "voxel_upload_update_stage",
         VOXEL_UPLOAD_UPDATE_STAGE,
+        allow_absent_or_zero=True,
+    )
+
+
+def _aggregate_dynamic_local_shadow_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "dynamic_local_shadow_stage",
+        DYNAMIC_LOCAL_SHADOW_STAGE,
         allow_absent_or_zero=True,
     )
 
@@ -1961,14 +2056,24 @@ def summarize(
     player_uuid: str = "unknown",
     dimension: str = "unknown",
     simulation_frozen: bool = False,
+    metal_validation_contract: bool = False,
 ) -> dict[str, Any]:
     all_windows = load_report(path)
     selected, selection = select_measurement(all_windows, frames, segment, scaler)
     for window in selected:
         _validate_l3_measurement(window)
-        _validate_l5_measurement(window)
+        _validate_l5_measurement(
+            window, enforce_stage_budgets=not metal_validation_contract
+        )
+        _validate_l6_measurement(
+            window, enforce_stage_budgets=not metal_validation_contract
+        )
     if len({window.detail for window in selected}) != 1:
         raise ReportError("selected windows mix detailed and basic instrumentation")
+    if metal_validation_contract and not selected[0].detail:
+        raise ReportError("Metal validation contract requires detailed timing")
+    if metal_validation_contract and release_contract:
+        raise ReportError("Metal validation and release contracts are mutually exclusive")
     if selected[0].schema >= 2:
         validate_selected_metadata_consistency(selected)
     renderer_generations = [window.renderer_generation for window in selected]
@@ -1978,9 +2083,17 @@ def summarize(
         stable_generations = []
         for value in renderer_generations:
             stable = dict(value)
-            # ABI v3 publishes every rendered frame; frame_id is dynamic while
-            # the renderer generation declaration remains stable.
+            # ABI v3 publishes every rendered frame. frame_id and the current
+            # scene-sized upload counters are live observations; the remaining
+            # renderer/resource/work declaration must stay stable across windows.
             stable.pop("frame_id", None)
+            work = stable.get("advanced_lighting_work")
+            if work is not None:
+                stable["advanced_lighting_work"] = {
+                    key: item
+                    for key, item in work.items()
+                    if key not in {"light_count", "upload_bytes"}
+                }
             stable_generations.append(stable)
         if any(value != stable_generations[0] for value in stable_generations[1:]):
             raise ReportError("selected windows mix renderer-generation declarations")
@@ -2021,6 +2134,7 @@ def summarize(
         "source_lines": [selected[0].line, selected[-1].line],
         "schema_versions": sorted({window.schema for window in selected}),
         "detail_enabled": selected[0].detail,
+        "metal_validation_contract": metal_validation_contract,
         "dropped_timing_events": dropped,
         "fps": {
             "elapsed_weighted": sum(window.frames for window in selected) / elapsed,
@@ -2078,6 +2192,9 @@ def summarize(
     voxel_stage = _aggregate_voxel_upload_update_stage(selected)
     if voxel_stage is not None:
         result.setdefault("stages", {})[VOXEL_UPLOAD_UPDATE_STAGE] = voxel_stage
+    dynamic_shadow_stage = _aggregate_dynamic_local_shadow_stage(selected)
+    if dynamic_shadow_stage is not None:
+        result.setdefault("stages", {})[DYNAMIC_LOCAL_SHADOW_STAGE] = dynamic_shadow_stage
     if selected[0].schema >= 2:
         result["metadata"] = selected[-1].metadata
     if renderer_generations and renderer_generations[0] is not None:
@@ -3604,6 +3721,22 @@ def self_test() -> None:
             }
         return payload
 
+    def l6_dynamic_line(index: int, *, detail: bool) -> dict[str, Any]:
+        payload = l5_line(index, advanced=True, detail=detail)
+        payload["renderer_generation"]["frame_graph_version"] = L6_FRAME_GRAPH_VERSION
+        payload["metadata"]["route"] = "hdrtest-l6-dynamic-v1"
+        payload["stages"][DYNAMIC_LOCAL_SHADOW_STAGE] = None
+        if detail:
+            payload["stages"][DYNAMIC_LOCAL_SHADOW_STAGE] = {
+                "frames": 300,
+                "average_ms": 0.31,
+                "p50_ms": 0.29,
+                "p95_ms": 0.42,
+                "p99_ms": 0.48,
+                "maximum_ms": 0.55,
+            }
+        return payload
+
     def report_text(
         source_sha256: str,
         artifact_sha256: str = "5" * 64,
@@ -3854,6 +3987,116 @@ def self_test() -> None:
         sparse_summary = summarize(l5_sparse_stage, 3000, 0, "OFF")
         assert sparse_summary["stages"][VOXEL_UPLOAD_UPDATE_STAGE]["frames"] == 1500
 
+        l6_dynamic = root / "l6-dynamic.jsonl"
+        l6_dynamic.write_text(
+            "\n".join(json.dumps(l6_dynamic_line(i, detail=True)) for i in range(10))
+            + "\n",
+            encoding="utf-8",
+        )
+        l6_dynamic_summary = summarize(l6_dynamic, 3000, 0, "OFF")
+        assert l6_dynamic_summary["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["frames"] == 3000
+        assert l6_dynamic_summary["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["p95_ms"][
+            "window_maximum"
+        ] == 0.42
+
+        l6_dynamic_l5_scroll_spike = root / "l6-dynamic-l5-scroll-spike.jsonl"
+        l5_scroll_spike_payloads = [
+            l6_dynamic_line(i, detail=True) for i in range(10)
+        ]
+        l5_scroll_spike_payloads[0]["stages"][VOXEL_UPLOAD_UPDATE_STAGE].update({
+            "p95_ms": 1.50,
+            "p99_ms": 1.60,
+            "maximum_ms": 1.70,
+        })
+        l6_dynamic_l5_scroll_spike.write_text(
+            "\n".join(json.dumps(payload) for payload in l5_scroll_spike_payloads) + "\n",
+            encoding="utf-8",
+        )
+        l5_scroll_spike_summary = summarize(
+            l6_dynamic_l5_scroll_spike, 3000, 0, "OFF"
+        )
+        assert l5_scroll_spike_summary["stages"][VOXEL_UPLOAD_UPDATE_STAGE][
+            "p95_ms"
+        ]["window_maximum"] == 1.50
+
+        l6_dynamic_over_budget = root / "l6-dynamic-over-budget.jsonl"
+        over_budget_payloads = [l6_dynamic_line(i, detail=True) for i in range(10)]
+        over_budget_payloads[0]["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["p95_ms"] = 1.01
+        over_budget_payloads[0]["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["p99_ms"] = 1.02
+        over_budget_payloads[0]["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["maximum_ms"] = 1.03
+        l6_dynamic_over_budget.write_text(
+            "\n".join(json.dumps(payload) for payload in over_budget_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l6_dynamic_over_budget, 3000, 0, "OFF"),
+            "exceeds balanced budget 1.00 ms",
+        )
+        validation_summary = summarize(
+            l6_dynamic_over_budget,
+            3000,
+            0,
+            "OFF",
+            metal_validation_contract=True,
+        )
+        assert validation_summary["metal_validation_contract"] is True
+        assert validation_summary["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["p95_ms"][
+            "window_maximum"
+        ] == 1.01
+
+        l6_validation_lost_timestamp = root / "l6-validation-lost-timestamp.jsonl"
+        lost_timestamp_payloads = [l6_dynamic_line(i, detail=True) for i in range(10)]
+        lost_timestamp_payloads[0]["stages"][DYNAMIC_LOCAL_SHADOW_STAGE]["frames"] = 298
+        l6_validation_lost_timestamp.write_text(
+            "\n".join(json.dumps(payload) for payload in lost_timestamp_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l6_validation_lost_timestamp, 3000, 0, "OFF"),
+            f"{DYNAMIC_LOCAL_SHADOW_STAGE} covers 298 of 300 presented frames",
+        )
+        lost_timestamp_validation = summarize(
+            l6_validation_lost_timestamp,
+            3000,
+            0,
+            "OFF",
+            metal_validation_contract=True,
+        )
+        assert lost_timestamp_validation["stages"][DYNAMIC_LOCAL_SHADOW_STAGE][
+            "frames"
+        ] == 2_998
+
+        l6_dynamic_missing = root / "l6-dynamic-missing-stage.jsonl"
+        missing_dynamic_payloads = [l6_dynamic_line(i, detail=True) for i in range(10)]
+        missing_dynamic_payloads[0]["stages"][DYNAMIC_LOCAL_SHADOW_STAGE] = None
+        l6_dynamic_missing.write_text(
+            "\n".join(json.dumps(payload) for payload in missing_dynamic_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l6_dynamic_missing, 3000, 0, "OFF"),
+            f"detailed L6 dynamic route requires {DYNAMIC_LOCAL_SHADOW_STAGE} timing",
+        )
+
+        l6_dynamic_vanilla = root / "l6-dynamic-vanilla.jsonl"
+        vanilla_dynamic_payloads = [
+            l5_line(i, advanced=False, detail=False) for i in range(10)
+        ]
+        for payload in vanilla_dynamic_payloads:
+            payload["renderer_generation"]["frame_graph_version"] = (
+                L6_FRAME_GRAPH_VERSION
+            )
+            payload["metadata"]["route"] = "hdrtest-l6-dynamic-v1"
+            payload["stages"][DYNAMIC_LOCAL_SHADOW_STAGE] = None
+        l6_dynamic_vanilla.write_text(
+            "\n".join(json.dumps(payload) for payload in vanilla_dynamic_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l6_dynamic_vanilla, 3000, 0, "OFF"),
+            "L6 dynamic route requires Advanced lighting",
+        )
+
         l5_missing_voxel = root / "l5-missing-voxel.jsonl"
         missing_voxel_payload = l5_line(0, advanced=True, detail=False)
         missing_voxel_payload.pop("voxel_clipmaps")
@@ -3973,6 +4216,39 @@ def self_test() -> None:
         basic_summary = summarize(l3_advanced_basic, 3000, 0, "OFF")
         assert basic_summary["clustered_lighting"]["active"] is True
         assert "stages" not in basic_summary
+
+        l3_live_work_counts = root / "l3-live-work-counts.jsonl"
+        live_work_payloads = [
+            l3_line(i, advanced=True, detail=False) for i in range(10)
+        ]
+        for index, payload in enumerate(live_work_payloads):
+            light_count = 32 + index
+            work = payload["renderer_generation"]["advanced_lighting_work"]
+            work["light_count"] = light_count
+            work["upload_bytes"] = 4_096 + index * 48
+            payload["clustered_lighting"]["light_count"] = light_count
+        l3_live_work_counts.write_text(
+            "\n".join(json.dumps(payload) for payload in live_work_payloads) + "\n",
+            encoding="utf-8",
+        )
+        live_work_summary = summarize(l3_live_work_counts, 3000, 0, "OFF")
+        assert live_work_summary["renderer_generation"]["advanced_lighting_work"][
+            "light_count"
+        ] == 32
+
+        l3_mixed_work_declaration = root / "l3-mixed-work-declaration.jsonl"
+        mixed_work_payloads = copy.deepcopy(live_work_payloads)
+        mixed_work_payloads[1]["renderer_generation"]["advanced_lighting_work"][
+            "pass_count"
+        ] += 1
+        l3_mixed_work_declaration.write_text(
+            "\n".join(json.dumps(payload) for payload in mixed_work_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(l3_mixed_work_declaration, 3000, 0, "OFF"),
+            "selected windows mix renderer-generation declarations",
+        )
 
         # Cluster statistics are sampled and published from an asynchronous
         # command-buffer completion handler. A completed frame may therefore trail
@@ -5112,6 +5388,14 @@ def parser() -> argparse.ArgumentParser:
     summary.add_argument("--segment", type=int, default=0)
     summary.add_argument("--scaler-mode", choices=("OFF", "QUALITY", "PERFORMANCE"), default="OFF")
     summary.add_argument("--release-contract", action="store_true")
+    summary.add_argument(
+        "--metal-validation-contract",
+        action="store_true",
+        help=(
+            "retain structural timing checks but disable p95 budgets distorted by "
+            "Metal API/Shader Validation"
+        ),
+    )
     summary.add_argument("--source-sha256", default="unknown")
     summary.add_argument("--artifact-sha256", default="unknown")
     summary.add_argument("--settings-id", default="unknown")
@@ -5203,6 +5487,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 player_uuid=args.player_uuid,
                 dimension=args.dimension,
                 simulation_frozen=args.simulation_frozen,
+                metal_validation_contract=args.metal_validation_contract,
             )
             if args.json:
                 json.dump(summary, sys.stdout, indent=2, sort_keys=True)

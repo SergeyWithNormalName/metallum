@@ -11,7 +11,7 @@ import java.util.Set;
 
 /** Versioned L3-L6 clustered, cached-shadow and voxel-visibility contract. */
 public final class AdvancedLightingFrameGraph {
-    public static final String GRAPH_ID = "advanced-clustered-resident-shadow-voxel-v5";
+    public static final String GRAPH_ID = "advanced-clustered-resident-shadow-voxel-v6";
 
     private static final FrameGraph.PassId UPLOAD = new FrameGraph.PassId(0, "light_upload");
     private static final FrameGraph.PassId PREPARE = new FrameGraph.PassId(1, "cluster_prepare");
@@ -24,7 +24,13 @@ public final class AdvancedLightingFrameGraph {
             6, "sun_shadow_static_copy");
     private static final FrameGraph.PassId SUN_DYNAMIC = new FrameGraph.PassId(
             7, "sun_shadow_dynamic");
-    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(8, "direct_lighting");
+    /** Bounded moving-source pages are generated in the atlas suffix before static replacements. */
+    private static final FrameGraph.PassId DYNAMIC_LOCAL_SHADOW = new FrameGraph.PassId(
+            8, "dynamic_local_shadow_compute");
+    /** Commits completed CPU-built resident pages after the dynamic page is available. */
+    private static final FrameGraph.PassId LOCAL_SHADOW_ATLAS_UPLOAD = new FrameGraph.PassId(
+            9, "local_shadow_atlas_upload");
+    private static final FrameGraph.PassId DIRECT = new FrameGraph.PassId(10, "direct_lighting");
 
     private static final FrameGraph.ResourceId UPLOAD_RING = resource(0, "lighting_upload_ring");
     private static final FrameGraph.ResourceId PARAMS = resource(1, "lighting_params");
@@ -63,6 +69,9 @@ public final class AdvancedLightingFrameGraph {
             19, "local_shadow_reference_ring");
     private static final FrameGraph.ResourceId LOCAL_SHADOW_ATLAS = resource(
             20, "local_shadow_visibility_atlas");
+    /** CPU-built resident-page data consumed by the ordered static-atlas upload blit. */
+    private static final FrameGraph.ResourceId LOCAL_SHADOW_ATLAS_STAGING = resource(
+            21, "local_shadow_atlas_staging");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -213,6 +222,10 @@ public final class AdvancedLightingFrameGraph {
                         buffer(LOCAL_SHADOW_ATLAS,
                                 FrameGraph.PersistenceClass.WORLD_PERSISTENT,
                                 "local_shadow_atlas_hits_v1", true, whole,
+                                FrameGraph.ResourceRole.SHADOW_DATA),
+                        buffer(LOCAL_SHADOW_ATLAS_STAGING,
+                                FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
+                                "local_shadow_atlas_staging_v1", true, whole,
                                 FrameGraph.ResourceRole.SHADOW_DATA)
                 ),
                 List.of(
@@ -341,9 +354,40 @@ public final class AdvancedLightingFrameGraph {
                                 contract
                         ),
                         new FrameGraph.PassDesc(
+                                DYNAMIC_LOCAL_SHADOW,
+                                FrameGraph.EncoderClass.COMPUTE,
+                                List.of(CLUSTER_BUILD, VOXEL_UPDATE),
+                                List.of(
+                                        access(VOXEL_OCCUPANCY, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_OPTICAL, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_TAGS, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
+                                        access(LOCAL_SHADOW_ATLAS,
+                                                FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE)
+                                ),
+                                contract
+                        ),
+                        new FrameGraph.PassDesc(
+                                LOCAL_SHADOW_ATLAS_UPLOAD,
+                                FrameGraph.EncoderClass.BLIT,
+                                List.of(DYNAMIC_LOCAL_SHADOW),
+                                List.of(
+                                        access(LOCAL_SHADOW_ATLAS_STAGING,
+                                                FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.BLIT),
+                                        access(LOCAL_SHADOW_ATLAS,
+                                                FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.BLIT)
+                                ),
+                                contract
+                        ),
+                        new FrameGraph.PassDesc(
                                 DIRECT,
                                 FrameGraph.EncoderClass.RENDER,
-                                List.of(CLUSTER_BUILD, VOXEL_UPDATE, SUN_DYNAMIC),
+                                List.of(LOCAL_SHADOW_ATLAS_UPLOAD, SUN_DYNAMIC),
                                 List.of(
                                         access(PARAMS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),

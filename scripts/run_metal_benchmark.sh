@@ -28,6 +28,7 @@ MIN_MAX_FPS=240
 ROUTE_SPEC_ARGUMENT="$DEFAULT_ROUTE_SPEC"
 SETTINGS_SPEC_ARGUMENT="$DEFAULT_SETTINGS_SPEC"
 METALFX_MODE="OFF"
+LIGHTING_PRESET="balanced"
 LABEL="baseline"
 PREFLIGHT_ONLY=0
 CAPTURE_REFERENCE=0
@@ -56,6 +57,8 @@ Options:
   --settings FILE    tracked performance/quality settings specification
                      (default: benchmark/settings/native-hdr-fancy-v1.json)
   --metalfx MODE     OFF, QUALITY, or PERFORMANCE (default: OFF)
+  --lighting-preset PRESET
+                     performance, balanced, or ultra (default: balanced)
   --label LABEL      short artifact label (default: baseline)
   --preflight-only   validate route/config/immutable fixture without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
@@ -97,6 +100,11 @@ while [ "$#" -gt 0 ]; do
             METALFX_MODE=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
             shift 2
             ;;
+        --lighting-preset)
+            need_value "$@"
+            LIGHTING_PRESET=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+            shift 2
+            ;;
         --settings)
             need_value "$@"
             SETTINGS_SPEC_ARGUMENT=$2
@@ -128,6 +136,10 @@ done
 case "$METALFX_MODE" in
     OFF|QUALITY|PERFORMANCE) ;;
     *) die "--metalfx must be OFF, QUALITY, or PERFORMANCE (AUTO is not reproducible)" ;;
+esac
+case "$LIGHTING_PRESET" in
+    performance|balanced|ultra) ;;
+    *) die "--lighting-preset must be performance, balanced, or ultra" ;;
 esac
 
 case "$WARMUP_FRAMES:$MEASURE_FRAMES:$TIMING_DETAIL:$METAL_VALIDATION" in
@@ -192,6 +204,18 @@ TORCH_SUPPORT_BLOCK="minecraft:air"
 TORCH_APPLY_AFTER_MEASURED_FRAMES=0
 TORCH_OBSERVATION_FRAMES=0
 TORCH_REMOVE_AFTER_MEASURED_FRAMES=0
+L6_HELD_ITEM="minecraft:air"
+L6_ORBIT_RADIUS=0
+L6_ORBIT_YAW_AMPLITUDE_DEGREES=0
+L6_ORBIT_PITCH_AMPLITUDE_DEGREES=0
+L6_ORBIT_PERIOD_FRAMES=0
+L6_PROBE_COUNT=0
+L6_PROBE_ORIGIN_X=0
+L6_PROBE_ORIGIN_Y=0
+L6_PROBE_ORIGIN_Z=0
+L6_PROBE_RADIUS=0
+L6_PROBE_VERTICAL_AMPLITUDE=0
+L6_PROBE_PERIOD_FRAMES=0
 case "$route_field_count" in
     19)
         IFS=$'\t' read -r \
@@ -229,8 +253,23 @@ case "$route_field_count" in
             TORCH_REMOVE_AFTER_MEASURED_FRAMES \
             <<< "$route_values"
         ;;
+    32)
+        IFS=$'\t' read -r \
+            ROUTE_ID ROUTE_SHA256 FIXTURE_ID FIXTURE_SHA256 \
+            PLAYER_NAME PLAYER_UUID DIMENSION \
+            POSITION_X POSITION_Y POSITION_Z YAW PITCH \
+            CLOCK_TICKS CLEAR_WEATHER_TICKS SIMULATION_FROZEN \
+            ROUTE_STABLE_FRAMES ROUTE_TIMEOUT_FRAMES \
+            POSITION_EPSILON ANGLE_EPSILON \
+            ROUTE_KIND L6_HELD_ITEM \
+            L6_ORBIT_RADIUS L6_ORBIT_YAW_AMPLITUDE_DEGREES \
+            L6_ORBIT_PITCH_AMPLITUDE_DEGREES L6_ORBIT_PERIOD_FRAMES \
+            L6_PROBE_COUNT L6_PROBE_ORIGIN_X L6_PROBE_ORIGIN_Y L6_PROBE_ORIGIN_Z \
+            L6_PROBE_RADIUS L6_PROBE_VERTICAL_AMPLITUDE L6_PROBE_PERIOD_FRAMES \
+            <<< "$route_values"
+        ;;
     *)
-        die "route helper returned $route_field_count fields instead of 19, 27, or 28"
+        die "route helper returned $route_field_count fields instead of 19, 27, 28, or 32"
         ;;
 esac
 
@@ -274,6 +313,19 @@ case "$ROUTE_KIND" in
         [ "$((TORCH_APPLY_AFTER_MEASURED_FRAMES + TORCH_OBSERVATION_FRAMES))" \
             -le "$MEASURE_FRAMES" ] \
             || die "torch toggle epoch exceeds the measurement frame budget"
+        ;;
+    L6_DYNAMIC_SHADOW)
+        [ "$route_field_count" -eq 32 ] \
+            || die "L6 dynamic-shadow route must use the schema-4 32-field contract"
+        require_value "$L6_HELD_ITEM" "minecraft:torch" "L6 held item"
+        [ "$L6_PROBE_COUNT" -eq 4 ] \
+            || die "L6 route must provide exactly four dynamic entity probes"
+        [ "$L6_ORBIT_PERIOD_FRAMES" -ge 60 ] \
+            && [ $((L6_ORBIT_PERIOD_FRAMES % 60)) -eq 0 ] \
+            || die "L6 camera orbit period must be a positive 60-frame multiple"
+        [ "$L6_PROBE_PERIOD_FRAMES" -ge 60 ] \
+            && [ $((L6_PROBE_PERIOD_FRAMES % 60)) -eq 0 ] \
+            || die "L6 probe period must be a positive 60-frame multiple"
         ;;
     *)
         die "unsupported route workload kind: $ROUTE_KIND"
@@ -346,9 +398,12 @@ RENDERER_INTERPOLATION=$(renderer_value frameInterpolation)
 RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
 [ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
-require_value "$RENDERER_PRESET" "balanced" "renderer lightingPreset"
+require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
 require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
+if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
+    require_value "$RENDERER_LIGHTING" "true" "L6 dynamic route renderer improvedLighting"
+fi
 RENDERER_VALUES_BEFORE="$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG"
 
 mkdir -p "$OUTPUT_DIR"
@@ -388,7 +443,7 @@ ACCEPTED_JSON="$OUTPUT_DIR/$stem.accepted.json"
 echo "Metallum benchmark preflight passed"
 echo "  display: $MONITOR_NAME, ${WIDTH}x${HEIGHT}@${REFRESH_HZ}, exclusive fullscreen"
 echo "  pacing: VSync off, maxFps=$MAX_FPS"
-echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$RENDERER_LIGHTING, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
+echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$RENDERER_LIGHTING/$LIGHTING_PRESET, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
@@ -400,6 +455,9 @@ case "$ROUTE_KIND" in
         ;;
     TORCH_TOGGLE)
         echo "  torch toggle epoch: position=[$TORCH_POSITION_X,$TORCH_POSITION_Y,$TORCH_POSITION_Z], initial=$TORCH_INITIAL_BLOCK, support=$TORCH_SUPPORT_BLOCK, apply=$TORCH_APPLY_AFTER_MEASURED_FRAMES, remove=$TORCH_REMOVE_AFTER_MEASURED_FRAMES, observe=$TORCH_OBSERVATION_FRAMES"
+        ;;
+    L6_DYNAMIC_SHADOW)
+        echo "  L6 dynamic shadow: held=$L6_HELD_ITEM, camera orbit radius=$L6_ORBIT_RADIUS period=$L6_ORBIT_PERIOD_FRAMES, probes=$L6_PROBE_COUNT origin=[$L6_PROBE_ORIGIN_X,$L6_PROBE_ORIGIN_Y,$L6_PROBE_ORIGIN_Z] period=$L6_PROBE_PERIOD_FRAMES"
         ;;
 esac
 echo "  fixture: $FIXTURE_ID ($FIXTURE_SHA256, read-only)"
@@ -666,6 +724,18 @@ METALLUM_BENCHMARK_TORCH_SUPPORT_BLOCK="$TORCH_SUPPORT_BLOCK" \
 METALLUM_BENCHMARK_TORCH_APPLY_AFTER_MEASURED_FRAMES="$TORCH_APPLY_AFTER_MEASURED_FRAMES" \
 METALLUM_BENCHMARK_TORCH_OBSERVATION_FRAMES="$TORCH_OBSERVATION_FRAMES" \
 METALLUM_BENCHMARK_TORCH_REMOVE_AFTER_MEASURED_FRAMES="$TORCH_REMOVE_AFTER_MEASURED_FRAMES" \
+METALLUM_BENCHMARK_L6_HELD_ITEM="$L6_HELD_ITEM" \
+METALLUM_BENCHMARK_L6_ORBIT_RADIUS="$L6_ORBIT_RADIUS" \
+METALLUM_BENCHMARK_L6_ORBIT_YAW_AMPLITUDE_DEGREES="$L6_ORBIT_YAW_AMPLITUDE_DEGREES" \
+METALLUM_BENCHMARK_L6_ORBIT_PITCH_AMPLITUDE_DEGREES="$L6_ORBIT_PITCH_AMPLITUDE_DEGREES" \
+METALLUM_BENCHMARK_L6_ORBIT_PERIOD_FRAMES="$L6_ORBIT_PERIOD_FRAMES" \
+METALLUM_BENCHMARK_L6_PROBE_COUNT="$L6_PROBE_COUNT" \
+METALLUM_BENCHMARK_L6_PROBE_ORIGIN_X="$L6_PROBE_ORIGIN_X" \
+METALLUM_BENCHMARK_L6_PROBE_ORIGIN_Y="$L6_PROBE_ORIGIN_Y" \
+METALLUM_BENCHMARK_L6_PROBE_ORIGIN_Z="$L6_PROBE_ORIGIN_Z" \
+METALLUM_BENCHMARK_L6_PROBE_RADIUS="$L6_PROBE_RADIUS" \
+METALLUM_BENCHMARK_L6_PROBE_VERTICAL_AMPLITUDE="$L6_PROBE_VERTICAL_AMPLITUDE" \
+METALLUM_BENCHMARK_L6_PROBE_PERIOD_FRAMES="$L6_PROBE_PERIOD_FRAMES" \
 METALLUM_GPU_TIMING=1 \
 METALLUM_GPU_TIMING_DETAIL="$TIMING_DETAIL" \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
@@ -804,6 +874,57 @@ if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
     fi
 fi
 
+if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
+    l6_ready="METALLUM_BENCHMARK EVENT=L6_DYNAMIC_READY route=$ROUTE_ID held=$L6_HELD_ITEM probes=$L6_PROBE_COUNT orbit_period=$L6_ORBIT_PERIOD_FRAMES probe_period=$L6_PROBE_PERIOD_FRAMES"
+    l6_ready_count=$(grep -Fc "$l6_ready" "$MINECRAFT_LOG" || true)
+    [ "$l6_ready_count" -eq 1 ] \
+        || die "expected exactly one matching L6_DYNAMIC_READY marker (found $l6_ready_count)"
+    l6_ready_line=$(grep -nF "$l6_ready" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$route_apply_line" -lt "$l6_ready_line" ] \
+        && [ "$l6_ready_line" -lt "$route_ready_line" ] \
+        || die "L6 dynamic route readiness marker is out of order"
+
+    case "$LIGHTING_PRESET" in
+        performance)
+            expected_dynamic="candidates=5 selected=1 dropped=4 held=true dispatches=1 rays=1536 ready=1 fallback=0 coverage_miss=0"
+            expected_dynamic_pages="failures=0 pages_bytes=49152"
+            expected_coverage_budget="candidates_min=5 candidates_max=5 selected_min=1 selected_max=1 dropped_min=4 dropped_max=4 rays_min=1536 rays_max=1536 ready_min=1 ready_max=1"
+            expected_coverage_pages="pages_bytes_min=49152 pages_bytes_max=49152"
+            ;;
+        balanced)
+            expected_dynamic="candidates=5 selected=2 dropped=3 held=true dispatches=1 rays=12288 ready=2 fallback=0 coverage_miss=0"
+            expected_dynamic_pages="failures=0 pages_bytes=393216"
+            expected_coverage_budget="candidates_min=5 candidates_max=5 selected_min=2 selected_max=2 dropped_min=3 dropped_max=3 rays_min=12288 rays_max=12288 ready_min=2 ready_max=2"
+            expected_coverage_pages="pages_bytes_min=393216 pages_bytes_max=393216"
+            ;;
+        ultra)
+            expected_dynamic="candidates=5 selected=4 dropped=1 held=true dispatches=1 rays=24576 ready=4 fallback=0 coverage_miss=0"
+            expected_dynamic_pages="failures=0 pages_bytes=786432"
+            expected_coverage_budget="candidates_min=5 candidates_max=5 selected_min=4 selected_max=4 dropped_min=1 dropped_max=1 rays_min=24576 rays_max=24576 ready_min=4 ready_max=4"
+            expected_coverage_pages="pages_bytes_min=786432 pages_bytes_max=786432"
+            ;;
+    esac
+    l6_coverage="METALLUM_BENCHMARK EVENT=L6_DYNAMIC_COVERAGE route=$ROUTE_ID frames=$MEASURE_FRAMES held_admitted_frames=$MEASURE_FRAMES held_ready_frames=$MEASURE_FRAMES dispatch_frames=$MEASURE_FRAMES $expected_coverage_budget fallback_total=0 coverage_miss_total=0 failure_total=0 $expected_coverage_pages"
+    l6_coverage_count=$(grep -Fc "$l6_coverage" "$MINECRAFT_LOG" || true)
+    [ "$l6_coverage_count" -eq 1 ] \
+        || die "expected exactly one matching L6_DYNAMIC_COVERAGE marker (found $l6_coverage_count)"
+    l6_coverage_line=$(grep -nF "$l6_coverage" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$measure_start_line" -lt "$l6_coverage_line" ] \
+        && [ "$l6_coverage_line" -lt "$measure_end_line" ] \
+        || die "L6 dynamic coverage marker is out of order"
+
+    l6_samples=$(sed -n "${measure_start_line},${measure_end_line}p" "$MINECRAFT_LOG" \
+        | grep -F "METALLUM_L6_DYNAMIC " || true)
+    l6_sample_count=$(printf '%s\n' "$l6_samples" | grep -Fc "METALLUM_L6_DYNAMIC " || true)
+    [ "$l6_sample_count" -ge 1 ] \
+        || die "L6 dynamic route emitted no periodic admission telemetry"
+    l6_valid_count=$(printf '%s\n' "$l6_samples" \
+        | grep -F "$expected_dynamic" \
+        | grep -Fc "$expected_dynamic_pages" || true)
+    [ "$l6_valid_count" -eq "$l6_sample_count" ] \
+        || die "L6 dynamic admission/ready telemetry violated the $LIGHTING_PRESET contract ($l6_valid_count/$l6_sample_count valid)"
+fi
+
 armed="METALLUM_BENCHMARK EVENT=ARMED scope=$MONITOR_NAME target=${WIDTH}x${HEIGHT} warmup=$WARMUP_FRAMES measure=$MEASURE_FRAMES sequence=[$METALFX_MODE]"
 grep -Fq "$armed" "$MINECRAFT_LOG" || die "benchmark ARMED marker does not match the requested contract"
 
@@ -820,10 +941,14 @@ complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ -s "$RAW_REPORT" ] || die "GPU timing JSONL report is missing or empty"
 
 RELEASE_ARG=""
+VALIDATION_ARG=""
 if [ "$TIMING_DETAIL" -eq 0 ] \
     && [ "$METAL_VALIDATION" -eq 0 ] \
     && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
     RELEASE_ARG=--release-contract
+fi
+if [ "$METAL_VALIDATION" -eq 1 ]; then
+    VALIDATION_ARG=--metal-validation-contract
 fi
 
 python3 "$ANALYZER" summarize "$RAW_REPORT" \
@@ -831,6 +956,7 @@ python3 "$ANALYZER" summarize "$RAW_REPORT" \
     --segment 0 \
     --scaler-mode "$METALFX_MODE" \
     ${RELEASE_ARG:+$RELEASE_ARG} \
+    ${VALIDATION_ARG:+$VALIDATION_ARG} \
     --source-sha256 "$SOURCE_SHA256" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --settings-id "$SETTINGS_ID" \
@@ -851,6 +977,7 @@ python3 "$ANALYZER" summarize "$RAW_REPORT" \
     --segment 0 \
     --scaler-mode "$METALFX_MODE" \
     ${RELEASE_ARG:+$RELEASE_ARG} \
+    ${VALIDATION_ARG:+$VALIDATION_ARG} \
     --source-sha256 "$SOURCE_SHA256" \
     --artifact-sha256 "$ARTIFACT_SHA256" \
     --settings-id "$SETTINGS_ID" \

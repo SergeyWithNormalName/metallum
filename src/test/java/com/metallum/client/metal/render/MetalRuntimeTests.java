@@ -330,12 +330,18 @@ public final class MetalRuntimeTests {
         require(failedRequest.sameSemanticWork(unrelatedMirrorRevision)
                         && !failedRequest.sameSemanticWork(differentWork),
                 "unrelated mirror revisions bypassed bounded L6 retry backoff");
+        require(LocalVoxelShadowGpuResources.checkedFraction(0.0) == 0.0f
+                        && LocalVoxelShadowGpuResources.checkedFraction(
+                        Math.nextDown(1.0)) == Math.nextDown(1.0f),
+                "valid near-boundary L6 coordinates were rejected by float quantization");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.checkedFraction(1.0));
 
         LocalVoxelShadowGpuResources.PreparedFrame prepared =
                 new LocalVoxelShadowGpuResources.PreparedFrame(
                         true, 5, 3, 41L,
                         15, 2, 3, 1, 4, 5,
-                        10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L
+                        10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L,
+                        3, 2, 1, true, 1, 12_288, 2, 0, 0, 1, 1, 0, 393_216L
                 );
         require(prepared.descriptorLights() == 15
                         && prepared.readyLights() == 2
@@ -351,22 +357,38 @@ public final class MetalRuntimeTests {
                         && prepared.capacityBlockedLights() == 1
                         && prepared.retryBackoffLights() == 2
                         && prepared.cacheUploads() == 2
-                        && prepared.cacheUploadBytes() == 8192L,
+                        && prepared.cacheUploadBytes() == 8192L
+                        && prepared.dynamicCandidates() == 3
+                        && prepared.dynamicSelected() == 2
+                        && prepared.dynamicDropped() == 1
+                        && prepared.heldAdmitted()
+                        && prepared.dynamicDispatches() == 1
+                        && prepared.dynamicReady() == 2
+                        && prepared.dynamicFallback() == 0,
                 "L6 prepared-frame telemetry lost a descriptor state");
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
                 true, 5, 3, 41L,
                 14, 2, 3, 1, 4, 5,
-                10, 4, 10, 8, 3, 16384L, 1, 2, 2, 8192L
+                10, 4, 10, 8, 3, 16384L, 1, 2, 2, 8192L,
+                0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0L
         ));
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
                 true, 2, 3, 41L,
                 15, 2, 3, 1, 4, 5,
-                10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L
+                10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L,
+                0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0L
         ));
         expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
                 true, 5, 3, 41L,
                 15, 2, 3, 1, 4, 5,
-                10, 5, 10, 8, 3, 16384L, 1, 2, 2, -1L
+                10, 5, 10, 8, 3, 16384L, 1, 2, 2, -1L,
+                0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0L
+        ));
+        expectIllegalArgument(() -> new LocalVoxelShadowGpuResources.PreparedFrame(
+                true, 5, 3, 41L,
+                15, 2, 3, 1, 4, 5,
+                10, 5, 10, 8, 3, 16384L, 1, 2, 2, 8192L,
+                3, 2, 1, true, 1, 12_288, 2, 1, 0, 1, 1, 0, 393_216L
         ));
     }
 
@@ -514,10 +536,11 @@ public final class MetalRuntimeTests {
                         LightingPreset.BALANCED);
         FrameState.AdvancedLightingWork localShadowed = MetalDevice.advancedLightingWork(
                 2, 3, true, localBudget);
-        require(localShadowed.passCount() == shadowed.passCount()
-                        && localShadowed.encoderCount() == shadowed.encoderCount()
-                        && localShadowed.psoCount() == shadowed.psoCount()
+        require(localShadowed.passCount() == shadowed.passCount() + 2
+                        && localShadowed.encoderCount() == shadowed.encoderCount() + 2
+                        && localShadowed.psoCount() == shadowed.psoCount() + 1
                         && localShadowed.workQueueCount() == 5
+                        && localShadowed.dispatchCount() == shadowed.dispatchCount() + 1
                         && localShadowed.uploadBytes() == shadowed.uploadBytes()
                         + com.metallum.client.renderer.LocalVoxelShadowLayout.PARAMS_BYTES
                         + (long) localBudget.maxEntityProxies()
@@ -826,10 +849,11 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.ACTUAL_HDR_DISPLAY,
                 MetalGpuTimingStage.LIGHT_UPLOAD_CLUSTER_BUILD,
                 MetalGpuTimingStage.SUN_SHADOW,
-                MetalGpuTimingStage.VOXEL_UPDATE
+                MetalGpuTimingStage.VOXEL_UPDATE,
+                MetalGpuTimingStage.DYNAMIC_LOCAL_SHADOW
         };
         require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
-                "GPU timing stage count does not match the native ABI");
+                "GPU timing stage count does not match the append-only Java contract");
         for (int index = 0; index < stages.length; index++) {
             require(stages[index].nativeId() == index,
                     "GPU timing stage native ID mismatch at index " + index);

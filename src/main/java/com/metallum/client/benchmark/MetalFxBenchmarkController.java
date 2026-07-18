@@ -31,6 +31,10 @@ import net.minecraft.world.clock.ClockState;
 import net.minecraft.world.clock.WorldClock;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.Relative;
+import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -49,6 +53,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Environment-gated, deterministic 5K benchmark driver.
@@ -94,14 +99,15 @@ public final class MetalFxBenchmarkController {
     private enum WorkloadKind {
         STATIC,
         TORCH_EPOCH,
-        TORCH_TOGGLE;
+        TORCH_TOGGLE,
+        L6_DYNAMIC_SHADOW;
 
         private static WorkloadKind fromEnvironment() {
             try {
                 return valueOf(requiredEnv("METALLUM_BENCHMARK_ROUTE_KIND"));
             } catch (IllegalArgumentException exception) {
                 throw new IllegalArgumentException(
-                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, or TORCH_TOGGLE",
+                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, TORCH_TOGGLE, or L6_DYNAMIC_SHADOW",
                         exception
                 );
             }
@@ -154,6 +160,59 @@ public final class MetalFxBenchmarkController {
         }
     }
 
+    /** Benchmark-only motion fixture exercising the production held/entity extraction paths. */
+    private record L6DynamicShadowConfig(
+            double orbitRadius,
+            float orbitYawAmplitudeDegrees,
+            float orbitPitchAmplitudeDegrees,
+            int orbitPeriodFrames,
+            int probeCount,
+            double probeOriginX,
+            double probeOriginY,
+            double probeOriginZ,
+            double probeRadius,
+            double probeVerticalAmplitude,
+            int probePeriodFrames
+    ) {
+        private static L6DynamicShadowConfig fromEnvironment() {
+            if (!"minecraft:torch".equals(requiredEnv("METALLUM_BENCHMARK_L6_HELD_ITEM"))) {
+                throw new IllegalArgumentException("METALLUM_BENCHMARK_L6_HELD_ITEM must be minecraft:torch");
+            }
+            int probeCount = positiveIntStrict("METALLUM_BENCHMARK_L6_PROBE_COUNT");
+            if (probeCount != 4) {
+                throw new IllegalArgumentException("METALLUM_BENCHMARK_L6_PROBE_COUNT must be exactly 4");
+            }
+            int orbitPeriod = positiveIntStrict("METALLUM_BENCHMARK_L6_ORBIT_PERIOD_FRAMES");
+            int probePeriod = positiveIntStrict("METALLUM_BENCHMARK_L6_PROBE_PERIOD_FRAMES");
+            if (orbitPeriod < 60 || orbitPeriod % 60 != 0
+                    || probePeriod < 60 || probePeriod % 60 != 0) {
+                throw new IllegalArgumentException("L6 motion periods must be 60-frame multiples");
+            }
+            float yawAmplitude = positiveFiniteFloat(
+                    "METALLUM_BENCHMARK_L6_ORBIT_YAW_AMPLITUDE_DEGREES"
+            );
+            float pitchAmplitude = positiveFiniteFloat(
+                    "METALLUM_BENCHMARK_L6_ORBIT_PITCH_AMPLITUDE_DEGREES"
+            );
+            if (yawAmplitude > 45.0F || pitchAmplitude > 30.0F) {
+                throw new IllegalArgumentException("L6 camera orbit exceeds its route bounds");
+            }
+            return new L6DynamicShadowConfig(
+                    positiveFiniteDouble("METALLUM_BENCHMARK_L6_ORBIT_RADIUS"),
+                    yawAmplitude,
+                    pitchAmplitude,
+                    orbitPeriod,
+                    probeCount,
+                    finiteDouble("METALLUM_BENCHMARK_L6_PROBE_ORIGIN_X"),
+                    finiteDouble("METALLUM_BENCHMARK_L6_PROBE_ORIGIN_Y"),
+                    finiteDouble("METALLUM_BENCHMARK_L6_PROBE_ORIGIN_Z"),
+                    positiveFiniteDouble("METALLUM_BENCHMARK_L6_PROBE_RADIUS"),
+                    positiveFiniteDouble("METALLUM_BENCHMARK_L6_PROBE_VERTICAL_AMPLITUDE"),
+                    probePeriod
+            );
+        }
+    }
+
     private record RouteConfig(
             String routeId,
             String routeSha256,
@@ -176,7 +235,8 @@ public final class MetalFxBenchmarkController {
             double positionEpsilon,
             float angleEpsilon,
             WorkloadKind workloadKind,
-            TorchEpochConfig torchEpoch
+            TorchEpochConfig torchEpoch,
+            L6DynamicShadowConfig l6DynamicShadow
     ) {
         private static RouteConfig fromEnvironment() {
             String routeId = requiredMatching("METALLUM_BENCHMARK_ROUTE_ID", SAFE_ID);
@@ -217,9 +277,13 @@ public final class MetalFxBenchmarkController {
             double positionEpsilon = positiveFiniteDouble("METALLUM_BENCHMARK_POSITION_EPSILON");
             float angleEpsilon = positiveFiniteFloat("METALLUM_BENCHMARK_ANGLE_EPSILON");
             WorkloadKind workloadKind = WorkloadKind.fromEnvironment();
-            TorchEpochConfig torchEpoch = workloadKind == WorkloadKind.STATIC
-                    ? null
-                    : TorchEpochConfig.fromEnvironment(workloadKind);
+            TorchEpochConfig torchEpoch = workloadKind == WorkloadKind.TORCH_EPOCH
+                    || workloadKind == WorkloadKind.TORCH_TOGGLE
+                    ? TorchEpochConfig.fromEnvironment(workloadKind)
+                    : null;
+            L6DynamicShadowConfig l6DynamicShadow = workloadKind == WorkloadKind.L6_DYNAMIC_SHADOW
+                    ? L6DynamicShadowConfig.fromEnvironment()
+                    : null;
             return new RouteConfig(
                     routeId,
                     routeSha256,
@@ -242,7 +306,8 @@ public final class MetalFxBenchmarkController {
                     positionEpsilon,
                     angleEpsilon,
                     workloadKind,
-                    torchEpoch
+                    torchEpoch,
+                    l6DynamicShadow
             );
         }
     }
@@ -320,6 +385,11 @@ public final class MetalFxBenchmarkController {
     private int originalFoodLevel;
     private float originalSaturation;
     private boolean originalClientStateCaptured;
+    private boolean l6DynamicReady;
+    private int l6MotionFrame;
+    private ItemStack l6OriginalMainHand = ItemStack.EMPTY;
+    private boolean l6OriginalMainHandCaptured;
+    private final List<ItemEntity> l6ProbeEntities = new ArrayList<>();
     private boolean armed;
     private final int[] framebufferWidthScratch = new int[1];
     private final int[] framebufferHeightScratch = new int[1];
@@ -515,6 +585,7 @@ public final class MetalFxBenchmarkController {
 
         switch (this.segmentPhase) {
             case WARMUP -> {
+                driveL6DynamicShadow(minecraft);
                 this.segmentFrame++;
                 if (this.segmentFrame >= this.warmupFrames) {
                     beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_START);
@@ -524,11 +595,17 @@ public final class MetalFxBenchmarkController {
             case MEASURE -> {
                 this.segmentFrame++;
                 this.measuredFrames++;
+                driveL6DynamicShadow(minecraft);
                 driveTorchEpoch(minecraft);
                 if (this.stage != Stage.RUNNING) {
                     return;
                 }
                 if (this.measuredFrames >= this.measureFrames) {
+                    String l6CoverageFailure = completeL6DynamicShadowCoverage();
+                    if (l6CoverageFailure != null) {
+                        fail(minecraft, l6CoverageFailure);
+                        return;
+                    }
                     logSegmentEvent("MEASURE_END");
                     MetalGpuTiming.completeBenchmark(
                             this.segmentIndex,
@@ -1485,6 +1562,14 @@ public final class MetalFxBenchmarkController {
             }
         }
 
+        if (this.routeApplyLogged) {
+            String l6SetupFailure = ensureL6DynamicShadowReady(minecraft);
+            if (l6SetupFailure != null) {
+                fail(minecraft, l6SetupFailure);
+                return;
+            }
+        }
+
         String clientMismatch = clientRouteMismatch(minecraft, true);
         if (this.routeApplyLogged
                 && this.routeServerMismatch == null
@@ -1527,6 +1612,7 @@ public final class MetalFxBenchmarkController {
             final Minecraft minecraft,
             final RouteCheckEvent event
     ) {
+        restoreL6DynamicShadowMotion(minecraft);
         this.boundaryCheckEvent = event;
         this.boundaryCheckFrames = 0;
         this.boundaryCheckToken = submitRouteServerCheck(minecraft, false);
@@ -1572,6 +1658,9 @@ public final class MetalFxBenchmarkController {
                     this.segmentIndex,
                     this.sequence.get(this.segmentIndex)
             );
+            if (this.route.l6DynamicShadow() != null) {
+                L6DynamicShadowBenchmarkTelemetry.begin();
+            }
             if (this.captureScreenshots) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
@@ -1694,7 +1783,7 @@ public final class MetalFxBenchmarkController {
         if (!player.level().dimension().equals(this.route.dimension())) {
             return "server player is in a different dimension";
         }
-        if (!samePose(player)) {
+        if (this.route.l6DynamicShadow() == null && !samePose(player)) {
             return "server player pose differs from the route (expected "
                     + routePose() + ", found " + entityPose(player) + ")";
         }
@@ -1810,6 +1899,22 @@ public final class MetalFxBenchmarkController {
     }
 
     private String clientWorkloadStateMismatch(final Minecraft minecraft) {
+        L6DynamicShadowConfig l6 = this.route.l6DynamicShadow();
+        if (l6 != null) {
+            if (!this.l6DynamicReady || !minecraft.player.getMainHandItem().is(Items.TORCH)) {
+                return "L6 dynamic route did not retain the held torch";
+            }
+            if (this.l6ProbeEntities.size() != l6.probeCount()) {
+                return "L6 dynamic route probe count differs from the route";
+            }
+            for (ItemEntity probe : this.l6ProbeEntities) {
+                if (probe.isRemoved() || probe.level() != minecraft.level
+                        || !probe.getItem().is(Items.TORCH)) {
+                    return "L6 dynamic route probe state differs from the route";
+                }
+            }
+            return null;
+        }
         TorchEpochConfig config = this.route.torchEpoch();
         if (config == null) {
             return null;
@@ -1831,6 +1936,139 @@ public final class MetalFxBenchmarkController {
         return minecraft.level.getBlockState(position).is(Blocks.AIR)
                 ? null
                 : "TORCH_EPOCH client initial block differs from air";
+    }
+
+    private String ensureL6DynamicShadowReady(final Minecraft minecraft) {
+        L6DynamicShadowConfig config = this.route.l6DynamicShadow();
+        if (config == null || this.l6DynamicReady) {
+            return null;
+        }
+        if (minecraft.player == null || minecraft.level == null) {
+            return "L6 dynamic route requires a client player and level";
+        }
+        try {
+            this.l6OriginalMainHand = minecraft.player.getMainHandItem().copy();
+            this.l6OriginalMainHandCaptured = true;
+            minecraft.player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TORCH));
+            for (int index = 0; index < config.probeCount(); index++) {
+                ItemEntity probe = new ItemEntity(
+                        minecraft.level,
+                        config.probeOriginX(),
+                        config.probeOriginY(),
+                        config.probeOriginZ(),
+                        new ItemStack(Items.TORCH),
+                        0.0,
+                        0.0,
+                        0.0
+                );
+                probe.setUUID(UUID.nameUUIDFromBytes(
+                        ("metallum-l6-probe-" + index).getBytes(StandardCharsets.UTF_8)
+                ));
+                // ClientLevel.addEntity consumes a network-assigned non-zero ID. Benchmark-only
+                // probes never cross the server boundary, so reserve a deterministic high range
+                // and fail if another client entity unexpectedly occupies it.
+                int probeId = 2_000_000_000 - index;
+                if (minecraft.level.getEntity(probeId) != null
+                        || minecraft.level.getEntity(probe.getUUID()) != null) {
+                    throw new IllegalStateException("L6 benchmark probe identity collision");
+                }
+                probe.setId(probeId);
+                probe.setNoGravity(true);
+                probe.setDeltaMovement(0.0, 0.0, 0.0);
+                minecraft.level.addEntity(probe);
+                this.l6ProbeEntities.add(probe);
+            }
+            this.l6DynamicReady = true;
+            this.l6MotionFrame = 0;
+            applyL6DynamicShadowMotion(minecraft, 0);
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=L6_DYNAMIC_READY route={} held=minecraft:torch probes={} orbit_period={} probe_period={}",
+                    this.route.routeId(),
+                    config.probeCount(),
+                    config.orbitPeriodFrames(),
+                    config.probePeriodFrames()
+            );
+            return null;
+        } catch (RuntimeException exception) {
+            clearL6DynamicShadowRoute(minecraft);
+            Metallum.LOGGER.error("L6 dynamic benchmark-route setup failed", exception);
+            return "L6 dynamic route setup failed: " + exception.getClass().getSimpleName();
+        }
+    }
+
+    private void driveL6DynamicShadow(final Minecraft minecraft) {
+        if (!this.l6DynamicReady || this.route.l6DynamicShadow() == null) {
+            return;
+        }
+        this.l6MotionFrame++;
+        applyL6DynamicShadowMotion(minecraft, this.l6MotionFrame);
+    }
+
+    private void applyL6DynamicShadowMotion(final Minecraft minecraft, final int frame) {
+        L6DynamicShadowConfig config = this.route.l6DynamicShadow();
+        if (config == null || minecraft.player == null || minecraft.level == null) {
+            return;
+        }
+        double orbitPhase = Math.TAU * frame / config.orbitPeriodFrames();
+        double x = this.route.x() + config.orbitRadius() * (Math.cos(orbitPhase) - 1.0);
+        double z = this.route.z() + config.orbitRadius() * Math.sin(orbitPhase);
+        float yaw = this.route.yaw() + config.orbitYawAmplitudeDegrees() * (float) Math.sin(orbitPhase);
+        float pitch = Mth.clamp(
+                this.route.pitch() + config.orbitPitchAmplitudeDegrees() * (float) Math.sin(orbitPhase),
+                -90.0F,
+                90.0F
+        );
+        minecraft.player.setPos(x, this.route.y(), z);
+        minecraft.player.xOld = x;
+        minecraft.player.yOld = this.route.y();
+        minecraft.player.zOld = z;
+        minecraft.player.setYRot(yaw);
+        minecraft.player.setXRot(pitch);
+        minecraft.player.yRotO = yaw;
+        minecraft.player.xRotO = pitch;
+
+        for (int index = 0; index < this.l6ProbeEntities.size(); index++) {
+            ItemEntity probe = this.l6ProbeEntities.get(index);
+            if (probe.isRemoved()) {
+                continue;
+            }
+            double phase = Math.TAU * frame / config.probePeriodFrames()
+                    + Math.TAU * index / config.probeCount();
+            double probeX = config.probeOriginX() + config.probeRadius() * Math.cos(phase);
+            double probeY = config.probeOriginY()
+                    + config.probeVerticalAmplitude() * Math.sin(phase * 2.0);
+            double probeZ = config.probeOriginZ() + config.probeRadius() * Math.sin(phase);
+            probe.xOld = probe.getX();
+            probe.yOld = probe.getY();
+            probe.zOld = probe.getZ();
+            probe.setPos(probeX, probeY, probeZ);
+            probe.setDeltaMovement(0.0, 0.0, 0.0);
+        }
+    }
+
+    private void restoreL6DynamicShadowMotion(final Minecraft minecraft) {
+        if (!this.l6DynamicReady || minecraft.player == null) {
+            return;
+        }
+        this.l6MotionFrame = 0;
+        applyL6DynamicShadowMotion(minecraft, 0);
+    }
+
+    private void clearL6DynamicShadowRoute(final Minecraft minecraft) {
+        restoreL6DynamicShadowMotion(minecraft);
+        if (minecraft.level != null) {
+            for (ItemEntity probe : this.l6ProbeEntities) {
+                minecraft.level.removeEntity(probe.getId(), Entity.RemovalReason.DISCARDED);
+            }
+        }
+        this.l6ProbeEntities.clear();
+        if (this.l6OriginalMainHandCaptured && minecraft.player != null) {
+            minecraft.player.setItemInHand(InteractionHand.MAIN_HAND, this.l6OriginalMainHand);
+        }
+        this.l6OriginalMainHand = ItemStack.EMPTY;
+        this.l6OriginalMainHandCaptured = false;
+        this.l6DynamicReady = false;
+        this.l6MotionFrame = 0;
     }
 
     private String runtimeSettingsMismatch(final Minecraft minecraft) {
@@ -1946,6 +2184,7 @@ public final class MetalFxBenchmarkController {
     private void startSegment() {
         SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
         TorchEpochTelemetry.abort();
+        L6DynamicShadowBenchmarkTelemetry.abort();
         SodiumRelightOracle.abortObservation();
         SodiumRelightFastPath.abortObservation();
         this.torchEpochServerTaskPending.set(false);
@@ -1988,6 +2227,52 @@ public final class MetalFxBenchmarkController {
         );
     }
 
+    private String completeL6DynamicShadowCoverage() {
+        if (this.route.l6DynamicShadow() == null) {
+            return null;
+        }
+        L6DynamicShadowBenchmarkTelemetry.Snapshot snapshot =
+                L6DynamicShadowBenchmarkTelemetry.end();
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=L6_DYNAMIC_COVERAGE route={} frames={} held_admitted_frames={} held_ready_frames={} dispatch_frames={} candidates_min={} candidates_max={} selected_min={} selected_max={} dropped_min={} dropped_max={} rays_min={} rays_max={} ready_min={} ready_max={} fallback_total={} coverage_miss_total={} failure_total={} pages_bytes_min={} pages_bytes_max={}",
+                this.route.routeId(),
+                snapshot.frames(),
+                snapshot.heldAdmittedFrames(),
+                snapshot.heldReadyFrames(),
+                snapshot.dispatchFrames(),
+                snapshot.candidatesMin(),
+                snapshot.candidatesMax(),
+                snapshot.selectedMin(),
+                snapshot.selectedMax(),
+                snapshot.droppedMin(),
+                snapshot.droppedMax(),
+                snapshot.raysMin(),
+                snapshot.raysMax(),
+                snapshot.readyMin(),
+                snapshot.readyMax(),
+                snapshot.fallbackTotal(),
+                snapshot.coverageMissTotal(),
+                snapshot.asyncFailureTotal(),
+                snapshot.pageBytesMin(),
+                snapshot.pageBytesMax()
+        );
+        if (snapshot.frames() != this.measureFrames) {
+            return "L6 dynamic coverage observed " + snapshot.frames()
+                    + " of " + this.measureFrames + " measured frames";
+        }
+        if (snapshot.heldAdmittedFrames() != this.measureFrames
+                || snapshot.heldReadyFrames() != this.measureFrames
+                || snapshot.dispatchFrames() != this.measureFrames) {
+            return "L6 held dynamic shadow was not READY on every measured frame";
+        }
+        if (snapshot.fallbackTotal() != 0L
+                || snapshot.coverageMissTotal() != 0L
+                || snapshot.asyncFailureTotal() != 0L) {
+            return "L6 dynamic coverage recorded fallback, coverage miss, or async failure";
+        }
+        return null;
+    }
+
     private void fail(final Minecraft minecraft, final String reason) {
         Metallum.LOGGER.error("METALLUM_BENCHMARK EVENT=FAIL reason={}", reason);
         finish(minecraft);
@@ -2001,9 +2286,11 @@ public final class MetalFxBenchmarkController {
         if (TorchEpochTelemetry.snapshot().active()) {
             TorchEpochTelemetry.abort();
         }
+        L6DynamicShadowBenchmarkTelemetry.abort();
         SodiumRelightOracle.abortObservation();
         SodiumRelightFastPath.abortObservation();
         restoreSurvivalGuard(minecraft);
+        clearL6DynamicShadowRoute(minecraft);
         if (this.originalClientStateCaptured && this.originalCameraType != null) {
             minecraft.options.setCameraType(this.originalCameraType);
             if (this.originalCameraEntity != null) {

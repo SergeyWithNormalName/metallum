@@ -473,6 +473,12 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return this.fragmentLevelBindings.get(level);
     }
 
+    /** Native context handle for same-command-buffer L6 compute consumers only. */
+    MemorySegment nativeContext() {
+        ensureOpen();
+        return this.context;
+    }
+
     @Override
     public void close() {
         if (MetalNativeBridge.isNullHandle(this.context)) {

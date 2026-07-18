@@ -351,6 +351,19 @@ public final class MTLCommandBuffer {
         );
     }
 
+    /** Encodes one bounded batch of moving L6 pages and publishes its atlas write fence. */
+    public int encodeDynamicVoxelShadow(
+            final MemorySegment dynamicContext,
+            final MemorySegment voxelContext,
+            final MemorySegment atlas,
+            final MemorySegment globalFence,
+            final MemorySegment packet
+    ) {
+        return MetalNativeBridge.metallum_dynamic_shadow_encode_v1(
+                dynamicContext, voxelContext, handle(), atlas, globalFence, packet
+        );
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

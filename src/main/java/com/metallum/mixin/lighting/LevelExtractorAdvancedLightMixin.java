@@ -287,6 +287,7 @@ abstract class LevelExtractorAdvancedLightMixin {
         if (collector == null || player == null || camera.entity() != player) {
             return;
         }
+        long attemptedStableId = 0L;
         try {
             float partialTick = deltaTracker.getGameTimeDeltaPartialTick(
                     !this.level.tickRateManager().isEntityFrozen(player)
@@ -294,6 +295,7 @@ abstract class LevelExtractorAdvancedLightMixin {
             long stableId = com.metallum.client.lighting.StableLightIds.entity(
                     world.dimensionId(), player.getUUID()
             );
+            attemptedStableId = stableId;
             CameraHeldLightTracker.CameraPose pose = Minecraft.getInstance().options
                     .getCameraType().isFirstPerson()
                     ? metallum$firstPersonHeldPose(camera)
@@ -311,9 +313,15 @@ abstract class LevelExtractorAdvancedLightMixin {
                 this.metallum$cameraHeldStableId = light.stableId();
             }
         } catch (Throwable failure) {
-            this.metallum$dynamicLights = null;
-            this.metallum$dynamicLightDeltaTracker = null;
-            AdvancedLightRegistry.global().failClosed("camera-held light extraction failed", failure);
+            // If the local source was identified before the failure, keep it deduplicated from
+            // the ordinary entity pass for this frame instead of publishing a differently
+            // anchored replacement after the isolated camera-held path failed.
+            this.metallum$cameraHeldStableId = attemptedStableId;
+            this.metallum$cameraHeldLightTracker.reset();
+            com.metallum.Metallum.LOGGER.warn(
+                    "Skipping this frame's camera-held light after an isolated extraction failure",
+                    failure
+            );
         }
     }
 

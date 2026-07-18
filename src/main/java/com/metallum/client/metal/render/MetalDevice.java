@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
@@ -1478,10 +1479,25 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     lightSnapshot
                             );
                     localPrepared = localShadowResources.uploadPending(this.commandEncoder);
+                    if (L6DynamicShadowBenchmarkTelemetry.isActive()) {
+                        L6DynamicShadowBenchmarkTelemetry.recordFrame(
+                                localPrepared.dynamicCandidates(),
+                                localPrepared.dynamicSelected(),
+                                localPrepared.dynamicDropped(),
+                                localPrepared.heldAdmitted(),
+                                localPrepared.dynamicDispatches(),
+                                localPrepared.dynamicRays(),
+                                localPrepared.dynamicReady(),
+                                localPrepared.dynamicFallback(),
+                                localPrepared.dynamicCoverageMisses(),
+                                localPrepared.dynamicAsyncFailures(),
+                                localPrepared.dynamicPageBytes()
+                        );
+                    }
                     if (MetalGpuTiming.isReportEnabled()
                             && (submitIndex + 1L) % 300L == 0L) {
                         Metallum.LOGGER.info(
-                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}",
+                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
                                 localPrepared.active(),
                                 localPrepared.descriptorLights(),
                                 lightSnapshot.lights().size(),
@@ -1502,7 +1518,36 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 localPrepared.cacheUploadBytes(),
                                 localPrepared.proxyCount(),
                                 localShadowResources.budget().maxEntityProxies(),
-                                localShadowResources.budget().maxSteps()
+                                localShadowResources.budget().maxSteps(),
+                                localPrepared.dynamicCandidates(),
+                                localPrepared.dynamicSelected(),
+                                localPrepared.dynamicDropped(),
+                                localPrepared.heldAdmitted(),
+                                localPrepared.dynamicDispatches(),
+                                localPrepared.dynamicRays(),
+                                localPrepared.dynamicReady(),
+                                localPrepared.dynamicFallback(),
+                                localPrepared.dynamicCoverageMisses(),
+                                localPrepared.staticToDynamicTransitions(),
+                                localPrepared.dynamicToStaticTransitions(),
+                                localPrepared.dynamicAsyncFailures(),
+                                localPrepared.dynamicPageBytes()
+                        );
+                        Metallum.LOGGER.info(
+                                "METALLUM_L6_DYNAMIC candidates={} selected={} dropped={} held={} dispatches={} rays={} ready={} fallback={} coverage_miss={} static_to_dynamic={} dynamic_to_static={} failures={} pages_bytes={}",
+                                localPrepared.dynamicCandidates(),
+                                localPrepared.dynamicSelected(),
+                                localPrepared.dynamicDropped(),
+                                localPrepared.heldAdmitted(),
+                                localPrepared.dynamicDispatches(),
+                                localPrepared.dynamicRays(),
+                                localPrepared.dynamicReady(),
+                                localPrepared.dynamicFallback(),
+                                localPrepared.dynamicCoverageMisses(),
+                                localPrepared.staticToDynamicTransitions(),
+                                localPrepared.dynamicToStaticTransitions(),
+                                localPrepared.dynamicAsyncFailures(),
+                                localPrepared.dynamicPageBytes()
                         );
                     }
                     this.advancedLightingFrameSubmitIndex = submitIndex;
@@ -2818,14 +2863,20 @@ public final class MetalDevice implements GpuDeviceBackend {
                 lightCount, cascadeCount, shadowPass);
         return new FrameState.AdvancedLightingWork(
                 base.lightCount(),
-                base.passCount(),
-                base.encoderCount(),
-                base.psoCount(),
+                Math.addExact(
+                        base.passCount(), LocalVoxelShadowGpuResources.PRODUCTION_PASS_COUNT),
+                Math.addExact(
+                        base.encoderCount(),
+                        LocalVoxelShadowGpuResources.PRODUCTION_ENCODER_COUNT),
+                Math.addExact(
+                        base.psoCount(), LocalVoxelShadowGpuResources.RESIDENT_PSO_COUNT),
                 Math.addExact(
                         base.workQueueCount(),
                         LocalVoxelShadowGpuResources.PRODUCTION_WORK_QUEUE_COUNT
                 ),
-                base.dispatchCount(),
+                Math.addExact(
+                        base.dispatchCount(),
+                        LocalVoxelShadowGpuResources.MAX_DYNAMIC_DISPATCH_COUNT),
                 Math.addExact(
                         base.uploadBytes(),
                         LocalVoxelShadowGpuResources.frameUploadBytes(localShadowBudget)

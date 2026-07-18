@@ -1,8 +1,15 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.lighting.AdvancedLight;
+import com.metallum.client.lighting.LightSourceKind;
+import com.metallum.client.lighting.LocalShadowSourceClass;
+import com.metallum.client.lighting.ShadowEmitterFootprint;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
+import com.metallum.client.renderer.LocalVoxelShadowLayout;
+
+import java.util.List;
 
 /** Standalone contracts for the future resident local-shadow atlas foundation. */
 public final class LocalVoxelShadowAtlasResidencyTests {
@@ -11,6 +18,11 @@ public final class LocalVoxelShadowAtlasResidencyTests {
 
     public static void main(final String[] args) {
         testLayoutAccounting();
+        testDynamicSuffixLayout();
+        testDynamicMotionAndPromotion();
+        testSubThresholdMotionAccumulates();
+        testPresetAdmissionCaps();
+        testHeldAdmissionAndHysteresis();
         testStableResidencyAndLease();
         testReplacementDefersOldPageRetirement();
         testSameEdgeReplacementNeverOverwritesInFlightPage();
@@ -49,6 +61,208 @@ public final class LocalVoxelShadowAtlasResidencyTests {
                         && LocalVoxelShadowAtlasLayout.forPreset(LightingPreset.ULTRA).atlasBytes()
                         == 128L * LocalVoxelShadowAtlasLayout.MEBIBYTE,
                 "resident atlas preset budgets changed");
+    }
+
+    private static void testDynamicSuffixLayout() {
+        long[] expectedDynamicBytes = {147_456L, 1_179_648L, 2_359_296L};
+        int[] expectedSlots = {1, 2, 4};
+        int[] expectedEdges = {16, 32, 32};
+        LightingPreset[] presets = LightingPreset.values();
+        for (int preset = 0; preset < presets.length; preset++) {
+            LocalVoxelShadowLayout.Budget budget = LocalVoxelShadowLayout.forPreset(
+                    presets[preset]
+            );
+            LocalVoxelShadowLayout.DynamicShadowBudget dynamic = budget.dynamicShadows();
+            require(dynamic.heroSlots() == expectedSlots[preset]
+                            && dynamic.pageEdge() == expectedEdges[preset]
+                            && dynamic.atlasBytes() == expectedDynamicBytes[preset]
+                            && budget.visibilityCacheBytes()
+                            == LocalVoxelShadowAtlasLayout.forPreset(presets[preset]).atlasBytes(),
+                    "Dynamic suffix changed static atlas residency or preset quality");
+            long cursor = budget.visibilityCacheBytes();
+            for (int inFlight = 0; inFlight < LocalVoxelShadowLayout.PARAMS_RING_SLOTS;
+                    inFlight++) {
+                for (int hero = 0; hero < dynamic.heroSlots(); hero++) {
+                    require(dynamic.pageOffset(
+                                    budget.visibilityCacheBytes(), hero, inFlight
+                            ) == cursor,
+                            "Dynamic suffix pages overlap or leave undeclared gaps");
+                    cursor += dynamic.pageBytes();
+                }
+            }
+            require(cursor == budget.totalVisibilityAtlasBytes(),
+                    "Dynamic suffix exceeds its Metal atlas allocation");
+        }
+    }
+
+    private static void testDynamicMotionAndPromotion() {
+        DynamicShadowAdmission admission = new DynamicShadowAdmission();
+        LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                LocalVoxelShadowLayout.forPreset(LightingPreset.BALANCED).dynamicShadows();
+        AdvancedLight entity = light(11L, 0.0, 0, LocalShadowSourceClass.ENTITY_DYNAMIC);
+        DynamicShadowAdmission.Result result = admission.select(
+                List.of(candidate(entity, false)), budget, 0.0, 0.0, 0.0
+        );
+        require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.MOVING
+                        && result.selected(11L) != null
+                        && !result.tracked(11L).staticBuildAllowed(),
+                "New moving entity did not enter the GPU path immediately");
+        for (int frame = 0; frame < DynamicShadowAdmission.STOP_HOLD_FRAMES; frame++) {
+            result = admission.select(
+                    List.of(candidate(entity, false)), budget, 0.0, 0.0, 0.0
+            );
+            require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.MOVING,
+                    "Moving entity left its 12-frame stop hold early");
+        }
+        result = admission.select(
+                List.of(candidate(entity, false)), budget, 0.0, 0.0, 0.0
+        );
+        require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.PROMOTING
+                        && result.tracked(11L).staticBuildAllowed()
+                        && result.selected(11L) != null,
+                "Stopped entity did not retain its dynamic page during CPU promotion");
+        result = admission.select(
+                List.of(candidate(entity, true)), budget, 0.0, 0.0, 0.0
+        );
+        require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.STATIC
+                        && result.selected(11L) == null
+                        && result.dynamicToStaticTransitions() == 1,
+                "Dynamic page did not switch atomically to exact static READY");
+
+        AdvancedLight subThreshold = light(
+                11L, DynamicShadowAdmission.MOVEMENT_THRESHOLD, 0,
+                LocalShadowSourceClass.ENTITY_DYNAMIC
+        );
+        result = admission.select(
+                List.of(candidate(subThreshold, true)), budget, 0.0, 0.0, 0.0
+        );
+        require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.STATIC,
+                "Exactly 1/64-block jitter incorrectly restarted dynamic shadows");
+        AdvancedLight moved = light(
+                11L, DynamicShadowAdmission.MOVEMENT_THRESHOLD * 2.0 + 0.001, 0,
+                LocalShadowSourceClass.ENTITY_DYNAMIC
+        );
+        result = admission.select(
+                List.of(candidate(moved, false)), budget, 0.0, 0.0, 0.0
+        );
+        require(result.tracked(11L).phase() == DynamicShadowAdmission.Phase.MOVING
+                        && result.selected(11L) != null
+                        && result.staticToDynamicTransitions() == 1,
+                "Movement did not return to a GPU page in the same frame");
+    }
+
+    private static void testHeldAdmissionAndHysteresis() {
+        DynamicShadowAdmission admission = new DynamicShadowAdmission();
+        LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                LocalVoxelShadowLayout.forPreset(LightingPreset.BALANCED).dynamicShadows();
+        AdvancedLight held = light(91L, 10.0, -100, LocalShadowSourceClass.CAMERA_HELD);
+        AdvancedLight near = light(92L, 2.0, 100, LocalShadowSourceClass.ENTITY_DYNAMIC);
+        AdvancedLight nearlyEqual = light(93L, 2.05, 100,
+                LocalShadowSourceClass.ENTITY_DYNAMIC);
+        DynamicShadowAdmission.Result first = admission.select(
+                List.of(candidate(held, true), candidate(near, true),
+                        candidate(nearlyEqual, true)),
+                budget, 0.0, 0.0, 0.0
+        );
+        require(first.heldAdmitted()
+                        && first.selected(91L) != null
+                        && first.selected(91L).heroSlot() == 0
+                        && first.selected(92L) != null
+                        && first.dropped() == 1,
+                "Held light did not reserve slot zero ahead of more significant entities");
+        AdvancedLight tinyAdvantage = light(93L, 1.99, 100,
+                LocalShadowSourceClass.ENTITY_DYNAMIC);
+        DynamicShadowAdmission.Result second = admission.select(
+                List.of(candidate(held, true), candidate(near, true),
+                        candidate(tinyAdvantage, true)),
+                budget, 0.0, 0.0, 0.0
+        );
+        require(second.selected(92L) != null && second.selected(93L) == null,
+                "Sub-material candidate difference churned the retained hero slot");
+    }
+
+    private static void testSubThresholdMotionAccumulates() {
+        DynamicShadowAdmission admission = new DynamicShadowAdmission();
+        LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                LocalVoxelShadowLayout.forPreset(LightingPreset.BALANCED).dynamicShadows();
+        DynamicShadowAdmission.Result result = admission.select(
+                List.of(candidate(light(301L, 0.0, 1,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false)),
+                budget, 0.0, 0.0, 0.0
+        );
+        for (int frame = 1; frame <= 8; frame++) {
+            result = admission.select(
+                    List.of(candidate(light(
+                            301L,
+                            frame * (DynamicShadowAdmission.MOVEMENT_THRESHOLD / 4.0),
+                            1,
+                            LocalShadowSourceClass.ENTITY_DYNAMIC
+                    ), false)),
+                    budget, 0.0, 0.0, 0.0
+            );
+        }
+        require(result.tracked(301L).phase() == DynamicShadowAdmission.Phase.MOVING
+                        && !result.tracked(301L).staticBuildAllowed(),
+                "Sub-threshold per-frame drift did not accumulate into dynamic motion");
+    }
+
+    private static void testPresetAdmissionCaps() {
+        for (LightingPreset preset : LightingPreset.values()) {
+            DynamicShadowAdmission admission = new DynamicShadowAdmission();
+            LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                    LocalVoxelShadowLayout.forPreset(preset).dynamicShadows();
+            List<DynamicShadowAdmission.Candidate> candidates = new java.util.ArrayList<>();
+            candidates.add(candidate(light(401L, 0.0, -100,
+                    LocalShadowSourceClass.CAMERA_HELD), false));
+            for (int index = 0; index < 8; index++) {
+                candidates.add(candidate(light(
+                        410L + index,
+                        1.0 + index,
+                        100 - index,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC
+                ), false));
+            }
+            DynamicShadowAdmission.Result result = admission.select(
+                    candidates, budget, 0.0, 0.0, 0.0
+            );
+            require(result.selected().size() == budget.heroSlots()
+                            && result.selected(401L) != null
+                            && result.selected(401L).heroSlot() == 0
+                            && result.dropped() == candidates.size() - budget.heroSlots(),
+                    "Dynamic admission no longer obeys the 1/2/4 preset budget");
+        }
+    }
+
+    private static DynamicShadowAdmission.Candidate candidate(
+            final AdvancedLight light,
+            final boolean staticReady
+    ) {
+        return new DynamicShadowAdmission.Candidate(light, true, staticReady);
+    }
+
+    private static AdvancedLight light(
+            final long stableId,
+            final double x,
+            final int priority,
+            final LocalShadowSourceClass sourceClass
+    ) {
+        return new AdvancedLight(
+                stableId,
+                1L,
+                LightSourceKind.ENTITY,
+                x,
+                0.0,
+                0.0,
+                8.0f,
+                1.0f,
+                0.8f,
+                0.6f,
+                1.0f,
+                priority,
+                false,
+                ShadowEmitterFootprint.empty(),
+                sourceClass
+        );
     }
 
     private static void testStableResidencyAndLease() {

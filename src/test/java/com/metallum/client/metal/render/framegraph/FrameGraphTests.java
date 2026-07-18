@@ -45,7 +45,7 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 21 && graph.passes().size() == 9,
+        require(graph.resources().size() == 22 && graph.passes().size() == 11,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
@@ -59,7 +59,8 @@ public final class FrameGraphTests {
                                 "voxel_indirect_args", "voxel_occupancy",
                                 "voxel_transmittance_material", "voxel_brick_tags",
                                 "local_shadow_params_ring", "entity_shadow_proxies_ring",
-                                "local_shadow_reference_ring", "local_shadow_visibility_atlas"
+                                "local_shadow_reference_ring", "local_shadow_visibility_atlas",
+                                "local_shadow_atlas_staging"
                         )),
                 "Advanced lighting resources do not describe the compact index and shadow path");
         for (int index = 0; index < graph.resources().size(); index++) {
@@ -72,7 +73,9 @@ public final class FrameGraphTests {
         require(passNames.equals(List.of(
                         "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",
                         "voxel_update", "sun_shadow_static_refresh",
-                        "sun_shadow_static_copy", "sun_shadow_dynamic", "direct_lighting")),
+                        "sun_shadow_static_copy", "sun_shadow_dynamic",
+                        "dynamic_local_shadow_compute", "local_shadow_atlas_upload",
+                        "direct_lighting")),
                 "Advanced lighting pass order changed");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
@@ -91,6 +94,8 @@ public final class FrameGraphTests {
         FrameGraph.PassDesc staticShadow = graph.passes().get(5);
         FrameGraph.PassDesc staticCopy = graph.passes().get(6);
         FrameGraph.PassDesc dynamicShadow = graph.passes().get(7);
+        FrameGraph.PassDesc dynamicLocalShadow = graph.passes().get(8);
+        FrameGraph.PassDesc localAtlasUpload = graph.passes().get(9);
         require(build.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_membership_scratch")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
@@ -128,9 +133,39 @@ public final class FrameGraphTests {
                                 && access.kind() == FrameGraph.AccessKind.READ_WRITE
                                 && access.attachment().loadAction() == FrameGraph.LoadAction.LOAD),
                 "Cached static copy and dynamic entity shadow ordering changed");
+        require(dynamicLocalShadow.encoder() == FrameGraph.EncoderClass.COMPUTE
+                        && dynamicLocalShadow.dependencies().equals(List.of(
+                        build.id(), voxelUpdate.id()))
+                        && dynamicLocalShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_occupancy")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && dynamicLocalShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_transmittance_material")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && dynamicLocalShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_brick_tags")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && dynamicLocalShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_visibility_atlas")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && dynamicLocalShadow.accesses().stream().noneMatch(access ->
+                        access.resource().name().equals("gpu_lights")
+                                || access.resource().name().equals("local_shadow_params_ring")
+                                || access.resource().name().equals("entity_shadow_proxies_ring")),
+                "Dynamic local-shadow compute ordering, voxel inputs or atlas output changed");
+        require(localAtlasUpload.encoder() == FrameGraph.EncoderClass.BLIT
+                        && localAtlasUpload.dependencies().equals(List.of(
+                        dynamicLocalShadow.id()))
+                        && localAtlasUpload.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_atlas_staging")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && localAtlasUpload.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("local_shadow_visibility_atlas")
+                                && access.kind() == FrameGraph.AccessKind.WRITE),
+                "Static atlas upload is not ordered after the dynamic local-shadow page");
         FrameGraph.PassDesc direct = graph.passes().getLast();
         require(direct.dependencies().equals(List.of(
-                        build.id(), voxelUpdate.id(), dynamicShadow.id()))
+                        localAtlasUpload.id(), dynamicShadow.id()))
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("cluster_compact_headers")
                                 && access.kind() == FrameGraph.AccessKind.READ)

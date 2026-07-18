@@ -407,3 +407,81 @@ mapped Metal staging, что устранило воспроизводимый S
 `594/594` descriptors, `46 READY`, `548 FAIL_CLOSED`, `DDA=0`, очереди и
 `unshadowedContributing=0`. `clean check` (64 задачи) и отдельный live Metal API +
 Shader Validation прошли без crash/fault и fallback после Advanced admission.
+
+---
+
+## 2026-07-19 — L6 dynamic hero shadows и atlas receiver A/B
+
+### Динамический GPU-путь — оставлено
+
+**Статус:** реализовано и принято.
+
+Статический CPU-atlas сохранён. Свет в руке и движущиеся `ENTITY` используют один
+Metal compute-dispatch по уже загруженному L5 clipmap; три suffix-страницы на hero-slot
+соответствуют трём submit in flight и не уменьшают static residency. Preset budgets:
+`1 × 16² × 32` шага (`147456 B` suffix), `2 × 32² × 96` (`1179648 B`) и
+`4 × 32² × 96` (`2359296 B`) для Performance/Balanced/Ultra. Невыбранные entity
+сохраняют `APPROXIMATE_DIRECT`.
+
+Held light получает первый слот и свежую страницу каждого кадра. Moving entity
+определяется порогом `1/64` блока и остаётся dynamic ещё 12 кадров; после остановки
+CPU-page строится параллельно, а переходы static↔dynamic атомарны. Stable entity ID
+передаётся в свободных `w` proxy ABI и исключает только self-shadow emitter. При
+L5-scroll compute читает последний snapshot, уже принятый native context, и выбирает
+самый детальный полностью tagged level; это устранило двухкадровые coverage gaps.
+
+| Accepted route | FPS | GPU p95 | Dynamic p95 | Hero coverage | Fallback/miss/failure |
+|---|---:|---:|---:|---:|---:|
+| Balanced, `1800+3000` | 41.108 | 28.909 ms | 0.237 ms | 3000/3000, 2 slots | 0/0/0 |
+| Ultra, `1800+3000` | 36.900 | 34.459 ms | 0.399 ms | 3000/3000, 4 slots | 0/0/0 |
+
+Маршрут намеренно тяжелее static fixture: плавная camera orbit, факел в руке и четыре
+движущихся entity-probe. Поэтому его FPS не является A/B со static route; acceptance
+gate для новой работы — per-frame coverage и stage p95 (`≤1.0/2.0 ms`). Sparse L5
+scroll stage продолжает измеряться, но его stationary budget не используется как
+gate именно этого L6-маршрута; whole-frame tails остаются в отчёте. Static
+`1800+3000` подтвердил `candidates/dispatches/rays = 0` и отсутствие dynamic stage.
+
+`300+300` Metal API/Shader Validation дало 300/300 READY held frames, dynamic p95
+`0.721 ms`, без crash/fault/fallback. `clean check` пересобрал и проверил 68 задач.
+Third-person anchor использует интерполированную body-space точку руки игрока, а не
+animated arm bone: стабильного bone transform в текущем renderer contract нет.
+
+### Fragment atlas candidate 1 — отклонено после двух A/B
+
+**Гипотеза:** dominant soft-shadow может переиспользовать уже проверенные hard lookup
+данные: world transform, proxy result, light-to-receiver, distance и page bounds.
+
+**Метод:** soft helper получал подготовленные данные hard lookup; число taps, веса,
+seams, четыре transmittance layers, tangent-plane correction и порядок накопления не
+менялись. Каждый прогон: одинаковый static route, `1800+3000`, detailed timing.
+
+### Fragment atlas candidate 2 — отклонено после двух A/B
+
+**Гипотеза:** normal length, receiver-plane numerator и `cacheFaceEdgeFloat` можно
+вычислить один раз для трёх дополнительных taps.
+
+**Метод:** значения передавались в три resolved-tap helpers без изменения выборок или
+арифметики visibility. Кандидат тестировался отдельно на исходном коде, без candidate 1.
+
+| Два прогона, среднее | FPS | GPU p95 | GPU p99 | 1% low | 0.1% low | CPU p95 |
+|---|---:|---:|---:|---:|---:|---:|
+| Baseline | 56.305 | 20.782 ms | 21.924 ms | 41.673 | 38.789 | 4.683 ms |
+| Candidate 1 | 56.502 | 20.280 ms | 21.379 ms | 41.497 | 38.074 | 4.689 ms |
+| Candidate 2 | 56.491 | 20.593 ms | 21.704 ms | 40.839 | 36.908 | 4.643 ms |
+
+Candidate 1 улучшил средний GPU p95 на `0.502 ms`, но второй повтор ухудшил оба lows,
+а средние lows и CPU p95 не прошли строгий критерий «без ухудшения». Candidate 2 дал
+только `0.189 ms`, ниже порога `0.20 ms`, и также ухудшил lows. Оба изменения и их
+goldens полностью удалены. Комбинация 1+2 не испытывалась, потому что независимо не
+прошёл ни один кандидат.
+
+### Explicit first-hit fast path — не реализовывался
+
+Generated MSL для реального Sodium solid shader сохранил bounded
+`for (layer < 4)` и ранние `return` для infinite/receiver-plane/zero-visibility
+случаев. Значит явное дублирование первого слоя не имеет compiler-backed основания;
+по условию эксперимента код не добавлялся.
+
+**Итог:** в production оставлен только динамический GPU-путь. Lossless fragment
+atlas-кандидаты честно остаются в журнале, но не в исходниках.

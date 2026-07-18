@@ -198,6 +198,98 @@ public final class VoxelShadowCacheBuilder {
         return -1;
     }
 
+    /**
+     * Cheap publication gate for a GPU-built page. Unlike the CPU builder, a compute kernel
+     * cannot retract a descriptor after one ray discovers a missing toroidal brick, so every
+     * brick touched by the selected light sphere must already carry the expected logical tag.
+     */
+    public static boolean hasCompleteCoverage(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light,
+            final int levelIndex
+    ) {
+        if (snapshot == null || light == null || !snapshot.current()
+                || levelIndex < 0 || levelIndex >= snapshot.clipmap().levels().size()) {
+            return false;
+        }
+        VoxelClipmapSnapshot.Level level = snapshot.clipmap().levels().get(levelIndex);
+        if (!containsSphere(level, light)) {
+            return false;
+        }
+        int brickBlockEdge = VoxelBrickPatch.LOGICAL_EDGE / level.subdivision();
+        double radius = light.radius();
+        int minimumX = floorToInt((light.x() - radius) / brickBlockEdge);
+        int minimumY = floorToInt((light.y() - radius) / brickBlockEdge);
+        int minimumZ = floorToInt((light.z() - radius) / brickBlockEdge);
+        int maximumX = floorToInt(Math.nextAfter(
+                light.x() + radius, Double.NEGATIVE_INFINITY) / brickBlockEdge);
+        int maximumY = floorToInt(Math.nextAfter(
+                light.y() + radius, Double.NEGATIVE_INFINITY) / brickBlockEdge);
+        int maximumZ = floorToInt(Math.nextAfter(
+                light.z() + radius, Double.NEGATIVE_INFINITY) / brickBlockEdge);
+        if (minimumX == Integer.MIN_VALUE || minimumY == Integer.MIN_VALUE
+                || minimumZ == Integer.MIN_VALUE || maximumX == Integer.MIN_VALUE
+                || maximumY == Integer.MIN_VALUE || maximumZ == Integer.MIN_VALUE) {
+            return false;
+        }
+        int dimension = level.brickDimension();
+        for (int z = minimumZ; z <= maximumZ; z++) {
+            for (int y = minimumY; y <= maximumY; y++) {
+                for (int x = minimumX; x <= maximumX; x++) {
+                    VoxelShadowCacheMirror.Brick brick = snapshot.bricks().get(
+                            new VoxelShadowCacheMirror.Key(
+                                    levelIndex,
+                                    Math.floorMod(x, dimension),
+                                    Math.floorMod(y, dimension),
+                                    Math.floorMod(z, dimension)
+                            )
+                    );
+                    if (brick == null || brick.contentStamp() == 0
+                            || brick.logicalX() != x || brick.logicalY() != y
+                            || brick.logicalZ() != z) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Chooses the finest traceable level whose entire light sphere is currently tagged.
+     *
+     * <p>A clipmap scroll can make the preferred fine level incomplete for one or two
+     * submits while an unchanged coarser level is already safe to consume. Dynamic lights
+     * must keep a valid shadow during that hand-off, so their GPU page may temporarily use
+     * the coarser complete level instead of disappearing into approximate direct light.</p>
+     */
+    public static int selectCompleteCacheLevel(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light,
+            final int maxSteps
+    ) {
+        if (snapshot == null || light == null || !snapshot.current()) {
+            return -1;
+        }
+        if (maxSteps < 1 || maxSteps > LocalVoxelShadowLayout.MAX_DDA_STEPS) {
+            throw new IllegalArgumentException("L6 cache step cap is outside its fixed bounds");
+        }
+        double radius = light.radius();
+        if (!(radius > 0.0) || !Double.isFinite(radius)
+                || !finite(light.x(), light.y(), light.z())) {
+            return -1;
+        }
+        for (int index = 0; index < snapshot.clipmap().levels().size(); index++) {
+            VoxelClipmapSnapshot.Level level = snapshot.clipmap().levels().get(index);
+            if (containsSphere(level, light)
+                    && worstCaseSphereCrossings(level, radius) <= maxSteps
+                    && hasCompleteCoverage(snapshot, light, index)) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
     public static byte[] visiblePayload(final int lightCapacity) {
         int bytes = Math.toIntExact(LocalVoxelShadowLayout.cacheBytes(lightCapacity));
         byte[] payload = new byte[bytes];

@@ -463,12 +463,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                         && all(lessThanEqual(startWorldRelative, maximum))) {
                     return false;
                 }
-                // An entity-emitted light terminates inside its own proxy. Treat either
-                // endpoint as ownership rather than letting the proxy extinguish that light.
-                if (all(greaterThanEqual(endWorldRelative, minimum))
-                        && all(lessThanEqual(endWorldRelative, maximum))) {
-                    return false;
-                }
                 vec3 delta = endWorldRelative - startWorldRelative;
                 float entry = 0.0;
                 float exit = 1.0;
@@ -502,6 +496,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             bool metallumProxyVisibilityV1(
                     vec3 startWorldRelative,
                     vec3 endWorldRelative,
+                    uvec2 lightStableId,
                     out bool failOpen) {
                 failOpen = false;
                 uint proxyCount = metallumVoxelShadow.proxyAndFrame.x;
@@ -518,11 +513,18 @@ public final class AdvancedDirectLightingShaderPatcher {
                             metallumVoxelProxyBuffer.proxies[proxyIndex];
                     vec3 minimum = proxy.minWorldRelative.xyz;
                     vec3 maximum = proxy.maxWorldRelative.xyz;
+                    uvec2 proxyStableId = uvec2(
+                            floatBitsToUint(proxy.minWorldRelative.w),
+                            floatBitsToUint(proxy.maxWorldRelative.w));
                     if (!metallumFiniteVec3V1(minimum)
                             || !metallumFiniteVec3V1(maximum)
-                            || any(greaterThan(minimum, maximum))) {
+                            || any(greaterThan(minimum, maximum))
+                            || all(equal(proxyStableId, uvec2(0u)))) {
                         failOpen = true;
                         return true;
+                    }
+                    if (all(equal(proxyStableId, lightStableId))) {
+                        continue;
                     }
                     if (metallumSegmentIntersectsProxyV1(
                             startWorldRelative, endWorldRelative, minimum, maximum)) {
@@ -561,7 +563,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverCameraRelative,
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
-                    vec3 lightViewPosition) {
+                    vec3 lightViewPosition,
+                    uvec2 lightStableId) {
                 if (metallumVoxelShadow.caps.x != 3u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
@@ -680,6 +683,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverCameraRelative,
                         endWorldRelative
                                 - metallumVoxelShadow.cameraFractionAndMinTrans.xyz,
+                        lightStableId,
                         proxyFailOpen)) {
                     return 0.0;
                 }
@@ -1207,6 +1211,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
+                    uvec2 lightStableId,
                     uvec4 shadowRef) {
                 uint atlasByteOffset = shadowRef.y;
                 uint atlasOffsetHigh = shadowRef.z;
@@ -1244,6 +1249,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (!metallumProxyVisibilityV1(
                         receiverCameraRelative,
                         lightCameraRelative,
+                        lightStableId,
                         proxyFailOpen)) {
                     return 0.0;
                 }
@@ -1265,6 +1271,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
+                    uvec2 lightStableId,
                     uvec4 shadowRef,
                     float nearestVisibility) {
                 uint atlasByteOffset = shadowRef.y;
@@ -1305,6 +1312,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (!metallumProxyVisibilityV1(
                         receiverCameraRelative,
                         lightCameraRelative,
+                        lightStableId,
                         proxyFailOpen)) {
                     return 0.0;
                 }
@@ -1427,6 +1435,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 softShadowContribution = vec3(0.0);
                 float softShadowHardVisibility = 1.0;
                 vec3 softShadowLightPosition = vec3(0.0);
+                uvec2 softShadowLightStableId = uvec2(0u);
                 uvec4 softShadowRef = uvec4(0u);
                 uint evaluated = 0u;
                 for (uint candidate = 0u; candidate < countLimit; ++candidate) {
@@ -1470,6 +1479,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                                     receiverWorldRelative,
                                     receiverWorldNormal,
                                     light.positionRadius.xyz,
+                                    light.metadata.xy,
                                     shadowRef);
                             cachedShadowCandidate = true;
                         } else {
@@ -1489,6 +1499,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             softShadowContribution = unshadowedContribution;
                             softShadowHardVisibility = visibility;
                             softShadowLightPosition = light.positionRadius.xyz;
+                            softShadowLightStableId = light.metadata.xy;
                             softShadowRef = shadowRef;
                         }
                     }
@@ -1500,6 +1511,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             receiverWorldRelative,
                             receiverWorldNormal,
                             softShadowLightPosition,
+                            softShadowLightStableId,
                             softShadowRef,
                             softShadowHardVisibility);
                     direct += softShadowContribution

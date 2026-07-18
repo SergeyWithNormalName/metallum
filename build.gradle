@@ -26,7 +26,8 @@ def macMetalSources = [
 	SodiumLightPatch: layout.projectDirectory.file("src/main/metal/MetallumSodiumLightPatch.metal"),
 	TemporalDiagnostics: layout.projectDirectory.file("src/main/metal/MetallumTemporalDiagnostics.metal"),
 	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
-	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal")
+	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal"),
+	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -231,6 +232,14 @@ tasks.register("torchEpochTelemetryUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.benchmark.TorchEpochTelemetryTests")
 }
 
+tasks.register("l6DynamicShadowTelemetryUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs deterministic L6 dynamic-shadow per-frame coverage telemetry tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetryTests")
+}
+
 tasks.register("sodiumLightSidecarUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs exhaustive Sodium compact-light sidecar packing and MSL patch tests"
@@ -421,6 +430,52 @@ tasks.register("voxelOccupancyValidation", Exec) {
 	environment "MTL_SHADER_VALIDATION", "1"
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 	commandLine voxelOccupancyValidationBinary.get().asFile.absolutePath,
+		macNativeLibrary.get().asFile.absolutePath
+}
+
+def dynamicVoxelShadowValidationBinary = layout.buildDirectory.file(
+	"generated/metallum/validation/DynamicVoxelShadowValidation"
+)
+
+tasks.register("compileDynamicVoxelShadowValidation", Exec) {
+	group = "verification"
+	description = "Compiles the isolated dynamic L6 voxel-page native validation harness"
+	onlyIf { isAppleSiliconMac }
+	inputs.file("src/test/native/DynamicVoxelShadowValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(dynamicVoxelShadowValidationBinary)
+	doFirst {
+		dynamicVoxelShadowValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", dynamicVoxelShadowValidationBinary.get().asFile.absolutePath,
+		"src/test/native/DynamicVoxelShadowValidation.swift"
+}
+
+tasks.register("dynamicVoxelShadowValidation", Exec) {
+	group = "verification"
+	description = "Validates GPU moving L6 pages, L5 sampling, packed transmittance and dynamic packet guards"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileDynamicVoxelShadowValidation")
+	)
+	inputs.file("src/main/native/MetallumNative.swift")
+	inputs.file("src/main/metal/MetallumDynamicVoxelShadow.metal")
+	inputs.file("src/main/metal/MetallumVoxelOccupancy.metal")
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine dynamicVoxelShadowValidationBinary.get().asFile.absolutePath,
 		macNativeLibrary.get().asFile.absolutePath
 }
 
@@ -936,6 +991,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("voxelOccupancyBridgeValidation"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
+	dependsOn(tasks.named("l6DynamicShadowTelemetryUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
 	dependsOn(tasks.named("sodiumRelightPlanUnitTest"))
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
@@ -961,6 +1017,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("metal4LifecycleValidation"))
 	dependsOn(tasks.named("lightClusterValidation"))
 	dependsOn(tasks.named("voxelOccupancyValidation"))
+	dependsOn(tasks.named("dynamicVoxelShadowValidation"))
 }
 
 java {

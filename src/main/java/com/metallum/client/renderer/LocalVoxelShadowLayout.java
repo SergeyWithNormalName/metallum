@@ -15,6 +15,7 @@ public final class LocalVoxelShadowLayout {
     public static final int MAX_SHADOW_DESCRIPTORS =
             AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
     public static final int MAX_DDA_STEPS = 96;
+    public static final int MAX_DYNAMIC_SHADOW_LIGHTS = 8;
     public static final int MAX_ENTITY_PROXIES = 32;
     public static final int PARAMS_BYTES = 256;
     public static final int PARAMS_RING_SLOTS = 3;
@@ -34,6 +35,7 @@ public final class LocalVoxelShadowLayout {
             long proxyRingBytes,
             long shadowReferenceRingBytes,
             long visibilityCacheBytes,
+            DynamicShadowBudget dynamicShadows,
             long totalDedicatedBytes
     ) {
         public Budget {
@@ -44,6 +46,10 @@ public final class LocalVoxelShadowLayout {
                     || maxEntityProxies < 1 || maxEntityProxies > MAX_ENTITY_PROXIES) {
                 throw new IllegalArgumentException("L6 work declaration exceeds its hard compile cap");
             }
+            Objects.requireNonNull(dynamicShadows, "dynamicShadows");
+            if (dynamicShadows.preset() != preset) {
+                throw new IllegalArgumentException("L6 dynamic-shadow preset differs from its owner");
+            }
             if (paramsRingBytes != (long) PARAMS_BYTES * PARAMS_RING_SLOTS
                     || proxyRingBytes != (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
                     || shadowReferenceRingBytes
@@ -51,9 +57,60 @@ public final class LocalVoxelShadowLayout {
                     || visibilityCacheBytes
                     != LocalVoxelShadowAtlasLayout.forPreset(preset).atlasBytes()
                     || totalDedicatedBytes != paramsRingBytes + proxyRingBytes
-                    + shadowReferenceRingBytes + visibilityCacheBytes) {
+                    + shadowReferenceRingBytes + visibilityCacheBytes
+                    + dynamicShadows.atlasBytes()) {
                 throw new IllegalArgumentException("L6 upload-ring accounting changed");
             }
+        }
+
+        /** Static residency plus the isolated triple-buffered dynamic suffix. */
+        public long totalVisibilityAtlasBytes() {
+            return Math.addExact(this.visibilityCacheBytes, this.dynamicShadows.atlasBytes());
+        }
+    }
+
+    /** One centrally editable quality/admission declaration for moving shadow sources. */
+    public record DynamicShadowBudget(
+            LightingPreset preset,
+            int heroSlots,
+            int pageEdge,
+            int maxSteps,
+            long pageBytes,
+            long atlasBytes
+    ) {
+        public DynamicShadowBudget {
+            Objects.requireNonNull(preset, "preset");
+            if (heroSlots < 1 || heroSlots > MAX_DYNAMIC_SHADOW_LIGHTS
+                    || pageEdge != 16 && pageEdge != 32
+                    || maxSteps < 1 || maxSteps > MAX_DDA_STEPS
+                    || pageBytes != LocalVoxelShadowAtlasLayout.pageAllocationBytes(pageEdge)
+                    || atlasBytes != Math.multiplyExact(
+                    Math.multiplyExact(pageBytes, heroSlots), PARAMS_RING_SLOTS)) {
+                throw new IllegalArgumentException("Invalid L6 dynamic-shadow budget");
+            }
+        }
+
+        public int pageIndex(final int heroSlot, final int inFlightSlot) {
+            if (heroSlot < 0 || heroSlot >= this.heroSlots
+                    || inFlightSlot < 0 || inFlightSlot >= PARAMS_RING_SLOTS) {
+                throw new IndexOutOfBoundsException("Dynamic L6 page slot is outside its budget");
+            }
+            return Math.addExact(
+                    Math.multiplyExact(inFlightSlot, this.heroSlots), heroSlot
+            );
+        }
+
+        public long pageOffset(final long staticAtlasBytes,
+                               final int heroSlot,
+                               final int inFlightSlot) {
+            if (staticAtlasBytes <= 0L
+                    || staticAtlasBytes % LocalVoxelShadowAtlasLayout.PAGE_ALIGNMENT_BYTES != 0L) {
+                throw new IllegalArgumentException("Dynamic L6 suffix has an invalid base offset");
+            }
+            return Math.addExact(
+                    staticAtlasBytes,
+                    Math.multiplyExact((long) pageIndex(heroSlot, inFlightSlot), this.pageBytes)
+            );
         }
     }
 
@@ -63,9 +120,9 @@ public final class LocalVoxelShadowLayout {
     public static Budget forPreset(final LightingPreset preset) {
         Objects.requireNonNull(preset, "preset");
         return switch (preset) {
-            case PERFORMANCE -> budget(preset, 1, 32, 8);
-            case BALANCED -> budget(preset, 2, 96, 16);
-            case ULTRA -> budget(preset, 2, 96, 24);
+            case PERFORMANCE -> budget(preset, 1, 32, 8, 1, 16, 32);
+            case BALANCED -> budget(preset, 2, 96, 16, 2, 32, 96);
+            case ULTRA -> budget(preset, 2, 96, 24, 4, 32, 96);
         };
     }
 
@@ -73,8 +130,25 @@ public final class LocalVoxelShadowLayout {
             final LightingPreset preset,
             final int shadowedLocalLights,
             final int maxSteps,
-            final int maxEntityProxies
+            final int maxEntityProxies,
+            final int dynamicHeroSlots,
+            final int dynamicPageEdge,
+            final int dynamicMaxSteps
     ) {
+        long dynamicPageBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(
+                dynamicPageEdge
+        );
+        long dynamicAtlasBytes = Math.multiplyExact(
+                Math.multiplyExact(dynamicPageBytes, dynamicHeroSlots), PARAMS_RING_SLOTS
+        );
+        DynamicShadowBudget dynamicShadows = new DynamicShadowBudget(
+                preset,
+                dynamicHeroSlots,
+                dynamicPageEdge,
+                dynamicMaxSteps,
+                dynamicPageBytes,
+                dynamicAtlasBytes
+        );
         return new Budget(
                 preset,
                 shadowedLocalLights,
@@ -85,10 +159,12 @@ public final class LocalVoxelShadowLayout {
                 (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS,
                 LocalVoxelShadowAtlasLayout.descriptorRingBytes(),
                 LocalVoxelShadowAtlasLayout.forPreset(preset).atlasBytes(),
+                dynamicShadows,
                 (long) PARAMS_BYTES * PARAMS_RING_SLOTS
                         + (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
                         + LocalVoxelShadowAtlasLayout.descriptorRingBytes()
                         + LocalVoxelShadowAtlasLayout.forPreset(preset).atlasBytes()
+                        + dynamicAtlasBytes
         );
     }
 

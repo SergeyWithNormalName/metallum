@@ -307,6 +307,32 @@ public final class VoxelOccupancyTests {
         require(teleport.fullReset() && teleport.incomingSlabs().isEmpty(),
                 "one-full-level teleport did not reset generation");
 
+        List<VoxelClipmapLayout.Level> balancedLevels = List.of(
+                new VoxelClipmapLayout.Level(64, VoxelSubdivision.FOUR),
+                new VoxelClipmapLayout.Level(128, VoxelSubdivision.TWO),
+                new VoxelClipmapLayout.Level(256, VoxelSubdivision.ONE)
+        );
+        require(VoxelClipmapLayout.scrollPhaseBlocks(balancedLevels.get(0)) == 0
+                        && VoxelClipmapLayout.scrollPhaseBlocks(balancedLevels.get(1)) == 8
+                        && VoxelClipmapLayout.scrollPhaseBlocks(balancedLevels.get(2)) == 16,
+                "nested L5 scroll phases lost their fine/medium/coarse staggering");
+        for (long coordinate = -64L; coordinate <= 64L; coordinate++) {
+            int scrollingLevels = 0;
+            for (VoxelClipmapLayout.Level candidate : balancedLevels) {
+                VoxelClipmapLayout.Origin before = VoxelClipmapLayout.cameraCenteredOrigin(
+                        candidate, coordinate - 1L, 0L, 0L
+                );
+                VoxelClipmapLayout.Origin after = VoxelClipmapLayout.cameraCenteredOrigin(
+                        candidate, coordinate, 0L, 0L
+                );
+                if (before.x() != after.x()) {
+                    scrollingLevels++;
+                }
+            }
+            require(scrollingLevels < balancedLevels.size(),
+                    "all nested L5 levels scrolled on one axial world-grid boundary");
+        }
+
         int negative = VoxelClipmapLayout.toroidalCellCoordinate(level, -1L, 1);
         require(negative == 127, "negative toroidal coordinate changed");
         int nearLimit = VoxelClipmapLayout.toroidalCellCoordinate(level, 30_000_000L, 0);

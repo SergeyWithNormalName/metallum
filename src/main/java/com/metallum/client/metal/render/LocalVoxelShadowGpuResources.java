@@ -1,10 +1,12 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.EntityShadowProxy;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.LocalShadowSourceClass;
 import com.metallum.client.lighting.ShadowEmitterFootprint;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLBlitCommandEncoder;
@@ -43,6 +45,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 /** Owns L6's resident point-shadow atlas, descriptor ring and bounded page builders. */
 final class LocalVoxelShadowGpuResources implements AutoCloseable {
     static final int PRODUCTION_WORK_QUEUE_COUNT = 3;
+    static final int PRODUCTION_PASS_COUNT = 2;
+    static final int PRODUCTION_ENCODER_COUNT = 2;
+    static final int RESIDENT_PSO_COUNT = 1;
+    static final int MAX_DYNAMIC_DISPATCH_COUNT = 1;
 
     record PreparedFrame(
             boolean active,
@@ -64,7 +70,20 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             int capacityBlockedLights,
             int retryBackoffLights,
             int cacheUploads,
-            long cacheUploadBytes
+            long cacheUploadBytes,
+            int dynamicCandidates,
+            int dynamicSelected,
+            int dynamicDropped,
+            boolean heldAdmitted,
+            int dynamicDispatches,
+            int dynamicRays,
+            int dynamicReady,
+            int dynamicFallback,
+            int dynamicCoverageMisses,
+            int staticToDynamicTransitions,
+            int dynamicToStaticTransitions,
+            int dynamicAsyncFailures,
+            long dynamicPageBytes
     ) {
         PreparedFrame {
             if (shadowedLocalLights < 0 || proxyCount < 0 || submitIndex < 0L
@@ -76,12 +95,25 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     || pendingPayloadBytes < 0L || capacityBlockedLights < 0
                     || retryBackoffLights < 0
                     || cacheUploads < 0 || cacheUploadBytes < 0L
+                    || dynamicCandidates < 0 || dynamicSelected < 0 || dynamicDropped < 0
+                    || dynamicDispatches < 0 || dynamicDispatches > 1 || dynamicRays < 0
+                    || dynamicReady < 0 || dynamicFallback < 0
+                    || dynamicCoverageMisses < 0 || staticToDynamicTransitions < 0
+                    || dynamicToStaticTransitions < 0 || dynamicAsyncFailures < 0
+                    || dynamicPageBytes < 0L
+                    || dynamicCandidates != dynamicSelected + dynamicDropped
+                    || dynamicSelected != dynamicReady + dynamicFallback
+                    || dynamicCoverageMisses > dynamicSelected
+                    || heldAdmitted && dynamicSelected == 0
+                    || dynamicDispatches == 0 && (dynamicRays != 0 || dynamicReady != 0
+                    || dynamicPageBytes != 0L)
                     || descriptorLights != readyLights + staleLights
                     + approximateDirectLights + buildingLights + failClosedLights
                     || shadowedLocalLights != readyLights + staleLights
                     || active && descriptorLights
                     != cacheCoveredLights + coverageLimitedLights
-                    || !active && (cacheCoveredLights != 0 || coverageLimitedLights != 0)) {
+                    || !active && (cacheCoveredLights != 0 || coverageLimitedLights != 0
+                    || dynamicCandidates != 0)) {
                 throw new IllegalArgumentException("Invalid L6 prepared-frame accounting");
             }
         }
@@ -137,6 +169,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private final MetalGpuBuffer visibilityAtlas;
     private final MetalGpuBuffer shadowReferenceRing;
     private final LocalVoxelShadowAtlasResidency residency;
+    private final DynamicShadowAdmission dynamicAdmission = new DynamicShadowAdmission();
+    private final DynamicVoxelShadowGpuResources dynamicBackend;
     private final ThreadPoolExecutor cacheWorkers;
     private final ThreadPoolExecutor cacheRefreshWorkers;
     private final Map<Long, ResidentPage> residents = new HashMap<>();
@@ -154,6 +188,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private FrameContext frameContext;
     private VoxelOccupancyGpuResources boundVoxelResources;
     private boolean closed;
+    private boolean dynamicBackendAvailable;
+    private int dynamicAsyncFailures;
 
     private LocalVoxelShadowGpuResources(
             final long generation,
@@ -161,7 +197,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final MetalGpuBuffer paramsRing,
             final MetalGpuBuffer proxyRing,
             final MetalGpuBuffer visibilityAtlas,
-            final MetalGpuBuffer shadowReferenceRing
+            final MetalGpuBuffer shadowReferenceRing,
+            final DynamicVoxelShadowGpuResources dynamicBackend
     ) {
         this.generation = generation;
         this.budget = budget;
@@ -169,6 +206,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         this.proxyRing = proxyRing;
         this.visibilityAtlas = visibilityAtlas;
         this.shadowReferenceRing = shadowReferenceRing;
+        this.dynamicBackend = dynamicBackend;
+        this.dynamicBackendAvailable = dynamicBackend != null;
         this.residency = new LocalVoxelShadowAtlasResidency(
                 budget.visibilityCacheBytes(), budget.maxShadowDescriptors()
         );
@@ -200,6 +239,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         MetalGpuBuffer proxies = null;
         MetalGpuBuffer atlas = null;
         MetalGpuBuffer references = null;
+        DynamicVoxelShadowGpuResources dynamic = null;
         try {
             params = new MetalGpuBuffer(
                     device,
@@ -217,7 +257,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     // This atlas is fragment-bound directly by native handle, so COPY_DST is
                     // sufficient and deliberately selects private Metal storage.
                     GpuBuffer.USAGE_COPY_DST,
-                    budget.visibilityCacheBytes()
+                    budget.totalVisibilityAtlasBytes()
             );
             references = new MetalGpuBuffer(
                     device,
@@ -225,10 +265,28 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     budget.shadowReferenceRingBytes()
             );
             zero(references.sliceStorage(0L, budget.shadowReferenceRingBytes()));
+            try {
+                dynamic = DynamicVoxelShadowGpuResources.create(
+                        device,
+                        budget.visibilityCacheBytes(),
+                        budget.dynamicShadows().atlasBytes()
+                );
+            } catch (RuntimeException | Error failure) {
+                // Dynamic pages are an isolated quality path. Static L6 remains valid when
+                // a machine or packaged shader cannot create its optional compute PSO.
+                Metallum.LOGGER.warn(
+                        "Dynamic L6 shadow backend unavailable for generation {}",
+                        generation,
+                        failure
+                );
+            }
             return new LocalVoxelShadowGpuResources(
-                    generation, budget, params, proxies, atlas, references
+                    generation, budget, params, proxies, atlas, references, dynamic
             );
         } catch (RuntimeException | Error failure) {
+            if (dynamic != null) {
+                dynamic.close();
+            }
             if (references != null) {
                 references.close();
             }
@@ -324,19 +382,37 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         int proxyCount = 0;
         VoxelShadowCacheMirror.Snapshot mirror = null;
         List<FrameLight> frameLights = new ArrayList<>(lights.size());
+        DynamicFramePlan dynamicPlan = DynamicFramePlan.empty();
         try {
             if (active) {
-                packLevels(params, snapshot);
+                mirror = VoxelShadowCacheMirror.global().snapshot(snapshot);
+                if (mirror == null) {
+                    mirror = VoxelShadowCacheMirror.global().latestAcceptedSnapshot(snapshot);
+                }
+                VoxelClipmapSnapshot acceptedSnapshot = mirror == null
+                        ? snapshot : mirror.clipmap();
+                packLevels(params, acceptedSnapshot);
                 proxyCount = packProxies(
                         proxies, proxySnapshot, frame.currentCameraPosition()
                 );
-                mirror = VoxelShadowCacheMirror.global().snapshot(snapshot);
                 frameLights = describeFrameLights(
-                        lights, snapshot, mirror, frame.currentCameraPosition()
+                        lights, acceptedSnapshot, mirror, frame.currentCameraPosition()
                 );
+                dynamicPlan = prepareDynamicFrame(
+                        frameLights,
+                        mirror,
+                        voxelResources,
+                        frame,
+                        frame.currentCameraPosition()
+                );
+                frameLights = dynamicPlan.lights();
+                cancelBuildsBlockedByMotion(frameLights, submitIndex);
                 consumeCompletedBuilds(frameLights, mirror, submitIndex);
                 scheduleBuildsInSnapshotOrder(frameLights, mirror, submitIndex);
-                packFrameDescriptors(descriptors, frameLights, mirror, submitIndex);
+                packFrameDescriptors(
+                        descriptors, frameLights, mirror, submitIndex,
+                        dynamicPlan, false
+                );
                 putInt4(params, VoxelShadowBindingAbi.CAPS_OFFSET,
                         VoxelShadowBindingAbi.VERSION,
                         snapshot.levels().size(),
@@ -360,6 +436,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             proxyCount = 0;
             frameLights = List.of();
             mirror = null;
+            dynamicPlan = DynamicFramePlan.empty();
             zero(params);
             zero(proxies);
             zero(descriptors);
@@ -373,10 +450,11 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             throw new IllegalStateException("L6 descriptor coverage lost an L3 upload light");
         }
         this.frameContext = new FrameContext(
-                submitIndex, slot, List.copyOf(frameLights), mirror, active
+                submitIndex, slot, List.copyOf(frameLights), mirror, active, dynamicPlan
         );
         this.prepared = preparedFrame(
-                active, proxyCount, submitIndex, coverage, frameLights, 0, 0L
+                active, proxyCount, submitIndex, coverage, frameLights, 0, 0L,
+                dynamicPlan, false, false
         );
         return this.prepared;
     }
@@ -395,6 +473,29 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
         if (!context.active()) {
             return this.prepared;
+        }
+        DynamicFramePlan dynamicPlan = context.dynamicPlan();
+        boolean dynamicDispatchAttempted = dynamicPlan.upload() != null;
+        boolean dynamicReady = false;
+        if (dynamicDispatchAttempted && this.dynamicBackendAvailable
+                && this.dynamicBackend != null) {
+            try {
+                int status = encoder.encodeDynamicVoxelShadow(
+                        this.dynamicBackend,
+                        this.boundVoxelResources,
+                        this.visibilityAtlas,
+                        dynamicPlan.upload()
+                );
+                dynamicReady = status == DynamicVoxelShadowGpuResources.STATUS_OK;
+                if (!dynamicReady) {
+                    disableDynamicBackend(
+                            "encode status " + status,
+                            new IllegalStateException("Native dynamic L6 encode rejected")
+                    );
+                }
+            } catch (RuntimeException failure) {
+                disableDynamicBackend("compute encode", failure);
+            }
         }
         consumeCompletedBuilds(
                 context.lights(), context.mirror(), context.submitIndex()
@@ -546,7 +647,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 descriptors,
                 context.lights(),
                 context.mirror(),
-                context.submitIndex()
+                context.submitIndex(),
+                dynamicPlan,
+                dynamicReady
         );
         DescriptorCoverage coverage = descriptorCoverage(
                 descriptors, context.lights().size()
@@ -558,7 +661,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 coverage,
                 context.lights(),
                 uploaded,
-                uploadedBytes
+                uploadedBytes,
+                dynamicPlan,
+                dynamicDispatchAttempted,
+                dynamicReady
         );
         return this.prepared;
     }
@@ -636,6 +742,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         this.evictedRecoveryTargets.clear();
         this.cacheRefreshWorkers.shutdownNow();
         this.cacheWorkers.shutdownNow();
+        if (this.dynamicBackend != null) {
+            this.dynamicBackend.close();
+        }
         this.shadowReferenceRing.close();
         this.visibilityAtlas.close();
         this.proxyRing.close();
@@ -871,7 +980,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final DescriptorCoverage coverage,
             final List<FrameLight> frameLights,
             final int cacheUploads,
-            final long cacheUploadBytes
+            final long cacheUploadBytes,
+            final DynamicFramePlan dynamicPlan,
+            final boolean dynamicDispatchAttempted,
+            final boolean dynamicReady
     ) {
         int cacheCovered = 0;
         for (FrameLight frameLight : frameLights) {
@@ -880,6 +992,22 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             }
         }
         int coverageLimited = active ? coverage.total() - cacheCovered : 0;
+        DynamicShadowAdmission.Result admission = dynamicPlan.admission();
+        int dynamicReadyCount = dynamicReady ? dynamicPlan.pages().size() : 0;
+        int dynamicRays = 0;
+        long dynamicPageBytes = 0L;
+        if (dynamicDispatchAttempted) {
+            for (DynamicPage page : dynamicPlan.pages()) {
+                dynamicRays = Math.addExact(
+                        dynamicRays,
+                        Math.multiplyExact(Math.multiplyExact(page.edge(), page.edge()), 6)
+                );
+                dynamicPageBytes = Math.addExact(
+                        dynamicPageBytes,
+                        LocalVoxelShadowAtlasLayout.pageAllocationBytes(page.edge())
+                );
+            }
+        }
         return new PreparedFrame(
                 active,
                 coverage.ready() + coverage.stale(),
@@ -900,7 +1028,20 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 this.capacityBlockedBuilds.size(),
                 retryBackoffCount(submitIndex),
                 cacheUploads,
-                cacheUploadBytes
+                cacheUploadBytes,
+                active ? admission.candidates() : 0,
+                active ? admission.selected().size() : 0,
+                active ? admission.dropped() : 0,
+                active && admission.heldAdmitted(),
+                active && dynamicDispatchAttempted ? 1 : 0,
+                active ? dynamicRays : 0,
+                active ? dynamicReadyCount : 0,
+                active ? admission.selected().size() - dynamicReadyCount : 0,
+                active ? dynamicPlan.coverageMisses() : 0,
+                active ? admission.staticToDynamicTransitions() : 0,
+                active ? admission.dynamicToStaticTransitions() : 0,
+                this.dynamicAsyncFailures,
+                active ? dynamicPageBytes : 0L
         );
     }
 
@@ -928,6 +1069,25 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             int cacheLevel = VoxelShadowCacheBuilder.selectCacheLevel(
                     snapshot, light, maxSteps
             );
+            boolean cacheEligible = mirror != null && mirror.current() && cacheLevel >= 0;
+            boolean exactStaticReady = false;
+            if (cacheEligible && sameSource && resident != null
+                    && residentQualityUsable(
+                    resident.page().edge(), edge, resident.cacheLevel(), cacheLevel
+            )) {
+                exactStaticReady = resident.cacheLevel() == cacheLevel
+                        && resident.mirror().clipmap().equals(snapshot)
+                        && VoxelShadowCacheBuilder.relevantGeometryEquals(
+                        resident.mirror(), mirror, light, cacheLevel
+                );
+            }
+            // Exact toroidal-tag coverage is intentionally checked only after top-K admission.
+            // This cheap precondition keeps a 4096-entity snapshot from scanning every light
+            // sphere when the preset can publish at most four dynamic pages.
+            boolean dynamicCoverage = light.shadowSourceClass()
+                    != LocalShadowSourceClass.STATIC_CACHE
+                    && cacheEligible
+                    && light.shadowEmitterFootprint().isEmpty();
             described.add(new FrameLight(
                     index,
                     light,
@@ -936,11 +1096,200 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     distance,
                     maxSteps,
                     cacheLevel,
-                    mirror != null && mirror.current() && cacheLevel >= 0,
-                    snapshot
+                    cacheEligible,
+                    snapshot,
+                    true,
+                    DynamicShadowAdmission.Phase.STATIC,
+                    -1,
+                    dynamicCoverage,
+                    exactStaticReady
             ));
         }
         return List.copyOf(described);
+    }
+
+    private DynamicFramePlan prepareDynamicFrame(
+            final List<FrameLight> described,
+            final VoxelShadowCacheMirror.Snapshot mirror,
+            final VoxelOccupancyGpuResources voxelResources,
+            final FrameState frame,
+            final FrameState.CameraPosition camera
+    ) {
+        List<DynamicShadowAdmission.Candidate> candidates = new ArrayList<>(described.size());
+        for (FrameLight frameLight : described) {
+            candidates.add(new DynamicShadowAdmission.Candidate(
+                    frameLight.light(),
+                    frameLight.dynamicCoverage(),
+                    frameLight.exactStaticReady()
+            ));
+        }
+        DynamicShadowAdmission.Result admission = this.dynamicAdmission.select(
+                candidates,
+                this.budget.dynamicShadows(),
+                camera.x(), camera.y(), camera.z()
+        );
+        List<FrameLight> lights = new ArrayList<>(described.size());
+        for (FrameLight frameLight : described) {
+            long stableId = frameLight.light().stableId();
+            DynamicShadowAdmission.TrackedCandidate tracked = admission.tracked(stableId);
+            DynamicShadowAdmission.Selected selected = admission.selected(stableId);
+            if (tracked == null) {
+                throw new IllegalStateException("Dynamic L6 admission lost an L3 light");
+            }
+            lights.add(new FrameLight(
+                    frameLight.uploadIndex(),
+                    frameLight.light(),
+                    frameLight.lightKey(),
+                    frameLight.desiredEdge(),
+                    frameLight.centerDistance(),
+                    frameLight.maxSteps(),
+                    frameLight.cacheLevel(),
+                    frameLight.cacheEligible(),
+                    frameLight.clipmap(),
+                    tracked.staticBuildAllowed(),
+                    tracked.phase(),
+                    selected == null ? -1 : selected.heroSlot(),
+                    frameLight.dynamicCoverage(),
+                    frameLight.exactStaticReady()
+            ));
+        }
+
+        List<DynamicPage> pages = new ArrayList<>();
+        List<DynamicVoxelShadowGpuResources.Request> requests = new ArrayList<>();
+        int coverageMisses = 0;
+        if (this.dynamicBackendAvailable && this.dynamicBackend != null) {
+            for (FrameLight frameLight : lights) {
+                if (frameLight.dynamicHeroSlot() < 0) {
+                    continue;
+                }
+                int dynamicCacheLevel = frameLight.dynamicCoverage()
+                        ? VoxelShadowCacheBuilder.selectCompleteCacheLevel(
+                        mirror, frameLight.light(), frameLight.maxSteps()
+                ) : -1;
+                if (dynamicCacheLevel < 0) {
+                    if (L6DynamicShadowBenchmarkTelemetry.isActive()) {
+                        StringBuilder levelCoverage = new StringBuilder();
+                        for (int level = 0; level < mirror.clipmap().levels().size(); level++) {
+                            if (!levelCoverage.isEmpty()) {
+                                levelCoverage.append(',');
+                            }
+                            VoxelClipmapSnapshot.Level descriptor =
+                                    mirror.clipmap().levels().get(level);
+                            levelCoverage.append(level)
+                                    .append(':')
+                                    .append(VoxelShadowCacheBuilder.hasCompleteCoverage(
+                                            mirror, frameLight.light(), level
+                                    ))
+                                    .append('@')
+                                    .append(descriptor.originBrickX()).append('/')
+                                    .append(descriptor.originBrickY()).append('/')
+                                    .append(descriptor.originBrickZ());
+                        }
+                        Metallum.LOGGER.info(
+                                "METALLUM_L6_COVERAGE_GAP frame={} stable_id={} class={} position=[{},{},{}] radius={} preferred_level={} mirror_revision={} mirror_bricks={} levels=[{}]",
+                                frame.frameId(),
+                                Long.toUnsignedString(frameLight.light().stableId()),
+                                frameLight.light().shadowSourceClass(),
+                                frameLight.light().x(),
+                                frameLight.light().y(),
+                                frameLight.light().z(),
+                                frameLight.light().radius(),
+                                frameLight.cacheLevel(),
+                                mirror.revision(),
+                                mirror.bricks().size(),
+                                levelCoverage
+                        );
+                    }
+                    coverageMisses++;
+                    continue;
+                }
+                long atlasOffset = this.budget.dynamicShadows().pageOffset(
+                        this.budget.visibilityCacheBytes(),
+                        frameLight.dynamicHeroSlot(),
+                        frame.inFlightSlot()
+                );
+                SourceParts source = sourceParts(frameLight.light());
+                requests.add(new DynamicVoxelShadowGpuResources.Request(
+                        frameLight.light().stableId(),
+                        atlasOffset,
+                        dynamicCacheLevel,
+                        this.budget.dynamicShadows().pageEdge(),
+                        this.budget.dynamicShadows().maxSteps(),
+                        source.blockX(), source.blockY(), source.blockZ(),
+                        source.fractionX(), source.fractionY(), source.fractionZ(),
+                        frameLight.light().radius()
+                ));
+                pages.add(new DynamicPage(
+                        frameLight.light().stableId(),
+                        frameLight.uploadIndex(),
+                        frameLight.dynamicHeroSlot(),
+                        atlasOffset,
+                        this.budget.dynamicShadows().pageEdge()
+                ));
+            }
+        } else {
+            for (FrameLight frameLight : lights) {
+                if (frameLight.dynamicHeroSlot() >= 0 && !frameLight.dynamicCoverage()) {
+                    coverageMisses++;
+                }
+            }
+        }
+
+        DynamicVoxelShadowGpuResources.FrameUpload upload = null;
+        if (!requests.isEmpty()) {
+            try {
+                upload = this.dynamicBackend.prepare(
+                        this.generation, voxelResources, frame.frameId(), requests
+                );
+            } catch (RuntimeException failure) {
+                disableDynamicBackend("packet preparation", failure);
+                pages.clear();
+            }
+        }
+        return new DynamicFramePlan(
+                List.copyOf(lights), admission, List.copyOf(pages), upload, coverageMisses
+        );
+    }
+
+    private void cancelBuildsBlockedByMotion(
+            final List<FrameLight> frameLights,
+            final long submitIndex
+    ) {
+        for (FrameLight frameLight : frameLights) {
+            if (frameLight.staticBuildAllowed()) {
+                continue;
+            }
+            long stableId = frameLight.light().stableId();
+            BuildTicket ticket = this.builds.remove(stableId);
+            if (ticket != null) {
+                cancelTicket(ticket);
+            }
+            this.uploads.remove(stableId);
+            this.failedBuilds.remove(stableId);
+            this.capacityBlockedBuilds.remove(stableId);
+            this.refreshLastScheduledSubmit.remove(stableId);
+            this.capacityRecoveryAfterSubmit.remove(stableId);
+            this.evictedRecoveryTargets.remove(stableId);
+            if (frameLight.dynamicPhase() == DynamicShadowAdmission.Phase.MOVING
+                    || frameLight.dynamicPhase() == DynamicShadowAdmission.Phase.CAMERA_HELD) {
+                this.residency.retire(stableId, delayedReuseSubmit(submitIndex));
+            }
+        }
+        removeRetiredResidentMetadata();
+    }
+
+    private void disableDynamicBackend(final String operation, final Throwable failure) {
+        if (!this.dynamicBackendAvailable) {
+            return;
+        }
+        this.dynamicBackendAvailable = false;
+        this.dynamicAsyncFailures = Math.incrementExact(this.dynamicAsyncFailures);
+        Metallum.LOGGER.warn(
+                "Dynamic L6 shadows disabled for generation {} after {} failure",
+                this.generation,
+                operation,
+                failure
+        );
     }
 
     private void consumeCompletedBuilds(
@@ -1008,7 +1357,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         discardObsoletePending(frameLights, mirror);
         Set<Long> eligible = new HashSet<>();
         for (FrameLight frameLight : frameLights) {
-            if (frameLight.cacheEligible()) {
+            if (frameLight.staticCacheEligible()) {
                 eligible.add(frameLight.light().stableId());
             }
         }
@@ -1030,7 +1379,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         List<FrameLight> dirtyResidents = new ArrayList<>();
         for (FrameLight frameLight : frameLights) {
             ResidentPage resident = matchingResident(frameLight);
-            if (!frameLight.cacheEligible()) {
+            if (!frameLight.staticCacheEligible()) {
                 continue;
             }
             if (resident == null) {
@@ -1107,7 +1456,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         // visible staircase while retaining approximate direct light until the page is ready.
         List<FrameLight> backgroundCandidates = new ArrayList<>();
         for (FrameLight frameLight : frameLights) {
-            if (!frameLight.cacheEligible()) {
+            if (!frameLight.staticCacheEligible()) {
                 continue;
             }
             ResidentPage resident = matchingResident(frameLight);
@@ -1589,12 +1938,20 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final ByteBuffer descriptors,
             final List<FrameLight> frameLights,
             final VoxelShadowCacheMirror.Snapshot mirror,
-            final long submitIndex
+            final long submitIndex,
+            final DynamicFramePlan dynamicPlan,
+            final boolean dynamicReady
     ) {
         initializeDescriptorRange(descriptors, frameLights.size());
         for (FrameLight frameLight : frameLights) {
-            Descriptor descriptor = descriptorFor(
-                    frameLight, mirror, submitIndex
+            DynamicPage page = dynamicReady
+                    ? dynamicPlan.page(frameLight.light().stableId()) : null;
+            Descriptor descriptor = page == null
+                    ? descriptorFor(frameLight, mirror, submitIndex)
+                    : new Descriptor(
+                    LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY,
+                    page.atlasOffset(),
+                    page.edge()
             );
             packDescriptor(
                     descriptors,
@@ -1632,7 +1989,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final long submitIndex
     ) {
         ResidentPage resident = matchingResident(frameLight);
-        if (frameLight.cacheLevel() >= 0 && resident != null
+        if (frameLight.dynamicPhase() == DynamicShadowAdmission.Phase.STATIC
+                && frameLight.cacheLevel() >= 0 && resident != null
                 && residentQualityUsable(
                 resident.page().edge(), frameLight.desiredEdge(),
                 resident.cacheLevel(), frameLight.cacheLevel()
@@ -1733,7 +2091,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final VoxelShadowCacheMirror.Snapshot mirror
     ) {
         BuildRequest request = ticket.request();
-        if (!frameLight.cacheEligible()
+        if (!frameLight.staticCacheEligible()
                 || !request.lightKey().equals(frameLight.lightKey())
                 || !requestMatchesFrameQuality(request, frameLight)
                 || !LocalVoxelShadowAtlasLayout.supportsPageEdge(request.edge())
@@ -1875,7 +2233,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         putMatrix(params, VoxelShadowBindingAbi.WORLD_FROM_VIEW_MATRIX_OFFSET,
                 frame.currentTransforms().unjitteredCamera());
         int atlasHitCapacity = Math.toIntExact(
-                this.budget.visibilityCacheBytes() / LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
+                this.budget.totalVisibilityAtlasBytes()
+                        / LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
         );
         putInt4(params, VoxelShadowBindingAbi.CAMERA_BLOCK_AND_FLAGS_OFFSET,
                 camera.blockX(), camera.blockY(), camera.blockZ(), atlasHitCapacity);
@@ -1935,11 +2294,13 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             putFloat4(proxies, offset,
                     proxy.minRelativeX(camera.x()),
                     proxy.minRelativeY(camera.y()),
-                    proxy.minRelativeZ(camera.z()), 0.0f);
+                    proxy.minRelativeZ(camera.z()),
+                    Float.intBitsToFloat((int) proxy.stableId()));
             putFloat4(proxies, offset + 16,
                     proxy.maxRelativeX(camera.x()),
                     proxy.maxRelativeY(camera.y()),
-                    proxy.maxRelativeZ(camera.z()), 0.0f);
+                    proxy.maxRelativeZ(camera.z()),
+                    Float.intBitsToFloat((int) (proxy.stableId() >>> 32)));
         }
         return count;
     }
@@ -2007,10 +2368,42 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
         return new CameraParts(
                 (int) blockX, (int) blockY, (int) blockZ,
-                (float) (camera.x() - blockX),
-                (float) (camera.y() - blockY),
-                (float) (camera.z() - blockZ)
+                checkedFraction(camera.x() - blockX),
+                checkedFraction(camera.y() - blockY),
+                checkedFraction(camera.z() - blockZ)
         );
+    }
+
+    private static SourceParts sourceParts(final AdvancedLight light) {
+        int blockX = floorWorldCoordinate(light.x());
+        int blockY = floorWorldCoordinate(light.y());
+        int blockZ = floorWorldCoordinate(light.z());
+        return new SourceParts(
+                blockX,
+                blockY,
+                blockZ,
+                checkedFraction(light.x() - blockX),
+                checkedFraction(light.y() - blockY),
+                checkedFraction(light.z() - blockZ)
+        );
+    }
+
+    private static int floorWorldCoordinate(final double value) {
+        double floor = Math.floor(value);
+        if (!Double.isFinite(value) || floor < -30_000_000.0 || floor > 30_000_000.0) {
+            throw new IllegalArgumentException("Dynamic L6 source is outside the supported world");
+        }
+        return (int) floor;
+    }
+
+    static float checkedFraction(final double value) {
+        if (!Double.isFinite(value) || value < 0.0 || value >= 1.0) {
+            throw new IllegalArgumentException("L6 coordinate fraction is invalid");
+        }
+        // A valid double immediately below 1.0 can round upward when narrowed to float. Keep
+        // the already-selected floor block and quantize to the largest representable fraction
+        // instead of rejecting one otherwise valid moving-light frame.
+        return Math.min((float) value, Math.nextDown(1.0f));
     }
 
     private static void putMatrix(
@@ -2243,7 +2636,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 final VoxelShadowCacheMirror.Snapshot currentMirror
         ) {
             return currentMirror != null && currentMirror.current()
-                    && light.cacheEligible()
+                    && light.staticCacheEligible()
                     && this.request.lightKey().equals(light.lightKey())
                     && requestMatchesFrameQuality(this.request, light)
                     && this.result.edge() == this.request.edge()
@@ -2268,8 +2661,16 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             int maxSteps,
             int cacheLevel,
             boolean cacheEligible,
-            VoxelClipmapSnapshot clipmap
+            VoxelClipmapSnapshot clipmap,
+            boolean staticBuildAllowed,
+            DynamicShadowAdmission.Phase dynamicPhase,
+            int dynamicHeroSlot,
+            boolean dynamicCoverage,
+            boolean exactStaticReady
     ) {
+        boolean staticCacheEligible() {
+            return this.cacheEligible && this.staticBuildAllowed;
+        }
     }
 
     private record FrameContext(
@@ -2277,8 +2678,65 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             int slot,
             List<FrameLight> lights,
             VoxelShadowCacheMirror.Snapshot mirror,
-            boolean active
+            boolean active,
+            DynamicFramePlan dynamicPlan
     ) {
+    }
+
+    private record DynamicPage(
+            long stableId,
+            int uploadIndex,
+            int heroSlot,
+            long atlasOffset,
+            int edge
+    ) {
+        DynamicPage {
+            if (stableId == 0L || uploadIndex < 0 || heroSlot < 0
+                    || atlasOffset < 0L || atlasOffset % 256L != 0L
+                    || edge != 16 && edge != 32) {
+                throw new IllegalArgumentException("Invalid dynamic L6 page declaration");
+            }
+        }
+    }
+
+    private record DynamicFramePlan(
+            List<FrameLight> lights,
+            DynamicShadowAdmission.Result admission,
+            List<DynamicPage> pages,
+            DynamicVoxelShadowGpuResources.FrameUpload upload,
+            int coverageMisses
+    ) {
+        DynamicFramePlan {
+            lights = List.copyOf(lights);
+            Objects.requireNonNull(admission, "admission");
+            pages = List.copyOf(pages);
+            if (coverageMisses < 0 || coverageMisses > admission.selected().size()
+                    || upload == null && !pages.isEmpty()
+                    || upload != null && upload.requestCount() != pages.size()) {
+                throw new IllegalArgumentException("Invalid dynamic L6 frame plan");
+            }
+        }
+
+        static DynamicFramePlan empty() {
+            return new DynamicFramePlan(
+                    List.of(),
+                    new DynamicShadowAdmission.Result(
+                            List.of(), List.of(), 0, 0, false, 0, 0
+                    ),
+                    List.of(),
+                    null,
+                    0
+            );
+        }
+
+        DynamicPage page(final long stableId) {
+            for (DynamicPage page : this.pages) {
+                if (page.stableId() == stableId) {
+                    return page;
+                }
+            }
+            return null;
+        }
     }
 
     private static final class BuildScheduleBudget {
@@ -2384,6 +2842,16 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     }
 
     private record CameraParts(
+            int blockX,
+            int blockY,
+            int blockZ,
+            float fractionX,
+            float fractionY,
+            float fractionZ
+    ) {
+    }
+
+    private record SourceParts(
             int blockX,
             int blockY,
             int blockZ,

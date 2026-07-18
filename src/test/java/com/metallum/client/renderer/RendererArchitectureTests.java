@@ -1064,7 +1064,8 @@ public final class RendererArchitectureTests {
         Set<String> expectedPasses = Set.of(
                 "light_upload", "cluster_prepare", "cluster_build", "voxel_upload",
                 "voxel_update", "sun_shadow_static_refresh", "sun_shadow_static_copy",
-                "sun_shadow_dynamic", "direct_lighting"
+                "sun_shadow_dynamic", "dynamic_local_shadow_compute",
+                "local_shadow_atlas_upload", "direct_lighting"
         );
         Set<String> expectedPipelines = Set.of(
                 "cluster_prepare_pso", "cluster_masks_pso", "cluster_count_pso",
@@ -1072,7 +1073,8 @@ public final class RendererArchitectureTests {
                 "cluster_prefix_add_pso", "cluster_fill_pso",
                 "terrain_direct_lighting_pso", "entity_direct_lighting_pso",
                 "terrain_sun_shadow_pso", "entity_sun_shadow_pso",
-                "voxel_apply_pso", "voxel_debug_checksum_pso"
+                "voxel_apply_pso", "voxel_debug_checksum_pso",
+                "dynamic_local_shadow_pso"
         );
         for (RendererGenerationManifest manifest : java.util.List.of(
                 sdr.manifest(), hdr.manifest())) {
@@ -1098,7 +1100,7 @@ public final class RendererArchitectureTests {
                             .collect(java.util.stream.Collectors.toUnmodifiableSet())
                             .equals(expectedPasses)
                             && manifest.encoderCount(
-                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 7L
+                            RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY) == 9L
                             && manifest.pipelines().stream()
                             .filter(pipeline -> pipeline.domain()
                                     == RendererGenerationManifest.Domain.ADVANCED_LIGHTING_ONLY)

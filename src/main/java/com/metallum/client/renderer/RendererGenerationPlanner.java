@@ -487,7 +487,7 @@ public final class RendererGenerationPlanner {
                     localShadowBudget.shadowReferenceRingBytes(), false));
             resources.add(resource(
                     "local_shadow_visibility_atlas", domain,
-                    localShadowBudget.visibilityCacheBytes(), false));
+                    localShadowBudget.totalVisibilityAtlasBytes(), false));
 
             passes.add(pass("light_upload", domain));
             passes.add(pass("cluster_prepare", domain));
@@ -497,6 +497,8 @@ public final class RendererGenerationPlanner {
             passes.add(pass("sun_shadow_static_refresh", domain));
             passes.add(pass("sun_shadow_static_copy", domain));
             passes.add(pass("sun_shadow_dynamic", domain));
+            passes.add(pass("dynamic_local_shadow_compute", domain));
+            passes.add(pass("local_shadow_atlas_upload", domain));
             passes.add(pass("direct_lighting", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "light_upload_blit_encoder", domain));
@@ -512,6 +514,10 @@ public final class RendererGenerationPlanner {
                     "sun_shadow_copy_blit_encoder", domain));
             encoders.add(new RendererGenerationManifest.Encoder(
                     "sun_shadow_dynamic_render_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "dynamic_local_shadow_compute_encoder", domain));
+            encoders.add(new RendererGenerationManifest.Encoder(
+                    "local_shadow_atlas_upload_blit_encoder", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_prepare_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_masks_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline("cluster_count_pso", domain));
@@ -530,6 +536,8 @@ public final class RendererGenerationPlanner {
             pipelines.add(new RendererGenerationManifest.Pipeline("voxel_apply_pso", domain));
             pipelines.add(new RendererGenerationManifest.Pipeline(
                     "voxel_debug_checksum_pso", domain));
+            pipelines.add(new RendererGenerationManifest.Pipeline(
+                    "dynamic_local_shadow_pso", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(
                     "static_light_registry", domain));
             workQueues.add(new RendererGenerationManifest.WorkQueue(

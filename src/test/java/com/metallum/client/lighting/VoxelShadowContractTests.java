@@ -40,6 +40,7 @@ public final class VoxelShadowContractTests {
         testVariableAtlasCubePages();
         testRelevantGeometrySurvivesClipmapScroll();
         testStableCubeLevelSelection();
+        testDynamicCubeFallsBackToCompleteCoarserLevel();
         testCachedCubeReceiverSurfaceRecognition();
         testCachedCubeOverflowLayerTracksLatestHit();
         testCompactedEmitterDoesNotShadowItself();
@@ -70,6 +71,7 @@ public final class VoxelShadowContractTests {
         require(LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS == 2
                         && LocalVoxelShadowLayout.MAX_SHADOW_DESCRIPTORS == 4_096
                         && LocalVoxelShadowLayout.MAX_DDA_STEPS == 96
+                        && LocalVoxelShadowLayout.MAX_DYNAMIC_SHADOW_LIGHTS == 8
                         && LocalVoxelShadowLayout.MAX_ENTITY_PROXIES == 32
                         && LocalVoxelShadowLayout.PARAMS_BYTES == 256
                         && LocalVoxelShadowLayout.PARAMS_RING_SLOTS == 3
@@ -82,10 +84,42 @@ public final class VoxelShadowContractTests {
         require(balanced.paramsRingBytes() == 768L && balanced.proxyRingBytes() == 1_536L
                         && balanced.shadowReferenceRingBytes() == 196_608L
                         && balanced.visibilityCacheBytes() == 67_108_864L
-                        && balanced.totalDedicatedBytes() == 67_307_776L
+                        && balanced.dynamicShadows().heroSlots() == 2
+                        && balanced.dynamicShadows().pageEdge() == 32
+                        && balanced.dynamicShadows().maxSteps() == 96
+                        && balanced.dynamicShadows().pageBytes() == 196_608L
+                        && balanced.dynamicShadows().atlasBytes() == 1_179_648L
+                        && balanced.totalVisibilityAtlasBytes() == 68_288_512L
+                        && balanced.totalDedicatedBytes() == 68_487_424L
                         && performance.visibilityCacheBytes() == 33_554_432L
-                        && ultra.visibilityCacheBytes() == 134_217_728L,
+                        && performance.dynamicShadows().heroSlots() == 1
+                        && performance.dynamicShadows().pageEdge() == 16
+                        && performance.dynamicShadows().maxSteps() == 32
+                        && performance.dynamicShadows().atlasBytes() == 147_456L
+                        && ultra.visibilityCacheBytes() == 134_217_728L
+                        && ultra.dynamicShadows().heroSlots() == 4
+                        && ultra.dynamicShadows().pageEdge() == 32
+                        && ultra.dynamicShadows().maxSteps() == 96
+                        && ultra.dynamicShadows().atlasBytes() == 2_359_296L,
                 "L6 resident atlas/ring bytes changed");
+
+        for (LocalVoxelShadowLayout.Budget candidate
+                : java.util.List.of(performance, balanced, ultra)) {
+            LocalVoxelShadowLayout.DynamicShadowBudget dynamic = candidate.dynamicShadows();
+            long staticEnd = candidate.visibilityCacheBytes();
+            long previousEnd = staticEnd;
+            for (int inFlight = 0; inFlight < LocalVoxelShadowLayout.PARAMS_RING_SLOTS;
+                    inFlight++) {
+                for (int hero = 0; hero < dynamic.heroSlots(); hero++) {
+                    long offset = dynamic.pageOffset(staticEnd, hero, inFlight);
+                    require(offset == previousEnd,
+                            "Dynamic L6 suffix pages are not tightly ordered");
+                    previousEnd = offset + dynamic.pageBytes();
+                }
+            }
+            require(previousEnd == candidate.totalVisibilityAtlasBytes(),
+                    "Dynamic L6 suffix crosses its declared atlas allocation");
+        }
     }
 
     private static void testExactBindingAbi() {
@@ -272,6 +306,22 @@ public final class VoxelShadowContractTests {
         ), clipmap);
         VoxelShadowCacheMirror.Snapshot opaqueSnapshot = mirror.snapshot(clipmap);
         require(opaqueSnapshot != null, "completed L5 batch did not expose an L6 cache mirror");
+        require(VoxelShadowCacheBuilder.hasCompleteCoverage(opaqueSnapshot, light, 0),
+                "GPU-page admission rejected a fully tagged L5 sphere");
+        java.util.Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> partial =
+                new java.util.HashMap<>(opaqueSnapshot.bricks());
+        partial.remove(partial.keySet().iterator().next());
+        require(!VoxelShadowCacheBuilder.hasCompleteCoverage(
+                        new VoxelShadowCacheMirror.Snapshot(
+                                opaqueSnapshot.clipmap(),
+                                opaqueSnapshot.revision(),
+                                partial,
+                                true
+                        ),
+                        light,
+                        0
+                ),
+                "GPU-page admission published a sphere with a missing toroidal brick");
         require(mirror.snapshot(clipmap) == opaqueSnapshot,
                 "static L6 clipmap snapshot was recopied instead of reused");
         VoxelClipmapSnapshot shiftedClipmap = new VoxelClipmapSnapshot(
@@ -280,6 +330,8 @@ public final class VoxelShadowContractTests {
         );
         require(mirror.snapshot(shiftedClipmap) == null,
                 "L6 reused a cache while a new toroidal window was still pending");
+        require(mirror.latestAcceptedSnapshot(shiftedClipmap) == opaqueSnapshot,
+                "L6 mirror did not retain the last native-accepted window across a pending scroll");
         VoxelShadowCacheBuilder.Result opaque = VoxelShadowCacheBuilder.build(
                 opaqueSnapshot, List.of(light), 1, 96
         );
@@ -574,6 +626,66 @@ public final class VoxelShadowContractTests {
                 "32-step cube did not choose one seam-free 1x level for lava");
     }
 
+    private static void testDynamicCubeFallsBackToCompleteCoarserLevel() {
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2),
+                        new VoxelClipmapSnapshot.Level(1, 2, 64, -1, -1, -1, 2)
+                )
+        );
+        List<VoxelBrickPatch> patches = new ArrayList<>(16);
+        int stamp = 20_000;
+        for (int level = 0; level < 2; level++) {
+            int subdivision = level == 0 ? 4 : 2;
+            for (int z = -1; z <= 0; z++) {
+                for (int y = -1; y <= 0; y++) {
+                    for (int x = -1; x <= 0; x++) {
+                        patches.add(emptyCachePatchAt(
+                                level, subdivision, x, y, z, 2, ++stamp
+                        ));
+                    }
+                }
+            }
+        }
+        VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
+        mirror.reset();
+        mirror.acknowledge(new VoxelUploadBatch(
+                92L, VOXEL_WORLD, 11L, 92L,
+                patches, 0, 0L, 0, 0, 0L, 0L
+        ), clipmap);
+        AdvancedLight light = new AdvancedLight(
+                92L, 1L, LightSourceKind.ENTITY,
+                0.5, 0.5, 0.5, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        VoxelShadowCacheMirror.Snapshot complete = mirror.snapshot(clipmap);
+        require(VoxelShadowCacheBuilder.selectCompleteCacheLevel(complete, light, 96) == 0,
+                "dynamic cube did not prefer complete fine coverage");
+
+        Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> missingFine =
+                new HashMap<>(complete.bricks());
+        missingFine.remove(new VoxelShadowCacheMirror.Key(0, 0, 0, 0));
+        VoxelShadowCacheMirror.Snapshot coarseOnly = new VoxelShadowCacheMirror.Snapshot(
+                clipmap, complete.revision() + 1L, missingFine, true
+        );
+        require(VoxelShadowCacheBuilder.selectCompleteCacheLevel(coarseOnly, light, 96) == 1,
+                "dynamic cube disappeared instead of using complete coarse coverage");
+
+        Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> missingAll =
+                new HashMap<>(missingFine);
+        missingAll.remove(new VoxelShadowCacheMirror.Key(1, 0, 0, 0));
+        require(VoxelShadowCacheBuilder.selectCompleteCacheLevel(
+                        new VoxelShadowCacheMirror.Snapshot(
+                                clipmap, complete.revision() + 2L, missingAll, true
+                        ),
+                        light,
+                        96
+                ) == -1,
+                "dynamic cube accepted an incompletely tagged level");
+        mirror.reset();
+    }
+
     /**
      * A receiver on an open floor must not be shadowed merely because a neighbouring cubemap
      * centre ray reaches that same floor at a shorter distance.
@@ -743,9 +855,23 @@ public final class VoxelShadowContractTests {
             final int brickDimension,
             final int stamp
     ) {
-        int blockEdge = VoxelBrickPatch.LOGICAL_EDGE / 4;
+        return emptyCachePatchAt(
+                0, 4, logicalX, logicalY, logicalZ, brickDimension, stamp
+        );
+    }
+
+    private static VoxelBrickPatch emptyCachePatchAt(
+            final int level,
+            final int subdivision,
+            final int logicalX,
+            final int logicalY,
+            final int logicalZ,
+            final int brickDimension,
+            final int stamp
+    ) {
+        int blockEdge = VoxelBrickPatch.LOGICAL_EDGE / subdivision;
         return new VoxelBrickPatch(
-                0,
+                level,
                 Math.floorMod(logicalX, brickDimension),
                 Math.floorMod(logicalY, brickDimension),
                 Math.floorMod(logicalZ, brickDimension),

@@ -34,9 +34,10 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     // L5 is optional and deliberately does not participate in base renderer warm-up.
     // A missing voxel metallib/source must fail context creation, never Vanilla/L3/L4.
     case voxelOccupancy
+    case dynamicVoxelShadow
 
     static var startupMandatory: [Self] {
-        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy }
+        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy && $0 != .dynamicVoxelShadow }
     }
 
     var sourceFileName: String {
@@ -48,6 +49,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .temporalDiagnostics: "MetallumTemporalDiagnostics.metal"
         case .clusterBuild: "MetallumClusterBuild.metal"
         case .voxelOccupancy: "MetallumVoxelOccupancy.metal"
+        case .dynamicVoxelShadow: "MetallumDynamicVoxelShadow.metal"
         }
     }
 
@@ -110,6 +112,8 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
                 "metallum_voxel_apply_v1",
                 "metallum_voxel_checksum_v1"
             ]
+        case .dynamicVoxelShadow:
+            ["metallum_dynamic_voxel_shadow_v1"]
         }
     }
 }
@@ -2133,6 +2137,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case sunShadow = 14
     // Append-only: Java's stable timing IDs 0...14 must never be renumbered.
     case voxelUploadUpdate = 15
+    // Append-only: moving L6 page generation is separately attributable from L5 updates.
+    case dynamicLocalShadow = 16
 
     var reportName: String {
         switch self {
@@ -2152,6 +2158,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .lightUploadClusterBuild: "light upload + cluster build"
         case .sunShadow: "sun shadow"
         case .voxelUploadUpdate: "voxel upload + update"
+        case .dynamicLocalShadow: "dynamic local shadow"
         }
     }
 
@@ -4334,6 +4341,213 @@ private func buildVoxelPipelines(device: MTLDevice) -> MetallumVoxelPipelines? {
         NSLog("[metallum] Voxel occupancy pipeline unavailable: %@", String(describing: error))
         return nil
     }
+}
+
+// MARK: - Dynamic L6 voxel-page ABI v1
+
+private enum MetallumDynamicShadowAbiV1 {
+    static let version: UInt32 = 1
+    static let magic: UInt32 = 0x3153_564d // "MVS1" in little-endian memory.
+    static let headerBytes = 48
+    static let requestBytes = 64
+    static let maxLights: UInt32 = 8
+    static let pageAlignment: UInt64 = 256
+    static let encoded: Int32 = 1
+    static let rejected: Int32 = -10
+    static let badPacket: Int32 = -2
+    static let staleGeneration: Int32 = -9
+    static let unavailable: Int32 = -13
+}
+
+private struct MetallumDynamicShadowRequestV1 {
+    let stableId: UInt64
+    let atlasOffset: UInt64
+    let levelIndex: UInt32
+    let edge: UInt32
+    let maxSteps: UInt32
+    let reserved0: UInt32
+    let sourceBlockX: Int32
+    let sourceBlockY: Int32
+    let sourceBlockZ: Int32
+    let sourceFractionX: Float
+    let sourceFractionY: Float
+    let sourceFractionZ: Float
+    let radius: Float
+}
+
+private struct MetallumDynamicShadowLevelV1 {
+    let logicalEdge: UInt32
+    let subdivision: UInt32
+    let brickDimension: UInt32
+    let reserved0: UInt32
+}
+
+private struct MetallumDynamicShadowPipelines {
+    let page: MTLComputePipelineState
+}
+
+private final class MetallumDynamicShadowContext: @unchecked Sendable {
+    let device: MTLDevice
+    let pipelines: MetallumDynamicShadowPipelines
+    let atlasSuffixOffset: UInt64
+    let atlasSuffixBytes: UInt64
+    private let lock = NSLock()
+    private var retired = false
+
+    init(
+        device: MTLDevice,
+        pipelines: MetallumDynamicShadowPipelines,
+        atlasSuffixOffset: UInt64,
+        atlasSuffixBytes: UInt64
+    ) {
+        self.device = device
+        self.pipelines = pipelines
+        self.atlasSuffixOffset = atlasSuffixOffset
+        self.atlasSuffixBytes = atlasSuffixBytes
+    }
+
+    func canEncode() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !retired
+    }
+
+    func retire() {
+        lock.lock()
+        retired = true
+        lock.unlock()
+    }
+}
+
+private func buildDynamicShadowPipelines(device: MTLDevice) -> MetallumDynamicShadowPipelines? {
+    do {
+        let library: MTLLibrary
+        if let precompiled = loadPrecompiledBuiltinShaderLibrary(device: device),
+           MetallumBuiltinShaderSet.dynamicVoxelShadow.requiredFunctionNames.allSatisfy({
+               precompiled.makeFunction(name: $0) != nil
+           }) {
+            library = precompiled
+        } else {
+            let sourceURL: URL
+            if let override = ProcessInfo.processInfo.environment["METALLUM_DYNAMIC_SHADOW_SHADER_SOURCE"],
+               !override.isEmpty {
+                sourceURL = URL(fileURLWithPath: override)
+            } else {
+                guard let assetDirectory = nativeAssetDirectory() else { return nil }
+                sourceURL = assetDirectory
+                    .appendingPathComponent("shaders", isDirectory: true)
+                    .appendingPathComponent(MetallumBuiltinShaderSet.dynamicVoxelShadow.sourceFileName)
+            }
+            library = try device.makeLibrary(source: String(contentsOf: sourceURL, encoding: .utf8), options: nil)
+        }
+        guard let function = library.makeFunction(name: "metallum_dynamic_voxel_shadow_v1") else {
+            return nil
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        guard pipeline.threadExecutionWidth > 0, pipeline.maxTotalThreadsPerThreadgroup >= 32 else {
+            return nil
+        }
+        recordBuiltinPipelineCreation(device: device, count: 1, succeeded: true)
+        return MetallumDynamicShadowPipelines(page: pipeline)
+    } catch {
+        NSLog("[metallum] Dynamic voxel-shadow pipeline unavailable: %@", String(describing: error))
+        return nil
+    }
+}
+
+private func parseDynamicShadowPacketV1(
+    _ pointer: UnsafeRawPointer?,
+    byteSize: UInt64,
+    voxel: MetallumVoxelContext,
+    atlas: MTLBuffer,
+    atlasSuffixOffset: UInt64,
+    atlasSuffixBytes: UInt64
+) -> (Int32, [MetallumDynamicShadowRequestV1]?) {
+    guard let pointer, byteSize >= UInt64(MetallumDynamicShadowAbiV1.headerBytes),
+          byteSize <= UInt64(Int.max) else {
+        return (MetallumDynamicShadowAbiV1.badPacket, nil)
+    }
+    let reader = MetallumFrameGraphPacketReader(
+        bytes: UnsafeRawBufferPointer(start: pointer, count: Int(byteSize))
+    )
+    guard let magic = reader.uint32(at: 0), let version = reader.uint32(at: 4),
+          let declaredBytes = reader.uint32(at: 8), let count = reader.uint32(at: 12),
+          let lightingGeneration = reader.uint64(at: 16), let clipmapGeneration = reader.uint64(at: 24),
+          let worldGeneration = reader.uint64(at: 32), let frameId = reader.uint64(at: 40),
+          magic == MetallumDynamicShadowAbiV1.magic, version == MetallumDynamicShadowAbiV1.version,
+          count > 0, count <= MetallumDynamicShadowAbiV1.maxLights,
+          UInt64(declaredBytes) == byteSize,
+          byteSize == UInt64(MetallumDynamicShadowAbiV1.headerBytes)
+              + UInt64(count) * UInt64(MetallumDynamicShadowAbiV1.requestBytes) else {
+        return (MetallumDynamicShadowAbiV1.badPacket, nil)
+    }
+    guard lightingGeneration == voxel.lightingGeneration,
+          clipmapGeneration == voxel.clipmapGeneration,
+          worldGeneration == voxel.worldGeneration, frameId > 0 else {
+        return (MetallumDynamicShadowAbiV1.staleGeneration, nil)
+    }
+    let (atlasSuffixEnd, atlasSuffixOverflow) = atlasSuffixOffset.addingReportingOverflow(
+        atlasSuffixBytes
+    )
+    guard !atlasSuffixOverflow,
+          atlasSuffixOffset > 0,
+          atlasSuffixOffset.isMultiple(of: MetallumDynamicShadowAbiV1.pageAlignment),
+          atlasSuffixBytes > 0,
+          atlasSuffixBytes.isMultiple(of: MetallumDynamicShadowAbiV1.pageAlignment),
+          atlasSuffixEnd == UInt64(atlas.length) else {
+        return (MetallumDynamicShadowAbiV1.badPacket, nil)
+    }
+    var requests: [MetallumDynamicShadowRequestV1] = []
+    requests.reserveCapacity(Int(count))
+    for index in 0..<Int(count) {
+        let offset = MetallumDynamicShadowAbiV1.headerBytes + index * MetallumDynamicShadowAbiV1.requestBytes
+        guard let stableId = reader.uint64(at: offset), stableId != 0,
+              let atlasOffset = reader.uint64(at: offset + 8),
+              let levelIndex = reader.uint32(at: offset + 16),
+              let edge = reader.uint32(at: offset + 20),
+              let maxSteps = reader.uint32(at: offset + 24),
+              let reserved0 = reader.uint32(at: offset + 28), reserved0 == 0,
+              let sourceBlockX = reader.int32(at: offset + 32),
+              let sourceBlockY = reader.int32(at: offset + 36),
+              let sourceBlockZ = reader.int32(at: offset + 40),
+              let sourceFractionX = reader.float32(at: offset + 44),
+              let sourceFractionY = reader.float32(at: offset + 48),
+              let sourceFractionZ = reader.float32(at: offset + 52),
+              let radius = reader.float32(at: offset + 56),
+              edge == 16 || edge == 32, maxSteps == 32 || maxSteps == 96,
+              levelIndex < UInt32(voxel.levels.count),
+              sourceFractionX.isFinite, sourceFractionY.isFinite, sourceFractionZ.isFinite,
+              sourceFractionX >= 0, sourceFractionX < 1,
+              sourceFractionY >= 0, sourceFractionY < 1,
+              sourceFractionZ >= 0, sourceFractionZ < 1,
+              radius.isFinite, radius > 0,
+              atlasOffset.isMultiple(of: MetallumDynamicShadowAbiV1.pageAlignment) else {
+            return (MetallumDynamicShadowAbiV1.badPacket, nil)
+        }
+        let pageBytes = UInt64(edge) * UInt64(edge) * 6 * 4 * 8
+        let (pageEnd, pageOverflow) = atlasOffset.addingReportingOverflow(pageBytes)
+        guard !pageOverflow,
+              atlasOffset >= atlasSuffixOffset,
+              pageEnd <= atlasSuffixEnd else {
+            return (MetallumDynamicShadowAbiV1.badPacket, nil)
+        }
+        for previous in requests {
+            let previousBytes = UInt64(previous.edge) * UInt64(previous.edge) * 6 * 4 * 8
+            let previousEnd = previous.atlasOffset + previousBytes
+            guard previous.stableId != stableId,
+                  pageEnd <= previous.atlasOffset || previousEnd <= atlasOffset else {
+                return (MetallumDynamicShadowAbiV1.badPacket, nil)
+            }
+        }
+        requests.append(MetallumDynamicShadowRequestV1(
+            stableId: stableId, atlasOffset: atlasOffset, levelIndex: levelIndex,
+            edge: edge, maxSteps: maxSteps, reserved0: reserved0,
+            sourceBlockX: sourceBlockX, sourceBlockY: sourceBlockY, sourceBlockZ: sourceBlockZ,
+            sourceFractionX: sourceFractionX, sourceFractionY: sourceFractionY,
+            sourceFractionZ: sourceFractionZ, radius: radius
+        ))
+    }
+    return (MetallumDynamicShadowAbiV1.encoded, requests)
 }
 
 private func alignVoxelHeapBytes(_ value: Int, _ alignment: Int) -> Int? {
@@ -8231,6 +8445,160 @@ public func metallum_voxel_release_context_v1(_ pointer: UnsafeMutableRawPointer
     guard let pointer else { return }
     Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).takeUnretainedValue().retire()
     Unmanaged<MetallumVoxelContext>.fromOpaque(pointer).release()
+}
+
+@_cdecl("metallum_dynamic_shadow_abi_version_v1")
+public func metallum_dynamic_shadow_abi_version_v1() -> UInt32 {
+    MetallumDynamicShadowAbiV1.version
+}
+
+/** Layout words: version, header bytes, request bytes, max lights, page alignment, magic. */
+@_cdecl("metallum_dynamic_shadow_layout_v1")
+public func metallum_dynamic_shadow_layout_v1(
+    _ output: UnsafeMutableRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    guard let output, byteSize == 32 else { return -1 }
+    output.initializeMemory(as: UInt8.self, repeating: 0, count: 32)
+    let values: [UInt32] = [
+        MetallumDynamicShadowAbiV1.version,
+        UInt32(MetallumDynamicShadowAbiV1.headerBytes),
+        UInt32(MetallumDynamicShadowAbiV1.requestBytes),
+        MetallumDynamicShadowAbiV1.maxLights,
+        UInt32(MetallumDynamicShadowAbiV1.pageAlignment),
+        MetallumDynamicShadowAbiV1.magic,
+        0, 0
+    ]
+    for (index, value) in values.enumerated() {
+        writeVoxelValue(value, to: output, offset: index * 4)
+    }
+    return 1
+}
+
+@_cdecl("metallum_dynamic_shadow_create_context_v1")
+public func metallum_dynamic_shadow_create_context_v1(
+    _ device: MTLDevice?,
+    _ atlasSuffixOffset: UInt64,
+    _ atlasSuffixBytes: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        let (atlasEnd, overflow) = atlasSuffixOffset.addingReportingOverflow(atlasSuffixBytes)
+        guard let device,
+              !overflow, atlasEnd > atlasSuffixOffset,
+              atlasSuffixOffset > 0,
+              atlasSuffixOffset.isMultiple(of: MetallumDynamicShadowAbiV1.pageAlignment),
+              atlasSuffixBytes.isMultiple(of: MetallumDynamicShadowAbiV1.pageAlignment),
+              let pipelines = buildDynamicShadowPipelines(device: device) else {
+            return nil
+        }
+        return Unmanaged.passRetained(
+            MetallumDynamicShadowContext(
+                device: device,
+                pipelines: pipelines,
+                atlasSuffixOffset: atlasSuffixOffset,
+                atlasSuffixBytes: atlasSuffixBytes
+            )
+        ).toOpaque()
+    }
+}
+
+@_cdecl("metallum_dynamic_shadow_release_context_v1")
+public func metallum_dynamic_shadow_release_context_v1(_ pointer: UnsafeMutableRawPointer?) {
+    guard let pointer else { return }
+    let context = Unmanaged<MetallumDynamicShadowContext>.fromOpaque(pointer).takeUnretainedValue()
+    context.retire()
+    Unmanaged<MetallumDynamicShadowContext>.fromOpaque(pointer).release()
+}
+
+@_cdecl("metallum_dynamic_shadow_encode_v1")
+public func metallum_dynamic_shadow_encode_v1(
+    _ dynamicPointer: UnsafeMutableRawPointer?,
+    _ voxelPointer: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ atlas: MTLBuffer?,
+    _ globalFence: MTLFence?,
+    _ packet: UnsafeRawPointer?,
+    _ byteSize: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let dynamicPointer, let voxelPointer, let commandBuffer, let atlas, let globalFence else {
+            return -1
+        }
+        let dynamic = Unmanaged<MetallumDynamicShadowContext>.fromOpaque(dynamicPointer)
+            .takeUnretainedValue()
+        let voxel = Unmanaged<MetallumVoxelContext>.fromOpaque(voxelPointer).takeUnretainedValue()
+        guard dynamic.canEncode(), objectAddress(commandBuffer.device) == objectAddress(dynamic.device),
+              objectAddress(commandBuffer.device) == objectAddress(voxel.device),
+              objectAddress(atlas.device) == objectAddress(dynamic.device),
+              commandBuffer.status == .notEnqueued else {
+            return MetallumDynamicShadowAbiV1.rejected
+        }
+        let (parseStatus, parsedRequests) = parseDynamicShadowPacketV1(
+            packet,
+            byteSize: byteSize,
+            voxel: voxel,
+            atlas: atlas,
+            atlasSuffixOffset: dynamic.atlasSuffixOffset,
+            atlasSuffixBytes: dynamic.atlasSuffixBytes
+        )
+        guard parseStatus == MetallumDynamicShadowAbiV1.encoded, let requests = parsedRequests else {
+            return parseStatus
+        }
+        guard !voxel.levels.isEmpty, voxel.levels.count <= 3 else {
+            return MetallumDynamicShadowAbiV1.rejected
+        }
+        guard MemoryLayout<MetallumDynamicShadowRequestV1>.stride
+                == MetallumDynamicShadowAbiV1.requestBytes,
+              MemoryLayout<MetallumDynamicShadowLevelV1>.stride == 16 else {
+            return MetallumDynamicShadowAbiV1.unavailable
+        }
+        let pass = MTLComputePassDescriptor()
+        attachGpuTiming(pass, commandBuffer: commandBuffer, stage: .dynamicLocalShadow)
+        guard let encoder = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: pass) else {
+            return MetallumDynamicShadowAbiV1.unavailable
+        }
+        encoder.label = "Metallum L6 dynamic voxel shadow v1"
+        encoder.waitForFence(globalFence)
+        let pipeline = dynamic.pipelines.page
+        let threads = min(max(32, pipeline.threadExecutionWidth), pipeline.maxTotalThreadsPerThreadgroup)
+        let lastLevel = voxel.levels.count - 1
+        let boundLevels = (0..<3).map { voxel.levels[min($0, lastLevel)] }
+        let levelBytes = boundLevels.map {
+            MetallumDynamicShadowLevelV1(
+                logicalEdge: $0.layout.logicalEdge,
+                subdivision: $0.layout.subdivision,
+                brickDimension: $0.brickDimension,
+                reserved0: 0
+            )
+        }
+        let maxRayCount = requests.map { Int($0.edge) * Int($0.edge) * 6 }.max() ?? 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(boundLevels[0].occupancy, offset: 0, index: 0)
+        encoder.setBuffer(boundLevels[1].occupancy, offset: 0, index: 1)
+        encoder.setBuffer(boundLevels[2].occupancy, offset: 0, index: 2)
+        encoder.setBuffer(boundLevels[0].optical, offset: 0, index: 3)
+        encoder.setBuffer(boundLevels[1].optical, offset: 0, index: 4)
+        encoder.setBuffer(boundLevels[2].optical, offset: 0, index: 5)
+        encoder.setBuffer(boundLevels[0].metadata, offset: 0, index: 6)
+        encoder.setBuffer(boundLevels[1].metadata, offset: 0, index: 7)
+        encoder.setBuffer(boundLevels[2].metadata, offset: 0, index: 8)
+        encoder.setBuffer(atlas, offset: 0, index: 9)
+        requests.withUnsafeBytes { bytes in
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 10)
+        }
+        levelBytes.withUnsafeBytes { bytes in
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 11)
+        }
+        encoder.dispatchThreads(
+            MTLSize(width: maxRayCount, height: requests.count, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1)
+        )
+        // The L6 atlas is deliberately untracked. Publish native compute writes to the
+        // renderer-wide fence so Java blits and the following fragment pass cannot race them.
+        encoder.updateFence(globalFence)
+        trackedEndEncoding(encoder)
+        return MetallumDynamicShadowAbiV1.encoded
+    }
 }
 
 private func voxelContextBuffer(
