@@ -64,8 +64,8 @@ public final class LocalVoxelShadowLayout {
         Objects.requireNonNull(preset, "preset");
         return switch (preset) {
             case PERFORMANCE -> budget(preset, 1, 32, 8);
-            case BALANCED -> budget(preset, 2, 64, 16);
-            case ULTRA -> budget(preset, 2, 80, 24);
+            case BALANCED -> budget(preset, 2, 96, 16);
+            case ULTRA -> budget(preset, 2, 96, 24);
         };
     }
 

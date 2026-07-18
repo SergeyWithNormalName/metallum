@@ -16,6 +16,7 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         testSameEdgeReplacementNeverOverwritesInFlightPage();
         testAbandonedReplacementKeepsOldPageActive();
         testFullAtlasRejectsSameEdgeOverwrite();
+        testCapacityRecoveryWaitsForFence();
         testAbsentPageRetiresBehindSubmitFence();
         testFragmentedAtlasRejectsStagingAdmission();
         testApproximateDirectOverflow();
@@ -172,6 +173,40 @@ public final class LocalVoxelShadowAtlasResidencyTests {
                         && residency.activePage(22L).offsetBytes() == old.offsetBytes()
                         && residency.retiredPageCount() == 0,
                 "full atlas exposed an unsafe same-edge replacement destination");
+    }
+
+    private static void testCapacityRecoveryWaitsForFence() {
+        long page64 = LocalVoxelShadowAtlasLayout.pageAllocationBytes(64);
+        LocalVoxelShadowAtlasResidency residency = new LocalVoxelShadowAtlasResidency(
+                page64 * 2L
+        );
+        LocalVoxelShadowAtlasResidency.Page oldTarget = residency.acquire(
+                51L, 64, 1L, 8L, 1L
+        ).page();
+        residency.acquire(52L, 64, 1L, 8L, 1L);
+        require(!residency.canAcquireReplacement(51L, 64)
+                        && residency.retire(52L, 5L)
+                        && residency.retiredPageCount() == 1
+                        && residency.releaseCompleted(4L) == 0
+                        && !residency.canAcquireReplacement(51L, 64),
+                "capacity recovery reused a visible page before its submit fence");
+        require(residency.releaseCompleted(5L) == 1
+                        && residency.canAcquireReplacement(51L, 64),
+                "capacity recovery did not expose its retired page at the exact fence");
+        LocalVoxelShadowAtlasResidency.ReplacementReservation replacement =
+                residency.reserveReplacement(51L, 64, 6L, 8L, 9L);
+        require(replacement != null
+                        && residency.activePage(51L).allocationId()
+                        == oldTarget.allocationId(),
+                "capacity recovery replaced the target before its page was encoded");
+        LocalVoxelShadowAtlasResidency.Page committed =
+                residency.commitReplacement(replacement);
+        require(committed.allocationId() != oldTarget.allocationId()
+                        && residency.activePage(51L).allocationId()
+                        == committed.allocationId()
+                        && residency.activePage(52L) == null
+                        && residency.retiredPageCount() == 1,
+                "capacity recovery did not atomically publish and fence-retire the target");
     }
 
     private static void testAbsentPageRetiresBehindSubmitFence() {

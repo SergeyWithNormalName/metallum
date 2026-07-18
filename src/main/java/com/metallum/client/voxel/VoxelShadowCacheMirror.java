@@ -14,14 +14,12 @@ public final class VoxelShadowCacheMirror {
     private long worldGeneration;
     private long clipmapGeneration;
     private long revision;
-    private int queueRemaining = Integer.MAX_VALUE;
     /**
-     * Last clipmap contract for which the native upload queue was fully drained.
-     * Incremental batches may be exposed immediately only while this exact toroidal
-     * topology is still in force: every acknowledged patch already carries its
-     * logical tag, so that publication is atomic at the patch-batch boundary.
+     * Exact origin contract captured for the most recently native-accepted batch. This lets L6
+     * publish partial, logically tagged coverage after a scroll without interpreting a batch
+     * from an older toroidal window as current.
      */
-    private VoxelClipmapSnapshot establishedClipmap;
+    private VoxelClipmapSnapshot acceptedClipmap;
     private Map<Key, Brick> publishedBricks;
     private Snapshot publishedSnapshot;
 
@@ -37,13 +35,16 @@ public final class VoxelShadowCacheMirror {
         this.worldGeneration = 0L;
         this.clipmapGeneration = 0L;
         this.revision = 0L;
-        this.queueRemaining = Integer.MAX_VALUE;
-        this.establishedClipmap = null;
+        this.acceptedClipmap = null;
         this.publishedBricks = null;
         this.publishedSnapshot = null;
     }
 
-    public synchronized void acknowledge(final VoxelUploadBatch batch) {
+    public synchronized void acknowledge(
+            final VoxelUploadBatch batch,
+            final VoxelClipmapSnapshot clipmap
+    ) {
+        validateBatchContract(batch, clipmap);
         boolean generationChanged = batch.world().generation() != this.worldGeneration
                 || batch.clipmapGeneration() != this.clipmapGeneration;
         if (generationChanged) {
@@ -51,7 +52,7 @@ public final class VoxelShadowCacheMirror {
             this.worldGeneration = batch.world().generation();
             this.clipmapGeneration = batch.clipmapGeneration();
             this.revision = 0L;
-            this.establishedClipmap = null;
+            this.acceptedClipmap = null;
             this.publishedBricks = null;
             this.publishedSnapshot = null;
         }
@@ -66,7 +67,7 @@ public final class VoxelShadowCacheMirror {
                     Brick.fromPatch(patch)
             );
         }
-        this.queueRemaining = batch.queueRemaining();
+        this.acceptedClipmap = clipmap;
         this.revision = Math.incrementExact(this.revision);
         this.publishedBricks = null;
         this.publishedSnapshot = null;
@@ -75,23 +76,11 @@ public final class VoxelShadowCacheMirror {
     public synchronized Snapshot snapshot(final VoxelClipmapSnapshot clipmap) {
         if (clipmap == null
                 || clipmap.world().generation() != this.worldGeneration
-                || clipmap.clipmapGeneration() != this.clipmapGeneration) {
+                || clipmap.clipmapGeneration() != this.clipmapGeneration
+                || this.revision <= 0L
+                || this.acceptedClipmap == null
+                || !this.acceptedClipmap.equals(clipmap)) {
             return null;
-        }
-        if (this.queueRemaining != 0) {
-            if (this.establishedClipmap == null
-                    || !this.establishedClipmap.equals(clipmap)) {
-                return null;
-            }
-            if (this.publishedSnapshot == null) {
-                if (this.publishedBricks == null) {
-                    this.publishedBricks = Map.copyOf(this.bricks);
-                }
-                this.publishedSnapshot = new Snapshot(
-                        this.establishedClipmap, this.revision, this.publishedBricks, true
-                );
-            }
-            return this.publishedSnapshot;
         }
         if (this.publishedSnapshot != null) {
             return this.publishedSnapshot.clipmap().equals(clipmap)
@@ -103,8 +92,44 @@ public final class VoxelShadowCacheMirror {
         this.publishedSnapshot = new Snapshot(
                 clipmap, this.revision, this.publishedBricks, true
         );
-        this.establishedClipmap = clipmap;
         return this.publishedSnapshot;
+    }
+
+    public static void validateBatchContract(
+            final VoxelUploadBatch batch,
+            final VoxelClipmapSnapshot clipmap
+    ) {
+        if (batch == null || clipmap == null
+                || !batch.world().equals(clipmap.world())
+                || batch.clipmapGeneration() != clipmap.clipmapGeneration()) {
+            throw new IllegalArgumentException("L6 mirror batch lacks its exact clipmap contract");
+        }
+        for (VoxelBrickPatch patch : batch.patches()) {
+            if (patch.level() < 0 || patch.level() >= clipmap.levels().size()) {
+                throw new IllegalArgumentException("L6 mirror patch level is outside its clipmap");
+            }
+            VoxelClipmapSnapshot.Level level = clipmap.levels().get(patch.level());
+            int dimension = level.brickDimension();
+            long maximumX = (long) level.originBrickX() + dimension;
+            long maximumY = (long) level.originBrickY() + dimension;
+            long maximumZ = (long) level.originBrickZ() + dimension;
+            if (patch.logicalBrickX() < level.originBrickX()
+                    || patch.logicalBrickX() >= maximumX
+                    || patch.logicalBrickY() < level.originBrickY()
+                    || patch.logicalBrickY() >= maximumY
+                    || patch.logicalBrickZ() < level.originBrickZ()
+                    || patch.logicalBrickZ() >= maximumZ
+                    || patch.destinationBrickX()
+                    != Math.floorMod(patch.logicalBrickX(), dimension)
+                    || patch.destinationBrickY()
+                    != Math.floorMod(patch.logicalBrickY(), dimension)
+                    || patch.destinationBrickZ()
+                    != Math.floorMod(patch.logicalBrickZ(), dimension)) {
+                throw new IllegalArgumentException(
+                        "L6 mirror patch does not belong to its captured toroidal window"
+                );
+            }
+        }
     }
 
     public record Key(int level, int destinationX, int destinationY, int destinationZ) {

@@ -10,6 +10,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 /** Pure CPU builder for the bounded, update-driven L6 point-shadow cube cache. */
 public final class VoxelShadowCacheBuilder {
@@ -104,8 +106,20 @@ public final class VoxelShadowCacheBuilder {
             final int edge,
             final int maxSteps
     ) {
+        return buildPage(snapshot, light, edge, maxSteps, () -> false);
+    }
+
+    /** Same bounded build with cooperative latest-wins cancellation for the async L6 scheduler. */
+    public static PageResult buildPage(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light,
+            final int edge,
+            final int maxSteps,
+            final BooleanSupplier cancelled
+    ) {
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(light, "light");
+        Objects.requireNonNull(cancelled, "cancelled");
         if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(edge)
                 || maxSteps < 1 || maxSteps > LocalVoxelShadowLayout.MAX_DDA_STEPS) {
             throw new IllegalArgumentException("Resident L6 shadow page exceeds its bounds");
@@ -121,8 +135,13 @@ public final class VoxelShadowCacheBuilder {
         for (int face = 0; face < LocalVoxelShadowAtlasLayout.FACE_COUNT; face++) {
             for (int y = 0; y < edge; y++) {
                 for (int x = 0; x < edge; x++) {
+                    if (cancelled.getAsBoolean()) {
+                        throw new CancellationException("Superseded L6 shadow page build");
+                    }
                     Direction direction = cubeDirection(face, x, y, edge);
-                    Trace trace = trace(snapshot, light, level, direction, maxSteps);
+                    Trace trace = trace(
+                            snapshot, light, level, direction, maxSteps, cancelled
+                    );
                     totalRays++;
                     if (!trace.valid) {
                         complete = false;
@@ -428,7 +447,8 @@ public final class VoxelShadowCacheBuilder {
             final AdvancedLight light,
             final VoxelClipmapSnapshot.Level level,
             final Direction direction,
-            final int maxSteps
+            final int maxSteps,
+            final BooleanSupplier cancelled
     ) {
         double radius = light.radius();
         if (level == null || !(radius > 0.0) || !Double.isFinite(radius)) {
@@ -452,7 +472,7 @@ public final class VoxelShadowCacheBuilder {
         }
         return traverse(
                 snapshot.bricks(), level, light, start, target,
-                direction, startDistance, radius, maxSteps
+                direction, startDistance, radius, maxSteps, cancelled
         );
     }
 
@@ -465,7 +485,8 @@ public final class VoxelShadowCacheBuilder {
             final Direction direction,
             final double startDistance,
             final double radius,
-            final int maxSteps
+            final int maxSteps,
+            final BooleanSupplier cancelled
     ) {
         int scale = level.subdivision();
         double startX = start.x * scale;
@@ -513,6 +534,9 @@ public final class VoxelShadowCacheBuilder {
         BrickCursor brickCursor = new BrickCursor();
 
         for (int step = 0; step < maxSteps; step++) {
+            if (cancelled.getAsBoolean()) {
+                throw new CancellationException("Superseded L6 shadow ray");
+            }
             if (cellX == endCellX && cellY == endCellY && cellZ == endCellZ) {
                 return new Trace(true, hitCount, distances, visibility);
             }

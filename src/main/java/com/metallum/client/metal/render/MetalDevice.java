@@ -1363,7 +1363,10 @@ public final class MetalDevice implements GpuDeviceBackend {
             voxelBatch = voxelController.leaseUploadBatch(published.frameId());
             if (voxelBatch != null) {
                 try {
-                    voxelUpload = voxelResources.encode(voxelBatch, published);
+                    VoxelClipmapSnapshot uploadClipmap = voxelController.snapshot();
+                    voxelUpload = voxelResources.encode(
+                            voxelBatch, uploadClipmap, published
+                    );
                     published = published.withAdvancedLightingWork(withVoxelWork(
                             published.advancedLightingWork(),
                             voxelUpload.patchCount(),

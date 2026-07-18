@@ -34,6 +34,7 @@ public final class VoxelOccupancyTests {
         testControllerRetryPreservesTelemetryDeltas();
         testClipmapControllerLifecycleAndRetry();
         testDirtyQueueCoalescingBoundsAgeAndActualDrain();
+        testReadyPublicationFairness();
         System.out.println("L5 voxel occupancy pure-Java tests passed");
     }
 
@@ -568,6 +569,46 @@ public final class VoxelOccupancyTests {
         VoxelDirtyQueue.Drain boundedDrain = bounded.drainActualCount();
         require(boundedDrain.actualCount() == 3 && boundedDrain.bricks().size() == 3,
                 "actual dirty-brick dispatch count did not match drained work");
+    }
+
+    private static void testReadyPublicationFairness() {
+        VoxelDirtyQueue.DirtyBrick fineNormal = readyWork(
+                0, VoxelDirtyQueue.Priority.NORMAL, 9L, 0L
+        );
+        VoxelDirtyQueue.DirtyBrick coarseCritical = readyWork(
+                2, VoxelDirtyQueue.Priority.CRITICAL, 9L, 1L
+        );
+        require(VoxelClipmapController.compareReadyForPublication(
+                        coarseCritical, fineNormal, 10L, 5L
+                ) < 0,
+                "ready L2 critical update still starved behind an L0 normal update");
+
+        VoxelDirtyQueue.DirtyBrick oldCoarse = readyWork(
+                2, VoxelDirtyQueue.Priority.LOW, 0L, 2L
+        );
+        require(VoxelClipmapController.compareReadyForPublication(
+                        oldCoarse, coarseCritical, 10L, 5L
+                ) < 0,
+                "starved ready coarse update did not outrank fresh fine work");
+        VoxelDirtyQueue.DirtyBrick olderSequence = readyWork(
+                1, VoxelDirtyQueue.Priority.LOW, 0L, 1L
+        );
+        require(VoxelClipmapController.compareReadyForPublication(
+                        olderSequence, oldCoarse, 10L, 5L
+                ) < 0,
+                "starved ready updates lost deterministic FIFO order");
+    }
+
+    private static VoxelDirtyQueue.DirtyBrick readyWork(
+            final int level,
+            final VoxelDirtyQueue.Priority priority,
+            final long enqueuedTick,
+            final long sequence
+    ) {
+        return new VoxelDirtyQueue.DirtyBrick(
+                new VoxelDirtyQueue.BrickKey(1L, 1L, level, level, 0L, 0L),
+                priority, enqueuedTick, 0L, 1L, sequence, 0, false
+        );
     }
 
     private static void testClipmapControllerLifecycleAndRetry() {

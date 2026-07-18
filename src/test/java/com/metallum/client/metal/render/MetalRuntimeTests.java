@@ -201,20 +201,44 @@ public final class MetalRuntimeTests {
                         LightingPreset.PERFORMANCE) == 1
                         && LocalVoxelShadowGpuResources.cacheRefreshWorkerCount(
                         LightingPreset.BALANCED) == 2
+                        && LocalVoxelShadowGpuResources.cacheRefreshPendingBuildLimit(
+                        LightingPreset.BALANCED) == 4
                         && LocalVoxelShadowGpuResources.backgroundPendingBuildLimit(
-                        LightingPreset.BALANCED) == 4,
+                        LightingPreset.BALANCED) == 4
+                        && LocalVoxelShadowGpuResources.effectiveMaxSteps(
+                        LightingPreset.BALANCED, 64, 96) == 96
+                        && LocalVoxelShadowGpuResources.effectiveMaxSteps(
+                        LightingPreset.BALANCED, 16, 96) == 64
+                        && LocalVoxelShadowGpuResources.effectiveMaxSteps(
+                        LightingPreset.PERFORMANCE, 64, 32) == 32
+                        && LocalVoxelShadowGpuResources.atlasCapacityAllows(
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES * 2L,
+                        0L,
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES,
+                        true)
+                        && !LocalVoxelShadowGpuResources.atlasCapacityAllows(
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES,
+                        0L,
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES,
+                        true)
+                        && LocalVoxelShadowGpuResources.atlasCapacityAllows(
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES,
+                        0L,
+                        LocalVoxelShadowGpuResources.REPLACEMENT_RESERVE_BYTES,
+                        false)
+                        && LocalVoxelShadowGpuResources.capacityRecoveryEvictionAllowed(0L, 0)
+                        && !LocalVoxelShadowGpuResources.capacityRecoveryEvictionAllowed(1L, 0)
+                        && !LocalVoxelShadowGpuResources.capacityRecoveryEvictionAllowed(0L, 1),
                 "L6 pending/upload work lost its per-frame and retained byte caps");
-        require(LocalVoxelShadowGpuResources.nextBuildEdge(0, 64, false, false) == 8
+        require(LocalVoxelShadowGpuResources.nextBuildEdge(0, 64, false) == 64
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
-                        64, 64, false, true) == 8
+                        64, 64, false) == 64
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
-                        8, 64, true, false) == 0
+                        8, 64, true) == 64
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
-                        8, 64, true, true) == 16
+                        64, 64, true) == 0
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
-                        16, 64, true, true) == 32
-                        && LocalVoxelShadowGpuResources.nextBuildEdge(
-                        32, 64, true, true) == 64
+                        64, 16, true) == 16
                         && LocalVoxelShadowGpuResources.residentDescriptorState(
                         false, 64, 64)
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED
@@ -224,11 +248,19 @@ public final class MetalRuntimeTests {
                         && LocalVoxelShadowGpuResources.residentDescriptorState(
                         true, 64, 64)
                         == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
+                        && !LocalVoxelShadowGpuResources.residentQualityUsable(
+                        8, 64, 0, 0)
+                        && !LocalVoxelShadowGpuResources.residentQualityUsable(
+                        64, 64, 1, 0)
+                        && LocalVoxelShadowGpuResources.residentQualityUsable(
+                        64, 16, 0, 0)
+                        && LocalVoxelShadowGpuResources.residentQualityUsable(
+                        64, 64, 0, 1)
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(1) == 1
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(2) == 2
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(6) == 32
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(20) == 32,
-                "L6 coarse-first scheduling or bounded retry policy regressed");
+                "L6 direct quality recovery or bounded retry policy regressed");
         long oldOffset = 0x00000002_00000100L;
         LocalVoxelShadowGpuResources.packDescriptor(
                 descriptors, 0,

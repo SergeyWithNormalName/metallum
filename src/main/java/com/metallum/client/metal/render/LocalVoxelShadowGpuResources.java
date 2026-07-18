@@ -35,7 +35,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -118,6 +118,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private static final float MINIMUM_TRANSMITTANCE = 1.0f / 32.0f;
     private static final int MAX_PENDING_BUILDS = 64;
     private static final int MAX_RETRY_BACKOFF_SUBMITS = 32;
+    static final long REPLACEMENT_RESERVE_BYTES =
+            LocalVoxelShadowAtlasLayout.pageAllocationBytes(64);
     private static final long PERFORMANCE_PENDING_PAYLOAD_BYTES = 8L << 20;
     private static final long BALANCED_PENDING_PAYLOAD_BYTES = 16L << 20;
     private static final long ULTRA_PENDING_PAYLOAD_BYTES = 32L << 20;
@@ -135,13 +137,19 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private final MetalGpuBuffer visibilityAtlas;
     private final MetalGpuBuffer shadowReferenceRing;
     private final LocalVoxelShadowAtlasResidency residency;
-    private final ExecutorService cacheWorkers;
-    private final ExecutorService cacheRefreshWorkers;
+    private final ThreadPoolExecutor cacheWorkers;
+    private final ThreadPoolExecutor cacheRefreshWorkers;
     private final Map<Long, ResidentPage> residents = new HashMap<>();
     private final LinkedHashMap<Long, BuildTicket> builds = new LinkedHashMap<>();
     private final LinkedHashMap<Long, AtlasUpload> uploads = new LinkedHashMap<>();
     private final Map<Long, BuildFailure> failedBuilds = new HashMap<>();
     private final Set<Long> capacityBlockedBuilds = new HashSet<>();
+    /** Last foreground admission per source; retained while visible to prevent refresh starvation. */
+    private final Map<Long, Long> refreshLastScheduledSubmit = new HashMap<>();
+    /** Target -> fence after a deliberately retired page can provide replacement capacity. */
+    private final Map<Long, Long> capacityRecoveryAfterSubmit = new HashMap<>();
+    /** Visible sources intentionally evicted for recovery may consume the protected scratch. */
+    private final Set<Long> evictedRecoveryTargets = new HashSet<>();
     private PreparedFrame prepared;
     private FrameContext frameContext;
     private VoxelOccupancyGpuResources boundVoxelResources;
@@ -396,7 +404,14 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         long uploadedBytes = 0L;
         UploadBudget uploadBudget = uploadBudget(this.budget.preset());
         List<Long> completedUploads = new ArrayList<>();
-        for (Map.Entry<Long, AtlasUpload> entry : this.uploads.entrySet()) {
+        List<Map.Entry<Long, AtlasUpload>> orderedUploads = new ArrayList<>(
+                this.uploads.entrySet()
+        );
+        orderedUploads.sort((left, right) -> Boolean.compare(
+                right.getValue().request().foreground(),
+                left.getValue().request().foreground()
+        ));
+        for (Map.Entry<Long, AtlasUpload> entry : orderedUploads) {
             AtlasUpload upload = entry.getValue();
             FrameLight current = findFrameLight(context.lights(), entry.getKey());
             if (current == null || !upload.matches(current, context.mirror())) {
@@ -411,14 +426,35 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     || requiredBytes > uploadBudget.maxBytes() - uploadedBytes) {
                 continue;
             }
-            if (this.residency.freeBytes() < requiredBytes) {
+            boolean needsActiveSlot = this.residency.activePage(entry.getKey()) == null;
+            boolean recoveryAdmission = this.evictedRecoveryTargets.contains(
+                    entry.getKey()
+            );
+            if (!atlasCapacityAllows(
+                    this.residency.freeBytes(), 0L, requiredBytes,
+                    needsActiveSlot && !recoveryAdmission
+            )) {
                 this.capacityBlockedBuilds.add(entry.getKey());
+                if (upload.request().foreground()
+                        && this.residency.retiredPageCount() == 0) {
+                    scheduleCapacityRecoveryEviction(
+                            current, context.lights(), requiredBytes,
+                            context.submitIndex()
+                    );
+                }
                 continue;
             }
             if (!this.residency.canAcquireReplacement(
                     entry.getKey(), upload.result().edge()
             )) {
                 this.capacityBlockedBuilds.add(entry.getKey());
+                if (upload.request().foreground()
+                        && this.residency.retiredPageCount() == 0) {
+                    scheduleCapacityRecoveryEviction(
+                            current, context.lights(), requiredBytes,
+                            context.submitIndex()
+                    );
+                }
                 continue;
             }
             LocalVoxelShadowAtlasResidency.ReplacementReservation reservation = null;
@@ -472,6 +508,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 this.residents.put(entry.getKey(), resident);
                 this.failedBuilds.remove(entry.getKey());
                 this.capacityBlockedBuilds.remove(entry.getKey());
+                this.capacityRecoveryAfterSubmit.remove(entry.getKey());
+                this.evictedRecoveryTargets.remove(entry.getKey());
                 completedUploads.add(entry.getKey());
                 uploaded++;
                 uploadedBytes = Math.addExact(uploadedBytes, page.payloadBytes());
@@ -586,13 +624,16 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         this.frameContext = null;
         this.boundVoxelResources = null;
         for (BuildTicket ticket : this.builds.values()) {
-            ticket.future().cancel(true);
+            cancelTicket(ticket);
         }
         this.builds.clear();
         this.uploads.clear();
         this.residents.clear();
         this.failedBuilds.clear();
         this.capacityBlockedBuilds.clear();
+        this.refreshLastScheduledSubmit.clear();
+        this.capacityRecoveryAfterSubmit.clear();
+        this.evictedRecoveryTargets.clear();
         this.cacheRefreshWorkers.shutdownNow();
         this.cacheWorkers.shutdownNow();
         this.shadowReferenceRing.close();
@@ -725,11 +766,58 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         };
     }
 
+    static int cacheRefreshPendingBuildLimit(final LightingPreset preset) {
+        return Math.multiplyExact(cacheRefreshWorkerCount(preset), 2);
+    }
+
     static int backgroundPendingBuildLimit(final LightingPreset preset) {
         return Math.multiplyExact(cacheWorkerCount(preset), 2);
     }
 
-    private static ExecutorService cacheExecutor(
+    /** Nearby large lights may spend the hard CPU cap to retain L5's finest occupancy. */
+    static int effectiveMaxSteps(
+            final LightingPreset preset,
+            final int desiredEdge,
+            final int configuredMaxSteps
+    ) {
+        Objects.requireNonNull(preset, "preset");
+        if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(desiredEdge)
+                || configuredMaxSteps < 1
+                || configuredMaxSteps > LocalVoxelShadowLayout.MAX_DDA_STEPS) {
+            throw new IllegalArgumentException("Invalid L6 adaptive step budget");
+        }
+        if (preset == LightingPreset.PERFORMANCE || desiredEdge < 32) {
+            return Math.min(configuredMaxSteps, 64);
+        }
+        return configuredMaxSteps;
+    }
+
+    static boolean atlasCapacityAllows(
+            final long freeBytes,
+            final long pendingBytes,
+            final long requiredBytes,
+            final boolean preserveReplacementReserve
+    ) {
+        if (freeBytes < 0L || pendingBytes < 0L || requiredBytes <= 0L) {
+            throw new IllegalArgumentException("Invalid L6 atlas capacity accounting");
+        }
+        long reserve = preserveReplacementReserve ? REPLACEMENT_RESERVE_BYTES : 0L;
+        return pendingBytes <= freeBytes
+                && requiredBytes <= freeBytes - pendingBytes
+                && reserve <= freeBytes - pendingBytes - requiredBytes;
+    }
+
+    static boolean capacityRecoveryEvictionAllowed(
+            final long pendingBytes,
+            final int retiredPages
+    ) {
+        if (pendingBytes < 0L || retiredPages < 0) {
+            throw new IllegalArgumentException("Invalid L6 recovery accounting");
+        }
+        return pendingBytes == 0L && retiredPages == 0;
+    }
+
+    private static ThreadPoolExecutor cacheExecutor(
             final int workerCount,
             final String threadPrefix,
             final AtomicInteger workerIndex
@@ -834,14 +922,19 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             double dz = light.z() - camera.z();
             double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
             int edge = desiredEdge(light.radius(), distance, residentEdge);
+            int maxSteps = effectiveMaxSteps(
+                    this.budget.preset(), edge, this.budget.maxSteps()
+            );
             int cacheLevel = VoxelShadowCacheBuilder.selectCacheLevel(
-                    snapshot, light, this.budget.maxSteps()
+                    snapshot, light, maxSteps
             );
             described.add(new FrameLight(
                     index,
                     light,
                     CacheLightKey.of(light),
                     edge,
+                    distance,
+                    maxSteps,
                     cacheLevel,
                     mirror != null && mirror.current() && cacheLevel >= 0,
                     snapshot
@@ -864,7 +957,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 continue;
             }
             if (!ticketMatches(ticket, frameLight, mirror)) {
-                ticket.future().cancel(true);
+                cancelTicket(ticket);
                 this.builds.remove(frameLight.light().stableId());
                 continue;
             }
@@ -912,6 +1005,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         if (mirror == null || !mirror.current()) {
             return;
         }
+        discardObsoletePending(frameLights, mirror);
         Set<Long> eligible = new HashSet<>();
         for (FrameLight frameLight : frameLights) {
             if (frameLight.cacheEligible()) {
@@ -923,65 +1017,282 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
 
         BuildScheduleBudget schedule = new BuildScheduleBudget(
                 Math.addExact(this.builds.size(), this.uploads.size()),
-                backgroundPendingWork(),
+                foregroundPendingBuildWork(),
+                backgroundPendingBuildWork(),
                 pendingPayloadBytes(),
                 pendingPayloadBudget(this.budget.preset()),
+                cacheRefreshPendingBuildLimit(this.budget.preset()),
                 backgroundPendingBuildLimit(this.budget.preset())
         );
 
-        // Geometry changes are foreground work. A cheap edge-8 replacement updates the visible
-        // shadow quickly; the prior page remains STALE until this replacement is encoded.
+        // Never publish a coarse intermediate page for a dirty close light. The previous page
+        // remains STALE and visible until a target-quality replacement is atomically committed.
+        List<FrameLight> dirtyResidents = new ArrayList<>();
         for (FrameLight frameLight : frameLights) {
             ResidentPage resident = matchingResident(frameLight);
-            if (!frameLight.cacheEligible() || resident == null
-                    || residentGeometryCurrent(resident, frameLight, mirror)) {
+            if (!frameLight.cacheEligible()) {
                 continue;
             }
-            tryScheduleBuild(
-                    frameLight, mirror, 8, true, submitIndex, schedule
-            );
-        }
-
-        // Bootstrap every eligible source at the cheapest page size before spending atlas/CPU
-        // work on projected-quality upgrades for early lights in the snapshot.
-        for (FrameLight frameLight : frameLights) {
-            if (!frameLight.cacheEligible() || matchingResident(frameLight) != null) {
+            if (resident == null) {
+                if (this.evictedRecoveryTargets.contains(
+                        frameLight.light().stableId()
+                )) {
+                    dirtyResidents.add(frameLight);
+                }
                 continue;
             }
-            tryScheduleBuild(
-                    frameLight, mirror, 8, false, submitIndex, schedule
-            );
-        }
-
-        boolean bootstrapComplete = true;
-        for (FrameLight frameLight : frameLights) {
-            if (frameLight.cacheEligible()
-                    && matchingResident(frameLight) == null
-                    && !hasUsefulPending(frameLight, mirror)) {
-                bootstrapComplete = false;
-                break;
+            if (residentGeometryCurrent(resident, frameLight, mirror)) {
+                continue;
             }
+            dirtyResidents.add(frameLight);
         }
-        if (!bootstrapComplete) {
-            return;
-        }
-
-        for (FrameLight frameLight : frameLights) {
+        dirtyResidents.sort((left, right) -> {
+            boolean leftCapacityTarget = this.capacityRecoveryAfterSubmit.containsKey(
+                    left.light().stableId()
+            );
+            boolean rightCapacityTarget = this.capacityRecoveryAfterSubmit.containsKey(
+                    right.light().stableId()
+            );
+            if (leftCapacityTarget != rightCapacityTarget) {
+                return leftCapacityTarget ? -1 : 1;
+            }
+            long leftLast = this.refreshLastScheduledSubmit.getOrDefault(
+                    left.light().stableId(), Long.MIN_VALUE
+            );
+            long rightLast = this.refreshLastScheduledSubmit.getOrDefault(
+                    right.light().stableId(), Long.MIN_VALUE
+            );
+            int ageOrder = Long.compare(leftLast, rightLast);
+            if (ageOrder != 0) {
+                return ageOrder;
+            }
+            int qualityOrder = Integer.compare(right.desiredEdge(), left.desiredEdge());
+            if (qualityOrder != 0) {
+                return qualityOrder;
+            }
+            int distanceOrder = Double.compare(left.centerDistance(), right.centerDistance());
+            return distanceOrder != 0 ? distanceOrder : Long.compareUnsigned(
+                    left.light().stableId(), right.light().stableId()
+            );
+        });
+        for (FrameLight frameLight : dirtyResidents) {
+            if (hasUsefulPending(frameLight, mirror)) {
+                continue;
+            }
             ResidentPage resident = matchingResident(frameLight);
-            if (!frameLight.cacheEligible() || resident == null
-                    || !residentGeometryCurrent(resident, frameLight, mirror)) {
-                continue;
-            }
             int buildEdge = nextBuildEdge(
-                    resident.page().edge(), frameLight.desiredEdge(), true, true
+                    resident == null ? 0 : resident.page().edge(),
+                    frameLight.desiredEdge(), false
+            );
+            if (!ensureForegroundReplacementCapacity(
+                    frameLight, frameLights, buildEdge, submitIndex, schedule
+            )) {
+                continue;
+            }
+            if (tryScheduleBuild(
+                    frameLight, mirror, buildEdge, true,
+                    submitIndex, schedule
+            )) {
+                this.capacityRecoveryAfterSubmit.remove(
+                        frameLight.light().stableId()
+                );
+                this.refreshLastScheduledSubmit.put(
+                        frameLight.light().stableId(), submitIndex
+                );
+            }
+        }
+
+        // Bootstrap and camera-driven resolution changes share a bounded background pool.
+        // Direct-to-target builds avoid the former global bootstrap barrier and 8->16->32->64
+        // visible staircase while retaining approximate direct light until the page is ready.
+        List<FrameLight> backgroundCandidates = new ArrayList<>();
+        for (FrameLight frameLight : frameLights) {
+            if (!frameLight.cacheEligible()) {
+                continue;
+            }
+            ResidentPage resident = matchingResident(frameLight);
+            if ((resident == null && !this.evictedRecoveryTargets.contains(
+                    frameLight.light().stableId()
+            )) || (resident != null
+                    && residentGeometryCurrent(resident, frameLight, mirror)
+                    && resident.page().edge() != frameLight.desiredEdge())) {
+                backgroundCandidates.add(frameLight);
+            }
+        }
+        backgroundCandidates.sort((left, right) -> {
+            int qualityOrder = Integer.compare(right.desiredEdge(), left.desiredEdge());
+            if (qualityOrder != 0) {
+                return qualityOrder;
+            }
+            int distanceOrder = Double.compare(left.centerDistance(), right.centerDistance());
+            return distanceOrder != 0 ? distanceOrder : Long.compareUnsigned(
+                    left.light().stableId(), right.light().stableId()
+            );
+        });
+        for (FrameLight frameLight : backgroundCandidates) {
+            if (hasUsefulPending(frameLight, mirror)) {
+                continue;
+            }
+            ResidentPage resident = matchingResident(frameLight);
+            int buildEdge = nextBuildEdge(
+                    resident == null ? 0 : resident.page().edge(),
+                    frameLight.desiredEdge(), true
             );
             if (buildEdge == 0) {
                 continue;
             }
             tryScheduleBuild(
-                    frameLight, mirror, buildEdge, false, submitIndex, schedule
+                    frameLight, mirror, buildEdge, false,
+                    submitIndex, schedule
             );
         }
+    }
+
+    private void discardObsoletePending(
+            final List<FrameLight> frameLights,
+            final VoxelShadowCacheMirror.Snapshot mirror
+    ) {
+        this.builds.entrySet().removeIf(entry -> {
+            FrameLight current = findFrameLight(frameLights, entry.getKey());
+            if (current != null && ticketMatches(entry.getValue(), current, mirror)) {
+                return false;
+            }
+            cancelTicket(entry.getValue());
+            return true;
+        });
+        this.uploads.entrySet().removeIf(entry -> {
+            FrameLight current = findFrameLight(frameLights, entry.getKey());
+            return current == null || !entry.getValue().matches(current, mirror);
+        });
+    }
+
+    private boolean ensureForegroundReplacementCapacity(
+            final FrameLight target,
+            final List<FrameLight> frameLights,
+            final int buildEdge,
+            final long submitIndex,
+            final BuildScheduleBudget schedule
+    ) {
+        long stableId = target.light().stableId();
+        long requiredBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(buildEdge);
+        boolean needsActiveSlot = this.residency.activePage(stableId) == null;
+        boolean recoveryAdmission = this.evictedRecoveryTargets.contains(stableId);
+        boolean capacityAllowed = atlasCapacityAllows(
+                this.residency.freeBytes(), schedule.pendingBytes, requiredBytes,
+                needsActiveSlot && !recoveryAdmission
+        );
+        if (capacityAllowed && (schedule.pendingBytes > 0L
+                || this.residency.canAcquireReplacement(stableId, buildEdge))) {
+            return true;
+        }
+        // Another admitted/retired page already owns the scratch range. Let it complete before
+        // evicting another visible shadow; this bounds recovery to one victim per fence window.
+        if (!capacityRecoveryEvictionAllowed(
+                schedule.pendingBytes, this.residency.retiredPageCount()
+        )) {
+            this.capacityBlockedBuilds.add(stableId);
+            return false;
+        }
+        scheduleCapacityRecoveryEviction(
+                target, frameLights, requiredBytes, submitIndex
+        );
+        return false;
+    }
+
+    private void scheduleCapacityRecoveryEviction(
+            final FrameLight target,
+            final List<FrameLight> frameLights,
+            final long requiredBytes,
+            final long submitIndex
+    ) {
+        long stableId = target.light().stableId();
+        if (!capacityRecoveryEvictionAllowed(
+                0L, this.residency.retiredPageCount()
+        )) {
+            this.capacityBlockedBuilds.add(stableId);
+            return;
+        }
+        Long recoveryAfter = this.capacityRecoveryAfterSubmit.get(stableId);
+        if (recoveryAfter != null && submitIndex < recoveryAfter) {
+            this.capacityBlockedBuilds.add(stableId);
+            return;
+        }
+        this.capacityRecoveryAfterSubmit.remove(stableId);
+
+        FrameLight victim = null;
+        LocalVoxelShadowAtlasResidency.Page victimPage = null;
+        LocalVoxelShadowAtlasResidency.Page own = this.residency.activePage(stableId);
+        if (own != null && own.allocationBytes() >= requiredBytes) {
+            victim = target;
+            victimPage = own;
+        }
+        for (FrameLight candidate : frameLights) {
+            long candidateId = candidate.light().stableId();
+            if (candidateId == stableId || this.builds.containsKey(candidateId)
+                    || this.uploads.containsKey(candidateId)) {
+                continue;
+            }
+            LocalVoxelShadowAtlasResidency.Page page =
+                    this.residency.activePage(candidateId);
+            if (page == null || page.allocationBytes() < requiredBytes) {
+                continue;
+            }
+            if (victim == null || lessImportantForShadowResidency(candidate, victim)) {
+                victim = candidate;
+                victimPage = page;
+            }
+        }
+        if (victim == null) {
+            this.capacityBlockedBuilds.add(stableId);
+            return;
+        }
+        if (victim != target && !lessImportantForShadowResidency(victim, target)) {
+            this.capacityBlockedBuilds.add(stableId);
+            return;
+        }
+
+        long reusableAfter = delayedReuseSubmit(submitIndex);
+        long victimId = victim.light().stableId();
+        if (!this.residency.retire(victimId, reusableAfter)) {
+            this.capacityBlockedBuilds.add(stableId);
+            return;
+        }
+        this.evictedRecoveryTargets.add(victimId);
+        this.residents.remove(victimId);
+        this.capacityBlockedBuilds.remove(victimId);
+        this.capacityRecoveryAfterSubmit.put(stableId, reusableAfter);
+        this.capacityBlockedBuilds.add(stableId);
+        Metallum.LOGGER.debug(
+                "L6 atlas capacity recovery: target={}, evicted={}, edge={}, bytes={}, reusableAfter={}",
+                Long.toUnsignedString(stableId),
+                Long.toUnsignedString(victimId),
+                victimPage.edge(),
+                victimPage.allocationBytes(),
+                reusableAfter
+        );
+    }
+
+    private static boolean lessImportantForShadowResidency(
+            final FrameLight candidate,
+            final FrameLight currentVictim
+    ) {
+        boolean candidateCovered = candidate.cacheLevel() >= 0;
+        boolean victimCovered = currentVictim.cacheLevel() >= 0;
+        if (candidateCovered != victimCovered) {
+            return !candidateCovered;
+        }
+        int quality = Integer.compare(
+                candidate.desiredEdge(), currentVictim.desiredEdge()
+        );
+        if (quality != 0) {
+            return quality < 0;
+        }
+        int distance = Double.compare(
+                candidate.centerDistance(), currentVictim.centerDistance()
+        );
+        return distance != 0 ? distance > 0 : Long.compareUnsigned(
+                candidate.light().stableId(), currentVictim.light().stableId()
+        ) > 0;
     }
 
     private boolean tryScheduleBuild(
@@ -999,25 +1310,27 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 return true;
             }
             this.uploads.remove(stableId);
-            schedule.remove(upload.request());
+            schedule.removeUpload(upload.request());
         }
         BuildTicket pending = this.builds.get(stableId);
         if (pending != null) {
             if (ticketMatches(pending, frameLight, mirror)) {
                 return true;
             }
-            pending.future().cancel(true);
+            cancelTicket(pending);
             this.builds.remove(stableId);
-            schedule.remove(pending.request());
+            schedule.removeBuild(pending.request());
         }
         if (schedule.pendingWork >= MAX_PENDING_BUILDS
+                || foreground
+                && schedule.foregroundWork >= schedule.foregroundWorkLimit
                 || !foreground
                 && schedule.backgroundWork >= schedule.backgroundWorkLimit) {
             return false;
         }
 
         BuildRequest request = BuildRequest.of(
-                frameLight, mirror, buildEdge, this.budget.maxSteps(), foreground
+                frameLight, mirror, buildEdge, foreground
         );
         BuildFailure previousFailure = this.failedBuilds.get(stableId);
         if (previousFailure != null) {
@@ -1032,7 +1345,11 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             return false;
         }
         boolean needsActiveSlot = this.residency.activePage(stableId) == null;
-        if (requiredBytes > this.residency.freeBytes() - schedule.pendingBytes
+        boolean recoveryAdmission = this.evictedRecoveryTargets.contains(stableId);
+        if (!atlasCapacityAllows(
+                this.residency.freeBytes(), schedule.pendingBytes, requiredBytes,
+                needsActiveSlot && !recoveryAdmission
+        )
                 || needsActiveSlot
                 && this.residency.activePageCount() >= this.budget.maxShadowDescriptors()) {
             this.capacityBlockedBuilds.add(stableId);
@@ -1041,27 +1358,46 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         this.capacityBlockedBuilds.remove(stableId);
         AdvancedLight capturedLight = frameLight.light();
         VoxelShadowCacheMirror.Snapshot capturedMirror = mirror;
+        BuildCancellation cancellation = new BuildCancellation();
         long started = System.nanoTime();
+        ThreadPoolExecutor executor = foreground
+                ? this.cacheRefreshWorkers : this.cacheWorkers;
+        CompletableFuture<BuildCompletion> future = new CompletableFuture<>();
+        FutureTask<Void> workerTask = new FutureTask<>(() -> {
+            try {
+                future.complete(new BuildCompletion(
+                        VoxelShadowCacheBuilder.buildPage(
+                                capturedMirror,
+                                capturedLight,
+                                request.edge(),
+                                request.maxSteps(),
+                                cancellation::cancelled
+                        ),
+                        Math.max(0L, System.nanoTime() - started)
+                ));
+            } catch (CancellationException cancelled) {
+                future.cancel(false);
+            } catch (RuntimeException | Error failure) {
+                future.completeExceptionally(failure);
+            }
+            return null;
+        });
         try {
-            CompletableFuture<BuildCompletion> future = CompletableFuture.supplyAsync(
-                    () -> new BuildCompletion(
-                            VoxelShadowCacheBuilder.buildPage(
-                                    capturedMirror,
-                                    capturedLight,
-                                    request.edge(),
-                                    request.maxSteps()
-                            ),
-                            Math.max(0L, System.nanoTime() - started)
-                    ),
-                    foreground ? this.cacheRefreshWorkers : this.cacheWorkers
-            );
+            executor.execute(workerTask);
             this.builds.put(
                     stableId,
-                    new BuildTicket(request, capturedMirror, capturedLight, future)
+                    new BuildTicket(
+                            request, capturedMirror, capturedLight, cancellation,
+                            executor, workerTask, future
+                    )
             );
-            schedule.add(request);
+            schedule.addBuild(request);
             return true;
         } catch (RuntimeException rejected) {
+            cancellation.cancel();
+            workerTask.cancel(true);
+            future.cancel(true);
+            executor.remove(workerTask);
             return false;
         }
     }
@@ -1078,6 +1414,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final VoxelShadowCacheMirror.Snapshot mirror
     ) {
         return mirror != null && mirror.current()
+                && resident.cacheLevel() == frameLight.cacheLevel()
                 && VoxelShadowCacheBuilder.relevantGeometryEquals(
                 resident.mirror(), mirror, frameLight.light(), resident.cacheLevel()
         );
@@ -1095,19 +1432,28 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return upload != null && upload.matches(frameLight, mirror);
     }
 
-    private int backgroundPendingWork() {
+    private int backgroundPendingBuildWork() {
         int count = 0;
         for (BuildTicket ticket : this.builds.values()) {
             if (!ticket.request().foreground()) {
                 count++;
             }
         }
-        for (AtlasUpload upload : this.uploads.values()) {
-            if (!upload.request().foreground()) {
-                count++;
-            }
-        }
         return count;
+    }
+
+    private int foregroundPendingBuildWork() {
+        return Math.subtractExact(
+                this.builds.size(),
+                backgroundPendingBuildWork()
+        );
+    }
+
+    private static void cancelTicket(final BuildTicket ticket) {
+        ticket.cancellation().cancel();
+        ticket.workerTask().cancel(true);
+        ticket.future().cancel(true);
+        ticket.executor().remove(ticket.workerTask());
     }
 
     private void recordBuildFailure(
@@ -1151,30 +1497,17 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     static int nextBuildEdge(
             final int residentEdge,
             final int desiredEdge,
-            final boolean geometryCurrent,
-            final boolean bootstrapComplete
+            final boolean geometryCurrent
     ) {
         if ((residentEdge != 0
                 && !LocalVoxelShadowAtlasLayout.supportsPageEdge(residentEdge))
                 || !LocalVoxelShadowAtlasLayout.supportsPageEdge(desiredEdge)) {
             throw new IllegalArgumentException("Unsupported L6 progressive page edge");
         }
-        if (residentEdge == 0 || !geometryCurrent) {
-            return 8;
-        }
-        if (!bootstrapComplete || residentEdge == desiredEdge) {
+        if (residentEdge != 0 && geometryCurrent && residentEdge == desiredEdge) {
             return 0;
         }
-        if (residentEdge > desiredEdge) {
-            return desiredEdge;
-        }
-        return switch (residentEdge) {
-            case 8 -> Math.min(16, desiredEdge);
-            case 16 -> Math.min(32, desiredEdge);
-            case 32 -> 64;
-            case 64 -> 0;
-            default -> throw new IllegalArgumentException("Unsupported L6 resident page edge");
-        };
+        return desiredEdge;
     }
 
     static int residentDescriptorState(
@@ -1189,6 +1522,22 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return geometryCurrent && residentEdge == desiredEdge
                 ? LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_READY
                 : LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED;
+    }
+
+    static boolean residentQualityUsable(
+            final int residentEdge,
+            final int desiredEdge,
+            final int residentCacheLevel,
+            final int desiredCacheLevel
+    ) {
+        if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(residentEdge)
+                || !LocalVoxelShadowAtlasLayout.supportsPageEdge(desiredEdge)
+                || residentCacheLevel < 0 || desiredCacheLevel < 0) {
+            throw new IllegalArgumentException("Invalid L6 resident quality transition");
+        }
+        // A formerly distant/coarse page is more distracting than unshadowed approximate direct
+        // while its close/fine replacement builds. Equal-or-better old pages remain continuous.
+        return residentEdge >= desiredEdge && residentCacheLevel <= desiredCacheLevel;
     }
 
     private long pendingPayloadBytes() {
@@ -1259,7 +1608,11 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final long submitIndex
     ) {
         ResidentPage resident = matchingResident(frameLight);
-        if (resident != null
+        if (frameLight.cacheLevel() >= 0 && resident != null
+                && residentQualityUsable(
+                resident.page().edge(), frameLight.desiredEdge(),
+                resident.cacheLevel(), frameLight.cacheLevel()
+        )
                 && sameClipmapContract(resident.mirror().clipmap(), frameLight)) {
             boolean geometryCurrent = residentGeometryCurrent(
                     resident, frameLight, mirror
@@ -1328,12 +1681,21 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             if (retained.contains(entry.getKey())) {
                 return false;
             }
-            entry.getValue().future().cancel(true);
+            cancelTicket(entry.getValue());
             return true;
         });
         this.uploads.keySet().removeIf(stableId -> !retained.contains(stableId));
         this.failedBuilds.keySet().removeIf(stableId -> !retained.contains(stableId));
         this.capacityBlockedBuilds.removeIf(stableId -> !retained.contains(stableId));
+        this.refreshLastScheduledSubmit.keySet().removeIf(
+                stableId -> !retained.contains(stableId)
+        );
+        this.capacityRecoveryAfterSubmit.keySet().removeIf(
+                stableId -> !retained.contains(stableId)
+        );
+        this.evictedRecoveryTargets.removeIf(
+                stableId -> !retained.contains(stableId)
+        );
         for (long stableId : this.residency.activeStableIds()) {
             if (!retained.contains(stableId)) {
                 this.residency.retire(stableId, delayedReuseSubmit(submitIndex));
@@ -1349,6 +1711,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         BuildRequest request = ticket.request();
         if (!frameLight.cacheEligible()
                 || !request.lightKey().equals(frameLight.lightKey())
+                || request.edge() != frameLight.desiredEdge()
+                || request.maxSteps() != frameLight.maxSteps()
+                || request.cacheLevel() != frameLight.cacheLevel()
                 || !LocalVoxelShadowAtlasLayout.supportsPageEdge(request.edge())
                 || request.maxSteps() <= 0
                 || request.worldGeneration() != mirror.clipmap().world().generation()
@@ -1360,6 +1725,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             return false;
         }
         return request.mirrorRevision() == mirror.revision()
+                && ticket.mirror().clipmap().equals(mirror.clipmap())
                 || VoxelShadowCacheBuilder.relevantGeometryEquals(
                 ticket.mirror(),
                 mirror,
@@ -1743,7 +2109,6 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 final FrameLight frameLight,
                 final VoxelShadowCacheMirror.Snapshot mirror,
                 final int edge,
-                final int maxSteps,
                 final boolean foreground
         ) {
             return new BuildRequest(
@@ -1752,7 +2117,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     mirror.clipmap().clipmapGeneration(),
                     mirror.revision(),
                     edge,
-                    maxSteps,
+                    frameLight.maxSteps(),
                     frameLight.cacheLevel(),
                     foreground,
                     mirror.clipmap().levels().stream().map(CacheLevelKey::of).toList()
@@ -1791,8 +2156,23 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             BuildRequest request,
             VoxelShadowCacheMirror.Snapshot mirror,
             AdvancedLight light,
+            BuildCancellation cancellation,
+            ThreadPoolExecutor executor,
+            FutureTask<Void> workerTask,
             CompletableFuture<BuildCompletion> future
     ) {
+    }
+
+    private static final class BuildCancellation {
+        private volatile boolean cancelled;
+
+        private void cancel() {
+            this.cancelled = true;
+        }
+
+        private boolean cancelled() {
+            return this.cancelled;
+        }
     }
 
     private record BuildCompletion(
@@ -1828,9 +2208,13 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             return currentMirror != null && currentMirror.current()
                     && light.cacheEligible()
                     && this.request.lightKey().equals(light.lightKey())
+                    && this.request.edge() == light.desiredEdge()
+                    && this.request.maxSteps() == light.maxSteps()
+                    && this.request.cacheLevel() == light.cacheLevel()
                     && this.result.edge() == this.request.edge()
                     && this.result.cacheLevel() == this.request.cacheLevel()
                     && (this.mirror.revision() == currentMirror.revision()
+                    && this.mirror.clipmap().equals(currentMirror.clipmap())
                     || VoxelShadowCacheBuilder.relevantGeometryEquals(
                     this.mirror,
                     currentMirror,
@@ -1845,6 +2229,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             AdvancedLight light,
             CacheLightKey lightKey,
             int desiredEdge,
+            double centerDistance,
+            int maxSteps,
             int cacheLevel,
             boolean cacheEligible,
             VoxelClipmapSnapshot clipmap
@@ -1862,33 +2248,42 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
 
     private static final class BuildScheduleBudget {
         private int pendingWork;
+        private int foregroundWork;
         private int backgroundWork;
         private long pendingBytes;
         private final long pendingByteBudget;
+        private final int foregroundWorkLimit;
         private final int backgroundWorkLimit;
 
         private BuildScheduleBudget(
                 final int pendingWork,
+                final int foregroundWork,
                 final int backgroundWork,
                 final long pendingBytes,
                 final long pendingByteBudget,
+                final int foregroundWorkLimit,
                 final int backgroundWorkLimit
         ) {
-            if (pendingWork < 0 || backgroundWork < 0 || backgroundWork > pendingWork
+            if (pendingWork < 0 || foregroundWork < 0 || backgroundWork < 0
+                    || foregroundWork + backgroundWork > pendingWork
                     || pendingBytes < 0L || pendingByteBudget < 0L
-                    || backgroundWorkLimit <= 0) {
+                    || foregroundWorkLimit <= 0 || backgroundWorkLimit <= 0) {
                 throw new IllegalArgumentException("Invalid L6 build scheduling budget");
             }
             this.pendingWork = pendingWork;
+            this.foregroundWork = foregroundWork;
             this.backgroundWork = backgroundWork;
             this.pendingBytes = pendingBytes;
             this.pendingByteBudget = pendingByteBudget;
+            this.foregroundWorkLimit = foregroundWorkLimit;
             this.backgroundWorkLimit = backgroundWorkLimit;
         }
 
-        private void add(final BuildRequest request) {
+        private void addBuild(final BuildRequest request) {
             this.pendingWork++;
-            if (!request.foreground()) {
+            if (request.foreground()) {
+                this.foregroundWork++;
+            } else {
                 this.backgroundWork++;
             }
             this.pendingBytes = Math.addExact(
@@ -1897,18 +2292,32 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             );
         }
 
-        private void remove(final BuildRequest request) {
+        private void removeBuild(final BuildRequest request) {
             this.pendingWork--;
-            if (!request.foreground()) {
+            if (request.foreground()) {
+                this.foregroundWork--;
+            } else {
                 this.backgroundWork--;
             }
             this.pendingBytes = Math.subtractExact(
                     this.pendingBytes,
                     LocalVoxelShadowAtlasLayout.pageAllocationBytes(request.edge())
             );
-            if (this.pendingWork < 0 || this.backgroundWork < 0
+            if (this.pendingWork < 0 || this.foregroundWork < 0
+                    || this.backgroundWork < 0
                     || this.pendingBytes < 0L) {
                 throw new IllegalStateException("L6 build scheduling accounting underflow");
+            }
+        }
+
+        private void removeUpload(final BuildRequest request) {
+            this.pendingWork--;
+            this.pendingBytes = Math.subtractExact(
+                    this.pendingBytes,
+                    LocalVoxelShadowAtlasLayout.pageAllocationBytes(request.edge())
+            );
+            if (this.pendingWork < 0 || this.pendingBytes < 0L) {
+                throw new IllegalStateException("L6 upload scheduling accounting underflow");
             }
         }
     }

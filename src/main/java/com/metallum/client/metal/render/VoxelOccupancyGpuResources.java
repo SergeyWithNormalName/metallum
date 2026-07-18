@@ -49,13 +49,14 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
     record FrameUpload(
             long batchId,
             VoxelUploadBatch batch,
+            VoxelClipmapSnapshot clipmap,
             MemorySegment packet,
             int patchCount,
             long uploadBytes
     ) {
         FrameUpload {
             if (batchId <= 0L || batch == null || batch.batchId() != batchId
-                    || packet == null || patchCount <= 0
+                    || clipmap == null || packet == null || patchCount <= 0
                     || packet.byteSize() != uploadBytes || uploadBytes <= 0L) {
                 throw new IllegalArgumentException("Invalid L5 frame upload declaration");
             }
@@ -310,17 +311,24 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                 && this.budget.equals(Objects.requireNonNull(expectedBudget, "expectedBudget"));
     }
 
-    FrameUpload encode(final VoxelUploadBatch batch, final FrameState frame) {
+    FrameUpload encode(
+            final VoxelUploadBatch batch,
+            final VoxelClipmapSnapshot clipmap,
+            final FrameState frame
+    ) {
         ensureOpen();
         Objects.requireNonNull(batch, "batch");
+        Objects.requireNonNull(clipmap, "clipmap");
         Objects.requireNonNull(frame, "frame");
         if (frame.lightingGenerationId() != this.lightingGeneration
                 || batch.world().generation() != this.worldGeneration
                 || batch.clipmapGeneration() != this.clipmapGeneration
+                || !matches(this.lightingGeneration, this.budget, clipmap)
                 || batch.frameId() != frame.frameId()
                 || batch.patches().size() > this.budget.maxBricksPerSubmit()) {
             throw new IllegalArgumentException("L5 upload does not match its native context/frame");
         }
+        VoxelShadowCacheMirror.validateBatchContract(batch, clipmap);
         List<VoxelBrickPatch> patches = batch.patches();
         long payloadOffset = Math.addExact(
                 VoxelClipmapLayout.PACKET_HEADER_BYTES,
@@ -381,7 +389,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             cursor += patch.packedPayloadLength();
         }
         return new FrameUpload(
-                batch.batchId(), batch, packet, patches.size(), packet.byteSize()
+                batch.batchId(), batch, clipmap, packet, patches.size(), packet.byteSize()
         );
     }
 
@@ -391,7 +399,9 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         Objects.requireNonNull(upload, "upload");
         int status = commandBuffer.encodeVoxelOccupancy(this.context, upload.packet());
         if (status == STATUS_OK) {
-            VoxelShadowCacheMirror.global().acknowledge(upload.batch());
+            VoxelShadowCacheMirror.global().acknowledge(
+                    upload.batch(), upload.clipmap()
+            );
         }
         return status;
     }

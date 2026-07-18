@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 
 /** Standalone L6 CPU/ABI contracts; intentionally runnable without a Metal device. */
 public final class VoxelShadowContractTests {
@@ -58,12 +59,12 @@ public final class VoxelShadowContractTests {
                 "Performance L6 atlas budget changed");
         require(balanced.shadowedLocalLights() == 2
                         && balanced.maxShadowDescriptors() == 4_096
-                        && balanced.maxSteps() == 64
+                        && balanced.maxSteps() == 96
                         && balanced.maxEntityProxies() == 16,
                 "Balanced L6 atlas budget changed");
         require(ultra.shadowedLocalLights() == 2
                         && ultra.maxShadowDescriptors() == 4_096
-                        && ultra.maxSteps() == 80
+                        && ultra.maxSteps() == 96
                         && ultra.maxEntityProxies() == 24,
                 "Ultra L6 atlas budget changed");
         require(LocalVoxelShadowLayout.MAX_SHADOWED_LOCAL_LIGHTS == 2
@@ -268,7 +269,7 @@ public final class VoxelShadowContractTests {
         VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
         mirror.acknowledge(cacheCoverageBatch(
                 1L, cacheWallPatch(1, VoxelMaterialClass.OPAQUE), 0, 2
-        ));
+        ), clipmap);
         VoxelShadowCacheMirror.Snapshot opaqueSnapshot = mirror.snapshot(clipmap);
         require(opaqueSnapshot != null, "completed L5 batch did not expose an L6 cache mirror");
         require(mirror.snapshot(clipmap) == opaqueSnapshot,
@@ -294,14 +295,14 @@ public final class VoxelShadowContractTests {
                 "cached +X ray did not become opaque behind the wall");
 
         VoxelBrickPatch restampedOpaque = cacheWallPatch(2, VoxelMaterialClass.OPAQUE);
-        mirror.acknowledge(cacheCoverageBatch(2L, restampedOpaque, 0, 2));
+        mirror.acknowledge(cacheCoverageBatch(2L, restampedOpaque, 0, 2), clipmap);
         VoxelShadowCacheMirror.Snapshot restampedSnapshot = mirror.snapshot(clipmap);
         require(VoxelShadowCacheBuilder.relevantGeometryEquals(
                         opaqueSnapshot, restampedSnapshot, List.of(light)),
                 "identical relevant geometry invalidated the cached point shadow");
 
         VoxelBrickPatch glassPatch = cacheWallPatch(3, VoxelMaterialClass.GLASS);
-        mirror.acknowledge(cacheCoverageBatch(3L, glassPatch, 1, 2));
+        mirror.acknowledge(cacheCoverageBatch(3L, glassPatch, 1, 2), clipmap);
         VoxelShadowCacheMirror.Snapshot incrementalSnapshot = mirror.snapshot(clipmap);
         require(incrementalSnapshot != null && incrementalSnapshot.current()
                         && incrementalSnapshot.revision() > restampedSnapshot.revision()
@@ -309,7 +310,7 @@ public final class VoxelShadowContractTests {
                 "same-topology acknowledged L5 batch did not publish to L6 immediately");
         require(mirror.snapshot(shiftedClipmap) == null,
                 "L6 exposed incremental cache data across a shifted toroidal window");
-        mirror.acknowledge(cacheCoverageBatch(4L, glassPatch, 0, 2));
+        mirror.acknowledge(cacheCoverageBatch(4L, glassPatch, 0, 2), clipmap);
         VoxelShadowCacheMirror.Snapshot glassSnapshot = mirror.snapshot(clipmap);
         require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
                         restampedSnapshot, glassSnapshot, List.of(light)),
@@ -336,7 +337,7 @@ public final class VoxelShadowContractTests {
         );
         mirror.acknowledge(cacheCoverageBatch(
                 71L, cacheWallPatch(71, VoxelMaterialClass.OPAQUE), 0, 2
-        ));
+        ), clipmap);
         VoxelShadowCacheMirror.Snapshot snapshot = mirror.snapshot(clipmap);
         require(snapshot != null, "variable-page cache fixture did not publish");
         AdvancedLight light = new AdvancedLight(
@@ -344,6 +345,13 @@ public final class VoxelShadowContractTests {
                 0.5, 0.5, 0.5, 4.0f,
                 1.0f, 0.8f, 0.5f, 2.0f, 10
         );
+        boolean cancelled = false;
+        try {
+            VoxelShadowCacheBuilder.buildPage(snapshot, light, 64, 96, () -> true);
+        } catch (CancellationException expected) {
+            cancelled = true;
+        }
+        require(cancelled, "superseded L6 CPU page ignored cooperative cancellation");
         for (int edge : LocalVoxelShadowAtlasLayout.PAGE_EDGES) {
             VoxelShadowCacheBuilder.PageResult page = VoxelShadowCacheBuilder.buildPage(
                     snapshot, light, edge, 96
@@ -421,9 +429,33 @@ public final class VoxelShadowContractTests {
         );
         mirror.acknowledge(cacheCoverageBatch(
                 81L, cacheWallPatch(81, VoxelMaterialClass.OPAQUE), 0, 4
-        ));
+        ), beforeScroll);
         VoxelShadowCacheMirror.Snapshot before = mirror.snapshot(beforeScroll);
         require(before != null, "pre-scroll relevant-geometry fixture did not publish");
+        require(mirror.snapshot(afterScroll) == null,
+                "L6 treated a pre-scroll batch as belonging to the shifted origins");
+        mirror.acknowledge(cacheCoverageBatch(
+                82L, cacheWallPatch(82, VoxelMaterialClass.OPAQUE), 5, 4
+        ), afterScroll);
+        VoxelShadowCacheMirror.Snapshot partialAfterScroll = mirror.snapshot(afterScroll);
+        require(partialAfterScroll != null && partialAfterScroll.current()
+                        && partialAfterScroll.revision() > before.revision(),
+                "accepted shifted-origin batch remained hidden until the L5 queue drained");
+        VoxelShadowCacheBuilder.PageResult coveredPartial =
+                VoxelShadowCacheBuilder.buildPage(
+                        partialAfterScroll, light, 8, 96
+                );
+        require(coveredPartial.complete(),
+                "fully tagged overlap could not rebuild during a shifted partial refill");
+        AdvancedLight missingSlabLight = new AdvancedLight(
+                82L, 1L, LightSourceKind.BLOCK,
+                12.0, 0.5, 0.5, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        require(!VoxelShadowCacheBuilder.buildPage(
+                        partialAfterScroll, missingSlabLight, 8, 96
+                ).complete(),
+                "shifted partial page published across an unacknowledged incoming slab");
         VoxelShadowCacheMirror.Snapshot remapped = new VoxelShadowCacheMirror.Snapshot(
                 afterScroll, before.revision() + 1L, new HashMap<>(before.bricks()), true
         );
@@ -507,8 +539,8 @@ public final class VoxelShadowContractTests {
                 "origin-shift reuse accepted changed clipmap topology");
 
         mirror.acknowledge(cacheCoverageBatch(
-                82L, cacheWallPatch(82, VoxelMaterialClass.GLASS), 0, 4
-        ));
+                83L, cacheWallPatch(83, VoxelMaterialClass.GLASS), 0, 4
+        ), beforeScroll);
         VoxelShadowCacheMirror.Snapshot changed = mirror.snapshot(beforeScroll);
         require(changed != null && !VoxelShadowCacheBuilder.relevantGeometryEquals(
                         before,
@@ -589,7 +621,7 @@ public final class VoxelShadowContractTests {
                 VOXEL_WORLD, 11L,
                 List.of(new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2))
         );
-        mirror.acknowledge(cacheBatch(61L, cacheTransparentLinePatch(), 0));
+        mirror.acknowledge(cacheBatch(61L, cacheTransparentLinePatch(), 0), clipmap);
         VoxelShadowCacheMirror.Snapshot snapshot = mirror.snapshot(clipmap);
         require(snapshot != null, "overflow-layer cache fixture did not publish");
         AdvancedLight light = new AdvancedLight(
@@ -623,7 +655,7 @@ public final class VoxelShadowContractTests {
                 41L, VOXEL_WORLD, 11L, 41L,
                 List.of(denseEmitterPatch(), emptyCachePatch()),
                 0, 0L, 0, 0, 0L, 0L
-        ));
+        ), clipmap);
         VoxelShadowCacheMirror.Snapshot snapshot = mirror.snapshot(clipmap);
         require(snapshot != null, "dense-emitter cache fixture did not publish");
 

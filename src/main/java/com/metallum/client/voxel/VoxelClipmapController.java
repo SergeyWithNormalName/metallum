@@ -411,20 +411,35 @@ public final class VoxelClipmapController {
         harvestPackResults(world);
         schedulePackJobs(world);
         harvestPackResults(world);
-        List<ReadyBrick> leased = new ArrayList<>(this.budget.hardDrainBudget());
-        List<VoxelBrickPatch> patches = new ArrayList<>(this.budget.hardDrainBudget());
+        List<ReadyBrick> readyCandidates = new ArrayList<>(world.readyCapacity);
         for (ArrayDeque<ReadyBrick> levelReady : world.readyByLevel) {
-            while (!levelReady.isEmpty() && patches.size() < this.budget.hardDrainBudget()) {
-                ReadyBrick ready = levelReady.removeFirst();
-                if (!isTicketCurrent(world, ready.ticket())) {
-                    continue;
-                }
-                leased.add(ready);
-                patches.add(ready.patch());
-            }
+            levelReady.removeIf(ready -> !isTicketCurrent(world, ready.ticket()));
+            readyCandidates.addAll(levelReady);
         }
-        if (leased.isEmpty()) {
+        if (readyCandidates.isEmpty()) {
             return null;
+        }
+        readyCandidates.sort((left, right) -> compareReadyForPublication(
+                left.ticket().dirty(), right.ticket().dirty(),
+                world.frameTick, world.starvationBoundTicks
+        ));
+        int actualCount = Math.min(
+                this.budget.hardDrainBudget(), readyCandidates.size()
+        );
+        List<ReadyBrick> leased = new ArrayList<>(
+                readyCandidates.subList(0, actualCount)
+        );
+        // The admission set is fair across levels; the native packet ABI still requires the
+        // selected records to be grouped by level.
+        leased.sort((left, right) -> Integer.compare(
+                left.patch().level(), right.patch().level()
+        ));
+        List<VoxelBrickPatch> patches = new ArrayList<>(actualCount);
+        for (ReadyBrick ready : leased) {
+            if (!world.readyByLevel.get(ready.patch().level()).remove(ready)) {
+                throw new IllegalStateException("Selected L5 ready brick disappeared");
+            }
+            patches.add(ready.patch());
         }
         VoxelDirtyQueue.Telemetry queueTelemetry = world.dirtyQueue.telemetry();
         QueueTelemetryDelta queueDelta = takeQueueTelemetryDelta(world, queueTelemetry);
@@ -447,6 +462,48 @@ public final class VoxelClipmapController {
         world.unloadClearsPending = 0;
         this.batchesLeased++;
         return batch;
+    }
+
+    static int compareReadyForPublication(
+            final VoxelDirtyQueue.DirtyBrick left,
+            final VoxelDirtyQueue.DirtyBrick right,
+            final long currentTick,
+            final long starvationBoundTicks
+    ) {
+        Objects.requireNonNull(left, "left");
+        Objects.requireNonNull(right, "right");
+        if (currentTick < 0L || starvationBoundTicks <= 0L) {
+            throw new IllegalArgumentException("Invalid L5 ready-publication clock");
+        }
+        boolean leftStarved = Math.max(0L, currentTick - left.enqueuedTick())
+                >= starvationBoundTicks;
+        boolean rightStarved = Math.max(0L, currentTick - right.enqueuedTick())
+                >= starvationBoundTicks;
+        if (leftStarved != rightStarved) {
+            return leftStarved ? -1 : 1;
+        }
+        int order = leftStarved
+                ? Long.compare(left.enqueueSequence(), right.enqueueSequence())
+                : Integer.compare(left.priority().ordinal(), right.priority().ordinal());
+        if (order != 0) {
+            return order;
+        }
+        order = Long.compare(left.enqueueSequence(), right.enqueueSequence());
+        if (order != 0) {
+            return order;
+        }
+        VoxelDirtyQueue.BrickKey leftKey = left.key();
+        VoxelDirtyQueue.BrickKey rightKey = right.key();
+        order = Integer.compare(leftKey.level(), rightKey.level());
+        if (order != 0) {
+            return order;
+        }
+        order = Long.compare(leftKey.brickX(), rightKey.brickX());
+        if (order != 0) {
+            return order;
+        }
+        order = Long.compare(leftKey.brickY(), rightKey.brickY());
+        return order != 0 ? order : Long.compare(leftKey.brickZ(), rightKey.brickZ());
     }
 
     /** Confirms that the exact leased batch reached the native upload ring. */
@@ -1174,6 +1231,7 @@ public final class VoxelClipmapController {
         private final VoxelDirtyQueue dirtyQueue;
         private final VoxelBrickPacker packer;
         private final int readyCapacity;
+        private final long starvationBoundTicks;
         private long clipmapGeneration = 1L;
         private long frameTick;
         private int scrollSlabsPending;
@@ -1199,6 +1257,7 @@ public final class VoxelClipmapController {
                     .toList();
             this.packer = Objects.requireNonNull(packer, "packer");
             this.readyCapacity = Math.multiplyExact(2, budget.hardDrainBudget());
+            this.starvationBoundTicks = budget.starvationBoundTicks();
             this.dirtyQueue = new VoxelDirtyQueue(
                     budget.hardQueueCapacity(),
                     budget.hardDrainBudget(),

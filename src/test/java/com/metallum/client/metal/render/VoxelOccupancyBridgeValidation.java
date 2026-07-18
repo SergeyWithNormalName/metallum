@@ -77,7 +77,7 @@ public final class VoxelOccupancyBridgeValidation {
             FrameState firstFrame = frame(3L);
             VoxelUploadBatch firstBatch = batch(1L, firstFrame.frameId(), world, snapshot, patch);
             VoxelOccupancyGpuResources.FrameUpload firstUpload = resources.encode(
-                    firstBatch, firstFrame
+                    firstBatch, snapshot, firstFrame
             );
             require(firstUpload.patchCount() == 1 && firstUpload.uploadBytes() > 4_096L,
                     "Java L5 bridge did not encode the exact patch payload");
@@ -99,7 +99,7 @@ public final class VoxelOccupancyBridgeValidation {
             FrameState heldFrame = frame(4L);
             VoxelUploadBatch heldBatch = batch(2L, heldFrame.frameId(), world, snapshot, patch);
             VoxelOccupancyGpuResources.FrameUpload heldUpload = resources.encode(
-                    heldBatch, heldFrame
+                    heldBatch, snapshot, heldFrame
             );
             try (CommandBufferScope held = new CommandBufferScope(queue.makeCommandBuffer(
                     "Metallum L5 held ring slot"
