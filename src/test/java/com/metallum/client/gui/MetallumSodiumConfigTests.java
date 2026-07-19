@@ -4,6 +4,8 @@ import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.client.config.ConfigManager;
 import net.caffeinemc.mods.sodium.client.config.builder.ConfigBuilderImpl;
 import net.caffeinemc.mods.sodium.client.config.structure.BooleanOption;
+import net.caffeinemc.mods.sodium.client.config.structure.EnumOption;
+import net.caffeinemc.mods.sodium.client.config.structure.IntegerOption;
 import net.caffeinemc.mods.sodium.client.config.structure.ModOptions;
 import net.caffeinemc.mods.sodium.client.config.structure.Option;
 import net.caffeinemc.mods.sodium.client.config.structure.OptionGroup;
@@ -35,8 +37,8 @@ public final class MetallumSodiumConfigTests {
         OptionPage page = (OptionPage) options.pages().getFirst();
         require(!page.groups().isEmpty(), "Metallum Sodium page has no option groups");
         OptionGroup lighting = page.groups().getFirst();
-        require(lighting.options().size() == 1,
-                "Metallum Lighting group must expose only the Advanced request at L2.5");
+        require(lighting.options().size() == 2,
+                "Metallum Lighting group must expose the Advanced request and the Preset selector");
 
         Option option = lighting.options().getFirst();
         Field idField = Option.class.getDeclaredField("id");
@@ -50,6 +52,12 @@ public final class MetallumSodiumConfigTests {
         require(option.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum improved-lighting option must require a full game restart");
 
+        Option lightingPreset = findOption(page, idField, "lighting_preset");
+        require(lightingPreset instanceof EnumOption,
+                "Metallum lighting-preset Sodium option is missing or has the wrong type");
+        require(lightingPreset.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum lighting-preset option must require a full game restart");
+
         Option hdrOption = findOption(page, idField, "hdr_enabled");
         require(hdrOption instanceof BooleanOption,
                 "Metallum HDR-enabled Sodium option is missing or has the wrong type");
@@ -60,6 +68,12 @@ public final class MetallumSodiumConfigTests {
                 "Metallum L5 checksum Sodium option is missing or has the wrong type");
         require(voxelChecksum.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum L5 checksum option must require a full game restart");
+        require(findOption(page, idField, "voxel_preview_mode") instanceof EnumOption,
+                "Metallum L5 preview mode is missing or has the wrong type");
+        require(findOption(page, idField, "voxel_preview_level") instanceof IntegerOption,
+                "Metallum L5 preview level is missing or has the wrong type");
+        require(findOption(page, idField, "voxel_preview_slice") instanceof IntegerOption,
+                "Metallum L5 preview slice is missing or has the wrong type");
         System.out.println("Metallum Sodium config registration tests passed");
     }
 
