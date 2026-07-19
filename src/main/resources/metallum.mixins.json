@@ -32,6 +32,7 @@
     "render.CubeMapHdrMixin",
     "render.FlameFeatureRendererHdrMixin",
     "render.GuiRendererHdrMixin",
+    "render.GuiVoxelPreviewMixin",
     "render.ScreenInWorldBlurMixin",
     "render.HdrShaderMixin",
     "render.KeyboardHandlerMixin",

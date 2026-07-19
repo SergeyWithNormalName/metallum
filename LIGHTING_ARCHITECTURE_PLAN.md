@@ -1688,6 +1688,7 @@ Diagnostic overlays:
 - `clean check` (62 задачи), Java/FFM/native bridge и отдельный native harness прошли с Metal API/GPU Validation. Финальный Balanced HDR Native runtime, 300 warmup + 300 measurement: `90.13 FPS`, полный GPU p95 `13.91 ms`, voxel upload/update avg/p95/worst `0.195/0.213/1.130 ms`; `2256/2256` bricks completed, remaining/age/rejected/stale/ring-busy/dropped events — `0`.
 - L5 остаётся producer-only: до L6 voxel data не читается fragment lighting path, поэтому новых видимых теней/GI на этом этапе быть не должно; для проверки предусмотрены PPM slice visualization и GPU checksum.
 - Дополнение L5: в Sodium добавлен выключенный по умолчанию `L5 GPU Clipmap Checksum`. После перезапуска он раз в 120 idle-кадров Advanced без блокировки считает checksum finest clipmap и публикует его в telemetry; Vanilla и production rejection accounting не затрагиваются. Runtime-проверка дала `debug_checksum=2779096485`, `2124/2124` completed и нули remaining/age/rejected/stale/ring-busy.
+- Дополнение L5: в Sodium добавлено выключенное по умолчанию экранное превью `Occupancy / Material / Transmittance` с выбором уровня и Z-среза. Панель использует fail-isolated CPU mirror только принятых native L5 upload-команд, корректно учитывает toroidal logical coordinates/subdivision и не изменяет Metal present или production L5 resource budget; пурпурные клетки означают ещё не загруженные слоты.
 
 ### Этап 6. Local voxel shadows и cached sun shadows — ✅ ВЫПОЛНЕН 18 июля 2026
 

@@ -57,6 +57,9 @@ import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelClipmapLayout;
 import com.metallum.client.voxel.VoxelClipmapSnapshot;
+import com.metallum.client.voxel.VoxelPreviewMirror;
+import com.metallum.client.voxel.VoxelPreviewMode;
+import com.metallum.client.voxel.VoxelPreviewSettings;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
@@ -1427,6 +1430,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                     if (voxelStatus == VoxelOccupancyGpuResources.STATUS_OK) {
                         shadowResources.invalidateVoxelBatch(voxelBatch);
+                        if (VoxelPreviewSettings.get().mode() != VoxelPreviewMode.OFF) {
+                            VoxelPreviewMirror.global().acknowledge(voxelBatch);
+                        }
                         voxelController.completeUploadBatch(voxelBatch.batchId());
                         voxelBatch = null;
                         this.acknowledgeVoxelNativeRejection(voxelResources);

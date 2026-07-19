@@ -5,6 +5,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import net.minecraft.core.SectionPos;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -27,6 +29,7 @@ public final class VoxelOccupancyTests {
         testStairFenceAndPaneMasks();
         testCoverageAwareOpticsAndDeterminism();
         testDebugSliceVisualization();
+        testPreviewSettingsAndAcknowledgedMirror();
         testClipmapPresetSizing();
         testCameraScrollAndToroidalAddressing();
         testAsyncPackingOracleAtAllSubdivisions();
@@ -70,6 +73,60 @@ public final class VoxelOccupancyTests {
                         == VoxelMaterialClass.UNKNOWN_CONSERVATIVE,
                 "unknown material fallback must remain opaque and ABI-stable");
         expect(IllegalArgumentException.class, () -> VoxelMaterialDescriptor.fromPackedUnsignedByte(0x1ff));
+    }
+
+    private static void testPreviewSettingsAndAcknowledgedMirror() {
+        Path settings = null;
+        try {
+            settings = Files.createTempFile("metallum-l5-preview-", ".properties");
+            VoxelPreviewSettings.State configured = new VoxelPreviewSettings.State(
+                    VoxelPreviewMode.MATERIAL, 2, 127
+            );
+            require(VoxelPreviewSettings.save(settings, configured)
+                            && VoxelPreviewSettings.load(settings).equals(configured),
+                    "L5 preview settings did not round-trip");
+            Files.writeString(settings, "mode=broken\nlevel=0\nslice=0\n");
+            require(VoxelPreviewSettings.load(settings).equals(
+                            VoxelPreviewSettings.State.defaults()),
+                    "malformed L5 preview settings did not fail closed");
+        } catch (java.io.IOException exception) {
+            throw new AssertionError("L5 preview settings test failed", exception);
+        } finally {
+            if (settings != null) {
+                try {
+                    Files.deleteIfExists(settings);
+                } catch (java.io.IOException ignored) {
+                }
+            }
+        }
+
+        int[] occupancy = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        occupancy[0] = 1;
+        byte[] optical = new byte[32 * 32 * 32];
+        optical[0] = (byte) OPAQUE.packedUnsignedByte();
+        VoxelBrickPatch patch = new VoxelBrickPatch(
+                0, 0, 0, 0, -2, 3, 4, 7, 11, 13,
+                occupancy, optical
+        );
+        VoxelWorldToken world = new VoxelWorldToken(11, "test");
+        VoxelUploadBatch batch = new VoxelUploadBatch(
+                1, world, 13, 0, List.of(patch), 0, 0, 0, 0, 0, 0
+        );
+        VoxelPreviewMirror mirror = VoxelPreviewMirror.global();
+        mirror.acknowledge(batch);
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(world, 13, List.of(
+                new VoxelClipmapSnapshot.Level(0, 1, 32, -2, 3, 4, 1)
+        ));
+        VoxelPreviewMirror.Snapshot preview = mirror.snapshot(clipmap, 0);
+        require(preview != null && preview.bricks().get(
+                        new VoxelPreviewMirror.Key(0, -2, 3, 4)
+                ).occupancy()[0] == 1,
+                "acknowledged L5 preview mirror lost its toroidal logical brick");
+        VoxelClipmapSnapshot stale = new VoxelClipmapSnapshot(
+                new VoxelWorldToken(12, "test"), 13, clipmap.levels()
+        );
+        require(mirror.snapshot(stale, 0) == null,
+                "L5 preview mirror exposed data to another world generation");
     }
 
     private static void testFullAndSlabMasks() {
