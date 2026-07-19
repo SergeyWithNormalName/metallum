@@ -288,14 +288,43 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
+        MetalGpuBuffer nativeCommandBuffer = (MetalGpuBuffer) commands.buffer();
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
+
+        long requiredCommandBytes = Math.multiplyExact(
+                (long) drawCount,
+                VkDrawIndexedIndirectCommand.SIZEOF
+        );
+        if (drawCount < 0 || commands.length() < requiredCommandBytes) {
+            throw new IllegalArgumentException("Indexed indirect command slice is too small");
+        }
+        MemorySegment cpuCommands = nativeCommandBuffer.cpuVisibleSliceForEncoding(
+                commands.offset(),
+                requiredCommandBytes
+        );
+        if (cpuCommands != null) {
+            // Sodium grows its mapped indirect ring while rendering. On Apple Metal the first
+            // draw that crosses that resize boundary can leave the replacement MTLBuffer with
+            // invalid driver-side indirect-resource state. The command bytes are already visible
+            // to the CPU, so replay them as direct indexed draws in one native call instead of
+            // asking AGX to dereference the indirect MTLBuffer.
+            enc.drawIndexedPrimitivesCpuCommands(
+                    primitiveType,
+                    indexType,
+                    nativeIndexBuffer.nativeHandle(),
+                    cpuCommands,
+                    drawCount,
+                    VkDrawIndexedIndirectCommand.SIZEOF
+            );
+            return;
+        }
 
         enc.drawIndexedPrimitivesIndirect(
                 primitiveType,
                 indexType,
                 nativeIndexBuffer.nativeHandle(),
-                ((MetalGpuBuffer) commands.buffer()).nativeHandle(),
+                nativeCommandBuffer.nativeHandle(),
                 commands.offset(),
                 drawCount,
                 VkDrawIndexedIndirectCommand.SIZEOF

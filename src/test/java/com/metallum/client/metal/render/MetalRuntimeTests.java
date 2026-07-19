@@ -56,6 +56,7 @@ public final class MetalRuntimeTests {
         testDestructionQueueSpreadsBurst();
         testDestructionQueueClose();
         testClosedBufferRetainsHandleUntilDeferredRelease();
+        testCpuVisibleSodiumIndirectResizeSlice();
         testTexelViewCacheReuseAndInvalidation();
         testTextureBindingHolderUpdatesInPlace();
         testDynamicBackingPoolBoundsAndReuse();
@@ -740,6 +741,37 @@ public final class MetalRuntimeTests {
             releasedRejected = true;
         }
         require(releasedRejected, "physically released Metal buffer still exposed its native handle");
+    }
+
+    private static void testCpuVisibleSodiumIndirectResizeSlice() {
+        int resizeBoundary = 512_000;
+        int commandOffset = 511_520;
+        int drawCount = 41;
+        int commandStride = 20;
+        int commandBytes = drawCount * commandStride;
+        ByteBuffer expandedRing = ByteBuffer.allocateDirect(resizeBoundary * 2).order(ByteOrder.nativeOrder());
+        expandedRing.putInt(commandOffset, 36);
+        expandedRing.putInt(commandOffset + 4, 1);
+        expandedRing.putInt(commandOffset + 8, 144);
+        expandedRing.putInt(commandOffset + 12, -7);
+        expandedRing.putInt(commandOffset + 16, 0);
+
+        MemorySegment commands = MetalGpuBuffer.cpuVisibleSlice(expandedRing, commandOffset, commandBytes);
+        ValueLayout.OfInt nativeInt = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
+        require(commandOffset < resizeBoundary && commandOffset + commandBytes > resizeBoundary,
+                "regression fixture no longer crosses Sodium's 512000-byte resize boundary");
+        require(commands.byteSize() == commandBytes
+                        && commands.get(nativeInt, 0) == 36
+                        && commands.get(nativeInt, 4) == 1
+                        && commands.get(nativeInt, 8) == 144
+                        && commands.get(nativeInt, 12) == -7
+                        && commands.get(nativeInt, 16) == 0,
+                "CPU-visible indirect replay did not preserve the resized Sodium command slice");
+        expectIndexOutOfBounds(() -> MetalGpuBuffer.cpuVisibleSlice(
+                expandedRing,
+                expandedRing.capacity() - 8L,
+                20L
+        ));
     }
 
     private static void testTexelViewCacheReuseAndInvalidation() {
@@ -1598,6 +1630,15 @@ public final class MetalRuntimeTests {
             action.run();
             throw new AssertionError("Expected IllegalStateException");
         } catch (IllegalStateException expected) {
+            // Expected.
+        }
+    }
+
+    private static void expectIndexOutOfBounds(final Runnable action) {
+        try {
+            action.run();
+            throw new AssertionError("Expected IndexOutOfBoundsException");
+        } catch (IndexOutOfBoundsException expected) {
             // Expected.
         }
     }

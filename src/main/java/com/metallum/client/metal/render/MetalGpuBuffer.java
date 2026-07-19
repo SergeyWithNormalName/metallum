@@ -133,6 +133,19 @@ class MetalGpuBuffer extends GpuBuffer {
         return this.storage.duplicate().order(this.storage.order());
     }
 
+    @Nullable
+    MemorySegment cpuVisibleSliceForEncoding(final long offset, final long length) {
+        ByteBuffer current = this.storage;
+        if (current == null) {
+            return null;
+        }
+        return cpuVisibleSlice(current, offset, length);
+    }
+
+    static MemorySegment cpuVisibleSlice(final ByteBuffer storage, final long offset, final long length) {
+        return MemorySegment.ofBuffer(storage).asSlice(offset, length);
+    }
+
     void swapBacking(final MemorySegment handle, final ByteBuffer storage) {
         // A texture view retains its backing. Queue all old views before the
         // caller queues that backing for reuse by the dynamic buffer pool.
