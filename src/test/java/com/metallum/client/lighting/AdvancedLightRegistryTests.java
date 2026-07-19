@@ -48,6 +48,7 @@ public final class AdvancedLightRegistryTests {
         testDirectLightFrustumClassification();
         testDirectFrameCompactsBackgroundGpuWork();
         testFullCandidatePoolCameraStability();
+        testVisibleOverflowPrefersNearestMembership();
         testExactStaticScanAndSectionCap();
         testOverrideRacePermutations();
         testReplacementAndStaleDeleteOwnership();
@@ -202,10 +203,10 @@ public final class AdvancedLightRegistryTests {
                 plane
         );
         require(compacted.rawLightCount() == 256
-                        && compacted.lights().size() == 16
-                        && compacted.aggregateGroupCount() == 16
-                        && compacted.mergedLightCount() == 240,
-                "16x1x16 lava-like plane did not compact to one proxy per 4x4 cell");
+                        && compacted.lights().size() == 4
+                        && compacted.aggregateGroupCount() == 4
+                        && compacted.mergedLightCount() == 252,
+                "16x1x16 lava-like plane did not compact to one proxy per 8x8 cell");
         for (AdvancedLight member : plane) {
             require(compacted.lights().stream().anyMatch(proxy -> {
                 double dx = member.x() - proxy.x();
@@ -218,7 +219,7 @@ public final class AdvancedLightRegistryTests {
         float sourceIntensity = plane.getFirst().intensity();
         require(compacted.lights().stream().allMatch(proxy ->
                         proxy.intensity() > sourceIntensity
-                                && proxy.intensity() < sourceIntensity * 16.0F),
+                                && proxy.intensity() < sourceIntensity * 64.0F),
                 "dense proxy energy scaling is outside its source-count bound");
         double expectedPlaneEnergy = plane.stream()
                 .mapToDouble(AdvancedLightRegistryTests::integratedRadialEnergy)
@@ -249,6 +250,45 @@ public final class AdvancedLightRegistryTests {
                         && DenseBlockLightCompactor.compact(DIMENSION, fourSources).lights().size()
                         == 1,
                 "dense representation no longer uses the intended four-source threshold");
+
+        List<AdvancedLight> coarseThreshold = new ArrayList<>();
+        for (int z = 0; z < 4; z++) {
+            for (int x = 0; x < 8; x++) {
+                coarseThreshold.add(lavaLike(60_000L + z * 8L + x, x, 0, z));
+            }
+        }
+        DenseBlockLightCompactor.Result thirtyTwo = DenseBlockLightCompactor.compact(
+                DIMENSION,
+                coarseThreshold
+        );
+        DenseBlockLightCompactor.Result thirtyOne = DenseBlockLightCompactor.compact(
+                DIMENSION,
+                coarseThreshold.subList(0, 31)
+        );
+        AdvancedLight coarseExemplar = coarseThreshold.getFirst();
+        long coarseStableId = StableLightIds.denseBlock(
+                DIMENSION,
+                0,
+                0,
+                0,
+                8,
+                coarseExemplar.radius(),
+                coarseExemplar.red(),
+                coarseExemplar.green(),
+                coarseExemplar.blue(),
+                coarseExemplar.intensity(),
+                coarseExemplar.priority()
+        );
+        require(DenseBlockLightCompactor.denseThreshold(8) == 32
+                        && thirtyTwo.lights().size() == 1
+                        && thirtyTwo.aggregateGroupCount() == 1
+                        && thirtyTwo.lights().getFirst().stableId() == coarseStableId
+                        && thirtyTwo.lights().getFirst().shadowEmitterFootprint().blocks().size()
+                        == 32
+                        && thirtyOne.lights().stream().noneMatch(
+                        light -> light.stableId() == coarseStableId
+                ),
+                "coarse dense representation no longer switches exactly at 32 sources");
         double[][] transitionProbes = {
                 {1.5, -1.5, 0.5},
                 {-1.0, -1.5, 0.5},
@@ -286,9 +326,14 @@ public final class AdvancedLightRegistryTests {
         AdvancedLight negative = lavaLike(10_000L, -1, -1, -1);
         DenseBlockLightCompactor.GroupKey negativeKey =
                 DenseBlockLightCompactor.groupKey(negative);
+        DenseBlockLightCompactor.GroupKey negativeCoarseKey =
+                DenseBlockLightCompactor.groupKey(negative, 8);
         require(negativeKey.cellX() == -4
                         && negativeKey.cellY() == -4
-                        && negativeKey.cellZ() == -4,
+                        && negativeKey.cellZ() == -4
+                        && negativeCoarseKey.cellX() == -8
+                        && negativeCoarseKey.cellY() == -8
+                        && negativeCoarseKey.cellZ() == -8,
                 "dense compaction did not use floor-aligned cells at negative coordinates");
 
         List<AdvancedLight> mixed = new ArrayList<>(plane.subList(0, 4));
@@ -348,8 +393,8 @@ public final class AdvancedLightRegistryTests {
         require(registry.publishAccepted(denseCandidate),
                 "stratified dense section was not accepted");
         LightFrameSnapshot denseSnapshot = registry.snapshotForFrame(0, 0, 0, 256);
-        require(denseSnapshot.lights().size() == 64,
-                "full 16^3 dense section did not compact to all 64 spatial cells");
+        require(denseSnapshot.lights().size() == 8,
+                "full 16^3 dense section did not compact to all eight 8^3 spatial cells");
         double fullSectionEnergy = denseSnapshot.lights().stream()
                 .mapToDouble(AdvancedLightRegistryTests::integratedRadialEnergy)
                 .sum();
@@ -591,6 +636,51 @@ public final class AdvancedLightRegistryTests {
                         && registry.telemetry().frameLightOverflows() == 1L
                         && registry.telemetry().protectedFrameLightOverflows() == 1L,
                 "overflow of more than 4096 potentially visible influence spheres was hidden");
+    }
+
+    private static void testVisibleOverflowPrefersNearestMembership() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        int capacity = AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
+        long farthestStableId = 1L;
+        long nearestStableId = capacity + 1L;
+        for (int index = 0; index <= capacity; index++) {
+            long stableId = index + 1L;
+            double z = stableId == farthestStableId
+                    ? -90.0
+                    : stableId == nearestStableId ? -2.0 : -10.0;
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    index / 256,
+                    index & 255,
+                    stableId,
+                    exactTemplate(100, 0.0, 0.0, z, 1.0F, 1.0F)
+            );
+        }
+
+        DirectLightFrustum forward = directLightFrustum(Matrix4.identity());
+        LightFrameSnapshot direct = registry.snapshotForFrame(forward, capacity, capacity);
+        require(direct.lights().size() == capacity
+                        && direct.droppedLightCount() == 1
+                        && stableIds(direct.lights()).contains(nearestStableId)
+                        && !stableIds(direct.lights()).contains(farthestStableId),
+                "visible full-pool overload preferred stableId over camera relevance");
+        List<AdvancedLight> expectedUploadOrder = new ArrayList<>(direct.lights());
+        expectedUploadOrder.sort(FrameLightOrder.admissionComparator());
+        require(direct.lights().equals(expectedUploadOrder),
+                "camera-relative membership leaked into deterministic GPU upload order");
+
+        LightFrameSnapshot legacy = registry.snapshotForFrame(
+                0.0,
+                0.0,
+                0.0,
+                capacity,
+                capacity
+        );
+        require(stableIds(legacy.lights()).contains(farthestStableId)
+                        && !stableIds(legacy.lights()).contains(nearestStableId),
+                "direct camera-relative admission leaked into the legacy full-pool API");
     }
 
     private static void testDirectFrameCompactsBackgroundGpuWork() {

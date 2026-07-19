@@ -7,6 +7,9 @@ import java.util.Map;
 
 /** Camera-independent spatial LOD for dense, photometrically identical block emitters. */
 public final class DenseBlockLightCompactor {
+    private static final int COARSE_CELL_EDGE = 8;
+    private static final int COARSE_DENSE_THRESHOLD = 32;
+
     public record Result(
             List<AdvancedLight> lights,
             int rawLightCount,
@@ -52,7 +55,11 @@ public final class DenseBlockLightCompactor {
             throw new NullPointerException("sourceLights");
         }
 
-        Map<GroupKey, List<AdvancedLight>> groups = new HashMap<>();
+        // Only raw static BLOCK emitters may enter this first pass.  Its output is
+        // deliberately kept out of the existing 4^3/2^3 pass: aggregating a proxy
+        // again would alter its footprint and energy a second time.
+        Map<GroupKey, List<AdvancedLight>> coarseGroups = new HashMap<>();
+        ArrayList<AdvancedLight> remainingEligibleLights = new ArrayList<>();
         ArrayList<AdvancedLight> compacted = new ArrayList<>();
         int rawCount = 0;
         for (AdvancedLight light : sourceLights) {
@@ -60,16 +67,33 @@ public final class DenseBlockLightCompactor {
                 throw new NullPointerException("sourceLights contains null");
             }
             rawCount++;
-            if (!light.denseCellEligible()) {
+            if (!light.denseCellEligible() || light.kind() != LightSourceKind.BLOCK) {
                 compacted.add(light);
                 continue;
             }
-            groups.computeIfAbsent(groupKey(light), ignored -> new ArrayList<>()).add(light);
+            coarseGroups.computeIfAbsent(groupKey(light, COARSE_CELL_EDGE), ignored -> new ArrayList<>())
+                    .add(light);
         }
 
         compacted.ensureCapacity(rawCount);
         int aggregateGroups = 0;
-        for (Map.Entry<GroupKey, List<AdvancedLight>> entry : groups.entrySet()) {
+        for (Map.Entry<GroupKey, List<AdvancedLight>> entry : coarseGroups.entrySet()) {
+            GroupKey key = entry.getKey();
+            List<AdvancedLight> members = entry.getValue();
+            members.sort(AdvancedLight.PRIORITY_ORDER);
+            if (members.size() < denseThreshold(key.cellEdge())) {
+                remainingEligibleLights.addAll(members);
+                continue;
+            }
+            compacted.add(aggregate(dimensionId, key, members));
+            aggregateGroups++;
+        }
+
+        Map<GroupKey, List<AdvancedLight>> fineGroups = new HashMap<>();
+        for (AdvancedLight light : remainingEligibleLights) {
+            fineGroups.computeIfAbsent(groupKey(light), ignored -> new ArrayList<>()).add(light);
+        }
+        for (Map.Entry<GroupKey, List<AdvancedLight>> entry : fineGroups.entrySet()) {
             GroupKey key = entry.getKey();
             List<AdvancedLight> members = entry.getValue();
             members.sort(AdvancedLight.PRIORITY_ORDER);
@@ -85,7 +109,13 @@ public final class DenseBlockLightCompactor {
     }
 
     static GroupKey groupKey(final AdvancedLight light) {
-        int edge = cellEdge(light.radius());
+        return groupKey(light, cellEdge(light.radius()));
+    }
+
+    static GroupKey groupKey(final AdvancedLight light, final int edge) {
+        if (edge != 1 && edge != 2 && edge != 4 && edge != COARSE_CELL_EDGE) {
+            throw new IllegalArgumentException("Unsupported dense-light cell edge");
+        }
         int blockX = floorToInt(light.x());
         int blockY = floorToInt(light.y());
         int blockZ = floorToInt(light.z());
@@ -115,6 +145,7 @@ public final class DenseBlockLightCompactor {
 
     static int denseThreshold(final int cellEdge) {
         return switch (cellEdge) {
+            case COARSE_CELL_EDGE -> COARSE_DENSE_THRESHOLD;
             case 4 -> 4;
             case 2 -> 2;
             case 1 -> Integer.MAX_VALUE;

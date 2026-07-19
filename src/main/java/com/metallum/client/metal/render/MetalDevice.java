@@ -2609,7 +2609,7 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     static int advancedLightingAdmissionLimit(final LightingPreset preset) {
         Objects.requireNonNull(preset, "preset");
-        return AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS;
+        return AdvancedLightingLayout.maxLightsForPreset(preset);
     }
 
     static VoxelClipmapLayout.Preset voxelPreset(final LightingPreset preset) {

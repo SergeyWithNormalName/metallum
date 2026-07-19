@@ -65,7 +65,7 @@ public final class AdvancedLightingLayout {
             throw new IllegalArgumentException("Render extent must be positive");
         }
 
-        int maxLights = MAX_GPU_CANDIDATE_LIGHTS;
+        int maxLights = maxLightsForPreset(preset);
         int maxLightsPerCluster;
         int hardIndexCapacity;
         switch (preset) {
@@ -128,6 +128,20 @@ public final class AdvancedLightingLayout {
                 clusterIndexBytes,
                 totalBytes
         );
+    }
+
+    /**
+     * Per-generation candidate budget. The native ABI remains capable of accepting the
+     * {@link #MAX_GPU_CANDIDATE_LIGHTS} Ultra maximum; lower presets deliberately allocate
+     * and admit a smaller working set.
+     */
+    public static int maxLightsForPreset(final LightingPreset preset) {
+        Objects.requireNonNull(preset, "preset");
+        return switch (preset) {
+            case PERFORMANCE -> 1_024;
+            case BALANCED -> 2_048;
+            case ULTRA -> MAX_GPU_CANDIDATE_LIGHTS;
+        };
     }
 
     private static int divideRoundUp(final int value, final int divisor) {

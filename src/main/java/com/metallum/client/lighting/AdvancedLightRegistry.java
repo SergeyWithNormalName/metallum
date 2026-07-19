@@ -570,9 +570,13 @@ public final class AdvancedLightRegistry {
         );
         boolean productionFullPool = maxLights == MAX_FRAME_LIGHTS
                 && admissionLimit == maxLights;
-        Comparator<AdvancedLight> materialOrder = productionFullPool
-                ? FrameLightOrder.admissionComparator()
-                : FrameLightOrder.comparator(cameraX, cameraY, cameraZ);
+        // Direct snapshots rank membership in each visibility tier by relevance to the active
+        // camera, even when the GPU candidate pool is full. The selected set is sorted back into
+        // the camera-independent admission order before upload below, so cluster overflow remains
+        // deterministic.
+        Comparator<AdvancedLight> materialOrder = directVisibility || !productionFullPool
+                ? FrameLightOrder.comparator(cameraX, cameraY, cameraZ)
+                : FrameLightOrder.admissionComparator();
         Comparator<FrameCandidate> selectionOrder = (left, right) -> {
             int visibilityOrder = left.tier.compareTo(right.tier);
             return visibilityOrder != 0

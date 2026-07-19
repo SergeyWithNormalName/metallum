@@ -481,12 +481,12 @@ public final class MetalRuntimeTests {
 
     private static void testAdvancedLightingAdmissionLimits() {
         require(MetalDevice.advancedLightingAdmissionLimit(LightingPreset.PERFORMANCE)
-                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        == 1_024
                         && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.BALANCED)
-                        == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+                        == 2_048
                         && MetalDevice.advancedLightingAdmissionLimit(LightingPreset.ULTRA)
                         == AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
-                "Java retained candidate pool drifted from the native total-light contract");
+                "Java retained candidate pool drifted from the preset/ABI contract");
         for (LightingPreset preset : LightingPreset.values()) {
             AdvancedLightingLayout.Budget budget = AdvancedLightingLayout.forGeneration(
                     preset,
@@ -494,7 +494,8 @@ public final class MetalRuntimeTests {
                     1
             );
             int expectedClusterCap = AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER;
-            require(budget.maxLights() == MetalDevice.advancedLightingAdmissionLimit(preset)
+            require(budget.maxLights() == AdvancedLightingLayout.maxLightsForPreset(preset)
+                            && budget.maxLights() == MetalDevice.advancedLightingAdmissionLimit(preset)
                             && budget.maxLightsPerCluster() == expectedClusterCap,
                     "Total candidate/per-cluster limits drifted for " + preset);
         }
