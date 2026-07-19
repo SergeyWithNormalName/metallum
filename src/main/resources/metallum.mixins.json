@@ -28,6 +28,7 @@
     "render.GameRendererMetalFxMixin",
     "render.ClientPacketListenerTemporalMixin",
     "render.CubeMapHdrMixin",
+    "render.FlameFeatureRendererHdrMixin",
     "render.GuiRendererHdrMixin",
     "render.ScreenInWorldBlurMixin",
     "render.HdrShaderMixin",
