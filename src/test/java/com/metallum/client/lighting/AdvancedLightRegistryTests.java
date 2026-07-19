@@ -1,6 +1,7 @@
 package com.metallum.client.lighting;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -119,6 +120,24 @@ public final class AdvancedLightRegistryTests {
         require(MinecraftLightPolicy.block(Blocks.WATER.defaultBlockState(), 0, 0, 0)
                         == null,
                 "non-emissive fluid produced an Advanced light");
+
+        BlockState smallBud = Blocks.SMALL_AMETHYST_BUD.defaultBlockState();
+        BlockState mediumBud = Blocks.MEDIUM_AMETHYST_BUD.defaultBlockState();
+        BlockState largeBud = Blocks.LARGE_AMETHYST_BUD.defaultBlockState();
+        BlockState cluster = Blocks.AMETHYST_CLUSTER.defaultBlockState();
+        require(SodiumHdrSemantic.surfaceEmission(smallBud, smallBud.getLightEmission(), false) == 1
+                        && SodiumHdrSemantic.surfaceEmission(mediumBud, mediumBud.getLightEmission(), false) == 2
+                        && SodiumHdrSemantic.surfaceEmission(largeBud, largeBud.getLightEmission(), false) == 2
+                        && SodiumHdrSemantic.surfaceEmission(cluster, cluster.getLightEmission(), false) == 2
+                        && SodiumHdrSemantic.surfaceEmission(cluster, cluster.getLightEmission(), true) == 15,
+                "amethyst surface HDR brightness should be capped without weakening exact emissives");
+        LightTemplate clusterLight = MinecraftLightPolicy.block(cluster, 0, 0, 0);
+        require(clusterLight != null
+                        && MinecraftLightPolicy.effectiveEmission(cluster) == 5
+                        && close(clusterLight.red(), 0.48F)
+                        && close(clusterLight.green(), 0.12F)
+                        && close(clusterLight.blue(), 1.0F),
+                "amethyst surface HDR tuning must not change its violet direct light");
 
         float[] redstoneWall = MinecraftLightPolicy.linearColorForIdentifier(
                 BuiltInRegistries.BLOCK.getKey(Blocks.REDSTONE_WALL_TORCH));

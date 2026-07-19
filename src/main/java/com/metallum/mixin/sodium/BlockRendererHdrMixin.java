@@ -81,7 +81,11 @@ abstract class BlockRendererHdrMixin {
             final CallbackInfo ci
     ) {
         boolean exact = quad.emissive();
-        int emission = exact ? 15 : this.metallum$blockLightEmission;
+        int emission = SodiumHdrSemantic.surfaceEmission(
+                this.metallum$blockState,
+                this.metallum$blockLightEmission,
+                exact
+        );
         SodiumHdrSemantic.tagQuad(this.vertices, emission, exact);
     }
 
