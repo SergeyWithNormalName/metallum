@@ -570,14 +570,22 @@ public final class AdvancedLightRegistry {
         );
         boolean productionFullPool = maxLights == MAX_FRAME_LIGHTS
                 && admissionLimit == maxLights;
-        // Direct snapshots rank membership in each visibility tier by relevance to the active
-        // camera, even when the GPU candidate pool is full. The selected set is sorted back into
-        // the camera-independent admission order before upload below, so cluster overflow remains
-        // deterministic.
-        Comparator<AdvancedLight> materialOrder = directVisibility || !productionFullPool
-                ? FrameLightOrder.comparator(cameraX, cameraY, cameraZ)
-                : FrameLightOrder.admissionComparator();
+        // Direct snapshots preserve camera relevance all the way through upload: the cluster
+        // builder resolves its local cap by ascending upload index. A camera-independent re-sort
+        // here would therefore undo visibility-aware selection inside dense overlapping clusters.
+        Comparator<AdvancedLight> materialOrder = directVisibility
+                ? FrameLightOrder.directComparator(cameraX, cameraY, cameraZ)
+                : !productionFullPool
+                        ? FrameLightOrder.comparator(cameraX, cameraY, cameraZ)
+                        : FrameLightOrder.admissionComparator();
         Comparator<FrameCandidate> selectionOrder = (left, right) -> {
+            boolean leftHeld = left.light.shadowSourceClass()
+                    == LocalShadowSourceClass.CAMERA_HELD;
+            boolean rightHeld = right.light.shadowSourceClass()
+                    == LocalShadowSourceClass.CAMERA_HELD;
+            if (leftHeld != rightHeld) {
+                return leftHeld ? -1 : 1;
+            }
             int visibilityOrder = left.tier.compareTo(right.tier);
             return visibilityOrder != 0
                     ? visibilityOrder
@@ -647,10 +655,9 @@ public final class AdvancedLightRegistry {
                 .toList();
         if (directVisibility) {
             // Retention must never let an off-frustum incumbent displace a currently intersecting
-            // source after a camera rotation. Keep the visibility-selected set and restore the
-            // camera-independent upload order required by deterministic cluster overflow.
-            List<AdvancedLight> ordered = new ArrayList<>(candidates);
-            ordered.sort(FrameLightOrder.admissionComparator());
+            // source after a camera rotation. Keep both the visibility-selected set and its
+            // deterministic camera-relevance order through upload so local cluster overflow does
+            // not reverse that decision.
             admission.update(
                     maxLights,
                     admissionLimit,
@@ -665,7 +672,7 @@ public final class AdvancedLightRegistry {
             return snapshot(
                     world,
                     eligibleTotal,
-                    ordered,
+                    candidates,
                     protectedCandidates - selectedProtected,
                     visibilityCulled
             );

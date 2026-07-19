@@ -45,7 +45,49 @@ public final class FrameLightOrder {
         };
     }
 
-    /** Camera-independent order consumed by deterministic native admission and overflow. */
+    /**
+     * Camera-relative membership order for the direct-light candidate pool.
+     *
+     * <p>Unlike {@link #comparator(double, double, double)}, this deliberately gives spatial
+     * relevance precedence over material priority after the protected camera-held class. Direct
+     * snapshots preserve this order through GPU upload so a bounded cluster keeps the most
+     * relevant overlapping lights instead of the lowest stable IDs.</p>
+     */
+    public static Comparator<AdvancedLight> directComparator(
+            final double cameraX,
+            final double cameraY,
+            final double cameraZ
+    ) {
+        requireFinite(cameraX, "cameraX");
+        requireFinite(cameraY, "cameraY");
+        requireFinite(cameraZ, "cameraZ");
+        return (left, right) -> {
+            int sourceClassOrder = compareShadowSourceClass(left, right);
+            if (sourceClassOrder != 0) {
+                return sourceClassOrder;
+            }
+            int influenceDistanceOrder = Double.compare(
+                    influenceDistance(left, cameraX, cameraY, cameraZ),
+                    influenceDistance(right, cameraX, cameraY, cameraZ)
+            );
+            if (influenceDistanceOrder != 0) {
+                return influenceDistanceOrder;
+            }
+            int centerDistanceOrder = Double.compare(
+                    distanceSquared(left, cameraX, cameraY, cameraZ),
+                    distanceSquared(right, cameraX, cameraY, cameraZ)
+            );
+            if (centerDistanceOrder != 0) {
+                return centerDistanceOrder;
+            }
+            int materialOrder = comparePriorityAndSignificance(left, right);
+            return materialOrder != 0
+                    ? materialOrder
+                    : AdvancedLight.PRIORITY_ORDER.compare(left, right);
+        };
+    }
+
+    /** Camera-independent order used by retained admission and the legacy snapshot API. */
     public static Comparator<AdvancedLight> admissionComparator() {
         return ADMISSION_ORDER;
     }

@@ -49,6 +49,7 @@ public final class AdvancedLightRegistryTests {
         testDirectFrameCompactsBackgroundGpuWork();
         testFullCandidatePoolCameraStability();
         testVisibleOverflowPrefersNearestMembership();
+        testDirectUploadProtectsCloseLightBeforeClusterCap();
         testExactStaticScanAndSectionCap();
         testOverrideRacePermutations();
         testReplacementAndStaleDeleteOwnership();
@@ -664,12 +665,13 @@ public final class AdvancedLightRegistryTests {
         require(direct.lights().size() == capacity
                         && direct.droppedLightCount() == 1
                         && stableIds(direct.lights()).contains(nearestStableId)
-                        && !stableIds(direct.lights()).contains(farthestStableId),
+                        && !stableIds(direct.lights()).contains(farthestStableId)
+                        && direct.lights().getFirst().stableId() == nearestStableId,
                 "visible full-pool overload preferred stableId over camera relevance");
         List<AdvancedLight> expectedUploadOrder = new ArrayList<>(direct.lights());
-        expectedUploadOrder.sort(FrameLightOrder.admissionComparator());
+        expectedUploadOrder.sort(FrameLightOrder.directComparator(0.0, 0.0, 0.0));
         require(direct.lights().equals(expectedUploadOrder),
-                "camera-relative membership leaked into deterministic GPU upload order");
+                "direct GPU upload did not preserve camera-relative membership order");
 
         LightFrameSnapshot legacy = registry.snapshotForFrame(
                 0.0,
@@ -681,6 +683,55 @@ public final class AdvancedLightRegistryTests {
         require(stableIds(legacy.lights()).contains(farthestStableId)
                         && !stableIds(legacy.lights()).contains(nearestStableId),
                 "direct camera-relative admission leaked into the legacy full-pool API");
+    }
+
+    private static void testDirectUploadProtectsCloseLightBeforeClusterCap() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object world = new Object();
+        int clusterCap = AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER;
+        long closeStableId = clusterCap + 1L;
+        for (int index = 0; index < clusterCap; index++) {
+            long stableId = index + 1L;
+            registry.recordBlockChange(
+                    world,
+                    DIMENSION,
+                    index / 256,
+                    index & 255,
+                    stableId,
+                    exactTemplate(240, 0.0, 0.0, -8.0, 12.0F, 10.0F)
+            );
+        }
+        registry.recordBlockChange(
+                world,
+                DIMENSION,
+                2L,
+                1,
+                closeStableId,
+                exactTemplate(1, 0.0, 0.0, -1.0, 2.0F, 0.01F)
+        );
+
+        LightFrameSnapshot direct = registry.snapshotForFrame(
+                directLightFrustum(Matrix4.identity()),
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(direct.lights().size() == clusterCap + 1
+                        && direct.lights().getFirst().stableId() == closeStableId,
+                "dense high-energy lights displaced a close visible light past the cluster cap");
+        List<AdvancedLight> expectedDirectOrder = new ArrayList<>(direct.lights());
+        expectedDirectOrder.sort(FrameLightOrder.directComparator(0.0, 0.0, 0.0));
+        require(direct.lights().equals(expectedDirectOrder),
+                "direct upload is not deterministically ordered by camera relevance");
+
+        LightFrameSnapshot legacy = registry.snapshotForFrame(
+                0.0,
+                0.0,
+                0.0,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS,
+                AdvancedLightingLayout.MAX_GPU_CANDIDATE_LIGHTS
+        );
+        require(legacy.lights().getFirst().stableId() != closeStableId,
+                "direct cluster-overflow order leaked into the legacy snapshot API");
     }
 
     private static void testDirectFrameCompactsBackgroundGpuWork() {
@@ -1533,6 +1584,36 @@ public final class AdvancedLightRegistryTests {
         require(FrameLightOrder.materiallyOutranks(held, block, 0.0, 0.0, 0.0)
                         && !FrameLightOrder.materiallyOutranks(block, held, 0.0, 0.0, 0.0),
                 "camera-held source class is not protected by dynamic admission hysteresis");
+
+        AdvancedLightRegistry guardRegistry = new AdvancedLightRegistry();
+        Object guardWorld = new Object();
+        LightWorldToken guardToken = guardRegistry.openWorld(guardWorld, DIMENSION);
+        guardRegistry.recordBlockChange(
+                guardWorld,
+                DIMENSION,
+                1L,
+                0,
+                94L,
+                exactTemplate(240, 0.0, 0.0, -10.0, 1.0F, 10.0F)
+        );
+        AdvancedLight guardHeld = new AdvancedLight(
+                95L, guardToken.generation(), LightSourceKind.ENTITY,
+                11.5, 0.0, -10.0,
+                1.0F, 1.0F, 0.5F, 0.25F, 1.0F, Integer.MIN_VALUE,
+                false, ShadowEmitterFootprint.empty(), LocalShadowSourceClass.CAMERA_HELD
+        );
+        DirectLightFrustum guardFrustum = directLightFrustum(Matrix4.identity());
+        require(guardFrustum.classify(guardHeld) == DirectLightFrustum.Tier.GUARD_BAND,
+                "camera-held guard-band regression fixture is not in the guard band");
+        guardRegistry.publishDynamicFrame(guardToken, List.of(guardHeld), 1);
+        LightFrameSnapshot guardSnapshot = guardRegistry.snapshotForFrame(
+                guardFrustum,
+                2,
+                2
+        );
+        require(guardSnapshot.lights().size() == 2
+                        && guardSnapshot.lights().getFirst().stableId() == guardHeld.stableId(),
+                "camera-held guard-band source lost the protected upload prefix");
 
         AdvancedLightRegistry registry = new AdvancedLightRegistry();
         Object world = new Object();

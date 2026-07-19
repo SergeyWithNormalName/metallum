@@ -28,17 +28,16 @@ public record LightFrameSnapshot(
         if (staticLightCount + dynamicLightCount != lights.size()) {
             throw new IllegalArgumentException("Snapshot source counters do not match its list");
         }
-        for (int index = 1; index < lights.size(); index++) {
-            AdvancedLight previous = lights.get(index - 1);
-            AdvancedLight current = lights.get(index);
-            boolean previousHeld = previous.shadowSourceClass()
+        boolean reachedWorldLights = false;
+        for (AdvancedLight light : lights) {
+            boolean cameraHeld = light.shadowSourceClass()
                     == LocalShadowSourceClass.CAMERA_HELD;
-            boolean currentHeld = current.shadowSourceClass()
-                    == LocalShadowSourceClass.CAMERA_HELD;
-            if ((!previousHeld && currentHeld)
-                    || (previousHeld == currentHeld && previous.priority() < current.priority())) {
-                throw new IllegalArgumentException("Snapshot lights are not upload ordered");
+            if (reachedWorldLights && cameraHeld) {
+                throw new IllegalArgumentException(
+                        "Snapshot camera-held lights are not an upload prefix"
+                );
             }
+            reachedWorldLights |= !cameraHeld;
         }
     }
 
