@@ -77,9 +77,9 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "9acd6dd3ce0c98f514372bc12f32459d87bc170ab888d6f6837aeca4ad3cbf4f",
+            "sodium-solid-fsh", "7e5a2601b9cc63a5a9fc1fb847b92c171b064f496557399b031ebd77c6a38a67",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "b1bc9ac961adbc6fb3de35856418d462b4a597106ee41843388108aeaa2555c1",
+            "sodium-cutout-fsh", "657ea934e142937df2842bed1e3ae183ec5411004e32cda7447d627808404d9f",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
             "minecraft-entity-fsh", "b72a08cff9765804e19ab8b7fbc2f92e366b90df6a1f9fc1444e254274286302",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",

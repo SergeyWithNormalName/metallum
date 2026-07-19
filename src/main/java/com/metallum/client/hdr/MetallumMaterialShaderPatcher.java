@@ -22,7 +22,6 @@ public final class MetallumMaterialShaderPatcher {
         }
     }
 
-    public static final float REFERENCE_WHITE = 1.0f;
     public static final float MAX_EMISSION_RADIANCE = 4.0f;
     public static final float MAX_BLOCK_EMISSION_RADIANCE = 1.75f;
     private static final String MARKER = "METALLUM_MATERIAL_LINEAR_V1";
@@ -118,11 +117,7 @@ public final class MetallumMaterialShaderPatcher {
 
     static float blockEmissionRadiance(final int emission) {
         int boundedEmission = Math.clamp(emission, 0, 15);
-        return boundedEmission == 0
-                ? 0.0f
-                : REFERENCE_WHITE
-                        + (MAX_BLOCK_EMISSION_RADIANCE - REFERENCE_WHITE)
-                        * boundedEmission / 15.0f;
+        return MAX_BLOCK_EMISSION_RADIANCE * boundedEmission / 15.0f;
     }
 
     static float linearBlend(final float source, final float destination, final float sourceAlpha) {
@@ -276,12 +271,12 @@ public final class MetallumMaterialShaderPatcher {
                 + "        float metallumEmissionStrength = float(metallumEmissionCode) / 15.0;\n"
                 + "        float metallumEmission = metallumExactEmission\n"
                 + "                ? 4.0 * metallumEmissionStrength\n"
-                + "                : 1.0 + 0.75 * metallumEmissionStrength;\n"
+                + "                : 1.75 * metallumEmissionStrength;\n"
                 + "        vec3 metallumAuthoredRadiance = metallumUnlitBase * metallumEmission;\n"
                 + "        // Block-state emission is an authored surface floor, not an\n"
-                + "        // additive copy of the complete albedo. Keeping it bounded\n"
-                + "        // prevents ripe cave-vine quads from separating violently\n"
-                + "        // from adjacent non-emitting vine states after lightmap decode.\n"
+                + "        // additive copy of the complete albedo. Its brightness scales\n"
+                + "        // from black: level-one gameplay emitters such as portal frames\n"
+                + "        // must not become nearly reference-white in a dark scene.\n"
                 + "        color.rgb = max(color.rgb, metallumAuthoredRadiance);\n"
                 + "    }\n"
                 + "    fragColor = _linearFog(color, v_FragDistance, metallumMaterialDecodeColor(u_FogColor), u_EnvironmentFog, u_RenderFog, fadeFactor);";
@@ -329,8 +324,8 @@ public final class MetallumMaterialShaderPatcher {
                     "    vec3 metallumUnlitBase = max(color.rgb, vec3(0.0));\n"
                             + "    color *= lightMapColor;\n"
                             + "    if (metallumHeldEmission > 0) {\n"
-                            + "        float metallumEmission = 1.0\n"
-                            + "                + 0.75 * float(metallumHeldEmission) / 15.0;\n"
+                            + "        float metallumEmission = 1.75\n"
+                            + "                * float(metallumHeldEmission) / 15.0;\n"
                             + "        color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);\n"
                             + "    }"
             );

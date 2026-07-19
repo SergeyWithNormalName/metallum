@@ -149,10 +149,10 @@ public final class MetallumMaterialContractTests {
         String itemFragment = patched(sources, "minecraft", "core/item",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
         require(itemFragment.contains("flat in int metallumHeldEmission;")
-                        && itemFragment.contains("0.75 * float(metallumHeldEmission) / 15.0")
+                        && itemFragment.contains("float metallumEmission = 1.75")
                         && itemFragment.contains(
                         "color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);"),
-                "held block items do not receive the bounded block-surface emission floor");
+                "held block items do not use scaled block-surface emission");
 
         String terrain = patched(sources, "minecraft", "core/terrain",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
@@ -234,8 +234,8 @@ public final class MetallumMaterialContractTests {
                 "Sodium exact-emission bit is absent");
         require(fragment.contains("? 4.0 * metallumEmissionStrength"),
                 "Sodium exact emission lost its full radiance range");
-        require(fragment.contains(": 1.0 + 0.75 * metallumEmissionStrength"),
-                "Sodium block emission is not bounded near reference white");
+        require(fragment.contains(": 1.75 * metallumEmissionStrength"),
+                "Sodium block emission does not scale from black");
         require(fragment.contains("color.rgb = max(color.rgb, metallumAuthoredRadiance)"),
                 "Sodium emission no longer preserves the lit surface as a floor");
         require(!fragment.contains("color.rgb + metallumAuthoredRadiance"),
@@ -293,7 +293,9 @@ public final class MetallumMaterialContractTests {
                 "emission clamp");
         require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(0), 0.0f),
                 "zero block emission radiance");
-        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(14), 1.7f),
+        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(1), 1.75f / 15.0f),
+                "level-one block emission became nearly reference white");
+        require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(14), 1.75f * 14.0f / 15.0f),
                 "glow-berry block emission radiance");
         require(close(MetallumMaterialShaderPatcher.blockEmissionRadiance(15), 1.75f),
                 "maximum block emission radiance");
