@@ -37,6 +37,7 @@ public final class VoxelShadowContractTests {
         testProxySelectionAndLifecycle();
         testExactTraversalAtAllSubdivisions();
         testCachedCubeTraversal();
+        testFinePartialOpaqueOccluders();
         testVariableAtlasCubePages();
         testRelevantGeometrySurvivesClipmapScroll();
         testStableCubeLevelSelection();
@@ -460,6 +461,58 @@ public final class VoxelShadowContractTests {
         );
         require(!uncoveredPage.complete() && uncoveredPage.cacheLevel() == -1,
                 "uncovered resident page could be published as a visible READY cache");
+        mirror.reset();
+    }
+
+    private static void testFinePartialOpaqueOccluders() {
+        VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
+        mirror.reset();
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2))
+        );
+
+        AdvancedLight slabLight = new AdvancedLight(
+                111L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.25, 0.5, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        mirror.acknowledge(cacheCoverageBatch(
+                111L, cacheFineSlabPatch(111), 0, 2
+        ), clipmap);
+        VoxelShadowCacheMirror.Snapshot slabSnapshot = mirror.snapshot(clipmap);
+        require(slabSnapshot != null, "fine slab cache fixture did not publish");
+        VoxelShadowCacheBuilder.PageResult slabPage = VoxelShadowCacheBuilder.buildPage(
+                slabSnapshot, slabLight, 64, 96
+        );
+        ByteBuffer slabPayload = ByteBuffer.wrap(slabPage.payload()).order(ByteOrder.nativeOrder());
+        int centralPositiveX = pageEntryOffset(0, 31, 31, 0, 64);
+        require(Float.isFinite(slabPayload.getFloat(centralPositiveX))
+                        && slabPayload.getFloat(centralPositiveX + Float.BYTES) == 0.0f,
+                "an occupied 4x slab cell did not cast an opaque point shadow");
+        int upperPositiveX = pageEntryOffset(0, 31, 0, 0, 64);
+        require(Float.isInfinite(slabPayload.getFloat(upperPositiveX))
+                        && slabPayload.getFloat(upperPositiveX + Float.BYTES) == 1.0f,
+                "a point-shadow ray outside the slab incorrectly became blocked");
+
+        mirror.reset();
+        AdvancedLight fenceLight = new AdvancedLight(
+                112L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.5, 0.5, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        mirror.acknowledge(cacheCoverageBatch(
+                112L, cacheFineFencePatch(112), 0, 2
+        ), clipmap);
+        VoxelShadowCacheMirror.Snapshot fenceSnapshot = mirror.snapshot(clipmap);
+        require(fenceSnapshot != null, "fine fence cache fixture did not publish");
+        VoxelShadowCacheBuilder.PageResult fencePage = VoxelShadowCacheBuilder.buildPage(
+                fenceSnapshot, fenceLight, 64, 96
+        );
+        ByteBuffer fencePayload = ByteBuffer.wrap(fencePage.payload()).order(ByteOrder.nativeOrder());
+        require(Float.isFinite(fencePayload.getFloat(centralPositiveX))
+                        && fencePayload.getFloat(centralPositiveX + Float.BYTES) == 0.0f,
+                "an occupied 4x fence cell did not cast an opaque point shadow");
         mirror.reset();
     }
 
@@ -900,6 +953,47 @@ public final class VoxelShadowContractTests {
                 optical[(z * blockEdge + y) * blockEdge + 2] = packed;
             }
         }
+        return new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, stamp,
+                VOXEL_WORLD.generation(), 11L, occupancy, optical
+        );
+    }
+
+    private static VoxelBrickPatch cacheFineSlabPatch(final int stamp) {
+        int[] occupancy = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        int blockX = 2;
+        for (int cellZ = 0; cellZ < 4; cellZ++) {
+            for (int cellY = 0; cellY < 2; cellY++) {
+                occupancy[cellZ * VoxelBrickPatch.LOGICAL_EDGE + cellY]
+                        |= 0x0f << (blockX * 4);
+            }
+        }
+        return fineOccluderPatch(stamp, occupancy, blockX, VoxelMaterialClass.OPAQUE);
+    }
+
+    private static VoxelBrickPatch cacheFineFencePatch(final int stamp) {
+        int[] occupancy = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        int blockX = 2;
+        for (int cellZ = 1; cellZ <= 2; cellZ++) {
+            for (int cellY = 0; cellY < 4; cellY++) {
+                occupancy[cellZ * VoxelBrickPatch.LOGICAL_EDGE + cellY]
+                        |= 0x06 << (blockX * 4);
+            }
+        }
+        return fineOccluderPatch(stamp, occupancy, blockX, VoxelMaterialClass.CUTOUT);
+    }
+
+    private static VoxelBrickPatch fineOccluderPatch(
+            final int stamp,
+            final int[] occupancy,
+            final int blockX,
+            final VoxelMaterialClass materialClass
+    ) {
+        int blockEdge = VoxelBrickPatch.LOGICAL_EDGE / 4;
+        byte[] optical = new byte[blockEdge * blockEdge * blockEdge];
+        optical[blockX] = (byte) VoxelMaterialDescriptor.defaults(
+                materialClass
+        ).packedUnsignedByte();
         return new VoxelBrickPatch(
                 0, 0, 0, 0, 0, 0, 0, stamp,
                 VOXEL_WORLD.generation(), 11L, occupancy, optical

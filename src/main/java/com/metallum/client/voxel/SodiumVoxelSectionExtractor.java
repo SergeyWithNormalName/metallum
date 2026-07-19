@@ -100,9 +100,10 @@ public final class SodiumVoxelSectionExtractor {
     }
 
     /**
-     * Optical storage is per world block, while occupancy is sub-block. Fold the exact aggregate
-     * shape coverage into transmittance so a fence/pane never becomes a full opaque block at a
-     * coarser level. The material class remains available for the future L6 consumer.
+     * Optical storage is per world block, while occupancy is sub-block. Fold aggregate shape
+     * coverage into transmittance for the coarse 2x/1x clipmap levels so a fence/pane does not
+     * become a full opaque block there. The packer restores base opacity for an occupied exact
+     * 4x cell of fully occluding material before L6 consumes it.
      */
     private static byte effectiveOptical(
             final VoxelMaterialDescriptor material,

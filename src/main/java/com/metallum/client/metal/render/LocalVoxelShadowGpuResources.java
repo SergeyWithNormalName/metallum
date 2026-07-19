@@ -1451,6 +1451,45 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             }
         }
 
+        // A new nearby static source has no stale page to preserve, so leaving it exclusively
+        // in the background pool can indefinitely keep its slab/fence shadow approximate when
+        // the atlas is full. Reserve only the preset's declared hero count for the most visible
+        // eligible block lights; the existing foreground recovery path still enforces fences,
+        // bounded workers and one safe eviction at a time.
+        List<FrameLight> foregroundBootstraps = new ArrayList<>();
+        for (FrameLight frameLight : frameLights) {
+            if (frameLight.light().shadowSourceClass() != LocalShadowSourceClass.STATIC_CACHE
+                    || !frameLight.staticCacheEligible()
+                    || matchingResident(frameLight) != null
+                    || this.evictedRecoveryTargets.contains(frameLight.light().stableId())) {
+                continue;
+            }
+            foregroundBootstraps.add(frameLight);
+        }
+        foregroundBootstraps.sort(LocalVoxelShadowGpuResources::compareStaticBootstrapPriority);
+        int remainingForegroundBootstraps = this.budget.shadowedLocalLights();
+        for (FrameLight frameLight : foregroundBootstraps) {
+            if (remainingForegroundBootstraps == 0) {
+                break;
+            }
+            if (hasUsefulPending(frameLight, mirror)) {
+                remainingForegroundBootstraps--;
+                continue;
+            }
+            int buildEdge = nextBuildEdge(0, frameLight.desiredEdge(), false);
+            if (!ensureForegroundReplacementCapacity(
+                    frameLight, frameLights, buildEdge, submitIndex, schedule
+            )) {
+                continue;
+            }
+            if (tryScheduleBuild(
+                    frameLight, mirror, buildEdge, true, submitIndex, schedule
+            )) {
+                this.capacityRecoveryAfterSubmit.remove(frameLight.light().stableId());
+                remainingForegroundBootstraps--;
+            }
+        }
+
         // Bootstrap and camera-driven resolution changes share a bounded background pool.
         // Direct-to-target builds avoid the former global bootstrap barrier and 8->16->32->64
         // visible staircase while retaining approximate direct light until the page is ready.
@@ -1468,16 +1507,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 backgroundCandidates.add(frameLight);
             }
         }
-        backgroundCandidates.sort((left, right) -> {
-            int qualityOrder = Integer.compare(right.desiredEdge(), left.desiredEdge());
-            if (qualityOrder != 0) {
-                return qualityOrder;
-            }
-            int distanceOrder = Double.compare(left.centerDistance(), right.centerDistance());
-            return distanceOrder != 0 ? distanceOrder : Long.compareUnsigned(
-                    left.light().stableId(), right.light().stableId()
-            );
-        });
+        backgroundCandidates.sort(LocalVoxelShadowGpuResources::compareStaticBootstrapPriority);
         for (FrameLight frameLight : backgroundCandidates) {
             if (hasUsefulPending(frameLight, mirror)) {
                 continue;
@@ -1639,9 +1669,31 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         int distance = Double.compare(
                 candidate.centerDistance(), currentVictim.centerDistance()
         );
-        return distance != 0 ? distance > 0 : Long.compareUnsigned(
+        if (distance != 0) {
+            return distance > 0;
+        }
+        int priority = Integer.compare(candidate.light().priority(), currentVictim.light().priority());
+        return priority != 0 ? priority < 0 : Long.compareUnsigned(
                 candidate.light().stableId(), currentVictim.light().stableId()
         ) > 0;
+    }
+
+    private static int compareStaticBootstrapPriority(
+            final FrameLight left,
+            final FrameLight right
+    ) {
+        int qualityOrder = Integer.compare(right.desiredEdge(), left.desiredEdge());
+        if (qualityOrder != 0) {
+            return qualityOrder;
+        }
+        int distanceOrder = Double.compare(left.centerDistance(), right.centerDistance());
+        if (distanceOrder != 0) {
+            return distanceOrder;
+        }
+        int priorityOrder = Integer.compare(right.light().priority(), left.light().priority());
+        return priorityOrder != 0 ? priorityOrder : Long.compareUnsigned(
+                left.light().stableId(), right.light().stableId()
+        );
     }
 
     private boolean tryScheduleBuild(

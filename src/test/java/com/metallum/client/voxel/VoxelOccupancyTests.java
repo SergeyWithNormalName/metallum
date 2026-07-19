@@ -360,6 +360,53 @@ public final class VoxelOccupancyTests {
                         && Byte.toUnsignedInt(four.opticalPayload()[0]) == 17,
                 "4x async brick oracle changed its fine mask or optical byte");
 
+        byte coverageFoldedOpaque = (byte) new VoxelMaterialDescriptor(
+                VoxelMaterialClass.OPAQUE, 0.5f
+        ).packedUnsignedByte();
+        VoxelSectionSnapshot partialOpaque = snapshotWithCell(0, 1L, coverageFoldedOpaque);
+        VoxelBrickPatch exactOpaque = VoxelBrickPacker.pack(packTicket(
+                VoxelSubdivision.FOUR, List.of(contributor(0, 0, 0, partialOpaque)), 41
+        ));
+        require(Byte.toUnsignedInt(exactOpaque.opticalPayload()[0]) == OPAQUE.packedUnsignedByte(),
+                "an occupied exact 4x opaque cell retained block-average transmittance");
+        byte coverageFoldedCutout = (byte) new VoxelMaterialDescriptor(
+                VoxelMaterialClass.CUTOUT, 0.5f
+        ).packedUnsignedByte();
+        VoxelBrickPatch exactCutout = VoxelBrickPacker.pack(packTicket(
+                VoxelSubdivision.FOUR,
+                List.of(contributor(0, 0, 0, snapshotWithCell(0, 1L, coverageFoldedCutout))),
+                42
+        ));
+        require(Byte.toUnsignedInt(exactCutout.opticalPayload()[0])
+                        == VoxelMaterialDescriptor.defaults(
+                        VoxelMaterialClass.CUTOUT
+        ).packedUnsignedByte(),
+                "an occupied exact 4x cutout cell retained block-average transmittance");
+        VoxelBrickPatch coarseOpaque = VoxelBrickPacker.pack(packTicket(
+                VoxelSubdivision.TWO, List.of(contributor(0, 0, 0, partialOpaque)), 43
+        ));
+        require(Byte.toUnsignedInt(coarseOpaque.opticalPayload()[0])
+                        == Byte.toUnsignedInt(coverageFoldedOpaque),
+                "a coarse 2x cell lost its coverage-aware opaque transmittance");
+        List<VoxelBrickPacker.Contributor> coarseContributors = new ArrayList<>(8);
+        for (int sectionZ = 0; sectionZ < 2; sectionZ++) {
+            for (int sectionY = 0; sectionY < 2; sectionY++) {
+                for (int sectionX = 0; sectionX < 2; sectionX++) {
+                    coarseContributors.add(contributor(
+                            sectionX, sectionY, sectionZ,
+                            sectionX == 0 && sectionY == 0 && sectionZ == 0
+                                    ? partialOpaque : VoxelSectionSnapshot.empty()
+                    ));
+                }
+            }
+        }
+        VoxelBrickPatch coarsestOpaque = VoxelBrickPacker.pack(packTicket(
+                VoxelSubdivision.ONE, coarseContributors, 44
+        ));
+        require(Byte.toUnsignedInt(coarsestOpaque.opticalPayload()[0])
+                        == Byte.toUnsignedInt(coverageFoldedOpaque),
+                "a coarse 1x cell lost its coverage-aware opaque transmittance");
+
         int lastBlock = (15 << 8) | (15 << 4) | 15;
         VoxelSectionSnapshot twoSource = snapshotWithCell(lastBlock, 1L << 63, 29);
         VoxelBrickPatch two = VoxelBrickPacker.pack(packTicket(

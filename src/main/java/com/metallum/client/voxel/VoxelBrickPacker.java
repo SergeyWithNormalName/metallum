@@ -150,8 +150,11 @@ final class VoxelBrickPacker implements AutoCloseable {
                             ? 0L : contributor.snapshot().occupancyMaskUnchecked(localIndex);
                     int opticalOffset = VoxelBrickPatch.OCCUPANCY_BYTES
                             + (blockZ * baseEdge + blockY) * baseEdge + blockX;
-                    payload[opticalOffset] = contributor.absent()
+                    byte packedOptical = contributor.absent()
                             ? 0 : contributor.snapshot().opticalUnchecked(localIndex);
+                    payload[opticalOffset] = exactCellOptical(
+                            packedOptical, sourceMask, subdivision
+                    );
                     if (sourceMask != 0L) {
                         writeOccupancy(
                                 littleEndian, sourceMask, subdivision, blockX, blockY, blockZ
@@ -174,6 +177,31 @@ final class VoxelBrickPacker implements AutoCloseable {
                 payload,
                 opticalLength
         );
+    }
+
+    /**
+     * The source mask is exact at 4x: once a ray hits one of its occupied cells, an opaque
+     * slab, fence or pane must block like its material rather than like the block-wide average
+     * coverage. At 2x/1x one cell may represent only part of the original shape, so retain the
+     * coverage-folded optical value to avoid turning those coarse cells into solid cubes.
+     */
+    private static byte exactCellOptical(
+            final byte packedOptical,
+            final long sourceMask,
+            final int subdivision
+    ) {
+        if (sourceMask == 0L || subdivision != VoxelSectionSnapshot.SOURCE_SUBDIVISION) {
+            return packedOptical;
+        }
+        VoxelMaterialDescriptor material = VoxelMaterialDescriptor.fromPackedUnsignedByte(
+                Byte.toUnsignedInt(packedOptical)
+        );
+        return switch (material.materialClass()) {
+            case OPAQUE, CUTOUT, UNKNOWN_CONSERVATIVE -> (byte) VoxelMaterialDescriptor.defaults(
+                    material.materialClass()
+            ).packedUnsignedByte();
+            case AIR, GLASS, FOLIAGE, WATER, TRANSLUCENT -> packedOptical;
+        };
     }
 
     private static void writeOccupancy(
