@@ -53,6 +53,7 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     public static final String SODIUM_TERRAIN_PATH = "blocks/block_layer_opaque";
     public static final String VANILLA_ENTITY_PATH = "core/entity";
+    public static final String VANILLA_END_PORTAL_PATH = "core/rendertype_end_portal";
     public static final String SHADOW_SAMPLER_0 = "metallumSunShadow0";
     public static final String SHADOW_SAMPLER_1 = "metallumSunShadow1";
     public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
@@ -73,6 +74,10 @@ public final class AdvancedDirectLightingShaderPatcher {
             new ShaderKey("minecraft", VANILLA_ENTITY_PATH,
                     MetallumMaterialShaderPatcher.Stage.VERTEX),
             new ShaderKey("minecraft", VANILLA_ENTITY_PATH,
+                    MetallumMaterialShaderPatcher.Stage.FRAGMENT),
+            new ShaderKey("minecraft", VANILLA_END_PORTAL_PATH,
+                    MetallumMaterialShaderPatcher.Stage.VERTEX),
+            new ShaderKey("minecraft", VANILLA_END_PORTAL_PATH,
                     MetallumMaterialShaderPatcher.Stage.FRAGMENT)
     );
 
@@ -1620,6 +1625,37 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            metallumPreparedAlbedo);\n"
                     + ENTITY_FOG_ANCHOR;
 
+    private static final String END_PORTAL_VERTEX_DECLARATION =
+            "out vec4 texProj0;\nout vec3 metallumLightingPosition;\n// " + MARKER;
+    private static final String END_PORTAL_VERTEX_ASSIGNMENT =
+            "    vec4 metallumViewPosition = ModelViewMat * vec4(Position, 1.0);\n"
+                    + "    gl_Position = ProjMat * metallumViewPosition;\n"
+                    + "    metallumLightingPosition = metallumViewPosition.xyz;";
+    private static final String END_PORTAL_FRAGMENT_INPUT =
+            "in vec4 texProj0;\nin vec3 metallumLightingPosition;";
+    private static final String END_PORTAL_FOG_ANCHOR =
+            "    fragColor = apply_fog(vec4(color, 1.0), sphericalVertexDistance, "
+                    + "cylindricalVertexDistance, FogEnvironmentalStart, FogEnvironmentalEnd, "
+                    + "FogRenderDistanceStart, FogRenderDistanceEnd, "
+                    + "metallumMaterialDecodeColor(FogColor));";
+    private static final String END_PORTAL_DIRECT_BLOCK =
+            "    vec3 metallumPortalDerivativeNormal = cross(\n"
+                    + "            dFdx(metallumLightingPosition),\n"
+                    + "            dFdy(metallumLightingPosition));\n"
+                    + "    if (!gl_FrontFacing) {\n"
+                    + "        metallumPortalDerivativeNormal = -metallumPortalDerivativeNormal;\n"
+                    + "    }\n"
+                    + "    vec3 metallumDirectNormal = metallumSafeNormalV1(\n"
+                    + "            metallumPortalDerivativeNormal);\n"
+                    + "    vec3 metallumPreparedAlbedo = max(color, vec3(0.0));\n"
+                    + "    color += metallumEvaluateEnvironmentV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo, 0.0);\n"
+                    + "    color += metallumEvaluateClusteredDirectV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n"
+                    + END_PORTAL_FOG_ANCHOR;
+
     private AdvancedDirectLightingShaderPatcher() {
     }
 
@@ -1680,9 +1716,13 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
         }
 
-        return isSodiumTerrain(namespace, path)
-                ? patchSodium(stage, materialSource)
-                : patchEntity(stage, materialSource);
+        if (isSodiumTerrain(namespace, path)) {
+            return patchSodium(stage, materialSource);
+        }
+        if (isEntity(namespace, path)) {
+            return patchEntity(stage, materialSource);
+        }
+        return patchEndPortal(stage, materialSource);
     }
 
     public static boolean isPatched(final String source) {
@@ -1853,6 +1893,48 @@ public final class AdvancedDirectLightingShaderPatcher {
         return Result.success(patched);
     }
 
+    private static Result patchEndPortal(
+            final MetallumMaterialShaderPatcher.Stage stage,
+            final String source
+    ) {
+        if (stage == MetallumMaterialShaderPatcher.Stage.VERTEX) {
+            String patched = replaceExactlyOnce(
+                    source,
+                    "out vec4 texProj0;",
+                    END_PORTAL_VERTEX_DECLARATION
+            );
+            patched = replaceExactlyOnce(
+                    patched,
+                    "    gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);",
+                    END_PORTAL_VERTEX_ASSIGNMENT
+            );
+            if (patched == null
+                    || !patched.contains("out vec3 metallumLightingPosition;")
+                    || !patched.contains("metallumLightingPosition = metallumViewPosition.xyz;")) {
+                return Result.failure(source, "end portal Advanced vertex anchors changed");
+            }
+            return Result.success(patched);
+        }
+
+        String withStorageBuffers = installStorageBufferVersion(source);
+        if (withStorageBuffers == null) {
+            return Result.failure(source, "end portal fragment has no unique GLSL version directive");
+        }
+        String patched = replaceExactlyOnce(
+                withStorageBuffers,
+                "in vec4 texProj0;",
+                END_PORTAL_FRAGMENT_INPUT
+        );
+        patched = installFragmentAbi(patched);
+        patched = replaceExactlyOnce(patched, END_PORTAL_FOG_ANCHOR, END_PORTAL_DIRECT_BLOCK);
+        if (patched == null
+                || !patched.contains("metallumPortalDerivativeNormal")
+                || !patched.contains(END_PORTAL_DIRECT_BLOCK)) {
+            return Result.failure(source, "end portal Advanced fragment anchors changed");
+        }
+        return Result.success(patched);
+    }
+
     private static String installFragmentAbi(final String source) {
         if (source == null) {
             return null;
@@ -1956,11 +2038,16 @@ public final class AdvancedDirectLightingShaderPatcher {
                         || !source.contains(SODIUM_DIRECT_BLOCK)) {
                     return Result.failure(source, "Advanced terrain fragment body is not canonical");
                 }
-            } else if (!source.contains(ENTITY_FRAGMENT_INPUT)
-                    || !source.contains(ENTITY_DIRECT_ALBEDO)
-                    || !source.contains(ENTITY_OVERLAY_WITH_DIRECT_ALBEDO)
-                    || !source.contains(ENTITY_DIRECT_BLOCK)) {
-                return Result.failure(source, "Advanced entity fragment body is not canonical");
+            } else if (isEntity(namespace, path)) {
+                if (!source.contains(ENTITY_FRAGMENT_INPUT)
+                        || !source.contains(ENTITY_DIRECT_ALBEDO)
+                        || !source.contains(ENTITY_OVERLAY_WITH_DIRECT_ALBEDO)
+                        || !source.contains(ENTITY_DIRECT_BLOCK)) {
+                    return Result.failure(source, "Advanced entity fragment body is not canonical");
+                }
+            } else if (!source.contains(END_PORTAL_FRAGMENT_INPUT)
+                    || !source.contains(END_PORTAL_DIRECT_BLOCK)) {
+                return Result.failure(source, "Advanced end portal fragment body is not canonical");
             }
         } else if (isSodiumTerrain(namespace, path)) {
             if (!source.contains(SODIUM_VERTEX_DECLARATION)
@@ -1968,16 +2055,22 @@ public final class AdvancedDirectLightingShaderPatcher {
                     || !source.contains(SODIUM_ADVANCED_SKY_LIGHTMAP)) {
                 return Result.failure(source, "Advanced terrain vertex body is not canonical");
             }
-        } else if (!source.contains(ENTITY_VERTEX_DECLARATION)
-                || !source.contains(ENTITY_VERTEX_ASSIGNMENT)
-                || !source.contains(ENTITY_ADVANCED_SKY_LIGHTMAP)) {
-            return Result.failure(source, "Advanced entity vertex body is not canonical");
+        } else if (isEntity(namespace, path)) {
+            if (!source.contains(ENTITY_VERTEX_DECLARATION)
+                    || !source.contains(ENTITY_VERTEX_ASSIGNMENT)
+                    || !source.contains(ENTITY_ADVANCED_SKY_LIGHTMAP)) {
+                return Result.failure(source, "Advanced entity vertex body is not canonical");
+            }
+        } else if (!source.contains(END_PORTAL_VERTEX_DECLARATION)
+                || !source.contains(END_PORTAL_VERTEX_ASSIGNMENT)) {
+            return Result.failure(source, "Advanced end portal vertex body is not canonical");
         }
         return Result.success(source);
     }
 
     private static boolean isSupportedTarget(final String namespace, final String path) {
-        return isSodiumTerrain(namespace, path) || isEntity(namespace, path);
+        return isSodiumTerrain(namespace, path) || isEntity(namespace, path)
+                || isEndPortal(namespace, path);
     }
 
     private static boolean isSodiumTerrain(final String namespace, final String path) {
@@ -1986,6 +2079,10 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     private static boolean isEntity(final String namespace, final String path) {
         return "minecraft".equals(namespace) && VANILLA_ENTITY_PATH.equals(path);
+    }
+
+    private static boolean isEndPortal(final String namespace, final String path) {
+        return "minecraft".equals(namespace) && VANILLA_END_PORTAL_PATH.equals(path);
     }
 
     private static int occupiedAdvancedSlot(final String source) {
@@ -2030,6 +2127,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumLightingPosition",
                 "metallumLightingNormal",
                 "metallumLightingTint",
+                "metallumPortalDerivativeNormal",
                 "metallumDirectAlbedo",
                 "metallumDirectNormal",
                 "metallumPreparedAlbedo",

@@ -109,8 +109,8 @@ public final class AdvancedLightingPreflightGate {
     }
 
     /**
-     * Validates the complete pinned terrain/entity source set. Each source first passes the L2
-     * material adapter and only then the independent Advanced lighting adapter.
+     * Validates the complete pinned terrain/entity/end-portal receiver source set. Each source
+     * first passes the L2 material adapter and only then the independent Advanced lighting adapter.
      */
     public static Evaluation evaluate(
             final Map<AdvancedDirectLightingShaderPatcher.ShaderKey, String> sources,
@@ -131,7 +131,7 @@ public final class AdvancedLightingPreflightGate {
         return source.ready()
                 ? new Evaluation(
                         true,
-                        "Minecraft 26.2 and Sodium 0.9.1 Advanced terrain/entity sources passed preflight"
+                        "Minecraft 26.2 and Sodium 0.9.1 Advanced terrain/entity/end-portal sources passed preflight"
                 )
                 : new Evaluation(false, source.failureReason());
     }

@@ -128,7 +128,7 @@ final class MetalCrossShaderCompiler {
             }
 
             if (AdvancedLightingPreflightGate.shouldCompileAdvancedVariants()
-                    && isAdvancedLightingPipeline(pipeline)) {
+                    && isAdvancedLightingReceiverPipeline(pipeline)) {
                 try {
                     MetalCompiledRenderPipeline.ShaderVariantSource advanced = compileVariant(
                             device,
@@ -143,7 +143,18 @@ final class MetalCrossShaderCompiler {
                             advanced
                     );
                     variants.put(HdrShaderFlavor.METALLUM_ADVANCED, advanced);
+                } catch (ShaderCompileException | RuntimeException exception) {
+                    AdvancedLightingPreflightGate.rejectAdvancedVariant(
+                            "failed to compile METALLUM_ADVANCED receiver for "
+                                    + pipeline.getLocation()
+                                    + ": " + failureMessage(exception)
+                    );
+                }
+            }
 
+            if (AdvancedLightingPreflightGate.shouldCompileAdvancedVariants()
+                    && isSunShadowCasterPipeline(pipeline)) {
+                try {
                     MetalCompiledRenderPipeline.ShaderVariantSource shadow = compileVariant(
                             device,
                             pipeline,
@@ -155,7 +166,7 @@ final class MetalCrossShaderCompiler {
                     variants.put(HdrShaderFlavor.SUN_SHADOW, shadow);
                 } catch (ShaderCompileException | RuntimeException exception) {
                     AdvancedLightingPreflightGate.rejectAdvancedVariant(
-                            "failed to compile METALLUM_ADVANCED/L4 shadow for "
+                            "failed to compile L4 shadow caster for "
                                     + pipeline.getLocation()
                                     + ": " + failureMessage(exception)
                     );
@@ -618,7 +629,25 @@ final class MetalCrossShaderCompiler {
         return count;
     }
 
-    private static boolean isAdvancedLightingPipeline(final RenderPipeline pipeline) {
+    private static boolean isAdvancedLightingReceiverPipeline(final RenderPipeline pipeline) {
+        var vertex = pipeline.getVertexShader();
+        var fragment = pipeline.getFragmentShader();
+        boolean sodiumTerrain = vertex.getNamespace().equals("sodium")
+                && fragment.getNamespace().equals("sodium")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
+        boolean vanillaEntity = vertex.getNamespace().equals("minecraft")
+                && fragment.getNamespace().equals("minecraft")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_ENTITY_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_ENTITY_PATH);
+        boolean endPortal = vertex.getNamespace().equals("minecraft")
+                && fragment.getNamespace().equals("minecraft")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH);
+        return sodiumTerrain || vanillaEntity || endPortal;
+    }
+
+    private static boolean isSunShadowCasterPipeline(final RenderPipeline pipeline) {
         var vertex = pipeline.getVertexShader();
         var fragment = pipeline.getFragmentShader();
         boolean sodiumTerrain = vertex.getNamespace().equals("sodium")

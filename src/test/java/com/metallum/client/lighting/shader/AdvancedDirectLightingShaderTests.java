@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Actual-source and numeric contracts for the L3 terrain/entity shader adapter. */
+/** Actual-source and numeric contracts for the L3 terrain/entity/end-portal shader adapter. */
 public final class AdvancedDirectLightingShaderTests {
     private static final ShaderDefines SODIUM_SOLID_DEFINES = ShaderDefines.builder()
             .define("USE_VERTEX_COMPRESSION")
@@ -58,6 +58,12 @@ public final class AdvancedDirectLightingShaderTests {
             .define("ALPHA_CUTOUT", 0.1f)
             .define("NO_OVERLAY")
             .build();
+    private static final ShaderDefines END_PORTAL_DEFINES = ShaderDefines.builder()
+            .define("PORTAL_LAYERS", 15)
+            .build();
+    private static final ShaderDefines END_GATEWAY_DEFINES = ShaderDefines.builder()
+            .define("PORTAL_LAYERS", 16)
+            .build();
     private static final ShaderDefines ENTITY_ENERGY_SWIRL_DEFINES = ShaderDefines.builder()
             .define("ALPHA_CUTOUT", 0.1f)
             .define("EMISSIVE")
@@ -75,7 +81,9 @@ public final class AdvancedDirectLightingShaderTests {
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
             "sodium-cutout-fsh", "b1bc9ac961adbc6fb3de35856418d462b4a597106ee41843388108aeaa2555c1",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "b72a08cff9765804e19ab8b7fbc2f92e366b90df6a1f9fc1444e254274286302"
+            "minecraft-entity-fsh", "b72a08cff9765804e19ab8b7fbc2f92e366b90df6a1f9fc1444e254274286302",
+            "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
+            "minecraft-end-portal-fsh", "1f0828a19402db15ed7b790a2be37ec04d08f98fb8fff5180f0f5e8000a77ed2"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -368,6 +376,8 @@ public final class AdvancedDirectLightingShaderTests {
         String sodiumFragment = advancedSource(sources[1]);
         String entityVertex = advancedSource(sources[2]);
         String entityFragment = advancedSource(sources[3]);
+        String endPortalVertex = advancedSource(sources[4]);
+        String endPortalFragment = advancedSource(sources[5]);
 
         require(countOccurrences(sodiumFragment,
                         "layout(std430, binding = 14)") == 1
@@ -420,13 +430,25 @@ public final class AdvancedDirectLightingShaderTests {
         require(!entityFragment.contains(
                         "metallumEntityNormal, metallumUnlitBase);"),
                 "entity direct light is still modulated by vanilla cardinal/per-face lighting");
+        require(endPortalVertex.contains(
+                        "metallumLightingPosition = metallumViewPosition.xyz;"),
+                "end portal does not forward view-space position");
+        require(endPortalFragment.contains("metallumPortalDerivativeNormal")
+                        && endPortalFragment.contains(
+                        "metallumPreparedAlbedo, 0.0);"),
+                "end portal did not reconstruct a receiver normal without fabricating lightmap sky data");
+        require(!endPortalVertex.contains("metallumSkyVisibility")
+                        && !endPortalFragment.contains("metallumSkyVisibility"),
+                "end portal invented a per-vertex lightmap channel it does not receive");
 
         String sodiumFormula = directHelper(sodiumFragment);
         String entityFormula = directHelper(entityFragment);
+        String endPortalFormula = directHelper(endPortalFragment);
         String sodiumEnvironment = environmentHelper(sodiumFragment);
         String entityEnvironment = environmentHelper(entityFragment);
-        require(sodiumFormula.equals(entityFormula),
-                "terrain and entities do not use one shared direct-light formula");
+        String endPortalEnvironment = environmentHelper(endPortalFragment);
+        require(sodiumFormula.equals(entityFormula) && sodiumFormula.equals(endPortalFormula),
+                "terrain, entities, and end portal do not use one shared direct-light formula");
         require(sodiumFormula.contains(
                         "* (attenuation * nDotL * 0.31830988618);")
                         && sodiumFormula.contains(
@@ -731,7 +753,7 @@ public final class AdvancedDirectLightingShaderTests {
         require(!sodiumFormula.contains("HDR") && !sodiumFormula.contains("SDR")
                         && !sodiumFormula.contains("Edr") && !sodiumFormula.contains("Output"),
                 "display output leaked into the direct-light formula");
-        require(sodiumEnvironment.equals(entityEnvironment)
+        require(sodiumEnvironment.equals(entityEnvironment) && sodiumEnvironment.equals(endPortalEnvironment)
                         && sodiumEnvironment.contains("metallumSunVisibilityV1")
                         && sodiumFragment.contains("uniform sampler2DShadow metallumSunShadow0")
                         && sodiumFragment.contains("cascadeNormalBias")
@@ -983,6 +1005,8 @@ public final class AdvancedDirectLightingShaderTests {
         String sodiumFragment = advancedSource(sources[1]);
         String entityVertex = advancedSource(sources[2]);
         String entityFragment = advancedSource(sources[3]);
+        String endPortalVertex = advancedSource(sources[4]);
+        String endPortalFragment = advancedSource(sources[5]);
 
         compilePair("sodium-solid", sodiumVertex, sodiumFragment, SODIUM_SOLID_DEFINES);
         compilePair("sodium-cutout", sodiumVertex, sodiumFragment, SODIUM_CUTOUT_DEFINES);
@@ -999,6 +1023,10 @@ public final class AdvancedDirectLightingShaderTests {
                 ENTITY_ENERGY_SWIRL_DEFINES);
         compilePair("minecraft-entity-dissolve", entityVertex, entityFragment,
                 ENTITY_DISSOLVE_DEFINES);
+        compilePair("minecraft-end-portal", endPortalVertex, endPortalFragment,
+                END_PORTAL_DEFINES);
+        compilePair("minecraft-end-gateway", endPortalVertex, endPortalFragment,
+                END_GATEWAY_DEFINES);
 
         Map<String, String> actual = new LinkedHashMap<>();
         actual.put("sodium-solid-vsh", digest(withDefines(sodiumVertex, SODIUM_SOLID_DEFINES)));
@@ -1007,6 +1035,8 @@ public final class AdvancedDirectLightingShaderTests {
         actual.put("sodium-cutout-fsh", digest(withDefines(sodiumFragment, SODIUM_CUTOUT_DEFINES)));
         actual.put("minecraft-entity-vsh", digest(entityVertex));
         actual.put("minecraft-entity-fsh", digest(entityFragment));
+        actual.put("minecraft-end-portal-vsh", digest(endPortalVertex));
+        actual.put("minecraft-end-portal-fsh", digest(endPortalFragment));
         require(actual.equals(EXPECTED_SOURCE_GOLDENS),
                 "Minecraft 26.2 / Sodium 0.9.1 Advanced source golden changed: " + actual);
     }
@@ -1058,6 +1088,11 @@ public final class AdvancedDirectLightingShaderTests {
                         MetallumMaterialShaderPatcher.Stage.FRAGMENT,
                         entityFragment).success(),
                 "unsupported shader entered the L4 caster contract");
+        require(!SunShadowShaderPatcher.patch(
+                        sources[4].namespace(), sources[4].path(), sources[4].stage(),
+                        preprocess(sources[4].namespace(), sources[4].path(), sources[4].stage())
+                ).success(),
+                "end portal receiver unexpectedly entered the L4 caster contract");
     }
 
     private static void compileShadowPair(
@@ -1466,6 +1501,12 @@ public final class AdvancedDirectLightingShaderTests {
                         MetallumMaterialShaderPatcher.Stage.VERTEX),
                 new ShaderCase("minecraft-entity-fsh", "minecraft",
                         AdvancedDirectLightingShaderPatcher.VANILLA_ENTITY_PATH,
+                        MetallumMaterialShaderPatcher.Stage.FRAGMENT),
+                new ShaderCase("minecraft-end-portal-vsh", "minecraft",
+                        AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH,
+                        MetallumMaterialShaderPatcher.Stage.VERTEX),
+                new ShaderCase("minecraft-end-portal-fsh", "minecraft",
+                        AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH,
                         MetallumMaterialShaderPatcher.Stage.FRAGMENT)
         };
     }
