@@ -9,7 +9,9 @@ import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Standalone contracts for the future resident local-shadow atlas foundation. */
 public final class LocalVoxelShadowAtlasResidencyTests {
@@ -23,6 +25,7 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         testSubThresholdMotionAccumulates();
         testPresetAdmissionCaps();
         testHeldAdmissionAndHysteresis();
+        testDuplicateStableIdCoalescesHeldProxy();
         testStableResidencyAndLease();
         testReplacementDefersOldPageRetirement();
         testSameEdgeReplacementNeverOverwritesInFlightPage();
@@ -179,6 +182,74 @@ public final class LocalVoxelShadowAtlasResidencyTests {
         );
         require(second.selected(92L) != null && second.selected(93L) == null,
                 "Sub-material candidate difference churned the retained hero slot");
+    }
+
+    private static void testDuplicateStableIdCoalescesHeldProxy() {
+        LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                LocalVoxelShadowLayout.forPreset(LightingPreset.BALANCED).dynamicShadows();
+        AdvancedLight held = light(211L, 12.0, -100, LocalShadowSourceClass.CAMERA_HELD);
+        AdvancedLight body = light(211L, 1.0, 100, LocalShadowSourceClass.ENTITY_DYNAMIC);
+        AdvancedLight remote = light(212L, 3.0, 10, LocalShadowSourceClass.ENTITY_DYNAMIC);
+
+        DynamicShadowAdmission.Result forward = new DynamicShadowAdmission().select(
+                List.of(
+                        new DynamicShadowAdmission.Candidate(held, false, false),
+                        new DynamicShadowAdmission.Candidate(body, true, true),
+                        candidate(remote, false)
+                ),
+                budget, 0.0, 0.0, 0.0
+        );
+        DynamicShadowAdmission.Result reverse = new DynamicShadowAdmission().select(
+                List.of(
+                        candidate(remote, false),
+                        new DynamicShadowAdmission.Candidate(body, true, true),
+                        new DynamicShadowAdmission.Candidate(held, false, false)
+                ),
+                budget, 0.0, 0.0, 0.0
+        );
+
+        require(forward.tracked().size() == 2
+                        && forward.candidates() == 2
+                        && forward.selected().size() == 2
+                        && forward.dropped() == 0
+                        && forward.heldAdmitted()
+                        && forward.selected(211L) != null
+                        && forward.selected(211L).heroSlot() == 0
+                        && forward.tracked(211L).candidate().light().shadowSourceClass()
+                        == LocalShadowSourceClass.CAMERA_HELD
+                        && !forward.tracked(211L).candidate().cacheCovered()
+                        && !forward.tracked(211L).candidate().exactStaticReady(),
+                "held/body duplicate transferred body cache state to the camera anchor");
+        require(new HashSet<>(forward.tracked().stream()
+                        .map(value -> value.candidate().light().stableId()).toList())
+                        .equals(new HashSet<>(reverse.tracked().stream()
+                                .map(value -> value.candidate().light().stableId()).toList()))
+                        && forward.selected().stream().map(value -> value.candidate().candidate().light().stableId()
+                                + ":" + value.heroSlot()).toList().equals(reverse.selected().stream()
+                                .map(value -> value.candidate().candidate().light().stableId()
+                                        + ":" + value.heroSlot()).toList())
+                        && reverse.selected(211L) != null
+                        && reverse.selected(211L).heroSlot() == 0
+                        && !reverse.tracked(211L).candidate().cacheCovered()
+                        && !reverse.tracked(211L).candidate().exactStaticReady(),
+                "duplicate coalescing changed with input insertion order");
+
+        DynamicShadowAdmission.Selected selected = forward.selected(211L);
+        Set<Long> claimed = new HashSet<>();
+        require(LocalVoxelShadowGpuResources.claimDynamicHeroSlot(body, selected, claimed) == -1
+                        && LocalVoxelShadowGpuResources.claimDynamicHeroSlot(
+                                held, selected, claimed
+                        ) == 0
+                        && LocalVoxelShadowGpuResources.claimDynamicHeroSlot(
+                                held, selected, claimed
+                        ) == -1,
+                "duplicate representations published the same dynamic atlas hero slot");
+        claimed.clear();
+        require(LocalVoxelShadowGpuResources.claimDynamicHeroSlot(held, selected, claimed) == 0
+                        && LocalVoxelShadowGpuResources.claimDynamicHeroSlot(
+                                body, selected, claimed
+                        ) == -1,
+                "dynamic atlas hero-slot ownership changed with duplicate insertion order");
     }
 
     private static void testSubThresholdMotionAccumulates() {

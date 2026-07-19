@@ -2,7 +2,9 @@ package com.metallum.client.lighting;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.function.Predicate;
 
@@ -14,6 +16,7 @@ public final class BoundedDynamicLightCollector {
     private final Comparator<AdvancedLight> admissionOrder;
     private final Predicate<AdvancedLight> intersectsView;
     private final Comparator<Candidate> selectionOrder;
+    private final Map<Long, Candidate> retainedByStableId;
     private int offered;
 
     public BoundedDynamicLightCollector(final LightWorldToken world, final int capacity) {
@@ -45,6 +48,7 @@ public final class BoundedDynamicLightCollector {
                     : this.admissionOrder.compare(left.light, right.light);
         };
         this.worstFirst = new PriorityQueue<>(capacity, this.selectionOrder.reversed());
+        this.retainedByStableId = new HashMap<>(capacity);
     }
 
     public LightWorldToken world() {
@@ -60,14 +64,30 @@ public final class BoundedDynamicLightCollector {
         }
         this.offered++;
         Candidate candidate = new Candidate(light, this.intersectsView.test(light));
+        Candidate existing = this.retainedByStableId.get(light.stableId());
+        if (existing != null) {
+            if (this.selectionOrder.compare(candidate, existing) < 0) {
+                if (!this.worstFirst.remove(existing)) {
+                    throw new IllegalStateException(
+                            "Dynamic light stable-ID index diverged from its bounded queue"
+                    );
+                }
+                this.worstFirst.add(candidate);
+                this.retainedByStableId.put(light.stableId(), candidate);
+            }
+            return;
+        }
         if (this.worstFirst.size() < this.capacity) {
             this.worstFirst.add(candidate);
+            this.retainedByStableId.put(light.stableId(), candidate);
             return;
         }
         Candidate worst = this.worstFirst.peek();
         if (this.selectionOrder.compare(candidate, worst) < 0) {
             this.worstFirst.remove();
+            this.retainedByStableId.remove(worst.light.stableId(), worst);
             this.worstFirst.add(candidate);
+            this.retainedByStableId.put(light.stableId(), candidate);
         }
     }
 

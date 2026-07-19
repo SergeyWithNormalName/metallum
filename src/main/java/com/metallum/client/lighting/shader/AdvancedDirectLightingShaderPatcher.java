@@ -1369,9 +1369,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (activeLightCount == 0u) {
                     return vec3(0.0);
                 }
-                // Every uploaded L3 light must have one matching L6 descriptor. Validate that
-                // contract once per fragment; a mismatch suppresses direct light fail-closed.
-                if (metallumVoxelShadow.caps.x != 3u
+                // L6 is an optional local-shadow refinement over an otherwise valid L3 batch.
+                // Its packet can be absent during a voxel/world transition, so a bad L6
+                // contract must fall back to unshadowed direct light instead of blacking out
+                // every clustered source in the fragment.
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 3u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1387,9 +1389,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         metallumLighting.frameIdAndGeneration.xy))
                         || metallumVoxelShadow.proxyAndFrame.y > 32u
                         || metallumVoxelShadow.proxyAndFrame.x
-                        > metallumVoxelShadow.proxyAndFrame.y) {
-                    return vec3(0.0);
-                }
+                        > metallumVoxelShadow.proxyAndFrame.y);
 
                 uint cluster = metallumClusterIndexV1(viewPosition);
                 uint clusterCapacity = metallumLighting.capacitiesAndFlags.x;
@@ -1410,28 +1410,36 @@ public final class AdvancedDirectLightingShaderPatcher {
                         256u);
 
                 if (!metallumFiniteVec3V1(viewPosition)
-                        || !metallumFiniteVec3V1(normal)
-                        || !metallumFiniteVec3V1(
+                        || !metallumFiniteVec3V1(normal)) {
+                    return vec3(0.0);
+                }
+                if (localShadowContractValid
+                        && (!metallumFiniteVec3V1(
                         metallumVoxelShadow.cameraFractionAndMinTrans.xyz)
                         || any(lessThan(
                         metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
                         || any(greaterThanEqual(
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))) {
-                    return vec3(0.0);
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0))))) {
+                    localShadowContractValid = false;
                 }
                 // Receiver state is invariant across every candidate in this fragment. Keep
                 // these matrix multiplies out of the potentially 256-light exact loop.
-                vec3 receiverCameraRelative =
-                        mat3(metallumVoxelShadow.worldFromView) * viewPosition;
-                vec3 receiverWorldRelative =
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
-                        + receiverCameraRelative;
-                vec3 receiverWorldNormal =
-                        mat3(metallumVoxelShadow.worldFromView) * normal;
-                if (!metallumFiniteVec3V1(receiverCameraRelative)
-                        || !metallumFiniteVec3V1(receiverWorldRelative)
-                        || !metallumFiniteVec3V1(receiverWorldNormal)) {
-                    return vec3(0.0);
+                vec3 receiverCameraRelative = vec3(0.0);
+                vec3 receiverWorldRelative = vec3(0.0);
+                vec3 receiverWorldNormal = vec3(0.0);
+                if (localShadowContractValid) {
+                    receiverCameraRelative =
+                            mat3(metallumVoxelShadow.worldFromView) * viewPosition;
+                    receiverWorldRelative =
+                            metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                            + receiverCameraRelative;
+                    receiverWorldNormal =
+                            mat3(metallumVoxelShadow.worldFromView) * normal;
+                    if (!metallumFiniteVec3V1(receiverCameraRelative)
+                            || !metallumFiniteVec3V1(receiverWorldRelative)
+                            || !metallumFiniteVec3V1(receiverWorldNormal)) {
+                        localShadowContractValid = false;
+                    }
                 }
 
                 vec3 direct = vec3(0.0);
@@ -1470,7 +1478,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float visibility = 1.0;
                     bool cachedShadowCandidate = false;
                     uvec4 shadowRef = uvec4(0u);
-                    if (nDotL > 0.0 && any(greaterThan(radiance, vec3(0.0)))) {
+                    if (localShadowContractValid && nDotL > 0.0
+                            && any(greaterThan(radiance, vec3(0.0)))) {
                         shadowRef = metallumVoxelShadowRefBuffer.refs[lightIndex];
                         uint shadowState = shadowRef.x;
                         // State zero is an explicit, valid approximation while a resident page
@@ -1488,7 +1497,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                                     shadowRef);
                             cachedShadowCandidate = true;
                         } else {
-                            visibility = 0.0;
+                            // A descriptor failure must not extinguish its L3 light. The
+                            // producer will repair the page/descriptor on a later submit.
+                            visibility = 1.0;
                         }
                     }
                     direct += unshadowedContribution * visibility;

@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "7e5a2601b9cc63a5a9fc1fb847b92c171b064f496557399b031ebd77c6a38a67",
+            "sodium-solid-fsh", "bb3a502476c275b01135138cf1d38b0248f94a2f6555aefa06c8afe6d95b2a77",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "657ea934e142937df2842bed1e3ae183ec5411004e32cda7447d627808404d9f",
+            "sodium-cutout-fsh", "40a49e3a44c1450b672555799c6715793717a5e66bbe5997832cdefbd0015dc4",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "b72a08cff9765804e19ab8b7fbc2f92e366b90df6a1f9fc1444e254274286302",
+            "minecraft-entity-fsh", "1d1b79ebc5912835166f3dc562ef0186d4cb7d7705043a42195ce6ec744a0fa1",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "01e5184e1bd900c3e5ee8ef9159306d23fba1546e58f9d86de3baa785e69e470"
+            "minecraft-end-portal-fsh", "f9b62f190f22f187a9a54913896660ef017f63c5095e51f29f2b17f6bafb2f42"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -525,6 +525,13 @@ public final class AdvancedDirectLightingShaderTests {
                         && !sodiumFormula.contains("shadowSlot")
                         && sodiumFormula.contains(
                         "metallumVoxelShadow.caps.w != activeLightCount")
+                        && sodiumFormula.contains("bool localShadowContractValid =")
+                        && sodiumFormula.contains(
+                        "must fall back to unshadowed direct light instead of blacking out")
+                        && sodiumFormula.contains("if (localShadowContractValid")
+                        && sodiumFormula.contains("localShadowContractValid = false;")
+                        && sodiumFormula.contains(
+                        "if (localShadowContractValid && nDotL > 0.0")
                         && sodiumFormula.contains(
                         "attenuation * nDotL * 0.31830988618")
                         && sodiumFormula.contains(

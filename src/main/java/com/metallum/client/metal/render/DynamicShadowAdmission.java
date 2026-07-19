@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -111,16 +112,13 @@ final class DynamicShadowAdmission {
         requireFinite(cameraY, "cameraY");
         requireFinite(cameraZ, "cameraZ");
 
-        Set<Long> seen = new HashSet<>();
+        List<Candidate> candidates = coalesceCandidates(input, cameraX, cameraY, cameraZ);
         Set<Long> dynamicSeen = new HashSet<>();
-        List<TrackedCandidate> tracked = new ArrayList<>(input.size());
+        List<TrackedCandidate> tracked = new ArrayList<>(candidates.size());
         int staticToDynamic = 0;
         int dynamicToStatic = 0;
-        for (Candidate candidate : input) {
+        for (Candidate candidate : candidates) {
             AdvancedLight light = candidate.light();
-            if (!seen.add(light.stableId())) {
-                throw new IllegalArgumentException("Duplicate dynamic-shadow stable ID");
-            }
             if (light.shadowSourceClass() == LocalShadowSourceClass.STATIC_CACHE) {
                 tracked.add(new TrackedCandidate(candidate, Phase.STATIC, true));
                 continue;
@@ -176,6 +174,52 @@ final class DynamicShadowAdmission {
                 heldAdmitted,
                 staticToDynamic,
                 dynamicToStatic
+        );
+    }
+
+    /**
+     * A held-item proxy and its entity body can legitimately share one L3 stable ID for one
+     * frame. Collapse that representation boundary before motion state or hero-slot accounting:
+     * both structures are keyed by stable ID and must never see two candidates for one key.
+     */
+    private static List<Candidate> coalesceCandidates(
+            final List<Candidate> input,
+            final double cameraX,
+            final double cameraY,
+            final double cameraZ
+    ) {
+        Comparator<AdvancedLight> relevance = FrameLightOrder.directComparator(
+                cameraX, cameraY, cameraZ
+        );
+        Map<Long, Candidate> byStableId = new LinkedHashMap<>();
+        for (Candidate candidate : input) {
+            Objects.requireNonNull(candidate, "input contains null");
+            long stableId = candidate.light().stableId();
+            Candidate current = byStableId.get(stableId);
+            byStableId.put(
+                    stableId,
+                    current == null ? candidate : mergeCandidates(current, candidate, relevance)
+            );
+        }
+        return new ArrayList<>(byStableId.values());
+    }
+
+    private static Candidate mergeCandidates(
+            final Candidate left,
+            final Candidate right,
+            final Comparator<AdvancedLight> relevance
+    ) {
+        Candidate preferred = relevance.compare(left.light(), right.light()) <= 0 ? left : right;
+        if (!left.light().equals(right.light())) {
+            // Coverage/readiness describe one exact position/radius. Never transfer the body
+            // representation's cache state to a preferred camera-held representation that only
+            // shares its stable identity.
+            return preferred;
+        }
+        return new Candidate(
+                preferred.light(),
+                left.cacheCovered() || right.cacheCovered(),
+                left.exactStaticReady() || right.exactStaticReady()
         );
     }
 

@@ -1474,6 +1474,37 @@ public final class AdvancedLightRegistryTests {
                         && visibilityCollector.dropped() == 1,
                 "dynamic pre-cap let a bright background source displace a visible source");
 
+        AdvancedLight duplicateBody = entityLight(token, 30_010L, -1.0, 240, 10.0F);
+        AdvancedLight duplicateHeld = new AdvancedLight(
+                duplicateBody.stableId(),
+                duplicateBody.generation(),
+                LightSourceKind.ENTITY,
+                -2.0,
+                0.0,
+                -1.0,
+                duplicateBody.radius(),
+                duplicateBody.red(),
+                duplicateBody.green(),
+                duplicateBody.blue(),
+                duplicateBody.intensity(),
+                Integer.MIN_VALUE,
+                false,
+                ShadowEmitterFootprint.empty(),
+                LocalShadowSourceClass.CAMERA_HELD
+        );
+        BoundedDynamicLightCollector duplicateCollector = new BoundedDynamicLightCollector(
+                token,
+                2
+        );
+        duplicateCollector.offer(duplicateBody);
+        duplicateCollector.offer(entityLight(token, 30_011L, -3.0, 1, 1.0F));
+        duplicateCollector.offer(duplicateHeld);
+        List<AdvancedLight> duplicateLights = duplicateCollector.finish();
+        require(duplicateLights.size() == 2
+                        && duplicateLights.getFirst().equals(duplicateHeld)
+                        && new HashSet<>(stableIds(duplicateLights)).size() == 2,
+                "camera-held/body duplicate consumed two dynamic-light slots");
+
         registry.publishDynamicFrame(token, retained, collector.offered());
         LightFrameSnapshot snapshot = registry.snapshotForFrame(0, 0, 0, 73);
         require(snapshot.dynamicLightCount() == 73 && snapshot.staticLightCount() == 0,

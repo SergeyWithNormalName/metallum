@@ -1129,6 +1129,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 camera.x(), camera.y(), camera.z()
         );
         List<FrameLight> lights = new ArrayList<>(described.size());
+        Set<Long> claimedDynamicStableIds = new HashSet<>();
         for (FrameLight frameLight : described) {
             long stableId = frameLight.light().stableId();
             DynamicShadowAdmission.TrackedCandidate tracked = admission.tracked(stableId);
@@ -1136,6 +1137,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             if (tracked == null) {
                 throw new IllegalStateException("Dynamic L6 admission lost an L3 light");
             }
+            int dynamicHeroSlot = claimDynamicHeroSlot(
+                    frameLight.light(), selected, claimedDynamicStableIds
+            );
             lights.add(new FrameLight(
                     frameLight.uploadIndex(),
                     frameLight.light(),
@@ -1148,7 +1152,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     frameLight.clipmap(),
                     tracked.staticBuildAllowed(),
                     tracked.phase(),
-                    selected == null ? -1 : selected.heroSlot(),
+                    dynamicHeroSlot,
                     frameLight.dynamicCoverage(),
                     frameLight.exactStaticReady()
             ));
@@ -1249,6 +1253,26 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return new DynamicFramePlan(
                 List.copyOf(lights), admission, List.copyOf(pages), upload, coverageMisses
         );
+    }
+
+    /**
+     * Assign one dynamic atlas page to the exact representation selected for a stable ID.
+     * A camera-held proxy and its entity body may coexist in the original L3 snapshot; only
+     * the preferred representation may publish the shared hero slot and backend request.
+     */
+    static int claimDynamicHeroSlot(
+            final AdvancedLight light,
+            final DynamicShadowAdmission.Selected selected,
+            final Set<Long> claimedStableIds
+    ) {
+        Objects.requireNonNull(light, "light");
+        Objects.requireNonNull(claimedStableIds, "claimedStableIds");
+        if (selected == null
+                || !light.equals(selected.candidate().candidate().light())
+                || !claimedStableIds.add(light.stableId())) {
+            return -1;
+        }
+        return selected.heroSlot();
     }
 
     private void cancelBuildsBlockedByMotion(
