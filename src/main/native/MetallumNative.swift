@@ -10724,6 +10724,10 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
     _ baseVertex: Int,
     _ baseInstance: Int
 ) {
+    let indexStride = indexType == .uint16 ? 2 : 4
+    guard indexBufferOffset + indexCount * indexStride <= indexBuffer.length else {
+        return
+    }
     encoder.drawIndexedPrimitives(
         type: primitiveType,
         indexCount: indexCount,
@@ -10749,15 +10753,20 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     _ instanceCount: Int,
     _ baseInstance: Int
 ) {
+    let indexStride = indexType == .uint16 ? 2 : 4
     for i in 0..<drawCount {
         let indexCount = Int(indexCounts[i])
         if indexCount > 0 {
+            let offset = firstIndexOffsets[i]
+            guard offset + indexCount * indexStride <= indexBuffer.length else {
+                continue
+            }
             encoder.drawIndexedPrimitives(
                 type: primitiveType,
                 indexCount: indexCount,
                 indexType: indexType,
                 indexBuffer: indexBuffer,
-                indexBufferOffset: firstIndexOffsets[i],
+                indexBufferOffset: offset,
                 instanceCount: instanceCount,
                 baseVertex: Int(vertexOffsets[i]),
                 baseInstance: baseInstance
@@ -10779,6 +10788,9 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
 ) {
     var offset = Int(indirectBufferOffset)
     for _ in 0..<drawCount {
+        guard offset + 20 <= indirectBuffer.length else {
+            break
+        }
         encoder.drawIndexedPrimitives(
             type: primitiveType,
             indexType: indexType,
@@ -10802,7 +10814,7 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
     _ stride: UInt64
 ) {
     guard drawCount > 0, stride >= 20 else { return }
-    let indexStride: UInt32
+    let indexStride: Int
     switch indexType {
     case .uint16:
         indexStride = 2
@@ -10820,16 +10832,19 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
         let baseVertex = command.load(fromByteOffset: 12, as: Int32.self)
         let baseInstance = command.load(fromByteOffset: 16, as: UInt32.self)
         if indexCount > 0, instanceCount > 0 {
-            encoder.drawIndexedPrimitives(
-                type: primitiveType,
-                indexCount: Int(indexCount),
-                indexType: indexType,
-                indexBuffer: indexBuffer,
-                indexBufferOffset: Int(UInt64(firstIndex) * UInt64(indexStride)),
-                instanceCount: Int(instanceCount),
-                baseVertex: Int(baseVertex),
-                baseInstance: Int(baseInstance)
-            )
+            let offset = Int(UInt64(firstIndex) * UInt64(indexStride))
+            if offset + Int(indexCount) * indexStride <= indexBuffer.length {
+                encoder.drawIndexedPrimitives(
+                    type: primitiveType,
+                    indexCount: Int(indexCount),
+                    indexType: indexType,
+                    indexBuffer: indexBuffer,
+                    indexBufferOffset: offset,
+                    instanceCount: Int(instanceCount),
+                    baseVertex: Int(baseVertex),
+                    baseInstance: Int(baseInstance)
+                )
+            }
         }
         command = command.advanced(by: Int(stride))
     }
@@ -10846,6 +10861,9 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
 ) {
     var offset = Int(indirectBufferOffset)
     for _ in 0..<drawCount {
+        guard offset + 16 <= indirectBuffer.length else {
+            break
+        }
         encoder.drawPrimitives(
             type: primitiveType,
             indirectBuffer: indirectBuffer,
