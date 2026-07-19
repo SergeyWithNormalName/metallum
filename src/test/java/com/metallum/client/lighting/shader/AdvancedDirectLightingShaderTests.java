@@ -83,7 +83,7 @@ public final class AdvancedDirectLightingShaderTests {
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
             "minecraft-entity-fsh", "b72a08cff9765804e19ab8b7fbc2f92e366b90df6a1f9fc1444e254274286302",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "1f0828a19402db15ed7b790a2be37ec04d08f98fb8fff5180f0f5e8000a77ed2"
+            "minecraft-end-portal-fsh", "01e5184e1bd900c3e5ee8ef9159306d23fba1546e58f9d86de3baa785e69e470"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -435,8 +435,9 @@ public final class AdvancedDirectLightingShaderTests {
                 "end portal does not forward view-space position");
         require(endPortalFragment.contains("metallumPortalDerivativeNormal")
                         && endPortalFragment.contains(
-                        "metallumPreparedAlbedo, 0.0);"),
-                "end portal did not reconstruct a receiver normal without fabricating lightmap sky data");
+                        "const vec3 metallumEndPortalReceiverAlbedo = vec3(0.18, 0.28, 0.30);")
+                        && endPortalFragment.contains("metallumPreparedAlbedo, 1.0);"),
+                "end portal did not use its sky-exposed special-receiver lighting contract");
         require(!endPortalVertex.contains("metallumSkyVisibility")
                         && !endPortalFragment.contains("metallumSkyVisibility"),
                 "end portal invented a per-vertex lightmap channel it does not receive");
