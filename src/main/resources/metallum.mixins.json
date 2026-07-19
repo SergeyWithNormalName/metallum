@@ -24,6 +24,8 @@
     "render.LightmapMixin",
     "render.ScreenshotMixin",
     "render.HdrSceneCaptureMixin",
+    "render.ItemModelResolverEmissionMixin",
+    "render.ItemStackRenderStateEmissionMixin",
     "render.GameRendererAccessor",
     "render.GameRendererMetalFxMixin",
     "render.ClientPacketListenerTemporalMixin",

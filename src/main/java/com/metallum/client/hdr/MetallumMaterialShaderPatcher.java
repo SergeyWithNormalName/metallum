@@ -27,6 +27,9 @@ public final class MetallumMaterialShaderPatcher {
     public static final float MAX_BLOCK_EMISSION_RADIANCE = 1.75f;
     private static final String MARKER = "METALLUM_MATERIAL_LINEAR_V1";
     private static final String COLOR_OUTPUT = "out vec4 fragColor;";
+    private static final String ITEM_SHADER = "core/item";
+    private static final String ITEM_TEX_COORD_OUTPUT = "out vec2 texCoord0;";
+    private static final String ITEM_TEX_COORD_INPUT = "in vec2 texCoord0;";
     private static final String TEXT_MASK_SAMPLE = "texture(Sampler0, texCoord0).rrrr";
     private static final String TEXT_MASK_PLACEHOLDER = "METALLUM_TEXT_COVERAGE_SAMPLE_RAW";
     private static final Pattern MAIN_PATTERN = Pattern.compile("\\bvoid\\s+main\\s*\\(\\s*\\)\\s*\\{");
@@ -143,6 +146,23 @@ public final class MetallumMaterialShaderPatcher {
                 "overlayColor = texelFetch(Sampler1, UV1, 0);",
                 "overlayColor = metallumMaterialDecodeColor(texelFetch(Sampler1, UV1, 0));"
         );
+        if (ITEM_SHADER.equals(path)) {
+            patched = replaceExactlyOnce(
+                    patched,
+                    ITEM_TEX_COORD_OUTPUT,
+                    ITEM_TEX_COORD_OUTPUT + "\nflat out int metallumHeldEmission;"
+            );
+            patched = replaceExactlyOnce(
+                    patched,
+                    "    lightMapColor = sample_lightmap(Sampler2, UV2);",
+                    "    metallumHeldEmission = UV2.x >= 257 && UV2.x <= 271 ? UV2.x - 256 : 0;\n"
+                            + "    ivec2 metallumHeldLightCoords = metallumHeldEmission > 0\n"
+                            + "            ? ivec2(240, UV2.y)\n"
+                            + "            : UV2;\n"
+                            + "    lightMapColor = metallumMaterialDecodeLegacyLightmap(\n"
+                            + "            sample_lightmap(Sampler2, metallumHeldLightCoords));"
+            );
+        }
         patched = patched.replace(
                 "sample_lightmap(Sampler2, UV2)",
                 "metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2))"
@@ -156,6 +176,14 @@ public final class MetallumMaterialShaderPatcher {
             return withHelpers;
         }
         String patched = withHelpers.source();
+
+        if (ITEM_SHADER.equals(path)) {
+            patched = replaceExactlyOnce(
+                    patched,
+                    ITEM_TEX_COORD_INPUT,
+                    ITEM_TEX_COORD_INPUT + "\nflat in int metallumHeldEmission;"
+            );
+        }
 
         if ("core/text".equals(path)) {
             patched = patched.replace(
@@ -296,6 +324,16 @@ public final class MetallumMaterialShaderPatcher {
 
     private static String addTrustedEmission(final String path, final String source) {
         return switch (path) {
+            case ITEM_SHADER -> source.replace(
+                    "    color *= lightMapColor;",
+                    "    vec3 metallumUnlitBase = max(color.rgb, vec3(0.0));\n"
+                            + "    color *= lightMapColor;\n"
+                            + "    if (metallumHeldEmission > 0) {\n"
+                            + "        float metallumEmission = 1.0\n"
+                            + "                + 0.75 * float(metallumHeldEmission) / 15.0;\n"
+                            + "        color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);\n"
+                            + "    }"
+            );
             case VanillaHdrShaderPatcher.ENTITY -> source.replace(
                     "#ifndef EMISSIVE\n    color *= lightMapColor;\n#endif",
                     "vec3 metallumUnlitBase = max(color.rgb, vec3(0.0));\n"
@@ -411,6 +449,16 @@ public final class MetallumMaterialShaderPatcher {
                 patched,
                 "metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2))"
         );
+        if (ITEM_SHADER.equals(path)) {
+            remappedLightmapSamples += countOccurrences(
+                    patched,
+                    "sample_lightmap(Sampler2, metallumHeldLightCoords)"
+            );
+            if (countOccurrences(patched, "flat out int metallumHeldEmission;") != 1
+                    || countOccurrences(patched, "UV2.x >= 257 && UV2.x <= 271") != 1) {
+                return Result.failure(original, "held-item emission vertex anchor changed");
+            }
+        }
         if (remappedLightmapSamples != originalLightmapSamples) {
             return Result.failure(
                     original,
@@ -477,6 +525,14 @@ public final class MetallumMaterialShaderPatcher {
         if (VanillaHdrShaderPatcher.ENTITY.equals(path)
                 && countOccurrences(patched, "color.rgb = max(color.rgb, metallumUnlitBase * 4.0);") != 1) {
             return Result.failure(original, "entity emissive material anchor changed");
+        }
+        if (ITEM_SHADER.equals(path)
+                && (countOccurrences(patched, "flat in int metallumHeldEmission;") != 1
+                || countOccurrences(
+                        patched,
+                        "color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);"
+                ) != 1)) {
+            return Result.failure(original, "held-item emission fragment anchor changed");
         }
         if (VanillaHdrShaderPatcher.BEACON_BEAM.equals(path)
                 && countOccurrences(patched, "color.rgb = max(color.rgb, metallumUnlitBase * 4.0);") != 1) {
@@ -599,7 +655,9 @@ public final class MetallumMaterialShaderPatcher {
                 || source.contains("metallumMaterialSrgbToLinear")
                 || source.contains("metallumMaterialDecodeColor")
                 || source.contains("metallumMaterialDecodeLegacyLightmap")
-                || source.contains("metallumMaterialTextCoverage");
+                || source.contains("metallumMaterialTextCoverage")
+                || source.contains("metallumHeldEmission")
+                || source.contains("metallumHeldLightCoords");
     }
 
     private static String mainBody(final String source) {

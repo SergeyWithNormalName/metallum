@@ -2,6 +2,7 @@ package com.metallum.client.lighting;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.hdr.HeldItemEmission;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -20,6 +21,8 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.item.ItemDisplayContext;
+import net.minecraft.world.item.Items;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -109,6 +112,21 @@ public final class AdvancedLightRegistryTests {
                         && MinecraftLightPolicy.effectiveEmission(
                         Blocks.SOUL_TORCH.defaultBlockState()) == 10,
                 "lower-emission soul torch was filtered out");
+        require(HeldItemEmission.surfaceEmission(
+                        Items.TORCH,
+                        ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
+                ) == Blocks.TORCH.defaultBlockState().getLightEmission(),
+                "held torch surface emission diverged from its dynamic-light block policy");
+        require(HeldItemEmission.surfaceEmission(
+                        Items.STONE,
+                        ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
+                ) == 0,
+                "non-emitting held block received surface emission");
+        require(HeldItemEmission.surfaceEmission(
+                        Items.TORCH,
+                        ItemDisplayContext.GUI
+                ) == 0,
+                "held torch surface emission leaked into GUI rendering");
         require(MinecraftLightPolicy.block(Blocks.LAVA.defaultBlockState(), 0, 0, 0)
                         != null
                         && MinecraftLightPolicy.block(

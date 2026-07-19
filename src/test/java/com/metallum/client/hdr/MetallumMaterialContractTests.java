@@ -8,6 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
+import net.minecraft.util.LightCoordsUtil;
+import net.minecraft.world.item.ItemDisplayContext;
+
 /** Source-backed L2 material adapter tests for Minecraft 26.2 and Sodium 0.9.1. */
 public final class MetallumMaterialContractTests {
     private static final String SODIUM_SHADER = "blocks/block_layer_opaque";
@@ -22,6 +25,7 @@ public final class MetallumMaterialContractTests {
         testSodiumLinearMaterialAdapter(sources);
         testPostProcessingContracts(sources);
         testNumericMaterialContracts();
+        testHeldItemEmissionContract();
         testLoadingUiContinuity();
         testFailClosedBehavior(sources);
         AdvancedDirectLightingShaderTests.runAll();
@@ -119,6 +123,13 @@ public final class MetallumMaterialContractTests {
                         "lightMapColor = metallumMaterialDecodeLegacyLightmap(sample_lightmap(Sampler2, UV2));"),
                 "entity lightmap attenuation was not calibrated for the linear material domain");
 
+        String itemVertex = patched(sources, "minecraft", "core/item",
+                MetallumMaterialShaderPatcher.Stage.VERTEX);
+        require(itemVertex.contains("flat out int metallumHeldEmission;")
+                        && itemVertex.contains("UV2.x >= 257 && UV2.x <= 271")
+                        && itemVertex.contains("sample_lightmap(Sampler2, metallumHeldLightCoords)"),
+                "held-item emission marker is not decoded before item lightmap sampling");
+
         String entityFragment = patched(sources, "minecraft", "core/entity",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
         require(entityFragment.contains(
@@ -134,6 +145,14 @@ public final class MetallumMaterialContractTests {
                 "material decode no longer preserves alpha as linear coverage data");
         require(entityFragment.contains("color.rgb = max(color.rgb, metallumUnlitBase * 4.0);"),
                 "entity EMISSIVE does not author exact 4x radiance");
+
+        String itemFragment = patched(sources, "minecraft", "core/item",
+                MetallumMaterialShaderPatcher.Stage.FRAGMENT);
+        require(itemFragment.contains("flat in int metallumHeldEmission;")
+                        && itemFragment.contains("0.75 * float(metallumHeldEmission) / 15.0")
+                        && itemFragment.contains(
+                        "color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);"),
+                "held block items do not receive the bounded block-surface emission floor");
 
         String terrain = patched(sources, "minecraft", "core/terrain",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
@@ -285,6 +304,35 @@ public final class MetallumMaterialContractTests {
                 "linear alpha blend");
         require(close(MetallumMaterialShaderPatcher.linearBlend(2.0f, 0.25f, 0.0f), 0.25f),
                 "zero-alpha blend");
+    }
+
+    private static void testHeldItemEmissionContract() {
+        int emission = HeldItemEmission.surfaceEmission(
+                14,
+                ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
+        );
+        require(emission == 14, "held torch did not inherit its block-state emission");
+        require(HeldItemEmission.surfaceEmission(
+                        14,
+                        ItemDisplayContext.THIRD_PERSON_LEFT_HAND
+                ) == emission,
+                "third-person held emission differs from first person");
+        require(HeldItemEmission.surfaceEmission(14, ItemDisplayContext.GUI) == 0,
+                "held emission leaked into the GUI");
+        require(HeldItemEmission.surfaceEmission(
+                        0,
+                        ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
+                ) == 0,
+                "non-emitting held block received an emission marker");
+
+        int original = LightCoordsUtil.pack(2, 5);
+        int encoded = HeldItemEmission.encodeLightCoords(original, emission);
+        require(HeldItemEmission.encodedEmission(encoded) == emission,
+                "held emission did not round-trip through light coordinates");
+        require((encoded & 0xffff0000) == (original & 0xffff0000),
+                "held emission marker changed the sky-light coordinate");
+        require(HeldItemEmission.encodeLightCoords(original, 0) == original,
+                "zero held emission changed light coordinates");
     }
 
     private static void testLoadingUiContinuity() {
