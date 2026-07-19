@@ -35,6 +35,7 @@ public final class VoxelOccupancyTests {
         testClipmapControllerLifecycleAndRetry();
         testDirtyQueueCoalescingBoundsAgeAndActualDrain();
         testReadyPublicationFairness();
+        testVanillaPartialBlockMaterialClassification();
         System.out.println("L5 voxel occupancy pure-Java tests passed");
     }
 
@@ -96,6 +97,31 @@ public final class VoxelOccupancyTests {
             }
         }
         require(slab.occupiedCellCount() == 4, "bottom slab reference mask changed");
+    }
+
+    private static void testVanillaPartialBlockMaterialClassification() {
+        net.minecraft.SharedConstants.tryDetectVersion();
+        net.minecraft.server.Bootstrap.bootStrap();
+        VoxelMaterialDescriptor glass = SodiumVoxelSectionExtractor.materialFor(
+                net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState()
+        );
+        VoxelMaterialDescriptor slab = SodiumVoxelSectionExtractor.materialFor(
+                net.minecraft.world.level.block.Blocks.STONE_SLAB.defaultBlockState()
+        );
+        VoxelMaterialDescriptor stairs = SodiumVoxelSectionExtractor.materialFor(
+                net.minecraft.world.level.block.Blocks.STONE_STAIRS.defaultBlockState()
+        );
+        VoxelMaterialDescriptor fence = SodiumVoxelSectionExtractor.materialFor(
+                net.minecraft.world.level.block.Blocks.OAK_FENCE.defaultBlockState()
+        );
+        require(slab.materialClass() == VoxelMaterialClass.CUTOUT,
+                "a stone slab was classified as " + slab.materialClass());
+        require(stairs.materialClass() == VoxelMaterialClass.CUTOUT,
+                "stone stairs were classified as " + stairs.materialClass());
+        require(fence.materialClass() == VoxelMaterialClass.CUTOUT,
+                "an oak fence was classified as " + fence.materialClass());
+        require(glass.materialClass() == VoxelMaterialClass.GLASS,
+                "glass lost its transparent material classification");
     }
 
     private static void testStairFenceAndPaneMasks() {

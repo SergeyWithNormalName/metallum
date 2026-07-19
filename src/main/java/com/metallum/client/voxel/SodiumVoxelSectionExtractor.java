@@ -77,7 +77,7 @@ public final class SodiumVoxelSectionExtractor {
         );
     }
 
-    private static VoxelMaterialDescriptor materialFor(final BlockState state) {
+    static VoxelMaterialDescriptor materialFor(final BlockState state) {
         if (state.isAir()) {
             return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.AIR);
         }
@@ -87,7 +87,10 @@ public final class SodiumVoxelSectionExtractor {
         if (state.is(BlockTags.LEAVES)) {
             return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.FOLIAGE);
         }
-        if (state.getBlock() instanceof TransparentBlock || state.getLightDampening() == 0) {
+        // Vanilla block-light propagation deliberately lets slabs, stairs and fences pass light.
+        // That does not make their occupied voxel cells glass for a ray shadow: only a block
+        // that is actually rendered as transparent keeps the GLASS material class.
+        if (state.getBlock() instanceof TransparentBlock) {
             return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.GLASS);
         }
         if (!state.isSolidRender()) {
