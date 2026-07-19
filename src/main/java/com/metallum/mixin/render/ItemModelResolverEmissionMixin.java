@@ -17,7 +17,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(ItemModelResolver.class)
 abstract class ItemModelResolverEmissionMixin {
     @Inject(method = "updateForTopItem", at = @At("RETURN"))
-    private void metallum$tagHeldBlockEmission(
+    private void metallum$tagInWorldBlockItemEmission(
             final ItemStackRenderState output,
             final ItemStack item,
             final ItemDisplayContext displayContext,

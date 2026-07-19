@@ -25,7 +25,7 @@ public final class MetallumMaterialContractTests {
         testSodiumLinearMaterialAdapter(sources);
         testPostProcessingContracts(sources);
         testNumericMaterialContracts();
-        testHeldItemEmissionContract();
+        testInWorldItemEmissionContract();
         testLoadingUiContinuity();
         testFailClosedBehavior(sources);
         AdvancedDirectLightingShaderTests.runAll();
@@ -128,7 +128,7 @@ public final class MetallumMaterialContractTests {
         require(itemVertex.contains("flat out int metallumHeldEmission;")
                         && itemVertex.contains("UV2.x >= 257 && UV2.x <= 271")
                         && itemVertex.contains("sample_lightmap(Sampler2, metallumHeldLightCoords)"),
-                "held-item emission marker is not decoded before item lightmap sampling");
+                "in-world item emission marker is not decoded before item lightmap sampling");
 
         String entityFragment = patched(sources, "minecraft", "core/entity",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
@@ -152,7 +152,7 @@ public final class MetallumMaterialContractTests {
                         && itemFragment.contains("float metallumEmission = 1.75")
                         && itemFragment.contains(
                         "color.rgb = max(color.rgb, metallumUnlitBase * metallumEmission);"),
-                "held block items do not use scaled block-surface emission");
+                "in-world block items do not use scaled block-surface emission");
 
         String terrain = patched(sources, "minecraft", "core/terrain",
                 MetallumMaterialShaderPatcher.Stage.FRAGMENT);
@@ -308,7 +308,7 @@ public final class MetallumMaterialContractTests {
                 "zero-alpha blend");
     }
 
-    private static void testHeldItemEmissionContract() {
+    private static void testInWorldItemEmissionContract() {
         int emission = HeldItemEmission.surfaceEmission(
                 14,
                 ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
@@ -319,22 +319,28 @@ public final class MetallumMaterialContractTests {
                         ItemDisplayContext.THIRD_PERSON_LEFT_HAND
                 ) == emission,
                 "third-person held emission differs from first person");
+        require(HeldItemEmission.surfaceEmission(15, ItemDisplayContext.GROUND) == 15,
+                "dropped block item did not inherit its block-state emission");
         require(HeldItemEmission.surfaceEmission(14, ItemDisplayContext.GUI) == 0,
-                "held emission leaked into the GUI");
+                "in-world item emission leaked into the GUI");
+        require(HeldItemEmission.surfaceEmission(14, ItemDisplayContext.FIXED) == 0,
+                "dropped-item emission leaked into item frames");
+        require(HeldItemEmission.surfaceEmission(14, ItemDisplayContext.ON_SHELF) == 0,
+                "dropped-item emission leaked onto shelves");
         require(HeldItemEmission.surfaceEmission(
                         0,
                         ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
                 ) == 0,
-                "non-emitting held block received an emission marker");
+                "non-emitting in-world block item received an emission marker");
 
         int original = LightCoordsUtil.pack(2, 5);
         int encoded = HeldItemEmission.encodeLightCoords(original, emission);
         require(HeldItemEmission.encodedEmission(encoded) == emission,
-                "held emission did not round-trip through light coordinates");
+                "item emission did not round-trip through light coordinates");
         require((encoded & 0xffff0000) == (original & 0xffff0000),
-                "held emission marker changed the sky-light coordinate");
+                "item emission marker changed the sky-light coordinate");
         require(HeldItemEmission.encodeLightCoords(original, 0) == original,
-                "zero held emission changed light coordinates");
+                "zero item emission changed light coordinates");
     }
 
     private static void testLoadingUiContinuity() {

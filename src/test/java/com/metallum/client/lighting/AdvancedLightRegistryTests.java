@@ -118,10 +118,15 @@ public final class AdvancedLightRegistryTests {
                 ) == Blocks.TORCH.defaultBlockState().getLightEmission(),
                 "held torch surface emission diverged from its dynamic-light block policy");
         require(HeldItemEmission.surfaceEmission(
+                        Items.GLOWSTONE,
+                        ItemDisplayContext.GROUND
+                ) == Blocks.GLOWSTONE.defaultBlockState().getLightEmission(),
+                "dropped glowstone surface emission diverged from its dynamic-light block policy");
+        require(HeldItemEmission.surfaceEmission(
                         Items.STONE,
-                        ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
+                        ItemDisplayContext.GROUND
                 ) == 0,
-                "non-emitting held block received surface emission");
+                "non-emitting dropped block received surface emission");
         require(HeldItemEmission.surfaceEmission(
                         Items.TORCH,
                         ItemDisplayContext.GUI

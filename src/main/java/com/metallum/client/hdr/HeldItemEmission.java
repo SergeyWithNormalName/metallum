@@ -5,7 +5,7 @@ import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.ItemStack;
 
-/** Carries held block emission through the otherwise legacy item lightmap coordinates. */
+/** Carries in-world block-item emission through the otherwise legacy item lightmap coordinates. */
 public final class HeldItemEmission {
     static final int LIGHT_COORD_MARKER_BASE = 0x100;
     private static final int LIGHT_COORD_LOW_WORD_MASK = 0xffff;
@@ -28,7 +28,7 @@ public final class HeldItemEmission {
             final Item item,
             final ItemDisplayContext displayContext
     ) {
-        if (!isHand(displayContext) || !(item instanceof BlockItem blockItem)) {
+        if (!supportsSurfaceEmission(displayContext) || !(item instanceof BlockItem blockItem)) {
             return 0;
         }
         return surfaceEmission(
@@ -41,13 +41,16 @@ public final class HeldItemEmission {
             final int blockEmission,
             final ItemDisplayContext displayContext
     ) {
-        return isHand(displayContext) ? Math.clamp(blockEmission, 0, MAX_EMISSION) : 0;
+        return supportsSurfaceEmission(displayContext)
+                ? Math.clamp(blockEmission, 0, MAX_EMISSION)
+                : 0;
     }
 
     /**
      * Uses the first normally-unused lightmap coordinate above 255 as a shader-visible marker.
      * Vanilla sampling clamps it to full block light, while the METALLUM item shader also
      * reconstructs the authored surface-emission floor from the encoded 0..15 strength.
+     * The marker is admitted only for held and dropped-item rendering contexts.
      */
     public static int encodeLightCoords(final int lightCoords, final int emission) {
         int bounded = Math.clamp(emission, 0, MAX_EMISSION);
@@ -63,10 +66,11 @@ public final class HeldItemEmission {
         return emission >= 1 && emission <= MAX_EMISSION ? emission : 0;
     }
 
-    private static boolean isHand(final ItemDisplayContext displayContext) {
+    private static boolean supportsSurfaceEmission(final ItemDisplayContext displayContext) {
         return displayContext == ItemDisplayContext.FIRST_PERSON_LEFT_HAND
                 || displayContext == ItemDisplayContext.FIRST_PERSON_RIGHT_HAND
                 || displayContext == ItemDisplayContext.THIRD_PERSON_LEFT_HAND
-                || displayContext == ItemDisplayContext.THIRD_PERSON_RIGHT_HAND;
+                || displayContext == ItemDisplayContext.THIRD_PERSON_RIGHT_HAND
+                || displayContext == ItemDisplayContext.GROUND;
     }
 }
