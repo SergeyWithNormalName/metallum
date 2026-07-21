@@ -14,7 +14,7 @@ abstract class SodiumEnumOptionMixin {
     private static final Identifier FULLSCREEN_MODE_ID = Identifier.fromNamespaceAndPath("sodium", "general.fullscreen_mode");
 
     @Inject(method = "isValueAllowed", at = @At("HEAD"), cancellable = true)
-    private void metallum$disallowExclusiveFullscreenOnMac(final Object value, final CallbackInfoReturnable<Boolean> cir) {
+    private void metallum$disallowExclusiveFullscreenOnMac(final Enum<?> value, final CallbackInfoReturnable<Boolean> cir) {
         if (!MacosUtil.IS_MACOS) {
             return;
         }
