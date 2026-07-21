@@ -79,6 +79,7 @@
     "sodium.SectionRenderDataStorageTerrainAccessMixin",
     "sodium.SodiumRelightBlockContextAccess",
     "sodium.SodiumPreferredGraphicsApiMixin",
+    "sodium.SodiumConfigBuilderMixin",
     "sodium.SodiumWorldRendererShadowMixin",
     "sodium.TerrainRenderPassShadowMixin",
     "sodium.UniformBufferManagerShadowMixin",
