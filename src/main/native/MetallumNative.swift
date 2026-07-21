@@ -11308,6 +11308,8 @@ public func metallum_configure_layer(
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
+    layer.isOpaque = true
+    layer.opacity = 1.0
     layer.pixelFormat = useEdr ? .rgba16Float : .bgra8Unorm
     layer.colorspace = colorSpace
     layer.edrMetadata = nil
@@ -11329,6 +11331,72 @@ public func metallum_configure_layer(
     layer.displaySyncEnabled = immediatePresentMode == 0
     CATransaction.commit()
     return 1
+}
+
+@_cdecl("metallum_fullscreen_create")
+public func metallum_fullscreen_create(
+    _ rawWindow: UnsafeMutableRawPointer?,
+    _ rawLayer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    guard let rawWindow, let rawLayer else {
+        return nil
+    }
+
+    let window = Unmanaged<NSWindow>.fromOpaque(rawWindow).takeUnretainedValue()
+    let layer = Unmanaged<CAMetalLayer>.fromOpaque(rawLayer).takeUnretainedValue()
+
+    let coordinator = MetallumFullscreenCoordinator(window: window, layer: layer)
+    return Unmanaged.passRetained(coordinator).toOpaque()
+}
+
+@_cdecl("metallum_fullscreen_set")
+public func metallum_fullscreen_set(
+    _ rawCoordinator: UnsafeMutableRawPointer?,
+    _ enabled: Int32
+) -> Int32 {
+    guard let rawCoordinator else {
+        return 0
+    }
+
+    let coordinator = Unmanaged<MetallumFullscreenCoordinator>.fromOpaque(rawCoordinator).takeUnretainedValue()
+    coordinator.setFullscreen(enabled != 0)
+    return 1
+}
+
+@_cdecl("metallum_fullscreen_toggle")
+public func metallum_fullscreen_toggle(
+    _ rawCoordinator: UnsafeMutableRawPointer?
+) -> Int32 {
+    guard let rawCoordinator else {
+        return 0
+    }
+
+    let coordinator = Unmanaged<MetallumFullscreenCoordinator>.fromOpaque(rawCoordinator).takeUnretainedValue()
+    coordinator.toggleFullscreen()
+    return 1
+}
+
+@_cdecl("metallum_fullscreen_query")
+public func metallum_fullscreen_query(
+    _ rawCoordinator: UnsafeMutableRawPointer?
+) -> UInt64 {
+    guard let rawCoordinator else {
+        return 0
+    }
+
+    let coordinator = Unmanaged<MetallumFullscreenCoordinator>.fromOpaque(rawCoordinator).takeUnretainedValue()
+    return coordinator.encodedSnapshot()
+}
+
+@_cdecl("metallum_fullscreen_release")
+public func metallum_fullscreen_release(
+    _ rawCoordinator: UnsafeMutableRawPointer?
+) {
+    guard let rawCoordinator else {
+        return
+    }
+
+    Unmanaged<MetallumFullscreenCoordinator>.fromOpaque(rawCoordinator).release()
 }
 
 @_cdecl("metallum_MTLCommandBuffer_encodeHdrUiBackdrop")

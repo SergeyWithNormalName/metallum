@@ -17,7 +17,7 @@ repositories {
 
 def isMacOs = System.getProperty("os.name").startsWith("Mac")
 def isAppleSiliconMac = isMacOs && System.getProperty("os.arch") in ["aarch64", "arm64"]
-def macNativeSource = layout.projectDirectory.file("src/main/native/MetallumNative.swift")
+def macNativeSources = fileTree("src/main/native").matching { include "**/*.swift" }
 def macNativeLibrary = layout.buildDirectory.file("generated/metallum/natives/macos/libmetallum.dylib")
 def macMetalSources = [
 	Present: layout.projectDirectory.file("src/main/metal/MetallumPresent.metal"),
@@ -82,7 +82,7 @@ processResources {
 tasks.register("buildMacNative", Exec) {
 	onlyIf { isMacOs }
 
-	inputs.file(macNativeSource)
+	inputs.files(macNativeSources)
 	inputs.property("compilerArguments", macNativeCompilerArguments)
 	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
 	inputs.property("macOsSdkVersion", macOsSdkVersion)
@@ -96,7 +96,7 @@ tasks.register("buildMacNative", Exec) {
 	commandLine "swiftc",
 		*macNativeCompilerArguments,
 		"-o", macNativeLibrary.get().asFile.absolutePath,
-		macNativeSource.asFile.absolutePath
+		*macNativeSources.files.collect { it.absolutePath }
 }
 
 def macMetalCompileTasks = macMetalSources.collect { name, sourceFile ->

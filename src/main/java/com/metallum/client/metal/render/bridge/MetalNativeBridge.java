@@ -73,6 +73,11 @@ public final class MetalNativeBridge {
                     FunctionDescriptor.of(LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
             createMetalLayer = downcall(lookup, "metallum_create_metal_layer", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, DOUBLE));
+            fullscreenCreate = downcall(lookup, "metallum_fullscreen_create", FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            fullscreenSet = downcall(lookup, "metallum_fullscreen_set", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, INT));
+            fullscreenToggle = downcall(lookup, "metallum_fullscreen_toggle", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
+            fullscreenQuery = downcallWithoutCritical(lookup, "metallum_fullscreen_query", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
+            fullscreenRelease = downcall(lookup, "metallum_fullscreen_release", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
@@ -686,6 +691,11 @@ public final class MetalNativeBridge {
     private static final MethodHandle EDRMonitorQuery;
     private static final MethodHandle rendererCapabilitiesV1;
     private static final MethodHandle createMetalLayer;
+    private static final MethodHandle fullscreenCreate;
+    private static final MethodHandle fullscreenSet;
+    private static final MethodHandle fullscreenToggle;
+    private static final MethodHandle fullscreenQuery;
+    private static final MethodHandle fullscreenRelease;
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
@@ -870,6 +880,46 @@ public final class MetalNativeBridge {
             return (MemorySegment) createMetalLayer.invokeExact(segment(device), contentsScale);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_metal_layer", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_fullscreen_create(final MemorySegment nsWindow, final MemorySegment metalLayer) {
+        try {
+            return (MemorySegment) fullscreenCreate.invokeExact(segment(nsWindow), segment(metalLayer));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fullscreen_create", throwable);
+        }
+    }
+
+    public static int metallum_fullscreen_set(final MemorySegment coordinator, final int enabled) {
+        try {
+            return (int) fullscreenSet.invokeExact(segment(coordinator), enabled);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fullscreen_set", throwable);
+        }
+    }
+
+    public static int metallum_fullscreen_toggle(final MemorySegment coordinator) {
+        try {
+            return (int) fullscreenToggle.invokeExact(segment(coordinator));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fullscreen_toggle", throwable);
+        }
+    }
+
+    public static long metallum_fullscreen_query(final MemorySegment coordinator) {
+        try {
+            return (long) fullscreenQuery.invokeExact(segment(coordinator));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fullscreen_query", throwable);
+        }
+    }
+
+    public static void metallum_fullscreen_release(final MemorySegment coordinator) {
+        try {
+            fullscreenRelease.invokeExact(segment(coordinator));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_fullscreen_release", throwable);
         }
     }
 

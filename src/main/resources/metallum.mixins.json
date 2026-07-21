@@ -42,6 +42,7 @@
     "render.ShaderManagerMixin",
     "render.ShaderSourceKeyAccessor",
     "render.PreferredGraphicsApiMixin",
+    "render.NativeFullscreenToggleMixin",
     "render.RenderTargetHdrMixin",
     "sodium.BlockRendererHdrMixin",
     "sodium.BlockRendererRelightOracleMixin",

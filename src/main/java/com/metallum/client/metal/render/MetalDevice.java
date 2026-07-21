@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.display.NativeFullscreen;
 import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
@@ -255,6 +256,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long lastVoxelDebugChecksumSubmitIndex = Long.MIN_VALUE;
     private boolean voxelDebugChecksumRuntimeDisabled;
     private boolean voxelDebugChecksumFailureLogged;
+    private NativeFullscreen nativeFullscreen;
 
     MetalDevice(
             final ShaderSource defaultShaderSource,
@@ -272,6 +274,12 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
         this.cocoaView = cocoaView;
+        try {
+            this.nativeFullscreen = new NativeFullscreen(cocoaWindow, metalLayer);
+        } catch (Throwable throwable) {
+            Metallum.LOGGER.warn("Failed to create NativeFullscreen coordinator", throwable);
+            this.nativeFullscreen = null;
+        }
         HdrSemanticState.reset();
         HdrSceneState.reset();
         MetallumMaterialState.reset();
@@ -632,11 +640,20 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         MetalNativeBridge.metallum_release_object(this.metalLayer);
         this.commandQueue.close();
+        if (this.nativeFullscreen != null) {
+            this.nativeFullscreen.close();
+            this.nativeFullscreen = null;
+        }
         if (!MetalNativeBridge.isNullHandle(this.edrMonitor)) {
             MetalNativeBridge.metallum_release_object(this.edrMonitor);
         }
         MetalNativeBridge.metallum_release_device_caches(this.metalDeviceHandle);
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
+    }
+
+    @Nullable
+    public NativeFullscreen nativeFullscreen() {
+        return this.nativeFullscreen;
     }
 
     @Override
