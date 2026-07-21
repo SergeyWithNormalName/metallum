@@ -322,6 +322,8 @@ Hot path вызывает уже выбранный executor/pass implementation
 - На HiDPI дисплеях валидировать exact GLFW/Metal backing framebuffer отдельно от
   logical `Window` points: target monitor, fullscreen и refresh остаются строгими,
   но logical размер не сопоставляется с backing pixels.
+- `METALLUM_BENCHMARK=1` закрепляет exact GLFW exclusive mode; production остаётся
+  на native AppKit fullscreen policy.
 - Записывать capability snapshot, executor/compiler kind, allocator high-water, argument-table updates, residency membership changes, barrier count/stages и pipeline archive hit/miss.
 - Добавить счётчик chunk rebuild reason: geometry/material/light/unknown.
 - Зафиксировать screenshot и HDR numeric probes до изменений.

@@ -1526,7 +1526,7 @@ public final class MetalFxBenchmarkController {
             return;
         }
         if (this.stageFrames >= WINDOW_TRANSITION_TIMEOUT_FRAMES) {
-            fail(minecraft, "timed out waiting for exact target framebuffer on the selected monitor");
+            fail(minecraft, framebufferTimeoutDetails(window));
         }
     }
 
@@ -2251,8 +2251,10 @@ public final class MetalFxBenchmarkController {
 
     private boolean isTargetFramebuffer(final Window window) {
         if (!this.useCurrentWindow) {
-            if (GLFW.glfwGetWindowMonitor(window.handle()) != this.targetMonitor
-                    || !window.isFullscreen()) {
+            // A matching GLFW monitor attachment is the runtime exclusive-fullscreen
+            // contract. Window.isFullscreen() is a cached Minecraft option and can
+            // remain false while macOS has already entered the target mode.
+            if (GLFW.glfwGetWindowMonitor(window.handle()) != this.targetMonitor) {
                 return false;
             }
         }
@@ -2286,6 +2288,30 @@ public final class MetalFxBenchmarkController {
                 // a live window, but it must not be compared to backing pixels.
                 && logicalWindowWidth > 0
                 && logicalWindowHeight > 0;
+    }
+
+    private String framebufferTimeoutDetails(final Window window) {
+        GLFW.glfwGetFramebufferSize(
+                window.handle(),
+                this.framebufferWidthScratch,
+                this.framebufferHeightScratch
+        );
+        long actualMonitor = GLFW.glfwGetWindowMonitor(window.handle());
+        Monitor bestMonitor = window.findBestMonitor();
+        long bestMonitorHandle = bestMonitor == null ? 0L : bestMonitor.monitor();
+        return "timed out waiting for exact target framebuffer"
+                + " actual_monitor=" + actualMonitor + "/" + monitorName(actualMonitor)
+                + " target_monitor=" + this.targetMonitor + "/" + monitorName(this.targetMonitor)
+                + " best_monitor=" + bestMonitorHandle + "/" + monitorName(bestMonitorHandle)
+                + " framebuffer=" + this.framebufferWidthScratch[0] + "x" + this.framebufferHeightScratch[0]
+                + " logical_window=" + window.getWidth() + "x" + window.getHeight()
+                + " screen=" + window.getScreenWidth() + "x" + window.getScreenHeight()
+                + " fullscreen=" + window.isFullscreen()
+                + " expected_framebuffer=" + this.expectedFramebufferWidth + "x" + this.expectedFramebufferHeight;
+    }
+
+    private static String monitorName(final long monitor) {
+        return monitor == 0L ? "<none>" : String.valueOf(GLFW.glfwGetMonitorName(monitor));
     }
 
     private void startSegment() {

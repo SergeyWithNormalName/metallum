@@ -552,24 +552,41 @@ workarea имеет `1512×949` points. Значит validator ошибочно 
 ### Метод и сохранённый контракт
 
 `MetalFxBenchmarkController.isTargetFramebuffer` продолжает требовать выбранный
-target monitor, Minecraft fullscreen и точный GLFW backing framebuffer; logical
-`Window` width/height теперь проверяются только как положительные. Refresh остаётся
-привязан к выбранному exact video mode и проверяется launcher marker. Добавлен
+target monitor через exact GLFW monitor attachment (runtime exclusive-fullscreen
+contract) и точный GLFW backing framebuffer; cached `Window.isFullscreen()` не
+используется, потому что на macOS он может оставаться false уже после входа в exact
+video mode. Logical `Window` width/height теперь проверяются только как
+положительные. Refresh остаётся привязан к выбранному exact video mode и проверяется
+launcher marker. Добавлен
 `BenchmarkWindowContractTests`: Retina `3024×1964` framebuffer с logical
 `1512×982` принимается, а неверный backing size и нулевое logical окно отвергаются.
+`METALLUM_BENCHMARK=1` теперь неизменно оставляет GLFW mode changes ванильному
+пути и не переводит startup exclusive mode в AppKit fullscreen; обычный production
+client сохраняет AppKit policy.
 
 ### Результат и побочные эффекты
 
 `./gradlew benchmarkWindowContractUnitTest --console=plain` прошёл. Проверка
 `scripts/run_metal_benchmark.sh ... --preflight-only` подтвердила фиксированные
 Nether route/settings: MetalFX off, Balanced, VSync off, `3024×1964@120`, HDR scene
-и frozen simulation. Полный runtime был остановлен до measurement, чтобы отдельный
-benchmark-fix commit стал clean HEAD для baseline; поэтому здесь намеренно нет FPS,
-CPU/GPU tail или выводов о производительности. Renderer, изображение, качество и
-tracked route/settings не менялись.
+и frozen simulation. Первый runtime на clean `0ae06ac` всё ещё не дошёл до
+measurement: `Window.isFullscreen()` оказался stale false при уже прикреплённом к
+target monitor GLFW окне. Это выявило вторую ошибочную cached-проверку validator;
+она удалена. Follow-up smoke `300+300` после этой правки всё равно завершился тем
+же timeout до `WINDOW_READY`; следовательно, stale cached flag был реальным
+недостоверным условием, но не единственной причиной сбоя window transition. Нет
+`ROUTE_READY`, `MEASURE_START/END` или nonzero summary. Renderer, изображение,
+качество и tracked route/settings не менялись.
+
+Финальная benchmark-only адаптация выключила AppKit fullscreen interception для
+`METALLUM_BENCHMARK=1`. Smoke `300+300` подтвердил exact `WINDOW_READY` на
+Built-in Retina с `3024×1964@120`, затем `ROUTE_READY`, `MEASURE_START/END` и
+`COMPLETE`; raw JSONL дал валидный nonzero non-release summary (FPS `21.709`).
+Короткий smoke не создаёт release attestation, потому что release contract требует
+десять `300`-frame окон, то есть стандартные `3000` measured frames.
 
 ### Итог
 
-Исправление оставлено. Следующее измерение обязано идти только после clean commit и
-содержать три production-прогона плюс отдельный detailed diagnostic; не использовать
-первый оборванный запуск как baseline.
+HiDPI и native fullscreen benchmark contract восстановлены. Следующий baseline должен
+идти на clean commit с тремя `1800+3000` production runs и отдельным detailed run;
+короткий smoke не использовать как performance baseline.

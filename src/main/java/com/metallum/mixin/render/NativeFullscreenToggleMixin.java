@@ -40,7 +40,7 @@ abstract class NativeFullscreenToggleMixin {
 
     @Inject(method = "updateFullscreenIfChanged", at = @At("HEAD"))
     private void metallum$syncAppKitFullscreenState(final CallbackInfo ci) {
-        if (!MacosUtil.IS_MACOS) {
+        if (!MacosUtil.IS_MACOS || NativeFullscreenStartup.allowsGlfwModeChange()) {
             return;
         }
 
@@ -82,7 +82,7 @@ abstract class NativeFullscreenToggleMixin {
 
     @Inject(method = "isFullscreen", at = @At("HEAD"), cancellable = true)
     private void metallum$nativeIsFullscreen(final CallbackInfoReturnable<Boolean> cir) {
-        if (!MacosUtil.IS_MACOS) {
+        if (!MacosUtil.IS_MACOS || NativeFullscreenStartup.allowsGlfwModeChange()) {
             return;
         }
 

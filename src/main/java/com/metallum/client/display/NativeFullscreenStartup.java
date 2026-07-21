@@ -7,17 +7,21 @@ import org.lwjgl.glfw.GLFW;
 
 /** Converts the vanilla startup fullscreen window to AppKit fullscreen after Metal is ready. */
 public final class NativeFullscreenStartup {
+    private static final boolean BENCHMARK_GLFW_MODE_CHANGE = "1".equals(
+            System.getenv("METALLUM_BENCHMARK")
+    );
     private static final ThreadLocal<Boolean> ALLOW_GLFW_MODE_CHANGE = ThreadLocal.withInitial(() -> false);
 
     private NativeFullscreenStartup() {
     }
 
     public static boolean allowsGlfwModeChange() {
-        return ALLOW_GLFW_MODE_CHANGE.get();
+        return BENCHMARK_GLFW_MODE_CHANGE || ALLOW_GLFW_MODE_CHANGE.get();
     }
 
     public static void normalizeInitialFullscreen(final Window window, final NativeFullscreen nativeFullscreen) {
-        if (!MacosUtil.IS_MACOS || GLFW.glfwGetWindowMonitor(window.handle()) == 0L) {
+        if (!MacosUtil.IS_MACOS || BENCHMARK_GLFW_MODE_CHANGE
+                || GLFW.glfwGetWindowMonitor(window.handle()) == 0L) {
             return;
         }
 
