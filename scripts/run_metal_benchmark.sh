@@ -42,6 +42,7 @@ SETTINGS_VALUES_BEFORE=""
 RENDERER_VALUES_BEFORE=""
 ARTIFACT_SHA256=""
 ATTEST_PENDING=0
+OPTIONS_FILE_BACKUP=""
 
 usage() {
     cat <<'EOF'
@@ -485,6 +486,11 @@ if [ "$PREFLIGHT_ONLY" -eq 1 ]; then
     exit 0
 fi
 
+OPTIONS_FILE_BACKUP=$(mktemp "${TMPDIR:-/tmp}/metallum-benchmark-options.XXXXXX") \
+    || die "failed to create benchmark options backup"
+cp "$OPTIONS_FILE" "$OPTIONS_FILE_BACKUP" \
+    || die "failed to back up benchmark options"
+
 echo "Building the exact Java, resource, and native benchmark artifacts"
 (
     cd "$ROOT"
@@ -530,6 +536,13 @@ cleanup() {
         echo "  before: ${SOURCE_SHA256:-<unavailable>}" >&2
         echo "  after:  ${source_after:-<unavailable>}" >&2
         cleanup_status=2
+    fi
+
+    # Vanilla resets this ignored launch preference on orderly fullscreen exit.
+    # Restore the exact launcher snapshot before validating benchmark quality
+    # settings; all other tracked runtime contracts remain independently checked.
+    if [ -n "${OPTIONS_FILE_BACKUP:-}" ] && [ -f "$OPTIONS_FILE_BACKUP" ]; then
+        cp "$OPTIONS_FILE_BACKUP" "$OPTIONS_FILE" || cleanup_status=2
     fi
 
     settings_after=$(python3 "$FIXTURE_HELPER" settings-values \
@@ -615,6 +628,7 @@ cleanup() {
             original_status=2
         fi
     fi
+    [ -z "${OPTIONS_FILE_BACKUP:-}" ] || rm -f "$OPTIONS_FILE_BACKUP"
     exit "$original_status"
 }
 
