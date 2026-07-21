@@ -79,3 +79,12 @@ This document records the identified technical debt, safety hazards, and concurr
 - **Description**: T1B currently has transform history, packet layout, shader math, and native matrix tests, but no production hook supplies the actual Metal entity vertex/index buffers. The recorder therefore emits no in-game replay packets by design.
 - **Risk**: Treating the implementation as ready would either render no dynamic entity motion or tempt a caller to pass invalid raw handles to the native bridge.
 - **Required completion**: Capture only deferred-lifetime real `MTLBuffer` handles from the Metal draw path, validate packet bounds/device ownership and render pipeline state, then prove the path in a live moving/teleporting-entity scene before enabling it.
+
+---
+
+## 7. Nether Lava Stress Artifact Does Not Capture Frame Timing
+- **Location**: `benchmark/nether_lava_stress_results.json`, `scripts/run_metal_benchmark.sh`
+- **Priority**: **P1**
+- **Description**: The committed eight-scenario artifact records `fps: 0.0` and `gpu_p95: 0.0` for every entry; the baseline also has zero measured frames. Its light-density and cluster-overflow fields are useful diagnostics, but it cannot support a frame-time or FPS conclusion.
+- **Risk**: Optimizing against unmeasured or manually inferred numbers would accept regressions or attribute cost to the wrong renderer stage.
+- **Required completion**: Rerun the route with the built-in timestamp profiler, reject zero-value measurement fields, and publish whole-frame median/p95/tail data together with the captured JSONL evidence.
