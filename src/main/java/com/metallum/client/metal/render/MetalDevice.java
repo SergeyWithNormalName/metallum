@@ -18,6 +18,10 @@ import com.metallum.client.hdr.SceneLinearShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.renderer.temporal.EntityTransformTracker;
+import com.metallum.client.renderer.temporal.EntityVelocityAbi;
+import com.metallum.client.renderer.temporal.EntityVelocityDrawRecorder;
+import com.metallum.client.renderer.temporal.EntityVelocityPacket;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
@@ -222,6 +226,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean frameInterpolationAdmissionLogged;
     private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
     private final FrameStateTracker frameStateTracker = new FrameStateTracker();
+    private final EntityTransformTracker entityTransformTracker = new EntityTransformTracker();
     @Nullable
     private RendererGenerationConfig activeRendererGeneration;
     private FrameState.ResourceBytes activeRendererResourceBytes = FrameState.ResourceBytes.NONE;
@@ -388,6 +393,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 "Temporal camera-motion diagnostics: {}",
                 this.temporalDiagnosticsActive ? "enabled (camera/static-depth only)" : "disabled"
         );
+        String debugVis = System.getenv("METALLUM_DEBUG_VISUALIZATION");
+        if (debugVis != null) {
+            Metallum.LOGGER.info("Temporal diagnostics debug visualization active: mode {}", debugVis);
+        }
         Metallum.LOGGER.info(
                 "Renderer generation request: contract={}, lighting={}, preset={}, frameInterpolation={} (production executor Metal 3)",
                 this.requestedRenderContract,
@@ -571,6 +580,7 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        this.entityTransformTracker.clear();
         HdrSemanticState.reset();
         HdrSceneState.reset();
         MetallumMaterialState.reset();
@@ -1233,6 +1243,18 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
+    public FrameStateTracker frameStateTracker() {
+        return this.frameStateTracker;
+    }
+
+    public boolean temporalDiagnosticsActive() {
+        return this.temporalDiagnosticsConfigured || this.temporalDiagnosticsActive;
+    }
+
+    public EntityTransformTracker entityTransformTracker() {
+        return this.entityTransformTracker;
+    }
+
     /** Publishes one final world-camera snapshot into its reusable in-flight ABI slot. */
     public synchronized FrameState publishFrameState(final FrameCapture capture) {
         Objects.requireNonNull(capture, "capture");
@@ -1281,11 +1303,20 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && AdvancedLightingRuntime.isActive()
                 && retainsL3L4AfterVoxelFailure(lightingResources != null, shadowResources != null)
                 && localShadowResources != null) {
+            long lightSnapshotStart = AdvancedLightRegistry.benchmarkTelemetryEnabled()
+                    ? System.nanoTime()
+                    : 0L;
             lightSnapshot = AdvancedLightRegistry.global().snapshotForFrameIfHealthy(
                     DirectLightFrustum.from(capture),
                     lightingResources.budget().maxLights(),
                     advancedLightingAdmissionLimit(generation.lightingPreset())
             );
+            if (lightSnapshot != null && lightSnapshotStart != 0L) {
+                AdvancedLightRegistry.global().recordBenchmarkFrameTelemetry(
+                        lightSnapshot,
+                        System.nanoTime() - lightSnapshotStart
+                );
+            }
             if (lightSnapshot == null) {
                 this.publishedRendererGeneration = null;
                 this.publishRendererGenerationState(displayExtent.width(), displayExtent.height());
@@ -1653,6 +1684,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.frameStateTracker.commit(published);
+        this.entityTransformTracker.stepFrame(published.frameId(), published.worldIdentity(), published.dimensionIdentity());
         return published;
     }
 
@@ -1660,18 +1692,38 @@ public final class MetalDevice implements GpuDeviceBackend {
     public synchronized void encodeTemporalDiagnostics(final GpuTexture depthTexture) {
         TemporalDiagnosticResources resources = this.temporalDiagnosticResources;
         if (!this.temporalDiagnosticsActive || resources == null) {
+            EntityVelocityDrawRecorder.getInstance().clearFrame();
             return;
         }
         if (!(depthTexture instanceof MetalGpuTexture depth)
                 || depth.getFormat() != GpuFormat.D32_FLOAT) {
             this.disableTemporalDiagnostics("main depth is not a Metal D32Float texture", null);
+            EntityVelocityDrawRecorder.getInstance().clearFrame();
             return;
         }
         int slot = (int) (this.commandEncoder.currentSubmitIndex() % FrameStatePacketRing.SLOT_COUNT);
         int status = this.commandEncoder.encodeTemporalDiagnostics(depth, resources.pair(slot));
         if (status < 0) {
             this.disableTemporalDiagnostics("native diagnostic pass failed with status " + status, null);
+        } else {
+            // Encode T1B.3 entity velocity replay pass
+            java.util.List<EntityVelocityPacket> packets = EntityVelocityDrawRecorder.getInstance().getRecordedPackets();
+            if (!packets.isEmpty()) {
+                try (java.lang.foreign.Arena frameArena = java.lang.foreign.Arena.ofConfined()) {
+                    long totalBytes = (long) packets.size() * EntityVelocityAbi.PACKET_BYTES;
+                    java.lang.foreign.MemorySegment packetsSegment = frameArena.allocate(totalBytes, 16L);
+                    for (int i = 0; i < packets.size(); i++) {
+                        java.lang.foreign.MemorySegment slice = packetsSegment.asSlice(
+                                (long) i * EntityVelocityAbi.PACKET_BYTES,
+                                EntityVelocityAbi.PACKET_BYTES
+                        );
+                        EntityVelocityAbi.encodeInto(packets.get(i), slice);
+                    }
+                    this.commandEncoder.encodeEntityVelocityReplay(depth, resources.pair(slot), packetsSegment, packets.size());
+                }
+            }
         }
+        EntityVelocityDrawRecorder.getInstance().clearFrame();
     }
 
     private void disableTemporalDiagnostics(final String reason, @Nullable final Throwable exception) {

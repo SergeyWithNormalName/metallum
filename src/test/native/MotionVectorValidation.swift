@@ -20,6 +20,28 @@ private struct MotionOutput {
     var reserved: Float
 }
 
+private struct ReprojectionInput {
+    var pixelCoord: SIMD2<Float>
+    var depth: Float
+    var reserved: UInt32 = 0
+}
+
+private struct MetallumTemporalDiagnosticUniforms {
+    var currentView: simd_float4x4
+    var currentProjection: simd_float4x4
+    var inverseCurrentView: simd_float4x4
+    var inverseCurrentProjection: simd_float4x4
+    var previousView: simd_float4x4
+    var previousProjection: simd_float4x4
+    var currentCameraPosition: SIMD4<Float>
+    var previousCameraPosition: SIMD4<Float>
+    var renderExtent: SIMD2<Float>
+    var jitter: SIMD2<Float>
+    var reserved_padding: SIMD2<Float> = .zero
+    var resetMask: UInt32
+    var reserved: UInt32 = 0
+}
+
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     guard condition() else { throw ValidationFailure.message(message) }
 }
@@ -30,7 +52,9 @@ private func dispatch(
     pipeline: MTLComputePipelineState,
     inputs: [MotionInput],
     extent: SIMD2<Float>,
-    resetMask: UInt32
+    resetMask: UInt32,
+    jitter: SIMD2<Float> = .zero,
+    prevJitter: SIMD2<Float> = .zero
 ) throws -> [MotionOutput] {
     let inputBytes = inputs.count * MemoryLayout<MotionInput>.stride
     let outputBytes = inputs.count * MemoryLayout<MotionOutput>.stride
@@ -42,11 +66,15 @@ private func dispatch(
     }
     var extentValue = extent
     var resetValue = resetMask
+    var jitterValue = jitter
+    var prevJitterValue = prevJitter
     encoder.setComputePipelineState(pipeline)
     encoder.setBuffer(inputBuffer, offset: 0, index: 0)
     encoder.setBuffer(outputBuffer, offset: 0, index: 1)
     encoder.setBytes(&extentValue, length: MemoryLayout<SIMD2<Float>>.stride, index: 2)
     encoder.setBytes(&resetValue, length: MemoryLayout<UInt32>.stride, index: 3)
+    encoder.setBytes(&jitterValue, length: MemoryLayout<SIMD2<Float>>.stride, index: 4)
+    encoder.setBytes(&prevJitterValue, length: MemoryLayout<SIMD2<Float>>.stride, index: 5)
     encoder.dispatchThreads(
         MTLSize(width: inputs.count, height: 1, depth: 1),
         threadsPerThreadgroup: MTLSize(width: min(inputs.count, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
@@ -55,8 +83,40 @@ private func dispatch(
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
     try require(commandBuffer.status == .completed, "Motion validation command buffer failed")
-    let pointer = outputBuffer.contents().bindMemory(to: MotionOutput.self, capacity: inputs.count)
-    return Array(UnsafeBufferPointer(start: pointer, count: inputs.count))
+    let ptr = outputBuffer.contents().bindMemory(to: MotionOutput.self, capacity: inputs.count)
+    return Array(UnsafeBufferPointer(start: ptr, count: inputs.count))
+}
+
+private func dispatchReprojection(
+    device: MTLDevice,
+    queue: MTLCommandQueue,
+    pipeline: MTLComputePipelineState,
+    inputs: [ReprojectionInput],
+    uniforms: MetallumTemporalDiagnosticUniforms
+) throws -> [MotionOutput] {
+    let inputBytes = inputs.count * MemoryLayout<ReprojectionInput>.stride
+    let outputBytes = inputs.count * MemoryLayout<MotionOutput>.stride
+    let uniformBytes = MemoryLayout<MetallumTemporalDiagnosticUniforms>.stride
+    guard let inputBuffer = device.makeBuffer(bytes: inputs, length: inputBytes, options: .storageModeShared),
+          let outputBuffer = device.makeBuffer(length: outputBytes, options: .storageModeShared),
+          let uniformBuffer = device.makeBuffer(bytes: [uniforms], length: uniformBytes, options: .storageModeShared),
+          let commandBuffer = queue.makeCommandBuffer(),
+          let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        throw ValidationFailure.message("Could not allocate reprojection validation resources")
+    }
+    encoder.setComputePipelineState(pipeline)
+    encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+    encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+    encoder.setBuffer(uniformBuffer, offset: 0, index: 2)
+    encoder.dispatchThreads(
+        MTLSize(width: inputs.count, height: 1, depth: 1),
+        threadsPerThreadgroup: MTLSize(width: min(inputs.count, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1)
+    )
+    encoder.endEncoding()
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+    let ptr = outputBuffer.contents().bindMemory(to: MotionOutput.self, capacity: inputs.count)
+    return Array(UnsafeBufferPointer(start: ptr, count: inputs.count))
 }
 
 private func validate(
@@ -95,7 +155,7 @@ private enum MotionVectorValidationMain {
                 MotionInput(currentClip: SIMD4(0, 0, 0.5, 1), previousClip: SIMD4(-0.1, 0, 0.5, 1)),
                 MotionInput(currentClip: SIMD4(0, 0, 0.5, 1), previousClip: SIMD4(0, 0.1, 0.5, 1)),
                 MotionInput(currentClip: SIMD4(0.4, 0, 0.5, 2), previousClip: SIMD4(0.2, 0, 0.5, 2)),
-                MotionInput(currentClip: SIMD4(0, 0, 0.5, 1), previousClip: SIMD4(0, 0, 0.5, 1), invalidDepth: 1),
+                MotionInput(currentClip: SIMD4(0, 0, 0.5, 1), previousClip: SIMD4(0, 0.5, 0.5, 1), invalidDepth: 1),
                 MotionInput(currentClip: SIMD4(.nan, 0, 0.5, 1), previousClip: SIMD4(0, 0, 0.5, 1))
             ]
             let outputs = try dispatch(
@@ -120,7 +180,48 @@ private enum MotionVectorValidationMain {
                 inputs: [inputs[1]], extent: SIMD2(1280, 720), resetMask: 1
             )
             try validate(reset[0], expected: .zero, reactive: 1, name: "history reset")
-            print("GPU motion-vector validation passed (9 cases, <=0.01 px)")
+
+            let jittered = try dispatch(
+                device: device, queue: queue, pipeline: pipeline,
+                inputs: [inputs[0]], extent: SIMD2(1280, 720), resetMask: 0,
+                jitter: SIMD2(0.5, -0.25), prevJitter: SIMD2(0.25, -0.125)
+            )
+            try validate(jittered[0], expected: SIMD2(0.25, -0.125), reactive: 0, name: "jitter unjittering")
+
+            guard let reprojFunction = library.makeFunction(name: "metallum_reprojection_validate") else {
+                throw ValidationFailure.message("Reprojection validation kernel is absent")
+            }
+            let reprojPipeline = try device.makeComputePipelineState(function: reprojFunction)
+            let ident = simd_float4x4(
+                SIMD4<Float>(1, 0, 0, 0),
+                SIMD4<Float>(0, 1, 0, 0),
+                SIMD4<Float>(0, 0, 1, 0),
+                SIMD4<Float>(0, 0, 0, 1)
+            )
+            let uniforms = MetallumTemporalDiagnosticUniforms(
+                currentView: ident,
+                currentProjection: ident,
+                inverseCurrentView: ident,
+                inverseCurrentProjection: ident,
+                previousView: ident,
+                previousProjection: ident,
+                currentCameraPosition: SIMD4<Float>(0, 0, 0, 0),
+                previousCameraPosition: SIMD4<Float>(-0.1, 0, 0, 0),
+                renderExtent: SIMD2<Float>(1280, 720),
+                jitter: SIMD2<Float>(0.5, -0.25),
+                reserved_padding: .zero,
+                resetMask: 0
+            )
+            let reprojInputs = [
+                ReprojectionInput(pixelCoord: SIMD2<Float>(640, 360), depth: 0.5)
+            ]
+            let reprojOutputs = try dispatchReprojection(
+                device: device, queue: queue, pipeline: reprojPipeline,
+                inputs: reprojInputs, uniforms: uniforms
+            )
+            try validate(reprojOutputs[0], expected: SIMD2<Float>(64.5, -0.25), reactive: 0, name: "reprojection roundtrip math")
+
+            print("GPU motion-vector validation passed (11 cases, <=0.01 px)")
         } catch {
             fputs("GPU motion-vector validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

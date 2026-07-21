@@ -25,6 +25,7 @@ def macMetalSources = [
 	Clear: layout.projectDirectory.file("src/main/metal/MetallumClear.metal"),
 	SodiumLightPatch: layout.projectDirectory.file("src/main/metal/MetallumSodiumLightPatch.metal"),
 	TemporalDiagnostics: layout.projectDirectory.file("src/main/metal/MetallumTemporalDiagnostics.metal"),
+	EntityMotion: layout.projectDirectory.file("src/main/metal/MetallumEntityMotion.metal"),
 	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
 	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal"),
 	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal")
@@ -309,6 +310,14 @@ tasks.register("frameSynthesisUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.renderer.temporal.FrameSynthesisTests")
 }
 
+tasks.register("entityMotionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs entity transform tracking and history reset tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.temporal.EntityMotionTests")
+}
+
 tasks.register("workBudgetUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs bounded future renderer work-queue budget and starvation tests"
@@ -332,6 +341,7 @@ def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimi
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
 def frameStateAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameStateAbiValidation")
 def motionVectorValidationBinary = layout.buildDirectory.file("native-tests/MotionVectorValidation")
+def entityMatrixValidationBinary = layout.buildDirectory.file("native-tests/EntityMatrixValidationNative")
 def temporalDiagnosticRuntimeValidationBinary = layout.buildDirectory.file("native-tests/TemporalDiagnosticRuntimeValidation")
 def resourceBindingAbiValidationBinary = layout.buildDirectory.file("native-tests/ResourceBindingAbiValidation")
 def staticGeometryHeapValidationBinary = layout.buildDirectory.file("native-tests/StaticGeometryHeapValidation")
@@ -737,6 +747,39 @@ tasks.register("motionVectorValidation", Exec) {
 		macBuiltinMetallib.get().asFile.absolutePath
 }
 
+tasks.register("compileEntityMatrixValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native entity matrix inversion and motion validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/EntityMatrixValidationNative.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(entityMatrixValidationBinary)
+
+	doFirst {
+		entityMatrixValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-o", entityMatrixValidationBinary.get().asFile.absolutePath,
+		"src/test/native/EntityMatrixValidationNative.swift"
+}
+
+tasks.register("entityMatrixValidation", Exec) {
+	group = "verification"
+	description = "Validates native matrix inversion and motion vectors"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("compileEntityMatrixValidation"))
+
+	commandLine entityMatrixValidationBinary.get().asFile.absolutePath
+}
+
 tasks.register("compileTemporalDiagnosticRuntimeValidation", Exec) {
 	group = "verification"
 	description = "Compiles the isolated temporal diagnostic runtime smoke harness"
@@ -1000,10 +1043,12 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumConfigUnitTest"))
 	dependsOn(tasks.named("temporalContractValidation"))
 	dependsOn(tasks.named("frameSynthesisUnitTest"))
+	dependsOn(tasks.named("entityMotionUnitTest"))
 	dependsOn(tasks.named("workBudgetUnitTest"))
 	dependsOn(tasks.named("frameGraphAbiNativeValidation"))
 	dependsOn(tasks.named("frameStateAbiNativeValidation"))
 	dependsOn(tasks.named("motionVectorValidation"))
+	dependsOn(tasks.named("entityMatrixValidation"))
 	dependsOn(tasks.named("temporalDiagnosticRuntimeValidation"))
 	dependsOn(tasks.named("resourceBindingAbiNativeValidation"))
 	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))

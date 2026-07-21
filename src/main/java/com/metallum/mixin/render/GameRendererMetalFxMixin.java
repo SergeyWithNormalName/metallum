@@ -172,16 +172,32 @@ abstract class GameRendererMetalFxMixin {
             }
             this.metallum$previousCameraEntity = cameraEntity;
 
+            float jitterX = 0f;
+            float jitterY = 0f;
+            if (com.metallum.client.renderer.temporal.TemporalDiagnostics.configured()) {
+                long nextFrameId = device.frameStateTracker().nextFrameId();
+                com.metallum.client.renderer.temporal.FrameState.JitterOffset jitter = com.metallum.client.renderer.temporal.JitterSequence.sample(nextFrameId, 1.0);
+                jitterX = (float) jitter.x();
+                jitterY = (float) jitter.y();
+            }
+
+            Matrix4f jitteredProjection = new Matrix4f(finalProjection);
+            if (jitterX != 0f || jitterY != 0f) {
+                jitteredProjection.m20(jitteredProjection.m20() + jitterX * 2.0f / this.mainRenderTarget.width);
+                jitteredProjection.m21(jitteredProjection.m21() + jitterY * 2.0f / this.mainRenderTarget.height);
+            }
+
             Matrix4 view = matrix(camera.viewRotationMatrix);
             Matrix4 cameraMatrix = matrix(this.metallum$cameraInverse);
-            Matrix4 projection = matrix(finalProjection);
+            Matrix4 projection = matrix(jitteredProjection);
+            Matrix4 unjitteredProjection = matrix(finalProjection);
             FrameState.Transforms transforms = new FrameState.Transforms(
                     cameraMatrix,
                     view,
                     projection,
                     cameraMatrix,
                     view,
-                    projection
+                    unjitteredProjection
             );
             Object dimensionKey = this.minecraft.level.dimension();
             if (dimensionKey != this.metallum$dimensionKey) {
@@ -200,6 +216,7 @@ abstract class GameRendererMetalFxMixin {
                     this.metallum$dimensionIdentity,
                     metallum$environmentDescriptor(camera, deltaTracker)
             ));
+            return projectionBuffer.getBuffer(jitteredProjection);
         }
         return projectionBuffer.getBuffer(finalProjection);
     }

@@ -3694,6 +3694,23 @@ private enum NativeState {
     static let gpuTimingStats: MetallumGpuTimingStats? = gpuTimingEnabled
         ? MetallumGpuTimingStats()
         : nil
+    static var lastMotionTexture: MTLTexture?
+    static var lastReactiveTexture: MTLTexture?
+    static var lastClassificationTexture: MTLTexture?
+    static var debugVisualizationPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
+    static let debugVisualizationMode: Int = {
+        if let env = ProcessInfo.processInfo.environment["METALLUM_DEBUG_VISUALIZATION"] {
+            switch env {
+            case "1", "motion_direction": return 1
+            case "2", "motion_magnitude": return 2
+            case "3", "reprojection_validity": return 3
+            case "4", "reactive_mask": return 4
+            case "5", "camera_motion": return 5
+            default: return 0
+            }
+        }
+        return 0
+    }()
 }
 
 @inline(__always)
@@ -4943,6 +4960,9 @@ private func ensureTemporalDiagnosticPipeline(device: MTLDevice) -> MTLRenderPip
         descriptor.fragmentFunction = fragment
         descriptor.colorAttachments[0].pixelFormat = .rg16Float
         descriptor.colorAttachments[1].pixelFormat = .r8Unorm
+        if NativeState.debugVisualizationMode != 0 {
+            descriptor.colorAttachments[2].pixelFormat = .r8Unorm
+        }
         let pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         recordBuiltinPipelineCreation(device: device, succeeded: true)
         NativeState.temporalDiagnosticPipelines[key] = pipeline
@@ -6985,6 +7005,25 @@ private func ensurePresentPipeline(
     return pipeline
 }
 
+private func ensureDebugPostPassPipeline(
+    device: MTLDevice,
+    colorFormat: MTLPixelFormat
+) -> MTLRenderPipelineState? {
+    let key = PresentPipelineKey(deviceAddress: objectAddress(device), colorFormat: colorFormat)
+    if let cached = NativeState.debugVisualizationPipelines[key] {
+        return cached
+    }
+    let pipeline = buildPresentPipeline(
+        device: device,
+        colorFormat: colorFormat,
+        fragmentName: "metallum_debug_postpass_fs"
+    )
+    if let pipeline = pipeline {
+        NativeState.debugVisualizationPipelines[key] = pipeline
+    }
+    return pipeline
+}
+
 private func ensureLegacyHdrPresentPipeline(
     device: MTLDevice,
     colorFormat: MTLPixelFormat
@@ -7345,9 +7384,13 @@ private struct MetallumRendererFrameStateSnapshot {
 private final class MetallumRendererFrameStateStore: @unchecked Sendable {
     private let lock = NSLock()
     private var current: MetallumRendererFrameStateSnapshot?
+    private var previous: MetallumRendererFrameStateSnapshot?
 
     func update(_ snapshot: MetallumRendererFrameStateSnapshot) {
         lock.lock()
+        if let currentVal = current, currentVal.frameId != snapshot.frameId {
+            previous = currentVal
+        }
         current = snapshot
         lock.unlock()
     }
@@ -7355,6 +7398,13 @@ private final class MetallumRendererFrameStateStore: @unchecked Sendable {
     func snapshot() -> MetallumRendererFrameStateSnapshot? {
         lock.lock()
         let value = current
+        lock.unlock()
+        return value
+    }
+
+    func previousSnapshot() -> MetallumRendererFrameStateSnapshot? {
+        lock.lock()
+        let value = previous
         lock.unlock()
         return value
     }
@@ -7370,6 +7420,8 @@ private struct MetallumTemporalDiagnosticUniforms {
     var currentCameraPosition: SIMD4<Float>
     var previousCameraPosition: SIMD4<Float>
     var renderExtent: SIMD2<Float>
+    var jitter: SIMD2<Float>
+    var reserved_padding: SIMD2<Float> = .zero
     var resetMask: UInt32
     var reserved: UInt32 = 0
 }
@@ -7380,9 +7432,10 @@ public func metallum_encode_temporal_diagnostics_v1(
     _ depthTexture: MTLTexture,
     _ motionTexture: MTLTexture,
     _ reactiveTexture: MTLTexture,
+    _ classificationTexture: MTLTexture?,
     _ globalFence: MTLFence
 ) -> Int32 {
-    autoreleasepool {
+    let result = autoreleasepool { () -> Int32 in
         // Renderer generation admission and the first valid camera publication
         // are separate events. A world hook may therefore arrive during the
         // short transition with no usable frame packet; skip that frame without
@@ -7392,6 +7445,11 @@ public func metallum_encode_temporal_diagnostics_v1(
         guard depthTexture.pixelFormat == .depth32Float,
               motionTexture.pixelFormat == .rg16Float,
               reactiveTexture.pixelFormat == .r8Unorm else { return -2 }
+        if let classificationTexture = classificationTexture {
+            guard classificationTexture.width == depthTexture.width,
+                  classificationTexture.height == depthTexture.height,
+                  classificationTexture.pixelFormat == .r8Unorm else { return -2 }
+        }
         guard depthTexture.width == Int(frame.renderWidth),
               depthTexture.height == Int(frame.renderHeight),
               motionTexture.width == depthTexture.width,
@@ -7399,6 +7457,10 @@ public func metallum_encode_temporal_diagnostics_v1(
               reactiveTexture.width == depthTexture.width,
               reactiveTexture.height == depthTexture.height else { return 0 }
         guard let pipeline = ensureTemporalDiagnosticPipeline(device: commandBuffer.device) else { return -3 }
+
+        NativeState.lastMotionTexture = motionTexture
+        NativeState.lastReactiveTexture = reactiveTexture
+        NativeState.lastClassificationTexture = classificationTexture
 
         let currentView = frame.currentView
         let currentProjection = frame.currentProjection
@@ -7408,7 +7470,7 @@ public func metallum_encode_temporal_diagnostics_v1(
             inverseCurrentView: currentView.inverse,
             inverseCurrentProjection: currentProjection.inverse,
             previousView: frame.previousView,
-            previousProjection: frame.previousProjection,
+            previousProjection: frame.previousUnjitteredProjection,
             currentCameraPosition: SIMD4(
                 Float(frame.currentCameraPosition[0]),
                 Float(frame.currentCameraPosition[1]),
@@ -7422,6 +7484,8 @@ public func metallum_encode_temporal_diagnostics_v1(
                 0
             ),
             renderExtent: SIMD2(Float(frame.renderWidth), Float(frame.renderHeight)),
+            jitter: SIMD2(frame.jitterX, frame.jitterY),
+            reserved_padding: .zero,
             resetMask: UInt32(truncatingIfNeeded: frame.resetMask)
         )
         let pass = MTLRenderPassDescriptor()
@@ -7431,6 +7495,11 @@ public func metallum_encode_temporal_diagnostics_v1(
         pass.colorAttachments[1].texture = reactiveTexture
         pass.colorAttachments[1].loadAction = .dontCare
         pass.colorAttachments[1].storeAction = .store
+        if let classificationTexture = classificationTexture {
+            pass.colorAttachments[2].texture = classificationTexture
+            pass.colorAttachments[2].loadAction = .dontCare
+            pass.colorAttachments[2].storeAction = .store
+        }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return -4 }
         encoder.label = "Metallum temporal camera-motion diagnostic"
         encoder.waitForFence(globalFence, before: .fragment)
@@ -7463,6 +7532,154 @@ public func metallum_encode_temporal_diagnostics_v1(
         encoder.endEncoding()
         return 1
     }
+    return result
+}
+
+struct MetallumEntityMotionUniforms {
+    var previousFromCurrentView: simd_float4x4
+    var currentUnjitteredProjection: simd_float4x4
+    var previousUnjitteredProjection: simd_float4x4
+    var currentJitteredProjection: simd_float4x4
+    var renderExtent: SIMD2<Float>
+    var alphaCutoff: Float
+    var isDiscontinuous: UInt32
+}
+
+public struct MetallumEntityVelocityPacket {
+    public var vertexBufferHandle: UInt64
+    public var vertexBufferOffset: UInt64
+    public var vertexLayoutId: Int32
+    public var vertexStride: Int32
+    public var indexBufferHandle: UInt64
+    public var indexType: Int32
+    public var indexByteOffset: UInt64
+    public var primitiveType: Int32
+    public var indexCount: Int32
+    public var baseVertex: Int32
+    public var instanceCount: Int32
+    public var baseInstance: Int32
+    public var winding: Int32
+    public var cullMode: Int32
+    public var depthBias: Float
+    public var slopeScale: Float
+    public var clamp: Float
+    public var textureHandle: UInt64
+    public var samplerHandle: UInt64
+    public var alphaCutoff: Float
+    public var useAlphaTest: Int32
+    public var uuidMost: UInt64
+    public var uuidLeast: UInt64
+    public var entityId: Int32
+    public var isDiscontinuous: Int32
+    public var previousFromCurrentView: simd_float4x4
+    public var currentUnjitteredProjection: simd_float4x4
+    public var previousUnjitteredProjection: simd_float4x4
+    public var frameId: UInt64
+    public var rendererGeneration: UInt64
+    public var inFlightSlot: Int32
+}
+
+@_cdecl("metallum_commit_entity_velocity_replay")
+public func metallum_commit_entity_velocity_replay(
+    _ commandBuffer: MTLCommandBuffer,
+    _ depthTexture: MTLTexture,
+    _ motionTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture,
+    _ classificationTexture: MTLTexture?,
+    _ packetsPointer: UnsafeRawPointer?,
+    _ packetCount: Int32
+) -> Int32 {
+    guard let packetsPointer, packetCount > 0 else { return 0 }
+
+    let device = depthTexture.device
+
+    let pass = MTLRenderPassDescriptor()
+    pass.colorAttachments[0].texture = motionTexture
+    pass.colorAttachments[0].loadAction = .load
+    pass.colorAttachments[0].storeAction = .store
+
+    pass.colorAttachments[1].texture = reactiveTexture
+    pass.colorAttachments[1].loadAction = .load
+    pass.colorAttachments[1].storeAction = .store
+
+    if let classificationTexture {
+        pass.colorAttachments[2].texture = classificationTexture
+        pass.colorAttachments[2].loadAction = .load
+        pass.colorAttachments[2].storeAction = .store
+    }
+
+    pass.depthAttachment.texture = depthTexture
+    pass.depthAttachment.loadAction = .load
+    pass.depthAttachment.storeAction = .store
+
+    guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return -4 }
+    encoder.label = "Metallum T1B.3 entity velocity replay pass"
+
+    encoder.setViewport(MTLViewport(
+        originX: 0, originY: 0,
+        width: Double(motionTexture.width),
+        height: Double(motionTexture.height),
+        znear: 0, zfar: 1
+    ))
+    encoder.setScissorRect(MTLScissorRect(
+        x: 0, y: 0,
+        width: motionTexture.width,
+        height: motionTexture.height
+    ))
+
+    let depthDesc = MTLDepthStencilDescriptor()
+    depthDesc.depthCompareFunction = .equal
+    depthDesc.isDepthWriteEnabled = false
+    guard let depthState = device.makeDepthStencilState(descriptor: depthDesc) else { return -5 }
+    encoder.setDepthStencilState(depthState)
+
+    let boundPackets = packetsPointer.bindMemory(to: MetallumEntityVelocityPacket.self, capacity: Int(packetCount))
+    let packets = UnsafeBufferPointer(start: boundPackets, count: Int(packetCount))
+    for packet in packets {
+        guard packet.vertexBufferHandle != 0, packet.indexBufferHandle != 0, packet.indexCount > 0 else { continue }
+
+        let mtlWinding: MTLWinding = (packet.winding == 1) ? .counterClockwise : .clockwise
+        let mtlCullMode: MTLCullMode = (packet.cullMode == 1) ? .front : ((packet.cullMode == 2) ? .back : .none)
+        encoder.setFrontFacing(mtlWinding)
+        encoder.setCullMode(mtlCullMode)
+        encoder.setDepthBias(packet.depthBias, slopeScale: packet.slopeScale, clamp: packet.clamp)
+
+        guard let vertexBuffer = bindingPacketObject(packet.vertexBufferHandle) as? MTLBuffer,
+              let indexBuffer = bindingPacketObject(packet.indexBufferHandle) as? MTLBuffer else {
+            encoder.endEncoding()
+            return -6
+        }
+        encoder.setVertexBuffer(vertexBuffer, offset: Int(packet.vertexBufferOffset), index: 0)
+
+        var uniforms = MetallumEntityMotionUniforms(
+            previousFromCurrentView: packet.previousFromCurrentView,
+            currentUnjitteredProjection: packet.currentUnjitteredProjection,
+            previousUnjitteredProjection: packet.previousUnjitteredProjection,
+            currentJitteredProjection: packet.currentUnjitteredProjection,
+            renderExtent: SIMD2<Float>(Float(motionTexture.width), Float(motionTexture.height)),
+            alphaCutoff: packet.alphaCutoff,
+            isDiscontinuous: UInt32(packet.isDiscontinuous)
+        )
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<MetallumEntityMotionUniforms>.stride, index: 1)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<MetallumEntityMotionUniforms>.stride, index: 1)
+
+        let mtlIndexType: MTLIndexType = (packet.indexType == 1) ? .uint32 : .uint16
+        let mtlPrimitiveType: MTLPrimitiveType = (packet.primitiveType == 1) ? .triangleStrip : .triangle
+
+        encoder.drawIndexedPrimitives(
+            type: mtlPrimitiveType,
+            indexCount: Int(packet.indexCount),
+            indexType: mtlIndexType,
+            indexBuffer: indexBuffer,
+            indexBufferOffset: Int(packet.indexByteOffset),
+            instanceCount: max(1, Int(packet.instanceCount)),
+            baseVertex: Int(packet.baseVertex),
+            baseInstance: Int(packet.baseInstance)
+        )
+    }
+
+    encoder.endEncoding()
+    return 1
 }
 
 private func parseFrameStateV3(
@@ -11925,6 +12142,57 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         guard let samplers = presentSamplers(device: commandBuffer.device) else {
             NSLog("[metallum] No present samplers for Metal device")
             return -1
+        }
+
+        if NativeState.debugVisualizationMode != 0,
+           let motion = NativeState.lastMotionTexture,
+           let reactive = NativeState.lastReactiveTexture {
+            let classification = NativeState.lastClassificationTexture
+            if let debugPipeline = ensureDebugPostPassPipeline(device: commandBuffer.device, colorFormat: sourceTexture.pixelFormat) {
+                let renderPass = MTLRenderPassDescriptor()
+                renderPass.colorAttachments[0].texture = sourceTexture
+                renderPass.colorAttachments[0].loadAction = .dontCare
+                renderPass.colorAttachments[0].storeAction = .store
+
+                if let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) {
+                    if let globalFence {
+                        encoder.waitForFence(globalFence, before: .fragment)
+                    }
+                    encoder.setViewport(MTLViewport(
+                        originX: 0.0,
+                        originY: 0.0,
+                        width: Double(sourceTexture.width),
+                        height: Double(sourceTexture.height),
+                        znear: 0.0,
+                        zfar: 1.0
+                    ))
+                    encoder.setRenderPipelineState(debugPipeline)
+                    encoder.setFragmentTexture(motion, index: 0)
+                    encoder.setFragmentTexture(reactive, index: 1)
+                    encoder.setFragmentTexture(classification ?? motion, index: 2)
+
+                    struct DebugVisualizationUniforms {
+                        var mode: UInt32
+                        var width: Float
+                        var height: Float
+                        var padding: UInt32 = 0
+                    }
+                    var uniforms = DebugVisualizationUniforms(
+                        mode: UInt32(NativeState.debugVisualizationMode),
+                        width: Float(sourceTexture.width),
+                        height: Float(sourceTexture.height)
+                    )
+                    withUnsafeBytes(of: &uniforms) { bytes in
+                        encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+                    }
+                    encoder.setFragmentSamplerState(samplers.nearest, index: 0)
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                    if let globalFence {
+                        encoder.updateFence(globalFence, after: .fragment)
+                    }
+                    trackedEndEncoding(encoder)
+                }
+            }
         }
 
         let timingStats = NativeState.gpuTimingStats

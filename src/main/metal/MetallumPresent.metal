@@ -968,3 +968,80 @@ fragment float4 metallum_spatial_screenshot_fs(
   float3 finalLinear = clamp(uiLinear + visibleDelta, 0.0, 1.0);
   return float4(metallum_linear_to_srgb(finalLinear), 1.0);
 }
+
+struct DebugPostPassUniforms {
+  uint mode;
+  float width;
+  float height;
+  uint padding;
+};
+
+fragment float4 metallum_debug_postpass_fs(
+    PresentVertexOut in [[stage_in]],
+    texture2d<float, access::read> motionTexture [[texture(0)]],
+    texture2d<float, access::read> reactiveTexture [[texture(1)]],
+    texture2d<float, access::read> classificationTexture [[texture(2)]],
+    sampler smp [[sampler(0)]],
+    constant DebugPostPassUniforms& uniforms [[buffer(0)]]
+) {
+    uint2 pixel = uint2(in.uv.x * uniforms.width, in.uv.y * uniforms.height);
+    float2 mv = motionTexture.read(pixel).xy;
+    float reactive = reactiveTexture.read(pixel).x;
+
+    // Read optional classification texture
+    float classVal = 0.0f;
+    if (classificationTexture.get_width() > 0) {
+        classVal = round(classificationTexture.read(pixel).x * 255.0f);
+    }
+
+    float3 color = float3(0.0f);
+
+    if (uniforms.mode == 1) {
+        // 1. Motion direction visualization: encode X/Y direction into visible color
+        float len = length(mv);
+        if (len > 1e-5f) {
+            float2 dir = mv / len;
+            color = float3(dir * 0.5f + 0.5f, 0.0f);
+            color *= clamp(len / 10.0f, 0.2f, 1.0f);
+        } else {
+            color = float3(0.0f);
+        }
+    } else if (uniforms.mode == 2) {
+        // 2. Motion magnitude heatmap
+        float len = length(mv);
+        if (len == 0.0f) {
+            color = float3(0.0f);
+        } else if (len <= 0.5f) {
+            color = float3(0.0f, 0.0f, 1.0f); // Small -> Blue
+        } else if (len <= 16.0f) {
+            color = float3(0.0f, 1.0f, 0.0f); // Normal -> Green
+        } else {
+            color = float3(1.0f, 0.0f, 0.0f); // Extreme -> Red
+        }
+    } else if (uniforms.mode == 3) {
+        // 3. Reprojection validity
+        if (classVal == 0.0f) {
+            color = float3(0.0f, 1.0f, 0.0f); // Valid -> Green
+        } else if (classVal == 1.0f) {
+            color = float3(1.0f, 0.5f, 0.0f); // Reset -> Orange
+        } else if (classVal == 2.0f) {
+            color = float3(0.15f, 0.15f, 0.15f); // Sky/invalid depth -> Dark Gray
+        } else if (classVal == 3.0f) {
+            color = float3(1.0f, 1.0f, 0.0f); // Out-of-frame -> Yellow
+        } else {
+            color = float3(1.0f, 0.0f, 0.0f); // Other invalid -> Red
+        }
+    } else if (uniforms.mode == 4) {
+        // 4. Reactive visualization: current reactive mask
+        color = float3(reactive);
+    } else if (uniforms.mode == 5) {
+        // 5. Camera motion vector visualization: raw component colors
+        color = float3(
+            clamp(mv.x * 0.1f + 0.5f, 0.0f, 1.0f),
+            clamp(mv.y * 0.1f + 0.5f, 0.0f, 1.0f),
+            0.5f
+        );
+    }
+
+    return float4(color, 1.0f);
+}

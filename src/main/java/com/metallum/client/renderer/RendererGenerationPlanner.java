@@ -376,17 +376,18 @@ public final class RendererGenerationPlanner {
             throw new IllegalStateException("L0 must not create a Frame Interpolation manifest");
         }
         if (temporalDiagnostics) {
-            long diagnosticBytes = multiply(renderExtent.pixels(), 5L * 3L);
+            long renderPixels = renderExtent.pixels();
+            long diagnosticBytes = multiply(renderPixels, 5L * 3L);
             resources.add(resource(
                     "temporal_motion_ring",
                     RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY,
-                    multiply(renderExtent.pixels(), 4L * 3L),
+                    multiply(renderPixels, 4L * 3L),
                     false
             ));
             resources.add(resource(
                     "temporal_reactive_ring",
                     RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY,
-                    multiply(renderExtent.pixels(), 3L),
+                    multiply(renderPixels, 3L),
                     false
             ));
             if (diagnosticBytes <= 0L) {

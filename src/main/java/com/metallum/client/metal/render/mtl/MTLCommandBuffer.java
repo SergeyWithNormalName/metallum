@@ -309,10 +309,24 @@ public final class MTLCommandBuffer {
             final MemorySegment depthTexture,
             final MemorySegment motionTexture,
             final MemorySegment reactiveTexture,
+            final MemorySegment classificationTexture,
             final MemorySegment globalFence
     ) {
         return MetalNativeBridge.metallum_encode_temporal_diagnostics_v1(
-                handle(), depthTexture, motionTexture, reactiveTexture, globalFence
+                handle(), depthTexture, motionTexture, reactiveTexture, classificationTexture, globalFence
+        );
+    }
+
+    public int encodeEntityVelocityReplay(
+            final MemorySegment depthTexture,
+            final MemorySegment motionTexture,
+            final MemorySegment reactiveTexture,
+            final MemorySegment classificationTexture,
+            final MemorySegment packetsBuffer,
+            final int packetCount
+    ) {
+        return MetalNativeBridge.metallum_commit_entity_velocity_replay(
+                handle(), depthTexture, motionTexture, reactiveTexture, classificationTexture, packetsBuffer, packetCount
         );
     }
 

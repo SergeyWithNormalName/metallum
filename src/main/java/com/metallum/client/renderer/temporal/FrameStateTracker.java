@@ -63,7 +63,7 @@ public final class FrameStateTracker {
                 candidate.displayExtent(),
                 candidate.exposure(),
                 candidate.preExposure(),
-                JitterSequence.sample(this.nextFrameId, 0.0),
+                JitterSequence.sample(this.nextFrameId, TemporalDiagnostics.configured() ? 1.0 : 0.0),
                 resets,
                 candidate.submitIndex(),
                 candidate.inFlightSlot(),
@@ -78,6 +78,10 @@ public final class FrameStateTracker {
                 candidate.potentialDisplayHeadroom()
         );
         return published;
+    }
+
+    public long nextFrameId() {
+        return this.nextFrameId;
     }
 
     public void commit(final FrameState published) {

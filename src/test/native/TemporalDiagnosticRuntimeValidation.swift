@@ -9,7 +9,7 @@ private enum ValidationFailure: Error, CustomStringConvertible {
 
 private typealias SetFrameState = @convention(c) (UnsafeRawPointer?, UInt64) -> Int32
 private typealias EncodeDiagnostics = @convention(c) (
-    UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?
+    UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?
 ) -> Int32
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -136,7 +136,7 @@ private func runCase(
     clearEncoder.endEncoding()
     try require(encode(
         objectPointer(commandBuffer), objectPointer(depth), objectPointer(motion),
-        objectPointer(reactive), objectPointer(fence)
+        objectPointer(reactive), nil, objectPointer(fence)
     ) == 1, "Native diagnostic render pass failed")
 
     let motionRowBytes = ((width * 4 + 255) / 256) * 256
@@ -203,7 +203,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(encode(
                 objectPointer(transitionCommandBuffer), objectPointer(transitionDepth),
                 objectPointer(transitionMotion), objectPointer(transitionReactive),
-                objectPointer(transitionFence)
+                nil, objectPointer(transitionFence)
             ) == 0, "Missing first FrameState must skip diagnostics without disabling them")
             let stationary = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,

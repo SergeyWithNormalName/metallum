@@ -1080,10 +1080,14 @@ public final class AdvancedLightRegistry {
                     effective.add(entry.getValue().light);
                 }
             }
+            long startCompaction = BENCHMARK_TELEMETRY_ENABLED ? System.nanoTime() : 0L;
             this.compactedLights = DenseBlockLightCompactor.compact(
                     dimensionId,
                     effective
             ).lights();
+            if (BENCHMARK_TELEMETRY_ENABLED) {
+                AdvancedLightRegistry.global().recordCompactionTime(System.nanoTime() - startCompaction);
+            }
             this.compactionDirty = false;
             return this.compactedLights;
         }
@@ -1111,5 +1115,96 @@ public final class AdvancedLightRegistry {
     }
 
     private record Override(long epoch, AdvancedLight light) {
+    }
+
+    private static final Object telemetryLock = new Object();
+    private static final boolean BENCHMARK_TELEMETRY_ENABLED = System.getenv("METALLUM_BENCHMARK") != null;
+    private static double accumLightExtractionNanos = 0;
+    private static double accumSnapshotBuildNanos = 0;
+    private static long accumRawLights = 0;
+    private static long accumCompactedLights = 0;
+    private static long accumUploadedLights = 0;
+    private static long telemetryFrameCount = 0;
+    private static double maxLightExtractionNanos = 0;
+    private static double maxSnapshotBuildNanos = 0;
+
+    public static boolean benchmarkTelemetryEnabled() {
+        return BENCHMARK_TELEMETRY_ENABLED;
+    }
+
+    public void recordCompactionTime(final long durationNanos) {
+        if (!BENCHMARK_TELEMETRY_ENABLED) {
+            return;
+        }
+        synchronized (telemetryLock) {
+            accumLightExtractionNanos += durationNanos;
+            if (durationNanos > maxLightExtractionNanos) {
+                maxLightExtractionNanos = durationNanos;
+            }
+        }
+    }
+
+    public void recordBenchmarkFrameTelemetry(final LightFrameSnapshot snapshot, final long buildDurationNanos) {
+        if (!BENCHMARK_TELEMETRY_ENABLED) {
+            return;
+        }
+        synchronized (telemetryLock) {
+            accumSnapshotBuildNanos += buildDurationNanos;
+            if (buildDurationNanos > maxSnapshotBuildNanos) {
+                maxSnapshotBuildNanos = buildDurationNanos;
+            }
+            telemetryFrameCount++;
+            long rawCount = 0;
+            long compactedCount = 0;
+            if (this.activeWorld != null) {
+                for (SectionState section : this.activeWorld.sections.values()) {
+                    rawCount += section.base.size() + section.overrides.size();
+                    compactedCount += section.compactedLights.size();
+                }
+                rawCount += this.activeWorld.dynamicLights.size();
+                compactedCount += this.activeWorld.dynamicLights.size();
+            }
+            accumRawLights += rawCount;
+            accumCompactedLights += compactedCount;
+            accumUploadedLights += snapshot.lights().size();
+        }
+    }
+
+    public void resetBenchmarkTelemetry() {
+        if (!BENCHMARK_TELEMETRY_ENABLED) {
+            return;
+        }
+        synchronized (telemetryLock) {
+            accumLightExtractionNanos = 0;
+            accumSnapshotBuildNanos = 0;
+            accumRawLights = 0;
+            accumCompactedLights = 0;
+            accumUploadedLights = 0;
+            telemetryFrameCount = 0;
+            maxLightExtractionNanos = 0;
+            maxSnapshotBuildNanos = 0;
+        }
+    }
+
+    public static String getTelemetryString() {
+        if (!BENCHMARK_TELEMETRY_ENABLED) {
+            return "disabled";
+        }
+        synchronized (telemetryLock) {
+            if (telemetryFrameCount == 0) {
+                return "frames=0";
+            }
+            double avgExtractionMs = (accumLightExtractionNanos / telemetryFrameCount) / 1_000_000.0;
+            double maxExtractionMs = maxLightExtractionNanos / 1_000_000.0;
+            double avgBuildMs = (accumSnapshotBuildNanos / telemetryFrameCount) / 1_000_000.0;
+            double maxBuildMs = maxSnapshotBuildNanos / 1_000_000.0;
+            double avgRaw = (double) accumRawLights / telemetryFrameCount;
+            double avgCompacted = (double) accumCompactedLights / telemetryFrameCount;
+            double avgUploaded = (double) accumUploadedLights / telemetryFrameCount;
+            return String.format(
+                "frames=%d light_extraction_avg_ms=%.6f light_extraction_max_ms=%.6f snapshot_build_avg_ms=%.6f snapshot_build_max_ms=%.6f raw_lights_avg=%.2f compacted_lights_avg=%.2f uploaded_lights_avg=%.2f",
+                telemetryFrameCount, avgExtractionMs, maxExtractionMs, avgBuildMs, maxBuildMs, avgRaw, avgCompacted, avgUploaded
+            );
+        }
     }
 }

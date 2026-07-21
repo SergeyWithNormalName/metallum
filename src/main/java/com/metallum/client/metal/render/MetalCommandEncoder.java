@@ -1080,17 +1080,48 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     ) {
         submitRenderPass();
         endEncoder();
+        java.lang.foreign.MemorySegment classificationHandle = outputs.classification() != null
+                ? outputs.classification().nativeHandle()
+                : java.lang.foreign.MemorySegment.NULL;
         int status = commandBuffer().encodeTemporalDiagnostics(
                 depth.nativeHandle(),
                 outputs.motion().nativeHandle(),
                 outputs.reactive().nativeHandle(),
+                classificationHandle,
                 this.fence
         );
         if (status == 1) {
             outputs.motion().markContentsDirty();
             outputs.reactive().markContentsDirty();
+            if (outputs.classification() != null) {
+                outputs.classification().markContentsDirty();
+            }
         }
         return status;
+    }
+
+    int encodeEntityVelocityReplay(
+            final MetalGpuTexture depth,
+            final TemporalDiagnosticResources.Pair outputs,
+            final java.lang.foreign.MemorySegment packetsBuffer,
+            final int packetCount
+    ) {
+        if (packetCount <= 0 || packetsBuffer == null) {
+            return 0;
+        }
+        submitRenderPass();
+        endEncoder();
+        java.lang.foreign.MemorySegment classificationHandle = outputs.classification() != null
+                ? outputs.classification().nativeHandle()
+                : java.lang.foreign.MemorySegment.NULL;
+        return commandBuffer().encodeEntityVelocityReplay(
+                depth.nativeHandle(),
+                outputs.motion().nativeHandle(),
+                outputs.reactive().nativeHandle(),
+                classificationHandle,
+                packetsBuffer,
+                packetCount
+        );
     }
 
     int encodeAdvancedLighting(

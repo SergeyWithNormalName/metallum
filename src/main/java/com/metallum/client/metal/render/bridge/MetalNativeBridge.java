@@ -281,7 +281,22 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS
+                    )
+            );
+            commitEntityVelocityReplay = downcallWithoutCritical(
+                    lookup,
+                    "metallum_commit_entity_velocity_replay",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT
                     )
             );
             initPipelines = downcallWithoutCritical(
@@ -703,6 +718,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle dynamicShadowReleaseContextV1;
     private static final MethodHandle dynamicShadowEncodeV1;
     private static final MethodHandle encodeTemporalDiagnosticsV1;
+    private static final MethodHandle commitEntityVelocityReplay;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -1265,6 +1281,7 @@ public final class MetalNativeBridge {
             final MemorySegment depthTexture,
             final MemorySegment motionTexture,
             final MemorySegment reactiveTexture,
+            final MemorySegment classificationTexture,
             final MemorySegment globalFence
     ) {
         try {
@@ -1273,10 +1290,35 @@ public final class MetalNativeBridge {
                     segment(depthTexture),
                     segment(motionTexture),
                     segment(reactiveTexture),
+                    segment(classificationTexture),
                     segment(globalFence)
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_encode_temporal_diagnostics_v1", throwable);
+        }
+    }
+
+    public static int metallum_commit_entity_velocity_replay(
+            final MemorySegment commandBuffer,
+            final MemorySegment depthTexture,
+            final MemorySegment motionTexture,
+            final MemorySegment reactiveTexture,
+            final MemorySegment classificationTexture,
+            final MemorySegment packetsBuffer,
+            final int packetCount
+    ) {
+        try {
+            return (int) commitEntityVelocityReplay.invokeExact(
+                    segment(commandBuffer),
+                    segment(depthTexture),
+                    segment(motionTexture),
+                    segment(reactiveTexture),
+                    segment(classificationTexture),
+                    segment(packetsBuffer),
+                    packetCount
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_commit_entity_velocity_replay", throwable);
         }
     }
 
