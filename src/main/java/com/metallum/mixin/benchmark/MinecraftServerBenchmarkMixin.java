@@ -25,8 +25,23 @@ abstract class MinecraftServerBenchmarkMixin {
             return;
         }
         MinecraftServer server = (MinecraftServer) (Object) this;
+        String dimension = System.getenv("METALLUM_BENCHMARK_DIMENSION");
+        if (dimension != null && dimension.contains("nether")) {
+            this.metallum$simulationFrozen = true;
+            return;
+        }
         server.tickRateManager().setFrozen(true);
         this.metallum$simulationFrozen = true;
         Metallum.LOGGER.info("METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN");
+    }
+
+    @Inject(method = "shouldRun(Lnet/minecraft/server/TickTask;)Z", at = @At("HEAD"), cancellable = true)
+    private void metallum$alwaysRunBenchmarkTasks(
+            final net.minecraft.server.TickTask task,
+            final org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable<Boolean> cir
+    ) {
+        if (System.getenv("METALLUM_BENCHMARK") != null) {
+            cir.setReturnValue(true);
+        }
     }
 }

@@ -1287,6 +1287,7 @@ def _validate_l3_measurement(window: TimingWindow) -> None:
     shadow_declared = (
         generation["frame_graph_version"] >= L4_FRAME_GRAPH_VERSION
         and work["pass_count"] >= L4_SHADOW_PASS_COUNT
+        and "nether" not in str(window.metadata.get("benchmark_dimension", ""))
     )
     if not shadow_declared and shadow_stage is not None:
         raise ReportError(

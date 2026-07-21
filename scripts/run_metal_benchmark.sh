@@ -817,13 +817,24 @@ route_measure_start_line=$(grep -nF "$route_measure_start" "$MINECRAFT_LOG" | cu
 route_measure_end_line=$(grep -nF "$route_measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_start_line=$(grep -nF "$measure_start" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
-[ "$server_frozen_line" -lt "$route_apply_line" ] \
-    && [ "$route_apply_line" -lt "$route_ready_line" ] \
-    && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
-    && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
-    && [ "$measure_start_line" -lt "$measure_end_line" ] \
-    && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
-    || die "deterministic route markers are out of order"
+if [[ "$DIMENSION" == *nether* ]]; then
+    [ "$route_apply_line" -lt "$server_frozen_line" ] \
+        && [ "$server_frozen_line" -lt "$route_ready_line" ] \
+        && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
+        && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
+        && [ "$measure_start_line" -lt "$measure_end_line" ] \
+        && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
+        || die "deterministic route markers are out of order"
+else
+    [ "$server_frozen_line" -lt "$route_apply_line" ] \
+        && [ "$route_apply_line" -lt "$route_ready_line" ] \
+        && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
+        && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
+        && [ "$measure_start_line" -lt "$measure_end_line" ] \
+        && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
+        || die "deterministic route markers are out of order"
+fi
+
 
 if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
     torch_end_frame=$((TORCH_APPLY_AFTER_MEASURED_FRAMES + TORCH_OBSERVATION_FRAMES))

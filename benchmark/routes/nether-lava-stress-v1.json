@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "nether-lava-stress-v1",
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "player": {
+    "name": "MetallumBench",
+    "uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9"
+  },
+  "dimension": "minecraft:the_nether",
+  "position": [
+    0.0,
+    32.0,
+    0.0
+  ],
+  "rotation": {
+    "yaw": 0.0,
+    "pitch": 15.0
+  },
+  "camera": "FIRST_PERSON",
+  "clock": {
+    "total_ticks": 181406,
+    "paused": true
+  },
+  "weather": {
+    "mode": "clear",
+    "frozen": true,
+    "clear_duration_ticks": 6000
+  },
+  "simulation": {
+    "frozen": true
+  },
+  "readiness": {
+    "stable_frames": 120,
+    "timeout_frames": 30000,
+    "position_epsilon": 0.0001,
+    "angle_epsilon": 0.001
+  }
+}

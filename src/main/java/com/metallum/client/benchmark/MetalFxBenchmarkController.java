@@ -146,7 +146,6 @@ public final class MetalFxBenchmarkController {
                             : 0
             );
         }
-
         private BlockPos position() {
             return new BlockPos(this.x, this.y, this.z);
         }
@@ -532,6 +531,9 @@ public final class MetalFxBenchmarkController {
         // limiter from replacing the requested uncapped framerate with 30 FPS.
         minecraft.getFramerateLimitTracker().onInputReceived();
         maintainSurvivalGuard(minecraft);
+        if (this.route != null && minecraft.level != null && minecraft.level.tickRateManager().isFrozen()) {
+            lockPlayerPose(minecraft);
+        }
         if (this.survivalGuardFailure != null) {
             fail(minecraft, this.survivalGuardFailure);
             return;
@@ -586,6 +588,7 @@ public final class MetalFxBenchmarkController {
         switch (this.segmentPhase) {
             case WARMUP -> {
                 driveL6DynamicShadow(minecraft);
+                driveNetherLavaStress(minecraft);
                 this.segmentFrame++;
                 if (this.segmentFrame >= this.warmupFrames) {
                     beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_START);
@@ -597,6 +600,7 @@ public final class MetalFxBenchmarkController {
                 this.measuredFrames++;
                 driveL6DynamicShadow(minecraft);
                 driveTorchEpoch(minecraft);
+                driveNetherLavaStress(minecraft);
                 if (this.stage != Stage.RUNNING) {
                     return;
                 }
@@ -605,6 +609,13 @@ public final class MetalFxBenchmarkController {
                     if (l6CoverageFailure != null) {
                         fail(minecraft, l6CoverageFailure);
                         return;
+                    }
+                    if (this.route != null && "nether-lava-stress-v1".equals(this.route.routeId())) {
+                        Metallum.LOGGER.info(
+                                "METALLUM_BENCHMARK EVENT=NETHER_LAVA_TELEMETRY route={} {}",
+                                this.route.routeId(),
+                                com.metallum.client.lighting.AdvancedLightRegistry.getTelemetryString()
+                        );
                     }
                     logSegmentEvent("MEASURE_END");
                     MetalGpuTiming.completeBenchmark(
@@ -1571,6 +1582,10 @@ public final class MetalFxBenchmarkController {
         }
 
         String clientMismatch = clientRouteMismatch(minecraft, true);
+        if (this.stageFrames % 100 == 0) {
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG waiting_for_route mismatch client={} server={} stable_frames={} target_stable_frames={}",
+                    clientMismatch, this.routeServerMismatch, this.routeStableFrames, this.route.stableFrames());
+        }
         if (this.routeApplyLogged
                 && this.routeServerMismatch == null
                 && clientMismatch == null) {
@@ -1661,6 +1676,7 @@ public final class MetalFxBenchmarkController {
             if (this.route.l6DynamicShadow() != null) {
                 L6DynamicShadowBenchmarkTelemetry.begin();
             }
+            com.metallum.client.lighting.AdvancedLightRegistry.global().resetBenchmarkTelemetry();
             if (this.captureScreenshots) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
@@ -1701,7 +1717,7 @@ public final class MetalFxBenchmarkController {
         }
         long token = ++this.nextRouteServerToken;
         try {
-            server.executeIfPossible(() -> {
+            server.execute(() -> {
                 try {
                     this.routeServerMismatch = applyAndVerifyServerRoute(server, apply);
                 } catch (RuntimeException exception) {
@@ -1728,32 +1744,51 @@ public final class MetalFxBenchmarkController {
             final boolean apply
     ) {
         ServerLevel level = server.getLevel(this.route.dimension());
+        ServerPlayer player = server.getPlayerList().getPlayer(this.route.playerUuid());
+        Minecraft mc = Minecraft.getInstance();
+        boolean clientDimensionMatches = mc.player != null && mc.player.level().dimension().equals(this.route.dimension());
+        Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG at=start level_exists={} player_exists={} server_dim={} server_paused={} ticks={} stageFrames={} server_frozen={} client_ready={}",
+                level != null,
+                player != null,
+                player != null ? player.level().dimension().identifier().toString() : "null",
+                server.isPaused(),
+                server.getTickCount(),
+                this.stageFrames,
+                server.tickRateManager().isFrozen(),
+                clientDimensionMatches
+        );
+
         if (level == null) {
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG early_return reason=level_null");
             return "benchmark dimension is unavailable";
         }
-        ServerPlayer player = server.getPlayerList().getPlayer(this.route.playerUuid());
         if (player == null) {
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG early_return reason=player_null");
             return "benchmark server player is unavailable";
         }
         if (!this.route.playerName().equals(player.getGameProfile().name())
                 || !this.route.playerUuid().equals(player.getGameProfile().id())) {
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG early_return reason=player_identity_mismatch expected_name={} actual_name={} expected_uuid={} actual_uuid={}",
+                    this.route.playerName(), player.getGameProfile().name(), this.route.playerUuid(), player.getGameProfile().id());
             return "benchmark server player identity differs from the route";
         }
 
         Holder<WorldClock> clock = level.dimensionType().defaultClock().orElse(null);
-        if (clock == null) {
-            return "benchmark dimension has no default clock";
-        }
         int chunkX = Mth.floor(this.route.x()) >> 4;
         int chunkZ = Mth.floor(this.route.z()) >> 4;
         if (apply) {
-            server.tickRateManager().setFrozen(true);
             level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
             level.getGameRules().set(GameRules.ADVANCE_TIME, false, server);
             level.getGameRules().set(GameRules.ADVANCE_WEATHER, false, server);
-            server.clockManager().setTotalTicks(clock, this.route.clockTicks());
-            server.clockManager().setPaused(clock, true);
+            if (clock != null) {
+                server.clockManager().setTotalTicks(clock, this.route.clockTicks());
+                server.clockManager().setPaused(clock, true);
+            }
             server.setWeatherParameters(this.route.clearWeatherTicks(), 0, false, false);
+            if (!player.level().dimension().equals(this.route.dimension())) {
+                server.tickRateManager().setFrozen(false);
+            }
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG before_teleport player_dim={}", player.level().dimension().identifier().toString());
             boolean teleported = player.teleportTo(
                     level,
                     this.route.x(),
@@ -1764,10 +1799,30 @@ public final class MetalFxBenchmarkController {
                     this.route.pitch(),
                     true
             );
+            Metallum.LOGGER.info("METALLUM_BENCHMARK_DEBUG after_teleport player_dim={} teleported={}", player.level().dimension().identifier().toString(), teleported);
             if (!teleported) {
                 return "server rejected the benchmark teleport";
             }
             player.setDeltaMovement(0.0, 0.0, 0.0);
+        }
+        if (player.level().dimension().equals(this.route.dimension()) && clientDimensionMatches) {
+            if (!server.tickRateManager().isFrozen()) {
+                server.tickRateManager().setFrozen(true);
+                Metallum.LOGGER.info("METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN");
+            }
+            if (!samePose(player)) {
+                player.teleportTo(
+                        level,
+                        this.route.x(),
+                        this.route.y(),
+                        this.route.z(),
+                        Set.<Relative>of(),
+                        this.route.yaw(),
+                        this.route.pitch(),
+                        true
+                );
+                player.setDeltaMovement(0.0, 0.0, 0.0);
+            }
         }
         return serverRouteMismatch(server, level, player, clock, chunkX, chunkZ);
     }
@@ -1781,6 +1836,9 @@ public final class MetalFxBenchmarkController {
             final int chunkZ
     ) {
         if (!player.level().dimension().equals(this.route.dimension())) {
+            if (this.stageFrames % 60 == 0) {
+                Metallum.LOGGER.info("METALLUM_BENCHMARK SERVER_DIMENSION_MISMATCH expected={} found={}", this.route.dimension().identifier(), player.level().dimension().identifier());
+            }
             return "server player is in a different dimension";
         }
         if (this.route.l6DynamicShadow() == null && !samePose(player)) {
@@ -1794,11 +1852,13 @@ public final class MetalFxBenchmarkController {
                 || level.getGameRules().get(GameRules.ADVANCE_WEATHER)) {
             return "benchmark time or weather gamerule is advancing";
         }
-        ClockState clockState = server.clockManager().packState().clocks().get(clock);
-        if (clockState == null
-                || !clockState.paused()
-                || clockState.totalTicks() != this.route.clockTicks()) {
-            return "server clock differs from the paused route clock";
+        if (clock != null) {
+            ClockState clockState = server.clockManager().packState().clocks().get(clock);
+            if (clockState == null
+                    || !clockState.paused()
+                    || clockState.totalTicks() != this.route.clockTicks()) {
+                return "server clock differs from the paused route clock";
+            }
         }
         if (level.getWeatherData().isRaining()
                 || level.getWeatherData().isThundering()
@@ -1836,13 +1896,17 @@ public final class MetalFxBenchmarkController {
             return "client camera is not fixed to first person";
         }
         if (!minecraft.player.level().dimension().equals(this.route.dimension())) {
+            if (this.stageFrames % 60 == 0) {
+                Metallum.LOGGER.info("METALLUM_BENCHMARK CLIENT_DIMENSION_MISMATCH expected={} found={}", this.route.dimension().identifier(), minecraft.player.level().dimension().identifier());
+            }
             return "client player is in a different dimension";
         }
         if (!samePose(minecraft.player)) {
             return "client player pose differs from the route (expected "
                     + routePose() + ", found " + entityPose(minecraft.player) + ")";
         }
-        if (minecraft.level.getDefaultClockTime() != this.route.clockTicks()) {
+        if (minecraft.level.dimensionType().defaultClock().isPresent()
+                && minecraft.level.getDefaultClockTime() != this.route.clockTicks()) {
             return "client clock differs from the route";
         }
         if (!minecraft.level.tickRateManager().isFrozen()) {
@@ -2004,6 +2068,22 @@ public final class MetalFxBenchmarkController {
         applyL6DynamicShadowMotion(minecraft, this.l6MotionFrame);
     }
 
+    private void driveNetherLavaStress(final Minecraft minecraft) {
+        if (this.route == null || !"nether-lava-stress-v1".equals(this.route.routeId())) {
+            return;
+        }
+        String rotateEnv = System.getenv("METALLUM_BENCHMARK_NETHER_ROTATE");
+        if (rotateEnv == null || !"1".equals(rotateEnv)) {
+            return;
+        }
+        if (minecraft.player == null) {
+            return;
+        }
+        float yaw = this.route.yaw() + this.segmentFrame * 0.05f;
+        minecraft.player.setYRot(yaw);
+        minecraft.player.yRotO = yaw;
+    }
+
     private void applyL6DynamicShadowMotion(final Minecraft minecraft, final int frame) {
         L6DynamicShadowConfig config = this.route.l6DynamicShadow();
         if (config == null || minecraft.player == null || minecraft.level == null) {
@@ -2044,6 +2124,7 @@ public final class MetalFxBenchmarkController {
             probe.setPos(probeX, probeY, probeZ);
             probe.setDeltaMovement(0.0, 0.0, 0.0);
         }
+
     }
 
     private void restoreL6DynamicShadowMotion(final Minecraft minecraft) {
@@ -2147,13 +2228,15 @@ public final class MetalFxBenchmarkController {
     }
 
     private boolean samePose(final Entity entity) {
+        boolean rotating = "nether-lava-stress-v1".equals(this.route.routeId())
+                && "1".equals(System.getenv("METALLUM_BENCHMARK_NETHER_ROTATE"));
         return Math.abs(entity.getX() - this.route.x()) <= this.route.positionEpsilon()
                 && Math.abs(entity.getY() - this.route.y()) <= this.route.positionEpsilon()
                 && Math.abs(entity.getZ() - this.route.z()) <= this.route.positionEpsilon()
-                && Math.abs(Mth.wrapDegrees(entity.getYRot() - this.route.yaw()))
+                && (rotating || (Math.abs(Mth.wrapDegrees(entity.getYRot() - this.route.yaw()))
                 <= this.route.angleEpsilon()
                 && Math.abs(Mth.wrapDegrees(entity.getXRot() - this.route.pitch()))
-                <= this.route.angleEpsilon();
+                <= this.route.angleEpsilon()));
     }
 
     private String routePose() {
@@ -2300,6 +2383,32 @@ public final class MetalFxBenchmarkController {
         minecraft.getWindow().setPreferredFullscreenVideoMode(this.originalFullscreenMode);
         MetalFxSpatialScaling.clearBenchmarkOverride();
         minecraft.stop();
+    }
+
+    private void lockPlayerPose(final Minecraft minecraft) {
+        if (this.route == null || minecraft.player == null) {
+            return;
+        }
+        if (this.route.l6DynamicShadow() == null) {
+            double x = this.route.x();
+            double y = this.route.y();
+            double z = this.route.z();
+            minecraft.player.setPos(x, y, z);
+            minecraft.player.xOld = x;
+            minecraft.player.yOld = y;
+            minecraft.player.zOld = z;
+            minecraft.player.setDeltaMovement(0.0, 0.0, 0.0);
+        }
+        boolean rotating = "nether-lava-stress-v1".equals(this.route.routeId())
+                && "1".equals(System.getenv("METALLUM_BENCHMARK_NETHER_ROTATE"));
+        if (this.route.l6DynamicShadow() == null && !rotating) {
+            float yaw = this.route.yaw();
+            float pitch = this.route.pitch();
+            minecraft.player.setYRot(yaw);
+            minecraft.player.setXRot(pitch);
+            minecraft.player.yRotO = yaw;
+            minecraft.player.xRotO = pitch;
+        }
     }
 
     private void maintainSurvivalGuard(final Minecraft minecraft) {
