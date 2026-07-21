@@ -320,6 +320,21 @@ private final class MetallumMenuBlurPipelines {
     }
 }
 
+/// Display-sized intermediates for the coherent menu blur.
+///
+/// This intentionally is not part of `MetallumHdrWorkspace`: a Temporal
+/// frame has a render-resolution HDR workspace but a display-resolution
+/// MetalFX output. The menu blur always operates on the latter.
+private final class MetallumMenuBlurWorkspace {
+    var first: MTLTexture?
+    var second: MTLTexture?
+
+    init() {
+        self.first = nil
+        self.second = nil
+    }
+}
+
 private final class MetallumHdrWorkspace {
     let renderContractMode: UInt32
     let sourceWidth: Int
@@ -332,8 +347,6 @@ private final class MetallumHdrWorkspace {
     var worldCompositeCommandBufferAddress: UInt?
     var uiMaskA: MTLTexture?
     var uiMaskB: MTLTexture?
-    var menuBlurA: MTLTexture?
-    var menuBlurB: MTLTexture?
     let histogram: MTLBuffer
     let adaptiveState: MTLBuffer
     var lastHistogramUptime: TimeInterval?
@@ -361,8 +374,6 @@ private final class MetallumHdrWorkspace {
         self.worldCompositeCommandBufferAddress = nil
         self.uiMaskA = nil
         self.uiMaskB = nil
-        self.menuBlurA = nil
-        self.menuBlurB = nil
         self.histogram = histogram
         self.adaptiveState = adaptiveState
         self.lastHistogramUptime = nil
@@ -2165,10 +2176,13 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     case actualHdrDisplay = 12
     case lightUploadClusterBuild = 13
     case sunShadow = 14
-    // Append-only: Java's stable timing IDs 0...14 must never be renumbered.
+    // Append-only: Java's stable timing IDs 0...16 must never be renumbered.
     case voxelUploadUpdate = 15
     // Append-only: moving L6 page generation is separately attributable from L5 updates.
     case dynamicLocalShadow = 16
+    // Append-only: Temporal input generation and optional entity replay are measured separately.
+    case temporalInputs = 17
+    case temporalEntityReplay = 18
 
     var reportName: String {
         switch self {
@@ -2189,6 +2203,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .sunShadow: "sun shadow"
         case .voxelUploadUpdate: "voxel upload + update"
         case .dynamicLocalShadow: "dynamic local shadow"
+        case .temporalInputs: "temporal inputs"
+        case .temporalEntityReplay: "temporal entity replay"
         }
     }
 
@@ -3691,6 +3707,7 @@ private enum NativeState {
     static var actualHdrPipelines: [UInt: MetallumActualHdrPipelines] = [:]
     static var uiBackdropPipelines: [UInt: MetallumUiBackdropPipelines] = [:]
     static var menuBlurPipelines: [UInt: MetallumMenuBlurPipelines] = [:]
+    static var menuBlurWorkspaces: [UInt: MetallumMenuBlurWorkspace] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
@@ -5324,8 +5341,6 @@ private func ensureHdrWorkspace(
             cached.displayHeight = displayHeight
             cached.uiMaskA = nil
             cached.uiMaskB = nil
-            cached.menuBlurA = nil
-            cached.menuBlurB = nil
             cached.lastHistogramUptime = nil
             cached.histogramNeedsInitialization = true
         }
@@ -5402,18 +5417,21 @@ private func ensureHdrWorkspace(
 
 private func ensureMenuBlurTextures(
     device: MTLDevice,
-    workspace: MetallumHdrWorkspace,
     width: Int,
     height: Int
 ) -> (MTLTexture, MTLTexture)? {
+    let key = objectAddress(device)
+    let workspace = NativeState.menuBlurWorkspaces[key] ?? MetallumMenuBlurWorkspace()
+    NativeState.menuBlurWorkspaces[key] = workspace
+
     func valid(_ texture: MTLTexture?) -> Bool {
         texture != nil
             && texture!.width == width
             && texture!.height == height
             && texture!.pixelFormat == .rgba16Float
     }
-    if valid(workspace.menuBlurA), valid(workspace.menuBlurB) {
-        return (workspace.menuBlurA!, workspace.menuBlurB!)
+    if valid(workspace.first), valid(workspace.second) {
+        return (workspace.first!, workspace.second!)
     }
 
     func makeTexture(label: String) -> MTLTexture? {
@@ -5435,8 +5453,8 @@ private func ensureMenuBlurTextures(
           let second = makeTexture(label: "Metallum coherent menu blur B") else {
         return nil
     }
-    workspace.menuBlurA = first
-    workspace.menuBlurB = second
+    workspace.first = first
+    workspace.second = second
     return (first, second)
 }
 
@@ -7377,6 +7395,7 @@ private func prepareRendererGeneration(
 
     // Resolution-dependent HDR resources never cross renderer generations.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
+    NativeState.menuBlurWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
     NativeState.temporalWorkspaces.removeValue(forKey: key)
     let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.spatialBit != 0
@@ -7699,6 +7718,7 @@ public func metallum_encode_temporal_diagnostics_v1(
             pass.colorAttachments[2].loadAction = .dontCare
             pass.colorAttachments[2].storeAction = .store
         }
+        attachGpuTiming(pass, commandBuffer: commandBuffer, stage: .temporalInputs)
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return -4 }
         encoder.label = "Metallum temporal camera-motion diagnostic"
         encoder.waitForFence(globalFence, before: .fragment)
@@ -7811,6 +7831,7 @@ public func metallum_commit_entity_velocity_replay(
     pass.depthAttachment.loadAction = .load
     pass.depthAttachment.storeAction = .store
 
+    attachGpuTiming(pass, commandBuffer: commandBuffer, stage: .temporalEntityReplay)
     guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return -4 }
     encoder.label = "Metallum T1B.3 entity velocity replay pass"
 
@@ -7826,10 +7847,11 @@ public func metallum_commit_entity_velocity_replay(
         height: motionTexture.height
     ))
 
-    let depthDesc = MTLDepthStencilDescriptor()
-    depthDesc.depthCompareFunction = .equal
-    depthDesc.isDepthWriteEnabled = false
-    guard let depthState = device.makeDepthStencilState(descriptor: depthDesc) else { return -5 }
+    guard let depthState = ensureDepthStencilState(
+        device: device,
+        compareOp: .equal,
+        writeDepth: false
+    ) else { return -5 }
     encoder.setDepthStencilState(depthState)
 
     let boundPackets = packetsPointer.bindMemory(to: MetallumEntityVelocityPacket.self, capacity: Int(packetCount))
@@ -9708,6 +9730,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.actualHdrPipelines.removeValue(forKey: deviceAddress)
         NativeState.uiBackdropPipelines.removeValue(forKey: deviceAddress)
         NativeState.menuBlurPipelines.removeValue(forKey: deviceAddress)
+        NativeState.menuBlurWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
@@ -10678,7 +10701,8 @@ public func metallum_create_sampler(
     _ mipFilter: MTLSamplerMipFilter,
     _ compareFunction: MTLCompareFunction,
     _ maxAnisotropy: Int32,
-    _ lodMaxClamp: Double
+    _ lodMaxClamp: Double,
+    _ lodBias: Double
 ) -> UnsafeMutableRawPointer? {
     return autoreleasepool {
         let descriptor = MTLSamplerDescriptor()
@@ -10691,6 +10715,19 @@ public func metallum_create_sampler(
         descriptor.maxAnisotropy = max(Int(maxAnisotropy), 1)
         descriptor.lodMinClamp = 0.0
         descriptor.lodMaxClamp = lodMaxClamp >= 0.0 && lodMaxClamp.isFinite ? Float(lodMaxClamp) : Float.greatestFiniteMagnitude
+        // Sampler-level LOD bias is available from macOS 26. It restores the
+        // texture detail that the lower-resolution Temporal input would
+        // otherwise discard. Returning nil makes Java retain the normal
+        // sampler on older systems instead of allocating unused variants.
+        guard lodBias.isFinite else {
+            return nil
+        }
+        if lodBias != 0.0 {
+            guard #available(macOS 26.0, *) else {
+                return nil
+            }
+            descriptor.lodBias = Float(min(max(lodBias, -16.0), 15.999))
+        }
         return retainedPointer(device.makeSamplerState(descriptor: descriptor))
     }
 }
@@ -12111,6 +12148,11 @@ public func metallum_MTLCommandBuffer_encodeCoherentMenuBlur(
                 inputTexture: sourceTexture,
                 outputWidth: uiTexture.width,
                 outputHeight: uiTexture.height
+              ) ?? currentTemporalOutput(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: uiTexture.width,
+                outputHeight: uiTexture.height
               ) ?? currentSpatialOutput(
                 commandBuffer: commandBuffer,
                 inputTexture: sourceTexture,
@@ -12122,12 +12164,8 @@ public func metallum_MTLCommandBuffer_encodeCoherentMenuBlur(
               hdrTexture.usage.contains(.renderTarget),
               hdrTexture.width == uiTexture.width,
               hdrTexture.height == uiTexture.height,
-              let workspace = NativeState.hdrWorkspaces[objectAddress(commandBuffer.device)],
-              workspace.displayWidth == uiTexture.width,
-              workspace.displayHeight == uiTexture.height,
               let blurTextures = ensureMenuBlurTextures(
                 device: commandBuffer.device,
-                workspace: workspace,
                 width: uiTexture.width,
                 height: uiTexture.height
               ),

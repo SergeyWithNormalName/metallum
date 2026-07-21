@@ -16,6 +16,12 @@ private typealias EncodeBackdrop = @convention(c) (
     UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?,
     Int32, Int32, Int32, Int32, Int32, Int32, Float, Float, Float
 ) -> Int32
+private typealias EncodeCoherentMenuBlur = @convention(c) (
+    UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, Float, Float
+) -> Int32
+private typealias CreateSampler = @convention(c) (
+    UnsafeRawPointer?, UInt, UInt, UInt, UInt, UInt, UInt, Int32, Double, Double
+) -> UnsafeMutableRawPointer?
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     guard condition() else { throw ValidationFailure.message(message) }
@@ -112,7 +118,8 @@ private func runCase(
     previousProjectionScaleX: Float = 1,
     temporalProduction: Bool = false,
     temporalHdrPrecompose: Bool = false,
-    backdrop: EncodeBackdrop? = nil
+    backdrop: EncodeBackdrop? = nil,
+    coherentBlur: EncodeCoherentMenuBlur? = nil
 ) throws -> (motion: SIMD2<Float>, reactive: UInt8) {
     let packet = framePacket(
         width: width,
@@ -189,6 +196,15 @@ private func runCase(
         if temporalHdrPrecompose {
             try require(backdropStatus == 2,
                         "HDR-precomposed Temporal backdrop did not report its fast path")
+            guard let coherentBlur else {
+                throw ValidationFailure.message("Temporal coherent menu blur symbol is unavailable")
+            }
+            let blurStatus = coherentBlur(
+                objectPointer(commandBuffer), objectPointer(source), objectPointer(destination),
+                objectPointer(fence), 12.0, 1.0
+            )
+            try require(blurStatus == 1,
+                        "HDR-precomposed Temporal output was unavailable to coherent menu blur: \(blurStatus)")
         }
     }
 
@@ -227,7 +243,9 @@ private enum TemporalDiagnosticRuntimeValidationMain {
                   let initializeSymbol = dlsym(handle, "metallum_init_pipelines"),
                   let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
                   let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v1"),
-                  let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop") else {
+                  let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
+                  let coherentBlurSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeCoherentMenuBlur"),
+                  let createSamplerSymbol = dlsym(handle, "metallum_create_sampler") else {
                 throw ValidationFailure.message("Native temporal diagnostic symbols are unavailable")
             }
             defer { dlclose(handle) }
@@ -240,6 +258,29 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             let setFrameState = unsafeBitCast(setSymbol, to: SetFrameState.self)
             let encode = unsafeBitCast(encodeSymbol, to: EncodeDiagnostics.self)
             let backdrop = unsafeBitCast(backdropSymbol, to: EncodeBackdrop.self)
+            let coherentBlur = unsafeBitCast(coherentBlurSymbol, to: EncodeCoherentMenuBlur.self)
+            let createSampler = unsafeBitCast(createSamplerSymbol, to: CreateSampler.self)
+            let temporalSamplerHandle = createSampler(
+                objectPointer(device as AnyObject),
+                MTLSamplerAddressMode.clampToEdge.rawValue,
+                MTLSamplerAddressMode.clampToEdge.rawValue,
+                MTLSamplerMinMagFilter.linear.rawValue,
+                MTLSamplerMinMagFilter.linear.rawValue,
+                MTLSamplerMipFilter.linear.rawValue,
+                MTLCompareFunction.never.rawValue,
+                1,
+                Double.greatestFiniteMagnitude,
+                -2.0
+            )
+            if #available(macOS 26.0, *) {
+                guard let temporalSamplerHandle else {
+                    throw ValidationFailure.message("Native Temporal mip-bias sampler creation failed")
+                }
+                _ = Unmanaged<MTLSamplerState>.fromOpaque(temporalSamplerHandle).takeRetainedValue()
+            } else {
+                try require(temporalSamplerHandle == nil,
+                            "Older macOS must keep the unbiased Temporal sampler fallback")
+            }
             let transitionDescriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .depth32Float, width: 1, height: 1, mipmapped: false
             )
@@ -281,7 +322,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             let hdrPrecomposedProduction = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 64, height: 64, temporalProduction: true, temporalHdrPrecompose: true,
-                backdrop: backdrop
+                backdrop: backdrop, coherentBlur: coherentBlur
             )
             try require(abs(hdrPrecomposedProduction.motion.x) <= 0.01
                             && abs(hdrPrecomposedProduction.motion.y) <= 0.01
@@ -306,7 +347,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose, camera, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

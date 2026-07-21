@@ -7,6 +7,7 @@ import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.Matrix4;
+import com.metallum.client.renderer.temporal.TemporalJitterProjection;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.pipeline.MainTarget;
@@ -178,15 +179,27 @@ abstract class GameRendererMetalFxMixin {
             if (MetalFxTemporalScaling.isActive()
                     || com.metallum.client.renderer.temporal.TemporalDiagnostics.configured()) {
                 long nextFrameId = device.frameStateTracker().nextFrameId();
-                com.metallum.client.renderer.temporal.FrameState.JitterOffset jitter = com.metallum.client.renderer.temporal.JitterSequence.sample(nextFrameId, 1.0);
+                com.metallum.client.renderer.temporal.FrameState.JitterOffset jitter =
+                        com.metallum.client.renderer.temporal.JitterSequence.sample(
+                                nextFrameId,
+                                1.0,
+                                this.mainRenderTarget.width,
+                                this.mainRenderTarget.height,
+                                displayWidth,
+                                displayHeight
+                        );
                 jitterX = (float) jitter.x();
                 jitterY = (float) jitter.y();
             }
 
             Matrix4f jitteredProjection = new Matrix4f(finalProjection);
             if (jitterX != 0f || jitterY != 0f) {
-                jitteredProjection.m20(jitteredProjection.m20() + jitterX * 2.0f / this.mainRenderTarget.width);
-                jitteredProjection.m21(jitteredProjection.m21() + jitterY * 2.0f / this.mainRenderTarget.height);
+                TemporalJitterProjection.apply(
+                        jitteredProjection,
+                        new FrameState.JitterOffset(jitterX, jitterY),
+                        this.mainRenderTarget.width,
+                        this.mainRenderTarget.height
+                );
             }
 
             Matrix4 view = matrix(camera.viewRotationMatrix);

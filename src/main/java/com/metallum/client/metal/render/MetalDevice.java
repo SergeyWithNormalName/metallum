@@ -21,9 +21,8 @@ import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.renderer.temporal.EntityTransformTracker;
-import com.metallum.client.renderer.temporal.EntityVelocityAbi;
 import com.metallum.client.renderer.temporal.EntityVelocityDrawRecorder;
-import com.metallum.client.renderer.temporal.EntityVelocityPacket;
+import com.metallum.client.renderer.temporal.EntityVelocityPacketRing;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
@@ -38,6 +37,7 @@ import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
+import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.renderer.MetalCapabilities;
@@ -234,6 +234,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private RendererAdmissionLogState loggedRendererAdmission;
     private boolean frameInterpolationAdmissionLogged;
     private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
+    private final EntityVelocityPacketRing entityVelocityPackets = new EntityVelocityPacketRing();
     private final FrameStateTracker frameStateTracker = new FrameStateTracker();
     private final EntityTransformTracker entityTransformTracker = new EntityTransformTracker();
     @Nullable
@@ -651,6 +652,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.localVoxelShadowResources = null;
         }
         this.commandEncoder.close();
+        this.entityVelocityPackets.close();
         this.frameStatePackets.close();
         this.clearPipelineCache();
         try {
@@ -821,6 +823,15 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     public boolean temporalUpscalingActive() {
         return this.temporalScalingActive;
+    }
+
+    /** Current Temporal mode for sampler selection; never bias a non-Temporal frame. */
+    TemporalScalingMode temporalMipBiasMode() {
+        if (!this.temporalScalingActive) {
+            return TemporalScalingMode.OFF;
+        }
+        TemporalScalingMode mode = MetalFxTemporalScaling.requestedMode();
+        return mode.enabled() ? mode : TemporalScalingMode.OFF;
     }
 
     /** Publishes the immutable renderer generation after output, scale and material admission. */
@@ -1778,20 +1789,15 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.disableTemporalInputs("native temporal-input pass failed with status " + status, null);
         } else {
             // Encode T1B.3 entity velocity replay pass
-            java.util.List<EntityVelocityPacket> packets = EntityVelocityDrawRecorder.getInstance().getRecordedPackets();
-            if (!packets.isEmpty()) {
-                try (java.lang.foreign.Arena frameArena = java.lang.foreign.Arena.ofConfined()) {
-                    long totalBytes = (long) packets.size() * EntityVelocityAbi.PACKET_BYTES;
-                    java.lang.foreign.MemorySegment packetsSegment = frameArena.allocate(totalBytes, 16L);
-                    for (int i = 0; i < packets.size(); i++) {
-                        java.lang.foreign.MemorySegment slice = packetsSegment.asSlice(
-                                (long) i * EntityVelocityAbi.PACKET_BYTES,
-                                EntityVelocityAbi.PACKET_BYTES
-                        );
-                        EntityVelocityAbi.encodeInto(packets.get(i), slice);
-                    }
-                    this.commandEncoder.encodeEntityVelocityReplay(depth, resources.pair(slot), packetsSegment, packets.size());
-                }
+            EntityVelocityDrawRecorder recorder = EntityVelocityDrawRecorder.getInstance();
+            int packetCount = recorder.encodeInto(this.entityVelocityPackets, slot);
+            if (packetCount > 0) {
+                this.commandEncoder.encodeEntityVelocityReplay(
+                        depth,
+                        resources.pair(slot),
+                        this.entityVelocityPackets.packetBuffer(slot, packetCount),
+                        packetCount
+                );
             }
         }
         EntityVelocityDrawRecorder.getInstance().clearFrame();

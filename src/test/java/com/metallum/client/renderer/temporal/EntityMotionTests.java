@@ -1,6 +1,8 @@
 package com.metallum.client.renderer.temporal;
 
 import org.joml.Matrix4f;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.UUID;
 
 public final class EntityMotionTests {
@@ -18,6 +20,7 @@ public final class EntityMotionTests {
         testEntityRenderStateReuseSimulation();
         testItemEntityCoverage();
         testVelocityDrawRecorder();
+        testVelocityPacketRingReuse();
         runClientSmokeSimulation();
         System.out.println("Entity motion tracking tests passed");
     }
@@ -322,6 +325,36 @@ public final class EntityMotionTests {
         // Clear frame
         recorder.clearFrame();
         require(recorder.getRecordedPackets().isEmpty(), "Recorded packets list must be cleared");
+    }
+
+    private static void testVelocityPacketRingReuse() {
+        EntityVelocityDrawRecorder recorder = EntityVelocityDrawRecorder.getInstance();
+        recorder.clearFrame();
+        EntityTransformTracker tracker = new EntityTransformTracker();
+        UUID uuid = UUID.randomUUID();
+        Matrix4f matrix = new Matrix4f();
+        tracker.stepFrame(1L, 100L, 200L);
+        tracker.record(uuid, 5, matrix, false, 1L, 1);
+        recorder.beginEntitySubmit(uuid, 5, "zombie", tracker, matrix, 1L, 0, 3);
+        recorder.recordDraw(
+                123L, 0L, 0, 32, 456L, 0, 0L, 0, 3, 0, 1, 0, 0, 0,
+                0.0f, 0.0f, 0.0f, 0L, 0L, 0.1f, 0,
+                tracker, matrix, matrix, matrix, 1L, 1L, 0
+        );
+        recorder.endEntitySubmit();
+        try (EntityVelocityPacketRing ring = new EntityVelocityPacketRing()) {
+            int count = recorder.encodeInto(ring, 0);
+            require(count == 1, "Packet ring did not encode the recorder contents");
+            MemorySegment first = ring.packetBuffer(0, count);
+            require(first.get(ValueLayout.JAVA_LONG_UNALIGNED, 0L) == 123L,
+                    "Packet ring did not preserve the vertex-buffer handle");
+            require(ring.capacity(0) >= 1, "Packet ring has no reusable slot capacity");
+            require(recorder.encodeInto(ring, 0) == 1,
+                    "Packet ring did not reuse its submission slot");
+            require(first.address() == ring.packetBuffer(0, 1).address(),
+                    "Packet ring replaced storage without a capacity increase");
+        }
+        recorder.clearFrame();
     }
 
     private static void require(final boolean condition, final String message) {

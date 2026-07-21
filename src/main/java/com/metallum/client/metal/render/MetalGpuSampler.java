@@ -5,6 +5,7 @@ import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.metal.render.mtl.MTLSamplerAddressMode;
 import com.metallum.client.metal.render.mtl.MTLSamplerMinMagFilter;
 import com.metallum.client.metal.render.mtl.MTLSamplerMipFilter;
+import com.metallum.client.metalfx.TemporalScalingMode;
 import com.mojang.blaze3d.textures.AddressMode;
 import com.mojang.blaze3d.textures.FilterMode;
 import com.mojang.blaze3d.textures.GpuSampler;
@@ -19,6 +20,10 @@ import java.util.OptionalDouble;
 final class MetalGpuSampler extends GpuSampler {
     private final MetalDevice device;
     private final MemorySegment nativeHandle;
+    private final MemorySegment temporalQualityHandle;
+    private final MemorySegment temporalPerformanceHandle;
+    private final MemorySegment temporalUltraPerformanceHandle;
+    private final boolean temporalMipBiasEligible;
     private final AddressMode addressModeU;
     private final AddressMode addressModeV;
     private final FilterMode minFilter;
@@ -59,17 +64,48 @@ final class MetalGpuSampler extends GpuSampler {
             final MTLCompareFunction compareFunction
     ) {
         this.device = device;
-        this.nativeHandle = MetalNativeBridge.metallum_create_sampler(
-                device.metalDeviceHandle(),
-                MTLSamplerAddressMode.from(addressModeU),
-                MTLSamplerAddressMode.from(addressModeV),
-                MTLSamplerMinMagFilter.from(minFilter),
-                MTLSamplerMinMagFilter.from(magFilter),
-                toMtlMipFilter(maxLod),
+        MTLSamplerAddressMode nativeAddressModeU = MTLSamplerAddressMode.from(addressModeU);
+        MTLSamplerAddressMode nativeAddressModeV = MTLSamplerAddressMode.from(addressModeV);
+        MTLSamplerMinMagFilter nativeMinFilter = MTLSamplerMinMagFilter.from(minFilter);
+        MTLSamplerMinMagFilter nativeMagFilter = MTLSamplerMinMagFilter.from(magFilter);
+        MTLSamplerMipFilter nativeMipFilter = toMtlMipFilter(maxLod);
+        int nativeAnisotropy = Math.max(1, maxAnisotropy);
+        double nativeMaxLod = toMtlMaxLodClamp(maxLod);
+        this.nativeHandle = createNativeHandle(
+                device,
+                nativeAddressModeU,
+                nativeAddressModeV,
+                nativeMinFilter,
+                nativeMagFilter,
+                nativeMipFilter,
                 compareFunction,
-                Math.max(1, maxAnisotropy),
-                toMtlMaxLodClamp(maxLod)
+                nativeAnisotropy,
+                nativeMaxLod,
+                0.0
         );
+        this.temporalMipBiasEligible = compareFunction == MTLCompareFunction.Never
+                && nativeMipFilter == MTLSamplerMipFilter.Linear;
+        if (this.temporalMipBiasEligible) {
+            this.temporalQualityHandle = tryCreateTemporalHandle(
+                    device, nativeAddressModeU, nativeAddressModeV, nativeMinFilter, nativeMagFilter,
+                    nativeMipFilter, compareFunction, nativeAnisotropy, nativeMaxLod,
+                    TemporalScalingMode.QUALITY.textureMipBias()
+            );
+            this.temporalPerformanceHandle = tryCreateTemporalHandle(
+                    device, nativeAddressModeU, nativeAddressModeV, nativeMinFilter, nativeMagFilter,
+                    nativeMipFilter, compareFunction, nativeAnisotropy, nativeMaxLod,
+                    TemporalScalingMode.PERFORMANCE.textureMipBias()
+            );
+            this.temporalUltraPerformanceHandle = tryCreateTemporalHandle(
+                    device, nativeAddressModeU, nativeAddressModeV, nativeMinFilter, nativeMagFilter,
+                    nativeMipFilter, compareFunction, nativeAnisotropy, nativeMaxLod,
+                    TemporalScalingMode.ULTRA_PERFORMANCE.textureMipBias()
+            );
+        } else {
+            this.temporalQualityHandle = MemorySegment.NULL;
+            this.temporalPerformanceHandle = MemorySegment.NULL;
+            this.temporalUltraPerformanceHandle = MemorySegment.NULL;
+        }
         this.addressModeU = addressModeU;
         this.addressModeV = addressModeV;
         this.minFilter = minFilter;
@@ -115,6 +151,9 @@ final class MetalGpuSampler extends GpuSampler {
         }
         this.closed = true;
         this.device.queueResourceRelease(this.nativeHandle);
+        queueResourceRelease(this.temporalQualityHandle);
+        queueResourceRelease(this.temporalPerformanceHandle);
+        queueResourceRelease(this.temporalUltraPerformanceHandle);
     }
 
     boolean isClosed() {
@@ -122,7 +161,76 @@ final class MetalGpuSampler extends GpuSampler {
     }
 
     MemorySegment nativeHandle() {
-        return this.nativeHandle;
+        if (!this.temporalMipBiasEligible) {
+            return this.nativeHandle;
+        }
+        MemorySegment selected = switch (this.device.temporalMipBiasMode()) {
+            case QUALITY -> this.temporalQualityHandle;
+            case PERFORMANCE -> this.temporalPerformanceHandle;
+            case ULTRA_PERFORMANCE -> this.temporalUltraPerformanceHandle;
+            case OFF -> this.nativeHandle;
+        };
+        return MetalNativeBridge.isNullHandle(selected) ? this.nativeHandle : selected;
+    }
+
+    private static MemorySegment createNativeHandle(
+            final MetalDevice device,
+            final MTLSamplerAddressMode addressModeU,
+            final MTLSamplerAddressMode addressModeV,
+            final MTLSamplerMinMagFilter minFilter,
+            final MTLSamplerMinMagFilter magFilter,
+            final MTLSamplerMipFilter mipFilter,
+            final MTLCompareFunction compareFunction,
+            final int maxAnisotropy,
+            final double maxLod,
+            final double lodBias
+    ) {
+        MemorySegment handle = MetalNativeBridge.metallum_create_sampler(
+                device.metalDeviceHandle(),
+                addressModeU,
+                addressModeV,
+                minFilter,
+                magFilter,
+                mipFilter,
+                compareFunction,
+                maxAnisotropy,
+                maxLod,
+                lodBias
+        );
+        if (MetalNativeBridge.isNullHandle(handle)) {
+            throw new IllegalStateException("Metal failed to create a sampler");
+        }
+        return handle;
+    }
+
+    private static MemorySegment tryCreateTemporalHandle(
+            final MetalDevice device,
+            final MTLSamplerAddressMode addressModeU,
+            final MTLSamplerAddressMode addressModeV,
+            final MTLSamplerMinMagFilter minFilter,
+            final MTLSamplerMinMagFilter magFilter,
+            final MTLSamplerMipFilter mipFilter,
+            final MTLCompareFunction compareFunction,
+            final int maxAnisotropy,
+            final double maxLod,
+            final double lodBias
+    ) {
+        try {
+            return createNativeHandle(
+                    device, addressModeU, addressModeV, minFilter, magFilter, mipFilter,
+                    compareFunction, maxAnisotropy, maxLod, lodBias
+            );
+        } catch (RuntimeException ignored) {
+            // This is an optional visual-quality variant. The unbiased sampler
+            // remains valid and is selected if a device cannot allocate it.
+            return MemorySegment.NULL;
+        }
+    }
+
+    private void queueResourceRelease(final MemorySegment handle) {
+        if (!MetalNativeBridge.isNullHandle(handle)) {
+            this.device.queueResourceRelease(handle);
+        }
     }
 
     private static MTLSamplerMipFilter toMtlMipFilter(final OptionalDouble maxLod) {

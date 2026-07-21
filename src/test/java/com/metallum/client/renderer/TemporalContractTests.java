@@ -1,13 +1,16 @@
 package com.metallum.client.renderer;
 
 import com.metallum.client.hdr.EdrCapabilities;
+import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStatePacketRing;
 import com.metallum.client.renderer.temporal.FrameStateTracker;
 import com.metallum.client.renderer.temporal.JitterSequence;
 import com.metallum.client.renderer.temporal.Matrix4;
+import com.metallum.client.renderer.temporal.TemporalJitterProjection;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
+import org.joml.Matrix4f;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Set;
@@ -20,6 +23,9 @@ public final class TemporalContractTests {
     public static void main(final String[] args) {
         testOneShotResetsAndPreviousPublication();
         testDeterministicDisabledJitter();
+        testPresetJitterPhaseCounts();
+        testPresetTextureMipBias();
+        testProjectionJitterConvention();
         testReusablePacketRing();
         testDiagnosticManifestIsolation();
         testTemporalCapabilityProfileAndProductionContract();
@@ -76,6 +82,45 @@ public final class TemporalContractTests {
             require(JitterSequence.sample(frame, 1.0).equals(JitterSequence.sample(frame + 16L, 1.0)),
                     "Halton jitter period is not deterministic");
         }
+    }
+
+    private static void testPresetJitterPhaseCounts() {
+        require(JitterSequence.phaseCount(2016, 1265, 3024, 1898) == 18,
+                "Quality jitter phase count must be 18");
+        require(JitterSequence.phaseCount(1512, 949, 3024, 1898) == 32,
+                "Performance jitter phase count must be 32");
+        require(JitterSequence.phaseCount(1008, 633, 3024, 1898) == 72,
+                "Ultra Performance jitter phase count must be 72");
+        require(!JitterSequence.sample(0L, 1.0, 2016, 1265, 3024, 1898).equals(
+                        JitterSequence.sample(16L, 1.0, 2016, 1265, 3024, 1898)),
+                "Quality sequence repeated at the obsolete 16-frame period");
+        require(JitterSequence.sample(0L, 1.0, 2016, 1265, 3024, 1898).equals(
+                        JitterSequence.sample(18L, 1.0, 2016, 1265, 3024, 1898)),
+                "Quality sequence did not repeat at its phase count");
+        require(JitterSequence.sample(0L, 1.0, 1512, 949, 3024, 1898).equals(
+                        JitterSequence.sample(32L, 1.0, 1512, 949, 3024, 1898)),
+                "Performance sequence did not repeat at its phase count");
+    }
+
+    private static void testProjectionJitterConvention() {
+        Matrix4f projection = new Matrix4f().identity();
+        FrameState.JitterOffset jitter = new FrameState.JitterOffset(0.25, -0.125);
+        TemporalJitterProjection.apply(projection, jitter, 200, 100);
+        require(Math.abs(projection.m20() - 0.0025f) <= 1.0e-7f,
+                "Projection X jitter was not converted from pixels to clip space");
+        require(Math.abs(projection.m21() - 0.0025f) <= 1.0e-7f,
+                "Projection Y jitter did not invert MetalFX's render-target Y axis");
+    }
+
+    private static void testPresetTextureMipBias() {
+        require(Math.abs(TemporalScalingMode.OFF.textureMipBias()) <= 1.0e-12,
+                "Disabled Temporal mode must not bias texture mip selection");
+        require(Math.abs(TemporalScalingMode.QUALITY.textureMipBias() + 1.5849625) <= 1.0e-6,
+                "Quality Temporal mip bias mismatch");
+        require(Math.abs(TemporalScalingMode.PERFORMANCE.textureMipBias() + 2.0) <= 1.0e-6,
+                "Performance Temporal mip bias mismatch");
+        require(Math.abs(TemporalScalingMode.ULTRA_PERFORMANCE.textureMipBias() + 2.5849625) <= 1.0e-6,
+                "Ultra Performance Temporal mip bias mismatch");
     }
 
     private static void testReusablePacketRing() {

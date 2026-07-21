@@ -67,7 +67,11 @@ public final class FrameStateTracker {
                         this.nextFrameId,
                         candidate.featureMask().contains(
                                 com.metallum.client.renderer.RendererFeatureMask.TEMPORAL_UPSCALING
-                        ) || TemporalDiagnostics.configured() ? 1.0 : 0.0
+                        ) || TemporalDiagnostics.configured() ? 1.0 : 0.0,
+                        candidate.renderExtent().width(),
+                        candidate.renderExtent().height(),
+                        candidate.displayExtent().width(),
+                        candidate.displayExtent().height()
                 ),
                 resets,
                 candidate.submitIndex(),

@@ -588,7 +588,7 @@ public final class MetalNativeBridge {
             createSampler = downcall(
                     lookup,
                     "metallum_create_sampler",
-                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE)
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG, INT, DOUBLE, DOUBLE)
             );
             MTLVertexDescriptorCreate = downcall(
                     lookup,
@@ -1752,7 +1752,8 @@ public final class MetalNativeBridge {
             final MTLSamplerMipFilter mipFilter,
             final MTLCompareFunction compareFunction,
             final int maxAnisotropy,
-            final double lodMaxClamp
+            final double lodMaxClamp,
+            final double lodBias
     ) {
         try {
             return (MemorySegment) createSampler.invokeExact(
@@ -1764,7 +1765,8 @@ public final class MetalNativeBridge {
                     mipFilter.value,
                     compareFunction.value,
                     maxAnisotropy,
-                    lodMaxClamp
+                    lodMaxClamp,
+                    lodBias
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_create_sampler", throwable);

@@ -3,6 +3,7 @@ package com.metallum.client.renderer.temporal;
 import org.joml.Matrix4f;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 public final class EntityVelocityDrawRecorder {
@@ -162,6 +163,14 @@ public final class EntityVelocityDrawRecorder {
 
     public synchronized List<EntityVelocityPacket> getRecordedPackets() {
         return new ArrayList<>(this.recordedPackets);
+    }
+
+    /** Copies the current frame directly into the reusable native packet ring. */
+    public synchronized int encodeInto(
+            final EntityVelocityPacketRing ring,
+            final int inFlightSlot
+    ) {
+        return Objects.requireNonNull(ring, "ring").encode(inFlightSlot, this.recordedPackets);
     }
 
     public synchronized long countEligibleDraws() { return countEligibleDraws; }

@@ -21,9 +21,13 @@ public enum MetalGpuTimingStage {
     SUN_SHADOW(14),
     VOXEL_UPDATE(15),
     /** Reserved for the future bounded player-attached local-shadow compute pass. */
-    DYNAMIC_LOCAL_SHADOW(16);
+    DYNAMIC_LOCAL_SHADOW(16),
+    /** Native Temporal depth-to-motion/reactive generation. */
+    TEMPORAL_INPUTS(17),
+    /** Native depth-equal entity velocity replay, emitted only when packets exist. */
+    TEMPORAL_ENTITY_REPLAY(18);
 
-    public static final int PROFILED_STAGE_COUNT = 17;
+    public static final int PROFILED_STAGE_COUNT = 19;
 
     private final int nativeId;
 
