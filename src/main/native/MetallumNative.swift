@@ -3675,7 +3675,7 @@ private enum NativeState {
     static let rendererFrameState = MetallumRendererFrameStateStore()
     static let staticGeometryHeapsEnabled = ProcessInfo.processInfo.environment[
         "METALLUM_STATIC_GEOMETRY_HEAPS"
-    ] != "0"
+    ] == "1"
     static let forceBuiltinShaderSource = ProcessInfo.processInfo.environment[
         "METALLUM_NATIVE_SHADER_FORCE_SOURCE"
     ] == "1"

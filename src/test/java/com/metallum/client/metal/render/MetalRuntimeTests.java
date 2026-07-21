@@ -837,18 +837,27 @@ public final class MetalRuntimeTests {
                 | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_COPY_SRC
                 | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_VERTEX
                 | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_INDEX;
-        require(MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, false),
-                "static geometry usage did not select the private heap");
-        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, true),
+        require(!MetalGpuBuffer.staticGeometryHeapsEnabled(null)
+                        && !MetalGpuBuffer.staticGeometryHeapsEnabled("")
+                        && !MetalGpuBuffer.staticGeometryHeapsEnabled("0")
+                        && MetalGpuBuffer.staticGeometryHeapsEnabled("1"),
+                "static geometry heap opt-in parsing changed");
+        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, false, false),
+                "static geometry unexpectedly selected the private heap without opt-in");
+        require(MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, false, true),
+                "opted-in static geometry did not select the private heap");
+        require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(geometryUsage, true, true),
                 "initial-data allocation unexpectedly selected the private geometry heap");
         require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(
                         geometryUsage | com.mojang.blaze3d.buffers.GpuBuffer.USAGE_MAP_WRITE,
-                        false
+                        false,
+                        true
                 ),
                 "broader buffer usage unexpectedly selected the private geometry heap");
         require(!MetalGpuBuffer.shouldUsePrivateGeometryHeap(
                         geometryUsage & ~com.mojang.blaze3d.buffers.GpuBuffer.USAGE_INDEX,
-                        false
+                        false,
+                        true
                 ),
                 "non-geometry buffer usage unexpectedly selected the private heap");
     }

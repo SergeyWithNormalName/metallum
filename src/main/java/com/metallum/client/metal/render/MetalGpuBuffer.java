@@ -28,6 +28,9 @@ class MetalGpuBuffer extends GpuBuffer {
             | GpuBuffer.USAGE_COPY_SRC
             | GpuBuffer.USAGE_VERTEX
             | GpuBuffer.USAGE_INDEX;
+    private static final boolean PRIVATE_GEOMETRY_HEAPS_ENABLED = staticGeometryHeapsEnabled(
+            System.getenv("METALLUM_STATIC_GEOMETRY_HEAPS")
+    );
     private final MetalDevice device;
     private final boolean cpuAccessible;
     private final boolean dynamic;
@@ -239,7 +242,23 @@ class MetalGpuBuffer extends GpuBuffer {
             @GpuBuffer.Usage final int originalUsage,
             final boolean initialData
     ) {
-        return !initialData && originalUsage == PRIVATE_GEOMETRY_HEAP_USAGE;
+        return shouldUsePrivateGeometryHeap(
+                originalUsage,
+                initialData,
+                PRIVATE_GEOMETRY_HEAPS_ENABLED
+        );
+    }
+
+    static boolean shouldUsePrivateGeometryHeap(
+            @GpuBuffer.Usage final int originalUsage,
+            final boolean initialData,
+            final boolean heapsEnabled
+    ) {
+        return heapsEnabled && !initialData && originalUsage == PRIVATE_GEOMETRY_HEAP_USAGE;
+    }
+
+    static boolean staticGeometryHeapsEnabled(final @Nullable String environmentValue) {
+        return "1".equals(environmentValue);
     }
 
     private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
