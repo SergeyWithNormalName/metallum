@@ -82,6 +82,7 @@
     "sodium.SodiumConfigBuilderMixin",
     "sodium.SodiumEnumOptionMixin",
     "sodium.SodiumOptionAccessor",
+    "sodium.SodiumStatefulOptionMixin",
     "sodium.SodiumWorldRendererShadowMixin",
     "sodium.TerrainRenderPassShadowMixin",
     "sodium.UniformBufferManagerShadowMixin",
