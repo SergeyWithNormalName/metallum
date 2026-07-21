@@ -319,6 +319,9 @@ Hot path вызывает уже выбранный executor/pass implementation
 - Добавить счётчики encoder/pass count, bytes copied, transient high-water, PSO compilation и resource allocation.
 - Отдельно считать время Java snapshot, native batch encode, command commit, in-flight wait и drawable wait.
 - Пометить существующие логи commit hash, OS, GPU family, thermal state и render/display size.
+- На HiDPI дисплеях валидировать exact GLFW/Metal backing framebuffer отдельно от
+  logical `Window` points: target monitor, fullscreen и refresh остаются строгими,
+  но logical размер не сопоставляется с backing pixels.
 - Записывать capability snapshot, executor/compiler kind, allocator high-water, argument-table updates, residency membership changes, barrier count/stages и pipeline archive hit/miss.
 - Добавить счётчик chunk rebuild reason: geometry/material/light/unknown.
 - Зафиксировать screenshot и HDR numeric probes до изменений.
@@ -326,6 +329,9 @@ Hot path вызывает уже выбранный executor/pass implementation
 ### Exit criteria
 
 - Один воспроизводимый скрипт/процедура создаёт сравнимый JSONL report.
+- HiDPI validator допускает только подтверждённый target monitor/fullscreen и exact
+  backing framebuffer; mismatch logical-points/backing-pixels не может искусственно
+  сорвать запуск или изменить условия измерения.
 - Для каждого текущего timing stage есть понятная граница начала/конца.
 - Нет влияния telemetry-off path на p95.
 - Baseline сохранён рядом с датой/commit, но тяжёлые runtime logs не коммитятся в репозиторий.

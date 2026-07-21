@@ -1526,7 +1526,7 @@ public final class MetalFxBenchmarkController {
             return;
         }
         if (this.stageFrames >= WINDOW_TRANSITION_TIMEOUT_FRAMES) {
-            fail(minecraft, "timed out waiting for exact external 5K framebuffer");
+            fail(minecraft, "timed out waiting for exact target framebuffer on the selected monitor");
         }
     }
 
@@ -2250,18 +2250,42 @@ public final class MetalFxBenchmarkController {
     }
 
     private boolean isTargetFramebuffer(final Window window) {
-        if (!this.useCurrentWindow && GLFW.glfwGetWindowMonitor(window.handle()) != this.targetMonitor) {
-            return false;
+        if (!this.useCurrentWindow) {
+            if (GLFW.glfwGetWindowMonitor(window.handle()) != this.targetMonitor
+                    || !window.isFullscreen()) {
+                return false;
+            }
         }
         GLFW.glfwGetFramebufferSize(
                 window.handle(),
                 this.framebufferWidthScratch,
                 this.framebufferHeightScratch
         );
-        return this.framebufferWidthScratch[0] == this.expectedFramebufferWidth
-                && this.framebufferHeightScratch[0] == this.expectedFramebufferHeight
-                && window.getWidth() == this.expectedFramebufferWidth
-                && window.getHeight() == this.expectedFramebufferHeight;
+        return hasExactTargetFramebuffer(
+                this.framebufferWidthScratch[0],
+                this.framebufferHeightScratch[0],
+                this.expectedFramebufferWidth,
+                this.expectedFramebufferHeight,
+                window.getWidth(),
+                window.getHeight()
+        );
+    }
+
+    static boolean hasExactTargetFramebuffer(
+            final int framebufferWidth,
+            final int framebufferHeight,
+            final int expectedFramebufferWidth,
+            final int expectedFramebufferHeight,
+            final int logicalWindowWidth,
+            final int logicalWindowHeight
+    ) {
+        return framebufferWidth == expectedFramebufferWidth
+                && framebufferHeight == expectedFramebufferHeight
+                // macOS Retina reports a logical Window size that is smaller
+                // than the Metal/GLFW backing framebuffer. It still has to be
+                // a live window, but it must not be compared to backing pixels.
+                && logicalWindowWidth > 0
+                && logicalWindowHeight > 0;
     }
 
     private void startSegment() {

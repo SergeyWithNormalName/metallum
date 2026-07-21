@@ -533,3 +533,43 @@ atlas-кандидаты честно остаются в журнале, но �
 chunk-streaming: оно должно доказывать CPU-узкое место, сохранять vanilla lightmap
 и сравнивать 1% low при полёте через лавовую местность. Это не является реализацией
 данной гипотезы и не должно начинаться без такого профиля.
+
+---
+
+## 2026-07-22 — Исправлен HiDPI-contract Nether benchmark
+
+**Статус:** внедрено; это исправление достоверности стенда, не оптимизация renderer.
+
+### Гипотеза и причина проверки
+
+Первый Nether production-запуск на `1e6697a` не дошёл до route и measurement:
+launcher подтвердил Built-in Retina `3024×1964@120`, но controller завершился с
+`timed out waiting for exact external 5K framebuffer`. На этом Mac framebuffer
+display mode действительно имеет `3024×1964` backing pixels, тогда как logical
+workarea имеет `1512×949` points. Значит validator ошибочно сравнивал две разные
+единицы и делал любой такой Nether baseline невалидным.
+
+### Метод и сохранённый контракт
+
+`MetalFxBenchmarkController.isTargetFramebuffer` продолжает требовать выбранный
+target monitor, Minecraft fullscreen и точный GLFW backing framebuffer; logical
+`Window` width/height теперь проверяются только как положительные. Refresh остаётся
+привязан к выбранному exact video mode и проверяется launcher marker. Добавлен
+`BenchmarkWindowContractTests`: Retina `3024×1964` framebuffer с logical
+`1512×982` принимается, а неверный backing size и нулевое logical окно отвергаются.
+
+### Результат и побочные эффекты
+
+`./gradlew benchmarkWindowContractUnitTest --console=plain` прошёл. Проверка
+`scripts/run_metal_benchmark.sh ... --preflight-only` подтвердила фиксированные
+Nether route/settings: MetalFX off, Balanced, VSync off, `3024×1964@120`, HDR scene
+и frozen simulation. Полный runtime был остановлен до measurement, чтобы отдельный
+benchmark-fix commit стал clean HEAD для baseline; поэтому здесь намеренно нет FPS,
+CPU/GPU tail или выводов о производительности. Renderer, изображение, качество и
+tracked route/settings не менялись.
+
+### Итог
+
+Исправление оставлено. Следующее измерение обязано идти только после clean commit и
+содержать три production-прогона плюс отдельный detailed diagnostic; не использовать
+первый оборванный запуск как baseline.

@@ -241,6 +241,14 @@ tasks.register("l6DynamicShadowTelemetryUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetryTests")
 }
 
+tasks.register("benchmarkWindowContractUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates HiDPI benchmark framebuffer and logical-window contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.benchmark.BenchmarkWindowContractTests")
+}
+
 tasks.register("sodiumLightSidecarUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs exhaustive Sodium compact-light sidecar packing and MSL patch tests"
@@ -1081,6 +1089,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("l6DynamicShadowTelemetryUnitTest"))
+	dependsOn(tasks.named("benchmarkWindowContractUnitTest"))
 	dependsOn(tasks.named("sodiumLightSidecarUnitTest"))
 	dependsOn(tasks.named("sodiumRelightPlanUnitTest"))
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
