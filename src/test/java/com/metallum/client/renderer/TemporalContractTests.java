@@ -126,10 +126,37 @@ public final class TemporalContractTests {
         require(available.temporalProfile().diagnosticsSupported()
                         && available.formatUsageProfile().effectSpecificUsagesValidated(),
                 "reactive/format/usage profile was not decoded independently");
-        FrameContract contract = FrameContract.temporalPreparationV1();
-        require(contract.motionVectors().availability() == FrameContract.MotionVectorAvailability.UNAVAILABLE
-                        && contract.reactiveMask() == FrameContract.ReactiveMaskAvailability.UNAVAILABLE,
+        FrameContract preparation = FrameContract.temporalPreparationV1();
+        require(preparation.motionVectors().availability() == FrameContract.MotionVectorAvailability.UNAVAILABLE
+                        && preparation.reactiveMask() == FrameContract.ReactiveMaskAvailability.UNAVAILABLE,
                 "camera-only diagnostics were advertised as production temporal inputs");
+        FrameContract production = FrameContract.temporalProductionV1();
+        require(production.motionVectors().availability() == FrameContract.MotionVectorAvailability.AVAILABLE
+                        && production.reactiveMask() == FrameContract.ReactiveMaskAvailability.AVAILABLE
+                        && production.depth().reversedZ(),
+                "MetalFX Temporal production contract is missing typed history inputs");
+
+        RendererGenerationConfig temporalConfig = new RendererGenerationConfig(
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_UPSCALING),
+                available,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        RendererGenerationManifest temporalManifest = RendererGenerationPlanner.manifest(
+                temporalConfig,
+                new RendererGenerationPlanner.Extent(192, 108),
+                new RendererGenerationPlanner.Extent(288, 162),
+                false
+        );
+        require(temporalManifest.resourceBytes(RendererGenerationManifest.Domain.UPSCALE_ONLY)
+                        == 192L * 108L * 5L * 3L + 288L * 162L * 4L
+                        && temporalManifest.passCount(RendererGenerationManifest.Domain.UPSCALE_ONLY) == 2L
+                        && temporalManifest.passCount(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY) == 0L,
+                "Temporal manifest does not own its typed inputs independently of diagnostics");
     }
 
     private static FrameState state(

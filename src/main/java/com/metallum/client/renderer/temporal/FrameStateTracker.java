@@ -63,7 +63,12 @@ public final class FrameStateTracker {
                 candidate.displayExtent(),
                 candidate.exposure(),
                 candidate.preExposure(),
-                JitterSequence.sample(this.nextFrameId, TemporalDiagnostics.configured() ? 1.0 : 0.0),
+                JitterSequence.sample(
+                        this.nextFrameId,
+                        candidate.featureMask().contains(
+                                com.metallum.client.renderer.RendererFeatureMask.TEMPORAL_UPSCALING
+                        ) || TemporalDiagnostics.configured() ? 1.0 : 0.0
+                ),
                 resets,
                 candidate.submitIndex(),
                 candidate.inFlightSlot(),

@@ -51,6 +51,12 @@ public final class MetalFxSpatialScaling {
 
     public static SpatialScalingMode effectiveMode() {
         ensureConfigLoaded();
+        // A stale properties file can contain both choices (for example after
+        // hand editing). Temporal owns the frame-history path, so it wins
+        // deterministically instead of allowing two scalers to claim a frame.
+        if (MetalFxTemporalScaling.isRequested()) {
+            return SpatialScalingMode.OFF;
+        }
         MetalDevice device = MetalDevice.getInstance();
         if (runtimeDisabled || device == null || !device.supportsSpatialScaling()) {
             return SpatialScalingMode.OFF;
@@ -83,9 +89,23 @@ public final class MetalFxSpatialScaling {
         requestedMode = nonNullMode;
         runtimeDisabled = false;
         saveMode(nonNullMode);
+        if (nonNullMode.enabled()) {
+            MetalFxTemporalScaling.disableForSpatialSelection();
+        }
         if (previous != nonNullMode || wasRuntimeDisabled) {
             requestRendererResize();
         }
+    }
+
+    static void disableForTemporalSelection() {
+        ensureConfigLoaded();
+        if (requestedMode == SpatialScalingMode.OFF && !runtimeDisabled) {
+            return;
+        }
+        requestedMode = SpatialScalingMode.OFF;
+        runtimeDisabled = false;
+        saveMode(SpatialScalingMode.OFF);
+        requestRendererResize();
     }
 
     /** Installs a non-persistent concrete preset for the automated benchmark. */

@@ -420,6 +420,36 @@ private final class MetallumSpatialWorkspace {
     }
 }
 
+private final class MetallumTemporalWorkspace {
+    let sourcePixelFormat: MTLPixelFormat
+    let inputWidth: Int
+    let inputHeight: Int
+    let outputWidth: Int
+    let outputHeight: Int
+    let scaler: MTLFXTemporalScaler
+    let output: MTLTexture
+    var outputCommandBufferAddress: UInt?
+
+    init(
+        sourcePixelFormat: MTLPixelFormat,
+        inputWidth: Int,
+        inputHeight: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        scaler: MTLFXTemporalScaler,
+        output: MTLTexture
+    ) {
+        self.sourcePixelFormat = sourcePixelFormat
+        self.inputWidth = inputWidth
+        self.inputHeight = inputHeight
+        self.outputWidth = outputWidth
+        self.outputHeight = outputHeight
+        self.scaler = scaler
+        self.output = output
+        self.outputCommandBufferAddress = nil
+    }
+}
+
 private struct MetallumPreparedSpatialUiSeed {
     let commandBufferAddress: UInt
     let sourceTextureAddress: UInt
@@ -3665,6 +3695,7 @@ private enum NativeState {
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
+    static var temporalWorkspaces: [UInt: MetallumTemporalWorkspace] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
     static var builtinShaderStates: [UInt: MetallumBuiltinShaderState] = [:]
@@ -5593,6 +5624,169 @@ private func currentSpatialOutput(
     )
 }
 
+private func ensureTemporalWorkspace(
+    device: MTLDevice,
+    sourcePixelFormat: MTLPixelFormat,
+    inputWidth: Int,
+    inputHeight: Int,
+    outputWidth: Int,
+    outputHeight: Int
+) -> MetallumTemporalWorkspace? {
+    let key = objectAddress(device)
+    if let cached = NativeState.temporalWorkspaces[key],
+       cached.sourcePixelFormat == sourcePixelFormat,
+       cached.inputWidth == inputWidth,
+       cached.inputHeight == inputHeight,
+       cached.outputWidth == outputWidth,
+       cached.outputHeight == outputHeight {
+        return cached
+    }
+    guard #available(macOS 14.4, *),
+          MTLFXTemporalScalerDescriptor.supportsDevice(device),
+          sourcePixelFormat == .rgba8Unorm || sourcePixelFormat == .rgba16Float else {
+        return nil
+    }
+    let descriptor = MTLFXTemporalScalerDescriptor()
+    descriptor.colorTextureFormat = sourcePixelFormat
+    descriptor.depthTextureFormat = .depth32Float
+    descriptor.motionTextureFormat = .rg16Float
+    descriptor.outputTextureFormat = sourcePixelFormat
+    descriptor.inputWidth = inputWidth
+    descriptor.inputHeight = inputHeight
+    descriptor.outputWidth = outputWidth
+    descriptor.outputHeight = outputHeight
+    descriptor.isReactiveMaskTextureEnabled = true
+    descriptor.reactiveMaskTextureFormat = .r8Unorm
+    descriptor.isAutoExposureEnabled = false
+    // This is created only on a renderer-generation change.  Synchronous
+    // initialization prevents the first selected Temporal frame from racing a
+    // still-initializing scaler and falling back to native resolution.
+    descriptor.requiresSynchronousInitialization = true
+    guard let scaler = descriptor.makeTemporalScaler(device: device) else {
+        return nil
+    }
+    let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: sourcePixelFormat,
+        width: outputWidth,
+        height: outputHeight,
+        mipmapped: false
+    )
+    outputDescriptor.storageMode = .private
+    outputDescriptor.hazardTrackingMode = .tracked
+    outputDescriptor.usage = scaler.outputTextureUsage.union([.shaderRead, .renderTarget])
+    guard let output = device.makeTexture(descriptor: outputDescriptor) else {
+        return nil
+    }
+    output.label = "Metallum MetalFX temporal output"
+    let workspace = MetallumTemporalWorkspace(
+        sourcePixelFormat: sourcePixelFormat,
+        inputWidth: inputWidth,
+        inputHeight: inputHeight,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
+        scaler: scaler,
+        output: output
+    )
+    NativeState.temporalWorkspaces[key] = workspace
+    NSLog(
+        "[metallum] MetalFX temporal scaler ready: %dx%d -> %dx%d, color %lu, color/depth/motion/reactive/output usage %lu/%lu/%lu/%lu/%lu",
+        inputWidth,
+        inputHeight,
+        outputWidth,
+        outputHeight,
+        sourcePixelFormat.rawValue,
+        scaler.colorTextureUsage.rawValue,
+        scaler.depthTextureUsage.rawValue,
+        scaler.motionTextureUsage.rawValue,
+        scaler.reactiveTextureUsage.rawValue,
+        scaler.outputTextureUsage.rawValue
+    )
+    return workspace
+}
+
+@available(macOS 14.4, *)
+private func encodeTemporalScale(
+    commandBuffer: MTLCommandBuffer,
+    colorTexture: MTLTexture,
+    depthTexture: MTLTexture,
+    motionTexture: MTLTexture,
+    reactiveTexture: MTLTexture,
+    globalFence: MTLFence?,
+    frame: MetallumRendererFrameStateSnapshot
+) -> MTLTexture? {
+    guard frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0,
+          colorTexture.width == Int(frame.renderWidth),
+          colorTexture.height == Int(frame.renderHeight),
+          depthTexture.width == colorTexture.width,
+          depthTexture.height == colorTexture.height,
+          depthTexture.pixelFormat == .depth32Float,
+          motionTexture.width == colorTexture.width,
+          motionTexture.height == colorTexture.height,
+          motionTexture.pixelFormat == .rg16Float,
+          reactiveTexture.width == colorTexture.width,
+          reactiveTexture.height == colorTexture.height,
+          reactiveTexture.pixelFormat == .r8Unorm,
+          objectAddress(colorTexture.device) == objectAddress(commandBuffer.device),
+          objectAddress(depthTexture.device) == objectAddress(commandBuffer.device),
+          objectAddress(motionTexture.device) == objectAddress(commandBuffer.device),
+          objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device),
+          let workspace = ensureTemporalWorkspace(
+            device: commandBuffer.device,
+            sourcePixelFormat: colorTexture.pixelFormat,
+            inputWidth: colorTexture.width,
+            inputHeight: colorTexture.height,
+            outputWidth: Int(frame.displayWidth),
+            outputHeight: Int(frame.displayHeight)
+          ),
+          colorTexture.usage.isSuperset(of: workspace.scaler.colorTextureUsage),
+          depthTexture.usage.isSuperset(of: workspace.scaler.depthTextureUsage),
+          motionTexture.usage.isSuperset(of: workspace.scaler.motionTextureUsage),
+          reactiveTexture.usage.isSuperset(of: workspace.scaler.reactiveTextureUsage),
+          workspace.output.usage.isSuperset(of: workspace.scaler.outputTextureUsage) else {
+        return nil
+    }
+    workspace.scaler.colorTexture = colorTexture
+    workspace.scaler.depthTexture = depthTexture
+    workspace.scaler.motionTexture = motionTexture
+    workspace.scaler.reactiveMaskTexture = reactiveTexture
+    workspace.scaler.inputContentWidth = colorTexture.width
+    workspace.scaler.inputContentHeight = colorTexture.height
+    workspace.scaler.outputTexture = workspace.output
+    workspace.scaler.preExposure = frame.preExposure > 0 && frame.preExposure.isFinite
+        ? frame.preExposure
+        : 1.0
+    workspace.scaler.jitterOffsetX = frame.jitterX
+    workspace.scaler.jitterOffsetY = frame.jitterY
+    workspace.scaler.motionVectorScaleX = 1.0
+    workspace.scaler.motionVectorScaleY = 1.0
+    workspace.scaler.isDepthReversed = true
+    workspace.scaler.reset = frame.resetMask != 0
+    workspace.scaler.fence = globalFence
+    let timing = beginExternalGpuTiming(commandBuffer: commandBuffer, stage: .metalFx, fence: globalFence)
+    workspace.scaler.encode(commandBuffer: commandBuffer)
+    workspace.outputCommandBufferAddress = objectAddress(commandBuffer)
+    endExternalGpuTiming(timing, commandBuffer: commandBuffer, fence: globalFence)
+    return workspace.output
+}
+
+private func currentTemporalOutput(
+    commandBuffer: MTLCommandBuffer,
+    inputTexture: MTLTexture,
+    outputWidth: Int,
+    outputHeight: Int
+) -> MTLTexture? {
+    guard let workspace = NativeState.temporalWorkspaces[objectAddress(commandBuffer.device)],
+          workspace.outputCommandBufferAddress == objectAddress(commandBuffer),
+          workspace.sourcePixelFormat == inputTexture.pixelFormat,
+          workspace.inputWidth == inputTexture.width,
+          workspace.inputHeight == inputTexture.height,
+          workspace.outputWidth == outputWidth,
+          workspace.outputHeight == outputHeight else {
+        return nil
+    }
+    return workspace.output
+}
+
 private func validatedPreparedSpatialUiSeed(
     commandBuffer: MTLCommandBuffer,
     sourceTexture: MTLTexture,
@@ -7184,8 +7378,11 @@ private func prepareRendererGeneration(
     // Resolution-dependent HDR resources never cross renderer generations.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
+    NativeState.temporalWorkspaces.removeValue(forKey: key)
     let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.spatialBit != 0
-    if !spatialEnabled {
+    let temporalEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
+    let upscaleEnabled = spatialEnabled || temporalEnabled
+    if !upscaleEnabled {
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
         NativeState.menuBlurPipelines.removeValue(forKey: key)
@@ -7212,7 +7409,7 @@ private func prepareRendererGeneration(
             && ensureActualNativeWorldUiPipeline(device: device) != nil
             && ensureUiBackdropPipelines(device: device) != nil
             && ensureMenuBlurPipelines(device: device) != nil
-            && (!spatialEnabled || (
+            && (!upscaleEnabled || (
                 ensureActualWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
@@ -7226,7 +7423,7 @@ private func prepareRendererGeneration(
             && ensureMenuBlurPipelines(device: device) != nil
             && ensureHdrFallbackAdaptiveState(device: device) != nil
             && ensureHdrFallbackDepthTexture(device: device) != nil
-            && (!spatialEnabled || (
+            && (!upscaleEnabled || (
                 ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
@@ -7441,7 +7638,9 @@ public func metallum_encode_temporal_diagnostics_v1(
         // short transition with no usable frame packet; skip that frame without
         // disabling the opt-in profile.
         guard let frame = NativeState.rendererFrameState.snapshot(),
-              frame.diagnosticResourceBytes > 0 else { return 0 }
+              frame.diagnosticResourceBytes > 0
+                || (frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
+                    && frame.upscaleResourceBytes > 0) else { return 0 }
         guard depthTexture.pixelFormat == .depth32Float,
               motionTexture.pixelFormat == .rg16Float,
               reactiveTexture.pixelFormat == .r8Unorm else { return -2 }
@@ -11515,6 +11714,62 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             return 4
         }
         var hdrPrecomposed = false
+        var temporalOutput: MTLTexture?
+        if #available(macOS 14.4, *),
+           spatialScalingEnabled == 0,
+           let frame = NativeState.rendererFrameState.snapshot(),
+           frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0 {
+            guard let sceneDepthTexture,
+                  let motionTexture = NativeState.lastMotionTexture,
+                  let reactiveTexture = NativeState.lastReactiveTexture else {
+                return -2
+            }
+            let temporalInput: MTLTexture
+            if canPrecomposeHdr {
+                guard let composite = canPrecomposeActualHdr
+                    ? encodeActualSpatialHdrWorldComposite(
+                        commandBuffer: commandBuffer,
+                        sceneTexture: sourceTexture,
+                        globalFence: globalFence,
+                        currentHeadroom: effectiveHeadroom,
+                        hdrStrength: effectiveHdrStrength,
+                        bloomStrength: effectiveBloomStrength,
+                        displayWidth: destinationTexture.width,
+                        displayHeight: destinationTexture.height
+                    )
+                    : encodeSpatialHdrWorldComposite(
+                        commandBuffer: commandBuffer,
+                        sceneTexture: sourceTexture,
+                        sceneDepthTexture: sceneDepthTexture,
+                        semanticTexture: semanticTexture,
+                        globalFence: globalFence,
+                        sourceEncoding: sourceEncoding,
+                        currentHeadroom: effectiveHeadroom,
+                        hdrStrength: effectiveHdrStrength,
+                        bloomStrength: effectiveBloomStrength,
+                        displayWidth: destinationTexture.width,
+                        displayHeight: destinationTexture.height
+                    ) else {
+                    return -3
+                }
+                temporalInput = composite
+                hdrPrecomposed = true
+            } else {
+                temporalInput = sourceTexture
+            }
+            guard let output = encodeTemporalScale(
+                commandBuffer: commandBuffer,
+                colorTexture: temporalInput,
+                depthTexture: sceneDepthTexture,
+                motionTexture: motionTexture,
+                reactiveTexture: reactiveTexture,
+                globalFence: globalFence,
+                frame: frame
+            ) else {
+                return -2
+            }
+            temporalOutput = output
+        }
         if spatialScalingEnabled != 0 {
             let useDirectPerceptualOutput = perceptualScalingEnabled != 0 && !canPrecomposeHdr
             let scalerInput: MTLTexture
@@ -11685,6 +11940,11 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                 backdropEncoding = 2
             } else {
                 backdropSource = output
+            }
+        } else if let temporalOutput {
+            backdropSource = temporalOutput
+            if hdrPrecomposed {
+                backdropEncoding = 2
             }
         } else {
             guard destinationTexture.width == sourceTexture.width,
@@ -12131,6 +12391,14 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                 outputHeight: $0.height
             )
         }
+        let candidateTemporalOutput = uiTexture.flatMap {
+            currentTemporalOutput(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: $0.width,
+                outputHeight: $0.height
+            )
+        }
         let candidateNativeOutput = spatialHdrPrecomposed != 0
             ? uiTexture.flatMap {
                 currentNativeHdrWorldComposite(
@@ -12144,7 +12412,9 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         // A spatial workspace can remain cached after MetalFX is disabled.
         // The native composite is command-buffer scoped, so prefer it when it
         // exists rather than accidentally presenting an older scaler output.
-        let candidatePrecomposedOutput = candidateNativeOutput ?? candidateSpatialOutput
+        let candidatePrecomposedOutput = candidateNativeOutput
+            ?? candidateTemporalOutput
+            ?? candidateSpatialOutput
         let hasCompatibleUi = uiTexture != nil
             && uiTexture!.pixelFormat == .rgba8Unorm
             && uiTexture!.textureType == .type2D

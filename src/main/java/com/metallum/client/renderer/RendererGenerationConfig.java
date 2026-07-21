@@ -178,7 +178,8 @@ public record RendererGenerationConfig(
             reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
         }
         if (requestedFeatures.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
-                && !capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)) {
+                && (!capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)
+                || !capabilities.temporalProfile().diagnosticsSupported())) {
             resolvedFeatures = resolvedFeatures.without(RendererFeatureMask.TEMPORAL_UPSCALING);
             reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
         }

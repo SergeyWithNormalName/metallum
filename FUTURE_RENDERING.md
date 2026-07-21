@@ -7,39 +7,28 @@ This document analyzes the readiness of the **Metallum** rendering engine for fu
 ## 1. MetalFX Temporal Upscaler
 
 Apple Silicon GPUs support two upscalers: **Spatial** and **Temporal**.
-- **Current Status**: Metallum already supports the **Spatial** scaler (`MTLFXSpatialScaler`) via the class [MetalFxSpatialScaling.java](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/src/main/java/com/metallum/client/metalfx/MetalFxSpatialScaling.java).
-- **Temporal Readiness**: The temporal scaler requires three high-resolution input textures:
-  1. The low-resolution color target (input).
-  2. The low-resolution depth target.
-  3. The motion vector (velocity) target.
-- **Current diagnostic foundation**: An opt-in T1A diagnostic path now writes camera/static-depth motion and a reactive mask, with reset and out-of-frame invalidation. It is not wired to the production temporal scaler.
-- **What is Missing**: The temporal upscaler context is not instantiated in Swift, dynamic geometry is not replayed from live Metal draw buffers, and no temporal history resolve exists.
+- **Current Status**: Both MetalFX implementations are available from the same Sodium `MetalFX` group. `MetalFxTemporalScaling` persists three Temporal presets: **Quality** (2/3 linear resolution), **Performance** (1/2), and **Ultra Performance** (1/3). Selecting either scaler clears the other setting, so exactly one owns a frame.
+- **Production path**: Swift owns a persistent `MTLFXTemporalScaler` and a private full-resolution output per renderer generation. It consumes the low-resolution color/depth targets plus the triple-buffered `RG16Float` motion and `R8Unorm` reactive inputs, then seeds the full-resolution UI/present route. It passes Halton jitter, exposure, reversed-Z depth, frame-history reset, and the command-buffer fence to MetalFX.
+- **Safety contract**: Format, usage, extent, device and generation checks fail closed to native resolution. The scaler is initialized synchronously only on a generation change; no texture or scaler allocation occurs in the frame loop.
+- **Automated proof**: Metal API/GPU validation encodes all three presets and the actual native motion/reactive → Temporal → UI-backdrop route.
 
 ---
 
 ## 2. Motion Vectors (Velocity Buffer)
 
 Motion vectors represent the screen-space velocity of each pixel from the previous frame to the current frame:
-- **Current Status**: The opt-in diagnostic motion buffer reconstructs camera/static-depth motion. It remains marked as `"never a production motion declaration"` and is not a MetalFX Temporal input.
-- **What is Missing**:
-  - **Camera Motion**: Implemented for the diagnostic path only; it still needs production-contract validation before a scaler consumes it.
-  - **Entity Motion**: Transform tracking, packet contracts, and shader math exist, but there is no live Metal draw-buffer interception. Entity replay must remain disabled until real handles and a runtime ABI test are available.
-  - **Block/Terrain animations**: Flowing liquids, wind-blown foliage, and block breaking must write displacement values to the velocity texture.
+- **Current Status**: Camera/static-depth reprojection and reactive invalidation are production Temporal inputs. Invalid depth, resets, non-finite projections and out-of-frame reprojections are reactive, preventing invalid history reuse.
+- **Known quality boundary**:
+  - **Entity motion**: Transform tracking, packet contracts, and shader math exist, but live Metal draw-buffer interception is still not wired. The replay remains fail-closed rather than inventing unsafe buffer pointers.
+  - **Animated terrain**: Flowing liquids, wind-blown foliage and block breaking are currently covered by the camera/static-depth path rather than per-vertex velocity. A future draw-level velocity hookup can improve these cases without changing the scaler contract.
 
 ---
 
 ## 3. Temporal Rendering (TAA / History Blending)
 
 Temporal Anti-Aliasing (TAA) blends the current frame with the historical accumulated frames to reduce alias-shimmering:
-- **Current Status**: A sub-pixel Halton jitter sequence is active only with temporal diagnostics. The normal production path remains unjittered:
-  ```java
-  // JitterSequence.java: L3
-  /** Deterministic Halton jitter contract; L1 production always requests zero amplitude. */
-  ```
-- **What is Missing**:
-  - The projection matrix must be jittered by sub-pixel offsets on a Halton cycle, and the final presentation pass must resolve and filter this jitter using history.
-  - A feedback history loop buffer must be added to the Frame Graph to accumulate linear color values across frames.
-  - A clamping/clipping pass must be added to prevent ghosting behind moving objects.
+- **Current Status**: Temporal selection enables a deterministic sub-pixel Halton projection jitter. `MTLFXTemporalScaler` owns the history resolve, filtering and internal clamping; Metallum supplies one-shot reset reasons for first frame, resize, teleport, world/dimension change and generation changes.
+- **Future quality work**: Feed live per-pixel velocity for entities and animated terrain into the existing reactive/motion attachments. This is an input-quality improvement, not a missing Temporal scaler or history implementation.
 
 ---
 
@@ -63,7 +52,7 @@ Generates synthetic intermediate frames on the GPU:
 
 ## 6. Required Architectural Modifications
 
-If other developers or agents decide to implement these features, they must modify:
-1. **Shaders**: Update MSL vertex and fragment shaders to accept previous-frame projection matrices and output an extra color attachment (`float2 velocity`).
-2. **Frame Graph**: Add history buffer nodes to `NativeHdrFrameGraph` and change lifetime assertions to span across frames.
-3. **Java State**: Activate Halton jitter in `JitterSequence` and pass the jitter offsets into the projection matrices.
+Further per-object temporal-quality work must modify:
+1. **Draw interception**: Wire the real entity and animated-geometry Metal buffers to `EntityVelocityDrawRecorder.recordDraw(...)`; never fabricate native buffer pointers.
+2. **Shaders**: Preserve the current motion/reactive convention (`previousNdc - currentNdc`, render pixels, Y down) when adding per-vertex velocity.
+3. **Validation**: Extend the native runtime harness with live-buffer coverage before enabling entity replay.

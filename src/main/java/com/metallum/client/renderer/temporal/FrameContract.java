@@ -27,6 +27,19 @@ public record FrameContract(
             ReactiveMaskAvailability.UNAVAILABLE,
             UiComposition.SEPARATE_SDR_TEXTURE
     );
+    private static final FrameContract TEMPORAL_PRODUCTION = new FrameContract(
+            CURRENT_VERSION,
+            new MotionVectorContract(
+                    MotionVectorAvailability.AVAILABLE,
+                    MotionVectorDelta.PREVIOUS_NDC_MINUS_CURRENT_NDC,
+                    MotionVectorUnits.RENDER_PIXELS,
+                    HorizontalAxis.POSITIVE_RIGHT,
+                    VerticalAxis.POSITIVE_DOWN
+            ),
+            new DepthContract(DepthRange.ZERO_TO_ONE, true),
+            ReactiveMaskAvailability.AVAILABLE,
+            UiComposition.SEPARATE_SDR_TEXTURE
+    );
 
     public enum MotionVectorAvailability {
         UNAVAILABLE,
@@ -106,5 +119,10 @@ public record FrameContract(
     /** Current preparation contract: declarations only, with all future temporal inputs disabled. */
     public static FrameContract temporalPreparationV1() {
         return TEMPORAL_PREPARATION;
+    }
+
+    /** Production MetalFX Temporal contract: all sampled history inputs are present and typed. */
+    public static FrameContract temporalProductionV1() {
+        return TEMPORAL_PRODUCTION;
     }
 }

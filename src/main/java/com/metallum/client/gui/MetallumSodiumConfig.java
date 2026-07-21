@@ -6,7 +6,9 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
+import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.voxel.VoxelPreviewMode;
@@ -88,6 +90,20 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     MetalFxSpatialScaling::setRequestedMode,
                                     MetalFxSpatialScaling::requestedMode
+                            )
+                    )
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "temporal_scaling"),
+                                TemporalScalingMode.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.metalfx_temporal_scaling.name"))
+                            .setTooltip(MetallumSodiumConfig::temporalScalingTooltip)
+                            .setElementNameProvider(mode -> Component.translatable(mode.translationKey()))
+                            .setDefaultValue(TemporalScalingMode.OFF)
+                            .setBinding(
+                                    MetalFxTemporalScaling::setRequestedMode,
+                                    MetalFxTemporalScaling::requestedMode
                             )
                     )
                 )
@@ -301,6 +317,40 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 dimensions.displayWidth(),
                 dimensions.displayHeight(),
                 resolvedMode.nominalLinearPercent(),
+                Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
+                Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
+                Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
+        );
+    }
+
+    private static Component temporalScalingTooltip(final TemporalScalingMode mode) {
+        Minecraft minecraft = Minecraft.getInstance();
+        int displayWidth = minecraft != null && minecraft.getWindow() != null
+                ? minecraft.getWindow().getWidth()
+                : 1;
+        int displayHeight = minecraft != null && minecraft.getWindow() != null
+                ? minecraft.getWindow().getHeight()
+                : 1;
+        MetalFxTemporalScaling.Dimensions dimensions = MetalFxTemporalScaling.dimensions(
+                mode, displayWidth, displayHeight
+        );
+        if (!mode.enabled()) {
+            return Component.translatable(
+                    "metallum.options.metalfx_temporal_scaling.tooltip.off",
+                    dimensions.displayWidth(), dimensions.displayHeight()
+            );
+        }
+        if (!MetalFxTemporalScaling.isSupported() || MetalFxTemporalScaling.isRuntimeDisabled()) {
+            return Component.translatable(
+                    "metallum.options.metalfx_temporal_scaling.tooltip.unavailable",
+                    dimensions.displayWidth(), dimensions.displayHeight()
+            );
+        }
+        return Component.translatable(
+                "metallum.options.metalfx_temporal_scaling.tooltip.enabled",
+                dimensions.renderWidth(), dimensions.renderHeight(),
+                dimensions.displayWidth(), dimensions.displayHeight(),
+                mode.nominalLinearPercent(),
                 Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f

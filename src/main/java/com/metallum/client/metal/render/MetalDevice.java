@@ -36,6 +36,8 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.MetalFxTemporalScaling;
+import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.renderer.MetalCapabilities;
@@ -104,6 +106,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             int displayHeight,
             DisplayOutputMode outputMode,
             boolean spatialActive,
+            boolean temporalActive,
             long materialCoverageEpoch,
             long advancedAdmissionEpoch
     ) {
@@ -150,7 +153,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             RenderContractMode renderContractMode,
             LightingModel lightingModel,
             DisplayOutputMode outputMode,
-            boolean spatialActive
+            boolean spatialActive,
+            boolean temporalActive
     ) {
         RendererAdmissionLogState {
             rejectionReasons = Set.copyOf(rejectionReasons);
@@ -171,6 +175,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final RendererConfig rendererConfig;
     private final RenderContractMode requestedRenderContract;
     private final boolean spatialScalingSupported;
+    private final boolean temporalScalingSupported;
+    private boolean temporalScalingActive;
     private final boolean temporalDiagnosticsConfigured;
     private boolean temporalDiagnosticsActive;
     private final MetalCommandEncoder commandEncoder;
@@ -335,6 +341,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                         && this.rendererConfig.improvedLighting()
         );
         this.temporalDiagnosticsConfigured = TemporalDiagnostics.configured();
+        this.temporalScalingSupported = this.rendererCapabilities.supports(
+                MetalCapabilities.Feature.METALFX_TEMPORAL
+        ) && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
+        this.temporalScalingActive = this.temporalScalingSupported
+                && MetalFxTemporalScaling.isRequested()
+                && !MetalFxTemporalScaling.isRuntimeDisabled();
         this.temporalDiagnosticsActive = this.temporalDiagnosticsConfigured
                 && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
         if (this.temporalDiagnosticsActive) {
@@ -403,6 +415,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 HdrSceneState.isRequested() ? "enabled" : "disabled"
         );
         Metallum.LOGGER.info("MetalFX spatial scaling support: {}", this.spatialScalingSupported ? "available" : "unavailable");
+        Metallum.LOGGER.info("MetalFX temporal scaling support: {}", this.temporalScalingSupported ? "available" : "unavailable");
         Metallum.LOGGER.info(
                 "Temporal camera-motion diagnostics: {}",
                 this.temporalDiagnosticsActive ? "enabled (camera/static-depth only)" : "disabled"
@@ -802,6 +815,14 @@ public final class MetalDevice implements GpuDeviceBackend {
         return this.spatialScalingSupported;
     }
 
+    public boolean supportsTemporalScaling() {
+        return this.temporalScalingSupported;
+    }
+
+    public boolean temporalUpscalingActive() {
+        return this.temporalScalingActive;
+    }
+
     /** Publishes the immutable renderer generation after output, scale and material admission. */
     public synchronized void publishRendererGenerationState(
             final int displayWidth,
@@ -809,12 +830,19 @@ public final class MetalDevice implements GpuDeviceBackend {
     ) {
         int safeDisplayWidth = Math.max(displayWidth, 1);
         int safeDisplayHeight = Math.max(displayHeight, 1);
-        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
+        MetalFxUpscaling.Dimensions dimensions = MetalFxUpscaling.effectiveDimensions(
                 safeDisplayWidth,
                 safeDisplayHeight
         );
+        boolean temporalActive = this.temporalScalingSupported
+                && MetalFxTemporalScaling.isRequested()
+                && !MetalFxTemporalScaling.isRuntimeDisabled();
+        this.temporalScalingActive = temporalActive;
         boolean spatialActive = dimensions.renderWidth() != dimensions.displayWidth()
                 || dimensions.renderHeight() != dimensions.displayHeight();
+        if (temporalActive) {
+            spatialActive = false;
+        }
         HdrOutputMode storageCompatibleOutput = MetallumMaterialState.resolveCompatibleOutput(
                 this.hdrOutputMode
         );
@@ -838,6 +866,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && currentKey.displayHeight() == dimensions.displayHeight()
                 && currentKey.outputMode() == requestedOutput
                 && currentKey.spatialActive() == spatialActive
+                && currentKey.temporalActive() == temporalActive
                 && currentKey.materialCoverageEpoch() == materialCoverageEpoch
                 && currentKey.advancedAdmissionEpoch() == advancedAdmission.epoch()) {
             return;
@@ -846,9 +875,11 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.rendererConfig.improvedLighting()
                 ? LightingModel.ADVANCED
                 : LightingModel.VANILLA;
-        RendererFeatureMask activeFeatures = spatialActive
-                ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
-                : RendererFeatureMask.NONE;
+        RendererFeatureMask activeFeatures = temporalActive
+                ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_UPSCALING)
+                : spatialActive
+                    ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
+                    : RendererFeatureMask.NONE;
         RendererGenerationPlanner.MaterialSceneStorage materialSceneStorage = resolveMainSceneStorage(
                 HdrSceneState.isRequested(),
                 MetallumMaterialState.requiresFp16Scene()
@@ -884,12 +915,21 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
 
         TemporalDiagnosticResources nextDiagnosticResources = null;
-        if (this.temporalDiagnosticsActive) {
+        // The production scaler consumes the same typed motion/reactive ring as
+        // the optional diagnostic view.  Do not make that allocation depend on
+        // METALLUM_TEMPORAL_DIAGNOSTICS: Temporal itself is the consumer here.
+        if (this.temporalDiagnosticsActive || temporalActive) {
             try {
                 nextDiagnosticResources = TemporalDiagnosticResources.create(
                         this, dimensions.renderWidth(), dimensions.renderHeight()
                 );
             } catch (RuntimeException exception) {
+                if (temporalActive) {
+                    MetalFxTemporalScaling.disableRuntimeAfterFailure(exception);
+                    this.temporalScalingActive = false;
+                    this.publishRendererGenerationState(safeDisplayWidth, safeDisplayHeight);
+                    return;
+                }
                 this.temporalDiagnosticsActive = false;
                 if (!this.temporalDiagnosticFailureLogged) {
                     this.temporalDiagnosticFailureLogged = true;
@@ -1226,6 +1266,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 dimensions.displayHeight(),
                 requestedOutput,
                 spatialActive,
+                temporalActive,
                 materialCoverageEpoch,
                 committedAdvancedAdmissionEpoch
         );
@@ -1235,7 +1276,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 resolved.renderContractMode(),
                 resolved.lightingModel(),
                 resolved.outputMode(),
-                spatialActive
+                spatialActive,
+                temporalActive
         );
         if (!admissionLogState.equals(this.loggedRendererAdmission)) {
             this.loggedRendererAdmission = admissionLogState;
@@ -1246,7 +1288,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         resolved.renderContractMode(),
                         resolved.lightingModel(),
                         resolved.outputMode(),
-                        spatialActive ? "SPATIAL" : "NATIVE"
+                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE"
                 );
             } else {
                 Metallum.LOGGER.info(
@@ -1254,7 +1296,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         resolved.renderContractMode(),
                         resolved.lightingModel(),
                         resolved.outputMode(),
-                        spatialActive ? "SPATIAL" : "NATIVE"
+                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE"
                 );
             }
         }
@@ -1272,6 +1314,10 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     public boolean temporalDiagnosticsActive() {
         return this.temporalDiagnosticsConfigured || this.temporalDiagnosticsActive;
+    }
+
+    public boolean temporalInputsActive() {
+        return this.temporalScalingActive || this.temporalDiagnosticsActive;
     }
 
     public EntityTransformTracker entityTransformTracker() {
@@ -1371,7 +1417,9 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.publishedRendererGeneration = null;
         }
         FrameState candidate = new FrameState(
-                FrameContract.temporalPreparationV1(),
+                generation.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                        ? FrameContract.temporalProductionV1()
+                        : FrameContract.temporalPreparationV1(),
                 0L,
                 this.rendererGenerationId,
                 0L,
@@ -1711,23 +1759,23 @@ public final class MetalDevice implements GpuDeviceBackend {
         return published;
     }
 
-    /** Encodes the isolated diagnostic between world depth completion and the UI depth clear. */
+    /** Encodes typed Temporal inputs between world depth completion and the UI depth clear. */
     public synchronized void encodeTemporalDiagnostics(final GpuTexture depthTexture) {
         TemporalDiagnosticResources resources = this.temporalDiagnosticResources;
-        if (!this.temporalDiagnosticsActive || resources == null) {
+        if (!this.temporalInputsActive() || resources == null) {
             EntityVelocityDrawRecorder.getInstance().clearFrame();
             return;
         }
         if (!(depthTexture instanceof MetalGpuTexture depth)
                 || depth.getFormat() != GpuFormat.D32_FLOAT) {
-            this.disableTemporalDiagnostics("main depth is not a Metal D32Float texture", null);
+            this.disableTemporalInputs("main depth is not a Metal D32Float texture", null);
             EntityVelocityDrawRecorder.getInstance().clearFrame();
             return;
         }
         int slot = (int) (this.commandEncoder.currentSubmitIndex() % FrameStatePacketRing.SLOT_COUNT);
         int status = this.commandEncoder.encodeTemporalDiagnostics(depth, resources.pair(slot));
         if (status < 0) {
-            this.disableTemporalDiagnostics("native diagnostic pass failed with status " + status, null);
+            this.disableTemporalInputs("native temporal-input pass failed with status " + status, null);
         } else {
             // Encode T1B.3 entity velocity replay pass
             java.util.List<EntityVelocityPacket> packets = EntityVelocityDrawRecorder.getInstance().getRecordedPackets();
@@ -1749,7 +1797,13 @@ public final class MetalDevice implements GpuDeviceBackend {
         EntityVelocityDrawRecorder.getInstance().clearFrame();
     }
 
-    private void disableTemporalDiagnostics(final String reason, @Nullable final Throwable exception) {
+    private void disableTemporalInputs(final String reason, @Nullable final Throwable exception) {
+        if (this.temporalScalingActive) {
+            this.temporalScalingActive = false;
+            MetalFxTemporalScaling.disableRuntimeAfterFailure(
+                    exception == null ? new IllegalStateException(reason) : exception
+            );
+        }
         this.temporalDiagnosticsActive = false;
         if (this.temporalDiagnosticResources != null) {
             this.temporalDiagnosticResources.close();
@@ -1801,8 +1855,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.resetHdrSceneColor();
         }
         MetalFxSpatialScaling.onHdrOutputModeChanged(previousOutputMode, compatibleOutputMode);
-        int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(0);
-        int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(0);
+        int displayWidth = MetalFxUpscaling.configuredDisplayWidth(0);
+        int displayHeight = MetalFxUpscaling.configuredDisplayHeight(0);
         if (displayWidth > 0 && displayHeight > 0) {
             this.publishRendererGenerationState(displayWidth, displayHeight);
         }
@@ -2091,7 +2145,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             @Nullable final MetalGpuTexture depth,
             final boolean worldSceneRendered
     ) {
-        this.spatialSceneAvailable = MetalFxSpatialScaling.isActive() && !source.isClosed();
+        this.spatialSceneAvailable = MetalFxUpscaling.isActive() && !source.isClosed();
         this.spatialSceneSubmitIndex = this.spatialSceneAvailable
                 ? this.commandEncoder.currentSubmitIndex()
                 : Long.MIN_VALUE;
@@ -2103,22 +2157,23 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean legacyHdrScene = generation != null && usesLegacyHdrDepthSnapshot(
                 generation.renderContractMode(), this.hdrEnhancedActive
         );
-        if ((!materialScene && !legacyHdrScene) || source.isClosed()) {
+        boolean temporalScene = this.temporalScalingActive;
+        if ((!materialScene && !legacyHdrScene && !temporalScene) || source.isClosed()) {
             return;
         }
         this.hdrWorldSceneAvailable = worldSceneRendered;
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
-        if (legacyHdrScene
+        if ((legacyHdrScene || temporalScene)
                 && (depth == null
                 || depth.isClosed()
                 || depth.getWidth(0) != width
                 || depth.getHeight(0) != height)) {
             return;
         }
-        boolean directSpatialScene = MetalFxSpatialScaling.isActive();
-        if (legacyHdrScene) {
+        boolean directSpatialScene = MetalFxUpscaling.isActive();
+        if (legacyHdrScene || temporalScene) {
             if (this.hdrSceneDepthSnapshot == null
                     || this.hdrSceneDepthSnapshot.isClosed()
                     || this.hdrSceneDepthSnapshot.getWidth(0) != width
@@ -2131,7 +2186,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                     this.hdrSceneDepthSnapshot = new MetalGpuTexture(
                             this,
                             GpuTexture.USAGE_COPY_DST | GpuTexture.USAGE_TEXTURE_BINDING,
-                            "Metallum HDR scene depth snapshot",
+                            "Metallum scene depth snapshot",
                             depth.getFormat(),
                             width,
                             height,
@@ -2166,7 +2221,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrDirectSceneSource = source;
             this.hdrSceneColorState = HdrSceneColorState.PENDING_REDIRECT;
         }
-        if (legacyHdrScene) {
+        if (legacyHdrScene || temporalScene) {
             this.commandEncoder.copyTextureToTexture(
                     depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height
             );
@@ -2178,7 +2233,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrUiHandle = MemorySegment.NULL;
         this.hdrUiSubmitIndex = Long.MIN_VALUE;
         this.hdrUiSuppressSceneEnhancement = false;
-        this.hdrSceneDepthHandle = legacyHdrScene
+        this.hdrSceneDepthHandle = (legacyHdrScene || temporalScene)
                 ? this.hdrSceneDepthSnapshot.nativeHandle()
                 : MemorySegment.NULL;
         this.hdrSemanticSceneAvailable = legacyHdrScene
@@ -2258,7 +2313,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     boolean confirmHdrUiRedirect(final MetalGpuTexture source) {
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         if (this.hdrSceneColorState == HdrSceneColorState.NONE) {
-            return MetalFxSpatialScaling.isActive()
+            return MetalFxUpscaling.isActive()
                     && this.spatialSceneAvailable
                     && this.spatialSceneSubmitIndex == submitIndex
                     && !source.isClosed();
@@ -2278,7 +2333,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     void captureHdrUi(final MetalGpuTexture ui, final boolean suppressSceneEnhancement) {
-        boolean spatialUi = MetalFxSpatialScaling.isActive()
+        boolean spatialUi = MetalFxUpscaling.isActive()
                 && this.spatialSceneAvailable
                 && this.spatialSceneSubmitIndex == this.commandEncoder.currentSubmitIndex();
         boolean hdrUi = this.isSceneRoutingActive()
@@ -2300,11 +2355,13 @@ public final class MetalDevice implements GpuDeviceBackend {
             final boolean hdrPrecomposeAllowed
     ) {
         boolean spatial = MetalFxSpatialScaling.isActive();
+        boolean temporal = this.temporalScalingActive;
+        boolean upscaled = spatial || temporal;
         boolean compatible = this.isHdrSceneReadyForUi(source)
                 && !destination.isClosed()
                 && source != destination
                 && destination.getFormat() == GpuFormat.RGBA8_UNORM
-                && (spatial
+                && (upscaled
                         ? source.getWidth(0) <= destination.getWidth(0)
                             && source.getHeight(0) <= destination.getHeight(0)
                         : source.getWidth(0) == destination.getWidth(0)
@@ -2335,7 +2392,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 source,
                 destination,
                 this.capturedFrameSourceEncoding(source),
-                precomposeHdr ? this.hdrSceneDepthHandle : MemorySegment.NULL,
+                (precomposeHdr || temporal) ? this.hdrSceneDepthHandle : MemorySegment.NULL,
                 semanticHandle,
                 precomposeHdr,
                 directPerceptual,
@@ -2348,7 +2405,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (result == 2 && !this.spatialHdrPrecomposeLogged) {
             this.spatialHdrPrecomposeLogged = true;
             Metallum.LOGGER.info(
-                    "MetalFX HDR fast path is active: low-resolution HDR precompose, spatial scale, full-resolution UI composite"
+                    "MetalFX HDR fast path is active: low-resolution HDR precompose, full-resolution UI composite"
             );
         }
         if (result == 3 && !this.spatialPerceptualDirectLogged) {
@@ -2422,7 +2479,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     boolean isHdrSceneReadyForUi(final MetalGpuTexture source) {
-        boolean spatialReady = MetalFxSpatialScaling.isActive()
+        boolean spatialReady = MetalFxUpscaling.isActive()
                 && this.spatialSceneAvailable
                 && this.spatialSceneSubmitIndex == this.commandEncoder.currentSubmitIndex()
                 && !source.isClosed();
@@ -2445,7 +2502,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 : MemorySegment.NULL;
         boolean directSourcePresent = this.hdrDirectSceneSource != null;
         boolean directRouteActive = !this.hdrDirectSceneRequiresSpatialScaling
-                || MetalFxSpatialScaling.isActive();
+                || MetalFxUpscaling.isActive();
         boolean sceneValid = this.isSceneRoutingActive()
                 && this.hdrSceneAvailable
                 && this.hdrSceneSubmitIndex == submitIndex

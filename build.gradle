@@ -334,9 +334,18 @@ tasks.register("spatialScalingUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metalfx.SpatialScalingTests")
 }
 
+tasks.register("temporalScalingUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs MetalFX Temporal preset and render-resolution policy tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metalfx.TemporalScalingTests")
+}
+
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
 def builtinShaderLibraryValidationBinary = layout.buildDirectory.file("native-tests/BuiltinShaderLibraryValidation")
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
+def temporalScalingValidationBinary = layout.buildDirectory.file("native-tests/TemporalScalingValidation")
 def gpuTimingValidationBinary = layout.buildDirectory.file("native-tests/GpuTimingValidation")
 def frameGraphAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameGraphAbiValidation")
 def frameStateAbiValidationBinary = layout.buildDirectory.file("native-tests/FrameStateAbiValidation")
@@ -908,6 +917,43 @@ tasks.register("spatialScalingValidation", Exec) {
 	commandLine spatialScalingValidationBinary.get().asFile.absolutePath
 }
 
+tasks.register("compileTemporalScalingValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native MetalFX Temporal scaling validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/TemporalScalingValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(temporalScalingValidationBinary)
+
+	doFirst {
+		temporalScalingValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-o", temporalScalingValidationBinary.get().asFile.absolutePath,
+		"src/test/native/TemporalScalingValidation.swift"
+}
+
+tasks.register("temporalScalingValidation", Exec) {
+	group = "verification"
+	description = "Runs MetalFX Temporal presets with Metal validation"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("compileTemporalScalingValidation"))
+
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine temporalScalingValidationBinary.get().asFile.absolutePath
+}
+
 tasks.register("compileHdrValueValidation", Exec) {
 	group = "verification"
 	description = "Compiles the macOS Metal HDR numerical validation harness"
@@ -1054,10 +1100,12 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumLightLegacyPatchNativeValidation"))
 	dependsOn(tasks.named("staticGeometryHeapValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
+	dependsOn(tasks.named("temporalScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("builtinShaderLibraryValidation"))
 	dependsOn(tasks.named("builtinShaderFallbackValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
+	dependsOn(tasks.named("temporalScalingValidation"))
 	dependsOn(tasks.named("gpuTimingValidation"))
 	dependsOn(tasks.named("metal4LifecycleValidation"))
 	dependsOn(tasks.named("lightClusterValidation"))

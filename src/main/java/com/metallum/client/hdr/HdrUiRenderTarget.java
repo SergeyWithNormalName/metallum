@@ -2,7 +2,7 @@ package com.metallum.client.hdr;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalHdrFrame;
-import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
@@ -54,7 +54,7 @@ public final class HdrUiRenderTarget {
         lastUiFinished = false;
         lastUiSource = null;
         backdropBlurredThisFrame = false;
-        spatialActiveThisFrame = MetalFxSpatialScaling.isActive();
+        spatialActiveThisFrame = MetalFxUpscaling.isActive();
         spatialHdrPrecomposedThisFrame = false;
         Minecraft minecraft = Minecraft.getInstance();
         boolean loadingSurfaceActive = minecraft.gui.screen() instanceof LevelLoadingScreen
@@ -397,6 +397,6 @@ public final class HdrUiRenderTarget {
             }
             target = null;
         }
-        MetalFxSpatialScaling.disableRuntimeAfterFailure(throwable);
+        MetalFxUpscaling.disableRuntimeAfterFailure(throwable);
     }
 }

@@ -239,6 +239,8 @@ public final class RendererGenerationPlanner {
         List<RendererGenerationManifest.Pass> passes = new ArrayList<>();
         boolean metallum = config.renderContractMode() == RenderContractMode.METALLUM;
         boolean spatial = config.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING);
+        boolean temporal = config.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING);
+        boolean upscaled = spatial || temporal;
         RendererGenerationManifest.SceneStorageContract sceneStorage = sceneStorage(
                 config,
                 materialSceneStorage
@@ -247,7 +249,7 @@ public final class RendererGenerationPlanner {
                 && config.outputMode() == DisplayOutputMode.HDR
                 && sceneStorage == RendererGenerationManifest.SceneStorageContract
                 .LEGACY_HDR_SEMANTIC_SRGB8;
-        boolean legacyEncodedFallback = legacyEncodedHdr && !spatial;
+        boolean legacyEncodedFallback = legacyEncodedHdr && !upscaled;
         RendererGenerationManifest.HdrPipelineContract hdrPipeline = hdrPipeline(config);
         resources.add(resource("main_color", RendererGenerationManifest.Domain.BASE, 0L, true));
         resources.add(resource("main_depth", RendererGenerationManifest.Domain.BASE, 0L, true));
@@ -257,7 +259,7 @@ public final class RendererGenerationPlanner {
             passes.add(pass("scene_linear_ui_seed",
                     RendererGenerationManifest.Domain.MATERIAL_ONLY));
         }
-        passes.add(pass(spatial ? "ui_render_with_seed" : "ui_render",
+        passes.add(pass(upscaled ? "ui_render_with_seed" : "ui_render",
                 RendererGenerationManifest.Domain.BASE));
         passes.add(pass("present", RendererGenerationManifest.Domain.BASE));
 
@@ -306,7 +308,7 @@ public final class RendererGenerationPlanner {
             } else {
                 resources.add(resource("hdr_world_composite",
                         RendererGenerationManifest.Domain.HDR_ONLY,
-                        multiply(spatial ? renderPixels : displayPixels, 8L), false));
+                        multiply(upscaled ? renderPixels : displayPixels, 8L), false));
                 resources.add(resource("sdr_ui_color",
                         RendererGenerationManifest.Domain.HDR_ONLY,
                         multiply(displayPixels, 4L), false));
@@ -331,7 +333,7 @@ public final class RendererGenerationPlanner {
                 passes.add(pass(
                         metallum
                                 ? "hdr_world_actual_radiance"
-                                : spatial ? "hdr_world_reconstruction" : "hdr_world_ui_seed",
+                                : upscaled ? "hdr_world_reconstruction" : "hdr_world_ui_seed",
                         RendererGenerationManifest.Domain.HDR_ONLY
                 ));
             }
@@ -369,13 +371,33 @@ public final class RendererGenerationPlanner {
             }
             passes.add(pass("metalfx_spatial", RendererGenerationManifest.Domain.UPSCALE_ONLY));
         }
-        if (config.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING)) {
-            throw new IllegalStateException("L0 must not create a Temporal manifest");
+        if (temporal) {
+            long renderPixels = renderExtent.pixels();
+            resources.add(resource(
+                    "metalfx_temporal_motion_ring",
+                    RendererGenerationManifest.Domain.UPSCALE_ONLY,
+                    multiply(renderPixels, 4L * 3L),
+                    false
+            ));
+            resources.add(resource(
+                    "metalfx_temporal_reactive_ring",
+                    RendererGenerationManifest.Domain.UPSCALE_ONLY,
+                    multiply(renderPixels, 3L),
+                    false
+            ));
+            resources.add(resource(
+                    "metalfx_temporal_output",
+                    RendererGenerationManifest.Domain.UPSCALE_ONLY,
+                    multiply(displayExtent.pixels(), config.outputMode() == DisplayOutputMode.HDR ? 8L : 4L),
+                    false
+            ));
+            passes.add(pass("temporal_motion_vectors", RendererGenerationManifest.Domain.UPSCALE_ONLY));
+            passes.add(pass("metalfx_temporal", RendererGenerationManifest.Domain.UPSCALE_ONLY));
         }
         if (config.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION)) {
             throw new IllegalStateException("L0 must not create a Frame Interpolation manifest");
         }
-        if (temporalDiagnostics) {
+        if (temporalDiagnostics && !temporal) {
             long renderPixels = renderExtent.pixels();
             long diagnosticBytes = multiply(renderPixels, 5L * 3L);
             resources.add(resource(

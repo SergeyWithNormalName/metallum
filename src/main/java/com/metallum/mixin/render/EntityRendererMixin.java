@@ -26,7 +26,7 @@ abstract class EntityRendererMixin {
             CallbackInfo ci
     ) {
         MetalDevice device = MetalDevice.getInstance();
-        if (device != null && device.temporalDiagnosticsActive()) {
+        if (device != null && device.temporalInputsActive()) {
             EntityRenderStateAccessor accessor = (EntityRenderStateAccessor) state;
             accessor.metallum$setUuid(entity.getUUID());
             accessor.metallum$setEntityId(entity.getId());
@@ -63,7 +63,7 @@ abstract class EntityRendererMixin {
             CallbackInfo ci
     ) {
         MetalDevice device = MetalDevice.getInstance();
-        if (device != null && device.temporalDiagnosticsActive()) {
+        if (device != null && device.temporalInputsActive()) {
             device.entityTransformTracker().incrementSubmitCalls();
             EntityRenderStateAccessor accessor = (EntityRenderStateAccessor) state;
             if (accessor.metallum$getUuid() == null) {
@@ -113,7 +113,7 @@ abstract class EntityRendererMixin {
             CallbackInfo ci
     ) {
         MetalDevice device = MetalDevice.getInstance();
-        if (device != null && device.temporalDiagnosticsActive()) {
+        if (device != null && device.temporalInputsActive()) {
             EntityVelocityDrawRecorder.getInstance().endEntitySubmit();
         }
     }

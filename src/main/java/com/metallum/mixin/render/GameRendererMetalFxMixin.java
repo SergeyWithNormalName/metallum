@@ -1,7 +1,8 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
-import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.MetalFxTemporalScaling;
+import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -54,19 +55,19 @@ abstract class GameRendererMetalFxMixin {
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
-        int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(this.mainRenderTarget.width);
-        int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(this.mainRenderTarget.height);
-        if (MetalFxSpatialScaling.consumePendingResize()) {
+        int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
+        int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
+        if (MetalFxUpscaling.consumePendingResize()) {
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
         }
-        if (!MetalFxSpatialScaling.isActive()) {
+        if (!MetalFxUpscaling.isActive()) {
             MetalDevice device = MetalDevice.getInstance();
             if (device != null) {
                 device.publishRendererGenerationState(displayWidth, displayHeight);
             }
             return;
         }
-        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
+        MetalFxUpscaling.Dimensions dimensions = MetalFxUpscaling.effectiveDimensions(
                 displayWidth,
                 displayHeight
         );
@@ -82,7 +83,7 @@ abstract class GameRendererMetalFxMixin {
 
     @Inject(method = "resize", at = @At("HEAD"))
     private void metallum$recordDisplaySize(final int width, final int height, final CallbackInfo ci) {
-        MetalFxSpatialScaling.recordDisplaySize(width, height);
+        MetalFxUpscaling.recordDisplaySize(width, height);
     }
 
     @Redirect(
@@ -97,7 +98,7 @@ abstract class GameRendererMetalFxMixin {
             final int displayWidth,
             final int displayHeight
     ) {
-        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
+        MetalFxUpscaling.Dimensions dimensions = MetalFxUpscaling.effectiveDimensions(
                 displayWidth,
                 displayHeight
         );
@@ -116,7 +117,7 @@ abstract class GameRendererMetalFxMixin {
             final int displayWidth,
             final int displayHeight
     ) {
-        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.effectiveDimensions(
+        MetalFxUpscaling.Dimensions dimensions = MetalFxUpscaling.effectiveDimensions(
                 displayWidth,
                 displayHeight
         );
@@ -155,8 +156,8 @@ abstract class GameRendererMetalFxMixin {
                     || camera.depthFar <= 0.05f) {
                 return projectionBuffer.getBuffer(finalProjection);
             }
-            int displayWidth = MetalFxSpatialScaling.configuredDisplayWidth(this.mainRenderTarget.width);
-            int displayHeight = MetalFxSpatialScaling.configuredDisplayHeight(this.mainRenderTarget.height);
+            int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
+            int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
             device.publishRendererGenerationState(displayWidth, displayHeight);
             if (this.metallum$hasPreviousBaseProjection
                     && !this.metallum$previousBaseProjection.equals(camera.projectionMatrix)) {
@@ -174,7 +175,8 @@ abstract class GameRendererMetalFxMixin {
 
             float jitterX = 0f;
             float jitterY = 0f;
-            if (com.metallum.client.renderer.temporal.TemporalDiagnostics.configured()) {
+            if (MetalFxTemporalScaling.isActive()
+                    || com.metallum.client.renderer.temporal.TemporalDiagnostics.configured()) {
                 long nextFrameId = device.frameStateTracker().nextFrameId();
                 com.metallum.client.renderer.temporal.FrameState.JitterOffset jitter = com.metallum.client.renderer.temporal.JitterSequence.sample(nextFrameId, 1.0);
                 jitterX = (float) jitter.x();
@@ -319,8 +321,8 @@ abstract class GameRendererMetalFxMixin {
             )
     )
     private int metallum$compareDisplayWidth(final RenderTarget target) {
-        return target instanceof MainTarget && MetalFxSpatialScaling.isActive()
-                ? MetalFxSpatialScaling.configuredDisplayWidth(target.width)
+        return target instanceof MainTarget && MetalFxUpscaling.isActive()
+                ? MetalFxUpscaling.configuredDisplayWidth(target.width)
                 : target.width;
     }
 
@@ -333,8 +335,8 @@ abstract class GameRendererMetalFxMixin {
             )
     )
     private int metallum$compareDisplayHeight(final RenderTarget target) {
-        return target instanceof MainTarget && MetalFxSpatialScaling.isActive()
-                ? MetalFxSpatialScaling.configuredDisplayHeight(target.height)
+        return target instanceof MainTarget && MetalFxUpscaling.isActive()
+                ? MetalFxUpscaling.configuredDisplayHeight(target.height)
                 : target.height;
     }
 
