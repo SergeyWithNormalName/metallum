@@ -350,6 +350,12 @@ public final class MetallumMaterialContractTests {
                 "a panorama target was reused for a different scene source");
         require(!HdrUiRenderTarget.shouldReuseActiveTarget(false, true, true),
                 "an inactive panorama target bypassed normal GUI preparation");
+        require(HdrUiRenderTarget.uiTargetDimension(true, 2016, 3024) == 3024,
+                "upscaled GUI target adopted the reduced render width instead of the display width");
+        require(HdrUiRenderTarget.uiTargetDimension(true, 1265, 1898) == 1898,
+                "upscaled GUI target adopted the reduced render height instead of the display height");
+        require(HdrUiRenderTarget.uiTargetDimension(false, 2016, 3024) == 2016,
+                "native-resolution GUI target no longer follows its main target");
         require(HdrUiRenderTarget.shouldRetainFullResolutionUiTargetAfterScalingFailure(true, true),
                 "a rejected upscaler can send display-coordinate scissors to a reduced MainTarget");
         require(!HdrUiRenderTarget.shouldRetainFullResolutionUiTargetAfterScalingFailure(true, false),

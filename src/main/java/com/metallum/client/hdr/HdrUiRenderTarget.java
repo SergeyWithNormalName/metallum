@@ -75,12 +75,16 @@ public final class HdrUiRenderTarget {
         }
 
         try {
-            int targetWidth = spatialActiveThisFrame
-                    ? Minecraft.getInstance().getWindow().getWidth()
-                    : mainTarget.width;
-            int targetHeight = spatialActiveThisFrame
-                    ? Minecraft.getInstance().getWindow().getHeight()
-                    : mainTarget.height;
+            int targetWidth = uiTargetDimension(
+                    spatialActiveThisFrame,
+                    mainTarget.width,
+                    MetalFxUpscaling.configuredDisplayWidth(mainTarget.width)
+            );
+            int targetHeight = uiTargetDimension(
+                    spatialActiveThisFrame,
+                    mainTarget.height,
+                    MetalFxUpscaling.configuredDisplayHeight(mainTarget.height)
+            );
             ensureUiTarget(mainTarget, targetWidth, targetHeight);
             if (!MetalHdrFrame.isSceneReadyForUi(mainTarget.getColorTextureView())) {
                 return fallbackWithoutScaledMainTarget(mainTarget);
@@ -218,6 +222,18 @@ public final class HdrUiRenderTarget {
             final boolean fullResolutionUiTargetAvailable
     ) {
         return upscalingActive && fullResolutionUiTargetAvailable;
+    }
+
+    /** Chooses display dimensions for GUI, which retains display-coordinate scissors. */
+    static int uiTargetDimension(
+            final boolean upscalingActive,
+            final int mainTargetDimension,
+            final int displayDimension
+    ) {
+        int safeMainTargetDimension = Math.max(mainTargetDimension, 1);
+        return upscalingActive
+                ? Math.max(displayDimension, safeMainTargetDimension)
+                : safeMainTargetDimension;
     }
 
     /** Blurs the composed FP16 world and the pre-blur GUI into matching HDR/SDR outputs. */

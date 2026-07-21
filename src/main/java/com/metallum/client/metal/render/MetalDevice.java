@@ -2357,7 +2357,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean spatial = MetalFxSpatialScaling.isActive();
         boolean temporal = this.temporalScalingActive;
         boolean upscaled = spatial || temporal;
-        boolean compatible = this.isHdrSceneReadyForUi(source)
+        boolean sceneReady = this.isHdrSceneReadyForUi(source);
+        boolean compatible = sceneReady
                 && !destination.isClosed()
                 && source != destination
                 && destination.getFormat() == GpuFormat.RGBA8_UNORM
@@ -2367,6 +2368,18 @@ public final class MetalDevice implements GpuDeviceBackend {
                         : source.getWidth(0) == destination.getWidth(0)
                             && source.getHeight(0) == destination.getHeight(0));
         if (!compatible) {
+            if (temporal) {
+                Metallum.LOGGER.warn(
+                        "MetalFX Temporal UI backdrop rejected before native encoding: sceneReady={}, source={}x{}, destination={}x{}, destinationClosed={}, destinationFormat={}",
+                        sceneReady,
+                        source.getWidth(0),
+                        source.getHeight(0),
+                        destination.getWidth(0),
+                        destination.getHeight(0),
+                        destination.isClosed(),
+                        destination.getFormat()
+                );
+            }
             return false;
         }
         long submitIndex = this.commandEncoder.currentSubmitIndex();
@@ -2388,10 +2401,11 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.hdrSemanticMask != null
                 ? this.hdrSemanticMask.nativeHandle()
                 : MemorySegment.NULL;
+        int sourceEncoding = this.capturedFrameSourceEncoding(source);
         int result = this.commandEncoder.encodeHdrUiBackdrop(
                 source,
                 destination,
-                this.capturedFrameSourceEncoding(source),
+                sourceEncoding,
                 (precomposeHdr || temporal) ? this.hdrSceneDepthHandle : MemorySegment.NULL,
                 semanticHandle,
                 precomposeHdr,
@@ -2399,6 +2413,21 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.hdrCurrentHeadroom,
                 this.hdrConfig
         );
+        if (result <= 0 && temporal) {
+            Metallum.LOGGER.warn(
+                    "MetalFX Temporal native UI backdrop rejected (status={}): source={}x{} {}, destination={}x{}, encoding={}, materialHdr={}, precomposeHdr={}, depthAvailable={}",
+                    result,
+                    source.getWidth(0),
+                    source.getHeight(0),
+                    source.getFormat(),
+                    destination.getWidth(0),
+                    destination.getHeight(0),
+                    sourceEncoding,
+                    materialHdr,
+                    precomposeHdr,
+                    !MetalNativeBridge.isNullHandle(this.hdrSceneDepthHandle)
+            );
+        }
         this.spatialHdrPrecomposedSubmitIndex = result == 2 || result == 4
                 ? submitIndex
                 : Long.MIN_VALUE;
