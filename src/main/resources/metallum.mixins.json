@@ -80,6 +80,7 @@
     "sodium.SodiumRelightBlockContextAccess",
     "sodium.SodiumPreferredGraphicsApiMixin",
     "sodium.SodiumConfigBuilderMixin",
+    "sodium.SodiumEnumOptionMixin",
     "sodium.SodiumWorldRendererShadowMixin",
     "sodium.TerrainRenderPassShadowMixin",
     "sodium.UniformBufferManagerShadowMixin",
