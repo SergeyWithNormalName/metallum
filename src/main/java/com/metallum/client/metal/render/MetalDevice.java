@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
 import com.metallum.client.display.NativeFullscreen;
+import com.metallum.client.display.NativeFullscreenStartup;
 import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
@@ -82,6 +83,7 @@ import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.ShaderDefines;
 import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.NonNull;
@@ -276,6 +278,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.cocoaView = cocoaView;
         try {
             this.nativeFullscreen = new NativeFullscreen(cocoaWindow, metalLayer);
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft != null && minecraft.getWindow() != null) {
+                NativeFullscreenStartup.normalizeInitialFullscreen(minecraft.getWindow(), this.nativeFullscreen);
+            }
         } catch (Throwable throwable) {
             Metallum.LOGGER.warn("Failed to create NativeFullscreen coordinator", throwable);
             this.nativeFullscreen = null;

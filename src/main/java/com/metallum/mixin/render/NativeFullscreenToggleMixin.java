@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.display.FullscreenSnapshot;
 import com.metallum.client.display.NativeFullscreen;
+import com.metallum.client.display.NativeFullscreenStartup;
 import com.metallum.client.metal.render.MetalDevice;
 import com.mojang.blaze3d.platform.MacosUtil;
 import com.mojang.blaze3d.platform.Window;
@@ -20,7 +21,7 @@ abstract class NativeFullscreenToggleMixin {
 
     @Inject(method = "setMode", at = @At("HEAD"), cancellable = true)
     private void metallum$interceptSetMode(final CallbackInfo ci) {
-        if (!MacosUtil.IS_MACOS) {
+        if (!MacosUtil.IS_MACOS || NativeFullscreenStartup.allowsGlfwModeChange()) {
             return;
         }
 
@@ -32,6 +33,7 @@ abstract class NativeFullscreenToggleMixin {
         NativeFullscreen nativeFs = device.nativeFullscreen();
         nativeFs.setFullscreen(this.fullscreen);
         this.actuallyFullscreen = this.fullscreen;
+        this.metallum$disableExclusiveFullscreen();
 
         ci.cancel();
     }
@@ -48,19 +50,29 @@ abstract class NativeFullscreenToggleMixin {
         }
 
         NativeFullscreen nativeFs = device.nativeFullscreen();
+        if (this.fullscreen != this.actuallyFullscreen) {
+            nativeFs.setFullscreen(this.fullscreen);
+            this.actuallyFullscreen = this.fullscreen;
+            this.metallum$disableExclusiveFullscreen();
+            return;
+        }
+
         FullscreenSnapshot snapshot = nativeFs.snapshot();
         boolean nativeIsFs = snapshot.isFullscreenOrEntering();
-        boolean nativeActualFs = snapshot.isFullscreen();
+        Minecraft mc = Minecraft.getInstance();
+        boolean optionNeedsSync = mc != null
+                && mc.options != null
+                && mc.options.fullscreen().get() != nativeIsFs;
 
-        if (this.fullscreen != nativeIsFs || this.actuallyFullscreen != nativeActualFs) {
+        if (this.fullscreen != nativeIsFs || this.actuallyFullscreen != nativeIsFs || optionNeedsSync) {
             this.fullscreen = nativeIsFs;
-            this.actuallyFullscreen = nativeActualFs;
+            this.actuallyFullscreen = nativeIsFs;
 
-            Minecraft mc = Minecraft.getInstance();
             if (mc != null) {
                 if (mc.options != null && mc.options.fullscreen().get() != nativeIsFs) {
                     mc.options.fullscreen().set(nativeIsFs);
                 }
+                this.metallum$disableExclusiveFullscreen();
                 if (mc.gui != null && mc.gui.screen() != null) {
                     mc.gui.screen().init(mc.getWindow().getGuiScaledWidth(), mc.getWindow().getGuiScaledHeight());
                 }
@@ -78,6 +90,15 @@ abstract class NativeFullscreenToggleMixin {
         if (device != null && device.nativeFullscreen() != null) {
             FullscreenSnapshot snapshot = device.nativeFullscreen().snapshot();
             cir.setReturnValue(snapshot.isFullscreenOrEntering());
+        }
+    }
+
+    private void metallum$disableExclusiveFullscreen() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft != null
+                && minecraft.options != null
+                && minecraft.options.exclusiveFullscreen().get()) {
+            minecraft.options.exclusiveFullscreen().set(false);
         }
     }
 }

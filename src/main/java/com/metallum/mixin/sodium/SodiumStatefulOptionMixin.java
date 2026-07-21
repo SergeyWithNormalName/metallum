@@ -6,6 +6,7 @@ import com.metallum.client.metal.render.MetalDevice;
 import com.mojang.blaze3d.platform.MacosUtil;
 import net.caffeinemc.mods.sodium.client.config.structure.StatefulOption;
 import net.caffeinemc.mods.sodium.client.gui.options.FullscreenMode;
+import net.minecraft.client.Minecraft;
 import net.minecraft.resources.Identifier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
@@ -25,6 +26,13 @@ abstract class SodiumStatefulOptionMixin {
 
         Identifier id = ((SodiumOptionAccessor) this).metallum$getId();
         if (FULLSCREEN_MODE_ID.equals(id)) {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft != null
+                    && minecraft.options != null
+                    && minecraft.options.exclusiveFullscreen().get()) {
+                minecraft.options.exclusiveFullscreen().set(false);
+            }
+
             MetalDevice device = MetalDevice.getInstance();
             if (device != null && device.nativeFullscreen() != null) {
                 FullscreenSnapshot snapshot = device.nativeFullscreen().snapshot();
