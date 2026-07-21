@@ -1,6 +1,6 @@
 # Metallum: глобальный план независимого нового освещения, HDR и temporal-ready renderer
 
-Статус: целевая архитектура; preparation gate и Lighting Stages 0–2 пройдены 16 июля 2026 года, следующая работа — Lighting Stage 3.
+Статус: целевая архитектура. Этапы L0–L6 выполнены. Следующий обязательный этап — L6.5 (Performance closure, стабилизация и исправление дефектов L3–L6). Ветвь T1 (Motion/Reactive) может готовиться параллельно после стабилизации ABI.
 
 Целевая версия на момент составления: Minecraft Java 26.2, Fabric Loader 0.19.3, Sodium 0.9.1, Java 25.
 
@@ -16,7 +16,7 @@ Iris: намеренно не является целью совместимос
 
 Обязательный предшествующий документ: [`METAL_RENDERER_OPTIMIZATION_PLAN.md`](METAL_RENDERER_OPTIMIZATION_PLAN.md). Новое освещение использует созданные там frame graph, resource ABI, upload rings, lifetime/synchronization model, shader packaging и work-budget controller. Оно не создаёт второй параллельный фундамент.
 
-### Условие начала lighting implementation
+### Условие начала lighting implementation (Архивный снимок состояния подготовки перед началом L3)
 
 Полномасштабная реализация света начинается только после `Optimization Foundation Gate`:
 
@@ -29,7 +29,7 @@ Iris: намеренно не является целью совместимос
 
 До этого разрешены только исследования, тестовые сцены, ABI/математические unit tests и capability scaffolding, не создающие постоянный второй render path.
 
-### Lighting Preparation Readiness — 15 июля 2026
+### Lighting Preparation Readiness — 15 июля 2026 (Архивный снимок состояния подготовки перед началом L3)
 
 Этот checklist фиксирует только фактически готовые контракты. Он не означает, что новое освещение, temporal processing или production Metal 4 renderer уже реализованы.
 
@@ -134,6 +134,7 @@ linear albedo × (direct light × shadow visibility + indirect irradiance)
 - Удаление работающего legacy HDR до полного покрытия нового renderer.
 - Большой предварительный рефакторинг нативной части без измеримого результата этапа.
 - Обязательное включение Temporal, Frame Interpolation, dynamic resolution или Metal 4 ради работы нового освещения.
+- Screen Space Reflections (SSR) в версии 1.0 (заменены на стабильные reflection probes и карты окружения; SSR не резервирует обязательный full-resolution normal buffer).
 
 ---
 
@@ -434,7 +435,7 @@ Java и native стороны должны обмениваться versioned fr
 | `uiColor` | `RGBA8Unorm` | Полноразмерный SDR UI | UI → present |
 | `exposure` | optional 1×1 float/private buffer | Exposure/pre-exposure | только HDR/Temporal consumer |
 
-Полноразмерный normal/roughness G-buffer не является обязательным. Если будущий SSR/denoiser докажет необходимость, добавляется отдельный optional attachment и измеряется его store/load стоимость. `sceneReactive` не следует заранее упаковывать в `sceneAux`: Temporal scaler получает отдельную texture с форматом и usage, которые сообщает фактический MetalFX descriptor. Объединение допустимо только после runtime/API validation.
+Полноразмерный normal/roughness G-buffer не является обязательным. Если будущий optional material/denoiser attachment докажет необходимость, добавляется отдельный optional attachment и измеряется его store/load стоимость. `sceneReactive` не следует заранее упаковывать в `sceneAux`: Temporal scaler получает отдельную texture с форматом и usage, которые сообщает фактический MetalFX descriptor. Объединение допустимо только после runtime/API validation.
 
 `sceneAux` не должен повторять нынешнюю packed semantic depth. В новом renderer actual depth уже является частью frame contract. Для специальных offscreen/translucent contributions применяется явный depth-aware composite.
 
@@ -1273,7 +1274,7 @@ dynamicResolution=false
 | Local shadowed lights | 1 важный | 1–2 | 2+ по budget |
 | Froxels | примерно 1/12–1/8 XY | примерно 1/8 XY | примерно 1/6–1/8 XY |
 | Recommended render scale | native по умолчанию; снижение только после положительного A/B | native или quality temporal после A/B | native/native-like |
-| Optional SSR/normal buffer | off | optional | on после profiling |
+| Optional material/denoiser attachment | off | optional | on после profiling |
 
 Все числа являются стартовыми гипотезами. Финальные значения фиксируются только после benchmark matrix.
 
@@ -1424,7 +1425,30 @@ Diagnostic overlays:
 
 ## 22. Поэтапная реализация
 
-Каждый этап завершается отдельным небольшим коммитом или серией checkpoint-коммитов. Переход к следующему этапу запрещён без exit criteria текущего.
+Каждый этап завершается отдельным коммитом или серией коммитов.
+
+Поскольку новые этапы не образуют строго линейную цепочку (подготовка векторов движения может идти параллельно со стабилизацией, а генерация кадров не блокирует работу над глобальным освещением), последовательность разработки определяется следующим графом зависимостей:
+
+```text
+Lighting (Освещение):
+L6.5 (Стабилизация L3-L6) ──> L6.6 (Direct Chromatic Transmittance) ──> L6.7 (Direct Froxel Volumetrics) ──> L7 (Voxel GI) ──> L8 (Materials/Water) ──> L9 (Hardening)
+
+Temporal (Временные эффекты):
+T1 (Motion/Reactive Contracts) ──> T2 (Fixed-scale MetalFX) ──> T3 (Dynamic Resolution)
+
+Presentation (Вывод кадров):
+P1 (ProMotion/Present Pacing) ──> P2 (Frame Interpolation) ──> P3 (Общая доводка)
+```
+
+Связи и правила взаимодействия между ветвями:
+- **T1** является обязательным условием для **T2** (MetalFX Temporal) и **P2** (Frame Interpolation), так как предоставляет векторы движения.
+- **L6.7** (Direct Froxel Volumetrics) использует конвенции и матрицы камеры из **T1** для накопления истории (reprojection), но не требует активного апскейлера **T2** (может работать на native/spatial сглаживании).
+- **T3** (Dynamic Resolution) требует полностью работоспособного **T2**.
+- **P2** (Frame Interpolation) требует готовности **T1**, **T2** и **P1** (для правильного present pacing интерфейса).
+- **T3** желателен перед **P2** по выбранному порядку, но технически не обязателен.
+- Разработка глобального освещения **L7** и материалов/воды **L8** не зависит от готовности **P1** / **P2**.
+- **L8** (Materials) использует и расширяет motion/reactive маски, заложенные на этапе **T1**.
+- Устройства без поддержки MetalFX (например, старые macOS) используют ветвь Lighting напрямую с Spatial fallback.
 
 ### Этап -1. Базовая оптимизация renderer
 
@@ -1726,132 +1750,230 @@ Diagnostic overlays:
 - ✅ Дополнение L6 — мерцание теней при смене distance quality устранено: пригодная resident-страница остаётся `STALE` до атомарного commit новой вместо временного `APPROXIMATE_DIRECT`, а начатый upgrade удерживается до обратного downgrade-порога. Контракты покрывают переход `32→64→32` без кадра без тени; `clean check` (`64` задачи) и 900 кадров torch-toggle под Metal API/GPU Validation прошли без fault/FAIL/L6 failure. Accepted `1800+3000`: `59.56 FPS`, GPU p95 `19.10 ms`, минимум окна `58.61 FPS`, `0` dropped events; установившееся L6-состояние — `46 READY / 548 APPROXIMATE / 0` pending/capacity/retry.
 - ✅ Дополнение L6 — динамические тени света в руке и движущихся `ENTITY` перенесены в отдельный GPU compute-path поверх L5, не меняющий static CPU-atlas и его `32/64/128 MiB`: budgets Performance/Balanced/Ultra равны `1×16²×32`, `2×32²×96`, `4×32²×96`, а тройной in-flight suffix занимает `147456/1179648/2359296 B`. Held light гарантированно занимает первый slot; movement threshold/hold равны `1/64` блока и `12` кадров, static↔dynamic переход атомарен, self-proxy исключается stable ID, а при L5 scroll используется последний принятый native snapshot и самый детальный полностью tagged level. Accepted dynamic `1800+3000` дал 3000/3000 READY held frames без fallback/miss/failure: Balanced `41.11 FPS`, full GPU p95 `28.91 ms`, dynamic p95 `0.237 ms`; Ultra `36.90 FPS`, `34.46 ms`, `0.399 ms`; static route подтвердил нулевые dispatches. `300+300` Metal API/Shader Validation и `clean check` (`68` задач) прошли; два lossless fragment-atlas кандидата удалены после A/B (один ухудшил lows, второй дал только `0.189 ms < 0.20 ms`). Важное отклонение: third-person anchor пока является интерполированной body-space точкой руки, а не animated arm bone, поскольку стабильного bone transform в renderer contract нет.
 
-### Этап 7. Voxel indirect lighting
+### Этап 6.5. Performance closure, стабилизация и исправление дефектов L3–L6
+
+Перед продолжением разработки необходимо стабилизировать текущую производительность прямого света и теней на Apple Silicon.
 
 #### Работы
-
-- Создать coarse irradiance levels.
-- Инжектировать sun/sky/block emission.
-- Реализовать budgeted propagation.
-- Использовать compact/FP16 irradiance formats после numeric validation и не хранить radiance с occupancy resolution.
-- Запускать propagation только по dirty/visible work list с фиксированным числом iterations на кадр.
-- Добавить surface/entity sampling.
-- Добавить temporal validity и leak-reduction.
-- Добавить GI telemetry и diagnostic view.
-- Сохранять одну calibrated irradiance scale для SDR/HDR; различие появляется только на output boundary.
+- **Nether & Light Overlaps:** Провести полную отладку производительности. Локализовать стоимость: измерить соотношение построения кластеров (cluster build) и шейдинга фрагментов (fragment shading), реальную стоимость DDA-трассировки локальных теней L6. Оптимизировать слишком большие перекрывающиеся сферы влияния (overlap influence spheres), ограничивая количество источников на кластер (до 256) и оптимизировав per-cluster selection и fragment loop.
+- **Cluster admission:** Оптимизировать построение и заполнение кластерных списков источников света на GPU, отсекая источники вне frustum и guard band.
+- **Dense fluid lighting:** Оптимизировать плотные светящиеся жидкости (лавовые прокси, вода) для исключения лишней нагрузки.
+- **L6 стоимость:** Снизить затраты на трассировку локальных воксельных теней, оптимизировав обращения к текстурному атласу и кэшу страниц.
+- **Bugs:** Исправить накопленные баги рендеринга (самозатенение лавы, артефакты размытия, стыки cubemap).
+- **Performance presets:** Реализовать масштабируемые пресеты качества (Performance, Balanced, Ultra) для настройки бюджетов очередей и разрешения атласа теней.
+- **Ручные signoff:** Провести ручную верификацию отсутствия мерцаний геометрии и теней в сложных тестовых сценах.
 
 #### Exit criteria
+- GPU p95 время кадра укладывается в целевые бюджеты на M1 Pro при Balanced HDR режиме (Performance: GPU p95 <= 10.5 ms; Balanced: GPU p95 <= 12.7–16.0 ms; Ultra: GPU p95 <= 16.0 ms).
+- Бюджеты должны выполняться и проверяться отдельно для следующих «гейтов»: обычная сцена, Nether lava, dynamic held light, torch toggle, camera rotation.
+- Стабильный фреймрейт без микрофризов (оценка 1% low и frame pacing).
+- Нулевой показатель dropped events в очередях обновления вокселей при динамических изменениях мира.
 
-- Один цветной bounce виден и численно стабилен.
-- Свет не проходит через обычную непрозрачную стену.
-- Установка/удаление света не оставляет бесконечный ghost.
-- Entity получает тот же indirect field, что соседний terrain.
-- Chunk load не вызывает яркой вспышки.
+### Этап T1. Полноценные motion/reactive contracts
 
-### Этап 8. Froxel volumetrics
+Подготовка основы для временного сглаживания и апскейлинга через внедрение точных векторов движения.
 
 #### Работы
-
-- Density profiles воздуха/воды/погоды/dimensions.
-- Clustered light injection.
-- Sun/local shadow visibility.
-- Z integration и scene-linear composite.
-- Temporal reprojection и reset.
-- Quality presets и timings.
-- Packed FP16 froxel fields, bounded light injection и пустой-cluster early-out.
-- Проверить fusion/совместное использование cluster data без дополнительной полной копии.
-- Выделять froxel/history resources только когда улучшенное освещение и volumetrics включены; HDR не является prerequisite.
+- **Terrain:** Добавить расчет векторов движения для статической геометрии ландшафта (учитывая сдвиги камеры и регенерацию чанков).
+- **Entities:** Реализовать корректные векторы движения для подвижных сущностей (мобы, игроки), используя их интерполированные по кадрам позиции и учитывая skinned animations (previous animation pose).
+- **Block entities:** Добавить поддержку векторов движения для анимированных и движущихся block entities (поршни, сундуки).
+- **Held items:** Сформировать корректный motion-контракт для предметов в руках игрока (с учетом покачивания камеры).
+- **Текущие жидкости и частицы:** Реализовать генерацию векторов движения для текущей воды/лавы и частиц (применяя упрощенный approximate fallback для частиц).
+- **Jitter:** Внедрить субпиксельное дрожание проекционной матрицы (jitter) для всех шейдеров геометрии.
+- **Reset:** Реализовать надежный механизм сброса истории (history reset) при телепортациях, смене измерений, резком FOV и FOV transitions.
+- **Debug views:** Создать экранные отладочные проходы (debug views) для визуального контроля векторов движения и маски реактивности.
 
 #### Exit criteria
+- Численный допуск и валидация векторов движения: векторы движения статичного кадра при неподвижной сцене строго равны нулю.
+- Удаление jitter ровно один раз перед презентацией/шейдингом с сохранением корректных проекций.
+- Корректная обработка Newly revealed geometry и disocclusion coverage.
+- Корректное смещение координат при camera-relative origin rebasing.
+- Отсутствие NaN/Inf и out-of-range значений в текстурах векторов движения.
+- Надежный сброс истории (history reset) при телепортациях, смене измерений и резком FOV без визуальных дефектов.
+- Визуально чистые и непрерывные карты motion vectors в debug-окне.
 
-- Sun shafts правильно скрываются геометрией.
-- Цветной источник окрашивает воздух без заметной tile/cluster границы.
-- Нет длинных trails после движения света.
-- Underwater/Nether/End имеют отдельные контролируемые profiles.
+### Этап T2. Fixed-scale MetalFX Temporal
 
-### Этап 9. Материалы, вода и отражения
+Интеграция временного апскейлинга при фиксированном разрешении рендеринга.
 
 #### Работы
-
-- GGX/roughness/normal maps.
-- Корректная water/glass transmission.
-- Wetness/weather material response.
-- Reflection probes и optional SSR.
-- Reactive/motion policy для каждого translucent path.
-- Optional material resource-pack extension.
-- Проверить SDR и HDR независимо; PBR/SSR не включают HDR и не меняют lighting mode.
+- **SDR:** Настроить и протестировать временной апскейл для SDR-режима вывода.
+- **HDR/preExposure:** Реализовать корректное масштабирование HDR-яркостей, используя механизм экспозиции (`preExposure`) для предотвращения переполнения и сохранения цветового тона (hue).
+- **UI после upscale:** Наложить полноэкранный SDR UI в нативном разрешении дисплея строго после фазы апскейлинга сцены.
+- **Spatial fallback:** Внедрить автоматический откат на пространственный апскейл (Spatial) или нативный рендер в случае сбоя инициализации Temporal-контекста.
+- **Без DRS:** Работа ведется строго с фиксированными коэффициентами масштабирования (без динамического разрешения).
 
 #### Exit criteria
+- Нет систематического либо неприемлемого ghosting в утвержденных reference scenes (включая entities, воду, частицы); обнаруженные исключения имеют documented reactive/fallback policy.
+- Отдельно проверена корректность SDR (RGBA8) и FP16 HDR (preExposure) диапазонов и ориентации.
+- Значения HDR не clamp-ятся и не вызывают сдвига цветового тона (no hue shift).
+- Нулевые allocations/passes для HDR в SDR, и нулевые allocations/passes для Temporal, если функция выключена.
+- UI остается в полном нативном разрешении и накладывается после апскейла кадра сцены.
+- Автоматический атомарный Spatial fallback при отказе Temporal на границе кадра.
+- Надежный reset истории при resize, camera cuts и world transitions.
+- Сравнение производительности (A/B testing) с Spatial/Native апскейлерами.
 
-- Без PBR pack vanilla textures выглядят корректно.
-- Вода не разрушает temporal history вокруг границ.
-- SSR имеет probe/fallback и не является обязательным для света.
-- Дополнительные attachments оправданы timing capture.
+### Этап T3. Dynamic resolution
 
-### Этап 10. Опциональный MetalFX Temporal и затем dynamic resolution
+Реализация динамического масштабирования разрешения (DRS) в зависимости от GPU-нагрузки.
 
 #### Работы
-
-- Создавать persistent `MTLFXTemporalScaler` только когда пользователь включил Temporal и runtime gate пройден.
-- Подать color/depth/motion/reactive/exposure/jitter/reset.
-- Отдельно проверить SDR-compatible format/range и FP16 HDR range/orientation.
-- Переместить bloom в утверждённое post-upscale место.
-- Добавить comparison benchmark Spatial vs Temporal.
-- Добавить dynamic-resolution controller после стабильного fixed-scale Temporal.
-- Не делать Temporal или dynamic resolution prerequisite/default для нового света; включать preset-рекомендацию только после положительного A/B на M1 Pro.
+- **Hysteresis:** Настроить гистерезис переключения разрешений, чтобы избежать постоянного мерцания (осцилляции) размеров буфера при граничной нагрузке.
+- **GPU p95 controller:** Создать контроллер времени кадра, отслеживающий p95/p99 задержку GPU и отдающий команду на снижение/повышение разрешения на основе устойчивого превышения GPU budget за окно наблюдения (без реакции на единичные всплески).
+- **Scale range:** Задать допустимый диапазон масштабирования входного разрешения, определяемый возможностями MetalFX и качеством изображения (без жестких ограничений в 50%).
+- **Integration с work budgets:** Связать контроллер DRS с бюджетами очередей освещения, чтобы при максимальном снижении разрешения также урезались лимиты фоновых обновлений.
+- **Benchmark mode:** Сохранять режим fixed-scale для бенчмаркинга.
+- **Context management:** Не пересоздавать MetalFX context при малейших изменениях масштаба, минимизировать сброс истории.
 
 #### Exit criteria
+- Кадр масштабируется плавно без видимых перепадов яркости, мерцания размеров буфера или скачков качества.
+- Dynamic resolution не осциллирует при пограничной нагрузке.
 
-- Static detail стабильнее Spatial при меньшем input resolution.
-- Нет systematic ghosting entities/water/particles.
-- HDR values не clamp и не меняют hue.
-- SDR не создаёт HDR resources, а HDR и lighting modes переключаются независимо от Temporal.
-- UI остаётся native-resolution.
-- Runtime failure возвращает Spatial/native path на границе кадра.
-- Dynamic resolution не осциллирует.
+### Этап L6.6. Direct chromatic transmittance
 
-### Этап 11. Опциональная MetalFX Frame Interpolation
-
-Frame Interpolation — отдельная продуктовая функция после стабильного этапа 10, а не способ «спасти» производительность освещения. Она увеличивает display FPS, но не simulation FPS и может увеличить latency/артефакты.
+Реализация цветного пропускания света через полупрозрачные блоки для прямого освещения.
 
 #### Работы
-
-- Capability-gate интерполяцию независимо от Metal 4 executor, HDR, lighting mode и Temporal upscale.
-- Использовать validated color/depth/motion contracts и отдельную history lifecycle; не создавать interpolator/resources, пока функция выключена.
-- Отделить world image от SDR UI/cursor: UI композится на реальном present и не интерполируется как часть мира.
-- Реализовать безопасный present pacing, reset при camera cut/resize/display change и fallback к обычному present.
-- Проверить шесть contract/lighting/output combinations, native/Temporal inputs и доступные display refresh rates.
-- В telemetry раздельно показывать rendered FPS, generated FPS, latency и interpolation cost.
+- **Сначала локальные источники:** Добавить расчет цветного затухания света от точечных и прожекторных источников.
+- **RGB attenuation в L6 visibility:** Внедрить поддержку 3-канального (RGB) затухания при DDA-трассировке вокселей локальных теней (вместо однокомпонентного occlusion).
+- **Ограниченное число samples:** Ограничить количество выборок вокселей при трассировке для сохранения производительности шейдера.
+- **Солнечный вариант (CSM):** Выделяется как отдельная исследовательская задача (research gate) для оценки влияния полупрозрачных блоков, без обещания гарантированного жесткого алгоритма.
+- **Absolute budgets:** Бюджет производительности устанавливается как абсолютный прирост в миллисекундах для каждого пресета качества (например, Ultra: <= 0.3 ms), а не как процент от полного кадра.
 
 #### Exit criteria
+- Нейтральное стекло не меняет цветовой тон (hue).
+- Цветное стекло не увеличивает энергию света (соблюдение закона сохранения энергии).
+- Несколько слоев стекла корректно перемножают transmittance.
+- Непрозрачные блоки полностью прекращают прохождение света (нулевой transmittance).
+- Пустое пространство сохраняет единичный transmittance (1.0).
+- Листья, вода и стекло имеют раздельные material policies.
+- RGB-значения transmittance строго укладываются в диапазон [0.0, 1.0], исключены NaN, отрицательные значения или выбросы.
 
-- Выключенная интерполяция имеет нулевые allocations/dispatches и неизменный обычный present path.
-- Generated frames не дают UI ghosting, duplicated cursor или повтор simulation input.
-- Camera cuts, меню, resize и display move не показывают старую history.
-- На M1 Pro есть измеримый выигрыш perceived smoothness при приемлемой latency; иначе функция остаётся experimental/off.
-- Runtime failure атомарно возвращает обычный present без изменения lighting/HDR.
+### Этап L6.7. Direct froxel volumetrics
 
-### Этап 12. Hardening и возможное завершение legacy transition
+Внедрение объемного тумана и световых лучей на основе прямого освещения.
 
 #### Работы
+- **Sun shafts:** Реализовать световые лучи (God Rays), пробивающиеся сквозь геометрию от солнца.
+- **Local-light fog:** Внедрить объемное рассеивание от локальных источников света (факелы, лампы) в froxel-сетке.
+- **Dimension profiles:** Создать пресеты плотности воздуха и тумана для Обычного мира, Nether и End.
+- **Temporal reprojection:** Реализовать сглаживание фрокселей во времени для устранения ступенчатости. Использовать camera matrices и reset conventions из T1, полностью независимо от наличия активного `MTLFXTemporalScaler` (может работать на native/spatial сглаживании).
 
+#### Exit criteria
+- Световые лучи корректно перекрываются геометрией (shadow visibility).
+- Локальный объемный свет рассеивается без видимых швов и переходов сетки фрокселей (no tile/cluster seams).
+- Исчезнувший или переместившийся источник света не оставляет шлейфов в тумане.
+- Объемный свет по стоимости укладывается в stage budget конкретного пресета качества.
+
+### Этап L7. Voxel GI
+
+Диффузное глобальное освещение (Global Illumination) на основе воксельных клипмапов.
+
+#### Работы
+- **Injection:** Инжекция прямого и излучающего (emissive) света в воксельную структуру.
+- **Propagation:** Распространение света по воксельной сетке с ограничением итераций на кадр.
+- **Chromatic transmittance:** Корректный учет цветного поглощения света вокселями при распространении (свет от GI несет цвета стекол).
+- **Surface/entity sampling:** Выборка диффузного вклада GI поверхностями мира и динамическими сущностями.
+- **Low-frequency indirect volumetric contribution:** Передача непрямого света в фроксельную сетку объемного тумана.
+
+#### Exit criteria
+- Voxel GI не протекает сквозь стены толщиной в 1 блок.
+- Ограниченная задержка обновления (bounded update latency) при быстрых изменениях сцены.
+- Нет бесконечного ghosting или ярких вспышек (white bursts) при chunk load.
+- Динамические сущности (entities) получают согласованное непрямое освещение с ландшафтом (terrain).
+
+### Этап L8. Materials, water, glass optics, reflections
+
+GGX-материалы, полупрозрачность и отражающие свойства без использования Screen Space Reflections (SSR).
+
+#### Работы
+- **GGX, roughness, metalness:** Внедрение микрограненого распределения GGX для расчета бликов, поддержка шероховатости (roughness) и металлических свойств (metalness) для металлов и гладких блоков.
+- **Water rendering:**
+  - Реализовать отражение неба и солнца для водной поверхности.
+  - Настроить коэффициент Френеля (Fresnel) для изменения отражающей способности в зависимости от угла обзора.
+  - Внедрить нормали (normal maps) или процедурные волны для симуляции волнения на воде.
+  - Реализовать преломление света (refraction) на границе раздела сред.
+  - Внедрить физически корректное поглощение цвета по глубине (absorption).
+  - Настроить прямые блики (specular highlights) от солнца и локальных источников света.
+  - Использовать фоновые отражения окружения (environment reflection) из профилей измерений (dimension profiles).
+- **Metal and smooth blocks:**
+  - Внедрить прямые блики от реальных источников света.
+  - Реализовать иерархию отражений:
+    1. Sky/dimension environment map — обязательный стабильный fallback.
+    2. Cached local reflection probes — включаются только после профилирования, обновляются редко (без per-frame cubemap capture), имеют жестко ограниченный бюджет.
+    3. Плавное смешивание зондов.
+    4. Нет обязательного полноразмерного normal buffer для отражений.
+    5. Статичный fallback при невалидном зонде.
+- **Wet surfaces (Мокрые поверхности):**
+  - Реализовать динамическое снижение шероховатости (roughness) во время дождя.
+  - Настроить усиление эффекта Френеля для мокрых блоков.
+  - Добавить точечные локальные блики и затемнение базового цвета (albedo).
+  - Спроецировать отражение неба и карт окружения (probe) на влажные поверхности.
+- **Полная reactive policy:** Тонкая настройка весов в реактивной маске апскейлера для всех полупрозрачных, мокрых и отражающих поверхностей во избежание шлейфов.
+
+#### Exit criteria
+- Корректный внешний вид PBR-материалов (металлы, гладкие блоки) и реалистичная вода без использования Screen Space Reflections (подтверждено отсутствием вызовов трассировки по буферу глубины).
+- Мокрые поверхности визуально воспринимаются влажными за счет правильного баланса Френеля, шероховатости и затемнения альбедо.
+- Вода выглядит качественно лучше ванильной, оставаясь стабильной в динамике и производительной на M1 Pro.
+
+### Этап P1. ProMotion/present pacing
+
+Оптимизация вывода кадров на дисплеях с переменной частотой обновления.
+
+#### Работы
+- **Параллельное выполнение:** Этап может разрабатываться параллельно после стабилизации временного апскейлера (Этап T2).
+- **CAMetalDisplayLink & preferredFrameRateRange:** Реализовать поддержку частоты кадров дисплеев Apple ProMotion (до 120 Гц).
+- **Presentation timestamping:** Внедрить точный present pacing на основе целевых временных меток, минимизируя input lag и устраняя микрофризы при выводе кадров.
+- **Telemetry:** Добавить телеметрию пропущенных кадров (missed deadline telemetry) и предпочтительную задержку кадров (preferred frame latency).
+- **Adaptability:** Обеспечить корректную работу в оконном и полноэкранном режимах, на встроенных дисплеях MacBook и внешних мониторах.
+- **Fallback:** Поддержка отката на стандартную презентацию `CAMetalLayer` при сбоях и обработка изменения thermal/system policy операционной системы.
+
+#### Exit criteria
+- Target presentation pacing минимизирует микрофризы и input lag при стабильной нагрузке.
+- Система корректно адаптируется под смену частоты обновления дисплея, а при изменении системных политик (температурный троттлинг, энергосбережение) корректно переходит на fallback без крашей (система может динамически снижать герцовку из-за ОС, что учитывается как нормальное поведение).
+
+### Этап P2. Frame Interpolation
+
+Внедрение генерации кадров для удвоения отображаемой плавности.
+
+#### Работы
+- **Последовательность:** Запуск только после готовности Temporal (T2), DRS (T3) и present pacing (P1). Не блокирует разработку GI (L7) или материалов (L8).
+- Интегрировать `MTLFXFrameInterpolator` в презентационную цепочку.
+- Использовать векторы движения и буфер глубины для синтеза промежуточных кадров, полностью исключая наложение на UI и курсор мыши.
+
+#### Exit criteria
+- При выключении генерации кадров в меню, allocations и dispatches `MTLFXFrameInterpolator` равны нулю.
+- В телеметрию выводятся раздельно rendered FPS (частота симуляции) и generated FPS (частота отображения кадра).
+- Измерение задержки ввода (input latency).
+- UI и курсор мыши полностью изолированы от интерполяции (UI накладывается на финальном present, курсор не дублируется и не размывается).
+- Сброс истории при camera cuts, изменении размеров окна, изменении настроек дисплея.
+- Автоматический fallback на обычный present при сбоях интерполятора.
+- Измеряемый прирост плавности (perceived smoothness) на дисплее M1 Pro.
+
+### Этап L9/P3. Общая доводка
+
+Финальная стабилизация всей графической системы мода.
+
+#### Работы
 - Покрыть все известные vanilla/Sodium render roles.
-- Проверить resource reload, world reload, resize, fullscreen, display move и shutdown.
-- Прогнать все шесть допустимых contract/lighting/output combinations с native, поддерживаемыми scaler modes и включённой/выключенной Frame Interpolation.
-- Оптимизировать реальные hotspots.
-- Рассмотреть tile shaders/sparse residency только по evidence.
-- Обновить README/config migration.
-- Определить, остаётся ли legacy default или новый renderer готов стать default.
+- Проверить ресурсный reload, world reload, resize, fullscreen, перенос на другой дисплей (display move) и корректный shutdown.
+- Прогнать полную матрицу совместимости как декартово произведение всех активных осей:
+  - Render contracts (Legacy/Metallum)
+  - Lighting models (Vanilla/Advanced)
+  - Output modes (SDR/HDR)
+  - Scaler modes (Native/Spatial/Temporal)
+  - DRS (on/off)
+  - Frame Interpolation (on/off)
+  - ProMotion (on/off)
+- Провести профилирование и оптимизацию критических hotspots.
+- Зафиксировать соблюдение memory и timing бюджетов.
+- Валидация fallback механизмов через искусственное введение ошибок (failure injections).
+- Принять финальное решение по судьбе Legacy renderer.
 
 #### Exit criteria
-
-- Полная validation matrix проходит.
-- Нет resource lifetime ошибок под Metal validation.
-- Нет необъяснённых p95 spikes.
-- Memory budget соблюдён.
-- Fallback проверен искусственными failure injections.
-- Новый renderer визуально и по производительности превосходит legacy на M1 Pro.
-- Отключённые HDR, Advanced Lighting, Temporal и Frame Interpolation подтверждены нулевыми собственными resources/passes.
+- Полная валидационная матрица успешно пройдена без ошибок времени жизни ресурсов под Metal validation.
+- Нет необъяснимых p95 всплесков времени кадра.
+- Неиспользуемые/выключенные подсистемы подтверждены нулевым объемом выделенных ресурсов и проходов.
 
 ---
 
