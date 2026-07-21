@@ -44,6 +44,15 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
 DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+# Every release settings profile has both its tracked startup configuration and
+# the resolved presentation contract emitted by the renderer.  Keep these
+# together: the startup values are checked before a long client run, while the
+# resolved values are checked against every timing window afterwards.
+RELEASE_OUTPUT_CONTRACTS: dict[str, tuple[str, str, str, str, str]] = {
+    "native-sdr-fancy-v1": ("sdr", "SDR", "LINEAR", "off", "srgb"),
+    "native-hdr-fancy-v1": ("hdr", "ENHANCED", "LINEAR", "scene", "srgb"),
+    "nether-lava-stress-v1": ("hdr", "ENHANCED", "LINEAR", "scene", "srgb"),
+}
 WORKLOAD_BASE_KEYS = frozenset({
     "command_buffers", "encoders", "copy_bytes", "resource_allocations",
 })
@@ -1789,6 +1798,37 @@ def validate_selected_metadata_consistency(windows: Sequence[TimingWindow]) -> N
             )
 
 
+def release_output_contract(settings_id: str) -> tuple[str, str, str, str, str]:
+    try:
+        return RELEASE_OUTPUT_CONTRACTS[settings_id]
+    except KeyError as error:
+        raise ReportError(
+            "release settings ID has no strict SDR/HDR output contract"
+        ) from error
+
+
+def validate_release_settings_contract(
+    settings_id: str,
+    hdr_mode: str,
+    configured_source_encoding: str,
+) -> None:
+    if not SAFE_ID_RE.fullmatch(settings_id):
+        raise ReportError("release settings ID is invalid")
+    _, _, _, expected_hdr_mode, expected_source_encoding = release_output_contract(
+        settings_id
+    )
+    if hdr_mode != expected_hdr_mode:
+        raise ReportError(
+            f"release settings HDR mode must be {expected_hdr_mode!r} "
+            f"(found {hdr_mode!r})"
+        )
+    if configured_source_encoding != expected_source_encoding:
+        raise ReportError(
+            "release settings configured source encoding must be "
+            f"{expected_source_encoding!r} (found {configured_source_encoding!r})"
+        )
+
+
 def validate_release_contract(
     windows: Sequence[TimingWindow],
     *,
@@ -1817,17 +1857,9 @@ def validate_release_contract(
         raise ReportError("release build-artifact digest must be lowercase SHA-256")
     if not SAFE_ID_RE.fullmatch(settings_id):
         raise ReportError("release settings ID is invalid")
-    output_contracts = {
-        "native-sdr-fancy-v1": ("sdr", "SDR", "LINEAR"),
-        "native-hdr-fancy-v1": ("hdr", "ENHANCED", "LINEAR"),
-    }
-    if settings_id not in output_contracts:
-        raise ReportError(
-            "release settings ID has no strict SDR/HDR output contract"
-        )
-    resolved_output, expected_hdr_output, expected_source_encoding = output_contracts[
-        settings_id
-    ]
+    resolved_output, expected_hdr_output, expected_source_encoding, _, _ = (
+        release_output_contract(settings_id)
+    )
     if not SHA256_RE.fullmatch(settings_spec_sha256):
         raise ReportError("release settings spec digest must be lowercase SHA-256")
     if not SHA256_RE.fullmatch(settings_sha256):
@@ -3343,6 +3375,17 @@ def self_test() -> None:
             assert expected_text in str(error), (expected_text, str(error))
         else:
             raise AssertionError(f"expected ReportError containing {expected_text!r}")
+
+    # The Nether route has its own HDR scene profile.  Validate this before
+    # exercising synthetic timing windows so a missing mapping cannot waste a
+    # full 1800+3000-frame client run.
+    validate_release_settings_contract("nether-lava-stress-v1", "scene", "srgb")
+    expect_error(
+        lambda: validate_release_settings_contract(
+            "nether-lava-stress-v1", "scene", "linear"
+        ),
+        "configured source encoding",
+    )
 
     def heap_snapshot(index: int, enabled: bool) -> dict[str, Any]:
         page_size = 64 * 1024 * 1024
@@ -5448,6 +5491,10 @@ def parser() -> argparse.ArgumentParser:
     attest.add_argument("minecraft_log", type=Path)
     attest.add_argument("console_log", type=Path)
     attest.add_argument("output", type=Path)
+    release_settings = sub.add_parser("release-settings-contract")
+    release_settings.add_argument("settings_id")
+    release_settings.add_argument("--hdr-mode", required=True)
+    release_settings.add_argument("--configured-source-encoding", required=True)
     sub.add_parser("self-test")
     return result
 
@@ -5465,6 +5512,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.minecraft_log,
                 args.console_log,
                 args.output,
+            )
+            return 0
+        if args.command == "release-settings-contract":
+            validate_release_settings_contract(
+                args.settings_id,
+                args.hdr_mode,
+                args.configured_source_encoding,
             )
             return 0
         if args.command == "summarize":

@@ -60,7 +60,8 @@ Options:
   --lighting-preset PRESET
                      performance, balanced, or ultra (default: balanced)
   --label LABEL      short artifact label (default: baseline)
-  --preflight-only   validate route/config/immutable fixture without cloning
+  --preflight-only   validate route/config/release settings contract/immutable fixture
+                     without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
   -h, --help         show this help
 
@@ -383,6 +384,14 @@ case "$HDR_MODE" in
 esac
 require_value "$HDR_SOURCE_ENCODING" "srgb" "HDR sourceEncoding"
 require_value "$PERSISTENT_METALFX_MODE" "off" "persistent MetalFX mode"
+if [ "$TIMING_DETAIL" -eq 0 ] \
+    && [ "$METAL_VALIDATION" -eq 0 ] \
+    && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+    python3 "$ANALYZER" release-settings-contract "$SETTINGS_ID" \
+        --hdr-mode "$HDR_MODE" \
+        --configured-source-encoding "$HDR_SOURCE_ENCODING" \
+        || die "release settings contract is incompatible with this benchmark profile"
+fi
 case "$MAX_FPS" in
     ''|*[!0-9]*) die "maxFps must be an integer >= $MIN_MAX_FPS (found ${MAX_FPS:-<missing>})" ;;
 esac
