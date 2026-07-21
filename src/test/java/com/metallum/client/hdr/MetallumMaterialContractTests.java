@@ -350,6 +350,12 @@ public final class MetallumMaterialContractTests {
                 "a panorama target was reused for a different scene source");
         require(!HdrUiRenderTarget.shouldReuseActiveTarget(false, true, true),
                 "an inactive panorama target bypassed normal GUI preparation");
+        require(HdrUiRenderTarget.shouldRetainFullResolutionUiTargetAfterScalingFailure(true, true),
+                "a rejected upscaler can send display-coordinate scissors to a reduced MainTarget");
+        require(!HdrUiRenderTarget.shouldRetainFullResolutionUiTargetAfterScalingFailure(true, false),
+                "a nonexistent full-resolution UI target was retained after scaling failed");
+        require(!HdrUiRenderTarget.shouldRetainFullResolutionUiTargetAfterScalingFailure(false, true),
+                "native-resolution UI retained a stale scaling fallback target");
         require(!HdrUiRenderTarget.shouldPrecomposeHdrBackdrop(true),
                 "loading transition still admits adaptive HDR precompose behind SDR UI");
         require(HdrUiRenderTarget.shouldPrecomposeHdrBackdrop(false),

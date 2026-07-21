@@ -11683,7 +11683,19 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
             && compatibleDepth
             && compatibleSemantic
         let canPrecomposeHdr = canPrecomposeActualHdr || canPrecomposeLegacyHdr
-        if spatialScalingEnabled == 0 && canPrecomposeHdr {
+        let temporalFrame: MetallumRendererFrameStateSnapshot?
+        if #available(macOS 14.4, *) {
+            temporalFrame = NativeState.rendererFrameState.snapshot()
+        } else {
+            temporalFrame = nil
+        }
+        let temporalScalingEnabled = temporalFrame.map {
+            $0.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
+        } ?? false
+        // A Temporal frame must precompose at render resolution and hand that
+        // texture to MetalFX. The native-resolution path below only owns
+        // non-Temporal frames, where the UI seed has the scene's dimensions.
+        if spatialScalingEnabled == 0 && canPrecomposeHdr && !temporalScalingEnabled {
             guard destinationTexture.width == sourceTexture.width,
                   destinationTexture.height == sourceTexture.height else {
                 return -3
@@ -11717,8 +11729,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
         var temporalOutput: MTLTexture?
         if #available(macOS 14.4, *),
            spatialScalingEnabled == 0,
-           let frame = NativeState.rendererFrameState.snapshot(),
-           frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0 {
+           let frame = temporalFrame,
+           temporalScalingEnabled {
             guard let sceneDepthTexture,
                   let motionTexture = NativeState.lastMotionTexture,
                   let reactiveTexture = NativeState.lastReactiveTexture else {
@@ -11734,8 +11746,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                         currentHeadroom: effectiveHeadroom,
                         hdrStrength: effectiveHdrStrength,
                         bloomStrength: effectiveBloomStrength,
-                        displayWidth: destinationTexture.width,
-                        displayHeight: destinationTexture.height
+                        displayWidth: Int(frame.renderWidth),
+                        displayHeight: Int(frame.renderHeight)
                     )
                     : encodeSpatialHdrWorldComposite(
                         commandBuffer: commandBuffer,
@@ -11747,8 +11759,8 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                         currentHeadroom: effectiveHeadroom,
                         hdrStrength: effectiveHdrStrength,
                         bloomStrength: effectiveBloomStrength,
-                        displayWidth: destinationTexture.width,
-                        displayHeight: destinationTexture.height
+                        displayWidth: Int(frame.renderWidth),
+                        displayHeight: Int(frame.renderHeight)
                     ) else {
                     return -3
                 }

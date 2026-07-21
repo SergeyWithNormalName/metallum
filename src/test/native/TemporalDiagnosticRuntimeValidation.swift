@@ -7,6 +7,7 @@ private enum ValidationFailure: Error, CustomStringConvertible {
     var description: String { switch self { case let .message(message): message } }
 }
 
+private typealias InitializePipelines = @convention(c) (UnsafeRawPointer?) -> Int32
 private typealias SetFrameState = @convention(c) (UnsafeRawPointer?, UInt64) -> Int32
 private typealias EncodeDiagnostics = @convention(c) (
     UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?
@@ -49,7 +50,8 @@ private func framePacket(
     currentCameraX: Double,
     previousCameraX: Double,
     previousProjectionScaleX: Float = 1,
-    temporalProduction: Bool = false
+    temporalProduction: Bool = false,
+    temporalHdrPrecompose: Bool = false
 ) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: 848)
     let displayWidth = temporalProduction ? width * 3 / 2 : width
@@ -69,6 +71,8 @@ private func framePacket(
     writeUInt64(1, at: 80, into: &bytes)
     writeUInt64(resetMask, at: 88, into: &bytes)
     writeUInt64(temporalProduction ? 1 << 1 : 0, at: 96, into: &bytes)
+    writeUInt32(temporalHdrPrecompose ? 1 : 0, at: 104, into: &bytes)
+    writeUInt32(temporalHdrPrecompose ? 1 : 0, at: 112, into: &bytes)
     writeUInt32(UInt32(width), at: 124, into: &bytes)
     writeUInt32(UInt32(height), at: 128, into: &bytes)
     writeUInt32(UInt32(displayWidth), at: 132, into: &bytes)
@@ -80,6 +84,8 @@ private func framePacket(
     writeFloat(1, at: 172, into: &bytes)
     writeFloat(1, at: 176, into: &bytes)
     writeFloat(1, at: 180, into: &bytes)
+    writeUInt64(temporalHdrPrecompose ? UInt64(width * height * 8) : 0, at: 200, into: &bytes)
+    writeUInt64(temporalHdrPrecompose ? UInt64(width * height * 8) : 0, at: 208, into: &bytes)
     writeUInt64(temporalProduction ? UInt64(width * height * 5 * 3) : 0, at: 224, into: &bytes)
     writeUInt64(temporalProduction ? 0 : UInt64(width * height * 5 * 3), at: 240, into: &bytes)
     writeDouble(currentCameraX, at: 280, into: &bytes)
@@ -105,6 +111,7 @@ private func runCase(
     previousCameraX: Double = 0,
     previousProjectionScaleX: Float = 1,
     temporalProduction: Bool = false,
+    temporalHdrPrecompose: Bool = false,
     backdrop: EncodeBackdrop? = nil
 ) throws -> (motion: SIMD2<Float>, reactive: UInt8) {
     let packet = framePacket(
@@ -114,7 +121,8 @@ private func runCase(
         currentCameraX: currentCameraX,
         previousCameraX: previousCameraX,
         previousProjectionScaleX: previousProjectionScaleX,
-        temporalProduction: temporalProduction
+        temporalProduction: temporalProduction,
+        temporalHdrPrecompose: temporalHdrPrecompose
     )
     try require(packet.withUnsafeBytes { setFrameState($0.baseAddress, UInt64($0.count)) } == 1,
                 "Native FrameState admission failed")
@@ -133,7 +141,7 @@ private func runCase(
     let depth = try texture(.depth32Float, [.renderTarget, .shaderRead])
     let motion = try texture(.rg16Float, [.renderTarget, .shaderRead])
     let reactive = try texture(.r8Unorm, [.renderTarget, .shaderRead])
-    let source = try texture(.rgba8Unorm, [.renderTarget, .shaderRead])
+    let source = try texture(temporalHdrPrecompose ? .rgba16Float : .rgba8Unorm, [.renderTarget, .shaderRead])
     let displayWidth = temporalProduction ? width * 3 / 2 : width
     let displayHeight = temporalProduction ? height * 3 / 2 : height
     let destinationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -169,11 +177,19 @@ private func runCase(
         guard let backdrop else {
             throw ValidationFailure.message("Temporal production backdrop symbol is unavailable")
         }
-        try require(backdrop(
+        let backdropStatus = backdrop(
             objectPointer(commandBuffer), objectPointer(source), objectPointer(destination),
             objectPointer(depth), nil, objectPointer(fence),
-            0, 0, 0, 0, 0, 0, 1.0, 1.0, 0.22
-        ) == 1, "Native MetalFX Temporal backdrop encoding failed")
+            temporalHdrPrecompose ? 2 : 0, temporalHdrPrecompose ? 1 : 0, 0,
+            temporalHdrPrecompose ? 1 : 0, 0, 0,
+            1.0, 1.0, 0.22
+        )
+        try require(backdropStatus > 0,
+                    "Native MetalFX Temporal backdrop encoding failed with status \(backdropStatus) (HDR precompose: \(temporalHdrPrecompose))")
+        if temporalHdrPrecompose {
+            try require(backdropStatus == 2,
+                        "HDR-precomposed Temporal backdrop did not report its fast path")
+        }
     }
 
     let motionRowBytes = ((width * 4 + 255) / 256) * 256
@@ -208,6 +224,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(CommandLine.arguments.count == 2,
                         "Usage: TemporalDiagnosticRuntimeValidation <libmetallum.dylib>")
             guard let handle = dlopen(CommandLine.arguments[1], RTLD_NOW | RTLD_LOCAL),
+                  let initializeSymbol = dlsym(handle, "metallum_init_pipelines"),
                   let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
                   let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v1"),
                   let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop") else {
@@ -217,6 +234,9 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
                 throw ValidationFailure.message("No Metal device/queue is available")
             }
+            let initialize = unsafeBitCast(initializeSymbol, to: InitializePipelines.self)
+            try require(initialize(objectPointer(device as AnyObject)) > 0,
+                        "Native built-in pipeline initialization failed")
             let setFrameState = unsafeBitCast(setSymbol, to: SetFrameState.self)
             let encode = unsafeBitCast(encodeSymbol, to: EncodeDiagnostics.self)
             let backdrop = unsafeBitCast(backdropSymbol, to: EncodeBackdrop.self)
@@ -258,6 +278,15 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(production.motion.x) <= 0.01 && abs(production.motion.y) <= 0.01
                             && production.reactive == 0,
                         "Production Temporal input contract mismatch")
+            let hdrPrecomposedProduction = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, temporalProduction: true, temporalHdrPrecompose: true,
+                backdrop: backdrop
+            )
+            try require(abs(hdrPrecomposedProduction.motion.x) <= 0.01
+                            && abs(hdrPrecomposedProduction.motion.y) <= 0.01
+                            && hdrPrecomposedProduction.reactive == 0,
+                        "HDR-precomposed Temporal input contract mismatch")
             let moved = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 64, height: 64, currentCameraX: 1
@@ -277,7 +306,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, production scaler, camera, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose, camera, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

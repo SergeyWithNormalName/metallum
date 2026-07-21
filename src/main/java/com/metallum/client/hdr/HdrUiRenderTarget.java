@@ -75,30 +75,15 @@ public final class HdrUiRenderTarget {
         }
 
         try {
-            if (!MetalHdrFrame.isSceneReadyForUi(mainTarget.getColorTextureView())) {
-                return fallbackToMainTarget(mainTarget);
-            }
             int targetWidth = spatialActiveThisFrame
                     ? Minecraft.getInstance().getWindow().getWidth()
                     : mainTarget.width;
             int targetHeight = spatialActiveThisFrame
                     ? Minecraft.getInstance().getWindow().getHeight()
                     : mainTarget.height;
-            if (target == null || target.width != targetWidth || target.height != targetHeight) {
-                TextureTarget replacement = MetalHdrFrame.createTrackedUiTarget(
-                        mainTarget.getColorTextureView(),
-                        "Metallum SDR UI",
-                        targetWidth,
-                        targetHeight,
-                        true,
-                        GpuFormat.RGBA8_UNORM
-                );
-                TextureTarget previous = target;
-                target = replacement;
-                if (previous != null) {
-                    MetalHdrFrame.materializeUiBackdrop(previous.getColorTextureView());
-                    previous.destroyBuffers();
-                }
+            ensureUiTarget(mainTarget, targetWidth, targetHeight);
+            if (!MetalHdrFrame.isSceneReadyForUi(mainTarget.getColorTextureView())) {
+                return fallbackWithoutScaledMainTarget(mainTarget);
             }
             MetalHdrFrame.markDisplaySdrColor(target.getColorTexture());
 
@@ -132,7 +117,18 @@ public final class HdrUiRenderTarget {
                 throwable.addSuppressed(fallbackFailure);
             }
             if (spatialActiveThisFrame) {
-                disableScalingAfterFailure(throwable);
+                TextureTarget fullResolutionUiTarget = target;
+                boolean retainFullResolutionUiTarget = shouldRetainFullResolutionUiTargetAfterScalingFailure(
+                        spatialActiveThisFrame,
+                        fullResolutionUiTarget != null
+                );
+                disableScalingAfterFailure(throwable, retainFullResolutionUiTarget);
+                if (retainFullResolutionUiTarget && fullResolutionUiTarget != null) {
+                    // The GUI Scissor coordinates remain in display pixels until the
+                    // renderer consumes the requested native-resolution resize next frame.
+                    // Never send them to the low-resolution MainTarget in that window.
+                    return fullResolutionUiTarget;
+                }
             } else {
                 disableAfterFailure(throwable);
             }
@@ -155,7 +151,7 @@ public final class HdrUiRenderTarget {
             } catch (Throwable throwable) {
                 rejectMaterialGenerationAfterSeedFailure();
                 if (spatialActiveThisFrame) {
-                    disableScalingAfterFailure(throwable);
+                    disableScalingAfterFailure(throwable, false);
                 } else {
                     disableAfterFailure(throwable);
                 }
@@ -211,6 +207,17 @@ public final class HdrUiRenderTarget {
             final boolean sameSource
     ) {
         return active && targetAvailable && sameSource;
+    }
+
+    /**
+     * A MetalFX rejection occurs after the renderer has adopted a reduced MainTarget,
+     * while vanilla GUI layout still expresses scissors in display coordinates.
+     */
+    static boolean shouldRetainFullResolutionUiTargetAfterScalingFailure(
+            final boolean upscalingActive,
+            final boolean fullResolutionUiTargetAvailable
+    ) {
+        return upscalingActive && fullResolutionUiTargetAvailable;
     }
 
     /** Blurs the composed FP16 world and the pre-blur GUI into matching HDR/SDR outputs. */
@@ -367,6 +374,41 @@ public final class HdrUiRenderTarget {
         }
     }
 
+    private static void ensureUiTarget(
+            final RenderTarget mainTarget,
+            final int targetWidth,
+            final int targetHeight
+    ) {
+        if (target != null && target.width == targetWidth && target.height == targetHeight) {
+            return;
+        }
+        TextureTarget replacement = MetalHdrFrame.createTrackedUiTarget(
+                mainTarget.getColorTextureView(),
+                "Metallum SDR UI",
+                targetWidth,
+                targetHeight,
+                true,
+                GpuFormat.RGBA8_UNORM
+        );
+        TextureTarget previous = target;
+        target = replacement;
+        if (previous != null) {
+            MetalHdrFrame.materializeUiBackdrop(previous.getColorTextureView());
+            previous.destroyBuffers();
+        }
+    }
+
+    private static RenderTarget fallbackWithoutScaledMainTarget(final RenderTarget mainTarget) {
+        TextureTarget fullResolutionUiTarget = target;
+        if (shouldRetainFullResolutionUiTargetAfterScalingFailure(
+                spatialActiveThisFrame,
+                fullResolutionUiTarget != null
+        ) && fullResolutionUiTarget != null) {
+            return fullResolutionUiTarget;
+        }
+        return fallbackToMainTarget(mainTarget);
+    }
+
     private static RenderTarget fallbackToMainTarget(final RenderTarget mainTarget) {
         try {
             MetalHdrFrame.materializeSceneFallback(mainTarget.getColorTextureView());
@@ -379,7 +421,10 @@ public final class HdrUiRenderTarget {
         return mainTarget;
     }
 
-    private static void disableScalingAfterFailure(final Throwable throwable) {
+    private static void disableScalingAfterFailure(
+            final Throwable throwable,
+            final boolean retainFullResolutionUiTarget
+    ) {
         activeThisFrame = false;
         activeSource = null;
         lastUiFinished = false;
@@ -388,7 +433,7 @@ public final class HdrUiRenderTarget {
         spatialActiveThisFrame = false;
         spatialHdrPrecomposedThisFrame = false;
         lastSpatialHdrPrecomposed = false;
-        if (target != null) {
+        if (target != null && !retainFullResolutionUiTarget) {
             try {
                 MetalHdrFrame.materializeUiBackdrop(target.getColorTextureView());
                 target.destroyBuffers();
