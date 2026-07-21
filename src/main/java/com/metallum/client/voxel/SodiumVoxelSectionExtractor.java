@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.TransparentBlock;
+import net.minecraft.world.level.block.VegetationBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
@@ -47,7 +48,9 @@ public final class SodiumVoxelSectionExtractor {
             try {
                 BlockState state = worldSlice.getBlockState(worldX, worldY, worldZ);
                 VoxelMaterialDescriptor material = materialFor(state);
-                VoxelShape shape = state.getShape(worldSlice, position);
+                VoxelShape shape = state.getBlock() instanceof VegetationBlock
+                        ? Shapes.empty()
+                        : state.getShape(worldSlice, position);
                 if (!state.getFluidState().isEmpty()) {
                     // Water normally has an empty block collision/outline shape. Its medium
                     // shape is still geometry for L5 opacity, and must remain paired with the
@@ -79,6 +82,9 @@ public final class SodiumVoxelSectionExtractor {
 
     static VoxelMaterialDescriptor materialFor(final BlockState state) {
         if (state.isAir()) {
+            return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.AIR);
+        }
+        if (state.getBlock() instanceof VegetationBlock) {
             return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.AIR);
         }
         if (!state.getFluidState().isEmpty()) {
