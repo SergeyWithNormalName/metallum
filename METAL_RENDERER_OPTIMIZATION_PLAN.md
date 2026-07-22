@@ -66,9 +66,26 @@
   `+17.21%`, GPU p95 `-15.77%`, requested `-29.70%`, dropped `-59.39%`, overflow
   `-41.36%`; copies `74,400 B/frame`, allocations `0`. Compare receipt по-прежнему
   блокирован known event ordering/missing `.accepted.json`, raw+summary `COMPLETE`.
-- Дальше — только обновлённый baseline и profile-backed направление; не считать
-  принятые shader/cluster меры бесконечно повторяемыми без новой причины и не менять
-  качество ради цифр.
+- Conservative cluster corner wedges **ВНЕДРЕНО/accepted**: после four side planes
+  adjacent inward plane pairs отбрасывают только sphere, которая не пересекает даже
+  более широкий pair-of-halfspaces wedge. Constrained distance uses positive
+  multipliers only; strict tangent has a conservative `1e-5` float retain guard, and
+  invalid/nonfinite/overflow/parallel input fails open. Z/order/caps/ABI/buffers не
+  менялись. Targeted Metal API/GPU validation и `clean check` прошли. Diagnostic
+  `20260722T173901Z-gb1ee55ca41e5-dirty-dense-lights-corner-wedge-diagnostic-off`
+  привёл к двум full COMPLETE production artifacts: `34.3243/34.0348 FPS`, GPU p95
+  `32.4382/32.6792 ms`, present p95 `29.8901/30.1436 ms`, requested
+  `443653/445605`, dropped `9948/10297`, p95 occupancy `116`, overflow `87/88` при
+  copies `74,400 B/frame` и `0` allocations. Vs current side-plane baseline mean:
+  FPS `+6.67%`, 1% low `+7.35%`, GPU p95 `-5.46%`, present p95 `-6.56%`, requested
+  `-13.74%`, dropped `-32.37%`, overflow `-31.10%`. Raw+summary имеют `COMPLETE` и
+  `0` dropped evidence events; compare receipt всё ещё блокирован known event order.
+- Дальше — обновлённый dense-light profile оставшегося World Opaque tail. Не повторять
+  side-plane/wedge culling без новой причины. Отдельная Z-plane refinement не является
+  кандидатом: `centerDepth ± radius` уже задаёт exact monotonic log-depth slice range.
+  Tile/depth-grid retune или 16-bit compact indices возможны только после отдельного
+  trace, доказывающего list/bandwidth bottleneck, и требуют собственного quality-aware
+  A/B; не менять качество ради цифр.
 
 ---
 

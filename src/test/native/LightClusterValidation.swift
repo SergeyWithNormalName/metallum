@@ -423,6 +423,59 @@ private func sphereStrictlyOutsidePlane(
     return distance < -radius * normalLength
 }
 
+// This deliberately normalizes the two planes and solves the constrained projection
+// independently of the shader's unnormalized Gram-matrix implementation. A rejected
+// sphere misses the larger pair-of-halfspaces wedge, so it cannot reach the tile inside it.
+private func sphereStrictlyOutsidePlaneWedge(
+    center: SIMD3<Float>,
+    radius: Float,
+    firstPlane: SIMD4<Float>,
+    secondPlane: SIMD4<Float>
+) -> Bool {
+    guard radius > 0, radius.isFinite,
+          center.x.isFinite, center.y.isFinite, center.z.isFinite,
+          firstPlane.x.isFinite, firstPlane.y.isFinite,
+          firstPlane.z.isFinite, firstPlane.w.isFinite,
+          secondPlane.x.isFinite, secondPlane.y.isFinite,
+          secondPlane.z.isFinite, secondPlane.w.isFinite else {
+        return false
+    }
+    let firstNormal = SIMD3(firstPlane.x, firstPlane.y, firstPlane.z)
+    let secondNormal = SIMD3(secondPlane.x, secondPlane.y, secondPlane.z)
+    let firstLength = simd_length(firstNormal)
+    let secondLength = simd_length(secondNormal)
+    guard firstLength > 0, secondLength > 0,
+          firstLength.isFinite, secondLength.isFinite else {
+        return false
+    }
+    let firstUnit = firstNormal / firstLength
+    let secondUnit = secondNormal / secondLength
+    let firstDistance = (simd_dot(firstNormal, center) + firstPlane.w) / firstLength
+    let secondDistance = (simd_dot(secondNormal, center) + secondPlane.w) / secondLength
+    guard firstDistance.isFinite, secondDistance.isFinite,
+          firstDistance < 0, secondDistance < 0 else {
+        return false
+    }
+    let normalDot = simd_dot(firstUnit, secondUnit)
+    let determinant = 1 - normalDot * normalDot
+    guard normalDot.isFinite, determinant.isFinite, determinant > 1e-6 else {
+        return false
+    }
+    let firstRequired = -firstDistance
+    let secondRequired = -secondDistance
+    let firstMultiplier = (firstRequired - normalDot * secondRequired) / determinant
+    let secondMultiplier = (secondRequired - normalDot * firstRequired) / determinant
+    guard firstMultiplier > 0, secondMultiplier > 0,
+          firstMultiplier.isFinite, secondMultiplier.isFinite else {
+        return false
+    }
+    let closestDistanceSquared = firstRequired * firstMultiplier
+        + secondRequired * secondMultiplier
+    let retainedTangentRadiusSquared = radius * radius * (1 + 1e-5)
+    guard closestDistanceSquared.isFinite, retainedTangentRadiusSquared.isFinite else { return false }
+    return closestDistanceSquared > retainedTangentRadiusSquared
+}
+
 private func sphereOutsideClusterSidePlanes(
     center: SIMD3<Float>,
     radius: Float,
@@ -439,6 +492,30 @@ private func sphereOutsideClusterSidePlanes(
         return false
     }
     return planes.contains { sphereStrictlyOutsidePlane(center: center, radius: radius, plane: $0) }
+}
+
+private func sphereOutsideClusterSideWedges(
+    center: SIMD3<Float>,
+    radius: Float,
+    clusterX: Int,
+    clusterY: Int,
+    width: Int,
+    height: Int,
+    projection: simd_float4x4
+) -> Bool {
+    guard let planes = clusterSidePlanes(
+        clusterX: clusterX, clusterY: clusterY, width: width, height: height,
+        projection: projection
+    ) else {
+        return false
+    }
+    let pairs = [(0, 2), (0, 3), (1, 2), (1, 3)]
+    return pairs.contains { pair in
+        sphereStrictlyOutsidePlaneWedge(
+            center: center, radius: radius,
+            firstPlane: planes[pair.0], secondPlane: planes[pair.1]
+        )
+    }
 }
 
 private func reference(
@@ -543,6 +620,17 @@ private func reference(
             for y in lightBounds.lower.y..<lightBounds.upper.y {
                 for x in lightBounds.lower.x..<lightBounds.upper.x {
                     if sphereOutsideClusterSidePlanes(
+                        center: lights[lightIndex].position,
+                        radius: lights[lightIndex].radius,
+                        clusterX: x,
+                        clusterY: y,
+                        width: width,
+                        height: height,
+                        projection: projection
+                    ) {
+                        continue
+                    }
+                    if sphereOutsideClusterSideWedges(
                         center: lights[lightIndex].position,
                         radius: lights[lightIndex].radius,
                         clusterX: x,
@@ -986,6 +1074,14 @@ private enum LightClusterValidationMain {
                     ),
                     "Strictly outside sphere was retained by side plane \(planeIndex)"
                 )
+                try require(
+                    !sphereOutsideClusterSideWedges(
+                        center: outsideCenter, radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        width: planeWidth, height: planeHeight, projection: identityProjection
+                    ),
+                    "Single-plane miss was incorrectly claimed by a corner wedge \(planeIndex)"
+                )
             }
             let edgeCenter = SIMD3<Float>(-0.5, 0, 0)
             let cornerCenter = SIMD3<Float>(-0.5, -1.0 / 3.0, 0)
@@ -1005,6 +1101,61 @@ private enum LightClusterValidationMain {
                 ),
                 "Tile-corner tangent sphere was rejected"
             )
+            let cornerFixtures: [(String, Int, Int, SIMD3<Float>)] = [
+                ("left-bottom", 0, 2, SIMD3(-0.5, -1.0 / 3.0, 0)),
+                ("left-top", 0, 3, SIMD3(-0.5, 1.0 / 3.0, 0)),
+                ("right-bottom", 1, 2, SIMD3(0, -1.0 / 3.0, 0)),
+                ("right-top", 1, 3, SIMD3(0, 1.0 / 3.0, 0))
+            ]
+            for (name, firstIndex, secondIndex, corner) in cornerFixtures {
+                let firstNormal = SIMD3(
+                    explicitPlanes[firstIndex].x,
+                    explicitPlanes[firstIndex].y,
+                    explicitPlanes[firstIndex].z
+                )
+                let secondNormal = SIMD3(
+                    explicitPlanes[secondIndex].x,
+                    explicitPlanes[secondIndex].y,
+                    explicitPlanes[secondIndex].z
+                )
+                let inward = simd_normalize(
+                    firstNormal / simd_length(firstNormal)
+                        + secondNormal / simd_length(secondNormal)
+                )
+                let insideCenter = corner + inward * 0.05
+                let tangentCenter = corner - inward * fixtureRadius
+                // This remains inside both individual radius-expanded planes: only the
+                // two-plane constrained distance may safely reject it.
+                let outsideCenter = corner - inward * (fixtureRadius + 0.05)
+                try require(
+                    !sphereOutsideClusterSideWedges(
+                        center: insideCenter, radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        width: planeWidth, height: planeHeight, projection: identityProjection
+                    ),
+                    "Inside corner sphere was rejected by \(name) wedge"
+                )
+                try require(
+                    !sphereOutsideClusterSideWedges(
+                        center: tangentCenter, radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        width: planeWidth, height: planeHeight, projection: identityProjection
+                    ),
+                    "Tangent corner sphere was rejected by \(name) wedge"
+                )
+                try require(
+                    !sphereOutsideClusterSidePlanes(
+                        center: outsideCenter, radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        width: planeWidth, height: planeHeight, projection: identityProjection
+                    ) && sphereOutsideClusterSideWedges(
+                        center: outsideCenter, radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        width: planeWidth, height: planeHeight, projection: identityProjection
+                    ),
+                    "Corner-only miss was not isolated by \(name) wedge"
+                )
+            }
             var invalidProjection = identityProjection
             invalidProjection[0][0] = .nan
             try require(
@@ -1023,6 +1174,21 @@ private enum LightClusterValidationMain {
                 ),
                 "Invalid side-plane input was not fail-open"
             )
+            let parallelPlane = SIMD4<Float>(1, 0, 0, 0)
+            let nearParallelPlane = SIMD4<Float>(1, 0.0001, 0, 0)
+            try require(
+                !sphereStrictlyOutsidePlaneWedge(
+                    center: SIMD3(-1, -1, 0), radius: fixtureRadius,
+                    firstPlane: SIMD4(.nan, 0, 0, 0), secondPlane: parallelPlane
+                ) && !sphereStrictlyOutsidePlaneWedge(
+                    center: SIMD3(-1, -1, 0), radius: fixtureRadius,
+                    firstPlane: parallelPlane, secondPlane: parallelPlane
+                ) && !sphereStrictlyOutsidePlaneWedge(
+                    center: SIMD3(-1, -1, 0), radius: fixtureRadius,
+                    firstPlane: parallelPlane, secondPlane: nearParallelPlane
+                ),
+                "Invalid, parallel, or near-parallel wedge was not fail-open"
+            )
 
             // A witness point at each representative tile/depth/projection is inside a
             // small source sphere. The conservative reject must therefore never remove it.
@@ -1037,11 +1203,20 @@ private enum LightClusterValidationMain {
                 let inverseProjection = simd_inverse(projection)
                 for clusterY in [0, 1, 2] {
                     for clusterX in [0, 1, 3] {
-                        let ndc = SIMD2<Float>(
-                            (Float(clusterX * tileSize + tileSize / 2) * 2 / Float(planeWidth)) - 1,
-                            (Float(clusterY * tileSize + tileSize / 2) * 2 / Float(planeHeight)) - 1
-                        )
-                        for clipDepth in [Float(0.05), 0.5, 0.95] {
+                        // Centre plus four interior corners exercise the tile wedge rather
+                        // than only the old single-plane boundaries.
+                        for localPixel in [
+                            SIMD2<Float>(Float(tileSize) * 0.5, Float(tileSize) * 0.5),
+                            SIMD2<Float>(1, 1),
+                            SIMD2<Float>(Float(tileSize - 1), 1),
+                            SIMD2<Float>(1, Float(tileSize - 1)),
+                            SIMD2<Float>(Float(tileSize - 1), Float(tileSize - 1))
+                        ] {
+                            let ndc = SIMD2<Float>(
+                                (Float(clusterX * tileSize) + localPixel.x) * 2 / Float(planeWidth) - 1,
+                                (Float(clusterY * tileSize) + localPixel.y) * 2 / Float(planeHeight) - 1
+                            )
+                            for clipDepth in [Float(0.05), 0.5, 0.95] {
                             let homogeneous = inverseProjection * SIMD4(ndc.x, ndc.y, clipDepth, 1)
                             try require(
                                 homogeneous.x.isFinite && homogeneous.y.isFinite
@@ -1077,6 +1252,15 @@ private enum LightClusterValidationMain {
                                 ),
                                 "Side-plane false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
                             )
+                            try require(
+                                !sphereOutsideClusterSideWedges(
+                                    center: witness, radius: 0.01,
+                                    clusterX: clusterX, clusterY: clusterY,
+                                    width: planeWidth, height: planeHeight, projection: projection
+                                ),
+                                "Corner-wedge false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
+                            )
+                        }
                         }
                     }
                 }
@@ -1143,6 +1327,74 @@ private enum LightClusterValidationMain {
                         "Rejected packets damaged the command buffer")
 
             var submit: UInt64 = 1
+
+            // A diagonal corner miss remains inside both individual radius-expanded
+            // planes, but it cannot intersect their shared wedge. Exercise the actual
+            // Metal kernel (not only the normalized CPU oracle) on all four tile corners.
+            do {
+                let cornerWidth = planeWidth
+                let cornerHeight = planeHeight
+                let cornerClustersX = UInt32((cornerWidth + tileSize - 1) / tileSize)
+                let cornerClustersY = UInt32((cornerHeight + tileSize - 1) / tileSize)
+                let cornerClusterCount = Int(cornerClustersX * cornerClustersY * UInt32(depthSlices))
+                let cornerGeneration: UInt64 = 704
+                guard let cornerContext = api.createContext(
+                    objectPointer(device as AnyObject),
+                    cornerGeneration,
+                    4,
+                    UInt32(cornerClusterCount * clusterCap),
+                    cornerClustersX,
+                    cornerClustersY,
+                    UInt32(depthSlices)
+                ) else {
+                    throw ValidationFailure.message("Could not create corner-wedge validation context")
+                }
+                defer { api.releaseContext(cornerContext) }
+                for (cornerIndex, (_, firstIndex, secondIndex, corner)) in cornerFixtures.enumerated() {
+                    let firstNormal = SIMD3(
+                        explicitPlanes[firstIndex].x,
+                        explicitPlanes[firstIndex].y,
+                        explicitPlanes[firstIndex].z
+                    )
+                    let secondNormal = SIMD3(
+                        explicitPlanes[secondIndex].x,
+                        explicitPlanes[secondIndex].y,
+                        explicitPlanes[secondIndex].z
+                    )
+                    let outward = -simd_normalize(
+                        firstNormal / simd_length(firstNormal)
+                            + secondNormal / simd_length(secondNormal)
+                    )
+                    let cornerLight = [Light(
+                        position: corner + outward * (fixtureRadius + 0.05),
+                        radius: fixtureRadius,
+                        color: SIMD3(1, 0.6, 0.2),
+                        intensity: 2,
+                        stableId: UInt64(20 + cornerIndex),
+                        flags: 0
+                    )]
+                    submit += 1
+                    let gpu = try runGpu(
+                        api: api, context: cornerContext, queue: queue,
+                        generation: cornerGeneration, frameId: UInt64(50 + cornerIndex),
+                        submitIndex: submit, width: cornerWidth, height: cornerHeight,
+                        lights: cornerLight, hdr: cornerIndex.isMultiple(of: 2),
+                        projectionOverride: identityProjection
+                    )
+                    let cpu = reference(
+                        lights: cornerLight, width: cornerWidth, height: cornerHeight,
+                        indexCapacity: cornerClusterCount * clusterCap,
+                        candidateCapacity: 4, projectionOverride: identityProjection
+                    )
+                    try requireMatches(gpu, cpu, context: "GPU corner-wedge \(cornerIndex)")
+                    let targetCluster = Int(cornerClustersX) + 1
+                    try require(
+                        gpu.headers[targetCluster].y == 0,
+                        "GPU corner-wedge \(cornerIndex) retained its diagonal tile"
+                    )
+                }
+            }
+
             let emptyGpu = try runGpu(
                 api: api, context: context, queue: queue, generation: generation,
                 frameId: 2, submitIndex: submit, width: width, height: height,
@@ -1398,6 +1650,18 @@ private enum LightClusterValidationMain {
                     let fragmentX = min(Int(floor(fragmentPixel.x / Float(tileSize))), bobClustersX - 1)
                     let fragmentY = min(Int(floor(fragmentPixel.y / Float(tileSize))), bobClustersY - 1)
                     let fragmentZ = depthSlice(-inSphereFragment.z, near: 0.1, far: 100)
+                    try require(
+                        !sphereOutsideClusterSideWedges(
+                            center: nearEyeLight.position,
+                            radius: nearEyeLight.radius,
+                            clusterX: fragmentX,
+                            clusterY: fragmentY,
+                            width: bobWidth,
+                            height: bobHeight,
+                            projection: projection
+                        ),
+                        "View-bob angle \(angle) corner wedge dropped an in-sphere fragment tile"
+                    )
                     let fragmentCluster = (fragmentZ * bobClustersY + fragmentY) * bobClustersX + fragmentX
                     let fragmentHeader = gpu.headers[fragmentCluster]
                     let fragmentStart = Int(fragmentHeader.x)

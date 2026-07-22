@@ -817,3 +817,79 @@ missing `.accepted.json`; это не скрывается: raw + summary `COMPL
 **Итог:** **ВНЕДРЕНО/accepted**, третий раздельный lossless Nether кандидат. Следующие
 направления — только после обновлённого baseline и нового profile: не возвращаться к
 уже принятому shader/cluster пути без новой причины и не подменять quality снижением.
+
+## 2026-07-23 — Nether: conservative cluster corner-wedge culling
+
+### Гипотеза и новая причина проверки
+
+После accepted side-plane culling плотный Nether/lava профиль всё ещё имел p95/p99
+occupancy `256`, `124/130` overflow clusters и `14,675/15,258` dropped indices. Sphere
+может пересекать каждый из четырёх per-tile side plane по отдельности, но не иметь
+общей точки с их парным угловым клином. Такие diagonal corner misses остаются в
+compact list и заставляют World Opaque обходить источники, которые не могут осветить
+ни один fragment tile. Это новая причина после side planes, а не повторение их A/B.
+
+### Семантика изменения
+
+После существующих single-plane checks для четырёх adjacent pair
+`(left,bottom)`, `(left,top)`, `(right,bottom)`, `(right,top)` вычисляется точная
+минимальная Euclidean distance от центра sphere до пересечения двух inward
+half-spaces. Reject разрешён только когда sphere нарушает **обе** plane, оба
+multiplier constrained projection положительны и расстояние строго больше radius.
+Tile является подмножеством такого wedge, поэтому miss более широкого wedge не может
+изменить ни один direct-light contribution в tile.
+
+Tangency сохранён: strict comparison имеет дополнительный relative float guard
+`1e-5`, который может только оставить почти касательный member. Любые invalid,
+nonfinite, overflow, zero-normal, parallel/near-parallel plane, multiplier или
+distance дают fail-open. Z slices, coarse bounds, caps, candidate/upload order,
+buffers, ABI и telemetry не менялись.
+
+### Способ проверки
+
+`lightClusterValidation` с Metal API/GPU Validation и `./gradlew clean check` прошли.
+Независимый normalized CPU oracle покрывает все четыре corner fixture
+(inside/tangent/corner-only outside), single-plane case, invalid/parallel/
+near-parallel fail-open, interior corner witnesses на representative depth и
+normal/view-bob projection. Отдельные GPU fixtures проверяют, что каждый diagonal
+miss не остаётся в target tile; прежние CPU/GPU determinism, capped-prefix и
+in-sphere view-bob contracts сохранены.
+
+Diagnostic artifact
+`20260722T173901Z-gb1ee55ca41e5-dirty-dense-lights-corner-wedge-diagnostic-off`
+использовался только для атрибуции и решения запускать production A/B. Acceptance —
+два независимых full production run при прежнем Nether contract, MetalFX off,
+Balanced, HDR, VSync off, `1800+3000`:
+
+`20260722T174051Z-gb1ee55ca41e5-dirty-dense-lights-corner-wedge-production-1-off` и
+`20260722T174426Z-gb1ee55ca41e5-dirty-dense-lights-corner-wedge-production-2-off`.
+
+| Run | FPS | min window | 1% / 0.1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 | requested/dropped | occupancy p50/p95/p99 | overflow |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Side-plane baseline #1 | 32.1040 | 32.0423 | 28.5964 / 27.2278 | 13.0865 / 13.9563 ms | 34.2910 / 34.5278 ms | 32.1245 / 33.3577 ms | 514368 / 14675 | 48 / 256 / 256 | 124 |
+| Side-plane baseline #2 | 31.9836 | 31.9438 | 28.6624 / 27.6401 | 13.4523 / 14.0540 ms | 34.5881 / 34.7771 ms | 32.1263 / 33.4132 ms | 516534 / 15258 | 48 / 256 / 256 | 130 |
+| Corner wedge #1 | 34.3243 | 34.2513 | 31.2519 / 29.8757 | 13.2454 / 13.7789 ms | 32.4382 / 32.6462 ms | 29.8901 / 30.7230 ms | 443653 / 9948 | 44 / 116 / 256 | 87 |
+| Corner wedge #2 | 34.0348 | 34.0013 | 30.2150 / 28.7590 | 13.0902 / 13.6333 ms | 32.6792 / 32.8884 ms | 30.1436 / 31.2690 ms | 445605 / 10297 | 44 / 116 / 256 | 88 |
+
+### Результат, побочные эффекты и итог
+
+Среднее side-plane baseline → corner wedge: FPS `32.0438 → 34.1796`
+(`+6.67%`), 1% low `28.6294 → 30.7334` (`+7.35%`), 0.1% low
+`27.4340 → 29.3173` (`+6.87%`), GPU p95 `34.4395 → 32.5587 ms`
+(`-5.46%`), present p95 `32.1254 → 30.0169 ms` (`-6.56%`). CPU p95
+`13.2694 → 13.1678 ms` остаётся без регрессии. Requested indices
+`515451 → 444629` (`-13.74%`), dropped `14966.5 → 10122.5` (`-32.37%`),
+overflow `127 → 87.5` (`-31.10%`); p95 occupancy падает `256 → 116`, при
+сохранении p99 `256` как честного remaining tail.
+
+Copies остались `74,400 B/frame`, successful Metal buffer allocations — `0`. Цена
+изменения — четыре bounded two-plane check на candidate tile; near-tangent и
+ill-conditioned случаи намеренно retain, поэтому false-positive work может остаться,
+но false-negative cull не вводится. Compare receipt снова не выпущен из-за known
+event-order failure; raw+summary обоих production artifacts имеют `COMPLETE`,
+`0` dropped evidence events. Это ограничение benchmark tooling, не скрыто как
+принятый receipt.
+
+**Итог:** **ВНЕДРЕНО/accepted**, четвёртый отдельный quality-preserving Nether
+кандидат. Следующий профиль должен измерять оставшийся World Opaque dense-light tail;
+не возвращаться к уже принятому side-plane/wedge пути без новой причины.

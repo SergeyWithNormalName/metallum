@@ -140,6 +140,69 @@ inline bool metallum_sphere_strictly_outside_plane(
     return distance < 0.0f && distanceSquared > radiusNormalSquared;
 }
 
+inline bool metallum_sphere_strictly_outside_plane_wedge(
+    const float3 center,
+    const float radius,
+    const float4 firstPlane,
+    const float4 secondPlane
+) {
+    // A tile is contained in every adjacent pair of its inward side half-spaces. A
+    // sphere which misses even that wider wedge cannot affect any fragment in the
+    // tile. Keep malformed or ill-conditioned pairs fail-open: this is a refinement
+    // of the already-conservative coarse bounds, never an authority on visibility.
+    if (!(radius > 0.0f) || !isfinite(radius)
+        || !all(isfinite(center)) || !all(isfinite(firstPlane))
+        || !all(isfinite(secondPlane))) {
+        return false;
+    }
+    const float firstNormalSquared = dot(firstPlane.xyz, firstPlane.xyz);
+    const float secondNormalSquared = dot(secondPlane.xyz, secondPlane.xyz);
+    const float normalDot = dot(firstPlane.xyz, secondPlane.xyz);
+    const float firstDistance = dot(firstPlane.xyz, center) + firstPlane.w;
+    const float secondDistance = dot(secondPlane.xyz, center) + secondPlane.w;
+    const float radiusSquared = radius * radius;
+    if (!(firstNormalSquared > 0.0f) || !(secondNormalSquared > 0.0f)
+        || !isfinite(firstNormalSquared) || !isfinite(secondNormalSquared)
+        || !isfinite(normalDot) || !isfinite(firstDistance) || !isfinite(secondDistance)
+        || !isfinite(radiusSquared) || !(firstDistance < 0.0f) || !(secondDistance < 0.0f)) {
+        return false;
+    }
+
+    // Solve the two-constraint Euclidean projection onto n0.x + w0 >= 0 and
+    // n1.x + w1 >= 0. A non-positive multiplier means a single plane owns the
+    // closest point; the preceding individual-plane test already handled the only
+    // safe rejection in that case. The relative determinant guard treats parallel
+    // and near-parallel planes as untrusted rather than amplifying float error.
+    const float normalProduct = firstNormalSquared * secondNormalSquared;
+    const float determinant = normalProduct - normalDot * normalDot;
+    if (!(normalProduct > 0.0f) || !isfinite(normalProduct)
+        || !(determinant > normalProduct * 1.0e-6f) || !isfinite(determinant)) {
+        return false;
+    }
+    const float firstRequired = -firstDistance;
+    const float secondRequired = -secondDistance;
+    const float firstMultiplier = (
+        firstRequired * secondNormalSquared - normalDot * secondRequired
+    ) / determinant;
+    const float secondMultiplier = (
+        secondRequired * firstNormalSquared - normalDot * firstRequired
+    ) / determinant;
+    if (!(firstMultiplier > 0.0f) || !(secondMultiplier > 0.0f)
+        || !isfinite(firstMultiplier) || !isfinite(secondMultiplier)) {
+        return false;
+    }
+    const float closestDistanceSquared = firstRequired * firstMultiplier
+        + secondRequired * secondMultiplier;
+    const float retainedTangentRadiusSquared = radiusSquared * (1.0f + 1.0e-5f);
+    if (!isfinite(closestDistanceSquared) || !isfinite(retainedTangentRadiusSquared)) {
+        return false;
+    }
+    // Keep a small relative float guard around tangency. The test is only a conservative
+    // refinement, so retaining a nearly tangent member is preferable to a rounding-driven
+    // false-negative at an adjacent-plane corner.
+    return closestDistanceSquared > retainedTangentRadiusSquared;
+}
+
 inline bool metallum_sphere_outside_cluster_side_planes(
     const float3 center,
     const float radius,
@@ -190,6 +253,20 @@ inline bool metallum_sphere_outside_cluster_side_planes(
     }
     for (uint index = 0u; index < 4u; ++index) {
         if (metallum_sphere_strictly_outside_plane(center, radius, planes[index])) {
+            return true;
+        }
+    }
+    const uint2 cornerPlanePairs[4] = {
+        uint2(0u, 2u), uint2(0u, 3u), uint2(1u, 2u), uint2(1u, 3u)
+    };
+    for (uint index = 0u; index < 4u; ++index) {
+        const uint2 pair = cornerPlanePairs[index];
+        if (metallum_sphere_strictly_outside_plane_wedge(
+                center,
+                radius,
+                planes[pair.x],
+                planes[pair.y]
+            )) {
             return true;
         }
     }
