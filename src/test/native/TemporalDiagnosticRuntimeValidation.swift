@@ -76,20 +76,23 @@ private func framePacket(
     currentCameraX: Double,
     previousCameraX: Double,
     previousProjectionScaleX: Float = 1,
+    rendererGeneration: UInt64 = 1,
     temporalProduction: Bool = false,
+    displayWidthOverride: Int? = nil,
+    displayHeightOverride: Int? = nil,
     temporalHdrPrecompose: Bool = false,
     projection: simd_float4x4? = nil
 ) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: 848)
-    let displayWidth = temporalProduction ? width * 3 / 2 : width
-    let displayHeight = temporalProduction ? height * 3 / 2 : height
+    let displayWidth = displayWidthOverride ?? (temporalProduction ? width * 3 / 2 : width)
+    let displayHeight = displayHeightOverride ?? (temporalProduction ? height * 3 / 2 : height)
     writeUInt32(3, at: 0, into: &bytes)
     writeUInt32(848, at: 4, into: &bytes)
     writeUInt32(1, at: 8, into: &bytes)
     writeUInt32(2, at: 12, into: &bytes)
     writeUInt64(1, at: 16, into: &bytes)
     writeUInt64(3, at: 24, into: &bytes)
-    writeUInt64(1, at: 32, into: &bytes)
+    writeUInt64(rendererGeneration, at: 32, into: &bytes)
     writeUInt64(resetMask == 0 ? 1 : 2, at: 40, into: &bytes)
     writeUInt64(1, at: 48, into: &bytes)
     writeUInt64(1, at: 56, into: &bytes)
@@ -151,7 +154,11 @@ private func runCase(
     currentCameraX: Double = 0,
     previousCameraX: Double = 0,
     previousProjectionScaleX: Float = 1,
+    rendererGeneration: UInt64 = 1,
     temporalProduction: Bool = false,
+    dynamicTemporalInputs: Bool = false,
+    displayWidthOverride: Int? = nil,
+    displayHeightOverride: Int? = nil,
     temporalHdrPrecompose: Bool = false,
     depthValue: Double = 0.5,
     backdrop: EncodeBackdrop? = nil,
@@ -165,16 +172,27 @@ private func runCase(
         currentCameraX: currentCameraX,
         previousCameraX: previousCameraX,
         previousProjectionScaleX: previousProjectionScaleX,
+        rendererGeneration: rendererGeneration,
         temporalProduction: temporalProduction,
+        displayWidthOverride: displayWidthOverride,
+        displayHeightOverride: displayHeightOverride,
         temporalHdrPrecompose: temporalHdrPrecompose,
         projection: projection
     )
     try require(packet.withUnsafeBytes { setFrameState($0.baseAddress, UInt64($0.count)) } == 1,
                 "Native FrameState admission failed")
 
-    func texture(_ format: MTLPixelFormat, _ usage: MTLTextureUsage) throws -> MTLTexture {
+    func texture(
+        _ format: MTLPixelFormat,
+        _ usage: MTLTextureUsage,
+        width textureWidth: Int? = nil,
+        height textureHeight: Int? = nil
+    ) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: width, height: height, mipmapped: false
+            pixelFormat: format,
+            width: textureWidth ?? width,
+            height: textureHeight ?? height,
+            mipmapped: false
         )
         descriptor.storageMode = .private
         descriptor.usage = usage
@@ -183,12 +201,24 @@ private func runCase(
         }
         return texture
     }
+    let displayWidth = displayWidthOverride ?? (temporalProduction ? width * 3 / 2 : width)
+    let displayHeight = displayHeightOverride ?? (temporalProduction ? height * 3 / 2 : height)
+    let temporalInputWidth = dynamicTemporalInputs ? displayWidth : width
+    let temporalInputHeight = dynamicTemporalInputs ? displayHeight : height
     let depth = try texture(.depth32Float, [.renderTarget, .shaderRead])
-    let motion = try texture(.rg16Float, [.renderTarget, .shaderRead])
-    let reactive = try texture(.r8Unorm, [.renderTarget, .shaderRead])
+    let motion = try texture(
+        .rg16Float,
+        [.renderTarget, .shaderRead],
+        width: temporalInputWidth,
+        height: temporalInputHeight
+    )
+    let reactive = try texture(
+        .r8Unorm,
+        [.renderTarget, .shaderRead],
+        width: temporalInputWidth,
+        height: temporalInputHeight
+    )
     let source = try texture(temporalHdrPrecompose ? .rgba16Float : .rgba8Unorm, [.renderTarget, .shaderRead])
-    let displayWidth = temporalProduction ? width * 3 / 2 : width
-    let displayHeight = temporalProduction ? height * 3 / 2 : height
     let destinationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: .rgba8Unorm, width: displayWidth, height: displayHeight, mipmapped: false
     )
@@ -352,14 +382,28 @@ private enum TemporalDiagnosticRuntimeValidationMain {
                         "Static diagnostic output mismatch")
             let production = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
-                width: 64, height: 64, temporalProduction: true, backdrop: backdrop
+                width: 64, height: 64, temporalProduction: true,
+                dynamicTemporalInputs: true, backdrop: backdrop
             )
             try require(abs(production.motion.x) <= 0.01 && abs(production.motion.y) <= 0.01
                             && production.reactive == 0,
                         "Production Temporal input contract mismatch")
+            // Simulate a real DRS generation transition: the world/depth
+            // target changes from 64 to 48 pixels while the Dynamic MetalFX
+            // descriptor and all physical input textures remain 96x96.
+            let dynamicResize = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 48, height: 48, resetMask: 1 << 4, rendererGeneration: 2,
+                temporalProduction: true, dynamicTemporalInputs: true,
+                displayWidthOverride: 96, displayHeightOverride: 96, backdrop: backdrop
+            )
+            try require(dynamicResize.motion.x.isFinite && dynamicResize.motion.y.isFinite
+                            && dynamicResize.reactive == 255,
+                        "Dynamic Temporal resize did not reset or produce finite inputs")
             let hdrPrecomposedProduction = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
-                width: 64, height: 64, temporalProduction: true, temporalHdrPrecompose: true,
+                width: 64, height: 64, temporalProduction: true,
+                dynamicTemporalInputs: true, temporalHdrPrecompose: true,
                 backdrop: backdrop, coherentBlur: coherentBlur
             )
             try require(abs(hdrPrecomposedProduction.motion.x) <= 0.01
@@ -426,7 +470,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

@@ -4,7 +4,11 @@ import com.metallum.client.renderer.temporal.FrameStatePacketRing;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.textures.GpuTexture;
 
-/** Atomic three-slot private motion/reactive allocation owned by one size generation. */
+/**
+ * Atomic three-slot private motion/reactive allocation owned by one physical
+ * extent. Dynamic Temporal keeps it at display size and rasterizes only the
+ * active DRS rectangle; fixed presets use their render extent.
+ */
 final class TemporalDiagnosticResources implements AutoCloseable {
     record Pair(MetalGpuTexture motion, MetalGpuTexture reactive, MetalGpuTexture classification) {
     }

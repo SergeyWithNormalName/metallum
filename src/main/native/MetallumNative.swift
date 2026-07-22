@@ -24,9 +24,9 @@ private struct PresentPipelineKey: Hashable {
     let colorFormat: MTLPixelFormat
 }
 
-/// MetalFX Temporal descriptors are extent-specific.  DRS commonly alternates
-/// between neighbouring extents, so the cache key must include the complete
-/// input/output contract rather than only the device.
+/// A temporal workspace owns one immutable MetalFX descriptor contract.  The
+/// dynamic path keeps that contract at the display extent and varies only the
+/// active input-content rectangle; fixed presets retain their render extent.
 private struct TemporalWorkspaceKey: Hashable {
     let deviceAddress: UInt
     let sourcePixelFormat: MTLPixelFormat
@@ -34,6 +34,13 @@ private struct TemporalWorkspaceKey: Hashable {
     let inputHeight: Int
     let outputWidth: Int
     let outputHeight: Int
+    let usesDynamicInputContent: Bool
+}
+
+private struct TemporalDepthResourceKey: Hashable {
+    let deviceAddress: UInt
+    let width: Int
+    let height: Int
 }
 
 private enum MetallumBuiltinShaderSet: String, CaseIterable {
@@ -450,6 +457,9 @@ private final class MetallumTemporalWorkspace {
     let outputWidth: Int
     let outputHeight: Int
     let scaler: MTLFXTemporalScaler
+    /// Fixed-size color input for MetalFX's built-in dynamic-resolution path.
+    /// Fixed-preset workspaces leave this nil and bind the world texture directly.
+    let dynamicColorInput: MTLTexture?
     let output: MTLTexture
     var outputCommandBufferAddress: UInt?
     var preparedUiSeed: MetallumPreparedHdrUiSeed?
@@ -462,6 +472,7 @@ private final class MetallumTemporalWorkspace {
         outputWidth: Int,
         outputHeight: Int,
         scaler: MTLFXTemporalScaler,
+        dynamicColorInput: MTLTexture?,
         output: MTLTexture
     ) {
         self.sourcePixelFormat = sourcePixelFormat
@@ -470,6 +481,7 @@ private final class MetallumTemporalWorkspace {
         self.outputWidth = outputWidth
         self.outputHeight = outputHeight
         self.scaler = scaler
+        self.dynamicColorInput = dynamicColorInput
         self.output = output
         self.outputCommandBufferAddress = nil
         self.preparedUiSeed = nil
@@ -478,14 +490,16 @@ private final class MetallumTemporalWorkspace {
 }
 
 /// Keeps one previous world-depth image for temporal disocclusion rejection.
-/// The image stays entirely GPU-private and is resized only with the render
-/// target, never allocated in the frame loop.
+/// The image stays entirely GPU-private.  Histories are keyed by physical
+/// extent so a DRS generation change never forces a fresh render-thread
+/// allocation when an extent is revisited.
 private final class MetallumTemporalDepthHistory {
     let width: Int
     let height: Int
     let texture: MTLTexture
     var isValid: Bool
     var jitter: SIMD2<Float>
+    var lastUseToken: UInt64
 
     init(width: Int, height: Int, texture: MTLTexture) {
         self.width = width
@@ -493,6 +507,25 @@ private final class MetallumTemporalDepthHistory {
         self.texture = texture
         self.isValid = false
         self.jitter = .zero
+        self.lastUseToken = 0
+    }
+}
+
+/// Dynamic Temporal inputs need a display-sized depth texture because the
+/// Java motion/reactive ring is likewise kept at one fixed physical extent.
+/// Each frame copies only the current low-resolution content rectangle into
+/// this texture; MetalFX receives the same rectangle through inputContent*.
+private final class MetallumTemporalInputDepth {
+    let width: Int
+    let height: Int
+    let texture: MTLTexture
+    var lastUseToken: UInt64
+
+    init(width: Int, height: Int, texture: MTLTexture) {
+        self.width = width
+        self.height = height
+        self.texture = texture
+        self.lastUseToken = 0
     }
 }
 
@@ -3747,13 +3780,16 @@ private enum NativeState {
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
-    /// Keep the current DRS extent and one recently used neighbour resident.
-    /// This bounds the substantial Temporal output/history allocation while
-    /// making normal downscale/upscale oscillation allocation-free.
+    /// Fixed dynamic-resolution workspaces are display-sized, while fixed
+    /// presets keep their render-sized descriptor.  Two entries cover an
+    /// output-format transition without retaining obsolete generations.
     static let temporalWorkspaceCacheCapacityPerDevice = 2
     static var temporalWorkspaceUseToken: UInt64 = 0
     static var temporalWorkspaces: [TemporalWorkspaceKey: MetallumTemporalWorkspace] = [:]
-    static var temporalDepthHistories: [UInt: MetallumTemporalDepthHistory] = [:]
+    static let temporalDepthResourceCacheCapacityPerDevice = 2
+    static var temporalDepthResourceUseToken: UInt64 = 0
+    static var temporalDepthHistories: [TemporalDepthResourceKey: MetallumTemporalDepthHistory] = [:]
+    static var temporalInputDepths: [TemporalDepthResourceKey: MetallumTemporalInputDepth] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
     static var builtinShaderStates: [UInt: MetallumBuiltinShaderState] = [:]
@@ -5118,10 +5154,13 @@ private func ensureTemporalDepthHistory(
     width: Int,
     height: Int
 ) -> MetallumTemporalDepthHistory? {
-    let key = objectAddress(device)
-    if let cached = NativeState.temporalDepthHistories[key],
-       cached.width == width,
-       cached.height == height {
+    let key = TemporalDepthResourceKey(
+        deviceAddress: objectAddress(device),
+        width: width,
+        height: height
+    )
+    if let cached = NativeState.temporalDepthHistories[key] {
+        touchTemporalDepthResource(cached)
         return cached
     }
     let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -5139,7 +5178,96 @@ private func ensureTemporalDepthHistory(
     texture.label = "Metallum temporal previous depth"
     let history = MetallumTemporalDepthHistory(width: width, height: height, texture: texture)
     NativeState.temporalDepthHistories[key] = history
+    touchTemporalDepthResource(history)
+    evictInactiveTemporalDepthResourceIfNeeded(
+        deviceAddress: key.deviceAddress,
+        retaining: key,
+        histories: true
+    )
     return history
+}
+
+private func ensureTemporalInputDepth(
+    device: MTLDevice,
+    width: Int,
+    height: Int
+) -> MetallumTemporalInputDepth? {
+    let key = TemporalDepthResourceKey(
+        deviceAddress: objectAddress(device),
+        width: width,
+        height: height
+    )
+    if let cached = NativeState.temporalInputDepths[key] {
+        touchTemporalDepthResource(cached)
+        return cached
+    }
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .depth32Float,
+        width: width,
+        height: height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .private
+    descriptor.hazardTrackingMode = .tracked
+    // The temporal input is both sampled by MetalFX and used as the depth
+    // attachment for entity-velocity replay. Extra usage bits are permitted
+    // by MetalFX and keep both consumers on one fixed texture.
+    descriptor.usage = [.shaderRead, .renderTarget]
+    guard let texture = device.makeTexture(descriptor: descriptor) else {
+        return nil
+    }
+    texture.label = "Metallum temporal dynamic input depth"
+    let input = MetallumTemporalInputDepth(width: width, height: height, texture: texture)
+    NativeState.temporalInputDepths[key] = input
+    touchTemporalDepthResource(input)
+    evictInactiveTemporalDepthResourceIfNeeded(
+        deviceAddress: key.deviceAddress,
+        retaining: key,
+        histories: false
+    )
+    return input
+}
+
+private func touchTemporalDepthResource(_ history: MetallumTemporalDepthHistory) {
+    NativeState.temporalDepthResourceUseToken &+= 1
+    history.lastUseToken = NativeState.temporalDepthResourceUseToken
+}
+
+private func touchTemporalDepthResource(_ input: MetallumTemporalInputDepth) {
+    NativeState.temporalDepthResourceUseToken &+= 1
+    input.lastUseToken = NativeState.temporalDepthResourceUseToken
+}
+
+private func evictInactiveTemporalDepthResourceIfNeeded(
+    deviceAddress: UInt,
+    retaining resourceKey: TemporalDepthResourceKey,
+    histories: Bool
+) {
+    if histories {
+        let deviceResources = NativeState.temporalDepthHistories.filter {
+            $0.key.deviceAddress == deviceAddress
+        }
+        guard deviceResources.count > NativeState.temporalDepthResourceCacheCapacityPerDevice,
+              let stale = deviceResources
+                .filter({ $0.key != resourceKey })
+                .min(by: { $0.value.lastUseToken < $1.value.lastUseToken })
+        else {
+            return
+        }
+        NativeState.temporalDepthHistories.removeValue(forKey: stale.key)
+    } else {
+        let deviceResources = NativeState.temporalInputDepths.filter {
+            $0.key.deviceAddress == deviceAddress
+        }
+        guard deviceResources.count > NativeState.temporalDepthResourceCacheCapacityPerDevice,
+              let stale = deviceResources
+                .filter({ $0.key != resourceKey })
+                .min(by: { $0.value.lastUseToken < $1.value.lastUseToken })
+        else {
+            return
+        }
+        NativeState.temporalInputDepths.removeValue(forKey: stale.key)
+    }
 }
 
 private func buildHdrPipelines(device: MTLDevice) -> MetallumHdrPipelines? {
@@ -5767,7 +5895,8 @@ private func ensureTemporalWorkspace(
     inputWidth: Int,
     inputHeight: Int,
     outputWidth: Int,
-    outputHeight: Int
+    outputHeight: Int,
+    usesDynamicInputContent: Bool
 ) -> MetallumTemporalWorkspace? {
     let key = TemporalWorkspaceKey(
         deviceAddress: objectAddress(device),
@@ -5775,7 +5904,8 @@ private func ensureTemporalWorkspace(
         inputWidth: inputWidth,
         inputHeight: inputHeight,
         outputWidth: outputWidth,
-        outputHeight: outputHeight
+        outputHeight: outputHeight,
+        usesDynamicInputContent: usesDynamicInputContent
     )
     if let cached = NativeState.temporalWorkspaces[key] {
         touchTemporalWorkspace(cached)
@@ -5795,6 +5925,30 @@ private func ensureTemporalWorkspace(
     descriptor.inputHeight = inputHeight
     descriptor.outputWidth = outputWidth
     descriptor.outputHeight = outputHeight
+    if usesDynamicInputContent {
+        // MetalFX dynamic resolution keeps every assigned texture at the
+        // descriptor extent and moves only the active content rectangle.  The
+        // API expresses scale as output/input (1.0 at native resolution).
+        guard inputWidth == outputWidth,
+              inputHeight == outputHeight else {
+            return nil
+        }
+        let supportedMinimum = MTLFXTemporalScalerDescriptor
+            .supportedInputContentMinScale(device: device)
+        let supportedMaximum = MTLFXTemporalScalerDescriptor
+            .supportedInputContentMaxScale(device: device)
+        guard supportedMinimum.isFinite,
+              supportedMaximum.isFinite,
+              supportedMinimum <= 1.0,
+              // The public Dynamic preset bottoms out at 50% input scale.
+              supportedMaximum >= 2.0,
+              supportedMinimum <= supportedMaximum else {
+            return nil
+        }
+        descriptor.isInputContentPropertiesEnabled = true
+        descriptor.inputContentMinScale = supportedMinimum
+        descriptor.inputContentMaxScale = supportedMaximum
+    }
     descriptor.isReactiveMaskTextureEnabled = true
     descriptor.reactiveMaskTextureFormat = .r8Unorm
     descriptor.isAutoExposureEnabled = false
@@ -5806,6 +5960,27 @@ private func ensureTemporalWorkspace(
     descriptor.requiresSynchronousInitialization = false
     guard let scaler = descriptor.makeTemporalScaler(device: device) else {
         return nil
+    }
+    let dynamicColorInput: MTLTexture?
+    if usesDynamicInputContent {
+        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: sourcePixelFormat,
+            width: inputWidth,
+            height: inputHeight,
+            mipmapped: false
+        )
+        inputDescriptor.storageMode = .private
+        inputDescriptor.hazardTrackingMode = .tracked
+        // The texture is populated by a GPU blit and then read by MetalFX.
+        // MTLTextureUsage has no separate blit-destination flag.
+        inputDescriptor.usage = scaler.colorTextureUsage.union([.shaderRead])
+        guard let input = device.makeTexture(descriptor: inputDescriptor) else {
+            return nil
+        }
+        input.label = "Metallum MetalFX temporal dynamic color input"
+        dynamicColorInput = input
+    } else {
+        dynamicColorInput = nil
     }
     let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: sourcePixelFormat,
@@ -5827,17 +6002,19 @@ private func ensureTemporalWorkspace(
         outputWidth: outputWidth,
         outputHeight: outputHeight,
         scaler: scaler,
+        dynamicColorInput: dynamicColorInput,
         output: output
     )
     NativeState.temporalWorkspaces[key] = workspace
     touchTemporalWorkspace(workspace)
     evictInactiveTemporalWorkspaceIfNeeded(deviceAddress: key.deviceAddress, retaining: key)
     NSLog(
-        "[metallum] Apple MetalFX temporal scaler ready: %dx%d -> %dx%d, color %lu, color/depth/motion/reactive/output usage %lu/%lu/%lu/%lu/%lu",
+        "[metallum] Apple MetalFX temporal scaler ready: %dx%d -> %dx%d, dynamic input %d, color %lu, color/depth/motion/reactive/output usage %lu/%lu/%lu/%lu/%lu",
         inputWidth,
         inputHeight,
         outputWidth,
         outputHeight,
+        usesDynamicInputContent ? 1 : 0,
         sourcePixelFormat.rawValue,
         scaler.colorTextureUsage.rawValue,
         scaler.depthTextureUsage.rawValue,
@@ -5876,7 +6053,8 @@ private func temporalWorkspace(
     inputWidth: Int,
     inputHeight: Int,
     outputWidth: Int,
-    outputHeight: Int
+    outputHeight: Int,
+    usesDynamicInputContent: Bool
 ) -> MetallumTemporalWorkspace? {
     NativeState.temporalWorkspaces[TemporalWorkspaceKey(
         deviceAddress: objectAddress(device),
@@ -5884,7 +6062,8 @@ private func temporalWorkspace(
         inputWidth: inputWidth,
         inputHeight: inputHeight,
         outputWidth: outputWidth,
-        outputHeight: outputHeight
+        outputHeight: outputHeight,
+        usesDynamicInputContent: usesDynamicInputContent
     )]
 }
 
@@ -5898,17 +6077,17 @@ private func encodeTemporalScale(
     globalFence: MTLFence?,
     frame: MetallumRendererFrameStateSnapshot
 ) -> MTLTexture? {
+    let renderWidth = Int(frame.renderWidth)
+    let renderHeight = Int(frame.renderHeight)
+    let displayWidth = Int(frame.displayWidth)
+    let displayHeight = Int(frame.displayHeight)
     guard frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0,
-          colorTexture.width == Int(frame.renderWidth),
-          colorTexture.height == Int(frame.renderHeight),
-          depthTexture.width == colorTexture.width,
-          depthTexture.height == colorTexture.height,
+          colorTexture.width == renderWidth,
+          colorTexture.height == renderHeight,
+          depthTexture.width == renderWidth,
+          depthTexture.height == renderHeight,
           depthTexture.pixelFormat == .depth32Float,
-          motionTexture.width == colorTexture.width,
-          motionTexture.height == colorTexture.height,
           motionTexture.pixelFormat == .rg16Float,
-          reactiveTexture.width == colorTexture.width,
-          reactiveTexture.height == colorTexture.height,
           reactiveTexture.pixelFormat == .r8Unorm,
           objectAddress(colorTexture.device) == objectAddress(commandBuffer.device),
           objectAddress(depthTexture.device) == objectAddress(commandBuffer.device),
@@ -5916,13 +6095,104 @@ private func encodeTemporalScale(
           objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device) else {
         return nil
     }
-    guard let workspace = ensureTemporalWorkspace(
+
+    let usesDynamicInputContent = motionTexture.width == displayWidth
+        && motionTexture.height == displayHeight
+        && reactiveTexture.width == displayWidth
+        && reactiveTexture.height == displayHeight
+
+    if usesDynamicInputContent {
+        let depthKey = TemporalDepthResourceKey(
+            deviceAddress: objectAddress(commandBuffer.device),
+            width: displayWidth,
+            height: displayHeight
+        )
+        guard let dynamicDepth = NativeState.temporalInputDepths[depthKey],
+              dynamicDepth.texture.usage.contains(.shaderRead),
+              let workspace = ensureTemporalWorkspace(
+                device: commandBuffer.device,
+                sourcePixelFormat: colorTexture.pixelFormat,
+                inputWidth: displayWidth,
+                inputHeight: displayHeight,
+                outputWidth: displayWidth,
+                outputHeight: displayHeight,
+                usesDynamicInputContent: true
+              ),
+              let dynamicColorInput = workspace.dynamicColorInput,
+              dynamicColorInput.usage.isSuperset(of: workspace.scaler.colorTextureUsage),
+              dynamicDepth.texture.usage.isSuperset(of: workspace.scaler.depthTextureUsage),
+              motionTexture.usage.isSuperset(of: workspace.scaler.motionTextureUsage),
+              reactiveTexture.usage.isSuperset(of: workspace.scaler.reactiveTextureUsage),
+              workspace.output.usage.isSuperset(of: workspace.scaler.outputTextureUsage) else {
+            return nil
+        }
+
+        let contentScaleX = Float(displayWidth) / Float(renderWidth)
+        let contentScaleY = Float(displayHeight) / Float(renderHeight)
+        guard contentScaleX >= workspace.scaler.inputContentMinScale - 1.0e-3,
+              contentScaleY >= workspace.scaler.inputContentMinScale - 1.0e-3,
+              contentScaleX <= workspace.scaler.inputContentMaxScale + 1.0e-3,
+              contentScaleY <= workspace.scaler.inputContentMaxScale + 1.0e-3,
+              let blit = trackedMakeBlitCommandEncoder(commandBuffer) else {
+            return nil
+        }
+        blit.label = "Metallum temporal dynamic color pack"
+        if let globalFence {
+            blit.waitForFence(globalFence)
+        }
+        blit.copy(
+            from: colorTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: .init(),
+            sourceSize: MTLSize(width: renderWidth, height: renderHeight, depth: 1),
+            to: dynamicColorInput,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: .init()
+        )
+        if let globalFence {
+            blit.updateFence(globalFence)
+        }
+        trackedEndEncoding(blit)
+
+        workspace.preparedUiSeed = nil
+        workspace.scaler.colorTexture = dynamicColorInput
+        workspace.scaler.depthTexture = dynamicDepth.texture
+        workspace.scaler.motionTexture = motionTexture
+        workspace.scaler.reactiveMaskTexture = reactiveTexture
+        workspace.scaler.inputContentWidth = renderWidth
+        workspace.scaler.inputContentHeight = renderHeight
+        workspace.scaler.outputTexture = workspace.output
+        workspace.scaler.preExposure = frame.preExposure > 0 && frame.preExposure.isFinite
+            ? frame.preExposure
+            : 1.0
+        workspace.scaler.jitterOffsetX = frame.jitterX
+        workspace.scaler.jitterOffsetY = frame.jitterY
+        workspace.scaler.motionVectorScaleX = 1.0
+        workspace.scaler.motionVectorScaleY = 1.0
+        workspace.scaler.isDepthReversed = true
+        workspace.scaler.reset = frame.resetMask != 0
+        workspace.scaler.fence = globalFence
+        let timing = beginExternalGpuTiming(commandBuffer: commandBuffer, stage: .metalFx, fence: globalFence)
+        workspace.scaler.encode(commandBuffer: commandBuffer)
+        workspace.outputCommandBufferAddress = objectAddress(commandBuffer)
+        endExternalGpuTiming(timing, commandBuffer: commandBuffer, fence: globalFence)
+        return workspace.output
+    }
+
+    guard motionTexture.width == renderWidth,
+          motionTexture.height == renderHeight,
+          reactiveTexture.width == renderWidth,
+          reactiveTexture.height == renderHeight,
+          let workspace = ensureTemporalWorkspace(
             device: commandBuffer.device,
             sourcePixelFormat: colorTexture.pixelFormat,
-            inputWidth: colorTexture.width,
-            inputHeight: colorTexture.height,
-            outputWidth: Int(frame.displayWidth),
-            outputHeight: Int(frame.displayHeight)
+            inputWidth: renderWidth,
+            inputHeight: renderHeight,
+            outputWidth: displayWidth,
+            outputHeight: displayHeight,
+            usesDynamicInputContent: false
           ),
           colorTexture.usage.isSuperset(of: workspace.scaler.colorTextureUsage),
           depthTexture.usage.isSuperset(of: workspace.scaler.depthTextureUsage),
@@ -5936,8 +6206,8 @@ private func encodeTemporalScale(
     workspace.scaler.depthTexture = depthTexture
     workspace.scaler.motionTexture = motionTexture
     workspace.scaler.reactiveMaskTexture = reactiveTexture
-    workspace.scaler.inputContentWidth = colorTexture.width
-    workspace.scaler.inputContentHeight = colorTexture.height
+    workspace.scaler.inputContentWidth = renderWidth
+    workspace.scaler.inputContentHeight = renderHeight
     workspace.scaler.outputTexture = workspace.output
     workspace.scaler.preExposure = frame.preExposure > 0 && frame.preExposure.isFinite
         ? frame.preExposure
@@ -5962,19 +6232,31 @@ private func currentTemporalOutput(
     outputWidth: Int,
     outputHeight: Int
 ) -> MTLTexture? {
-    guard let workspace = temporalWorkspace(
-            device: commandBuffer.device,
-            sourcePixelFormat: inputTexture.pixelFormat,
-            inputWidth: inputTexture.width,
-            inputHeight: inputTexture.height,
-            outputWidth: outputWidth,
-            outputHeight: outputHeight
-          ),
-          workspace.outputCommandBufferAddress == objectAddress(commandBuffer),
-          workspace.sourcePixelFormat == inputTexture.pixelFormat else {
-        return nil
+    let dynamicWorkspace = temporalWorkspace(
+        device: commandBuffer.device,
+        sourcePixelFormat: inputTexture.pixelFormat,
+        inputWidth: outputWidth,
+        inputHeight: outputHeight,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
+        usesDynamicInputContent: true
+    )
+    let fixedWorkspace = temporalWorkspace(
+        device: commandBuffer.device,
+        sourcePixelFormat: inputTexture.pixelFormat,
+        inputWidth: inputTexture.width,
+        inputHeight: inputTexture.height,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
+        usesDynamicInputContent: false
+    )
+    for workspace in [dynamicWorkspace, fixedWorkspace].compactMap({ $0 }) {
+        if workspace.outputCommandBufferAddress == objectAddress(commandBuffer),
+           workspace.sourcePixelFormat == inputTexture.pixelFormat {
+            return workspace.output
+        }
     }
-    return workspace.output
+    return nil
 }
 
 private func validatedPreparedHdrUiSeed(
@@ -5983,14 +6265,27 @@ private func validatedPreparedHdrUiSeed(
     destinationTexture: MTLTexture
 ) -> MetallumPreparedHdrUiSeed? {
     let deviceAddress = objectAddress(commandBuffer.device)
-    let temporalWorkspace = temporalWorkspace(
+    let dynamicTemporalWorkspace = temporalWorkspace(
+        device: commandBuffer.device,
+        sourcePixelFormat: sourceTexture.pixelFormat,
+        inputWidth: destinationTexture.width,
+        inputHeight: destinationTexture.height,
+        outputWidth: destinationTexture.width,
+        outputHeight: destinationTexture.height,
+        usesDynamicInputContent: true
+    )
+    let fixedTemporalWorkspace = temporalWorkspace(
         device: commandBuffer.device,
         sourcePixelFormat: sourceTexture.pixelFormat,
         inputWidth: sourceTexture.width,
         inputHeight: sourceTexture.height,
         outputWidth: destinationTexture.width,
-        outputHeight: destinationTexture.height
+        outputHeight: destinationTexture.height,
+        usesDynamicInputContent: false
     )
+    let temporalWorkspace = [dynamicTemporalWorkspace, fixedTemporalWorkspace]
+        .compactMap { $0 }
+        .first { $0.preparedUiSeed?.commandBufferAddress == objectAddress(commandBuffer) }
     let prepared = NativeState.spatialWorkspaces[deviceAddress]?.preparedUiSeed
         ?? temporalWorkspace?.preparedUiSeed
     guard let prepared,
@@ -7592,9 +7887,9 @@ private func prepareRendererGeneration(
     let temporalEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
     let upscaleEnabled = spatialEnabled || temporalEnabled
 
-    // HDR and Spatial intermediates are generation-owned. Temporal instead
-    // retains a bounded per-extent cache: a DRS resize must not destroy the
-    // exact scaler that the next opposite transition will need.
+    // HDR and Spatial intermediates are generation-owned. Temporal resources
+    // are deliberately display/extent cached: a DRS generation change must
+    // never allocate a new scaler or depth history on the render thread.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
     NativeState.menuBlurWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
@@ -7602,8 +7897,13 @@ private func prepareRendererGeneration(
         NativeState.temporalWorkspaces = NativeState.temporalWorkspaces.filter {
             $0.key.deviceAddress != key
         }
+        NativeState.temporalDepthHistories = NativeState.temporalDepthHistories.filter {
+            $0.key.deviceAddress != key
+        }
+        NativeState.temporalInputDepths = NativeState.temporalInputDepths.filter {
+            $0.key.deviceAddress != key
+        }
     }
-    NativeState.temporalDepthHistories.removeValue(forKey: key)
     if !upscaleEnabled {
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
@@ -7874,25 +8174,78 @@ public func metallum_encode_temporal_diagnostics_v1(
                     && frame.upscaleResourceBytes > 0) else { return 0 }
         guard depthTexture.pixelFormat == .depth32Float,
               motionTexture.pixelFormat == .rg16Float,
-              reactiveTexture.pixelFormat == .r8Unorm else { return -2 }
-        if let classificationTexture = classificationTexture {
-            guard classificationTexture.width == depthTexture.width,
-                  classificationTexture.height == depthTexture.height,
-                  classificationTexture.pixelFormat == .r8Unorm else { return -2 }
+              reactiveTexture.pixelFormat == .r8Unorm,
+              objectAddress(depthTexture.device) == objectAddress(commandBuffer.device),
+              objectAddress(motionTexture.device) == objectAddress(commandBuffer.device),
+              objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device) else {
+            return -2
         }
-        guard depthTexture.width == Int(frame.renderWidth),
-              depthTexture.height == Int(frame.renderHeight),
-              motionTexture.width == depthTexture.width,
-              motionTexture.height == depthTexture.height,
-              reactiveTexture.width == depthTexture.width,
-              reactiveTexture.height == depthTexture.height else { return 0 }
+        let renderWidth = Int(frame.renderWidth)
+        let renderHeight = Int(frame.renderHeight)
+        let displayWidth = Int(frame.displayWidth)
+        let displayHeight = Int(frame.displayHeight)
+        let usesDynamicInputContent = motionTexture.width == displayWidth
+            && motionTexture.height == displayHeight
+            && reactiveTexture.width == displayWidth
+            && reactiveTexture.height == displayHeight
+        if let classificationTexture = classificationTexture {
+            guard classificationTexture.width == motionTexture.width,
+                  classificationTexture.height == motionTexture.height,
+                  classificationTexture.pixelFormat == .r8Unorm,
+                  objectAddress(classificationTexture.device) == objectAddress(commandBuffer.device) else {
+                return -2
+            }
+        }
+        guard depthTexture.width == renderWidth,
+              depthTexture.height == renderHeight,
+              motionTexture.width == reactiveTexture.width,
+              motionTexture.height == reactiveTexture.height,
+              (usesDynamicInputContent
+                || (motionTexture.width == renderWidth && motionTexture.height == renderHeight)) else {
+            return 0
+        }
         guard let pipeline = ensureTemporalDiagnosticPipeline(device: commandBuffer.device) else { return -3 }
 
-        let depthHistory = ensureTemporalDepthHistory(
-            device: commandBuffer.device,
-            width: depthTexture.width,
-            height: depthTexture.height
-        )
+        let diagnosticDepth: MTLTexture
+        let depthHistory: MetallumTemporalDepthHistory?
+        if usesDynamicInputContent {
+            guard let inputDepth = ensureTemporalInputDepth(
+                    device: commandBuffer.device,
+                    width: displayWidth,
+                    height: displayHeight
+                  ),
+                  let depthCopy = trackedMakeBlitCommandEncoder(commandBuffer) else {
+                return -4
+            }
+            depthCopy.label = "Metallum temporal dynamic depth pack"
+            depthCopy.waitForFence(globalFence)
+            depthCopy.copy(
+                from: depthTexture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: .init(),
+                sourceSize: MTLSize(width: renderWidth, height: renderHeight, depth: 1),
+                to: inputDepth.texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: .init()
+            )
+            depthCopy.updateFence(globalFence)
+            trackedEndEncoding(depthCopy)
+            diagnosticDepth = inputDepth.texture
+            depthHistory = ensureTemporalDepthHistory(
+                device: commandBuffer.device,
+                width: displayWidth,
+                height: displayHeight
+            )
+        } else {
+            diagnosticDepth = depthTexture
+            depthHistory = ensureTemporalDepthHistory(
+                device: commandBuffer.device,
+                width: renderWidth,
+                height: renderHeight
+            )
+        }
         let hasPreviousDepth = depthHistory?.isValid == true && frame.resetMask == 0
 
         NativeState.lastMotionTexture = motionTexture
@@ -7959,8 +8312,8 @@ public func metallum_encode_temporal_diagnostics_v1(
             height: Int(frame.renderHeight)
         ))
         encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentTexture(depthTexture, index: 0)
-        encoder.setFragmentTexture(depthHistory?.texture ?? depthTexture, index: 1)
+        encoder.setFragmentTexture(diagnosticDepth, index: 0)
+        encoder.setFragmentTexture(depthHistory?.texture ?? diagnosticDepth, index: 1)
         encoder.setFragmentBytes(
             &uniforms,
             length: MemoryLayout<MetallumTemporalDiagnosticUniforms>.stride,
@@ -7969,7 +8322,8 @@ public func metallum_encode_temporal_diagnostics_v1(
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         // Main depth and all renderer textures use untracked hazards. Carry the
         // read dependency through the shared fence before the following UI
-        // depth clear; the private outputs have no same-frame consumers.
+        // depth clear; dynamic inputs were copied into their persistent
+        // display-sized textures above.
         encoder.updateFence(globalFence, after: .fragment)
         encoder.endEncoding()
         if let depthHistory,
@@ -7977,11 +8331,11 @@ public func metallum_encode_temporal_diagnostics_v1(
             blit.label = "Metallum temporal depth history"
             blit.waitForFence(globalFence)
             blit.copy(
-                from: depthTexture,
+                from: diagnosticDepth,
                 sourceSlice: 0,
                 sourceLevel: 0,
                 sourceOrigin: .init(),
-                sourceSize: MTLSize(width: depthTexture.width, height: depthTexture.height, depth: 1),
+                sourceSize: MTLSize(width: renderWidth, height: renderHeight, depth: 1),
                 to: depthHistory.texture,
                 destinationSlice: 0,
                 destinationLevel: 0,
@@ -8051,8 +8405,45 @@ public func metallum_commit_entity_velocity_replay(
     _ packetCount: Int32
 ) -> Int32 {
     guard let packetsPointer, packetCount > 0 else { return 0 }
+    guard let frame = NativeState.rendererFrameState.snapshot() else { return 0 }
+    let renderWidth = Int(frame.renderWidth)
+    let renderHeight = Int(frame.renderHeight)
+    let displayWidth = Int(frame.displayWidth)
+    let displayHeight = Int(frame.displayHeight)
+    let replayDepth: MTLTexture
+    if depthTexture.width == motionTexture.width && depthTexture.height == motionTexture.height {
+        replayDepth = depthTexture
+    } else {
+        let key = TemporalDepthResourceKey(
+            deviceAddress: objectAddress(commandBuffer.device),
+            width: displayWidth,
+            height: displayHeight
+        )
+        guard let dynamicDepth = NativeState.temporalInputDepths[key],
+              dynamicDepth.texture.width == motionTexture.width,
+              dynamicDepth.texture.height == motionTexture.height else {
+            return -2
+        }
+        replayDepth = dynamicDepth.texture
+    }
+    guard renderWidth <= motionTexture.width,
+          renderHeight <= motionTexture.height,
+          motionTexture.width == reactiveTexture.width,
+          motionTexture.height == reactiveTexture.height,
+          replayDepth.width == motionTexture.width,
+          replayDepth.height == motionTexture.height,
+          replayDepth.pixelFormat == .depth32Float,
+          objectAddress(replayDepth.device) == objectAddress(commandBuffer.device),
+          objectAddress(motionTexture.device) == objectAddress(commandBuffer.device),
+          objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device),
+          classificationTexture == nil
+            || (classificationTexture!.width == motionTexture.width
+                && classificationTexture!.height == motionTexture.height
+                && objectAddress(classificationTexture!.device) == objectAddress(commandBuffer.device)) else {
+        return -2
+    }
 
-    let device = depthTexture.device
+    let device = replayDepth.device
 
     let pass = MTLRenderPassDescriptor()
     pass.colorAttachments[0].texture = motionTexture
@@ -8069,7 +8460,7 @@ public func metallum_commit_entity_velocity_replay(
         pass.colorAttachments[2].storeAction = .store
     }
 
-    pass.depthAttachment.texture = depthTexture
+    pass.depthAttachment.texture = replayDepth
     pass.depthAttachment.loadAction = .load
     pass.depthAttachment.storeAction = .store
 
@@ -8079,14 +8470,14 @@ public func metallum_commit_entity_velocity_replay(
 
     encoder.setViewport(MTLViewport(
         originX: 0, originY: 0,
-        width: Double(motionTexture.width),
-        height: Double(motionTexture.height),
+        width: Double(renderWidth),
+        height: Double(renderHeight),
         znear: 0, zfar: 1
     ))
     encoder.setScissorRect(MTLScissorRect(
         x: 0, y: 0,
-        width: motionTexture.width,
-        height: motionTexture.height
+        width: renderWidth,
+        height: renderHeight
     ))
 
     guard let depthState = ensureDepthStencilState(
@@ -8119,7 +8510,7 @@ public func metallum_commit_entity_velocity_replay(
             currentUnjitteredProjection: packet.currentUnjitteredProjection,
             previousUnjitteredProjection: packet.previousUnjitteredProjection,
             currentJitteredProjection: packet.currentUnjitteredProjection,
-            renderExtent: SIMD2<Float>(Float(motionTexture.width), Float(motionTexture.height)),
+            renderExtent: SIMD2<Float>(Float(renderWidth), Float(renderHeight)),
             alphaCutoff: packet.alphaCutoff,
             isDiscontinuous: UInt32(packet.isDiscontinuous)
         )
@@ -9976,7 +10367,12 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.temporalWorkspaces = NativeState.temporalWorkspaces.filter {
             $0.key.deviceAddress != deviceAddress
         }
-        NativeState.temporalDepthHistories.removeValue(forKey: deviceAddress)
+        NativeState.temporalDepthHistories = NativeState.temporalDepthHistories.filter {
+            $0.key.deviceAddress != deviceAddress
+        }
+        NativeState.temporalInputDepths = NativeState.temporalInputDepths.filter {
+            $0.key.deviceAddress != deviceAddress
+        }
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
@@ -10171,15 +10567,32 @@ private func supportsTemporalDiagnosticProfile(_ device: MTLDevice) -> Bool {
     guard MTLFXTemporalScalerDescriptor.supportsDevice(device) else { return false }
     guard #available(macOS 14.4, *) else { return false }
 
+    let supportedMinimum = MTLFXTemporalScalerDescriptor
+        .supportedInputContentMinScale(device: device)
+    let supportedMaximum = MTLFXTemporalScalerDescriptor
+        .supportedInputContentMaxScale(device: device)
+    guard supportedMinimum.isFinite,
+          supportedMaximum.isFinite,
+          supportedMinimum <= 1.0,
+          supportedMaximum >= 2.0,
+          supportedMinimum <= supportedMaximum else {
+        return false
+    }
+
     let descriptor = MTLFXTemporalScalerDescriptor()
     descriptor.colorTextureFormat = .rgba16Float
     descriptor.depthTextureFormat = .depth32Float
     descriptor.motionTextureFormat = .rg16Float
     descriptor.outputTextureFormat = .rgba16Float
-    descriptor.inputWidth = 64
-    descriptor.inputHeight = 64
+    // Validate the same one-scaler Dynamic DRS contract used at runtime:
+    // fixed physical input extent, then per-frame inputContent dimensions.
+    descriptor.inputWidth = 128
+    descriptor.inputHeight = 128
     descriptor.outputWidth = 128
     descriptor.outputHeight = 128
+    descriptor.isInputContentPropertiesEnabled = true
+    descriptor.inputContentMinScale = supportedMinimum
+    descriptor.inputContentMaxScale = supportedMaximum
     descriptor.isReactiveMaskTextureEnabled = true
     descriptor.reactiveMaskTextureFormat = .r8Unorm
     descriptor.requiresSynchronousInitialization = false
@@ -10188,8 +10601,8 @@ private func supportsTemporalDiagnosticProfile(_ device: MTLDevice) -> Bool {
     func supports(_ format: MTLPixelFormat, _ usage: MTLTextureUsage) -> Bool {
         let texture = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: format,
-            width: 64,
-            height: 64,
+            width: 128,
+            height: 128,
             mipmapped: false
         )
         texture.storageMode = .private
@@ -12267,14 +12680,27 @@ public func metallum_MTLCommandBuffer_encodeHdrUiBackdrop(
                     outputHeight: destinationTexture.height,
                     output: temporalOutput
                 )
-                guard let workspace = temporalWorkspace(
+                let dynamicWorkspace = temporalWorkspace(
+                    device: commandBuffer.device,
+                    sourcePixelFormat: sourceTexture.pixelFormat,
+                    inputWidth: destinationTexture.width,
+                    inputHeight: destinationTexture.height,
+                    outputWidth: destinationTexture.width,
+                    outputHeight: destinationTexture.height,
+                    usesDynamicInputContent: true
+                )
+                let fixedWorkspace = temporalWorkspace(
                     device: commandBuffer.device,
                     sourcePixelFormat: sourceTexture.pixelFormat,
                     inputWidth: sourceTexture.width,
                     inputHeight: sourceTexture.height,
                     outputWidth: destinationTexture.width,
-                    outputHeight: destinationTexture.height
-                ) else {
+                    outputHeight: destinationTexture.height,
+                    usesDynamicInputContent: false
+                )
+                guard let workspace = [dynamicWorkspace, fixedWorkspace]
+                    .compactMap({ $0 })
+                    .first(where: { objectAddress($0.output) == objectAddress(temporalOutput) }) else {
                     return -1
                 }
                 workspace.preparedUiSeed = prepared

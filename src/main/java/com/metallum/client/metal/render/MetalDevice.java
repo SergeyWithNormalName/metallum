@@ -945,8 +945,21 @@ public final class MetalDevice implements GpuDeviceBackend {
         // METALLUM_TEMPORAL_DIAGNOSTICS: Temporal itself is the consumer here.
         if (this.temporalDiagnosticsActive || temporalActive) {
             try {
+                // MetalFX Temporal's dynamic-resolution API requires fixed
+                // physical input textures. Keep the diagnostic ring at the
+                // display extent and let the native pass write only the active
+                // low-resolution rectangle. Fixed Temporal presets and the
+                // standalone diagnostic retain their exact render extent.
+                boolean dynamicTemporalInputs = temporalActive
+                        && MetalFxTemporalScaling.effectiveMode().isDynamic();
+                int temporalInputWidth = dynamicTemporalInputs
+                        ? dimensions.displayWidth()
+                        : dimensions.renderWidth();
+                int temporalInputHeight = dynamicTemporalInputs
+                        ? dimensions.displayHeight()
+                        : dimensions.renderHeight();
                 nextDiagnosticResources = this.acquireTemporalDiagnosticResources(
-                        this, dimensions.renderWidth(), dimensions.renderHeight()
+                        this, temporalInputWidth, temporalInputHeight
                 );
             } catch (RuntimeException exception) {
                 if (temporalActive) {
@@ -1816,9 +1829,11 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     /**
-     * Acquires a render-extent-specific Temporal input ring without touching
-     * the current ring. Native releases remain deferred through each texture's
-     * Metal destruction queue, so an LRU eviction cannot race in-flight work.
+     * Acquires a fixed physical Temporal input ring without touching the
+     * current ring. Dynamic Temporal keys this by display extent so changing
+     * the active DRS content rectangle performs no Java-side allocation.
+     * Native releases remain deferred through each texture's Metal destruction
+     * queue, so an LRU eviction cannot race in-flight work.
      */
     private TemporalDiagnosticResources acquireTemporalDiagnosticResources(
             final MetalDevice device,

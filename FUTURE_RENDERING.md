@@ -8,9 +8,9 @@ This document analyzes the readiness of the **Metallum** rendering engine for fu
 
 Apple Silicon GPUs support two upscalers: **Spatial** and **Temporal**.
 - **Current Status**: Spatial MetalFX and **Temporal Upscaling** live in the same Sodium `MetalFX` group. `MetalFxTemporalScaling` persists three Temporal presets: **Quality** (3/4 linear resolution, 15 jitter phases), **Performance** (1/2), and **Ultra Performance** (1/3). Selecting either scaler clears the other setting, so exactly one owns a frame.
-- **Production path**: Every Temporal preset uses a persistent native Apple `MTLFXTemporalScaler` and a private full-resolution output per renderer generation. The scaler consumes low-resolution color/depth-derived motion plus triple-buffered `RG16Float` motion and `R8Unorm` reactive inputs, then seeds the full-resolution UI/present route.
-- **Safety contract**: Format, usage, extent, device and generation checks fail closed to native resolution. The MetalFX scaler is initialized synchronously only on a generation change; it does not allocate a texture or scaler in the frame loop.
-- **Automated proof**: Metal API/GPU validation encodes the MetalFX descriptor for all three scales. The native runtime harness validates the motion/reactive → Temporal → HDR-precompose/UI-backdrop route, including camera and depth-disocclusion cases.
+- **Production path**: Fixed Temporal presets use their render-sized inputs. Temporal Dynamic uses MetalFX's `inputContent*` API: it retains one display-sized scaler, color/depth inputs and output, while a GPU blit packs only the active low-resolution world rectangle at the origin. The triple-buffered `RG16Float` motion and `R8Unorm` reactive ring is likewise display-sized but rasterized only inside that active rectangle.
+- **Safety contract**: Format, usage, device, active-content and generation checks fail closed to native resolution. Dynamic depth staging and depth history are GPU-private and retained across DRS generations; a resolution change resets history but does not recreate the scaler, motion/reactive ring, staging depth or history texture.
+- **Automated proof**: Metal API/GPU validation encodes the MetalFX descriptor for all three fixed scales and the Dynamic path. The native runtime harness validates a `64×64 → 48×48` DRS transition inside unchanged `96×96` physical inputs, plus motion/reactive → Temporal → HDR-precompose/UI-backdrop, camera and depth-disocclusion cases.
 
 ---
 
@@ -35,10 +35,8 @@ Temporal Anti-Aliasing (TAA) blends the current frame with the historical accumu
 ## 4. Dynamic Resolution Scaling (DRS)
 
 Dynamic Resolution alters the rendering target resolution based on GPU workload:
-- **Current Status**: Sizing descriptors (e.g. `render_extent` vs `display_extent` in [NativeHdrFrameGraph.java:L114-L131](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/src/main/java/com/metallum/client/metal/render/framegraph/NativeHdrFrameGraph.java#L114-L131)) are already separated, which is a major prerequisite.
-- **What is Missing**:
-  - A dynamic workload controller that monitors GPU timing reports (`MetalGpuTiming`).
-  - If GPU frame time exceeds 8.3ms (for 120Hz) or 16.6ms (for 60Hz), it must scale the `render_extent` dynamically, forcing the viewport and culling grids to adapt mid-frame.
+- **Current Status**: `MetallumDrsController` consumes completed presented-GPU timing, targets 60 FPS with 15.5 ms / 13.5 ms hysteresis, and adjusts the world render extent from 100% down to 50%. Spatial DRS resizes the world targets directly. Temporal Dynamic keeps MetalFX's physical inputs at the display extent and updates only `inputContentWidth/Height`; low-resolution color and depth are copied GPU-to-GPU into the active origin rectangle, with no CPU readback or render-thread resource allocation on a scale transition.
+- **Boundary**: Minecraft still physically resizes its world targets to reduce shaded pixels. The one-time cost of enabling Temporal Dynamic, changing display size or changing color format remains intentional; ordinary DRS scale changes reuse the Temporal resources and reset history safely.
 
 ---
 
