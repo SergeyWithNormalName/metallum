@@ -99,6 +99,13 @@ import java.util.regex.Pattern;
 
 @Environment(EnvType.CLIENT)
 public final class MetalDevice implements GpuDeviceBackend {
+    /**
+     * DRS normally oscillates between one or two neighbouring input extents.
+     * Keeping that small set resident avoids allocating the Temporal motion /
+     * reactive ring on the render thread at every resolution transition.
+     */
+    private static final int TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY = 2;
+
     private record RendererGenerationKey(
             int renderWidth,
             int renderHeight,
@@ -159,6 +166,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         RendererAdmissionLogState {
             rejectionReasons = Set.copyOf(rejectionReasons);
         }
+    }
+
+    private record TemporalDiagnosticResourceKey(int width, int height) {
     }
 
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
@@ -244,6 +254,13 @@ public final class MetalDevice implements GpuDeviceBackend {
     private FrameState.@Nullable Extent activeDisplayExtent;
     @Nullable
     private TemporalDiagnosticResources temporalDiagnosticResources;
+    /** Access-ordered so eviction releases the least-recently-used inactive extent. */
+    private final LinkedHashMap<TemporalDiagnosticResourceKey, TemporalDiagnosticResources>
+            temporalDiagnosticResourceCache = new LinkedHashMap<>(
+                    TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY,
+                    0.75f,
+                    true
+            );
     private boolean temporalDiagnosticFailureLogged;
     @Nullable
     private AdvancedLightingGpuResources advancedLightingResources;
@@ -628,10 +645,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSemanticMask.close();
             this.hdrSemanticMask = null;
         }
-        if (this.temporalDiagnosticResources != null) {
-            this.temporalDiagnosticResources.close();
-            this.temporalDiagnosticResources = null;
-        }
+        this.clearTemporalDiagnosticResourceCache();
         SodiumLightSidecar.releaseAll();
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
@@ -931,7 +945,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         // METALLUM_TEMPORAL_DIAGNOSTICS: Temporal itself is the consumer here.
         if (this.temporalDiagnosticsActive || temporalActive) {
             try {
-                nextDiagnosticResources = TemporalDiagnosticResources.create(
+                nextDiagnosticResources = this.acquireTemporalDiagnosticResources(
                         this, dimensions.renderWidth(), dimensions.renderHeight()
                 );
             } catch (RuntimeException exception) {
@@ -965,6 +979,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                         HdrSemanticState.isRequested()
                 );
             }
+        } else {
+            this.clearTemporalDiagnosticResourceCache();
         }
 
         RendererGenerationConfig previousGeneration = this.activeRendererGeneration;
@@ -1265,11 +1281,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.activeDisplayExtent = new FrameState.Extent(
                 dimensions.displayWidth(), dimensions.displayHeight()
         );
-        TemporalDiagnosticResources previousDiagnostics = this.temporalDiagnosticResources;
         this.temporalDiagnosticResources = nextDiagnosticResources;
-        if (previousDiagnostics != null) {
-            previousDiagnostics.close();
-        }
         RendererGenerationKey key = new RendererGenerationKey(
                 dimensions.renderWidth(),
                 dimensions.renderHeight(),
@@ -1803,6 +1815,42 @@ public final class MetalDevice implements GpuDeviceBackend {
         EntityVelocityDrawRecorder.getInstance().clearFrame();
     }
 
+    /**
+     * Acquires a render-extent-specific Temporal input ring without touching
+     * the current ring. Native releases remain deferred through each texture's
+     * Metal destruction queue, so an LRU eviction cannot race in-flight work.
+     */
+    private TemporalDiagnosticResources acquireTemporalDiagnosticResources(
+            final MetalDevice device,
+            final int width,
+            final int height
+    ) {
+        TemporalDiagnosticResourceKey key = new TemporalDiagnosticResourceKey(width, height);
+        TemporalDiagnosticResources cached = this.temporalDiagnosticResourceCache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        TemporalDiagnosticResources created = TemporalDiagnosticResources.create(device, width, height);
+        this.temporalDiagnosticResourceCache.put(key, created);
+        while (this.temporalDiagnosticResourceCache.size() > TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY) {
+            Iterator<TemporalDiagnosticResources> iterator =
+                    this.temporalDiagnosticResourceCache.values().iterator();
+            TemporalDiagnosticResources evicted = iterator.next();
+            iterator.remove();
+            evicted.close();
+        }
+        return created;
+    }
+
+    /** Clears every cached Temporal extent when Temporal itself is no longer admitted. */
+    private void clearTemporalDiagnosticResourceCache() {
+        for (TemporalDiagnosticResources resources : this.temporalDiagnosticResourceCache.values()) {
+            resources.close();
+        }
+        this.temporalDiagnosticResourceCache.clear();
+        this.temporalDiagnosticResources = null;
+    }
+
     private void disableTemporalInputs(final String reason, @Nullable final Throwable exception) {
         if (this.temporalScalingActive) {
             this.temporalScalingActive = false;
@@ -1811,10 +1859,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             );
         }
         this.temporalDiagnosticsActive = false;
-        if (this.temporalDiagnosticResources != null) {
-            this.temporalDiagnosticResources.close();
-            this.temporalDiagnosticResources = null;
-        }
+        this.clearTemporalDiagnosticResourceCache();
         this.publishedRendererGeneration = null;
         if (!this.temporalDiagnosticFailureLogged) {
             this.temporalDiagnosticFailureLogged = true;
