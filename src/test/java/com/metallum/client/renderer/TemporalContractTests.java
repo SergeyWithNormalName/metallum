@@ -11,6 +11,7 @@ import com.metallum.client.renderer.temporal.Matrix4;
 import com.metallum.client.renderer.temporal.TemporalJitterProjection;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import org.joml.Matrix4f;
+import org.joml.Vector4f;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Set;
@@ -111,6 +112,22 @@ public final class TemporalContractTests {
                 "Projection X jitter was not converted from pixels to clip space");
         require(Math.abs(projection.m21() - 0.0025f) <= 1.0e-7f,
                 "Projection Y jitter did not invert MetalFX's render-target Y axis");
+
+        Matrix4f perspective = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0), 16.0f / 9.0f, 0.05f, 1_000.0f, true
+        );
+        Matrix4f jitteredPerspective = new Matrix4f(perspective);
+        TemporalJitterProjection.apply(jitteredPerspective, jitter, 200, 100);
+        Vector4f point = new Vector4f(0.7f, 0.2f, -6.0f, 1.0f);
+        Vector4f unjitteredClip = perspective.transform(new Vector4f(point));
+        Vector4f jitteredClip = jitteredPerspective.transform(new Vector4f(point));
+        float unjitteredX = unjitteredClip.x / unjitteredClip.w;
+        float unjitteredY = unjitteredClip.y / unjitteredClip.w;
+        float rasterX = jitteredClip.x / jitteredClip.w;
+        float rasterY = jitteredClip.y / jitteredClip.w;
+        require(Math.abs((rasterX + 0.0025f) - unjitteredX) <= 1.0e-6f
+                        && Math.abs((rasterY + 0.0025f) - unjitteredY) <= 1.0e-6f,
+                "Temporal unjitter signs do not match Minecraft's right-handed perspective raster");
     }
 
     private static void testJitterPrecedesViewBobbing() {

@@ -186,10 +186,14 @@ private enum MotionVectorValidationMain {
 
             let jittered = try dispatch(
                 device: device, queue: queue, pipeline: pipeline,
-                inputs: [inputs[0]], extent: SIMD2(1280, 720), resetMask: 0,
+                inputs: [MotionInput(
+                    currentClip: SIMD4(-1.0 / 1280.0, -0.5 / 720.0, 0.5, 1.0),
+                    previousClip: SIMD4(-0.5 / 1280.0, -0.25 / 720.0, 0.5, 1.0)
+                )],
+                extent: SIMD2(1280, 720), resetMask: 0,
                 jitter: SIMD2(0.5, -0.25), prevJitter: SIMD2(0.25, -0.125)
             )
-            try validate(jittered[0], expected: SIMD2(0.25, -0.125), reactive: 0, name: "jitter unjittering")
+            try validate(jittered[0], expected: .zero, reactive: 0, name: "jitter unjittering")
 
             guard let reprojFunction = library.makeFunction(name: "metallum_reprojection_validate") else {
                 throw ValidationFailure.message("Reprojection validation kernel is absent")
@@ -211,8 +215,8 @@ private enum MotionVectorValidationMain {
                 currentCameraPosition: SIMD4<Float>(0, 0, 0, 0),
                 previousCameraPosition: SIMD4<Float>(-0.1, 0, 0, 0),
                 renderExtent: SIMD2<Float>(1280, 720),
-                jitter: SIMD2<Float>(0.5, -0.25),
-                previousJitter: SIMD2<Float>(0.25, -0.125),
+                jitter: .zero,
+                previousJitter: .zero,
                 reserved_padding: .zero,
                 resetMask: 0,
                 previousDepthValid: 0
@@ -224,7 +228,7 @@ private enum MotionVectorValidationMain {
                 device: device, queue: queue, pipeline: reprojPipeline,
                 inputs: reprojInputs, uniforms: uniforms
             )
-            try validate(reprojOutputs[0], expected: SIMD2<Float>(64.5, -0.25), reactive: 0, name: "reprojection roundtrip math")
+            try validate(reprojOutputs[0], expected: SIMD2<Float>(64, 0), reactive: 0, name: "reprojection roundtrip math")
 
             print("GPU motion-vector validation passed (11 cases, <=0.01 px)")
         } catch {

@@ -96,10 +96,13 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
         1.0f - (input.position.y / uniforms.renderExtent.y) * 2.0f
     );
 
-    // Unjitter the current NDC coordinate
+    // A positive logical jitter moves Minecraft's right-handed perspective
+    // raster by the opposite amount. Undo that physical shift before static
+    // reprojection; applying the signs below in reverse injects up to two
+    // jitter samples of false camera motion every frame.
     float2 currentNdcUnjittered = float2(
-        currentNdc.x - uniforms.jitter.x * 2.0f / uniforms.renderExtent.x,
-        currentNdc.y + uniforms.jitter.y * 2.0f / uniforms.renderExtent.y
+        currentNdc.x + uniforms.jitter.x * 2.0f / uniforms.renderExtent.x,
+        currentNdc.y - uniforms.jitter.y * 2.0f / uniforms.renderExtent.y
     );
 
     // Reconstruct camera space position from depth
@@ -136,8 +139,8 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
     // deliberately measured between unjittered frames, so shift the previous
     // location back to the raster coordinate only for the depth lookup.
     float2 previousNdcJittered = float2(
-        previousNdc.x + uniforms.previousJitter.x * 2.0f / uniforms.renderExtent.x,
-        previousNdc.y - uniforms.previousJitter.y * 2.0f / uniforms.renderExtent.y
+        previousNdc.x - uniforms.previousJitter.x * 2.0f / uniforms.renderExtent.x,
+        previousNdc.y + uniforms.previousJitter.y * 2.0f / uniforms.renderExtent.y
     );
     bool outOfBounds = previousNdc.x < -1.0f || previousNdc.x > 1.0f
         || previousNdc.y < -1.0f || previousNdc.y > 1.0f
@@ -197,11 +200,11 @@ fragment float4 metallum_fast_temporal_resolve_fs(
     float2 outputUv = input.position.xy / outputExtent;
     float2 inputTexel = 1.0f / uniforms.inputExtent;
 
-    // The low-resolution scene carries the current projection jitter. Sample
-    // at the matching shifted coordinate before blending it with the
-    // unjittered display-resolution history.
+    // The logical jitter is the source-coordinate offset used to generate the
+    // low-resolution scene. To reconstruct the display reference coordinate,
+    // read the input at the inverse offset before blending history.
     float2 currentUv = clamp(
-        outputUv + uniforms.jitter / uniforms.inputExtent,
+        outputUv - uniforms.jitter / uniforms.inputExtent,
         0.0f,
         1.0f
     );
@@ -261,13 +264,13 @@ kernel void metallum_motion_vector_validate(
     } else {
         float2 currentNdc = input.currentClip.xy / input.currentClip.w;
         float2 currentNdcUnjittered = float2(
-            currentNdc.x - jitter.x * 2.0f / renderExtent.x,
-            currentNdc.y + jitter.y * 2.0f / renderExtent.y
+            currentNdc.x + jitter.x * 2.0f / renderExtent.x,
+            currentNdc.y - jitter.y * 2.0f / renderExtent.y
         );
         float2 previousNdc = input.previousClip.xy / input.previousClip.w;
         float2 previousNdcUnjittered = float2(
-            previousNdc.x - prevJitter.x * 2.0f / renderExtent.x,
-            previousNdc.y + prevJitter.y * 2.0f / renderExtent.y
+            previousNdc.x + prevJitter.x * 2.0f / renderExtent.x,
+            previousNdc.y - prevJitter.y * 2.0f / renderExtent.y
         );
         output.motion = metallum_motion_pixels(currentNdcUnjittered, previousNdcUnjittered, renderExtent);
         output.reactive = all(isfinite(output.motion)) ? 0.0f : 1.0f;
@@ -305,10 +308,11 @@ kernel void metallum_reprojection_validate(
             1.0f - (input.pixelCoord.y / uniforms.renderExtent.y) * 2.0f
         );
 
-        // Unjitter the current NDC coordinate
+        // See metallum_temporal_diagnostic_fs for the right-handed jitter
+        // convention used by the Minecraft projection matrix.
         float2 currentNdcUnjittered = float2(
-            currentNdc.x - uniforms.jitter.x * 2.0f / uniforms.renderExtent.x,
-            currentNdc.y + uniforms.jitter.y * 2.0f / uniforms.renderExtent.y
+            currentNdc.x + uniforms.jitter.x * 2.0f / uniforms.renderExtent.x,
+            currentNdc.y - uniforms.jitter.y * 2.0f / uniforms.renderExtent.y
         );
 
         // Reconstruct camera space position from depth
