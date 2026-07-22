@@ -12,6 +12,7 @@ public final class TemporalScalingTests {
         testPresetDimensions();
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
+        testEffectiveSelection();
         System.out.println("MetalFX Temporal scaling policy validation passed");
     }
 
@@ -30,6 +31,8 @@ public final class TemporalScalingTests {
     }
 
     private static void testPresetDimensions() {
+        require(Math.abs(TemporalScalingMode.QUALITY.linearScale() - 0.75f) <= 1.0e-6f,
+                "quality linear scale");
         MetalFxTemporalScaling.Dimensions off = MetalFxTemporalScaling.dimensions(
                 TemporalScalingMode.OFF, 3024, 1964
         );
@@ -38,8 +41,8 @@ public final class TemporalScalingTests {
         MetalFxTemporalScaling.Dimensions quality = MetalFxTemporalScaling.dimensions(
                 TemporalScalingMode.QUALITY, 3024, 1964
         );
-        require(quality.renderWidth() == 2016 && quality.renderHeight() == 1309, "quality dimensions");
-        require(Math.abs(quality.actualPixelScale() - 0.4443f) < 0.0001f, "quality pixel workload");
+        require(quality.renderWidth() == 2268 && quality.renderHeight() == 1473, "quality dimensions");
+        require(Math.abs(quality.actualPixelScale() - 0.5625f) < 0.0001f, "quality pixel workload");
 
         MetalFxTemporalScaling.Dimensions performance = MetalFxTemporalScaling.dimensions(
                 TemporalScalingMode.PERFORMANCE, 3024, 1964
@@ -90,6 +93,30 @@ public final class TemporalScalingTests {
         require(BenchmarkScalingMode.TEMPORAL_PERFORMANCE.temporalMode()
                         == TemporalScalingMode.PERFORMANCE,
                 "Temporal benchmark selects requested preset");
+    }
+
+    private static void testEffectiveSelection() {
+        require(MetalFxTemporalScaling.selectEffectiveMode(
+                        TemporalScalingMode.QUALITY,
+                        TemporalScalingMode.PERFORMANCE,
+                        false,
+                        true
+                ) == TemporalScalingMode.PERFORMANCE,
+                "Benchmark override must also select the effective Temporal mode");
+        require(MetalFxTemporalScaling.selectEffectiveMode(
+                        TemporalScalingMode.QUALITY,
+                        TemporalScalingMode.PERFORMANCE,
+                        true,
+                        true
+                ) == TemporalScalingMode.OFF,
+                "Runtime disable must override a benchmark Temporal mode");
+        require(MetalFxTemporalScaling.selectEffectiveMode(
+                        TemporalScalingMode.QUALITY,
+                        null,
+                        false,
+                        false
+                ) == TemporalScalingMode.OFF,
+                "Unsupported devices must reject the selected Temporal mode");
     }
 
     private static void require(final boolean condition, final String message) {

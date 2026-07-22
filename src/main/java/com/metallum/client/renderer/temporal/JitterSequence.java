@@ -15,11 +15,11 @@ public final class JitterSequence {
     /**
      * Samples the sequence for the actual render/display ratio used by MetalFX.
      *
-     * <p>MetalFX needs approximately {@code ceil(8 * scale^2)} phases to distribute its subpixel
-     * samples: 18 at 1.5x, 32 at 2x, and 72 at 3x. Render targets are rounded to whole pixels,
-     * so the target count is rounded too; one-pixel rounding must not turn the 18-phase Quality
-     * sequence into 19. Keeping this calculation here prevents the world projection and native
-     * scaler packet from drifting apart.</p>
+     * <p>MetalFX needs {@code ceil(8 * scale^2)} phases to distribute its subpixel samples:
+     * 15 at the 4/3x Quality scale, 32 at 2x, and 72 at 3x. Render targets are rounded to whole
+     * pixels, so calculate from the actual ratio and round upward to avoid undersampling. Keeping
+     * this calculation here prevents the world projection and native scaler packet from drifting
+     * apart.</p>
      */
     public static FrameState.JitterOffset sample(
             final long frameId,
@@ -49,7 +49,7 @@ public final class JitterSequence {
                 displayWidth / (double) renderWidth,
                 displayHeight / (double) renderHeight
         );
-        final long phases = Math.round(BASE_PHASE_COUNT * scale * scale);
+        final long phases = (long) Math.ceil(BASE_PHASE_COUNT * scale * scale);
         return (int) Math.max(BASE_PHASE_COUNT, Math.min(phases, (long) Integer.MAX_VALUE));
     }
 

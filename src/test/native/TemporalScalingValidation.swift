@@ -146,12 +146,12 @@ private enum TemporalScalingValidation {
             throw ValidationError.failed("No Metal device")
         }
         try require(MTLFXTemporalScalerDescriptor.supportsDevice(device), "MetalFX Temporal unsupported")
-        // 288x162 lets every exposed scale resolve exactly: 2/3, 1/2 and 1/3.
-        try validatePreset(device: device, inputWidth: 192, inputHeight: 108,
-                           outputWidth: 288, outputHeight: 162, label: "Quality")
-        try validatePreset(device: device, inputWidth: 144, inputHeight: 81,
-                           outputWidth: 288, outputHeight: 162, label: "Performance")
-        try validatePreset(device: device, inputWidth: 96, inputHeight: 54,
-                           outputWidth: 288, outputHeight: 162, label: "Ultra Performance")
+        // 288x180 lets every exposed scale resolve exactly: 3/4, 1/2 and 1/3.
+        try validatePreset(device: device, inputWidth: 216, inputHeight: 135,
+                           outputWidth: 288, outputHeight: 180, label: "Quality")
+        try validatePreset(device: device, inputWidth: 144, inputHeight: 90,
+                           outputWidth: 288, outputHeight: 180, label: "Performance")
+        try validatePreset(device: device, inputWidth: 96, inputHeight: 60,
+                           outputWidth: 288, outputHeight: 180, label: "Ultra Performance")
     }
 }

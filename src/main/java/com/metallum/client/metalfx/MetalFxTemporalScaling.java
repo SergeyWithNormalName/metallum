@@ -49,10 +49,12 @@ public final class MetalFxTemporalScaling {
     public static TemporalScalingMode effectiveMode() {
         ensureConfigLoaded();
         MetalDevice device = MetalDevice.getInstance();
-        if (runtimeDisabled || device == null || !device.supportsTemporalScaling()) {
-            return TemporalScalingMode.OFF;
-        }
-        return requestedMode;
+        return selectEffectiveMode(
+                requestedMode,
+                benchmarkOverride,
+                runtimeDisabled,
+                device != null && device.supportsTemporalScaling()
+        );
     }
 
     public static boolean isActive() {
@@ -174,6 +176,17 @@ public final class MetalFxTemporalScaling {
         return overrideMode != null
                 ? overrideMode
                 : (persistedMode == null ? TemporalScalingMode.OFF : persistedMode);
+    }
+
+    /** Applies the one canonical requested-mode selector before runtime admission. */
+    static TemporalScalingMode selectEffectiveMode(
+            final TemporalScalingMode persistedMode,
+            final TemporalScalingMode overrideMode,
+            final boolean disabledAtRuntime,
+            final boolean supportedByDevice
+    ) {
+        TemporalScalingMode selected = selectRequestedMode(persistedMode, overrideMode);
+        return disabledAtRuntime || !supportedByDevice ? TemporalScalingMode.OFF : selected;
     }
 
     private static int scaledDimension(final int displayDimension, final float scale) {

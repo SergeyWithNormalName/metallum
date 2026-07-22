@@ -5,7 +5,9 @@ import java.util.Locale;
 /** Explicit MetalFX Temporal presets. The lowest preset is intentionally opt-in. */
 public enum TemporalScalingMode {
     OFF("metallum.options.metalfx_temporal_scaling.off", 1.0f),
-    QUALITY("metallum.options.metalfx_temporal_scaling.quality", 2.0f / 3.0f),
+    // Quality keeps 75% of each display dimension (56.25% of display pixels)
+    // to preserve more stable near-field block edges than the 2/3x preset.
+    QUALITY("metallum.options.metalfx_temporal_scaling.quality", 0.75f),
     PERFORMANCE("metallum.options.metalfx_temporal_scaling.performance", 0.50f),
     ULTRA_PERFORMANCE("metallum.options.metalfx_temporal_scaling.ultra_performance", 1.0f / 3.0f);
 

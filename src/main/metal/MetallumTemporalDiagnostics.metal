@@ -12,6 +12,7 @@ struct MetallumTemporalUniforms {
     float4x4 inverseCurrentProjection;
     float4x4 previousView;
     float4x4 previousProjection;
+    float4x4 inversePreviousJitteredProjection;
     float4 currentCameraPosition;
     float4 previousCameraPosition;
     float2 renderExtent;
@@ -130,7 +131,14 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
         return output;
     }
     float2 previousNdc = previousClip.xy / previousClip.w;
-    float previousDepth = previousClip.z / previousClip.w;
+    float4 expectedPreviousViewH = uniforms.previousView * float4(previousRelative, 1.0f);
+    if (!all(isfinite(expectedPreviousViewH)) || abs(expectedPreviousViewH.w) < 1.0e-7f) {
+        output.motion = float2(0.0f);
+        output.reactive = 1.0f;
+        output.classification = 4.0f / 255.0f; // 4: other invalid
+        return output;
+    }
+    float expectedPreviousViewDepth = abs(expectedPreviousViewH.z / expectedPreviousViewH.w);
 
     // Compute motion vectors
     output.motion = metallum_motion_pixels(currentNdcUnjittered, previousNdc, uniforms.renderExtent);
@@ -151,7 +159,8 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
         output.classification = 3.0f / 255.0f; // 3: out-of-frame
         output.motion = float2(0.0f);
     } else {
-        bool valid = all(isfinite(output.motion)) && isfinite(previousDepth);
+        bool valid = all(isfinite(output.motion)) && isfinite(expectedPreviousViewDepth)
+            && expectedPreviousViewDepth > 0.0f;
         bool depthDisoccluded = false;
         if (valid && uniforms.previousDepthValid != 0u) {
             float2 previousPixel = float2(
@@ -160,12 +169,29 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
             );
             uint2 previousPixelCoordinate = uint2(previousPixel);
             float recordedPreviousDepth = previousDepthTexture.read(previousPixelCoordinate).x;
-            // Reversed-Z depth has much finer resolution near the camera.  A
-            // small relative allowance preserves history on continuous slopes,
-            // while a different surface at the reprojected location rejects it.
-            float depthTolerance = max(1.0e-5f, abs(previousDepth) * 0.015f);
-            depthDisoccluded = !isfinite(recordedPreviousDepth)
-                || abs(recordedPreviousDepth - previousDepth) > depthTolerance;
+            float4 recordedPreviousViewH = uniforms.inversePreviousJitteredProjection
+                * float4(previousNdcJittered, recordedPreviousDepth, 1.0f);
+            bool recordedDepthValid = isfinite(recordedPreviousDepth)
+                && recordedPreviousDepth > 0.0f && recordedPreviousDepth < 1.0f
+                && all(isfinite(recordedPreviousViewH))
+                && abs(recordedPreviousViewH.w) >= 1.0e-7f;
+            float recordedPreviousViewDepth = recordedDepthValid
+                ? abs(recordedPreviousViewH.z / recordedPreviousViewH.w)
+                : 0.0f;
+
+            // Compare in view-space distance, not non-linear reversed-Z.  At
+            // long range a fixed normalized-depth epsilon covers many blocks,
+            // allowing a reprojected neighbour to contaminate history.  The
+            // lower bound absorbs float/raster quantization; the relative
+            // allowance is capped at one quarter of a Minecraft block so a
+            // distinct voxel surface cannot become a valid history match.
+            float viewDepthTolerance = min(
+                0.25f,
+                max(0.03125f, expectedPreviousViewDepth * 0.001f)
+            );
+            depthDisoccluded = !recordedDepthValid
+                || !isfinite(recordedPreviousViewDepth)
+                || abs(recordedPreviousViewDepth - expectedPreviousViewDepth) > viewDepthTolerance;
         }
         valid = valid && !depthDisoccluded;
         output.reactive = valid ? 0.0f : 1.0f;

@@ -33,6 +33,7 @@ private struct MetallumTemporalDiagnosticUniforms {
     var inverseCurrentProjection: simd_float4x4
     var previousView: simd_float4x4
     var previousProjection: simd_float4x4
+    var inversePreviousJitteredProjection: simd_float4x4
     var currentCameraPosition: SIMD4<Float>
     var previousCameraPosition: SIMD4<Float>
     var renderExtent: SIMD2<Float>
@@ -118,6 +119,7 @@ private func dispatchReprojection(
     encoder.endEncoding()
     commandBuffer.commit()
     commandBuffer.waitUntilCompleted()
+    try require(commandBuffer.status == .completed, "Reprojection validation command buffer failed")
     let ptr = outputBuffer.contents().bindMemory(to: MotionOutput.self, capacity: inputs.count)
     return Array(UnsafeBufferPointer(start: ptr, count: inputs.count))
 }
@@ -135,6 +137,225 @@ private func validate(
                 "\(name) motion \(output.motion) != \(expected)")
     try require(abs(output.reactive - reactive) <= 0.0001,
                 "\(name) reactive \(output.reactive) != \(reactive)")
+}
+
+private func perspectiveProjection(
+    verticalFovRadians: Float,
+    aspect: Float,
+    near: Float,
+    far: Float
+) -> simd_float4x4 {
+    let focalLength = 1.0 / tanf(verticalFovRadians * 0.5)
+    // Right-handed, depth [0, 1], column-vector convention.  This deliberately
+    // stays independent of the shader's inverse/reprojection implementation.
+    return simd_float4x4(columns: (
+        SIMD4<Float>(focalLength / aspect, 0, 0, 0),
+        SIMD4<Float>(0, focalLength, 0, 0),
+        SIMD4<Float>(0, 0, far / (near - far), -1),
+        SIMD4<Float>(0, 0, near * far / (near - far), 0)
+    ))
+}
+
+private func translation(_ x: Float, _ y: Float, _ z: Float) -> simd_float4x4 {
+    simd_float4x4(columns: (
+        SIMD4<Float>(1, 0, 0, 0),
+        SIMD4<Float>(0, 1, 0, 0),
+        SIMD4<Float>(0, 0, 1, 0),
+        SIMD4<Float>(x, y, z, 1)
+    ))
+}
+
+private func rotationX(_ radians: Float) -> simd_float4x4 {
+    let cosine = cosf(radians)
+    let sine = sinf(radians)
+    return simd_float4x4(columns: (
+        SIMD4<Float>(1, 0, 0, 0),
+        SIMD4<Float>(0, cosine, sine, 0),
+        SIMD4<Float>(0, -sine, cosine, 0),
+        SIMD4<Float>(0, 0, 0, 1)
+    ))
+}
+
+private func rotationZ(_ radians: Float) -> simd_float4x4 {
+    let cosine = cosf(radians)
+    let sine = sinf(radians)
+    return simd_float4x4(columns: (
+        SIMD4<Float>(cosine, sine, 0, 0),
+        SIMD4<Float>(-sine, cosine, 0, 0),
+        SIMD4<Float>(0, 0, 1, 0),
+        SIMD4<Float>(0, 0, 0, 1)
+    ))
+}
+
+private func jitterBeforeBobbing(
+    _ baseProjection: simd_float4x4,
+    jitter: SIMD2<Float>,
+    extent: SIMD2<Float>
+) -> simd_float4x4 {
+    var projection = baseProjection
+    // Match TemporalJitterProjection: logical MetalFX Y is render-target down,
+    // whereas the projection's clip-space Y is up.
+    projection.columns.2.x += 2.0 * jitter.x / extent.x
+    projection.columns.2.y -= 2.0 * jitter.y / extent.y
+    return projection
+}
+
+private func ndc(_ projection: simd_float4x4, _ point: SIMD4<Float>) -> SIMD3<Float> {
+    let clip = projection * point
+    return SIMD3<Float>(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w)
+}
+
+private func pixelCoordinate(_ ndc: SIMD3<Float>, extent: SIMD2<Float>) -> SIMD2<Float> {
+    SIMD2<Float>(
+        (ndc.x * 0.5 + 0.5) * extent.x,
+        (1.0 - ndc.y) * 0.5 * extent.y
+    )
+}
+
+private func expectedMotionPixels(
+    currentUnjitteredNdc: SIMD3<Float>,
+    previousUnjitteredNdc: SIMD3<Float>,
+    extent: SIMD2<Float>
+) -> SIMD2<Float> {
+    SIMD2<Float>(
+        (previousUnjitteredNdc.x - currentUnjitteredNdc.x) * 0.5 * extent.x,
+        -(previousUnjitteredNdc.y - currentUnjitteredNdc.y) * 0.5 * extent.y
+    )
+}
+
+/**
+ * Reproduces Minecraft's relevant projection shape: a perspective matrix followed by a changing
+ * view-bob transform.  The CPU expected value projects the same world point through the two
+ * unjittered matrices; the GPU under test must reconstruct that value from the jittered depth
+ * sample.  Covering near/middle/far points makes a post-bobbing jitter depth-dependent and
+ * therefore observable.
+ */
+private func validateCameraBobJitterReprojection(
+    device: MTLDevice,
+    queue: MTLCommandQueue,
+    pipeline: MTLComputePipelineState
+) throws {
+    let extent = SIMD2<Float>(1512, 982) // Exact production Performance render extent at 3024x1964.
+    let baseProjection = perspectiveProjection(
+        verticalFovRadians: 70.0 * .pi / 180.0,
+        aspect: extent.x / extent.y,
+        near: 0.05,
+        far: 1_024.0
+    )
+    // Deliberately stress the same translation/roll/pitch composition as view bob.
+    // Normal gameplay bob is smaller; this larger deterministic pair makes an accidental
+    // P * B_jitter construction fail loudly instead of hiding below a sub-pixel tolerance.
+    let previousBob = translation(0.0, -0.18, 0.0)
+        * rotationZ(-13.0 * .pi / 180.0)
+        * rotationX(15.0 * .pi / 180.0)
+    let currentBob = translation(0.0, 0.27, 0.0)
+        * rotationZ(20.0 * .pi / 180.0)
+        * rotationX(-18.0 * .pi / 180.0)
+    let jitter = SIMD2<Float>(0.45, -0.35)
+    let previousJitter = SIMD2<Float>(-0.125, 0.375)
+    let previousProjection = baseProjection * previousBob
+    let previousJitteredProjection = jitterBeforeBobbing(
+        baseProjection, jitter: previousJitter, extent: extent
+    ) * previousBob
+    let currentUnjitteredProjection = baseProjection * currentBob
+    let currentProjection = jitterBeforeBobbing(baseProjection, jitter: jitter, extent: extent)
+        * currentBob
+
+    let points: [SIMD4<Float>] = [
+        SIMD4<Float>(-0.22, -0.14, -0.75, 1.0),
+        SIMD4<Float>(0.31, 0.19, -0.75, 1.0),
+        SIMD4<Float>(-0.55, 0.28, -3.5, 1.0),
+        SIMD4<Float>(0.47, -0.31, -3.5, 1.0),
+        SIMD4<Float>(-1.2, -0.7, -28.0, 1.0),
+        SIMD4<Float>(1.35, 0.82, -28.0, 1.0)
+    ]
+
+    var inputs: [ReprojectionInput] = []
+    var expected: [SIMD2<Float>] = []
+    for point in points {
+        let rasterNdc = ndc(currentProjection, point)
+        let currentUnjitteredNdc = ndc(currentUnjitteredProjection, point)
+        let previousUnjitteredNdc = ndc(previousProjection, point)
+        try require(
+            abs(rasterNdc.x) < 0.95 && abs(rasterNdc.y) < 0.95
+                && rasterNdc.z > 0.0 && rasterNdc.z < 1.0,
+            "camera-bob fixture escaped the raster/depth range: \(rasterNdc)"
+        )
+        inputs.append(ReprojectionInput(
+            pixelCoord: pixelCoordinate(rasterNdc, extent: extent), depth: rasterNdc.z
+        ))
+        expected.append(expectedMotionPixels(
+            currentUnjitteredNdc: currentUnjitteredNdc,
+            previousUnjitteredNdc: previousUnjitteredNdc,
+            extent: extent
+        ))
+    }
+
+    let identity = matrix_identity_float4x4
+    let uniforms = MetallumTemporalDiagnosticUniforms(
+        currentView: identity,
+        currentProjection: currentProjection,
+        inverseCurrentView: identity,
+        inverseCurrentProjection: simd_inverse(currentProjection),
+        previousView: identity,
+        previousProjection: previousProjection,
+        inversePreviousJitteredProjection: simd_inverse(previousJitteredProjection),
+        currentCameraPosition: .zero,
+        previousCameraPosition: .zero,
+        renderExtent: extent,
+        jitter: jitter,
+        previousJitter: previousJitter,
+        reserved_padding: .zero,
+        resetMask: 0,
+        previousDepthValid: 0
+    )
+    let outputs = try dispatchReprojection(
+        device: device, queue: queue, pipeline: pipeline, inputs: inputs, uniforms: uniforms
+    )
+    var maximumResidual: Float = 0.0
+    for index in inputs.indices {
+        try validate(
+            outputs[index], expected: expected[index], reactive: 0,
+            name: "camera bob/jitter point \(index)"
+        )
+        maximumResidual = max(maximumResidual, length(outputs[index].motion - expected[index]))
+    }
+    try require(maximumResidual <= 0.25,
+                "camera bob/jitter residual exceeded 0.25 render pixels: \(maximumResidual)")
+
+    // This is the historical failure shape: applying the nominal projection jitter after the
+    // view-bob transform makes the offset non-constant in depth.  It must diverge materially
+    // from the independent P_jittered * B reference above; otherwise this fixture is too weak
+    // to guard the regression it was introduced for.
+    let currentProjectionWithWrongOrder = jitterBeforeBobbing(
+        baseProjection * currentBob, jitter: jitter, extent: extent
+    )
+    var wrongOrderInputs: [ReprojectionInput] = []
+    for point in points {
+        let rasterNdc = ndc(currentProjectionWithWrongOrder, point)
+        try require(
+            abs(rasterNdc.x) < 0.95 && abs(rasterNdc.y) < 0.95
+                && rasterNdc.z > 0.0 && rasterNdc.z < 1.0,
+            "wrong-order camera-bob fixture escaped the raster/depth range: \(rasterNdc)"
+        )
+        wrongOrderInputs.append(ReprojectionInput(
+            pixelCoord: pixelCoordinate(rasterNdc, extent: extent), depth: rasterNdc.z
+        ))
+    }
+    var wrongOrderUniforms = uniforms
+    wrongOrderUniforms.currentProjection = currentProjectionWithWrongOrder
+    wrongOrderUniforms.inverseCurrentProjection = simd_inverse(currentProjectionWithWrongOrder)
+    let wrongOrderOutputs = try dispatchReprojection(
+        device: device, queue: queue, pipeline: pipeline,
+        inputs: wrongOrderInputs, uniforms: wrongOrderUniforms
+    )
+    let wrongOrderResiduals = zip(wrongOrderOutputs, expected).map { output, reference in
+        length(output.motion - reference)
+    }
+    let wrongOrderMaximumResidual = wrongOrderResiduals.max() ?? 0.0
+    let wrongOrderDepthSpread = (wrongOrderResiduals.max() ?? 0.0) - (wrongOrderResiduals.min() ?? 0.0)
+    try require(wrongOrderMaximumResidual > 0.05 && wrongOrderDepthSpread > 0.04,
+                "camera-bob wrong-order guard is not depth-sensitive: max=\(wrongOrderMaximumResidual), spread=\(wrongOrderDepthSpread)")
 }
 
 @main
@@ -212,6 +433,7 @@ private enum MotionVectorValidationMain {
                 inverseCurrentProjection: ident,
                 previousView: ident,
                 previousProjection: ident,
+                inversePreviousJitteredProjection: ident,
                 currentCameraPosition: SIMD4<Float>(0, 0, 0, 0),
                 previousCameraPosition: SIMD4<Float>(-0.1, 0, 0, 0),
                 renderExtent: SIMD2<Float>(1280, 720),
@@ -229,8 +451,11 @@ private enum MotionVectorValidationMain {
                 inputs: reprojInputs, uniforms: uniforms
             )
             try validate(reprojOutputs[0], expected: SIMD2<Float>(64, 0), reactive: 0, name: "reprojection roundtrip math")
+            try validateCameraBobJitterReprojection(
+                device: device, queue: queue, pipeline: reprojPipeline
+            )
 
-            print("GPU motion-vector validation passed (11 cases, <=0.01 px)")
+            print("GPU motion-vector validation passed (11 scalar cases + camera-bob depth grid)")
         } catch {
             fputs("GPU motion-vector validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

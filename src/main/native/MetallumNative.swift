@@ -5868,7 +5868,7 @@ private func shouldUseFastTemporalResolve(
     }
     let scaleX = Float(frame.renderWidth) / Float(frame.displayWidth)
     let scaleY = Float(frame.renderHeight) / Float(frame.displayHeight)
-    // The full Apple Temporal kernel is the best fit at Quality (2/3x). On
+    // The full Apple Temporal kernel is the best fit at Quality (3/4x). On
     // M1-class GPUs its display-resolution cost dominates the Performance and
     // Ultra presets despite their lower render workload, so those presets use
     // the bounded history resolver below instead.
@@ -7941,7 +7941,11 @@ private struct MetallumTemporalDiagnosticUniforms {
     var inverseCurrentView: simd_float4x4
     var inverseCurrentProjection: simd_float4x4
     var previousView: simd_float4x4
+    // The previous depth history was rasterized with the prior frame's jittered
+    // projection.  It is intentionally separate from previousProjection,
+    // which remains unjittered for MetalFX motion vectors.
     var previousProjection: simd_float4x4
+    var inversePreviousJitteredProjection: simd_float4x4
     var currentCameraPosition: SIMD4<Float>
     var previousCameraPosition: SIMD4<Float>
     var renderExtent: SIMD2<Float>
@@ -8008,6 +8012,7 @@ public func metallum_encode_temporal_diagnostics_v1(
             inverseCurrentProjection: currentProjection.inverse,
             previousView: frame.previousView,
             previousProjection: frame.previousUnjitteredProjection,
+            inversePreviousJitteredProjection: frame.previousProjection.inverse,
             currentCameraPosition: SIMD4(
                 Float(frame.currentCameraPosition[0]),
                 Float(frame.currentCameraPosition[1]),

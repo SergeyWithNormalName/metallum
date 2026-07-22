@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Metal
+import simd
 
 private enum ValidationFailure: Error, CustomStringConvertible {
     case message(String)
@@ -49,6 +50,25 @@ private func writeDouble(_ value: Double, at offset: Int, into bytes: inout [UIn
     writeUInt64(value.bitPattern, at: offset, into: &bytes)
 }
 
+private func writeMatrix(_ value: simd_float4x4, at offset: Int, into bytes: inout [UInt8]) {
+    for column in 0..<4 {
+        for row in 0..<4 {
+            writeFloat(value[column][row], at: offset + (column * 4 + row) * 4, into: &bytes)
+        }
+    }
+}
+
+private func reversedZProjection(nearPlane: Float, aspect: Float = 1) -> simd_float4x4 {
+    let focalLength: Float = 1.0
+    // Right-handed Metal depth [0, 1]: NDC z = near / -viewZ.
+    return simd_float4x4(columns: (
+        SIMD4<Float>(focalLength / aspect, 0, 0, 0),
+        SIMD4<Float>(0, focalLength, 0, 0),
+        SIMD4<Float>(0, 0, 0, -1),
+        SIMD4<Float>(0, 0, nearPlane, 0)
+    ))
+}
+
 private func framePacket(
     width: Int,
     height: Int,
@@ -57,7 +77,8 @@ private func framePacket(
     previousCameraX: Double,
     previousProjectionScaleX: Float = 1,
     temporalProduction: Bool = false,
-    temporalHdrPrecompose: Bool = false
+    temporalHdrPrecompose: Bool = false,
+    projection: simd_float4x4? = nil
 ) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: 848)
     let displayWidth = temporalProduction ? width * 3 / 2 : width
@@ -96,10 +117,24 @@ private func framePacket(
     writeUInt64(temporalProduction ? 0 : UInt64(width * height * 5 * 3), at: 240, into: &bytes)
     writeDouble(currentCameraX, at: 280, into: &bytes)
     writeDouble(previousCameraX, at: 304, into: &bytes)
-    for matrix in 0..<8 {
-        for diagonal in 0..<4 {
-            let value: Float = matrix == 5 && diagonal == 0 ? previousProjectionScaleX : 1
-            writeFloat(value, at: 328 + matrix * 64 + diagonal * 20, into: &bytes)
+    if let projection {
+        // FrameState ABI matrix order is column-major: current view/projection,
+        // current unjittered view/projection, then previous equivalents.
+        let identity = matrix_identity_float4x4
+        writeMatrix(identity, at: 328, into: &bytes)
+        writeMatrix(projection, at: 392, into: &bytes)
+        writeMatrix(identity, at: 456, into: &bytes)
+        writeMatrix(projection, at: 520, into: &bytes)
+        writeMatrix(identity, at: 584, into: &bytes)
+        writeMatrix(projection, at: 648, into: &bytes)
+        writeMatrix(identity, at: 712, into: &bytes)
+        writeMatrix(projection, at: 776, into: &bytes)
+    } else {
+        for matrix in 0..<8 {
+            for diagonal in 0..<4 {
+                let value: Float = matrix == 5 && diagonal == 0 ? previousProjectionScaleX : 1
+                writeFloat(value, at: 328 + matrix * 64 + diagonal * 20, into: &bytes)
+            }
         }
     }
     return bytes
@@ -120,7 +155,8 @@ private func runCase(
     temporalHdrPrecompose: Bool = false,
     depthValue: Double = 0.5,
     backdrop: EncodeBackdrop? = nil,
-    coherentBlur: EncodeCoherentMenuBlur? = nil
+    coherentBlur: EncodeCoherentMenuBlur? = nil,
+    projection: simd_float4x4? = nil
 ) throws -> (motion: SIMD2<Float>, reactive: UInt8) {
     let packet = framePacket(
         width: width,
@@ -130,7 +166,8 @@ private func runCase(
         previousCameraX: previousCameraX,
         previousProjectionScaleX: previousProjectionScaleX,
         temporalProduction: temporalProduction,
-        temporalHdrPrecompose: temporalHdrPrecompose
+        temporalHdrPrecompose: temporalHdrPrecompose,
+        projection: projection
     )
     try require(packet.withUnsafeBytes { setFrameState($0.baseAddress, UInt64($0.count)) } == 1,
                 "Native FrameState admission failed")
@@ -353,6 +390,29 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             )
             try require(depthStable.reactive == 0,
                         "Stable depth was rejected after the history refresh")
+            let farProjection = reversedZProjection(nearPlane: 0.05)
+            let farDistance: Float = 512
+            let farDepth = 0.05 / farDistance
+            let farPrimer = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, resetMask: 1 << 4,
+                depthValue: Double(farDepth), projection: farProjection
+            )
+            try require(farPrimer.reactive == 255,
+                        "Far-depth primer must honor a global reset")
+            let farStable = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, depthValue: Double(farDepth), projection: farProjection
+            )
+            try require(farStable.reactive == 0,
+                        "Stable far surface was rejected by view-space depth validation")
+            let mismatchedFarDepth = 0.05 / 480.0
+            let farMismatch = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, depthValue: Double(mismatchedFarDepth), projection: farProjection
+            )
+            try require(farMismatch.reactive == 255,
+                        "Mismatched far surface was accepted as temporal history")
             let resized = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 96, height: 48, previousProjectionScaleX: 0.75
@@ -366,7 +426,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, depth disocclusion, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

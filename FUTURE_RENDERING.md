@@ -4,13 +4,13 @@ This document analyzes the readiness of the **Metallum** rendering engine for fu
 
 ---
 
-## 1. MetalFX Temporal Upscaler
+## 1. Temporal Upscaling
 
 Apple Silicon GPUs support two upscalers: **Spatial** and **Temporal**.
-- **Current Status**: Both MetalFX implementations are available from the same Sodium `MetalFX` group. `MetalFxTemporalScaling` persists three Temporal presets: **Quality** (2/3 linear resolution), **Performance** (1/2), and **Ultra Performance** (1/3). Selecting either scaler clears the other setting, so exactly one owns a frame.
-- **Production path**: Swift owns a persistent `MTLFXTemporalScaler` and a private full-resolution output per renderer generation. It consumes the low-resolution color/depth targets plus the triple-buffered `RG16Float` motion and `R8Unorm` reactive inputs, then seeds the full-resolution UI/present route. It passes Halton jitter, exposure, reversed-Z depth, frame-history reset, and the command-buffer fence to MetalFX.
-- **Safety contract**: Format, usage, extent, device and generation checks fail closed to native resolution. The scaler is initialized synchronously only on a generation change; no texture or scaler allocation occurs in the frame loop.
-- **Automated proof**: Metal API/GPU validation encodes all three presets and the actual native motion/reactive → Temporal → UI-backdrop route.
+- **Current Status**: Spatial MetalFX and **Temporal Upscaling** live in the same Sodium `MetalFX` group. `MetalFxTemporalScaling` persists three Temporal presets: **Quality** (3/4 linear resolution, 15 jitter phases), **Performance** (1/2), and **Ultra Performance** (1/3). Selecting either scaler clears the other setting, so exactly one owns a frame.
+- **Production path**: Quality uses a persistent Apple `MTLFXTemporalScaler` and a private full-resolution output per renderer generation. The same MetalFX path serves Performance and Ultra Performance unless the device is Apple M1 and the HDR input is `RGBA16Float`; that M1 HDR combination uses Metallum's optimized bounded temporal resolver instead. Both routes consume low-resolution color/depth-derived motion plus triple-buffered `RG16Float` motion and `R8Unorm` reactive inputs, and seed the full-resolution UI/present route.
+- **Safety contract**: Format, usage, extent, device and generation checks fail closed to native resolution. The MetalFX scaler is initialized synchronously only on a generation change; neither route allocates a texture or scaler in the frame loop.
+- **Automated proof**: Metal API/GPU validation encodes the MetalFX descriptor for all three scales. The native runtime harness validates the motion/reactive → Temporal → HDR-precompose/UI-backdrop route, including camera and depth-disocclusion cases.
 
 ---
 
@@ -27,7 +27,7 @@ Motion vectors represent the screen-space velocity of each pixel from the previo
 ## 3. Temporal Rendering (TAA / History Blending)
 
 Temporal Anti-Aliasing (TAA) blends the current frame with the historical accumulated frames to reduce alias-shimmering:
-- **Current Status**: Temporal selection enables a deterministic sub-pixel Halton projection jitter. `MTLFXTemporalScaler` owns the history resolve, filtering and internal clamping; Metallum supplies one-shot reset reasons for first frame, resize, teleport, world/dimension change and generation changes.
+- **Current Status**: Temporal selection enables a deterministic sub-pixel Halton projection jitter. Apple MetalFX owns history resolve, filtering and internal clamping for Quality and non-M1-FP16 configurations; the Apple-M1 FP16 HDR Performance/Ultra route uses Metallum's bounded history resolver. Metallum supplies one-shot reset reasons for first frame, resize, teleport, world/dimension change and generation changes to both routes.
 - **Future quality work**: Feed live per-pixel velocity for entities and animated terrain into the existing reactive/motion attachments. This is an input-quality improvement, not a missing Temporal scaler or history implementation.
 
 ---

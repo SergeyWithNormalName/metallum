@@ -87,20 +87,20 @@ public final class TemporalContractTests {
     }
 
     private static void testPresetJitterPhaseCounts() {
-        require(JitterSequence.phaseCount(2016, 1265, 3024, 1898) == 18,
-                "Quality jitter phase count must be 18");
-        require(JitterSequence.phaseCount(1512, 949, 3024, 1898) == 32,
+        require(JitterSequence.phaseCount(2268, 1473, 3024, 1964) == 15,
+                "Quality jitter phase count must be 15");
+        require(JitterSequence.phaseCount(1512, 982, 3024, 1964) == 32,
                 "Performance jitter phase count must be 32");
-        require(JitterSequence.phaseCount(1008, 633, 3024, 1898) == 72,
+        require(JitterSequence.phaseCount(1008, 655, 3024, 1964) == 72,
                 "Ultra Performance jitter phase count must be 72");
-        require(!JitterSequence.sample(0L, 1.0, 2016, 1265, 3024, 1898).equals(
-                        JitterSequence.sample(16L, 1.0, 2016, 1265, 3024, 1898)),
-                "Quality sequence repeated at the obsolete 16-frame period");
-        require(JitterSequence.sample(0L, 1.0, 2016, 1265, 3024, 1898).equals(
-                        JitterSequence.sample(18L, 1.0, 2016, 1265, 3024, 1898)),
+        require(!JitterSequence.sample(0L, 1.0, 2268, 1473, 3024, 1964).equals(
+                        JitterSequence.sample(14L, 1.0, 2268, 1473, 3024, 1964)),
+                "Quality sequence repeated before its 15-frame period");
+        require(JitterSequence.sample(0L, 1.0, 2268, 1473, 3024, 1964).equals(
+                        JitterSequence.sample(15L, 1.0, 2268, 1473, 3024, 1964)),
                 "Quality sequence did not repeat at its phase count");
-        require(JitterSequence.sample(0L, 1.0, 1512, 949, 3024, 1898).equals(
-                        JitterSequence.sample(32L, 1.0, 1512, 949, 3024, 1898)),
+        require(JitterSequence.sample(0L, 1.0, 1512, 982, 3024, 1964).equals(
+                        JitterSequence.sample(32L, 1.0, 1512, 982, 3024, 1964)),
                 "Performance sequence did not repeat at its phase count");
     }
 
@@ -188,7 +188,8 @@ public final class TemporalContractTests {
     private static void testPresetTextureMipBias() {
         require(Math.abs(TemporalScalingMode.OFF.textureMipBias()) <= 1.0e-12,
                 "Disabled Temporal mode must not bias texture mip selection");
-        require(Math.abs(TemporalScalingMode.QUALITY.textureMipBias() + 1.5849625) <= 1.0e-6,
+        double qualityMipBias = Math.log(0.75) / Math.log(2.0) - 1.0;
+        require(Math.abs(TemporalScalingMode.QUALITY.textureMipBias() - qualityMipBias) <= 1.0e-6,
                 "Quality Temporal mip bias mismatch");
         require(Math.abs(TemporalScalingMode.PERFORMANCE.textureMipBias() + 2.0) <= 1.0e-6,
                 "Performance Temporal mip bias mismatch");
