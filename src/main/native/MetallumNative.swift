@@ -3789,6 +3789,10 @@ private enum NativeState {
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
     static var temporalWorkspaces: [UInt: MetallumTemporalWorkspace] = [:]
     static var fastTemporalWorkspaces: [UInt: MetallumFastTemporalWorkspace] = [:]
+    // A fast resolver failure must not turn into a per-frame retry/log storm.
+    // Renderer generations change for route/settings changes, which lets a new
+    // compatible configuration try the optimized path again.
+    static var fastTemporalFailureGenerations: [UInt: UInt64] = [:]
     static var temporalDepthHistories: [UInt: MetallumTemporalDepthHistory] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
@@ -5841,7 +5845,7 @@ private func ensureTemporalWorkspace(
     )
     NativeState.temporalWorkspaces[key] = workspace
     NSLog(
-        "[metallum] MetalFX temporal scaler ready: %dx%d -> %dx%d, color %lu, color/depth/motion/reactive/output usage %lu/%lu/%lu/%lu/%lu",
+        "[metallum] Apple MetalFX temporal scaler ready: %dx%d -> %dx%d, color %lu, color/depth/motion/reactive/output usage %lu/%lu/%lu/%lu/%lu",
         inputWidth,
         inputHeight,
         outputWidth,
@@ -5861,6 +5865,12 @@ private func shouldUseFastTemporalResolve(
     frame: MetallumRendererFrameStateSnapshot,
     colorTexture: MTLTexture
 ) -> Bool {
+    // An explicit Apple request is authoritative. An explicit Metallum
+    // request intentionally falls through to the same eligibility test as
+    // Auto so unsupported hardware/formats fail open to Apple MetalFX.
+    if frame.featureMask & MetallumFrameStateAbiV3.temporalForceAppleBit != 0 {
+        return false
+    }
     guard colorTexture.pixelFormat == .rgba16Float,
           frame.displayWidth > 0,
           frame.displayHeight > 0 else {
@@ -6016,14 +6026,28 @@ private func encodeTemporalScale(
           objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device) else {
         return nil
     }
-    if shouldUseFastTemporalResolve(device: commandBuffer.device, frame: frame, colorTexture: colorTexture) {
-        return encodeFastTemporalResolve(
+    let deviceAddress = objectAddress(commandBuffer.device)
+    let fastFailedForGeneration = NativeState.fastTemporalFailureGenerations[deviceAddress]
+        == frame.rendererGenerationId
+    if !fastFailedForGeneration,
+       shouldUseFastTemporalResolve(device: commandBuffer.device, frame: frame, colorTexture: colorTexture) {
+        if let fastOutput = encodeFastTemporalResolve(
             commandBuffer: commandBuffer,
             colorTexture: colorTexture,
             motionTexture: motionTexture,
             reactiveTexture: reactiveTexture,
             globalFence: globalFence,
             frame: frame
+        ) {
+            return fastOutput
+        }
+        // A requested/Auto optimized route is never allowed to disable the
+        // entire Temporal feature. Reuse the same frame's validated inputs in
+        // the full Apple scaler instead; this is the local safe fallback.
+        NativeState.fastTemporalFailureGenerations[deviceAddress] = frame.rendererGenerationId
+        NSLog(
+            "[metallum] Fast temporal resolve failed for renderer generation %llu; falling back to Apple MetalFX until the next generation",
+            frame.rendererGenerationId
         )
     }
     guard let workspace = ensureTemporalWorkspace(
@@ -7766,11 +7790,19 @@ private func prepareRendererGeneration(
 private enum MetallumFrameStateAbiV3 {
     static let version: UInt32 = 3
     static let packetBytes = 848
-    static let knownFeatureBits: UInt64 = 0b111
-    static let knownResetBits: UInt64 = 0x1fff
     static let spatialBit: UInt64 = 1
     static let temporalBit: UInt64 = 1 << 1
     static let interpolationBit: UInt64 = 1 << 2
+    // These modifiers are meaningful only with temporalBit. Their values are
+    // ABI-stable because Java serializes the same RendererFeatureMask.
+    static let temporalForceAppleBit: UInt64 = 1 << 3
+    static let temporalForceMetallumOptimizedBit: UInt64 = 1 << 4
+    static let knownFeatureBits: UInt64 = spatialBit
+        | temporalBit
+        | interpolationBit
+        | temporalForceAppleBit
+        | temporalForceMetallumOptimizedBit
+    static let knownResetBits: UInt64 = 0x1fff
 }
 
 private struct MetallumRendererFrameStateSnapshot {
@@ -7840,6 +7872,14 @@ private struct MetallumRendererFrameStateSnapshot {
         } else {
             upscaleMode = "native"
         }
+        let temporalAlgorithmPolicy: String
+        if featureMask & MetallumFrameStateAbiV3.temporalForceAppleBit != 0 {
+            temporalAlgorithmPolicy = "apple_metalfx"
+        } else if featureMask & MetallumFrameStateAbiV3.temporalForceMetallumOptimizedBit != 0 {
+            temporalAlgorithmPolicy = "metallum_optimized"
+        } else {
+            temporalAlgorithmPolicy = "auto"
+        }
         return [
             "frame_contract_version": frameContractVersion,
             "frame_graph_version": frameGraphVersion,
@@ -7858,6 +7898,7 @@ private struct MetallumRendererFrameStateSnapshot {
             "resolved_lighting_model": lightingModel == 0 ? "vanilla" : "advanced",
             "resolved_output_mode": outputMode == 0 ? "sdr" : "hdr",
             "resolved_upscale_mode": upscaleMode,
+            "temporal_algorithm_policy": temporalAlgorithmPolicy,
             "resolved_interpolation_mode": featureMask & MetallumFrameStateAbiV3.interpolationBit == 0
                 ? "off" : "frame_interpolation",
             "lighting_preset": ["performance", "balanced", "ultra"][Int(lightingPreset)],
@@ -8319,12 +8360,17 @@ private func parseFrameStateV3(
           let advancedUploadBytes = reader.uint64(at: 272) else {
         return (-1, nil)
     }
+    let temporalAlgorithmBits = MetallumFrameStateAbiV3.temporalForceAppleBit
+        | MetallumFrameStateAbiV3.temporalForceMetallumOptimizedBit
     guard renderContractMode <= 1, lightingModel <= 1, outputMode <= 1, executorKind <= 1,
           lightingPreset <= 2, reservedFlags == 0, reservedFloat == 0,
           featureMask & ~MetallumFrameStateAbiV3.knownFeatureBits == 0,
           resetMask & ~MetallumFrameStateAbiV3.knownResetBits == 0,
-          featureMask & MetallumFrameStateAbiV3.spatialBit == 0
-            || featureMask & MetallumFrameStateAbiV3.temporalBit == 0,
+          (featureMask & temporalAlgorithmBits) == 0
+            || (featureMask & MetallumFrameStateAbiV3.temporalBit) != 0,
+          (featureMask & temporalAlgorithmBits) != temporalAlgorithmBits,
+          (featureMask & MetallumFrameStateAbiV3.spatialBit) == 0
+            || (featureMask & MetallumFrameStateAbiV3.temporalBit) == 0,
           renderWidth > 0, renderHeight > 0, displayWidth > 0, displayHeight > 0 else {
         return (-4, nil)
     }
@@ -10079,6 +10125,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.menuBlurPipelines.removeValue(forKey: deviceAddress)
         NativeState.menuBlurWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.fastTemporalWorkspaces.removeValue(forKey: deviceAddress)
+        NativeState.fastTemporalFailureGenerations.removeValue(forKey: deviceAddress)
         NativeState.temporalDepthHistories.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)

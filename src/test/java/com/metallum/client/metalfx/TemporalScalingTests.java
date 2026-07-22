@@ -1,5 +1,7 @@
 package com.metallum.client.metalfx;
 
+import com.metallum.client.renderer.RendererFeatureMask;
+
 import java.util.Properties;
 
 /** Pure policy checks for the persistent Temporal preset surface. */
@@ -9,6 +11,7 @@ public final class TemporalScalingTests {
 
     public static void main(final String[] args) {
         testModeParsing();
+        testAlgorithmPolicyParsingAndMask();
         testPresetDimensions();
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
@@ -57,6 +60,43 @@ public final class TemporalScalingTests {
         require(ultra.renderWidth() == 1008 && ultra.renderHeight() == 655, "ultra dimensions");
         require(Math.abs(ultra.actualPixelScale() - 1.0f / 9.0f) < 0.0002f,
                 "ultra pixel workload");
+    }
+
+    private static void testAlgorithmPolicyParsingAndMask() {
+        Properties properties = new Properties();
+        require(MetalFxTemporalScaling.algorithmFrom(properties) == TemporalAlgorithmPolicy.AUTO,
+                "default Temporal algorithm policy");
+        properties.setProperty("algorithm", "apple_metalfx");
+        require(MetalFxTemporalScaling.algorithmFrom(properties) == TemporalAlgorithmPolicy.APPLE_METALFX,
+                "Apple MetalFX policy parsing");
+        properties.setProperty("algorithm", "METALLUM_OPTIMIZED");
+        require(MetalFxTemporalScaling.algorithmFrom(properties)
+                        == TemporalAlgorithmPolicy.METALLUM_OPTIMIZED,
+                "Metallum optimized policy parsing");
+        properties.setProperty("algorithm", "corrupt");
+        require(MetalFxTemporalScaling.algorithmFrom(properties) == TemporalAlgorithmPolicy.AUTO,
+                "corrupt Temporal algorithm policy fallback");
+        require(MetalFxTemporalScaling.selectRequestedAlgorithmPolicy(
+                        TemporalAlgorithmPolicy.APPLE_METALFX,
+                        TemporalAlgorithmPolicy.AUTO
+                ) == TemporalAlgorithmPolicy.AUTO,
+                "benchmark algorithm override must win over persisted policy");
+
+        RendererFeatureMask apple = RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_UPSCALING,
+                TemporalAlgorithmPolicy.APPLE_METALFX.featureBit()
+        );
+        require(apple.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                        && apple.contains(RendererFeatureMask.TEMPORAL_FORCE_APPLE_METALFX),
+                "Apple policy feature-mask contract");
+        expectIllegalArgument(() -> RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_FORCE_APPLE_METALFX
+        ));
+        expectIllegalArgument(() -> RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_UPSCALING,
+                RendererFeatureMask.TEMPORAL_FORCE_APPLE_METALFX,
+                RendererFeatureMask.TEMPORAL_FORCE_METALLUM_OPTIMIZED
+        ));
     }
 
     private static void testOddAndTinyDimensions() {
@@ -123,5 +163,14 @@ public final class TemporalScalingTests {
         if (!condition) {
             throw new AssertionError(message);
         }
+    }
+
+    private static void expectIllegalArgument(final Runnable action) {
+        try {
+            action.run();
+        } catch (IllegalArgumentException expected) {
+            return;
+        }
+        throw new AssertionError("Expected IllegalArgumentException");
     }
 }

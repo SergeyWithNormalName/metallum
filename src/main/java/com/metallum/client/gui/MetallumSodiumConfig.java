@@ -8,6 +8,7 @@ import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.SpatialScalingMode;
+import com.metallum.client.metalfx.TemporalAlgorithmPolicy;
 import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
@@ -104,6 +105,22 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     MetalFxTemporalScaling::setRequestedMode,
                                     MetalFxTemporalScaling::requestedMode
+                            )
+                    )
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "temporal_algorithm"),
+                                TemporalAlgorithmPolicy.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.metalfx_temporal_algorithm.name"
+                            ))
+                            .setTooltip(MetallumSodiumConfig::temporalAlgorithmTooltip)
+                            .setElementNameProvider(policy -> Component.translatable(policy.translationKey()))
+                            .setDefaultValue(TemporalAlgorithmPolicy.AUTO)
+                            .setBinding(
+                                    MetalFxTemporalScaling::setRequestedAlgorithmPolicy,
+                                    MetalFxTemporalScaling::requestedAlgorithmPolicy
                             )
                     )
                 )
@@ -354,6 +371,13 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
                 Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
+        );
+    }
+
+    private static Component temporalAlgorithmTooltip(final TemporalAlgorithmPolicy policy) {
+        return Component.translatable(
+                "metallum.options.metalfx_temporal_algorithm.tooltip."
+                        + policy.name().toLowerCase(Locale.ROOT)
         );
     }
 

@@ -180,7 +180,7 @@ public record RendererGenerationConfig(
         if (requestedFeatures.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
                 && (!capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)
                 || !capabilities.temporalProfile().diagnosticsSupported())) {
-            resolvedFeatures = resolvedFeatures.without(RendererFeatureMask.TEMPORAL_UPSCALING);
+            resolvedFeatures = resolvedFeatures.withoutTemporalUpscaling();
             reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
         }
         if (requestedFeatures.contains(RendererFeatureMask.FRAME_INTERPOLATION)
