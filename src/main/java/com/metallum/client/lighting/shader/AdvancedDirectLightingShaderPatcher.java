@@ -1467,9 +1467,12 @@ public final class AdvancedDirectLightingShaderPatcher {
                     }
 
                     float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));
+                    float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
+                    if (nDotL == 0.0) {
+                        continue;
+                    }
                     float range = max(1.0 - sqrt(max(distanceSquared, 0.0)) / radius, 0.0);
                     float attenuation = range * range;
-                    float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);
                     vec3 radiance = max(light.linearColorIntensity.rgb, vec3(0.0))
                             * max(light.linearColorIntensity.a, 0.0);
                     vec3 unshadowedContribution = albedo

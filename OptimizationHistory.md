@@ -717,13 +717,57 @@ CPU p95 `-94.66%`, present p95 `-83.68%`, GPU p95 `-10.52%`, shared→private co
 **Итог:** **ВНЕДРЕНО/accepted**. Это устойчивый lossless результат по двум полным
 прогонам, без регрессии качества или L6 safety contracts.
 
+### Lossless `nDotL` early reject — принято
+
+**Гипотеза и причина проверки:** для direct light с нулевым `nDotL` дальнейшие
+range/sqrt/attenuation/radiance вычисления не могут изменить вклад. Нужен был
+строго output-equivalent early reject, уменьшающий fragment работу в Nether без
+перестановки вычислений, которые могут влиять на NaN/edge behavior.
+
+**Семантика изменения:** используются существующие exact `inverseDistance` и `nDotL`;
+сравнение строго `== 0.0` выполняется до range, sqrt, attenuation и radiance. Раньше
+при таком `nDotL` shadow gate был false, а вклад уже был нулевым. NaN не равен нулю,
+поэтому его прежнее поведение сохранено. Изменение покрыто только четырьмя fragment
+goldens и не меняет материал, свет, тень или order для ненулевого вклада.
+
+**Способ измерения:** два полных production Nether run с одинаковыми source/artifact
+digest, `1800+3000` кадров, raw + summary `COMPLETE`:
+`20260722T005156Z-gef373bfda794-dirty-nether-ndotl-reject-1-off` и
+`20260722T005628Z-gef373bfda794-dirty-nether-ndotl-reject-2-off`. Acceptance
+сравнивает их с accepted L6 pair; `materialContractUnitTest` и `./gradlew clean check`
+прошли. Detailed-attribution, не участвующий в FPS acceptance:
+`20260722T010217Z-gef373bfda794-dirty-nether-ndotl-detail-off`.
+
+| Candidate | FPS | min window | 1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| #1 | 25.709 | 25.516 | 22.593 | 14.015 / 14.614 ms | 44.605 / 45.972 ms | 41.039 / 42.731 ms |
+| #2 | 25.678 | 25.554 | 22.218 | 13.920 / 14.810 ms | 44.712 / 46.688 ms | 41.402 / 43.625 ms |
+
+**Результат:** средние accepted L6 → `nDotL` значения: FPS `21.760 → 25.694`
+(`+18.079%`), GPU p95 `50.238 → 44.659 ms` (`-11.105%`), 1% low
+`18.816 → 22.405` (`+19.072%`), present p95 `48.811 → 41.221 ms` (`-15.550%`).
+Copies остаются `74,400 B/frame`, allocations `0`. Quality: в обоих run
+`READY=87`, `APPROXIMATE=1961`, `FAIL_CLOSED=0`; coverage/failures неизменны при
+`lightCount=2048`. READY находится в исходном baseline range, что согласуется с
+математической output-equivalence, а не с понижением качества.
+
+Detailed показывает World Opaque mean/p95-mean/max `28.861/29.785/35.438 ms` против
+baseline `37.235/46.357/53.396 ms` (`-22.49/-35.75/-33.63%`). Cluster Build:
+`0.7575/1.1876/2.2626 ms` против `1.1307/2.6833/11.8215 ms`. Это attribution, не
+дополнительный FPS evidence.
+
+**Побочные эффекты и ограничение evidence:** compare tool снова не выпустил accepted
+receipt из-за известного post-evidence ordering/missing `.accepted.json`. Raw+summary
+обоих production artifacts валидны и имеют `COMPLETE`; исправление receipt остаётся
+отдельной benchmark-задачей и не скрывается.
+
+**Итог:** **ВНЕДРЕНО/accepted**. Это второй раздельно измеренный lossless кандидат
+после L6 recovery, с улучшением CPU/GPU/present tail и без visual/L6 regression.
+
 ### Кандидаты позже — без реализации
 
-**Lossless `nDotL` early reject:** проверить после принятого L6 capacity A/B и только
-при доказанном числе фрагментных direct-light итераций; reject обязан быть
-математически эквивалентен нулевому вкладу и не менять свет/тени.
-
-**Conservative cluster side planes:** проверить как отдельную GPU-гипотезу лишь при
+**Conservative cluster side planes — следующий кандидат:** проверить как отдельную
+GPU-гипотезу лишь при
 доказанном cluster false-positive/индексном pressure. Плоскости могут отбрасывать
 только sphere, целиком лежащую вне coarse-cell frustum; invalid projection остаётся
-fail-open. Ни один из вариантов ещё не измерялся и не внедрялся.
+fail-open. Кандидат ещё не измерялся и не внедрялся.

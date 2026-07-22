@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "bb3a502476c275b01135138cf1d38b0248f94a2f6555aefa06c8afe6d95b2a77",
+            "sodium-solid-fsh", "c3dc251dcd5d2bef84826b55ebd15de63c7a51ea4435686547c6112fec591dfc",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "40a49e3a44c1450b672555799c6715793717a5e66bbe5997832cdefbd0015dc4",
+            "sodium-cutout-fsh", "4b55d4077d2a5a60254de2dfd62f67529fc6298b24e650135322dafb0e0304e6",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "1d1b79ebc5912835166f3dc562ef0186d4cb7d7705043a42195ce6ec744a0fa1",
+            "minecraft-entity-fsh", "f3cc919e2340eb6c2946ffe9e71bafc462978f8a4d5182b0abbf6baa074bde0d",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "f9b62f190f22f187a9a54913896660ef017f63c5095e51f29f2b17f6bafb2f42"
+            "minecraft-end-portal-fsh", "5d05b519fe9c83602a6b0c069d323955a7f5ff6c78fc798bb75722c8f53d6df2"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -455,6 +455,22 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFormula.contains(
                         "direct += unshadowedContribution * visibility;"),
                 "direct-light formula is no longer visibility-weighted Lambertian scene-linear radiance");
+        require(sodiumFormula.contains(
+                        "float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));")
+                        && sodiumFormula.contains(
+                        "float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);")
+                        && countOccurrences(sodiumFormula, "if (nDotL == 0.0)") == 1
+                        && before(sodiumFormula,
+                        "float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));",
+                        "float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);")
+                        && before(sodiumFormula,
+                        "float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);",
+                        "if (nDotL == 0.0)")
+                        && before(sodiumFormula, "if (nDotL == 0.0)", "float range =")
+                        && before(sodiumFormula, "if (nDotL == 0.0)", "float attenuation =")
+                        && before(sodiumFormula, "if (nDotL == 0.0)", "vec3 radiance =")
+                        && !sodiumFormula.contains("if (nDotL <= 0.0)"),
+                "back-facing direct lights do not reject before range, attenuation, and radiance work");
         require(sodiumFragment.contains("vec3 metallumSafeNormalV1(vec3 surfaceNormal)")
                         && sodiumFragment.contains("vec3 scaledNormal = surfaceNormal / normalScale;")
                         && sodiumFragment.contains(

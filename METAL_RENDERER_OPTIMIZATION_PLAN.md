@@ -46,8 +46,19 @@
   сохранены. Compare tool не выпустил accepted receipt из-за известного post-evidence
   ordering/missing `.accepted.json`; валидные raw+summary обоих artifacts имеют
   `COMPLETE`, а исправление receipt — отдельная задача.
-- Отложены до нового профиля: lossless `nDotL` early reject и conservative
-  cluster-side planes (строго fail-open/консервативные, без снижения качества).
+- Lossless `nDotL` early reject **ВНЕДРЕНО/accepted**: exact existing
+  `inverseDistance/nDotL` получает strict `== 0.0` reject до range/sqrt/attenuation/
+  radiance; это output-equivalent (включая NaN) и не меняет свет/тени. Два full
+  `1800+3000` COMPLETE artifacts дали `25.709/25.678 FPS`, GPU p95
+  `44.605/44.712 ms`, 1% low `22.593/22.218`, present p95 `41.039/41.402 ms`,
+  `74,400 B/frame` copies и `0` allocations при неизменных coverage/failures.
+  Detailed World Opaque p95-mean `29.785 ms` против baseline `46.357 ms`.
+  `materialContractUnitTest` и `clean check` прошли; compare receipt всё ещё
+  заблокирован известным post-evidence ordering/missing `.accepted.json`, хотя raw+
+  summary имеют `COMPLETE`.
+- Следующий pending кандидат — conservative cluster-side planes: только fail-open,
+  консервативный reject sphere, целиком вне coarse-cell frustum, и только после
+  профиля cluster false-positive/индексного pressure; без снижения качества.
 
 ---
 
