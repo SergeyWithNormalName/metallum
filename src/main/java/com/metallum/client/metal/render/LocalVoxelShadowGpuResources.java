@@ -1397,6 +1397,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 cacheRefreshPendingBuildLimit(this.budget.preset()),
                 backgroundPendingBuildLimit(this.budget.preset())
         );
+        CapacityRecoveryVictimCache recoveryVictims =
+                new CapacityRecoveryVictimCache(frameLights);
 
         // Never publish a coarse intermediate page for a dirty close light. The previous page
         // remains STALE and visible until a target-quality replacement is atomically committed.
@@ -1458,7 +1460,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     frameLight.desiredEdge(), false
             );
             if (!ensureForegroundReplacementCapacity(
-                    frameLight, frameLights, buildEdge, submitIndex, schedule
+                    frameLight, frameLights, buildEdge, submitIndex, schedule,
+                    recoveryVictims
             )) {
                 continue;
             }
@@ -1502,7 +1505,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             }
             int buildEdge = nextBuildEdge(0, frameLight.desiredEdge(), false);
             if (!ensureForegroundReplacementCapacity(
-                    frameLight, frameLights, buildEdge, submitIndex, schedule
+                    frameLight, frameLights, buildEdge, submitIndex, schedule,
+                    recoveryVictims
             )) {
                 continue;
             }
@@ -1569,12 +1573,69 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         });
     }
 
+    /**
+     * Pre-sorts the current resident candidates at first recovery, once per scheduling pass.
+     * The live maps are still rechecked immediately before retiring a victim, because foreground scheduling can
+     * add pending work and a retirement can remove an active page during the same pass.
+     */
+    private Map<Long, List<CapacityRecoveryCandidate>> buildCapacityRecoveryVictims(
+            final List<FrameLight> frameLights
+    ) {
+        List<CapacityRecoveryCandidate> residents = new ArrayList<>();
+        for (int index = 0; index < frameLights.size(); index++) {
+            FrameLight frameLight = frameLights.get(index);
+            LocalVoxelShadowAtlasResidency.Page page = this.residency.activePage(
+                    frameLight.light().stableId()
+            );
+            if (page == null) {
+                continue;
+            }
+            residents.add(new CapacityRecoveryCandidate(
+                    index,
+                    frameLight.light().stableId(),
+                    frameLight.cacheLevel(),
+                    frameLight.desiredEdge(),
+                    frameLight.centerDistance(),
+                    frameLight.light().priority(),
+                    page.allocationBytes()
+            ));
+        }
+        Map<Long, List<CapacityRecoveryCandidate>> candidatesByRequiredBytes =
+                new HashMap<>();
+        for (int edge : LocalVoxelShadowAtlasLayout.PAGE_EDGES) {
+            long requiredBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(edge);
+            candidatesByRequiredBytes.put(
+                    requiredBytes,
+                    orderedCapacityRecoveryCandidates(residents, requiredBytes)
+            );
+        }
+        return Map.copyOf(candidatesByRequiredBytes);
+    }
+
+    static List<CapacityRecoveryCandidate> orderedCapacityRecoveryCandidates(
+            final List<CapacityRecoveryCandidate> candidates,
+            final long requiredBytes
+    ) {
+        if (requiredBytes <= 0L) {
+            throw new IllegalArgumentException("L6 capacity-recovery size must be positive");
+        }
+        List<CapacityRecoveryCandidate> ordered = new ArrayList<>();
+        for (CapacityRecoveryCandidate candidate : candidates) {
+            if (candidate.allocationBytes() >= requiredBytes) {
+                ordered.add(candidate);
+            }
+        }
+        ordered.sort(LocalVoxelShadowGpuResources::compareCapacityRecoveryCandidates);
+        return List.copyOf(ordered);
+    }
+
     private boolean ensureForegroundReplacementCapacity(
             final FrameLight target,
             final List<FrameLight> frameLights,
             final int buildEdge,
             final long submitIndex,
-            final BuildScheduleBudget schedule
+            final BuildScheduleBudget schedule,
+            final CapacityRecoveryVictimCache recoveryVictims
     ) {
         long stableId = target.light().stableId();
         long requiredBytes = LocalVoxelShadowAtlasLayout.pageAllocationBytes(buildEdge);
@@ -1597,7 +1658,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             return false;
         }
         scheduleCapacityRecoveryEviction(
-                target, frameLights, requiredBytes, submitIndex
+                target, frameLights, requiredBytes, submitIndex, recoveryVictims
         );
         return false;
     }
@@ -1607,6 +1668,18 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final List<FrameLight> frameLights,
             final long requiredBytes,
             final long submitIndex
+    ) {
+        scheduleCapacityRecoveryEviction(
+                target, frameLights, requiredBytes, submitIndex, null
+        );
+    }
+
+    private void scheduleCapacityRecoveryEviction(
+            final FrameLight target,
+            final List<FrameLight> frameLights,
+            final long requiredBytes,
+            final long submitIndex,
+            final CapacityRecoveryVictimCache recoveryVictims
     ) {
         long stableId = target.light().stableId();
         if (!capacityRecoveryEvictionAllowed(
@@ -1629,20 +1702,44 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             victim = target;
             victimPage = own;
         }
-        for (FrameLight candidate : frameLights) {
-            long candidateId = candidate.light().stableId();
-            if (candidateId == stableId || this.builds.containsKey(candidateId)
-                    || this.uploads.containsKey(candidateId)) {
-                continue;
+        if (recoveryVictims == null) {
+            for (FrameLight candidate : frameLights) {
+                long candidateId = candidate.light().stableId();
+                if (candidateId == stableId || this.builds.containsKey(candidateId)
+                        || this.uploads.containsKey(candidateId)) {
+                    continue;
+                }
+                LocalVoxelShadowAtlasResidency.Page page =
+                        this.residency.activePage(candidateId);
+                if (page == null || page.allocationBytes() < requiredBytes) {
+                    continue;
+                }
+                if (victim == null || lessImportantForShadowResidency(candidate, victim)) {
+                    victim = candidate;
+                    victimPage = page;
+                }
             }
-            LocalVoxelShadowAtlasResidency.Page page =
-                    this.residency.activePage(candidateId);
-            if (page == null || page.allocationBytes() < requiredBytes) {
-                continue;
-            }
-            if (victim == null || lessImportantForShadowResidency(candidate, victim)) {
-                victim = candidate;
-                victimPage = page;
+        } else {
+            for (CapacityRecoveryCandidate cachedCandidate
+                    : recoveryVictims.candidates(requiredBytes)) {
+                long candidateId = cachedCandidate.stableId();
+                if (candidateId == stableId || this.builds.containsKey(candidateId)
+                        || this.uploads.containsKey(candidateId)) {
+                    continue;
+                }
+                FrameLight candidate = frameLights.get(cachedCandidate.frameLightIndex());
+                LocalVoxelShadowAtlasResidency.Page page =
+                        this.residency.activePage(candidateId);
+                if (page == null || page.allocationBytes() < requiredBytes) {
+                    continue;
+                }
+                if (victim == null || lessImportantForShadowResidency(candidate, victim)) {
+                    victim = candidate;
+                    victimPage = page;
+                }
+                // The cache is least-important-first. Once its first live candidate was
+                // compared against the target's own page, no later candidate can win.
+                break;
             }
         }
         if (victim == null) {
@@ -1659,6 +1756,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         if (!this.residency.retire(victimId, reusableAfter)) {
             this.capacityBlockedBuilds.add(stableId);
             return;
+        }
+        if (recoveryVictims != null) {
+            recoveryVictims.invalidate();
         }
         this.evictedRecoveryTargets.add(victimId);
         this.residents.remove(victimId);
@@ -1679,27 +1779,55 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final FrameLight candidate,
             final FrameLight currentVictim
     ) {
-        boolean candidateCovered = candidate.cacheLevel() >= 0;
-        boolean victimCovered = currentVictim.cacheLevel() >= 0;
+        return compareCapacityRecoveryPriority(
+                candidate.light().stableId(), candidate.cacheLevel(), candidate.desiredEdge(),
+                candidate.centerDistance(), candidate.light().priority(),
+                currentVictim.light().stableId(), currentVictim.cacheLevel(),
+                currentVictim.desiredEdge(), currentVictim.centerDistance(),
+                currentVictim.light().priority()
+        ) < 0;
+    }
+
+    private static int compareCapacityRecoveryCandidates(
+            final CapacityRecoveryCandidate candidate,
+            final CapacityRecoveryCandidate currentVictim
+    ) {
+        return compareCapacityRecoveryPriority(
+                candidate.stableId(), candidate.cacheLevel(), candidate.desiredEdge(),
+                candidate.centerDistance(), candidate.priority(),
+                currentVictim.stableId(), currentVictim.cacheLevel(),
+                currentVictim.desiredEdge(), currentVictim.centerDistance(),
+                currentVictim.priority()
+        );
+    }
+
+    private static int compareCapacityRecoveryPriority(
+            final long candidateId,
+            final int candidateCacheLevel,
+            final int candidateDesiredEdge,
+            final double candidateCenterDistance,
+            final int candidatePriority,
+            final long victimId,
+            final int victimCacheLevel,
+            final int victimDesiredEdge,
+            final double victimCenterDistance,
+            final int victimPriority
+    ) {
+        boolean candidateCovered = candidateCacheLevel >= 0;
+        boolean victimCovered = victimCacheLevel >= 0;
         if (candidateCovered != victimCovered) {
-            return !candidateCovered;
+            return candidateCovered ? 1 : -1;
         }
-        int quality = Integer.compare(
-                candidate.desiredEdge(), currentVictim.desiredEdge()
-        );
+        int quality = Integer.compare(candidateDesiredEdge, victimDesiredEdge);
         if (quality != 0) {
-            return quality < 0;
+            return quality;
         }
-        int distance = Double.compare(
-                candidate.centerDistance(), currentVictim.centerDistance()
-        );
+        int distance = Double.compare(victimCenterDistance, candidateCenterDistance);
         if (distance != 0) {
-            return distance > 0;
+            return distance;
         }
-        int priority = Integer.compare(candidate.light().priority(), currentVictim.light().priority());
-        return priority != 0 ? priority < 0 : Long.compareUnsigned(
-                candidate.light().stableId(), currentVictim.light().stableId()
-        ) > 0;
+        int priority = Integer.compare(candidatePriority, victimPriority);
+        return priority != 0 ? priority : Long.compareUnsigned(victimId, candidateId);
     }
 
     private static int compareStaticBootstrapPriority(
@@ -2746,6 +2874,51 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     ) {
         boolean staticCacheEligible() {
             return this.cacheEligible && this.staticBuildAllowed;
+        }
+    }
+
+    record CapacityRecoveryCandidate(
+            int frameLightIndex,
+            long stableId,
+            int cacheLevel,
+            int desiredEdge,
+            double centerDistance,
+            int priority,
+            long allocationBytes
+    ) {
+        CapacityRecoveryCandidate {
+            if (frameLightIndex < 0 || stableId == 0L
+                    || !LocalVoxelShadowAtlasLayout.supportsPageEdge(desiredEdge)
+                    || !Double.isFinite(centerDistance) || centerDistance < 0.0
+                    || allocationBytes <= 0L) {
+                throw new IllegalArgumentException("Invalid L6 capacity-recovery candidate");
+            }
+        }
+    }
+
+    private final class CapacityRecoveryVictimCache {
+        private final List<FrameLight> frameLights;
+        private Map<Long, List<CapacityRecoveryCandidate>> candidatesByRequiredBytes;
+        private boolean valid = true;
+
+        private CapacityRecoveryVictimCache(
+                final List<FrameLight> frameLights
+        ) {
+            this.frameLights = frameLights;
+        }
+
+        private List<CapacityRecoveryCandidate> candidates(final long requiredBytes) {
+            if (!this.valid) {
+                return List.of();
+            }
+            if (this.candidatesByRequiredBytes == null) {
+                this.candidatesByRequiredBytes = buildCapacityRecoveryVictims(this.frameLights);
+            }
+            return this.candidatesByRequiredBytes.getOrDefault(requiredBytes, List.of());
+        }
+
+        private void invalidate() {
+            this.valid = false;
         }
     }
 

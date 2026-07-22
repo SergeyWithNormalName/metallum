@@ -590,3 +590,140 @@ Built-in Retina с `3024×1964@120`, затем `ROUTE_READY`, `MEASURE_START/EN
 HiDPI и native fullscreen benchmark contract восстановлены. Следующий baseline должен
 идти на clean commit с тремя `1800+3000` production runs и отдельным detailed run;
 короткий smoke не использовать как performance baseline.
+
+---
+
+## 2026-07-22 — Nether: исходные данные после восстановления contract
+
+### Достоверность стенда — внедрено, но не является оптимизацией
+
+**Причина проверки:** до этого этапа Nether-прогоны могли завершаться до
+`ROUTE_READY` или сравнивать logical points с Retina backing pixels. Такие цифры нельзя
+использовать ни как baseline, ни как результат A/B.
+
+**Способ измерения и результат:** benchmark-contract последовательно восстановлен
+четырьмя отдельными commit: `0ae06ac` (Retina framebuffer в pixels), `c4e1b61`
+(exact GLFW fullscreen mode), `6662597` (attestation Nether HDR profile) и `452b98d`
+(fullscreen launcher config). Это изменения условий достоверного измерения, а не
+renderer hot path и не оптимизация FPS. После них сохранены три обязательных
+production baseline-артефакта (`1800+3000`, без detailed markers) и отдельный detailed
+артефакт с GPU-stage метриками; условия во всех случаях остаются неизменными:
+Nether lava-stress, MetalFX off, Balanced lighting, VSync off, HDR, frozen
+simulation, Built-in Retina `3024×1964@120`.
+
+| Роль | Artifact stem | FPS | CPU p95 | GPU p95 |
+|---|---|---:|---:|---:|
+| Production baseline 1 | `20260721T232601Z-gc4e1b614a588-clean-nether-baseline-1-off` | 8.6924 | 272.5201 ms | 57.8272 ms |
+| Production baseline 2 | `20260721T234157Z-g666259768439-clean-nether-baseline-2-off` | 12.3003 | 268.4227 ms | 56.5651 ms |
+| Production baseline 3 | `20260721T235234Z-g452b98dd1aa2-clean-nether-baseline-3-off` | 8.5917 | 277.7705 ms | 57.7181 ms |
+| Detailed, только атрибуция | `20260722T000347Z-g452b98dd1aa2-clean-nether-baseline-detail-off` | 8.5931 | 283.6399 ms | 57.8990 ms |
+
+Все артефакты лежат в `run/logs/metallum-benchmarks/`. У первого production raw
+валиден, но legacy analyzer оставил zero-byte summary; его текущая ручная агрегация
+даёт приведённые `8.6924 FPS / 272.5201 ms CPU p95 / 57.8272 ms GPU p95`. Detailed
+дополнительно показывает World Opaque около `37.2 ms`, Cluster Build `1.131 ms`;
+его FPS не является production-метрикой.
+
+**Побочные эффекты:** detailed report нужен только для атрибуции CPU/GPU стадий и не
+смешивается с production FPS/frame-pacing. Сами четыре commit не дают основания
+заявлять какой-либо выигрыш производительности.
+
+**Итог:** внедрено как benchmark-contract. Production baseline теперь допускается к
+сравнению следующих одиночных гипотез; улучшение Nether пока не заявлено.
+
+### JFR tail diagnostic — опровергнут sidecar как главный источник CPU-tail
+
+**Причина проверки:** после валидного baseline требовалось отделить CPU tail,
+allocation/GC pressure и синхронизацию от неизменного GPU workload, прежде чем менять
+native heaps или shader path.
+
+**Способ измерения:** отдельный 77-секундный JFR diagnostic capture с последующей
+агрегацией Render samples, Long allocation samples, young-GC pauses и monitor
+contention. Это профиль причины, не acceptance benchmark и не A/B.
+
+**Результат:** из `4697` Render samples `3880` (`82.6%`) пришлись на ресурсы L6.
+Long allocation sample экстраполирует около `148.6 GB` или `~1.93 GB/s` allocation
+pressure; за capture произошло `93` young GC, pause p99 `16.0 ms`, максимум
+`17.1 ms`. Monitor contention не найден, а GPU-метрики относительно production/detailed
+артефактов не изменились. Следовательно, Sodium light sidecar не подтверждается как
+главная причина CPU-tail; профиль указывает прежде всего на L6 resource/capacity path.
+
+**Побочные эффекты и ограничение:** JFR сам меняет нагрузку и Long allocation даёт
+оценку, а не точный allocation counter. Поэтому эти числа нельзя принимать как FPS
+результат или как доказательство качества изображения.
+
+**Итог:** sidecar как главный CPU-tail кандидат отклонён. Диагностика оставлена как
+основание для изолированного L6 A/B, но не как acceptance evidence.
+
+### O3 private heaps — отложено для текущего CPU-tail
+
+**Причина проверки:** старый план предлагал private heaps для GPU residency и memory
+pressure. После JFR возник риск принять сложную native-memory работу за ответ на
+Java/L6 allocation tail.
+
+**Способ измерения:** сопоставлены назначение O3 (GPU resources/placement/aliasing) и
+JFR-источник нагрузки; новый O3 A/B не запускался, чтобы не смешивать гипотезы.
+Упомянутые здесь прежние current-Nether evidence относятся к старому dirty run, а не
+к свежему clean/same-artifact A/B этой записи.
+
+**Результат:** private heaps не устраняют наблюдаемый L6 allocation/capacity CPU-tail
+и не имеют новой причины для первоочередной проверки. GPU workload в diagnostic не
+изменился.
+
+**Побочные эффекты:** это не общий запрет O3: heaps могут быть полезны при отдельно
+доказанном native allocation, residency или bandwidth bottleneck.
+
+**Итог:** для текущего Nether-tail **отложено/deprioritized**, не внедрено и не
+объявлено отвергнутым навсегда.
+
+### L6 capacity recovery без `O(blocked × lights)` — принято
+
+**Гипотеза и причина проверки:** L6 capacity-recovery повторно обходил blocked lights
+и создавал allocation/CPU tail. Нужно было сохранить качество и fairness, но сделать
+recovery bounded по реально изменившимся/capacity-blocked объектам, а не по
+`blocked × lights`.
+
+**Семантика изменения:** lazy cache хранит только выбор наименее важного кандидата
+для capacity recovery. Перед фактическим действием он не является источником истины:
+live conditions перепроверяются, включая актуальные blocked/capacity/epoch условия.
+Поэтому cache не отменяет retry, starvation/fairness, readiness либо fallback и не
+меняет семантику света или теней.
+
+**Способ измерения:** два независимых полных Nether A/B на одинаковых source и
+built-artifact digest, `1800+3000` кадров, raw + summary со статусом `COMPLETE`:
+`20260722T003215Z-g452b98dd1aa2-dirty-nether-l6-recovery-cache-1-off` и
+`20260722T003725Z-g452b98dd1aa2-dirty-nether-l6-recovery-cache-2-off`. Сравнение
+идёт с тремя production baseline выше; detailed не участвует в FPS/frame-pacing
+acceptance. `metalRuntimeUnitTest` и `./gradlew clean check` прошли.
+
+| Candidate | FPS | min window | 1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| #1 | 21.927 | 21.784 | 18.921 | 14.311 / 15.135 ms | 49.861 / 52.142 ms | 48.505 / 50.889 ms |
+| #2 | 21.593 | 21.498 | 18.712 | 14.330 / 14.844 ms | 50.614 / 53.045 ms | 49.116 / 51.779 ms |
+
+**Результат:** средний candidate FPS `21.760` против `9.861` у трёх baseline. Даже
+консервативное сопоставление худшего candidate с лучшим baseline даёт FPS `+75.55%`,
+CPU p95 `-94.66%`, present p95 `-83.68%`, GPU p95 `-10.52%`, shared→private copy
+`-61.29%`. Копирование составляет `74,400 B/frame` вместо `192,210–271,244 B/frame`,
+успешных Metal buffer allocations — `0` вместо `1.55–2.60/frame`. Качество не
+деградировало: `READY 92/102` против baseline `86–87`, `APPROXIMATE 1956/1946`,
+`FAIL_CLOSED=0`, coverage/failures неизменны, `lightCount=2048`.
+
+**Побочные эффекты и ограничение evidence:** compare tool не создал accepted receipt
+из-за известного post-evidence ordering и отсутствующего `.accepted.json`. Это не
+скрывается: raw + summary каждого прогона валидны и имеют `COMPLETE`, но receipt
+нужно восстановить отдельной работой над инструментом, не подменяя им результат A/B.
+
+**Итог:** **ВНЕДРЕНО/accepted**. Это устойчивый lossless результат по двум полным
+прогонам, без регрессии качества или L6 safety contracts.
+
+### Кандидаты позже — без реализации
+
+**Lossless `nDotL` early reject:** проверить после принятого L6 capacity A/B и только
+при доказанном числе фрагментных direct-light итераций; reject обязан быть
+математически эквивалентен нулевому вкладу и не менять свет/тени.
+
+**Conservative cluster side planes:** проверить как отдельную GPU-гипотезу лишь при
+доказанном cluster false-positive/индексном pressure. Плоскости могут отбрасывать
+только sphere, целиком лежащую вне coarse-cell frustum; invalid projection остаётся
+fail-open. Ни один из вариантов ещё не измерялся и не внедрялся.

@@ -270,6 +270,40 @@ public final class MetalRuntimeTests {
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(6) == 32
                         && LocalVoxelShadowGpuResources.retryDelaySubmits(20) == 32,
                 "L6 distance-transition continuity, upgrade latching, or retry policy regressed");
+        List<LocalVoxelShadowGpuResources.CapacityRecoveryCandidate> recoveryCandidates =
+                List.of(
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                0, 1L, 0, 64, 12.0, 8, 4096L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                1, 2L, -1, 64, 1.0, 99, 4096L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                2, 3L, 0, 32, 100.0, 1, 4096L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                3, 4L, 0, 32, 100.0, 0, 4096L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                4, -1L, 0, 32, 100.0, 0, 4096L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                5, 5L, 0, 16, 200.0, 0, 1024L
+                        ),
+                        new LocalVoxelShadowGpuResources.CapacityRecoveryCandidate(
+                                6, 6L, 0, 32, 200.0, Integer.MAX_VALUE, 4096L
+                        )
+                );
+        List<Long> orderedRecoveryIds = LocalVoxelShadowGpuResources
+                .orderedCapacityRecoveryCandidates(recoveryCandidates, 4096L)
+                .stream()
+                .map(LocalVoxelShadowGpuResources.CapacityRecoveryCandidate::stableId)
+                .toList();
+        require(orderedRecoveryIds.equals(List.of(2L, 6L, -1L, 4L, 3L, 1L))
+                        && LocalVoxelShadowGpuResources
+                        .orderedCapacityRecoveryCandidates(recoveryCandidates, 8192L)
+                        .isEmpty(),
+                "L6 capacity-recovery cache changed the exact eviction priority or size filter");
         long oldOffset = 0x00000002_00000100L;
         LocalVoxelShadowGpuResources.packDescriptor(
                 descriptors, 0,

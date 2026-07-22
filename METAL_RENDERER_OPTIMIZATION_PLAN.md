@@ -14,6 +14,43 @@
 
 ---
 
+## Актуализация Nether — 2026-07-22
+
+Это старый базовый план; ниже зафиксировано только его текущее применение к Nether,
+а не новый порядок всей программы.
+
+- Commit `0ae06ac`, `c4e1b61`, `6662597` и `452b98d` восстановили benchmark contract
+  (Retina pixels, exact GLFW fullscreen, HDR-profile attestation, launcher config).
+  Они не являются renderer-оптимизациями. На их основе сохранены три production
+  baseline (`20260721T232601Z-gc4e1b614a588-clean-nether-baseline-1-off`,
+  `20260721T234157Z-g666259768439-clean-nether-baseline-2-off`,
+  `20260721T235234Z-g452b98dd1aa2-clean-nether-baseline-3-off`) и отдельный detailed
+  artifact (`20260722T000347Z-g452b98dd1aa2-clean-nether-baseline-detail-off`) при
+  неизменных Nether conditions: MetalFX off, Balanced lighting, VSync off, HDR, frozen
+  simulation и `3024×1964@120`.
+- JFR diagnostic длительностью 77 s — только средство поиска причины, не acceptance:
+  `3880/4697` (`82.6%`) Render samples находятся в L6 resources; Long allocation
+  sample оценивает `~148.6 GB`/`~1.93 GB/s`, `93` young GC, pause p99/max
+  `16.0/17.1 ms`, без monitor contention и без изменения GPU-метрик. Поэтому sidecar
+  не является главным CPU-tail кандидатом.
+- Для текущего tail O3 private heaps остаётся deprioritized: прежнее evidence было
+  старым dirty run, а не свежим same-artifact A/B. Это возможный ответ на native
+  residency/bandwidth, но не на наблюдаемый L6 Java allocation/capacity path; O3
+  требует самостоятельного доказательства.
+- Lossless L6 capacity-recovery без `O(blocked × lights)` **ВНЕДРЕНО/accepted**.
+  Два full `1800+3000` COMPLETE artifacts на одинаковых source/artifact digest дали
+  `21.927/21.593 FPS`, CPU p95 `14.311/14.330 ms`, GPU p95 `49.861/50.614 ms`,
+  present p95 `48.505/49.116 ms`, `0` successful Metal buffer allocations и без
+  изменения L6 coverage/failures. Lazy least-important cache всегда перепроверяет
+  live blocked/capacity/epoch conditions до действия; retry/fairness/readiness/fallback
+  сохранены. Compare tool не выпустил accepted receipt из-за известного post-evidence
+  ordering/missing `.accepted.json`; валидные raw+summary обоих artifacts имеют
+  `COMPLETE`, а исправление receipt — отдельная задача.
+- Отложены до нового профиля: lossless `nDotL` early reject и conservative
+  cluster-side planes (строго fail-open/консервативные, без снижения качества).
+
+---
+
 ## 1. Однозначный инженерный вывод
 
 Максимальный практический выигрыш для Metallum даст не одна «секретная» функция Metal, а последовательное устранение четырёх классов потерь:
@@ -427,6 +464,13 @@ worker пишет конечный packed layout
 ---
 
 ## 9. Этап O3 — private heaps, transient aliasing и memory pressure
+
+**Nether status 2026-07-22:** не запускать O3 как реакцию на текущий CPU-tail.
+JFR указывает на L6 resource/capacity allocation pressure, тогда как этот этап меняет
+native GPU placement/residency. Вернуться к нему можно только с самостоятельным
+доказательством native allocation, bandwidth или residency bottleneck и отдельным
+same-contract A/B. Предыдущее current-Nether private-heaps evidence было старым dirty
+run; оно не является fresh A/B и поэтому оставлено только как deprioritized context.
 
 ### 9.1. Вводить heaps по классам, не один глобальный heap
 
