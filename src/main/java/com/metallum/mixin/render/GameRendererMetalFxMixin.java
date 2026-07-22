@@ -49,6 +49,8 @@ abstract class GameRendererMetalFxMixin {
 
     private final Matrix4f metallum$previousBaseProjection = new Matrix4f();
     private final Matrix4f metallum$cameraInverse = new Matrix4f();
+    private final Matrix4f metallum$jitteredProjection = new Matrix4f();
+    private final Matrix4f metallum$postProjectionTransform = new Matrix4f();
     private boolean metallum$hasPreviousBaseProjection;
     private Entity metallum$previousCameraEntity;
     private Object metallum$dimensionKey;
@@ -192,14 +194,23 @@ abstract class GameRendererMetalFxMixin {
                 jitterY = (float) jitter.y();
             }
 
-            Matrix4f jitteredProjection = new Matrix4f(finalProjection);
+            Matrix4f jitteredProjection = this.metallum$jitteredProjection;
             if (jitterX != 0f || jitterY != 0f) {
-                TemporalJitterProjection.apply(
+                // finalProjection is P * B, where B contains view bobbing and
+                // portal effects. Applying the classic m20/m21 projection
+                // jitter to P * B makes its pixel offset vary with B and scene
+                // depth. Build P_jittered * B instead.
+                TemporalJitterProjection.applyBeforePostProjection(
                         jitteredProjection,
+                        camera.projectionMatrix,
+                        finalProjection,
+                        this.metallum$postProjectionTransform,
                         new FrameState.JitterOffset(jitterX, jitterY),
                         this.mainRenderTarget.width,
                         this.mainRenderTarget.height
                 );
+            } else {
+                jitteredProjection.set(finalProjection);
             }
 
             Matrix4 view = matrix(camera.viewRotationMatrix);

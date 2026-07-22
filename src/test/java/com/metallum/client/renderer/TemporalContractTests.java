@@ -26,6 +26,7 @@ public final class TemporalContractTests {
         testPresetJitterPhaseCounts();
         testPresetTextureMipBias();
         testProjectionJitterConvention();
+        testJitterPrecedesViewBobbing();
         testReusablePacketRing();
         testDiagnosticManifestIsolation();
         testTemporalCapabilityProfileAndProductionContract();
@@ -110,6 +111,61 @@ public final class TemporalContractTests {
                 "Projection X jitter was not converted from pixels to clip space");
         require(Math.abs(projection.m21() - 0.0025f) <= 1.0e-7f,
                 "Projection Y jitter did not invert MetalFX's render-target Y axis");
+    }
+
+    private static void testJitterPrecedesViewBobbing() {
+        Matrix4f baseProjection = new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0), 16.0f / 9.0f, 0.05f, 1_000.0f, true
+        );
+        Matrix4f bobbing = new Matrix4f()
+                .translate(0.0f, 0.12f, 0.0f)
+                .rotateZ((float) Math.toRadians(2.0))
+                .rotateX((float) Math.toRadians(-3.0));
+        Matrix4f vanillaFinalProjection = new Matrix4f(baseProjection).mul(bobbing);
+        FrameState.JitterOffset jitter = new FrameState.JitterOffset(0.25, -0.125);
+
+        Matrix4f expected = new Matrix4f(baseProjection);
+        TemporalJitterProjection.apply(expected, jitter, 200, 100);
+        expected.mul(bobbing);
+
+        Matrix4f actual = new Matrix4f();
+        TemporalJitterProjection.applyBeforePostProjection(
+                actual,
+                baseProjection,
+                vanillaFinalProjection,
+                new Matrix4f(),
+                jitter,
+                200,
+                100
+        );
+        require(maximumMatrixDelta(expected, actual) <= 2.0e-6f,
+                "Temporal jitter was not applied before the bobbing transform");
+
+        Matrix4f wrongOrder = new Matrix4f(vanillaFinalProjection);
+        TemporalJitterProjection.apply(wrongOrder, jitter, 200, 100);
+        require(maximumMatrixDelta(expected, wrongOrder) > 1.0e-4f,
+                "Bobbing regression guard did not distinguish post-projection jitter");
+    }
+
+    private static float maximumMatrixDelta(final Matrix4f left, final Matrix4f right) {
+        float maximum = 0.0f;
+        maximum = Math.max(maximum, Math.abs(left.m00() - right.m00()));
+        maximum = Math.max(maximum, Math.abs(left.m01() - right.m01()));
+        maximum = Math.max(maximum, Math.abs(left.m02() - right.m02()));
+        maximum = Math.max(maximum, Math.abs(left.m03() - right.m03()));
+        maximum = Math.max(maximum, Math.abs(left.m10() - right.m10()));
+        maximum = Math.max(maximum, Math.abs(left.m11() - right.m11()));
+        maximum = Math.max(maximum, Math.abs(left.m12() - right.m12()));
+        maximum = Math.max(maximum, Math.abs(left.m13() - right.m13()));
+        maximum = Math.max(maximum, Math.abs(left.m20() - right.m20()));
+        maximum = Math.max(maximum, Math.abs(left.m21() - right.m21()));
+        maximum = Math.max(maximum, Math.abs(left.m22() - right.m22()));
+        maximum = Math.max(maximum, Math.abs(left.m23() - right.m23()));
+        maximum = Math.max(maximum, Math.abs(left.m30() - right.m30()));
+        maximum = Math.max(maximum, Math.abs(left.m31() - right.m31()));
+        maximum = Math.max(maximum, Math.abs(left.m32() - right.m32()));
+        maximum = Math.max(maximum, Math.abs(left.m33() - right.m33()));
+        return maximum;
     }
 
     private static void testPresetTextureMipBias() {
