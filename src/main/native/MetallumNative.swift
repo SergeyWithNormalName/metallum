@@ -5776,10 +5776,12 @@ private func ensureTemporalWorkspace(
     descriptor.isReactiveMaskTextureEnabled = true
     descriptor.reactiveMaskTextureFormat = .r8Unorm
     descriptor.isAutoExposureEnabled = false
-    // This is created only on a renderer-generation change.  Synchronous
-    // initialization prevents the first selected Temporal frame from racing a
-    // still-initializing scaler and falling back to native resolution.
-    descriptor.requiresSynchronousInitialization = true
+    // DRS changes the input extent during live gameplay. A synchronous
+    // MetalFX initialization compiles the scaler on this render-thread call
+    // and turns every scale step into a visible hitch. Let MetalFX bring up
+    // its interim scaler asynchronously instead; Apple guarantees equivalent
+    // output quality while the optimized scaler compiles in the background.
+    descriptor.requiresSynchronousInitialization = false
     guard let scaler = descriptor.makeTemporalScaler(device: device) else {
         return nil
     }
