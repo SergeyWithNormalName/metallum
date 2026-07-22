@@ -12,6 +12,7 @@ public final class DrsScalingTests {
 
     public static void main(final String[] args) {
         testHysteresisScaleDown();
+        testDownscaleSettlesBeforeAnotherResize();
         testHysteresisScaleDownBoundary();
         testHysteresisScaleUpHoldoff();
         testHysteresisScaleUpLadder();
@@ -40,13 +41,35 @@ public final class DrsScalingTests {
         require(MetallumDrsController.scaleUpHoldoffCounter() == 0, "holdoff counter reset on scale-down");
 
         MetallumDrsController.updateGpuFrameTime(16.0f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.90f) < 1.0e-5f, "scale-down step 0.90");
+        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
+                "second stale sample must not trigger another resize");
 
         // Scale down all the way to MIN_SCALE (0.50f)
-        for (int i = 0; i < 20; i++) {
+        for (int i = 0; i < 600; i++) {
             MetallumDrsController.updateGpuFrameTime(16.0f);
         }
         require(Math.abs(MetallumDrsController.currentScale() - 0.50f) < 1.0e-5f, "min scale clamp 0.50");
+        MetallumDrsController.setEnabled(false);
+    }
+
+    private static void testDownscaleSettlesBeforeAnotherResize() {
+        MetallumDrsController.reset();
+        MetallumDrsController.setEnabled(true);
+        MetallumDrsController.setEmaGpuTimeDirectForTest(20.0f);
+
+        // 20ms needs roughly sqrt(15.5 / 20) = 88% extent, rounded to 85%.
+        MetallumDrsController.updateGpuFrameTime(20.0f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.85f) < 1.0e-5f,
+                "over-budget sample jumps directly near its required pixel budget");
+        require(MetallumDrsController.scaleDownSettleCounter()
+                        == MetallumDrsController.SCALE_DOWN_SETTLE_FRAMES,
+                "downscale starts feedback settle interval");
+
+        for (int frame = 0; frame < MetallumDrsController.SCALE_DOWN_SETTLE_FRAMES; frame++) {
+            MetallumDrsController.updateGpuFrameTime(20.0f);
+            require(Math.abs(MetallumDrsController.currentScale() - 0.85f) < 1.0e-5f,
+                    "settle interval blocks stale resize cascade (frame " + frame + ")");
+        }
         MetallumDrsController.setEnabled(false);
     }
 
@@ -60,11 +83,13 @@ public final class DrsScalingTests {
         MetallumDrsController.updateGpuFrameTime(15.50f);
         require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f, "exact 15.50ms should not scale down");
 
-        // 15.50001ms (> 15.50ms) SHOULD trigger scale down
+        // Use a representable margin above 15.50ms; a 0.00001f delta is lost
+        // by the controller's float EMA arithmetic.
         MetallumDrsController.setScaleDirectForTest(1.00f);
-        MetallumDrsController.setEmaGpuTimeDirectForTest(15.50001f);
-        MetallumDrsController.updateGpuFrameTime(15.50001f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f, "15.50001ms (>15.50ms) triggers scale down");
+        MetallumDrsController.setEmaGpuTimeDirectForTest(15.60f);
+        MetallumDrsController.updateGpuFrameTime(15.60f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
+                "15.60ms (>15.50ms) triggers scale down");
 
         MetallumDrsController.setEnabled(false);
     }
@@ -258,8 +283,11 @@ public final class DrsScalingTests {
         MetallumDrsController.reset();
         MetallumDrsController.setEnabled(true);
 
-        // EMA formula: EMA_k = alpha * input + (1 - alpha) * EMA_{k-1}
-        // Alpha = 0.10, initial EMA = 16.0
+        // EMA formula: EMA_k = alpha * input + (1 - alpha) * EMA_{k-1}.
+        // Seed an existing sample explicitly; a fresh DRS session adopts its
+        // first completed GPU sample verbatim instead of inventing a baseline.
+        MetallumDrsController.setEmaGpuTimeDirectForTest(16.0f);
+        // Alpha = 0.10, previous EMA = 16.0
         // Update with 20.0ms: 0.10 * 20.0 + 0.90 * 16.0 = 2.0 + 14.4 = 16.4ms
         MetallumDrsController.updateGpuFrameTime(20.0f);
         float ema = MetallumDrsController.emaGpuTimeMs();
@@ -280,7 +308,7 @@ public final class DrsScalingTests {
         MetallumDrsController.setEnabled(true);
 
         // Test clamping to default min scale (0.50f)
-        for (int i = 0; i < 30; i++) {
+        for (int i = 0; i < 300; i++) {
             MetallumDrsController.updateGpuFrameTime(20.0f);
         }
         require(Math.abs(MetallumDrsController.currentScale() - 0.50f) < 1.0e-5f, "clamped to default min scale 0.50");
@@ -290,7 +318,7 @@ public final class DrsScalingTests {
         require(Math.abs(MetallumDrsController.minScaleBound() - 0.40f) < 1.0e-5f, "min scale bound updated to 0.40");
 
         // Scale should now drop to 0.40f on further high frame times
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 150; i++) {
             MetallumDrsController.updateGpuFrameTime(20.0f);
         }
         require(Math.abs(MetallumDrsController.currentScale() - 0.40f) < 1.0e-5f, "clamped to new min scale bound 0.40");
@@ -332,14 +360,14 @@ public final class DrsScalingTests {
 
         // Native command-buffer timing uses seconds; the controller owns milliseconds.
         MetalFxUpscaling.updateDynamicResolution(0.020);
-        require(Math.abs(MetallumDrsController.emaGpuTimeMs() - 16.4f) < 1.0e-5f,
-                "20ms native sample is converted from seconds exactly once");
-        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
+        require(Math.abs(MetallumDrsController.emaGpuTimeMs() - 20.0f) < 1.0e-5f,
+                "first 20ms native sample initializes EMA without a fabricated baseline");
+        require(Math.abs(MetallumDrsController.currentScale() - 0.85f) < 1.0e-5f,
                 "converted over-budget sample scales down");
 
         MetalFxUpscaling.updateDynamicResolution(0.0);
         MetalFxUpscaling.updateDynamicResolution(Double.NaN);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
+        require(Math.abs(MetallumDrsController.currentScale() - 0.85f) < 1.0e-5f,
                 "empty or invalid native samples do not reuse stale timing");
 
         MetallumDrsController.setEnabled(false);
