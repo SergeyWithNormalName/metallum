@@ -80,6 +80,32 @@
   FPS `+6.67%`, 1% low `+7.35%`, GPU p95 `-5.46%`, present p95 `-6.56%`, requested
   `-13.74%`, dropped `-32.37%`, overflow `-31.10%`. Raw+summary имеют `COMPLETE` и
   `0` dropped evidence events; compare receipt всё ещё блокирован known event order.
+- Conservative cluster side×depth wedges **ВНЕДРЕНО/accepted**: это не повторный
+  отдельный Z-range test — `centerDepth ± radius` уже точно даёт monotonic slice
+  range. Новый случай: sphere может не пересечь side×internal-depth wedge, хотя
+  проходит coarse range, side planes и XY corner wedges. Для нарушенной допустимой
+  внутренней depth boundary она проверяется в паре с каждым из four inward side
+  planes; strict tangent остаётся retained, invalid/nonfinite/nonpositive/parallel
+  input fail-open. Endpoint clamp fragment path сохранён: первый slice не получает
+  lower plane, последний — upper. Depth boundaries precompute-ятся один раз на
+  threadgroup; Z/order/cap/ABI/buffers/copies/passes не менялись. `lightClusterValidation`
+  с Metal API/GPU Validation — PASS. Diagnostic `20260722T184506Z` показал цену
+  Cluster Build avg/p95 `0.89837/0.93423 → 1.1255/1.2665 ms`, но World Opaque avg
+  `21.4144 → 19.0044 ms`, requested `444160 → 369055`, dropped `10318 → 8570`,
+  occupancy `44/116/256 → 36/100/256`, overflow `88 → 74`. Три full
+  `1800+3000` COMPLETE run при том же contract дали `37.4334/37.3986/37.4145 FPS`,
+  GPU p95 `29.9300/30.0796/30.0756 ms`, present p95
+  `27.4694/27.5701/27.4999 ms`, requested `367243/367366/367393`, dropped
+  `8343/8282/8250`, overflow `72/71/71`; #1/#3 имели `0` allocations, а #2 — одно
+  отдельное окно `10` buffers/`2.5 MiB` (не code-caused: candidate не создаёт
+  resources). Vs
+  accepted corner mean: FPS `+9.47%`, 1% low `+3.60%`, GPU p95/p99
+  `-7.77/-7.78%`, present p95/p99 `-8.34/-7.05%`, CPU p95/p99 `-1.69/-1.04%`,
+  requested `-17.39%`, dropped `-18.09%`, overflow `-18.48%`; 0.1% low `-0.69%`
+  остаётся в noise из-за rare `nextDrawable` pauses в первых двух run. All raw+summary
+  reports имеют `COMPLETE`/`0` dropped timing events; receipt-order exit 2 остаётся
+  known tooling defect. Отдельный pre-existing risk L6 metadata/stable-ID aliasing
+  не caused/fixed here и является дальнейшим correctness blocker.
 - Отдельный post-L6 shadow-index tag pass **ОТКЛОНЁН**. Несмотря на diagnostic
   World Opaque `-0.90%`, pass добавлял один compute encoder/dispatch/PSO, а два full
   production run дали средний FPS `-1.32%`, 1% low `-1.70%`, present p95 `+1.50%`
@@ -103,12 +129,14 @@
   к accepted corner-wedge diagnostic (`33.57195 FPS`, GPU p95 `32.71996 ms`, cluster
   `0.89837/0.93423`) и не показывает явной static regression, но не является FPS
   evidence для dynamic path. Invalid `600`-frame non-detail smoke исключён.
-- Дальше — обновлённый dense-light profile оставшегося World Opaque tail. Не повторять
-  side-plane/wedge culling без новой причины. Отдельная Z-plane refinement не является
-  кандидатом: `centerDepth ± radius` уже задаёт exact monotonic log-depth slice range.
-  Tile/depth-grid retune или 16-bit compact indices возможны только после отдельного
-  trace, доказывающего list/bandwidth bottleneck, и требуют собственного quality-aware
-  A/B; не менять качество ради цифр.
+- Дальше — обновлённый dense-light profile оставшегося World Opaque tail и отдельное
+  устранение pre-existing L6 metadata/stable-ID aliasing correctness blocker. Не
+  повторять accepted side-plane/XY-corner/side×depth wedge culling без новой причины.
+  Отдельная Z-plane refinement всё ещё не является кандидатом: `centerDepth ± radius`
+  уже задаёт exact monotonic log-depth slice range; это не относится к принятому
+  совместному side×depth test. Tile/depth-grid retune или 16-bit compact indices
+  возможны только после отдельного trace, доказывающего list/bandwidth bottleneck, и
+  требуют собственного quality-aware A/B; не менять качество ради цифр.
 
 ---
 

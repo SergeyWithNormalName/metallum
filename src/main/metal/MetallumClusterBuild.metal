@@ -208,6 +208,8 @@ inline bool metallum_sphere_outside_cluster_side_planes(
     const float radius,
     const uint clusterX,
     const uint clusterY,
+    const uint clusterZ,
+    threadgroup const float* depthBoundaries,
     constant MetallumLightingParamsV1& params
 ) {
     const float extentX = float(params.extentAndClusterCap.x);
@@ -266,6 +268,54 @@ inline bool metallum_sphere_outside_cluster_side_planes(
                 radius,
                 planes[pair.x],
                 planes[pair.y]
+            )) {
+            return true;
+        }
+    }
+
+    // Fragment cluster selection clamps the first and final logarithmic slices, so
+    // slice 0 has no lower depth half-space and the final slice has no upper one.
+    // Retaining those unbounded endpoints is essential: treating them as ordinary
+    // near/far planes could cull a valid clamp-region fragment. Interior Z bounds are
+    // otherwise exact in this same pre-projection view space.
+    const uint depthSliceCount = params.gridAndLightCount.z;
+    if (depthBoundaries == nullptr || depthSliceCount != 6u || clusterZ >= depthSliceCount
+        || !all(isfinite(center))) {
+        return false;
+    }
+    const float centerDepth = -center.z;
+    float4 depthPlane;
+    bool hasViolatedDepthPlane = false;
+    if (clusterZ > 0u && centerDepth < depthBoundaries[clusterZ]) {
+        const float lowerDepth = depthBoundaries[clusterZ];
+        if (!isfinite(lowerDepth) || !(lowerDepth > 0.0f)) {
+            return false;
+        }
+        // -viewZ >= lowerDepth
+        depthPlane = float4(0.0f, 0.0f, -1.0f, -lowerDepth);
+        hasViolatedDepthPlane = true;
+    } else if (clusterZ + 1u < depthSliceCount
+            && centerDepth > depthBoundaries[clusterZ + 1u]) {
+        const float upperDepth = depthBoundaries[clusterZ + 1u];
+        if (!isfinite(upperDepth) || !(upperDepth > 0.0f)) {
+            return false;
+        }
+        // -viewZ <= upperDepth
+        depthPlane = float4(0.0f, 0.0f, 1.0f, upperDepth);
+        hasViolatedDepthPlane = true;
+    }
+    if (!hasViolatedDepthPlane || !all(isfinite(depthPlane))) {
+        return false;
+    }
+    // The selected depth plane is the only one the center can violate for this
+    // slice. Pairing it with a side plane rejects a sphere that overlaps each
+    // half-space alone but cannot reach their shared cluster edge.
+    for (uint index = 0u; index < 4u; ++index) {
+        if (metallum_sphere_strictly_outside_plane_wedge(
+                center,
+                radius,
+                planes[index],
+                depthPlane
             )) {
             return true;
         }
@@ -571,6 +621,19 @@ kernel void metallum_cluster_count_v1(
     if (!bounds.valid) {
         return;
     }
+    threadgroup float depthBoundaries[7];
+    if (lane <= 6u) {
+        const float depthScale = params.depth.z;
+        const float depthBias = params.depth.w;
+        if (isfinite(depthScale) && isfinite(depthBias) && depthScale > 0.0f) {
+            depthBoundaries[lane] = exp2((float(lane) - depthBias) / depthScale);
+        } else {
+            // The side/depth refinement is optional. An invalid frame contract must
+            // retain the existing coarse member rather than invent a depth boundary.
+            depthBoundaries[lane] = INFINITY;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint membershipWord = lightIndex >> 5u;
     const uint membershipBit = 1u << (lightIndex & 31u);
     const uint width = bounds.upper.x - bounds.lower.x;
@@ -583,14 +646,16 @@ kernel void metallum_cluster_count_v1(
         const uint yz = linear / width;
         const uint y = bounds.lower.y + yz % height;
         const uint z = bounds.lower.z + yz / height;
-        // Coarse bounds remain the authoritative Z range. These four planes only reject
-        // a sphere wholly outside this XY tile; the stable candidate order and all caps
-        // are unchanged for members that remain.
+        // Coarse bounds remain the authoritative candidate range. Side/corner and
+        // side×depth edge planes only reject a sphere wholly outside this cluster;
+        // stable candidate order and all caps are unchanged for members that remain.
         if (metallum_sphere_outside_cluster_side_planes(
                 lights[lightIndex].positionRadius.xyz,
                 lights[lightIndex].positionRadius.w,
                 x,
                 y,
+                z,
+                depthBoundaries,
                 params
             )) {
             continue;

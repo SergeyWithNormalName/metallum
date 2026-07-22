@@ -894,6 +894,89 @@ event-order failure; raw+summary обоих production artifacts имеют `COM
 кандидат. Следующий профиль должен измерять оставшийся World Opaque dense-light tail;
 не возвращаться к уже принятому side-plane/wedge пути без новой причины.
 
+## 2026-07-23 — Nether: conservative cluster side×depth-wedge culling
+
+### Гипотеза и новая причина проверки
+
+После accepted corner-wedge culling плотный Nether/lava маршрут всё ещё передавал в
+World Opaque sphere, которая могла пересекать XY side planes по отдельности, но при
+этом целиком находилась за внутренней границей своего log-depth slice. Для такой
+sphere не достаточно одной XY plane: нужен тест пересечения с более широким
+двухплоскостным side×depth wedge. Если sphere не пересекает этот wedge, она не может
+осветить ни один fragment соответствующего tile/slice. Это новый геометрический
+случай после corner wedges, а не повторный тест отдельного Z-range: `centerDepth ±
+radius` уже точно определяет monotonic диапазон slice, но не устраняет совместный
+side+depth false positive.
+
+### Семантика изменения и correctness contract
+
+После прежних coarse bounds, four side-plane и four XY-corner-wedge checks для
+кандидата, нарушающего допустимую внутреннюю depth boundary, проверяется эта boundary
+в паре с каждым из четырёх inward side planes. Reject разрешён только когда строгая
+distance-to-intersection двух half-spaces больше radius; существующий conservative
+near-tangent guard оставляет пограничный случай. Не вычисляется новый approximate
+light range и не меняются порядок/лимиты compact prefix.
+
+Endpoint clamp сохранён точно: для первого slice нет lower plane, для последнего —
+upper plane, потому что fragment path clamp-ит depth index. Поэтому эти две
+гипотетические внешние boundaries никогда не участвуют в reject. Глубинные границы
+вычисляются один раз на threadgroup, а не `exp2` для каждого candidate. Invalid,
+nonfinite, nonpositive scale/boundary, overflow, zero/ill-conditioned/parallel plane
+или near-tangent input fail-open и retain candidate. Изменение не трогает quality,
+Z-slice count, light/order/cap contracts, ABI, buffers, uploads/copies либо число
+passes/encoders.
+
+### Способ проверки
+
+`./gradlew lightClusterValidation --console=plain` — **PASS** с Metal API и GPU
+Validation на Apple M1 Pro. Независимый CPU oracle покрывает все `4×2` сочетания
+side plane с нижней/верхней внутренней depth boundary: inside, tangent и edge-only
+outside. Отдельно проверены endpoint clamp, invalid depth boundary и existing
+parallel/near-parallel fail-open, normal/view-bob projection witness и GPU fixtures
+для каждого side×depth miss. Existing determinism/capped-prefix/in-sphere contracts
+сохранены.
+
+Diagnostic `20260722T184506Z` использовался только для атрибуции: `36.7656 FPS`,
+1%/0.1% low `31.0543/29.8332`, CPU p95/p99 `13.1433/13.8121 ms`, GPU p95/p99
+`30.5468/30.8576 ms`. Cluster Build average/p95 выросли `0.89837/0.93423 →
+1.1255/1.2665 ms`: дополнительная conservative geometry имеет измеримую локальную
+цену. Но World Opaque average упал `21.4144 → 19.0044 ms`, requested
+`444160 → 369055`, dropped `10318 → 8570`, occupancy p50/p95/p99 `44/116/256 →
+36/100/256`, overflow `88 → 74`; поэтому гипотеза прошла к production A/B.
+
+Три независимых full production run при прежнем Nether contract (MetalFX off,
+Balanced, HDR, VSync off, `1800+3000`) дали:
+
+| Run | FPS | 1% / 0.1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 | requested/dropped | overflow | allocations |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Side×depth #1 | 37.4334 | 30.6569 / 26.8534 | 12.9785 / 13.5786 ms | 29.9300 / 30.1403 ms | 27.4694 / 29.1441 ms | 367243 / 8343 | 72 | 0 |
+| Side×depth #2 | 37.3986 | 31.2878 / 28.5979 | 13.0472 / 13.6917 ms | 30.0796 / 30.2333 ms | 27.5701 / 29.0123 ms | 367366 / 8282 | 71 | 10 buffers / 2.5 MiB |
+| Side×depth #3 | 37.4145 | 33.5754 / 31.8977 | 12.8109 / 13.4184 ms | 30.0756 / 30.2793 ms | 27.4999 / 28.2804 ms | 367393 / 8250 | 71 | 0 |
+
+### Результат, побочные эффекты и итог
+
+Среднее accepted corner-wedge pair → side×depth mean: FPS `34.1796 → 37.4155`
+(`+9.47%`), 1% low `30.7334 → 31.8400` (`+3.60%`), CPU p95/p99 `-1.69/-1.04%`,
+GPU p95/p99 `-7.77/-7.78%`, present p95/p99 `-8.34/-7.05%`. Requested indices
+`444629 → 367334` (`-17.39%`), dropped `10122.5 → 8291.7` (`-18.09%`), overflow
+`87.5 → 71.3` (`-18.48%`), p50/p95 occupancy `44/116 → 36/100`. 0.1% low
+`29.3173 → 29.1163` (`-0.69%`) находится в обычном разбросе: первые два run имели
+редкие `nextDrawable` pauses, а третий их не подтвердил и показал `31.8977`.
+
+Все три raw+summary reports имеют `COMPLETE` и `0` dropped timing events. Known
+receipt-order exit 2 по-прежнему не создаёт accepted receipt, поэтому не
+подменяется benchmark evidence. Во втором run отдельно наблюдалось окно `10`
+buffers/`2.5 MiB`; кандидат не создаёт resources, buffers или copies, и #1/#3 имеют
+`0` allocations, поэтому это не приписывается данному изменению.
+
+Отдельно выявлен существовавший до этой работы риск correctness: aliasing L6 metadata
+и stable-ID. Он не вызван и не исправлен этим кандидатом; считать его отдельным
+последующим блокером перед расширением L6-зависимых оптимизаций.
+
+**Итог:** **ВНЕДРЕНО/accepted**, пятый раздельно измеренный quality-preserving
+Nether кандидат. Side×depth geometry даёт устойчивый выигрыш GPU/present tails и
+FPS при неизменной картинке; не повторять эту проверку без нового профиля/геометрии.
+
 ## 2026-07-23 — Nether: post-L6 shadow-index tagging
 
 ### Гипотеза и причина проверки

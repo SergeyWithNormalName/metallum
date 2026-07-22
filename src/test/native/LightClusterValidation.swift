@@ -518,6 +518,75 @@ private func sphereOutsideClusterSideWedges(
     }
 }
 
+private func clusterDepthBoundaries(near: Float = 0.1, far: Float = 100) -> [Float]? {
+    guard near > 0, far > near, near.isFinite, far.isFinite else { return nil }
+    let scale = Float(depthSlices) / log2(far / near)
+    let bias = -log2(near) * scale
+    guard scale > 0, scale.isFinite, bias.isFinite else { return nil }
+    let boundaries = (0...depthSlices).map { exp2((Float($0) - bias) / scale) }
+    guard boundaries.allSatisfy({ $0 > 0 && $0.isFinite }) else { return nil }
+    return boundaries
+}
+
+// Fragment Z selection clamps both endpoints: slice zero is open toward the camera and
+// the final slice is open toward infinity. This oracle deliberately models that exact
+// contract while using the normalized two-plane solver independently of the MSL form.
+private func sphereOutsideClusterSideDepthEdges(
+    center: SIMD3<Float>,
+    radius: Float,
+    clusterX: Int,
+    clusterY: Int,
+    clusterZ: Int,
+    width: Int,
+    height: Int,
+    projection: simd_float4x4,
+    depthBoundaries: [Float]
+) -> Bool {
+    guard clusterZ >= 0, clusterZ < depthSlices,
+          depthBoundaries.count == depthSlices + 1,
+          center.x.isFinite, center.y.isFinite, center.z.isFinite,
+          depthBoundaries.allSatisfy({ $0 > 0 && $0.isFinite }),
+          let sidePlanes = clusterSidePlanes(
+              clusterX: clusterX, clusterY: clusterY, width: width, height: height,
+              projection: projection
+          ) else {
+        return false
+    }
+    let centerDepth = -center.z
+    let depthPlane: SIMD4<Float>
+    if clusterZ > 0 && centerDepth < depthBoundaries[clusterZ] {
+        depthPlane = SIMD4(0, 0, -1, -depthBoundaries[clusterZ])
+    } else if clusterZ + 1 < depthSlices && centerDepth > depthBoundaries[clusterZ + 1] {
+        depthPlane = SIMD4(0, 0, 1, depthBoundaries[clusterZ + 1])
+    } else {
+        return false
+    }
+    return sidePlanes.contains {
+        sphereStrictlyOutsidePlaneWedge(
+            center: center, radius: radius, firstPlane: $0, secondPlane: depthPlane
+        )
+    }
+}
+
+private func closestPlaneEdgePoint(_ first: SIMD4<Float>, _ second: SIMD4<Float>) -> SIMD3<Float>? {
+    let firstNormal = SIMD3(first.x, first.y, first.z)
+    let secondNormal = SIMD3(second.x, second.y, second.z)
+    let firstSquared = simd_dot(firstNormal, firstNormal)
+    let secondSquared = simd_dot(secondNormal, secondNormal)
+    let normalDot = simd_dot(firstNormal, secondNormal)
+    let determinant = firstSquared * secondSquared - normalDot * normalDot
+    guard firstSquared > 0, secondSquared > 0, determinant > firstSquared * secondSquared * 1e-6,
+          firstSquared.isFinite, secondSquared.isFinite, normalDot.isFinite, determinant.isFinite else {
+        return nil
+    }
+    let firstRequired = -first.w
+    let secondRequired = -second.w
+    let firstMultiplier = (firstRequired * secondSquared - normalDot * secondRequired) / determinant
+    let secondMultiplier = (secondRequired * firstSquared - normalDot * firstRequired) / determinant
+    let point = firstMultiplier * firstNormal + secondMultiplier * secondNormal
+    return point.x.isFinite && point.y.isFinite && point.z.isFinite ? point : nil
+}
+
 private func reference(
     lights: [Light],
     width: Int,
@@ -532,6 +601,7 @@ private func reference(
     let clusterCount = gridX * gridY * depthSlices
     let projection = projectionOverride
         ?? perspective(near: 0.1, far: 100, aspect: Float(width) / Float(height))
+    let depthBoundaries = clusterDepthBoundaries()!
 
     func bounds(for light: Light) -> ReferenceBounds? {
         let view = light.position
@@ -638,6 +708,19 @@ private func reference(
                         width: width,
                         height: height,
                         projection: projection
+                    ) {
+                        continue
+                    }
+                    if sphereOutsideClusterSideDepthEdges(
+                        center: lights[lightIndex].position,
+                        radius: lights[lightIndex].radius,
+                        clusterX: x,
+                        clusterY: y,
+                        clusterZ: z,
+                        width: width,
+                        height: height,
+                        projection: projection,
+                        depthBoundaries: depthBoundaries
                     ) {
                         continue
                     }
@@ -1190,6 +1273,104 @@ private enum LightClusterValidationMain {
                 "Invalid, parallel, or near-parallel wedge was not fail-open"
             )
 
+            // A sphere may cross one side plane and one valid logarithmic-depth plane
+            // independently while missing their shared edge. Cover all four side planes
+            // at both lower/upper interior-Z boundaries with inside/tangent/edge-only
+            // fixtures. This stays independent of the shader's unnormalized math.
+            try require(clusterDepthBoundaries() != nil,
+                        "Could not construct logarithmic depth boundaries")
+            let depthBoundaries = clusterDepthBoundaries()!
+            let interiorSlice = 2
+            let depthFixtures: [(String, SIMD4<Float>)] = [
+                ("lower", SIMD4(0, 0, -1, -depthBoundaries[interiorSlice])),
+                ("upper", SIMD4(0, 0, 1, depthBoundaries[interiorSlice + 1]))
+            ]
+            for (depthName, depthPlane) in depthFixtures {
+                for (sideIndex, sidePlane) in explicitPlanes.enumerated() {
+                    guard let edge = closestPlaneEdgePoint(sidePlane, depthPlane) else {
+                        throw ValidationFailure.message("Could not construct \(depthName) edge \(sideIndex)")
+                    }
+                    let sideNormal = SIMD3(sidePlane.x, sidePlane.y, sidePlane.z)
+                    let depthNormal = SIMD3(depthPlane.x, depthPlane.y, depthPlane.z)
+                    let outward = -simd_normalize(
+                        sideNormal / simd_length(sideNormal)
+                            + depthNormal / simd_length(depthNormal)
+                    )
+                    let insideCenter = edge - outward * 0.05
+                    let tangentCenter = edge + outward * fixtureRadius
+                    let outsideCenter = edge + outward * (fixtureRadius + 0.05)
+                    try require(
+                        !sphereOutsideClusterSideDepthEdges(
+                            center: insideCenter, radius: fixtureRadius,
+                            clusterX: planeClusterX, clusterY: planeClusterY, clusterZ: interiorSlice,
+                            width: planeWidth, height: planeHeight, projection: identityProjection,
+                            depthBoundaries: depthBoundaries
+                        ) && !sphereOutsideClusterSideDepthEdges(
+                            center: tangentCenter, radius: fixtureRadius,
+                            clusterX: planeClusterX, clusterY: planeClusterY, clusterZ: interiorSlice,
+                            width: planeWidth, height: planeHeight, projection: identityProjection,
+                            depthBoundaries: depthBoundaries
+                        ),
+                        "Inside/tangent \(depthName) side-depth edge was rejected for side \(sideIndex)"
+                    )
+                    try require(
+                        !sphereOutsideClusterSidePlanes(
+                            center: outsideCenter, radius: fixtureRadius,
+                            clusterX: planeClusterX, clusterY: planeClusterY,
+                            width: planeWidth, height: planeHeight, projection: identityProjection
+                        ) && !sphereOutsideClusterSideWedges(
+                            center: outsideCenter, radius: fixtureRadius,
+                            clusterX: planeClusterX, clusterY: planeClusterY,
+                            width: planeWidth, height: planeHeight, projection: identityProjection
+                        ) && sphereOutsideClusterSideDepthEdges(
+                            center: outsideCenter, radius: fixtureRadius,
+                            clusterX: planeClusterX, clusterY: planeClusterY, clusterZ: interiorSlice,
+                            width: planeWidth, height: planeHeight, projection: identityProjection,
+                            depthBoundaries: depthBoundaries
+                        ),
+                        "\(depthName) edge-only miss was not isolated for side \(sideIndex)"
+                    )
+                }
+            }
+            // Endpoint clamps are part of the fragment ABI, not an approximation: a
+            // hypothetical lower plane for slice 0 or upper plane for the final slice
+            // must never be used by this cull.
+            let clampSide = explicitPlanes[0]
+            let firstClampPlane = SIMD4<Float>(0, 0, -1, -depthBoundaries[0])
+            let lastClampPlane = SIMD4<Float>(0, 0, 1, depthBoundaries[depthSlices])
+            for (clusterZ, clampPlane, name) in [
+                (0, firstClampPlane, "first"),
+                (depthSlices - 1, lastClampPlane, "last")
+            ] {
+                guard let edge = closestPlaneEdgePoint(clampSide, clampPlane) else {
+                    throw ValidationFailure.message("Could not construct \(name) clamp edge")
+                }
+                let outward = -simd_normalize(
+                    SIMD3(clampSide.x, clampSide.y, clampSide.z) / simd_length(SIMD3(clampSide.x, clampSide.y, clampSide.z))
+                        + SIMD3(clampPlane.x, clampPlane.y, clampPlane.z) / simd_length(SIMD3(clampPlane.x, clampPlane.y, clampPlane.z))
+                )
+                try require(
+                    !sphereOutsideClusterSideDepthEdges(
+                        center: edge + outward * (fixtureRadius + 0.05), radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY, clusterZ: clusterZ,
+                        width: planeWidth, height: planeHeight, projection: identityProjection,
+                        depthBoundaries: depthBoundaries
+                    ),
+                    "\(name) clamp endpoint was incorrectly treated as a depth half-space"
+                )
+            }
+            var invalidDepthBoundaries = depthBoundaries
+            invalidDepthBoundaries[interiorSlice] = .infinity
+            try require(
+                !sphereOutsideClusterSideDepthEdges(
+                    center: SIMD3(-0.7, -0.2, -0.8), radius: fixtureRadius,
+                    clusterX: planeClusterX, clusterY: planeClusterY, clusterZ: interiorSlice,
+                    width: planeWidth, height: planeHeight, projection: identityProjection,
+                    depthBoundaries: invalidDepthBoundaries
+                ),
+                "Invalid side-depth boundary was not fail-open"
+            )
+
             // A witness point at each representative tile/depth/projection is inside a
             // small source sphere. The conservative reject must therefore never remove it.
             let witnessProjections = [
@@ -1259,6 +1440,16 @@ private enum LightClusterValidationMain {
                                     width: planeWidth, height: planeHeight, projection: projection
                                 ),
                                 "Corner-wedge false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
+                            )
+                            let witnessSlice = depthSlice(-witness.z, near: 0.1, far: 100)
+                            try require(
+                                !sphereOutsideClusterSideDepthEdges(
+                                    center: witness, radius: 0.01,
+                                    clusterX: clusterX, clusterY: clusterY, clusterZ: witnessSlice,
+                                    width: planeWidth, height: planeHeight, projection: projection,
+                                    depthBoundaries: depthBoundaries
+                                ),
+                                "Side-depth edge false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
                             )
                         }
                         }
@@ -1392,6 +1583,68 @@ private enum LightClusterValidationMain {
                         gpu.headers[targetCluster].y == 0,
                         "GPU corner-wedge \(cornerIndex) retained its diagonal tile"
                     )
+                }
+            }
+
+            // GPU contract for every side×interior-depth edge. The source sphere crosses
+            // each plane alone but cannot reach the selected cluster edge, so only the new
+            // refinement may remove the target membership.
+            do {
+                let edgeClustersX = UInt32((planeWidth + tileSize - 1) / tileSize)
+                let edgeClustersY = UInt32((planeHeight + tileSize - 1) / tileSize)
+                let edgeClusterCount = Int(edgeClustersX * edgeClustersY * UInt32(depthSlices))
+                let edgeGeneration: UInt64 = 705
+                guard let edgeContext = api.createContext(
+                    objectPointer(device as AnyObject), edgeGeneration, 4,
+                    UInt32(edgeClusterCount * clusterCap), edgeClustersX, edgeClustersY,
+                    UInt32(depthSlices)
+                ) else {
+                    throw ValidationFailure.message("Could not create side-depth edge validation context")
+                }
+                defer { api.releaseContext(edgeContext) }
+                let edgeDepthFixtures: [(String, SIMD4<Float>)] = [
+                    ("lower", SIMD4(0, 0, -1, -depthBoundaries[interiorSlice])),
+                    ("upper", SIMD4(0, 0, 1, depthBoundaries[interiorSlice + 1]))
+                ]
+                for (depthName, depthPlane) in edgeDepthFixtures {
+                    for (sideIndex, sidePlane) in explicitPlanes.enumerated() {
+                        guard let edge = closestPlaneEdgePoint(sidePlane, depthPlane) else {
+                            throw ValidationFailure.message("Could not construct GPU \(depthName) edge \(sideIndex)")
+                        }
+                        let outward = -simd_normalize(
+                            SIMD3(sidePlane.x, sidePlane.y, sidePlane.z)
+                                / simd_length(SIMD3(sidePlane.x, sidePlane.y, sidePlane.z))
+                                + SIMD3(depthPlane.x, depthPlane.y, depthPlane.z)
+                                / simd_length(SIMD3(depthPlane.x, depthPlane.y, depthPlane.z))
+                        )
+                        let edgeLight = [Light(
+                            position: edge + outward * (fixtureRadius + 0.05),
+                            radius: fixtureRadius,
+                            color: SIMD3(1, 0.6, 0.2),
+                            intensity: 2,
+                            stableId: UInt64(40 + sideIndex),
+                            flags: 0
+                        )]
+                        submit += 1
+                        let gpu = try runGpu(
+                            api: api, context: edgeContext, queue: queue,
+                            generation: edgeGeneration,
+                            frameId: UInt64(70 + sideIndex + (depthName == "upper" ? 4 : 0)),
+                            submitIndex: submit, width: planeWidth, height: planeHeight,
+                            lights: edgeLight, hdr: sideIndex.isMultiple(of: 2),
+                            projectionOverride: identityProjection
+                        )
+                        let cpu = reference(
+                            lights: edgeLight, width: planeWidth, height: planeHeight,
+                            indexCapacity: edgeClusterCount * clusterCap,
+                            candidateCapacity: 4, projectionOverride: identityProjection
+                        )
+                        try requireMatches(gpu, cpu, context: "GPU \(depthName) side-depth edge \(sideIndex)")
+                        let targetCluster = (interiorSlice * Int(edgeClustersY) + planeClusterY)
+                            * Int(edgeClustersX) + planeClusterX
+                        try require(gpu.headers[targetCluster].y == 0,
+                                    "GPU \(depthName) side-depth edge \(sideIndex) retained its target cluster")
+                    }
                 }
             }
 
