@@ -154,6 +154,26 @@ public final class MinecraftLightPolicy {
         return emissiveCell(state).emission();
     }
 
+    /**
+     * Returns whether a committed state transition leaves the static L3 light profile unchanged.
+     * This deliberately accepts only identical non-zero emissive cells, so removals, dimming and
+     * unfamiliar state-dependent emitters continue through the ordinary registry mutation path.
+     */
+    public static boolean hasEquivalentNonZeroBlockLightProfile(
+            final BlockState oldState,
+            final BlockState newState
+    ) {
+        if (oldState == null || newState == null) {
+            return false;
+        }
+        EmissiveCell oldCell = emissiveCell(oldState);
+        EmissiveCell newCell = emissiveCell(newState);
+        return oldCell.emission() > 0
+                && oldCell.emission() == newCell.emission()
+                && oldCell.colorState().getBlock() == newCell.colorState().getBlock()
+                && oldCell.denseCellEligible() == newCell.denseCellEligible();
+    }
+
     static int priorityForEmission(final int emission) {
         return clampEmission(emission) * 16;
     }

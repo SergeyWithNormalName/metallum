@@ -35,26 +35,33 @@ abstract class ClientLevelAdvancedLightMixin {
         registry.observeHook(AdvancedLightRegistry.Hook.BLOCK_CHANGE);
         try {
             ClientLevel level = (ClientLevel) (Object) this;
-            String dimension = level.dimension().identifier().toString();
-            LightTemplate replacement = MinecraftLightPolicy.block(
-                    newState,
-                    pos.getX(),
-                    pos.getY(),
-                    pos.getZ()
+            boolean equivalentNonZeroProfile = newState.getLightEmission() > 0
+                    && MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                    oldState, newState
             );
-            int localIndex = (pos.getY() & 15) << 8 | (pos.getZ() & 15) << 4 | pos.getX() & 15;
-            registry.recordBlockChange(
-                    level,
-                    dimension,
-                    SectionPos.asLong(
-                            SectionPos.blockToSectionCoord(pos.getX()),
-                            SectionPos.blockToSectionCoord(pos.getY()),
-                            SectionPos.blockToSectionCoord(pos.getZ())
-                    ),
-                    localIndex,
-                    StableLightIds.block(dimension, pos.getX(), pos.getY(), pos.getZ()),
-                    replacement
-            );
+            if (!equivalentNonZeroProfile) {
+                String dimension = level.dimension().identifier().toString();
+                LightTemplate replacement = MinecraftLightPolicy.block(
+                        newState,
+                        pos.getX(),
+                        pos.getY(),
+                        pos.getZ()
+                );
+                int localIndex = (pos.getY() & 15) << 8
+                        | (pos.getZ() & 15) << 4 | pos.getX() & 15;
+                registry.recordBlockChange(
+                        level,
+                        dimension,
+                        SectionPos.asLong(
+                                SectionPos.blockToSectionCoord(pos.getX()),
+                                SectionPos.blockToSectionCoord(pos.getY()),
+                                SectionPos.blockToSectionCoord(pos.getZ())
+                        ),
+                        localIndex,
+                        StableLightIds.block(dimension, pos.getX(), pos.getY(), pos.getZ()),
+                        replacement
+                );
+            }
         } catch (Throwable failure) {
             registry.failClosed("block light update failed", failure);
         }

@@ -20,6 +20,7 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.world.item.Items;
@@ -44,6 +45,7 @@ public final class AdvancedLightRegistryTests {
 
     public static void main(final String[] args) {
         testMinecraftEmitterPolicy();
+        testEquivalentNonzeroBlockLightUpdates();
         testDenseBlockCompaction();
         testDirectLightFrustumClassification();
         testDirectFrameCompactsBackgroundGpuWork();
@@ -189,6 +191,102 @@ public final class AdvancedLightRegistryTests {
         require(MinecraftLightPolicy.priorityForEmission(1)
                         < MinecraftLightPolicy.priorityForEmission(15),
                 "a dim held block can still outrank a full-brightness placed emitter");
+    }
+
+    private static void testEquivalentNonzeroBlockLightUpdates() {
+        BlockState lavaLevelZero = Blocks.LAVA.defaultBlockState();
+        BlockState lavaLevelOne = lavaLevelZero.setValue(LiquidBlock.LEVEL, 1);
+        BlockState lavaLevelSeven = lavaLevelZero.setValue(LiquidBlock.LEVEL, 7);
+        for (int level = 0; level <= 15; level++) {
+            BlockState levelledLava = lavaLevelZero.setValue(LiquidBlock.LEVEL, level);
+            require(levelledLava.getLightEmission() > 0
+                            && MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                            lavaLevelZero, levelledLava
+                    ) && MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                            levelledLava, lavaLevelZero
+                    ),
+                    "lava level " + level + " lost its identical non-zero L3 profile");
+        }
+        require(!MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        lavaLevelZero, Blocks.AIR.defaultBlockState()
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        Blocks.AIR.defaultBlockState(), lavaLevelZero
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        lavaLevelZero, Blocks.MAGMA_BLOCK.defaultBlockState()
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        lavaLevelZero, Blocks.TORCH.defaultBlockState()
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        Blocks.STONE.defaultBlockState(), Blocks.WATER.defaultBlockState()
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        null, lavaLevelZero
+                ) && !MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                        lavaLevelZero, null
+                ),
+                "non-equivalent, non-emissive or absent block states skipped an L3 mutation");
+
+        final int transitionCount = 512;
+        final long sectionKey = 901L;
+        AdvancedLightRegistry skippedRegistry = new AdvancedLightRegistry();
+        Object skippedWorld = new Object();
+        publishDenseLavaSection(skippedRegistry, skippedWorld, sectionKey, lavaLevelZero);
+        LightFrameSnapshot beforeSkipped = skippedRegistry.snapshotForFrame(0, 0, 0, 4096);
+        LightRegistryTelemetry beforeSkippedTelemetry = skippedRegistry.telemetry();
+        for (int update = 0; update < transitionCount; update++) {
+            int localIndex = update & 4095;
+            int blockX = localIndex & 15;
+            int blockY = localIndex >>> 8;
+            int blockZ = localIndex >>> 4 & 15;
+            BlockState oldState = (update & 1) == 0 ? lavaLevelOne : lavaLevelSeven;
+            BlockState newState = (update & 1) == 0 ? lavaLevelSeven : lavaLevelOne;
+            boolean equivalentNonZeroProfile = newState.getLightEmission() > 0
+                    && MinecraftLightPolicy.hasEquivalentNonZeroBlockLightProfile(
+                    oldState, newState
+            );
+            if (!equivalentNonZeroProfile) {
+                skippedRegistry.recordBlockChange(
+                        skippedWorld,
+                        DIMENSION,
+                        sectionKey,
+                        localIndex,
+                        StableLightIds.block(DIMENSION, blockX, blockY, blockZ),
+                        MinecraftLightPolicy.block(newState, blockX, blockY, blockZ)
+                );
+            }
+        }
+        LightFrameSnapshot afterSkipped = skippedRegistry.snapshotForFrame(0, 0, 0, 4096);
+        require(skippedRegistry.telemetry().blockOverrides()
+                        == beforeSkippedTelemetry.blockOverrides()
+                        && afterSkipped.registryEpoch() == beforeSkipped.registryEpoch()
+                        && sameLightReferences(beforeSkipped.lights(), afterSkipped.lights()),
+                "equivalent lava levels mutated L3 epoch, overrides or compacted cache");
+
+        AdvancedLightRegistry legacyRegistry = new AdvancedLightRegistry();
+        Object legacyWorld = new Object();
+        publishDenseLavaSection(legacyRegistry, legacyWorld, sectionKey, lavaLevelZero);
+        LightFrameSnapshot beforeLegacy = legacyRegistry.snapshotForFrame(0, 0, 0, 4096);
+        for (int update = 0; update < transitionCount; update++) {
+            int localIndex = update & 4095;
+            int blockX = localIndex & 15;
+            int blockY = localIndex >>> 8;
+            int blockZ = localIndex >>> 4 & 15;
+            BlockState newState = (update & 1) == 0 ? lavaLevelSeven : lavaLevelOne;
+            legacyRegistry.recordBlockChange(
+                    legacyWorld,
+                    DIMENSION,
+                    sectionKey,
+                    localIndex,
+                    StableLightIds.block(DIMENSION, blockX, blockY, blockZ),
+                    MinecraftLightPolicy.block(newState, blockX, blockY, blockZ)
+            );
+        }
+        LightFrameSnapshot afterLegacy = legacyRegistry.snapshotForFrame(0, 0, 0, 4096);
+        require(legacyRegistry.telemetry().blockOverrides() == transitionCount
+                        && afterLegacy.registryEpoch()
+                        == beforeLegacy.registryEpoch() + transitionCount
+                        && !sameLightReferences(beforeLegacy.lights(), afterLegacy.lights()),
+                "legacy lava-level control did not expose all registry/compaction mutations");
+        require(sameLightShadingInputs(afterSkipped.lights(), afterLegacy.lights()),
+                "equivalent lava-level skip changed final L3 photometry, stable IDs or footprints");
     }
 
     private static void testDenseBlockCompaction() {
@@ -1886,6 +1984,75 @@ public final class AdvancedLightRegistryTests {
                 0.0, 0.0, -1.0, 0.0,
                 0.0, 0.0, 0.0, 1.0
         );
+    }
+
+    private static void publishDenseLavaSection(
+            final AdvancedLightRegistry registry,
+            final Object world,
+            final long sectionKey,
+            final BlockState lavaState
+    ) {
+        LightSectionTask task = registry.beginSectionTask(world, DIMENSION, sectionKey);
+        LightSectionCandidate candidate = StaticLightSectionScanner.scan(
+                task,
+                0,
+                0,
+                0,
+                AdvancedLightRegistry.MAX_LIGHTS_PER_SECTION,
+                (localIndex, blockX, blockY, blockZ) -> MinecraftLightPolicy.block(
+                        lavaState, blockX, blockY, blockZ
+                )
+        );
+        require(candidate.emittedLightCount() == StaticLightSectionScanner.BLOCKS_PER_SECTION
+                        && registry.publishAccepted(candidate),
+                "dense real-lava section was not published");
+    }
+
+    private static boolean sameLightReferences(
+            final List<AdvancedLight> first,
+            final List<AdvancedLight> second
+    ) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (int index = 0; index < first.size(); index++) {
+            if (first.get(index) != second.get(index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameLightShadingInputs(
+            final List<AdvancedLight> first,
+            final List<AdvancedLight> second
+    ) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (int index = 0; index < first.size(); index++) {
+            AdvancedLight left = first.get(index);
+            AdvancedLight right = second.get(index);
+            if (left.stableId() != right.stableId()
+                    || left.kind() != right.kind()
+                    || Double.doubleToRawLongBits(left.x()) != Double.doubleToRawLongBits(right.x())
+                    || Double.doubleToRawLongBits(left.y()) != Double.doubleToRawLongBits(right.y())
+                    || Double.doubleToRawLongBits(left.z()) != Double.doubleToRawLongBits(right.z())
+                    || Float.floatToRawIntBits(left.radius())
+                    != Float.floatToRawIntBits(right.radius())
+                    || Float.floatToRawIntBits(left.red()) != Float.floatToRawIntBits(right.red())
+                    || Float.floatToRawIntBits(left.green()) != Float.floatToRawIntBits(right.green())
+                    || Float.floatToRawIntBits(left.blue()) != Float.floatToRawIntBits(right.blue())
+                    || Float.floatToRawIntBits(left.intensity())
+                    != Float.floatToRawIntBits(right.intensity())
+                    || left.priority() != right.priority()
+                    || left.denseCellEligible() != right.denseCellEligible()
+                    || !left.shadowEmitterFootprint().equals(right.shadowEmitterFootprint())
+                    || left.shadowSourceClass() != right.shadowSourceClass()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static LightTemplate exactTemplate(

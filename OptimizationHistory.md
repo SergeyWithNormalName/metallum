@@ -963,3 +963,65 @@ buffer allocations — `0`.
 причины. Вернуться к самой идее можно только если tagging удастся встроить в уже
 существующий pass после готовности descriptors либо передать shadow-state без нового
 encoder/synchronization boundary.
+
+## 2026-07-23 — Nether: equivalent nonzero block-light profile update skip
+
+### Гипотеза и причина проверки
+
+При плотной лаве изменение только `LiquidBlock.LEVEL` многократно приходит через
+block-change hook. Для L3 оно раньше каждый раз materialize-ило тот же point light,
+добавляло override, поднимало epoch и invalidated cached dense compaction, хотя
+итоговые photometry, stable IDs и shadow footprint не менялись. Гипотеза: можно
+консервативно пропустить только такой L3 update, если старый и новый state дают
+гарантированно одинаковый **ненулевой** profile.
+
+### Семантика изменения и safety contract
+
+`MinecraftLightPolicy` сравнивает тот же `emissiveCell`, который authority для
+materialization: emission должен совпадать и быть `>0`, chosen color/emissive block
+должен быть тем же object identity, а `denseCellEligible` — совпадать. Поэтому
+разные blocks/profiles, different emission, null и non-emissive states всегда идут
+через прежний `recordBlockChange` path. Mixin сначала использует дешёвый
+`newState.getLightEmission() > 0` pre-gate; для target lava это исключает
+`LightTemplate`, RGB-array и dimension String allocation. Fluid-only exotic source
+с нулевой block emission лишь консервативно не получает skip, без изменения картинки.
+
+`observeHook` и `try/failClosed` остаются прежними. Критично, L5
+`VoxelClipmapController.markBlockDirty` сохранён безусловным в отдельном try после
+L3: geometry/optics invalidation не пропускается даже при L3 skip или L3 failure.
+
+### Способ проверки и результаты
+
+Targeted `advancedLightRegistryUnitTest` и `voxelOccupancyUnitTest` — **PASS**.
+Контрактные tests проверяют реальные `Blocks.LAVA` states для всех допустимых
+`LiquidBlock.LEVEL 0..15`, обе стороны сравнения, а также lava↔air, magma, другой
+emission, non-emissive и null как conservative non-skip.
+
+Детерминированный secondary workload сначала published real 4096-cell lava section,
+затем прогнал 128 level transitions со snapshot после **каждого** update, с прогревом
+и пятью повторами. Median skip/reuse — `0.388208 ms`; legacy
+record+recompact — `157.520209 ms` (`~405.76x`). Exact operation counts:
+`0/0` block overrides/registry epoch у skip против `128/128` у legacy. В финальном
+property test 512 transitions дополнительно подтверждают zero extra overrides,
+epoch-visible mutation и compaction-cache invalidation, при идентичных final
+photometry, stable IDs и footprints; generation intentionally не считается shading
+input.
+
+Основной Nether detailed `300+600` regression diagnostic при закреплённом contract
+дал `33.765 FPS`, GPU p95 `32.9272 ms`, cluster average/p95 `0.9922/1.0705 ms`,
+`COMPLETE` и `0` dropped timing events. Для context accepted corner-wedge diagnostic
+имел `33.57195 FPS`, GPU p95 `32.71996 ms`, cluster average/p95
+`0.89837/0.93423 ms`. Это исключает явную static regression в этом diagnostic, но
+не доказывает FPS benefit dynamic block-update path. Invalid `600`-frame non-detail
+smoke исключён и не используется как evidence.
+
+### Побочные эффекты и итог
+
+Fast path намеренно не расширяет scope на L5 и не меняет world geometry, optics,
+vanilla lightmap, lighting quality, benchmark settings или основной Nether route.
+В production нет новой очереди, packet, copy или allocation на accepted lava-level
+target; неизвестные state families остаются на прежнем safe path.
+
+**Итог:** **ВНЕДРЕНО/accepted** как точное устранение эквивалентного L3
+update-churn. Оно не принимается как утверждение о повышении основного Nether FPS:
+для этого нужен отдельный valid dynamic-path A/B при неизменном benchmark contract.

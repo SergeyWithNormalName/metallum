@@ -86,6 +86,23 @@
   при неустойчивом GPU p95 `-0.20%`. Реализация полностью удалена. Не повторять её
   без способа встроить tagging в уже существующий post-descriptor pass и избежать
   новой synchronization/encoder boundary.
+- Equivalent nonzero block-light profile **ВНЕДРЕНО/accepted как точное устранение
+  update churn, не как FPS-claim**. Причина — лавовые `LiquidBlock.LEVEL` transitions
+  многократно вызывали одинаковую L3 override/materialize/compaction работу, хотя
+  итоговые emission, chosen emissive-block identity и dense profile не менялись.
+  Fast path допускает skip только для того же ненулевого `emissiveCell`; null,
+  non-emissive, другой block/profile или emission fail closed к обычному update.
+  `VoxelClipmapController.markBlockDirty` остался безусловным после изолированного L3
+  try, поэтому L5 geometry/optics invalidation не пропускается.
+  `advancedLightRegistryUnitTest` и `voxelOccupancyUnitTest` прошли. Secondary
+  4096-cell lava diagnostic с 128 level transitions и snapshot после каждого update
+  дал median `0.388208 ms` skip/reuse против `157.520209 ms` legacy record+recompact
+  (`~405.76x`), с `0/0` против `128/128` block overrides/registry epoch. Основной
+  detailed `300+600` regression diagnostic: `33.765 FPS`, GPU p95 `32.9272 ms`,
+  cluster avg/p95 `0.9922/1.0705`, `COMPLETE`, `0` dropped timing events. Он близок
+  к accepted corner-wedge diagnostic (`33.57195 FPS`, GPU p95 `32.71996 ms`, cluster
+  `0.89837/0.93423`) и не показывает явной static regression, но не является FPS
+  evidence для dynamic path. Invalid `600`-frame non-detail smoke исключён.
 - Дальше — обновлённый dense-light profile оставшегося World Opaque tail. Не повторять
   side-plane/wedge culling без новой причины. Отдельная Z-plane refinement не является
   кандидатом: `centerDepth ± radius` уже задаёт exact monotonic log-depth slice range.
