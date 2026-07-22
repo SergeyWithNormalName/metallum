@@ -3,6 +3,7 @@ package com.metallum.client.metal.render;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
+import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
@@ -492,7 +493,8 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         pendingDepthClears.remove(destination);
         destination.markContentsDirty();
         endEncoder();
-        boolean deferSpatialHdrUiSeed = MetalFxSpatialScaling.isActive() && hdrPrecomposeEnabled;
+        boolean deferHdrUiSeed = (MetalFxSpatialScaling.isActive() || MetalFxTemporalScaling.isActive())
+                && hdrPrecomposeEnabled;
         boolean materialGenerationActive = this.device.isMaterialGenerationActive();
         int result = commandBuffer().encodeHdrUiBackdrop(
                 source.nativeHandle(),
@@ -505,12 +507,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 MetalFxSpatialScaling.isActive(),
                 hdrPrecomposeEnabled,
                 perceptualScalingEnabled,
-                deferSpatialHdrUiSeed,
+                deferHdrUiSeed,
                 currentHeadroom,
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
         );
-        if (result == 2 && deferSpatialHdrUiSeed) {
+        if (result == 2 && deferHdrUiSeed) {
             this.pendingUiSeeds.arm(new PendingUiSeed(
                     source,
                     destination,

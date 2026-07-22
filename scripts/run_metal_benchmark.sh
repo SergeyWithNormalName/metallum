@@ -57,7 +57,9 @@ Options:
                      (default: benchmark/routes/hdrtest-static-v1.json)
   --settings FILE    tracked performance/quality settings specification
                      (default: benchmark/settings/native-hdr-fancy-v1.json)
-  --metalfx MODE     OFF, QUALITY, or PERFORMANCE (default: OFF)
+  --metalfx MODE     OFF, QUALITY, PERFORMANCE, TEMPORAL_QUALITY,
+                     TEMPORAL_PERFORMANCE, or TEMPORAL_ULTRA_PERFORMANCE
+                     (default: OFF)
   --lighting-preset PRESET
                      performance, balanced, or ultra (default: balanced)
   --label LABEL      short artifact label (default: baseline)
@@ -136,8 +138,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$METALFX_MODE" in
-    OFF|QUALITY|PERFORMANCE) ;;
-    *) die "--metalfx must be OFF, QUALITY, or PERFORMANCE (AUTO is not reproducible)" ;;
+    OFF|QUALITY|PERFORMANCE|TEMPORAL_QUALITY|TEMPORAL_PERFORMANCE|TEMPORAL_ULTRA_PERFORMANCE) ;;
+    *) die "--metalfx must be OFF, QUALITY, PERFORMANCE, TEMPORAL_QUALITY, TEMPORAL_PERFORMANCE, or TEMPORAL_ULTRA_PERFORMANCE" ;;
 esac
 case "$LIGHTING_PRESET" in
     performance|balanced|ultra) ;;

@@ -44,6 +44,14 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 PLAYER_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
 DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]*")
+BENCHMARK_SCALER_MODES = (
+    "OFF",
+    "QUALITY",
+    "PERFORMANCE",
+    "TEMPORAL_QUALITY",
+    "TEMPORAL_PERFORMANCE",
+    "TEMPORAL_ULTRA_PERFORMANCE",
+)
 # Every release settings profile has both its tracked startup configuration and
 # the resolved presentation contract emitted by the renderer.  Keep these
 # together: the startup values are checked before a long client run, while the
@@ -2708,7 +2716,7 @@ def _derive_release_summary(
     segment, scaler, generation = next(iter(selections))
     if not isinstance(segment, int) or segment < 0:
         raise ReportError("accepted raw report has an invalid measurement segment")
-    if scaler not in {"OFF", "QUALITY", "PERFORMANCE"}:
+    if scaler not in BENCHMARK_SCALER_MODES:
         raise ReportError("accepted raw report has an invalid scaler mode")
     frames = sum(window.frames for window in measure_windows)
     preliminary = summarize(raw_report, frames, segment, scaler)
@@ -5430,7 +5438,7 @@ def parser() -> argparse.ArgumentParser:
     summary.add_argument("report", type=Path)
     summary.add_argument("--measure-frames", type=int, default=DEFAULT_MEASURE_FRAMES)
     summary.add_argument("--segment", type=int, default=0)
-    summary.add_argument("--scaler-mode", choices=("OFF", "QUALITY", "PERFORMANCE"), default="OFF")
+    summary.add_argument("--scaler-mode", choices=BENCHMARK_SCALER_MODES, default="OFF")
     summary.add_argument("--release-contract", action="store_true")
     summary.add_argument(
         "--metal-validation-contract",
@@ -5461,7 +5469,7 @@ def parser() -> argparse.ArgumentParser:
     comparison.add_argument("candidate", type=Path)
     comparison.add_argument("--measure-frames", type=int, default=DEFAULT_MEASURE_FRAMES)
     comparison.add_argument("--segment", type=int, default=0)
-    comparison.add_argument("--scaler-mode", choices=("OFF", "QUALITY", "PERFORMANCE"), default="OFF")
+    comparison.add_argument("--scaler-mode", choices=BENCHMARK_SCALER_MODES, default="OFF")
     comparison.add_argument("--p95-regression-ms", type=float, default=DEFAULT_P95_GATE_MS)
     comparison.add_argument(
         "--provisional",

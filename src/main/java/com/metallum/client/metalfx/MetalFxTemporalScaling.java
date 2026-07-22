@@ -36,13 +36,14 @@ public final class MetalFxTemporalScaling {
     private static volatile TemporalScalingMode requestedMode = TemporalScalingMode.OFF;
     private static volatile boolean configLoaded;
     private static volatile boolean runtimeDisabled;
+    private static volatile TemporalScalingMode benchmarkOverride;
 
     private MetalFxTemporalScaling() {
     }
 
     public static TemporalScalingMode requestedMode() {
         ensureConfigLoaded();
-        return requestedMode;
+        return selectRequestedMode(requestedMode, benchmarkOverride);
     }
 
     public static TemporalScalingMode effectiveMode() {
@@ -59,7 +60,8 @@ public final class MetalFxTemporalScaling {
     }
 
     public static boolean isRequested() {
-        return requestedMode().enabled();
+        ensureConfigLoaded();
+        return selectRequestedMode(requestedMode, benchmarkOverride).enabled();
     }
 
     public static boolean isSupported() {
@@ -95,6 +97,30 @@ public final class MetalFxTemporalScaling {
         requestedMode = TemporalScalingMode.OFF;
         runtimeDisabled = false;
         saveMode(TemporalScalingMode.OFF);
+        requestRendererResize();
+    }
+
+    /** Installs a non-persistent concrete preset for the automated benchmark. */
+    public static void setBenchmarkOverride(final TemporalScalingMode mode) {
+        ensureConfigLoaded();
+        TemporalScalingMode concreteMode = mode == null ? TemporalScalingMode.OFF : mode;
+        TemporalScalingMode previous = benchmarkOverride;
+        boolean wasRuntimeDisabled = runtimeDisabled;
+        benchmarkOverride = concreteMode;
+        runtimeDisabled = false;
+        if (previous != concreteMode || wasRuntimeDisabled) {
+            requestRendererResize();
+        }
+    }
+
+    /** Restores the persisted user policy after an automated benchmark. */
+    public static void clearBenchmarkOverride() {
+        ensureConfigLoaded();
+        if (benchmarkOverride == null) {
+            return;
+        }
+        benchmarkOverride = null;
+        runtimeDisabled = false;
         requestRendererResize();
     }
 
@@ -139,6 +165,15 @@ public final class MetalFxTemporalScaling {
 
     static TemporalScalingMode from(final Properties properties) {
         return TemporalScalingMode.parse(properties.getProperty("mode"));
+    }
+
+    static TemporalScalingMode selectRequestedMode(
+            final TemporalScalingMode persistedMode,
+            final TemporalScalingMode overrideMode
+    ) {
+        return overrideMode != null
+                ? overrideMode
+                : (persistedMode == null ? TemporalScalingMode.OFF : persistedMode);
     }
 
     private static int scaledDimension(final int displayDimension, final float scale) {

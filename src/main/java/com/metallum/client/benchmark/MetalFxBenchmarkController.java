@@ -2,8 +2,7 @@ package com.metallum.client.benchmark;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTiming;
-import com.metallum.client.metalfx.MetalFxSpatialScaling;
-import com.metallum.client.metalfx.SpatialScalingMode;
+import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumRelightFastPath;
@@ -331,7 +330,7 @@ public final class MetalFxBenchmarkController {
     private final List<String> expectedResourcePackIds;
     private final boolean useCurrentWindow;
     private final boolean captureScreenshots;
-    private final List<SpatialScalingMode> sequence;
+    private final List<BenchmarkScalingMode> sequence;
     private final RouteConfig route;
     private final String configurationError;
 
@@ -452,14 +451,10 @@ public final class MetalFxBenchmarkController {
         this.expectedFramebufferWidth = this.targetWidth;
         this.expectedFramebufferHeight = this.targetHeight;
 
-        List<SpatialScalingMode> parsed = new ArrayList<>();
+        List<BenchmarkScalingMode> parsed = new ArrayList<>();
         try {
             for (String value : env("METALLUM_BENCHMARK_SEQUENCE", "OFF").split(",")) {
-                SpatialScalingMode mode = SpatialScalingMode.valueOf(value.trim().toUpperCase(Locale.ROOT));
-                if (!mode.concrete()) {
-                    throw new IllegalArgumentException("AUTO is not a benchmark preset");
-                }
-                parsed.add(mode);
+                parsed.add(BenchmarkScalingMode.parse(value));
             }
             if (parsed.isEmpty()) {
                 error = "benchmark sequence is empty";
@@ -620,7 +615,7 @@ public final class MetalFxBenchmarkController {
                     logSegmentEvent("MEASURE_END");
                     MetalGpuTiming.completeBenchmark(
                             this.segmentIndex,
-                            this.sequence.get(this.segmentIndex)
+                            this.sequence.get(this.segmentIndex).name()
                     );
                     beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_END);
                 }
@@ -1671,7 +1666,7 @@ public final class MetalFxBenchmarkController {
         if (this.boundaryCheckEvent == RouteCheckEvent.MEASURE_START) {
             MetalGpuTiming.beginBenchmarkMeasurement(
                     this.segmentIndex,
-                    this.sequence.get(this.segmentIndex)
+                    this.sequence.get(this.segmentIndex).name()
             );
             if (this.route.l6DynamicShadow() != null) {
                 L6DynamicShadowBenchmarkTelemetry.begin();
@@ -2315,7 +2310,7 @@ public final class MetalFxBenchmarkController {
     }
 
     private void startSegment() {
-        SpatialScalingMode mode = this.sequence.get(this.segmentIndex);
+        BenchmarkScalingMode mode = this.sequence.get(this.segmentIndex);
         TorchEpochTelemetry.abort();
         L6DynamicShadowBenchmarkTelemetry.abort();
         SodiumRelightOracle.abortObservation();
@@ -2332,8 +2327,8 @@ public final class MetalFxBenchmarkController {
         this.torchEpochFailure = null;
         this.torchEpochAppliedMeasuredFrame = -1;
         this.torchEpochRemovedMeasuredFrame = -1;
-        MetalFxSpatialScaling.setBenchmarkOverride(mode);
-        MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode);
+        mode.apply();
+        MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode.name());
         this.segmentFrame = 0;
         this.measuredFrames = 0;
         this.segmentPhase = SegmentPhase.WARMUP;
@@ -2431,7 +2426,7 @@ public final class MetalFxBenchmarkController {
             }
         }
         minecraft.getWindow().setPreferredFullscreenVideoMode(this.originalFullscreenMode);
-        MetalFxSpatialScaling.clearBenchmarkOverride();
+        BenchmarkScalingMode.clearOverrides();
         minecraft.stop();
     }
 

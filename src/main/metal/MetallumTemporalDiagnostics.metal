@@ -145,6 +145,72 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
     return output;
 }
 
+struct MetallumFastTemporalUniforms {
+    float2 inputExtent;
+    float2 jitter;
+    float historyWeight;
+    uint historyValid;
+    uint resetMask;
+    uint reserved;
+};
+
+fragment float4 metallum_fast_temporal_resolve_fs(
+    MetallumTemporalVertexOut input [[stage_in]],
+    texture2d<float, access::sample> colorTexture [[texture(0)]],
+    texture2d<float, access::sample> historyTexture [[texture(1)]],
+    texture2d<float, access::sample> motionTexture [[texture(2)]],
+    texture2d<float, access::sample> reactiveTexture [[texture(3)]],
+    constant MetallumFastTemporalUniforms& uniforms [[buffer(0)]]
+) {
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 outputExtent = float2(historyTexture.get_width(), historyTexture.get_height());
+    float2 outputUv = input.position.xy / outputExtent;
+    float2 inputTexel = 1.0f / uniforms.inputExtent;
+
+    // The low-resolution scene carries the current projection jitter. Sample
+    // at the matching shifted coordinate before blending it with the
+    // unjittered display-resolution history.
+    float2 currentUv = clamp(
+        outputUv + uniforms.jitter / uniforms.inputExtent,
+        0.0f,
+        1.0f
+    );
+    float4 current = colorTexture.sample(linearSampler, currentUv);
+
+    if (uniforms.historyValid == 0u || uniforms.resetMask != 0u) {
+        return current;
+    }
+
+    float2 motionPixels = motionTexture.sample(linearSampler, currentUv).xy;
+    float2 historyUv = clamp(
+        outputUv + motionPixels / uniforms.inputExtent,
+        0.0f,
+        1.0f
+    );
+    float4 history = historyTexture.sample(linearSampler, historyUv);
+    float reactive = clamp(reactiveTexture.sample(linearSampler, currentUv).x, 0.0f, 1.0f);
+
+    // Clamp reprojected history to the local low-resolution color bounds.
+    // This preserves accumulated sub-pixel detail while rejecting disoccluded
+    // geometry and high-contrast moving edges rather than smearing them.
+    float3 neighborX = colorTexture.sample(linearSampler, currentUv + float2(inputTexel.x, 0.0f)).rgb;
+    float3 neighborY = colorTexture.sample(linearSampler, currentUv + float2(0.0f, inputTexel.y)).rgb;
+    float3 neighborDiagonal = colorTexture.sample(
+        linearSampler,
+        currentUv - float2(inputTexel.x, inputTexel.y)
+    ).rgb;
+    float3 lower = min(current.rgb, min(neighborX, min(neighborY, neighborDiagonal)));
+    float3 upper = max(current.rgb, max(neighborX, max(neighborY, neighborDiagonal)));
+    float3 clampedHistory = clamp(history.rgb, lower, upper);
+    float colorDelta = max(
+        abs(clampedHistory.r - current.r),
+        max(abs(clampedHistory.g - current.g), abs(clampedHistory.b - current.b))
+    );
+    float consistency = 1.0f - smoothstep(0.03f, 0.18f, colorDelta);
+    float weight = uniforms.historyWeight * (1.0f - reactive) * consistency;
+    return float4(mix(current.rgb, clampedHistory, weight), current.a);
+}
+
 kernel void metallum_motion_vector_validate(
     const device MetallumMotionValidationInput* inputs [[buffer(0)]],
     device MetallumMotionValidationOutput* outputs [[buffer(1)]],

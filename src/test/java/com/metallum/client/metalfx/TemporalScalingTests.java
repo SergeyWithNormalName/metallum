@@ -11,6 +11,7 @@ public final class TemporalScalingTests {
         testModeParsing();
         testPresetDimensions();
         testOddAndTinyDimensions();
+        testBenchmarkOverrides();
         System.out.println("MetalFX Temporal scaling policy validation passed");
     }
 
@@ -68,6 +69,27 @@ public final class TemporalScalingTests {
                         "render dimensions clamp");
             }
         }
+    }
+
+    private static void testBenchmarkOverrides() {
+        require(MetalFxTemporalScaling.selectRequestedMode(
+                        TemporalScalingMode.QUALITY,
+                        null
+                ) == TemporalScalingMode.QUALITY,
+                "persisted Temporal mode without override");
+        require(MetalFxTemporalScaling.selectRequestedMode(
+                        TemporalScalingMode.QUALITY,
+                        TemporalScalingMode.PERFORMANCE
+                ) == TemporalScalingMode.PERFORMANCE,
+                "Temporal benchmark override wins");
+        require(BenchmarkScalingMode.parse("temporal_performance")
+                        == BenchmarkScalingMode.TEMPORAL_PERFORMANCE,
+                "Temporal benchmark parsing");
+        require(BenchmarkScalingMode.TEMPORAL_PERFORMANCE.spatialMode() == SpatialScalingMode.OFF,
+                "Temporal benchmark disables Spatial");
+        require(BenchmarkScalingMode.TEMPORAL_PERFORMANCE.temporalMode()
+                        == TemporalScalingMode.PERFORMANCE,
+                "Temporal benchmark selects requested preset");
     }
 
     private static void require(final boolean condition, final String message) {

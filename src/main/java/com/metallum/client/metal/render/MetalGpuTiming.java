@@ -1,7 +1,6 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
-import com.metallum.client.metalfx.SpatialScalingMode;
 import org.jspecify.annotations.Nullable;
 
 /** Render-thread stage markers used by Minecraft mixins in detailed GPU timing mode. */
@@ -63,27 +62,27 @@ public final class MetalGpuTiming {
         }
     }
 
-    public static void beginBenchmarkWarmup(final int segmentIndex, final SpatialScalingMode mode) {
+    public static void beginBenchmarkWarmup(final int segmentIndex, final String mode) {
         setBenchmarkState(segmentIndex, BENCHMARK_PHASE_WARMUP, mode);
     }
 
-    public static void beginBenchmarkMeasurement(final int segmentIndex, final SpatialScalingMode mode) {
+    public static void beginBenchmarkMeasurement(final int segmentIndex, final String mode) {
         setBenchmarkState(segmentIndex, BENCHMARK_PHASE_MEASURE, mode);
     }
 
-    public static void completeBenchmark(final int segmentIndex, final SpatialScalingMode mode) {
+    public static void completeBenchmark(final int segmentIndex, final String mode) {
         setBenchmarkState(segmentIndex, BENCHMARK_PHASE_COMPLETE, mode);
     }
 
     private static void setBenchmarkState(
             final int segmentIndex,
             final int phase,
-            final SpatialScalingMode mode
+            final String mode
     ) {
-        if (!REPORT_ENABLED || mode == null) {
+        if (!REPORT_ENABLED || mode == null || mode.isBlank()) {
             return;
         }
-        MetalNativeBridge.metallum_gpu_timing_set_benchmark_state(segmentIndex, phase, mode.name());
+        MetalNativeBridge.metallum_gpu_timing_set_benchmark_state(segmentIndex, phase, mode);
     }
 
     static @Nullable MetalGpuTimingStage currentStageForTests() {
