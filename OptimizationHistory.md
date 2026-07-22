@@ -764,10 +764,56 @@ receipt из-за известного post-evidence ordering/missing `.accepted
 **Итог:** **ВНЕДРЕНО/accepted**. Это второй раздельно измеренный lossless кандидат
 после L6 recovery, с улучшением CPU/GPU/present tail и без visual/L6 regression.
 
-### Кандидаты позже — без реализации
+### Conservative cluster-side planes — принято
 
-**Conservative cluster side planes — следующий кандидат:** проверить как отдельную
-GPU-гипотезу лишь при
-доказанном cluster false-positive/индексном pressure. Плоскости могут отбрасывать
-только sphere, целиком лежащую вне coarse-cell frustum; invalid projection остаётся
-fail-open. Кандидат ещё не измерялся и не внедрялся.
+**Гипотеза и причина проверки:** после L6 recovery и `nDotL` оставалось слишком много
+ложных coarse cluster membership: sphere попадает в грубый X/Y/Z AABB, хотя целиком
+лежит вне конкретной XY tile. Это повышает requested indices, per-cluster overflow и
+fragment direct-light work. Нужен был reject без изменения видимого света.
+
+**Семантика изменения:** после существующих coarse bounds строятся четыре side plane
+конкретной tile. Sphere исключается только если она **целиком** находится снаружи хотя
+бы одной valid plane; tangency сохранён строгим `<`, а не `<=`. Любой invalid,
+nonfinite или overflow во входе/plane — fail-open. Z-range не уточняется; stable
+upload order, candidate indices и caps не меняются.
+
+**Способ измерения:** targeted `lightClusterValidation` с Metal API/GPU Validation и
+`./gradlew clean check` прошли. Независимый CPU oracle покрывает четыре
+plane tangent/outside fixture, edge/corner, invalid fail-open, witness без ложного
+отбрасывания на representative tile/depth/projection с view bob, а также прежние
+determinism/capped-prefix contracts.
+
+Diagnostic artifact
+`20260722T011853Z-g45ffbae7adb7-dirty-nether-cluster-side-planes-diagnostic-off`
+дал `30.241 FPS`, requested `514226` против `733180–733738` у accepted `nDotL`,
+p50 occupancy `48` против `68`, overflow `124` против `220`, Cluster Build average
+`0.6717 ms` и World Opaque около `23.27 ms`. Это attribution, не production
+acceptance.
+
+Два full production artifact с одинаковым built-artifact digest `c2fcc5…`,
+`1800+3000`, raw + summary `COMPLETE`:
+`20260722T012057Z-g45ffbae7adb7-dirty-nether-cluster-side-planes-1-off` и
+`20260722T012447Z-g45ffbae7adb7-dirty-nether-cluster-side-planes-2-off`.
+
+| Candidate | FPS | min window | 1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 | requested/dropped | p50/overflow |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| #1 | 30.1959 | 30.1055 | 26.1780 | 13.6804 / 14.6092 ms | 36.6391 / 38.3044 ms | 35.2902 / 36.8553 ms | 516669 / 15199 | 48 / 130 |
+| #2 | 30.0339 | 29.9038 | 26.1683 | 14.1949 / 14.7223 ms | 38.5898 / 40.0930 ms | 35.4377 / 36.8759 ms | 514594 / 15144 | 48 / 128 |
+
+**Результат:** accepted `nDotL` mean → cluster planes mean: FPS
+`25.6938 → 30.1149` (`+17.21%`), 1% low `22.4055 → 26.1731` (`+16.82%`), GPU p95
+`44.6585 → 37.6145 ms` (`-15.77%`), present p95 `41.2206 → 35.3639 ms`
+(`-14.21%`), CPU p95 `13.9675 → 13.9376 ms` (`-0.21%`). Requested indices
+`733459 → 515631.5` (`-29.70%`), dropped `37363 → 15171.5` (`-59.39%`), overflow
+`220 → 129` (`-41.36%`). Copies остаются `74,400 B/frame`, successful Metal buffer
+allocations `0`. L6 в обоих production run: `READY=87`, `APPROXIMATE=1961`,
+`FAIL_CLOSED=0`, coverage/failures неизменны, `lightCount=2048`.
+
+**Побочные эффекты и ограничение evidence:** добавлены четыре plane checks в Cluster
+Build, но их стоимость не вызвала измеримой регрессии; cap p95 остаётся `256`, однако
+overflow значительно ниже. Compare receipt отсутствует по известному event-ordering/
+missing `.accepted.json`; это не скрывается: raw + summary `COMPLETE` сохранены.
+
+**Итог:** **ВНЕДРЕНО/accepted**, третий раздельный lossless Nether кандидат. Следующие
+направления — только после обновлённого baseline и нового profile: не возвращаться к
+уже принятому shader/cluster пути без новой причины и не подменять quality снижением.

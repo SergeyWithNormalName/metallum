@@ -56,9 +56,19 @@
   `materialContractUnitTest` и `clean check` прошли; compare receipt всё ещё
   заблокирован известным post-evidence ordering/missing `.accepted.json`, хотя raw+
   summary имеют `COMPLETE`.
-- Следующий pending кандидат — conservative cluster-side planes: только fail-open,
-  консервативный reject sphere, целиком вне coarse-cell frustum, и только после
-  профиля cluster false-positive/индексного pressure; без снижения качества.
+- Conservative cluster-side planes **ВНЕДРЕНО/accepted**: после coarse bounds четыре
+  per-tile plane отбрасывают только sphere, целиком вне valid side plane; tangency
+  retained, invalid/nonfinite/overflow fail-open, без Z/order/cap changes. Targeted
+  Metal API/GPU validation и `clean check` прошли. Diagnostic дал requested `514226`,
+  p50 `48`, overflow `124`; два full COMPLETE production artifacts дали
+  `30.1959/30.0339 FPS`, GPU p95 `36.6391/38.5898 ms`, present p95
+  `35.2902/35.4377 ms` при unchanged L6 quality. Vs accepted `nDotL` mean: FPS
+  `+17.21%`, GPU p95 `-15.77%`, requested `-29.70%`, dropped `-59.39%`, overflow
+  `-41.36%`; copies `74,400 B/frame`, allocations `0`. Compare receipt по-прежнему
+  блокирован known event ordering/missing `.accepted.json`, raw+summary `COMPLETE`.
+- Дальше — только обновлённый baseline и profile-backed направление; не считать
+  принятые shader/cluster меры бесконечно повторяемыми без новой причины и не менять
+  качество ради цифр.
 
 ---
 

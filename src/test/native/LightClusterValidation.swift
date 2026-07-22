@@ -365,6 +365,82 @@ private func sphereOutsideSideFrustum(
     }
 }
 
+private func clusterSidePlanes(
+    clusterX: Int,
+    clusterY: Int,
+    width: Int,
+    height: Int,
+    projection: simd_float4x4
+) -> [SIMD4<Float>]? {
+    guard width > 0, height > 0,
+          clusterX >= 0, clusterY >= 0 else { return nil }
+    let lowerX = Float(clusterX * tileSize)
+    let lowerY = Float(clusterY * tileSize)
+    let upperX = min(lowerX + Float(tileSize), Float(width))
+    let upperY = min(lowerY + Float(tileSize), Float(height))
+    guard lowerX.isFinite, lowerY.isFinite, upperX.isFinite, upperY.isFinite,
+          upperX > lowerX, upperY > lowerY else { return nil }
+    let lowerNdc = SIMD2(lowerX * 2 / Float(width) - 1, lowerY * 2 / Float(height) - 1)
+    let upperNdc = SIMD2(upperX * 2 / Float(width) - 1, upperY * 2 / Float(height) - 1)
+    guard lowerNdc.x.isFinite, lowerNdc.y.isFinite,
+          upperNdc.x.isFinite, upperNdc.y.isFinite else { return nil }
+    func row(_ index: Int) -> SIMD4<Float> {
+        SIMD4(
+            projection[0][index], projection[1][index],
+            projection[2][index], projection[3][index]
+        )
+    }
+    let rowX = row(0)
+    let rowY = row(1)
+    let rowW = row(3)
+    let planes = [
+        rowX - lowerNdc.x * rowW,
+        upperNdc.x * rowW - rowX,
+        rowY - lowerNdc.y * rowW,
+        upperNdc.y * rowW - rowY
+    ]
+    guard planes.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite })
+    else { return nil }
+    return planes
+}
+
+// This oracle deliberately uses a normalized-plane comparison rather than the shader's
+// squared form. It proves the same strict half-space relation independently.
+private func sphereStrictlyOutsidePlane(
+    center: SIMD3<Float>,
+    radius: Float,
+    plane: SIMD4<Float>
+) -> Bool {
+    guard radius > 0, radius.isFinite,
+          center.x.isFinite, center.y.isFinite, center.z.isFinite,
+          plane.x.isFinite, plane.y.isFinite, plane.z.isFinite, plane.w.isFinite else {
+        return false
+    }
+    let normal = SIMD3(plane.x, plane.y, plane.z)
+    let normalLength = simd_length(normal)
+    let distance = simd_dot(normal, center) + plane.w
+    guard normalLength > 0, normalLength.isFinite, distance.isFinite else { return false }
+    return distance < -radius * normalLength
+}
+
+private func sphereOutsideClusterSidePlanes(
+    center: SIMD3<Float>,
+    radius: Float,
+    clusterX: Int,
+    clusterY: Int,
+    width: Int,
+    height: Int,
+    projection: simd_float4x4
+) -> Bool {
+    guard let planes = clusterSidePlanes(
+        clusterX: clusterX, clusterY: clusterY, width: width, height: height,
+        projection: projection
+    ) else {
+        return false
+    }
+    return planes.contains { sphereStrictlyOutsidePlane(center: center, radius: radius, plane: $0) }
+}
+
 private func reference(
     lights: [Light],
     width: Int,
@@ -466,6 +542,17 @@ private func reference(
         for z in lightBounds.lower.z..<lightBounds.upper.z {
             for y in lightBounds.lower.y..<lightBounds.upper.y {
                 for x in lightBounds.lower.x..<lightBounds.upper.x {
+                    if sphereOutsideClusterSidePlanes(
+                        center: lights[lightIndex].position,
+                        radius: lights[lightIndex].radius,
+                        clusterX: x,
+                        clusterY: y,
+                        width: width,
+                        height: height,
+                        projection: projection
+                    ) {
+                        continue
+                    }
                     raw[(z * gridY + y) * gridX + x].append(UInt32(lightIndex))
                 }
             }
@@ -861,6 +948,139 @@ private enum LightClusterValidationMain {
             }
             try require(api.initialize(objectPointer(device as AnyObject)) > 0,
                         "Native built-in pipeline initialization failed")
+
+            // Side-plane oracle fixtures are intentionally independent of the GPU reference
+            // build. A tangent sphere is retained; moving it strictly outside each individual
+            // plane rejects it. Edge/corner contact must also remain a member.
+            let planeWidth = 256
+            let planeHeight = 192
+            let planeClusterX = 1
+            let planeClusterY = 1
+            let identityProjection = matrix_identity_float4x4
+            guard let explicitPlanes = clusterSidePlanes(
+                clusterX: planeClusterX,
+                clusterY: planeClusterY,
+                width: planeWidth,
+                height: planeHeight,
+                projection: identityProjection
+            ) else {
+                throw ValidationFailure.message("Could not construct explicit cluster side planes")
+            }
+            let fixtureRadius: Float = 0.25
+            for (planeIndex, plane) in explicitPlanes.enumerated() {
+                let normal = SIMD3(plane.x, plane.y, plane.z)
+                let normalSquared = simd_dot(normal, normal)
+                let normalLength = simd_length(normal)
+                let tangentDistance = -fixtureRadius * normalLength
+                let tangentCenter = normal * ((tangentDistance - plane.w) / normalSquared)
+                let outsideCenter = normal * ((tangentDistance - 0.125 - plane.w) / normalSquared)
+                try require(
+                    !sphereStrictlyOutsidePlane(
+                        center: tangentCenter, radius: fixtureRadius, plane: plane
+                    ),
+                    "Tangent sphere was rejected by side plane \(planeIndex)"
+                )
+                try require(
+                    sphereStrictlyOutsidePlane(
+                        center: outsideCenter, radius: fixtureRadius, plane: plane
+                    ),
+                    "Strictly outside sphere was retained by side plane \(planeIndex)"
+                )
+            }
+            let edgeCenter = SIMD3<Float>(-0.5, 0, 0)
+            let cornerCenter = SIMD3<Float>(-0.5, -1.0 / 3.0, 0)
+            try require(
+                !sphereOutsideClusterSidePlanes(
+                    center: edgeCenter, radius: fixtureRadius,
+                    clusterX: planeClusterX, clusterY: planeClusterY,
+                    width: planeWidth, height: planeHeight, projection: identityProjection
+                ),
+                "Tile-edge tangent sphere was rejected"
+            )
+            try require(
+                !sphereOutsideClusterSidePlanes(
+                    center: cornerCenter, radius: fixtureRadius,
+                    clusterX: planeClusterX, clusterY: planeClusterY,
+                    width: planeWidth, height: planeHeight, projection: identityProjection
+                ),
+                "Tile-corner tangent sphere was rejected"
+            )
+            var invalidProjection = identityProjection
+            invalidProjection[0][0] = .nan
+            try require(
+                !sphereOutsideClusterSidePlanes(
+                    center: SIMD3(0, -9, 0), radius: fixtureRadius,
+                    clusterX: planeClusterX, clusterY: planeClusterY,
+                    width: planeWidth, height: planeHeight, projection: invalidProjection
+                ) && !sphereOutsideClusterSidePlanes(
+                    center: .zero, radius: .infinity,
+                    clusterX: planeClusterX, clusterY: planeClusterY,
+                    width: planeWidth, height: planeHeight, projection: identityProjection
+                ) && !sphereOutsideClusterSidePlanes(
+                    center: .zero, radius: fixtureRadius,
+                    clusterX: planeClusterX, clusterY: planeClusterY,
+                    width: 0, height: planeHeight, projection: identityProjection
+                ),
+                "Invalid side-plane input was not fail-open"
+            )
+
+            // A witness point at each representative tile/depth/projection is inside a
+            // small source sphere. The conservative reject must therefore never remove it.
+            let witnessProjections = [
+                perspective(near: 0.1, far: 100, aspect: Float(planeWidth) / Float(planeHeight)),
+                bobbedProjection(near: 0.1, far: 100, aspect: Float(planeWidth) / Float(planeHeight),
+                                  xRotationDegrees: -0.5, zTranslation: 0.001),
+                bobbedProjection(near: 0.1, far: 100, aspect: Float(planeWidth) / Float(planeHeight),
+                                  xRotationDegrees: 0.5, zTranslation: 0.001)
+            ]
+            for (projectionIndex, projection) in witnessProjections.enumerated() {
+                let inverseProjection = simd_inverse(projection)
+                for clusterY in [0, 1, 2] {
+                    for clusterX in [0, 1, 3] {
+                        let ndc = SIMD2<Float>(
+                            (Float(clusterX * tileSize + tileSize / 2) * 2 / Float(planeWidth)) - 1,
+                            (Float(clusterY * tileSize + tileSize / 2) * 2 / Float(planeHeight)) - 1
+                        )
+                        for clipDepth in [Float(0.05), 0.5, 0.95] {
+                            let homogeneous = inverseProjection * SIMD4(ndc.x, ndc.y, clipDepth, 1)
+                            try require(
+                                homogeneous.x.isFinite && homogeneous.y.isFinite
+                                    && homogeneous.z.isFinite && homogeneous.w.isFinite
+                                    && abs(homogeneous.w) > 1e-6,
+                                "Invalid side-plane witness inverse at projection \(projectionIndex)"
+                            )
+                            let witness = SIMD3(
+                                homogeneous.x / homogeneous.w,
+                                homogeneous.y / homogeneous.w,
+                                homogeneous.z / homogeneous.w
+                            )
+                            let reprojected = projection * SIMD4(witness, 1)
+                            try require(
+                                reprojected.w > 1e-6 && reprojected.w.isFinite,
+                                "Side-plane witness is not visible at projection \(projectionIndex)"
+                            )
+                            let reprojectedNdc = SIMD2(
+                                reprojected.x / reprojected.w,
+                                reprojected.y / reprojected.w
+                            )
+                            try require(
+                                reprojectedNdc.x.isFinite && reprojectedNdc.y.isFinite
+                                    && abs(reprojectedNdc.x - ndc.x) < 1e-4
+                                    && abs(reprojectedNdc.y - ndc.y) < 1e-4,
+                                "Side-plane witness left its representative tile"
+                            )
+                            try require(
+                                !sphereOutsideClusterSidePlanes(
+                                    center: witness, radius: 0.01,
+                                    clusterX: clusterX, clusterY: clusterY,
+                                    width: planeWidth, height: planeHeight, projection: projection
+                                ),
+                                "Side-plane false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
+                            )
+                        }
+                    }
+                }
+            }
 
             let generation: UInt64 = 700
             let width = 64

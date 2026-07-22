@@ -112,6 +112,90 @@ inline float4 metallum_matrix_row(const float4x4 matrix, uint row) {
     return float4(matrix[0][row], matrix[1][row], matrix[2][row], matrix[3][row]);
 }
 
+inline bool metallum_sphere_strictly_outside_plane(
+    const float3 center,
+    const float radius,
+    const float4 plane
+) {
+    // Invalid data must retain the coarse membership. This check runs after upload
+    // validation, but remains fail-open for malformed projection math or float overflow.
+    if (!(radius > 0.0f) || !isfinite(radius)
+        || !all(isfinite(center)) || !all(isfinite(plane))) {
+        return false;
+    }
+    const float normalSquared = dot(plane.xyz, plane.xyz);
+    const float distance = dot(plane.xyz, center) + plane.w;
+    const float radiusSquared = radius * radius;
+    if (!(normalSquared > 0.0f) || !isfinite(normalSquared)
+        || !isfinite(distance) || !isfinite(radiusSquared)) {
+        return false;
+    }
+    const float distanceSquared = distance * distance;
+    const float radiusNormalSquared = radiusSquared * normalSquared;
+    if (!isfinite(distanceSquared) || !isfinite(radiusNormalSquared)) {
+        return false;
+    }
+    // distance < -radius * |normal|, expressed without sqrt. Strict comparison keeps
+    // tangent spheres in the cluster, so this can only reject an entirely outside sphere.
+    return distance < 0.0f && distanceSquared > radiusNormalSquared;
+}
+
+inline bool metallum_sphere_outside_cluster_side_planes(
+    const float3 center,
+    const float radius,
+    const uint clusterX,
+    const uint clusterY,
+    constant MetallumLightingParamsV1& params
+) {
+    const float extentX = float(params.extentAndClusterCap.x);
+    const float extentY = float(params.extentAndClusterCap.y);
+    const float tileSize = float(params.capacitiesAndFlags.w);
+    if (!(extentX > 0.0f) || !(extentY > 0.0f) || !(tileSize > 0.0f)
+        || !isfinite(extentX) || !isfinite(extentY) || !isfinite(tileSize)) {
+        return false;
+    }
+    const float lowerPixelX = float(clusterX) * tileSize;
+    const float lowerPixelY = float(clusterY) * tileSize;
+    const float upperPixelX = min(lowerPixelX + tileSize, extentX);
+    const float upperPixelY = min(lowerPixelY + tileSize, extentY);
+    if (!isfinite(lowerPixelX) || !isfinite(lowerPixelY)
+        || !isfinite(upperPixelX) || !isfinite(upperPixelY)
+        || !(upperPixelX > lowerPixelX) || !(upperPixelY > lowerPixelY)) {
+        return false;
+    }
+    const float2 lowerNdc = float2(
+        lowerPixelX * 2.0f / extentX - 1.0f,
+        lowerPixelY * 2.0f / extentY - 1.0f
+    );
+    const float2 upperNdc = float2(
+        upperPixelX * 2.0f / extentX - 1.0f,
+        upperPixelY * 2.0f / extentY - 1.0f
+    );
+    if (!all(isfinite(lowerNdc)) || !all(isfinite(upperNdc))) {
+        return false;
+    }
+    const float4 rowX = metallum_matrix_row(params.projection, 0u);
+    const float4 rowY = metallum_matrix_row(params.projection, 1u);
+    const float4 rowW = metallum_matrix_row(params.projection, 3u);
+    const float4 planes[4] = {
+        rowX - lowerNdc.x * rowW,
+        upperNdc.x * rowW - rowX,
+        rowY - lowerNdc.y * rowW,
+        upperNdc.y * rowW - rowY
+    };
+    for (uint index = 0u; index < 4u; ++index) {
+        if (!all(isfinite(planes[index]))) {
+            return false;
+        }
+    }
+    for (uint index = 0u; index < 4u; ++index) {
+        if (metallum_sphere_strictly_outside_plane(center, radius, planes[index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline bool metallum_sphere_outside_side_frustum(
     const float3 center,
     float radius,
@@ -422,6 +506,18 @@ kernel void metallum_cluster_count_v1(
         const uint yz = linear / width;
         const uint y = bounds.lower.y + yz % height;
         const uint z = bounds.lower.z + yz / height;
+        // Coarse bounds remain the authoritative Z range. These four planes only reject
+        // a sphere wholly outside this XY tile; the stable candidate order and all caps
+        // are unchanged for members that remain.
+        if (metallum_sphere_outside_cluster_side_planes(
+                lights[lightIndex].positionRadius.xyz,
+                lights[lightIndex].positionRadius.w,
+                x,
+                y,
+                params
+            )) {
+            continue;
+        }
         const uint cluster = metallum_cluster_index(x, y, z, params);
         atomic_fetch_or_explicit(
             &scratch[cluster].membership[membershipWord],
