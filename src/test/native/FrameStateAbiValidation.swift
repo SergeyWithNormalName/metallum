@@ -149,23 +149,6 @@ private enum FrameStateAbiValidationMain {
             let valid = validPacket()
             try require(validate(nativeValidate, valid) == 1, "Valid FrameState packet was rejected")
 
-            var temporalApple = valid
-            writeUInt64((1 << 1) | (1 << 3), at: 96, into: &temporalApple)
-            try require(validate(nativeValidate, temporalApple) == 1,
-                        "Temporal + Apple MetalFX policy was rejected")
-            var temporalMetallum = valid
-            writeUInt64((1 << 1) | (1 << 4), at: 96, into: &temporalMetallum)
-            try require(validate(nativeValidate, temporalMetallum) == 1,
-                        "Temporal + Metallum optimized policy was rejected")
-            var orphanTemporalPolicy = valid
-            writeUInt64((1 << 0) | (1 << 3), at: 96, into: &orphanTemporalPolicy)
-            try require(validate(nativeValidate, orphanTemporalPolicy) == -4,
-                        "Temporal policy without Temporal was accepted")
-            var conflictingTemporalPolicies = valid
-            writeUInt64((1 << 1) | (1 << 3) | (1 << 4), at: 96,
-                        into: &conflictingTemporalPolicies)
-            try require(validate(nativeValidate, conflictingTemporalPolicies) == -4,
-                        "Conflicting temporal policies were accepted")
             var unknownFeatureBit = valid
             writeUInt64((1 << 0) | (1 << 63), at: 96, into: &unknownFeatureBit)
             try require(validate(nativeValidate, unknownFeatureBit) == -4,

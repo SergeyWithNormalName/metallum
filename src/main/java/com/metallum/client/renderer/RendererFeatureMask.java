@@ -5,15 +5,9 @@ public record RendererFeatureMask(long bits) {
     public static final long SPATIAL_UPSCALING = 1L << 0;
     public static final long TEMPORAL_UPSCALING = 1L << 1;
     public static final long FRAME_INTERPOLATION = 1L << 2;
-    /** Requests the full Apple MetalFX Temporal route for this generation. */
-    public static final long TEMPORAL_FORCE_APPLE_METALFX = 1L << 3;
-    /** Requests Metallum's bounded resolver when that native route is eligible. */
-    public static final long TEMPORAL_FORCE_METALLUM_OPTIMIZED = 1L << 4;
     public static final long VALID_BITS = SPATIAL_UPSCALING
             | TEMPORAL_UPSCALING
-            | FRAME_INTERPOLATION
-            | TEMPORAL_FORCE_APPLE_METALFX
-            | TEMPORAL_FORCE_METALLUM_OPTIMIZED;
+            | FRAME_INTERPOLATION;
 
     public static final RendererFeatureMask NONE = new RendererFeatureMask(0L);
 
@@ -23,14 +17,6 @@ public record RendererFeatureMask(long bits) {
         }
         if ((bits & SPATIAL_UPSCALING) != 0L && (bits & TEMPORAL_UPSCALING) != 0L) {
             throw new IllegalArgumentException("Spatial and temporal upscalers are mutually exclusive");
-        }
-        long temporalAlgorithmBits = TEMPORAL_FORCE_APPLE_METALFX
-                | TEMPORAL_FORCE_METALLUM_OPTIMIZED;
-        if ((bits & temporalAlgorithmBits) != 0L && (bits & TEMPORAL_UPSCALING) == 0L) {
-            throw new IllegalArgumentException("Temporal algorithm policy requires Temporal upscaling");
-        }
-        if ((bits & temporalAlgorithmBits) == temporalAlgorithmBits) {
-            throw new IllegalArgumentException("Temporal algorithm policy is ambiguous");
         }
     }
 
@@ -53,10 +39,7 @@ public record RendererFeatureMask(long bits) {
         return new RendererFeatureMask(this.bits & ~feature);
     }
 
-    /** Removes Temporal and its optional algorithm modifier as one fail-closed unit. */
     public RendererFeatureMask withoutTemporalUpscaling() {
-        return new RendererFeatureMask(this.bits & ~(TEMPORAL_UPSCALING
-                | TEMPORAL_FORCE_APPLE_METALFX
-                | TEMPORAL_FORCE_METALLUM_OPTIMIZED));
+        return new RendererFeatureMask(this.bits & ~TEMPORAL_UPSCALING);
     }
 }

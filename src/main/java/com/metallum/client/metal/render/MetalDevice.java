@@ -37,7 +37,6 @@ import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
-import com.metallum.client.metalfx.TemporalAlgorithmPolicy;
 import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
@@ -108,7 +107,6 @@ public final class MetalDevice implements GpuDeviceBackend {
             DisplayOutputMode outputMode,
             boolean spatialActive,
             boolean temporalActive,
-            TemporalAlgorithmPolicy temporalAlgorithmPolicy,
             long materialCoverageEpoch,
             long advancedAdmissionEpoch
     ) {
@@ -850,9 +848,6 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean temporalActive = this.temporalScalingSupported
                 && MetalFxTemporalScaling.isRequested()
                 && !MetalFxTemporalScaling.isRuntimeDisabled();
-        TemporalAlgorithmPolicy temporalAlgorithmPolicy = temporalActive
-                ? MetalFxTemporalScaling.requestedAlgorithmPolicy()
-                : TemporalAlgorithmPolicy.AUTO;
         this.temporalScalingActive = temporalActive;
         boolean spatialActive = dimensions.renderWidth() != dimensions.displayWidth()
                 || dimensions.renderHeight() != dimensions.displayHeight();
@@ -883,7 +878,6 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && currentKey.outputMode() == requestedOutput
                 && currentKey.spatialActive() == spatialActive
                 && currentKey.temporalActive() == temporalActive
-                && currentKey.temporalAlgorithmPolicy() == temporalAlgorithmPolicy
                 && currentKey.materialCoverageEpoch() == materialCoverageEpoch
                 && currentKey.advancedAdmissionEpoch() == advancedAdmission.epoch()) {
             return;
@@ -893,10 +887,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 ? LightingModel.ADVANCED
                 : LightingModel.VANILLA;
         RendererFeatureMask activeFeatures = temporalActive
-                ? RendererFeatureMask.of(
-                        RendererFeatureMask.TEMPORAL_UPSCALING,
-                        temporalAlgorithmPolicy.featureBit()
-                )
+                ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_UPSCALING)
                 : spatialActive
                     ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
                     : RendererFeatureMask.NONE;
@@ -1287,7 +1278,6 @@ public final class MetalDevice implements GpuDeviceBackend {
                 requestedOutput,
                 spatialActive,
                 temporalActive,
-                temporalAlgorithmPolicy,
                 materialCoverageEpoch,
                 committedAdvancedAdmissionEpoch
         );

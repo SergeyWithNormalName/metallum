@@ -34,11 +34,9 @@ public final class MetalFxTemporalScaling {
     private static final String FILE_NAME = "metallum-metalfx-temporal.properties";
     private static final AtomicBoolean RESIZE_PENDING = new AtomicBoolean();
     private static volatile TemporalScalingMode requestedMode = TemporalScalingMode.OFF;
-    private static volatile TemporalAlgorithmPolicy requestedAlgorithmPolicy = TemporalAlgorithmPolicy.AUTO;
     private static volatile boolean configLoaded;
     private static volatile boolean runtimeDisabled;
     private static volatile TemporalScalingMode benchmarkOverride;
-    private static volatile TemporalAlgorithmPolicy benchmarkAlgorithmOverride;
 
     private MetalFxTemporalScaling() {
     }
@@ -56,19 +54,6 @@ public final class MetalFxTemporalScaling {
                 benchmarkOverride,
                 runtimeDisabled,
                 device != null && device.supportsTemporalScaling()
-        );
-    }
-
-    /**
-     * Persisted algorithm selection shown by Sodium. It has no effect while
-     * Temporal is off, but is retained so users can prepare a preset before
-     * enabling it.
-     */
-    public static TemporalAlgorithmPolicy requestedAlgorithmPolicy() {
-        ensureConfigLoaded();
-        return selectRequestedAlgorithmPolicy(
-                requestedAlgorithmPolicy,
-                benchmarkAlgorithmOverride
         );
     }
 
@@ -97,24 +82,10 @@ public final class MetalFxTemporalScaling {
         boolean wasRuntimeDisabled = runtimeDisabled;
         requestedMode = selected;
         runtimeDisabled = false;
-        saveSettings(selected, requestedAlgorithmPolicy);
+        saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
         }
-        if (previous != selected || wasRuntimeDisabled) {
-            requestRendererResize();
-        }
-    }
-
-    /** Changes only the resolver policy and invalidates the current Temporal generation. */
-    public static void setRequestedAlgorithmPolicy(final TemporalAlgorithmPolicy policy) {
-        ensureConfigLoaded();
-        TemporalAlgorithmPolicy selected = policy == null ? TemporalAlgorithmPolicy.AUTO : policy;
-        TemporalAlgorithmPolicy previous = requestedAlgorithmPolicy;
-        boolean wasRuntimeDisabled = runtimeDisabled;
-        requestedAlgorithmPolicy = selected;
-        runtimeDisabled = false;
-        saveSettings(requestedMode, selected);
         if (previous != selected || wasRuntimeDisabled) {
             requestRendererResize();
         }
@@ -127,7 +98,7 @@ public final class MetalFxTemporalScaling {
         }
         requestedMode = TemporalScalingMode.OFF;
         runtimeDisabled = false;
-        saveSettings(TemporalScalingMode.OFF, requestedAlgorithmPolicy);
+        saveSettings(TemporalScalingMode.OFF);
         requestRendererResize();
     }
 
@@ -136,26 +107,21 @@ public final class MetalFxTemporalScaling {
         ensureConfigLoaded();
         TemporalScalingMode concreteMode = mode == null ? TemporalScalingMode.OFF : mode;
         TemporalScalingMode previous = benchmarkOverride;
-        TemporalAlgorithmPolicy previousAlgorithm = benchmarkAlgorithmOverride;
         boolean wasRuntimeDisabled = runtimeDisabled;
         benchmarkOverride = concreteMode;
-        // Benchmarks must not inherit a user's resolver A/B selection: existing
-        // TEMPORAL_* names remain the documented AUTO baseline.
-        benchmarkAlgorithmOverride = TemporalAlgorithmPolicy.AUTO;
         runtimeDisabled = false;
-        if (previous != concreteMode || previousAlgorithm != benchmarkAlgorithmOverride || wasRuntimeDisabled) {
+        if (previous != concreteMode || wasRuntimeDisabled) {
             requestRendererResize();
         }
     }
 
-    /** Restores the persisted user policy after an automated benchmark. */
+    /** Restores the persisted user preset after an automated benchmark. */
     public static void clearBenchmarkOverride() {
         ensureConfigLoaded();
-        if (benchmarkOverride == null && benchmarkAlgorithmOverride == null) {
+        if (benchmarkOverride == null) {
             return;
         }
         benchmarkOverride = null;
-        benchmarkAlgorithmOverride = null;
         runtimeDisabled = false;
         requestRendererResize();
     }
@@ -203,10 +169,6 @@ public final class MetalFxTemporalScaling {
         return TemporalScalingMode.parse(properties.getProperty("mode"));
     }
 
-    static TemporalAlgorithmPolicy algorithmFrom(final Properties properties) {
-        return TemporalAlgorithmPolicy.parse(properties.getProperty("algorithm"));
-    }
-
     static TemporalScalingMode selectRequestedMode(
             final TemporalScalingMode persistedMode,
             final TemporalScalingMode overrideMode
@@ -214,15 +176,6 @@ public final class MetalFxTemporalScaling {
         return overrideMode != null
                 ? overrideMode
                 : (persistedMode == null ? TemporalScalingMode.OFF : persistedMode);
-    }
-
-    static TemporalAlgorithmPolicy selectRequestedAlgorithmPolicy(
-            final TemporalAlgorithmPolicy persistedPolicy,
-            final TemporalAlgorithmPolicy overridePolicy
-    ) {
-        return overridePolicy != null
-                ? overridePolicy
-                : (persistedPolicy == null ? TemporalAlgorithmPolicy.AUTO : persistedPolicy);
     }
 
     /** Applies the one canonical requested-mode selector before runtime admission. */
@@ -240,26 +193,26 @@ public final class MetalFxTemporalScaling {
         return Math.clamp(Math.round(displayDimension * scale), 1, displayDimension);
     }
 
-    private record Settings(TemporalScalingMode mode, TemporalAlgorithmPolicy algorithmPolicy) {
+    private record Settings(TemporalScalingMode mode) {
     }
 
     private static Settings loadSettings() {
         try {
             Path path = configPath();
             if (!Files.isRegularFile(path)) {
-                return new Settings(TemporalScalingMode.OFF, TemporalAlgorithmPolicy.AUTO);
+                return new Settings(TemporalScalingMode.OFF);
             }
             Properties properties = new Properties();
             try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
                 properties.load(reader);
-                return new Settings(from(properties), algorithmFrom(properties));
+                return new Settings(from(properties));
             } catch (IOException exception) {
                 Metallum.LOGGER.warn("Failed to read {}, using MetalFX Temporal defaults", path, exception);
             }
         } catch (RuntimeException ignored) {
-            return new Settings(TemporalScalingMode.OFF, TemporalAlgorithmPolicy.AUTO);
+            return new Settings(TemporalScalingMode.OFF);
         }
-        return new Settings(TemporalScalingMode.OFF, TemporalAlgorithmPolicy.AUTO);
+        return new Settings(TemporalScalingMode.OFF);
     }
 
     private static void ensureConfigLoaded() {
@@ -270,16 +223,12 @@ public final class MetalFxTemporalScaling {
             if (!configLoaded) {
                 Settings settings = loadSettings();
                 requestedMode = settings.mode();
-                requestedAlgorithmPolicy = settings.algorithmPolicy();
                 configLoaded = true;
             }
         }
     }
 
-    private static void saveSettings(
-            final TemporalScalingMode mode,
-            final TemporalAlgorithmPolicy algorithmPolicy
-    ) {
+    private static void saveSettings(final TemporalScalingMode mode) {
         final Path path;
         try {
             path = configPath();
@@ -288,10 +237,6 @@ public final class MetalFxTemporalScaling {
         }
         Properties properties = new Properties();
         properties.setProperty("mode", mode.name().toLowerCase(Locale.ROOT));
-        properties.setProperty(
-                "algorithm",
-                algorithmPolicy.name().toLowerCase(Locale.ROOT)
-        );
         try {
             Files.createDirectories(path.getParent());
             try (Writer writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8)) {
