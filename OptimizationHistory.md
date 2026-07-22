@@ -893,3 +893,73 @@ event-order failure; raw+summary обоих production artifacts имеют `COM
 **Итог:** **ВНЕДРЕНО/accepted**, четвёртый отдельный quality-preserving Nether
 кандидат. Следующий профиль должен измерять оставшийся World Opaque dense-light tail;
 не возвращаться к уже принятому side-plane/wedge пути без новой причины.
+
+## 2026-07-23 — Nether: post-L6 shadow-index tagging
+
+### Гипотеза и причина проверки
+
+В принятом corner-wedge профиле только `87/2048` источников имели L6 state
+`READY`, остальные `1961` работали как `APPROXIMATE_DIRECT`. При этом fragment path
+после range/`nDotL` reject всё равно читал 16-byte shadow descriptor каждого
+подходящего источника. Гипотеза: после окончательной публикации L6 descriptors
+пометить high bit только у compact indices со state `READY`/`STALE_RETAINED`, чтобы
+для остальных источников не выполнять descriptor read/branch.
+
+### Проверенный вариант и safety contract
+
+Был реализован отдельный post-L6 compute pass после `uploadPending` и до World
+Opaque. Он сохранял порядок и low 31 bits индекса, помечал только states `1/2`, а
+state `0/3/4` и неизвестные оставлял untagged. Per-frame flag в уже reserved params
+word включал новую интерпретацию только после успешно закодированного pass; при
+любой ошибке оставался прежний shader path. Invalid/high-bit/OOB member переводился
+в invalid sentinel. Новых buffers, readbacks, copies либо per-frame packets не было.
+
+Targeted `lightClusterValidation`, `metalRuntimeUnitTest`,
+`materialContractUnitTest`, precompiled и forced source-fallback shader validation
+прошли. Они покрывали states `0..4` и unknown, empty batch, malformed range/header,
+duplicate call, legacy fallback, index masking/order и отсутствие L6 read для
+untagged source.
+
+### Способ измерения и результат
+
+Diagnostic `300+600` artifact
+`20260722T180508Z-gce39e98f87a4-dirty-l6-shadow-index-tag-diagnostic-off`
+показал небольшой согласованный stage-сигнал относительно corner-wedge diagnostic:
+FPS `33.572 → 33.841` (`+0.80%`), GPU p95 `32.720 → 32.488 ms` (`-0.71%`), World
+Opaque average `21.414 → 21.221 ms` (`-0.90%`). Однако дополнительный tag pass
+поднял light-upload/cluster-build average `0.898 → 0.941 ms` и p95
+`0.934 → 1.062 ms`; compute encoders выросли `3 → 4/frame` в detailed режиме.
+
+Чтобы не принять короткий шум, выполнены два полных `1800+3000` production run с
+одинаковым source/artifact digest и неизменным Nether contract:
+
+| Run | FPS | min window | 1% / 0.1% low | CPU p95/p99 | GPU p95/p99 | present p95/p99 |
+|---|---:|---:|---:|---:|---:|---:|
+| Tag #1 | 33.7868 | 33.7288 | 30.0904 / 28.4375 | 13.2729 / 14.0708 ms | 31.8917 / 32.3451 ms | 30.4020 / 31.4801 ms |
+| Tag #2 | 33.6728 | 33.6120 | 30.3303 / 28.8815 | 13.0990 / 13.7552 ms | 33.0984 / 33.4219 ms | 30.5330 / 31.3745 ms |
+
+Artifacts:
+`20260722T180715Z-gce39e98f87a4-dirty-l6-shadow-index-tag-production-1-off` и
+`20260722T181108Z-gce39e98f87a4-dirty-l6-shadow-index-tag-production-2-off`.
+Оба raw/summary имеют `COMPLETE`, `0` dropped timing events; receipt не создан из-за
+известного event-order defect.
+
+Среднее accepted corner-wedge pair → tag pair: FPS `34.1796 → 33.7298`
+(`-1.32%`), 1% low `30.7334 → 30.2104` (`-1.70%`), 0.1% low
+`29.3173 → 28.6595` (`-2.24%`), present p95 `30.0169 → 30.4675 ms`
+(`+1.50%`). CPU p95 практически неизменен (`+0.14%`), GPU p95 также не дал
+устойчивого выигрыша: среднее `32.5587 → 32.4951 ms` (`-0.20%`), причём runs
+разошлись `31.8917/33.0984 ms`. Copies остались `74,400 B/frame`, successful Metal
+buffer allocations — `0`.
+
+### Побочные эффекты и итог
+
+Вариант добавлял один compute pass/encoder/dispatch/PSO в каждый Advanced frame.
+Экономия чтения маленького, хорошо кэшируемого descriptor ring не компенсировала
+дополнительную границу pass и ухудшила реальный present pacing и lows. Вся
+12-файловая реализация удалена; коммита кода нет.
+
+**Итог:** **ОТКЛОНЕНО/rejected**. Не повторять отдельный post-L6 tag pass без новой
+причины. Вернуться к самой идее можно только если tagging удастся встроить в уже
+существующий pass после готовности descriptors либо передать shadow-state без нового
+encoder/synchronization boundary.

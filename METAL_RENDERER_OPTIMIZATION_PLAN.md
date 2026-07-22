@@ -80,6 +80,12 @@
   FPS `+6.67%`, 1% low `+7.35%`, GPU p95 `-5.46%`, present p95 `-6.56%`, requested
   `-13.74%`, dropped `-32.37%`, overflow `-31.10%`. Raw+summary имеют `COMPLETE` и
   `0` dropped evidence events; compare receipt всё ещё блокирован known event order.
+- Отдельный post-L6 shadow-index tag pass **ОТКЛОНЁН**. Несмотря на diagnostic
+  World Opaque `-0.90%`, pass добавлял один compute encoder/dispatch/PSO, а два full
+  production run дали средний FPS `-1.32%`, 1% low `-1.70%`, present p95 `+1.50%`
+  при неустойчивом GPU p95 `-0.20%`. Реализация полностью удалена. Не повторять её
+  без способа встроить tagging в уже существующий post-descriptor pass и избежать
+  новой synchronization/encoder boundary.
 - Дальше — обновлённый dense-light profile оставшегося World Opaque tail. Не повторять
   side-plane/wedge culling без новой причины. Отдельная Z-plane refinement не является
   кандидатом: `centerDepth ± radius` уже задаёт exact monotonic log-depth slice range.
