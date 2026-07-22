@@ -463,6 +463,25 @@ private final class MetallumTemporalWorkspace {
     }
 }
 
+/// Keeps one previous world-depth image for temporal disocclusion rejection.
+/// The image stays entirely GPU-private and is resized only with the render
+/// target, never allocated in the frame loop.
+private final class MetallumTemporalDepthHistory {
+    let width: Int
+    let height: Int
+    let texture: MTLTexture
+    var isValid: Bool
+    var jitter: SIMD2<Float>
+
+    init(width: Int, height: Int, texture: MTLTexture) {
+        self.width = width
+        self.height = height
+        self.texture = texture
+        self.isValid = false
+        self.jitter = .zero
+    }
+}
+
 /// A bounded history-aware resolve for the M1 Performance and Ultra presets.
 /// MetalFX Temporal remains the quality path; this path keeps the same typed
 /// color/depth-motion/reactive contract while avoiding the disproportionately
@@ -3770,6 +3789,7 @@ private enum NativeState {
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
     static var temporalWorkspaces: [UInt: MetallumTemporalWorkspace] = [:]
     static var fastTemporalWorkspaces: [UInt: MetallumFastTemporalWorkspace] = [:]
+    static var temporalDepthHistories: [UInt: MetallumTemporalDepthHistory] = [:]
     static var presentNearestSamplers: [UInt: MTLSamplerState] = [:]
     static var presentLinearSamplers: [UInt: MTLSamplerState] = [:]
     static var builtinShaderStates: [UInt: MetallumBuiltinShaderState] = [:]
@@ -5077,6 +5097,35 @@ private func ensureTemporalDiagnosticPipeline(device: MTLDevice) -> MTLRenderPip
         NSLog("[metallum] Failed to create temporal diagnostic pipeline: %@", String(describing: error))
         return nil
     }
+}
+
+private func ensureTemporalDepthHistory(
+    device: MTLDevice,
+    width: Int,
+    height: Int
+) -> MetallumTemporalDepthHistory? {
+    let key = objectAddress(device)
+    if let cached = NativeState.temporalDepthHistories[key],
+       cached.width == width,
+       cached.height == height {
+        return cached
+    }
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .depth32Float,
+        width: width,
+        height: height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .private
+    descriptor.hazardTrackingMode = .tracked
+    descriptor.usage = [.shaderRead]
+    guard let texture = device.makeTexture(descriptor: descriptor) else {
+        return nil
+    }
+    texture.label = "Metallum temporal previous depth"
+    let history = MetallumTemporalDepthHistory(width: width, height: height, texture: texture)
+    NativeState.temporalDepthHistories[key] = history
+    return history
 }
 
 private func ensureFastTemporalPipeline(device: MTLDevice) -> MTLRenderPipelineState? {
@@ -7657,6 +7706,7 @@ private func prepareRendererGeneration(
     NativeState.spatialWorkspaces.removeValue(forKey: key)
     NativeState.temporalWorkspaces.removeValue(forKey: key)
     NativeState.fastTemporalWorkspaces.removeValue(forKey: key)
+    NativeState.temporalDepthHistories.removeValue(forKey: key)
     let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.spatialBit != 0
     let temporalEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
     let upscaleEnabled = spatialEnabled || temporalEnabled
@@ -7896,9 +7946,12 @@ private struct MetallumTemporalDiagnosticUniforms {
     var previousCameraPosition: SIMD4<Float>
     var renderExtent: SIMD2<Float>
     var jitter: SIMD2<Float>
+    var previousJitter: SIMD2<Float>
     var reserved_padding: SIMD2<Float> = .zero
     var resetMask: UInt32
-    var reserved: UInt32 = 0
+    var previousDepthValid: UInt32
+    var reserved0: UInt32 = 0
+    var reserved1: UInt32 = 0
 }
 
 @_cdecl("metallum_encode_temporal_diagnostics_v1")
@@ -7935,6 +7988,13 @@ public func metallum_encode_temporal_diagnostics_v1(
               reactiveTexture.height == depthTexture.height else { return 0 }
         guard let pipeline = ensureTemporalDiagnosticPipeline(device: commandBuffer.device) else { return -3 }
 
+        let depthHistory = ensureTemporalDepthHistory(
+            device: commandBuffer.device,
+            width: depthTexture.width,
+            height: depthTexture.height
+        )
+        let hasPreviousDepth = depthHistory?.isValid == true && frame.resetMask == 0
+
         NativeState.lastMotionTexture = motionTexture
         NativeState.lastReactiveTexture = reactiveTexture
         NativeState.lastClassificationTexture = classificationTexture
@@ -7962,8 +8022,10 @@ public func metallum_encode_temporal_diagnostics_v1(
             ),
             renderExtent: SIMD2(Float(frame.renderWidth), Float(frame.renderHeight)),
             jitter: SIMD2(frame.jitterX, frame.jitterY),
+            previousJitter: depthHistory?.jitter ?? .zero,
             reserved_padding: .zero,
-            resetMask: UInt32(truncatingIfNeeded: frame.resetMask)
+            resetMask: UInt32(truncatingIfNeeded: frame.resetMask),
+            previousDepthValid: hasPreviousDepth ? 1 : 0
         )
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = motionTexture
@@ -7997,6 +8059,7 @@ public func metallum_encode_temporal_diagnostics_v1(
         ))
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentTexture(depthTexture, index: 0)
+        encoder.setFragmentTexture(depthHistory?.texture ?? depthTexture, index: 1)
         encoder.setFragmentBytes(
             &uniforms,
             length: MemoryLayout<MetallumTemporalDiagnosticUniforms>.stride,
@@ -8008,6 +8071,25 @@ public func metallum_encode_temporal_diagnostics_v1(
         // depth clear; the private outputs have no same-frame consumers.
         encoder.updateFence(globalFence, after: .fragment)
         encoder.endEncoding()
+        if let depthHistory,
+           let blit = trackedMakeBlitCommandEncoder(commandBuffer) {
+            blit.label = "Metallum temporal depth history"
+            blit.waitForFence(globalFence)
+            blit.copy(
+                from: depthTexture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: .init(),
+                sourceSize: MTLSize(width: depthTexture.width, height: depthTexture.height, depth: 1),
+                to: depthHistory.texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: .init()
+            )
+            trackedEndEncoding(blit)
+            depthHistory.jitter = SIMD2(frame.jitterX, frame.jitterY)
+            depthHistory.isValid = true
+        }
         return 1
     }
     return result
@@ -9992,6 +10074,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
         NativeState.menuBlurPipelines.removeValue(forKey: deviceAddress)
         NativeState.menuBlurWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.fastTemporalWorkspaces.removeValue(forKey: deviceAddress)
+        NativeState.temporalDepthHistories.removeValue(forKey: deviceAddress)
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)

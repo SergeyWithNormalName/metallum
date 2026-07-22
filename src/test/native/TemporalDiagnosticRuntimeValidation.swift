@@ -118,6 +118,7 @@ private func runCase(
     previousProjectionScaleX: Float = 1,
     temporalProduction: Bool = false,
     temporalHdrPrecompose: Bool = false,
+    depthValue: Double = 0.5,
     backdrop: EncodeBackdrop? = nil,
     coherentBlur: EncodeCoherentMenuBlur? = nil
 ) throws -> (motion: SIMD2<Float>, reactive: UInt8) {
@@ -170,7 +171,7 @@ private func runCase(
     clear.depthAttachment.texture = depth
     clear.depthAttachment.loadAction = .clear
     clear.depthAttachment.storeAction = .store
-    clear.depthAttachment.clearDepth = 0.5
+    clear.depthAttachment.clearDepth = depthValue
     guard let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: clear) else {
         throw ValidationFailure.message("Could not clear diagnostic depth")
     }
@@ -334,6 +335,24 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             )
             try require(moved.motion.x.isFinite && moved.motion.x > 0 && moved.reactive == 0,
                         "Camera translation direction is invalid")
+            let disocclusionPrimer = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, resetMask: 1 << 4, depthValue: 0.5
+            )
+            try require(disocclusionPrimer.reactive == 255,
+                        "Depth-history primer must honor a global reset")
+            let disoccluded = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, depthValue: 0.25
+            )
+            try require(disoccluded.reactive == 255,
+                        "In-frame depth disocclusion did not invalidate temporal history")
+            let depthStable = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, depthValue: 0.25
+            )
+            try require(depthStable.reactive == 0,
+                        "Stable depth was rejected after the history refresh")
             let resized = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 96, height: 48, previousProjectionScaleX: 0.75
@@ -347,7 +366,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, production scaler, HDR precompose + menu blur, camera, depth disocclusion, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

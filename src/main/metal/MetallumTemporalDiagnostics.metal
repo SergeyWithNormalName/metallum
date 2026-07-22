@@ -16,9 +16,12 @@ struct MetallumTemporalUniforms {
     float4 previousCameraPosition;
     float2 renderExtent;
     float2 jitter;
+    float2 previousJitter;
     float2 reserved_padding;
     uint resetMask;
-    uint reserved;
+    uint previousDepthValid;
+    uint reserved0;
+    uint reserved1;
 };
 
 struct MetallumTemporalOutputs {
@@ -66,6 +69,7 @@ vertex MetallumTemporalVertexOut metallum_temporal_diagnostic_vs(uint vertexId [
 fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
     MetallumTemporalVertexOut input [[stage_in]],
     texture2d<float, access::read> depthTexture [[texture(0)]],
+    texture2d<float, access::read> previousDepthTexture [[texture(1)]],
     constant MetallumTemporalUniforms& uniforms [[buffer(0)]]
 ) {
     MetallumTemporalOutputs output;
@@ -123,18 +127,44 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
         return output;
     }
     float2 previousNdc = previousClip.xy / previousClip.w;
+    float previousDepth = previousClip.z / previousClip.w;
 
     // Compute motion vectors
     output.motion = metallum_motion_pixels(currentNdcUnjittered, previousNdc, uniforms.renderExtent);
 
-    // Out-of-frame invalidation only (full disocclusion detection deferred to T1B)
-    bool outOfBounds = previousNdc.x < -1.0f || previousNdc.x > 1.0f || previousNdc.y < -1.0f || previousNdc.y > 1.0f;
+    // The stored depth belongs to the previous *jittered* raster.  Motion is
+    // deliberately measured between unjittered frames, so shift the previous
+    // location back to the raster coordinate only for the depth lookup.
+    float2 previousNdcJittered = float2(
+        previousNdc.x + uniforms.previousJitter.x * 2.0f / uniforms.renderExtent.x,
+        previousNdc.y - uniforms.previousJitter.y * 2.0f / uniforms.renderExtent.y
+    );
+    bool outOfBounds = previousNdc.x < -1.0f || previousNdc.x > 1.0f
+        || previousNdc.y < -1.0f || previousNdc.y > 1.0f
+        || previousNdcJittered.x < -1.0f || previousNdcJittered.x > 1.0f
+        || previousNdcJittered.y < -1.0f || previousNdcJittered.y > 1.0f;
     if (outOfBounds) {
         output.reactive = 1.0f;
         output.classification = 3.0f / 255.0f; // 3: out-of-frame
         output.motion = float2(0.0f);
     } else {
-        bool valid = all(isfinite(output.motion));
+        bool valid = all(isfinite(output.motion)) && isfinite(previousDepth);
+        bool depthDisoccluded = false;
+        if (valid && uniforms.previousDepthValid != 0u) {
+            float2 previousPixel = float2(
+                (previousNdcJittered.x * 0.5f + 0.5f) * uniforms.renderExtent.x,
+                (1.0f - previousNdcJittered.y) * 0.5f * uniforms.renderExtent.y
+            );
+            uint2 previousPixelCoordinate = uint2(previousPixel);
+            float recordedPreviousDepth = previousDepthTexture.read(previousPixelCoordinate).x;
+            // Reversed-Z depth has much finer resolution near the camera.  A
+            // small relative allowance preserves history on continuous slopes,
+            // while a different surface at the reprojected location rejects it.
+            float depthTolerance = max(1.0e-5f, abs(previousDepth) * 0.015f);
+            depthDisoccluded = !isfinite(recordedPreviousDepth)
+                || abs(recordedPreviousDepth - previousDepth) > depthTolerance;
+        }
+        valid = valid && !depthDisoccluded;
         output.reactive = valid ? 0.0f : 1.0f;
         output.classification = valid ? 0.0f : (4.0f / 255.0f); // 0: valid, 4: other invalid
         if (!valid) {

@@ -37,9 +37,12 @@ private struct MetallumTemporalDiagnosticUniforms {
     var previousCameraPosition: SIMD4<Float>
     var renderExtent: SIMD2<Float>
     var jitter: SIMD2<Float>
+    var previousJitter: SIMD2<Float>
     var reserved_padding: SIMD2<Float> = .zero
     var resetMask: UInt32
-    var reserved: UInt32 = 0
+    var previousDepthValid: UInt32
+    var reserved0: UInt32 = 0
+    var reserved1: UInt32 = 0
 }
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -209,8 +212,10 @@ private enum MotionVectorValidationMain {
                 previousCameraPosition: SIMD4<Float>(-0.1, 0, 0, 0),
                 renderExtent: SIMD2<Float>(1280, 720),
                 jitter: SIMD2<Float>(0.5, -0.25),
+                previousJitter: SIMD2<Float>(0.25, -0.125),
                 reserved_padding: .zero,
-                resetMask: 0
+                resetMask: 0,
+                previousDepthValid: 0
             )
             let reprojInputs = [
                 ReprojectionInput(pixelCoord: SIMD2<Float>(640, 360), depth: 0.5)
