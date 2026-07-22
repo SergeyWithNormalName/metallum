@@ -261,9 +261,22 @@ class MetalGpuBuffer extends GpuBuffer {
         return "1".equals(environmentValue);
     }
 
-    private static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
+    static long toMtlResourceOptions(@GpuBuffer.Usage final int usage) {
         MTLStorageMode storageMode = isCpuAccessible(usage) || isDynamic(usage) ? MTLStorageMode.Shared : MTLStorageMode.Private;
-        return MTLResourceOptions.of(storageMode, MTLHazardTrackingMode.Untracked);
+        // Chunk geometry crosses blit and render encoders while Sodium may rebuild its
+        // indirect ring or the renderer generation changes.  Leaving those vertex/index
+        // resources untracked makes that transition depend entirely on our manual fence
+        // ordering and can hand AGX an invalid resource state during an indexed draw.
+        // Keep untracked hazards for the remaining transient/hot buffers, but let Metal
+        // own synchronization for every resource consumed by a geometry draw.
+        MTLHazardTrackingMode hazardTracking = isGeometryDrawBuffer(usage)
+                ? MTLHazardTrackingMode.Tracked
+                : MTLHazardTrackingMode.Untracked;
+        return MTLResourceOptions.of(storageMode, hazardTracking);
+    }
+
+    static boolean isGeometryDrawBuffer(@GpuBuffer.Usage final int usage) {
+        return (usage & (GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_INDEX)) != 0;
     }
 
     private void releaseTexelViews() {

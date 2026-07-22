@@ -22,6 +22,9 @@ import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.temporal.FrameState;
+import com.metallum.client.metal.render.mtl.MTLHazardTrackingMode;
+import com.metallum.client.metal.render.mtl.MTLResourceOptions;
+import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.buffers.GpuBufferSlice;
@@ -61,6 +64,7 @@ public final class MetalRuntimeTests {
         testTextureBindingHolderUpdatesInPlace();
         testDynamicBackingPoolBoundsAndReuse();
         testPrivateGeometryHeapRouting();
+        testGeometryBuffersUseTrackedHazards();
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
@@ -894,6 +898,26 @@ public final class MetalRuntimeTests {
                         true
                 ),
                 "non-geometry buffer usage unexpectedly selected the private heap");
+    }
+
+    private static void testGeometryBuffersUseTrackedHazards() {
+        int geometryUsage = GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_VERTEX | GpuBuffer.USAGE_INDEX;
+        require(MetalGpuBuffer.isGeometryDrawBuffer(geometryUsage),
+                "indexed geometry was not recognized as a draw resource");
+        require(MetalGpuBuffer.toMtlResourceOptions(geometryUsage) == MTLResourceOptions.of(
+                        MTLStorageMode.Private,
+                        MTLHazardTrackingMode.Tracked
+                ),
+                "indexed geometry did not use Metal hazard tracking");
+
+        int transientUsage = GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_UNIFORM;
+        require(!MetalGpuBuffer.isGeometryDrawBuffer(transientUsage),
+                "non-geometry dynamic buffer was classified as geometry");
+        require(MetalGpuBuffer.toMtlResourceOptions(transientUsage) == MTLResourceOptions.of(
+                        MTLStorageMode.Shared,
+                        MTLHazardTrackingMode.Untracked
+                ),
+                "non-geometry dynamic buffer unexpectedly changed hazard mode");
     }
 
     private static void testEdrRefreshThrottle() {
