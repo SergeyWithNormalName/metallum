@@ -36,6 +36,7 @@
     "render.FlameFeatureRendererHdrMixin",
     "render.GuiRendererHdrMixin",
     "render.GuiVoxelPreviewMixin",
+    "render.GuiDrsResolutionOverlayMixin",
     "render.ScreenInWorldBlurMixin",
     "render.HdrShaderMixin",
     "render.KeyboardHandlerMixin",

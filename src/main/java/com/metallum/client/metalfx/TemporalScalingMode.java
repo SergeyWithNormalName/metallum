@@ -2,14 +2,13 @@ package com.metallum.client.metalfx;
 
 import java.util.Locale;
 
-/** Explicit MetalFX Temporal presets. The lowest preset is intentionally opt-in. */
+/** Explicit MetalFX Temporal presets and dynamic mode. */
 public enum TemporalScalingMode {
     OFF("metallum.options.metalfx_temporal_scaling.off", 1.0f),
-    // Quality keeps 75% of each display dimension (56.25% of display pixels)
-    // to preserve more stable near-field block edges than the 2/3x preset.
+    TEMPORAL("metallum.options.metalfx_temporal_scaling.temporal", 1.0f),
     QUALITY("metallum.options.metalfx_temporal_scaling.quality", 0.75f),
     PERFORMANCE("metallum.options.metalfx_temporal_scaling.performance", 0.50f),
-    ULTRA_PERFORMANCE("metallum.options.metalfx_temporal_scaling.ultra_performance", 1.0f / 3.0f);
+    ULTRA_PERFORMANCE("metallum.options.metalfx_temporal_scaling.ultra_performance", 0.40f);
 
     private final String translationKey;
     private final float linearScale;
@@ -24,35 +23,38 @@ public enum TemporalScalingMode {
     }
 
     public float linearScale() {
+        if (this == TEMPORAL) {
+            return MetallumDrsController.currentScale();
+        }
         return this.linearScale;
     }
 
     public int nominalLinearPercent() {
-        return Math.round(this.linearScale * 100.0f);
+        return Math.round(this.linearScale() * 100.0f);
     }
 
     public int nominalPixelPercent() {
-        return Math.round(this.linearScale * this.linearScale * 100.0f);
+        float scale = this.linearScale();
+        return Math.round(scale * scale * 100.0f);
     }
 
-    /**
-     * Biases texture sampling back toward the mip detail appropriate for the
-     * display-resolution image reconstructed by MetalFX.
-     *
-     * <p>The render target is smaller than the displayed image, so its raw
-     * derivatives select a coarser mip than the reconstructed output needs.
-     * The additional {@code -1} follows MetalFX's temporal integration
-     * guidance and is intentionally unavailable while Temporal is off.</p>
-     */
     public double textureMipBias() {
         if (!this.enabled()) {
             return 0.0;
         }
-        return Math.log(this.linearScale) / Math.log(2.0) - 1.0;
+        return Math.log(this.linearScale()) / Math.log(2.0) - 1.0;
     }
 
     public boolean enabled() {
         return this != OFF;
+    }
+
+    public boolean isDynamic() {
+        return this == TEMPORAL;
+    }
+
+    public boolean isFixedPreset() {
+        return this == QUALITY || this == PERFORMANCE || this == ULTRA_PERFORMANCE;
     }
 
     public static TemporalScalingMode parse(final String value) {

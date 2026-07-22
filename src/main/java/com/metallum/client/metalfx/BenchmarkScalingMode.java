@@ -11,6 +11,7 @@ public enum BenchmarkScalingMode {
     OFF(SpatialScalingMode.OFF, TemporalScalingMode.OFF),
     QUALITY(SpatialScalingMode.QUALITY, TemporalScalingMode.OFF),
     PERFORMANCE(SpatialScalingMode.PERFORMANCE, TemporalScalingMode.OFF),
+    ULTRA_PERFORMANCE(SpatialScalingMode.ULTRA_PERFORMANCE, TemporalScalingMode.OFF),
     TEMPORAL_QUALITY(SpatialScalingMode.OFF, TemporalScalingMode.QUALITY),
     TEMPORAL_PERFORMANCE(SpatialScalingMode.OFF, TemporalScalingMode.PERFORMANCE),
     TEMPORAL_ULTRA_PERFORMANCE(SpatialScalingMode.OFF, TemporalScalingMode.ULTRA_PERFORMANCE);

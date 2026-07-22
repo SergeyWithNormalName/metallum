@@ -58,6 +58,14 @@ public final class MetallumSodiumConfigTests {
         require(lightingPreset.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum lighting-preset option must require a full game restart");
 
+        Option metalfxUpscaling = findOption(page, idField, "metalfx_upscaling");
+        require(metalfxUpscaling instanceof EnumOption,
+                "Metallum metalfx_upscaling Sodium option is missing or has the wrong type");
+
+        Option resolutionOverlay = findOption(page, idField, "metalfx_resolution_overlay");
+        require(resolutionOverlay instanceof BooleanOption,
+                "Metallum metalfx_resolution_overlay Sodium option is missing or has the wrong type");
+
         Option hdrOption = findOption(page, idField, "hdr_enabled");
         require(hdrOption instanceof BooleanOption,
                 "Metallum HDR-enabled Sodium option is missing or has the wrong type");

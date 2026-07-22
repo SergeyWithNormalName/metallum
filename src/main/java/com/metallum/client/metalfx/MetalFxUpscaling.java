@@ -1,5 +1,7 @@
 package com.metallum.client.metalfx;
 
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+
 /** Single source of truth for world sizing while preserving the two native scaler implementations. */
 public final class MetalFxUpscaling {
     public enum Type {
@@ -23,7 +25,17 @@ public final class MetalFxUpscaling {
         }
     }
 
+    private static boolean resolutionOverlayEnabled = false;
+
     private MetalFxUpscaling() {
+    }
+
+    public static boolean isResolutionOverlayEnabled() {
+        return resolutionOverlayEnabled;
+    }
+
+    public static void setResolutionOverlayEnabled(final boolean enabled) {
+        resolutionOverlayEnabled = enabled;
     }
 
     public static Type activeType() {
@@ -38,6 +50,66 @@ public final class MetalFxUpscaling {
 
     public static boolean isActive() {
         return activeType() != Type.NONE;
+    }
+
+    public static MetalFxUpscalingMode requestedMode() {
+        if (MetalFxTemporalScaling.isRequested()) {
+            return MetalFxUpscalingMode.TEMPORAL;
+        }
+        if (MetalFxSpatialScaling.isRequested()) {
+            return MetalFxUpscalingMode.SPATIAL;
+        }
+        return MetalFxUpscalingMode.OFF;
+    }
+
+    public static void setRequestedMode(final MetalFxUpscalingMode mode) {
+        MetalFxUpscalingMode nonNullMode = mode == null ? MetalFxUpscalingMode.OFF : mode;
+        switch (nonNullMode) {
+            case OFF -> {
+                MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
+                MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.OFF);
+                MetallumDrsController.setEnabled(false);
+            }
+            case SPATIAL -> {
+                MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.OFF);
+                MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
+                MetallumDrsController.setEnabled(true);
+            }
+            case TEMPORAL -> {
+                MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
+                MetalFxTemporalScaling.setRequestedMode(TemporalScalingMode.TEMPORAL);
+                MetallumDrsController.setEnabled(true);
+            }
+        }
+    }
+
+    /**
+     * Feeds DRS with one fresh, completed GPU sample when native presentation
+     * has made one available. The native side returns zero when there is no new
+     * sample, so this is safe to call once at the start of every render frame.
+     */
+    public static void updateDynamicResolution() {
+        // Configuration is lazily loaded, including on the first rendered
+        // frame after a client restart. Derive controller ownership from the
+        // admitted scaler every frame so a persisted dynamic choice cannot
+        // silently behave like a fixed preset until the user changes it again.
+        Type activeType = activeType();
+        boolean dynamic = activeType == Type.TEMPORAL
+                ? MetalFxTemporalScaling.requestedMode().isDynamic()
+                : activeType == Type.SPATIAL && MetalFxSpatialScaling.requestedMode().isDynamic();
+        MetallumDrsController.setEnabled(dynamic);
+        if (!dynamic) {
+            return;
+        }
+        updateDynamicResolution(MetalNativeBridge.metallum_drs_consume_completed_frame_time_seconds());
+    }
+
+    /** Package-private so the native seconds-to-milliseconds boundary stays unit-testable. */
+    static void updateDynamicResolution(final double completedFrameSeconds) {
+        if (!Double.isFinite(completedFrameSeconds) || completedFrameSeconds <= 0.0) {
+            return;
+        }
+        MetallumDrsController.updateGpuFrameTime((float) (completedFrameSeconds * 1_000.0));
     }
 
     public static Dimensions effectiveDimensions(final int displayWidth, final int displayHeight) {

@@ -168,6 +168,7 @@ final class MetalGpuSampler extends GpuSampler {
             case QUALITY -> this.temporalQualityHandle;
             case PERFORMANCE -> this.temporalPerformanceHandle;
             case ULTRA_PERFORMANCE -> this.temporalUltraPerformanceHandle;
+            case TEMPORAL -> this.temporalQualityHandle;
             case OFF -> this.nativeHandle;
         };
         return MetalNativeBridge.isNullHandle(selected) ? this.nativeHandle : selected;

@@ -3972,6 +3972,49 @@ private func completeGpuTiming(
     )
 }
 
+/**
+ * Minimal production feedback channel for Dynamic Resolution Scaling.
+ *
+ * This deliberately does not reuse the optional benchmark timing collector:
+ * DRS needs one completed presentation sample in ordinary gameplay, while the
+ * detailed collector is opt-in and allocates/report-aggregates diagnostics.
+ */
+private final class MetallumDrsFrameTiming: @unchecked Sendable {
+    static let shared = MetallumDrsFrameTiming()
+
+    private let lock = NSLock()
+    private var presentedCommandBuffers: Set<UInt> = []
+    private var latestCompletedFrameSeconds = 0.0
+
+    func markPresented(_ commandBuffer: MTLCommandBuffer) {
+        lock.lock()
+        presentedCommandBuffers.insert(objectAddress(commandBuffer))
+        lock.unlock()
+    }
+
+    func complete(_ commandBuffer: MTLCommandBuffer) {
+        let commandBufferKey = objectAddress(commandBuffer)
+        lock.lock()
+        let wasPresented = presentedCommandBuffers.remove(commandBufferKey) != nil
+        lock.unlock()
+        guard wasPresented, commandBuffer.status == .completed else { return }
+
+        let duration = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+        guard duration.isFinite, duration > 0.0 else { return }
+        lock.lock()
+        latestCompletedFrameSeconds = duration
+        lock.unlock()
+    }
+
+    func consumeCompletedFrameTimeSeconds() -> Double {
+        lock.lock()
+        let sample = latestCompletedFrameSeconds
+        latestCompletedFrameSeconds = 0.0
+        lock.unlock()
+        return sample
+    }
+}
+
 private func addGpuTimingCompletionHandler(
     to commandBuffer: MTLCommandBuffer,
     signal semaphore: DispatchSemaphore? = nil
@@ -3980,10 +4023,12 @@ private func addGpuTimingCompletionHandler(
         let completion = MetallumGpuTimingCoordinator.shared.take(commandBuffer)
         commandBuffer.addCompletedHandler { completed in
             semaphore?.signal()
+            MetallumDrsFrameTiming.shared.complete(completed)
             completeGpuTiming(commandBuffer: completed, completion: completion)
         }
     } else {
         commandBuffer.addCompletedHandler { completed in
+            MetallumDrsFrameTiming.shared.complete(completed)
             if completed.status == .error {
                 NSLog(
                     "[metallum] Metal command buffer failed (%@): %@",
@@ -3994,6 +4039,11 @@ private func addGpuTimingCompletionHandler(
             semaphore?.signal()
         }
     }
+}
+
+@_cdecl("metallum_drs_consume_completed_frame_time_seconds")
+public func metallum_drs_consume_completed_frame_time_seconds() -> Double {
+    MetallumDrsFrameTiming.shared.consumeCompletedFrameTimeSeconds()
 }
 
 private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
@@ -12773,6 +12823,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }
             trackedEndEncoding(encoder)
             commandBuffer.present(drawable)
+            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
             if NativeState.gpuTimingStats != nil {
                 MetallumGpuTimingCoordinator.shared.markPresented(
                     commandBuffer,
@@ -12841,6 +12892,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }
             trackedEndEncoding(encoder)
             commandBuffer.present(drawable)
+            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
             if NativeState.gpuTimingStats != nil {
                 MetallumGpuTimingCoordinator.shared.markPresented(
                     commandBuffer,
@@ -12918,6 +12970,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }
             trackedEndEncoding(encoder)
             commandBuffer.present(drawable)
+            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
             if NativeState.gpuTimingStats != nil {
                 MetallumGpuTimingCoordinator.shared.markPresented(
                     commandBuffer,
@@ -13074,6 +13127,7 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
 
         trackedEndEncoding(encoder)
         commandBuffer.present(drawable)
+        MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
         if NativeState.gpuTimingStats != nil {
             MetallumGpuTimingCoordinator.shared.markPresented(
                 commandBuffer,

@@ -41,6 +41,19 @@ public final class MetalFxTemporalScaling {
     private MetalFxTemporalScaling() {
     }
 
+    public static boolean isBenchmarkOverrideActive() {
+        return benchmarkOverride != null;
+    }
+
+    public static boolean isFixedPresetActive() {
+        ensureConfigLoaded();
+        return requestedMode.isFixedPreset();
+    }
+
+    public static void requestRendererResize() {
+        RESIZE_PENDING.set(true);
+    }
+
     public static TemporalScalingMode requestedMode() {
         ensureConfigLoaded();
         return selectRequestedMode(requestedMode, benchmarkOverride);
@@ -85,6 +98,15 @@ public final class MetalFxTemporalScaling {
         saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
+            if (selected.isDynamic()) {
+                MetallumDrsController.setEnabled(true);
+            } else {
+                MetallumDrsController.setEnabled(false);
+            }
+        } else {
+            if (!MetalFxSpatialScaling.isActive()) {
+                MetallumDrsController.setEnabled(false);
+            }
         }
         if (previous != selected || wasRuntimeDisabled) {
             requestRendererResize();
@@ -149,11 +171,14 @@ public final class MetalFxTemporalScaling {
         if (!safeMode.enabled()) {
             return new Dimensions(safeDisplayWidth, safeDisplayHeight, safeDisplayWidth, safeDisplayHeight);
         }
+        float scale = safeMode.isDynamic() && !isBenchmarkOverrideActive() && !isFixedPresetActive()
+                ? MetallumDrsController.currentScale()
+                : safeMode.linearScale();
         return new Dimensions(
                 safeDisplayWidth,
                 safeDisplayHeight,
-                scaledDimension(safeDisplayWidth, safeMode.linearScale()),
-                scaledDimension(safeDisplayHeight, safeMode.linearScale())
+                scaledDimension(safeDisplayWidth, scale),
+                scaledDimension(safeDisplayHeight, scale)
         );
     }
 
@@ -249,9 +274,5 @@ public final class MetalFxTemporalScaling {
 
     private static Path configPath() {
         return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
-    }
-
-    private static void requestRendererResize() {
-        RESIZE_PENDING.set(true);
     }
 }

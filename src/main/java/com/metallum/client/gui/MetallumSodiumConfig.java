@@ -7,6 +7,8 @@ import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
+import com.metallum.client.metalfx.MetalFxUpscaling;
+import com.metallum.client.metalfx.MetalFxUpscalingMode;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.LightingPreset;
@@ -79,31 +81,29 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.metalfx"))
                     .addOption(builder.createEnumOption(
-                                Identifier.fromNamespaceAndPath("metallum", "spatial_scaling"),
-                                SpatialScalingMode.class
+                                Identifier.fromNamespaceAndPath("metallum", "metalfx_upscaling"),
+                                MetalFxUpscalingMode.class
                             )
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable("metallum.options.metalfx_spatial_scaling.name"))
-                            .setTooltip(MetallumSodiumConfig::spatialScalingTooltip)
+                            .setName(Component.translatable("metallum.options.metalfx_upscaling.name"))
+                            .setTooltip(MetallumSodiumConfig::upscalingTooltip)
                             .setElementNameProvider(mode -> Component.translatable(mode.translationKey()))
-                            .setDefaultValue(SpatialScalingMode.OFF)
+                            .setDefaultValue(MetalFxUpscalingMode.OFF)
                             .setBinding(
-                                    MetalFxSpatialScaling::setRequestedMode,
-                                    MetalFxSpatialScaling::requestedMode
+                                    MetalFxUpscaling::setRequestedMode,
+                                    MetalFxUpscaling::requestedMode
                             )
                     )
-                    .addOption(builder.createEnumOption(
-                                Identifier.fromNamespaceAndPath("metallum", "temporal_scaling"),
-                                TemporalScalingMode.class
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "metalfx_resolution_overlay")
                             )
                             .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable("metallum.options.metalfx_temporal_scaling.name"))
-                            .setTooltip(MetallumSodiumConfig::temporalScalingTooltip)
-                            .setElementNameProvider(mode -> Component.translatable(mode.translationKey()))
-                            .setDefaultValue(TemporalScalingMode.OFF)
+                            .setName(Component.translatable("metallum.options.metalfx_resolution_overlay.name"))
+                            .setTooltip(Component.translatable("metallum.options.metalfx_resolution_overlay.tooltip"))
+                            .setDefaultValue(false)
                             .setBinding(
-                                    MetalFxTemporalScaling::setRequestedMode,
-                                    MetalFxTemporalScaling::requestedMode
+                                    MetalFxUpscaling::setResolutionOverlayEnabled,
+                                    MetalFxUpscaling::isResolutionOverlayEnabled
                             )
                     )
                 )
@@ -254,7 +254,7 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     }
 
 
-    private static Component spatialScalingTooltip(final SpatialScalingMode mode) {
+    private static Component upscalingTooltip(final MetalFxUpscalingMode mode) {
         Minecraft minecraft = Minecraft.getInstance();
         int displayWidth = minecraft != null && minecraft.getWindow() != null
                 ? minecraft.getWindow().getWidth()
@@ -262,98 +262,24 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
         int displayHeight = minecraft != null && minecraft.getWindow() != null
                 ? minecraft.getWindow().getHeight()
                 : 1;
-        MetalDevice device = MetalDevice.getInstance();
-        HdrOutputMode outputMode = device != null ? device.hdrOutputMode() : HdrOutputMode.SDR;
-        SpatialScalingMode resolvedMode = MetalFxSpatialScaling.resolveRequestedMode(mode, outputMode);
-        MetalFxSpatialScaling.Dimensions dimensions = MetalFxSpatialScaling.dimensions(
-                resolvedMode,
+        if (mode == MetalFxUpscalingMode.OFF) {
+            return Component.translatable(
+                    "metallum.options.metalfx_upscaling.tooltip.off",
+                    displayWidth,
+                    displayHeight
+            );
+        }
+        if (mode == MetalFxUpscalingMode.SPATIAL) {
+            return Component.translatable(
+                    "metallum.options.metalfx_upscaling.tooltip.spatial",
+                    displayWidth,
+                    displayHeight
+            );
+        }
+        return Component.translatable(
+                "metallum.options.metalfx_upscaling.tooltip.temporal",
                 displayWidth,
                 displayHeight
-        );
-        if (mode == SpatialScalingMode.AUTO && !resolvedMode.enabled()) {
-            return Component.translatable(
-                    "metallum.options.metalfx_spatial_scaling.tooltip.auto_off",
-                    dimensions.displayWidth(),
-                    dimensions.displayHeight()
-            );
-        }
-        if (!resolvedMode.enabled()) {
-            return Component.translatable(
-                    "metallum.options.metalfx_spatial_scaling.tooltip.off",
-                    dimensions.displayWidth(),
-                    dimensions.displayHeight()
-            );
-        }
-
-        if (!MetalFxSpatialScaling.isSupported() || MetalFxSpatialScaling.isRuntimeDisabled()) {
-            return Component.translatable(
-                    "metallum.options.metalfx_spatial_scaling.tooltip.unavailable",
-                    dimensions.displayWidth(),
-                    dimensions.displayHeight()
-            );
-        }
-
-        String tooltipKey = mode == SpatialScalingMode.AUTO
-                ? "metallum.options.metalfx_spatial_scaling.tooltip.auto_enabled"
-                : "metallum.options.metalfx_spatial_scaling.tooltip.enabled";
-        if (mode == SpatialScalingMode.AUTO) {
-            return Component.translatable(
-                    tooltipKey,
-                    Component.translatable(resolvedMode.translationKey()),
-                    dimensions.renderWidth(),
-                    dimensions.renderHeight(),
-                    dimensions.displayWidth(),
-                    dimensions.displayHeight(),
-                    resolvedMode.nominalLinearPercent(),
-                    Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
-                    Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
-                    Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
-            );
-        }
-        return Component.translatable(
-                tooltipKey,
-                dimensions.renderWidth(),
-                dimensions.renderHeight(),
-                dimensions.displayWidth(),
-                dimensions.displayHeight(),
-                resolvedMode.nominalLinearPercent(),
-                Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
-                Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
-                Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
-        );
-    }
-
-    private static Component temporalScalingTooltip(final TemporalScalingMode mode) {
-        Minecraft minecraft = Minecraft.getInstance();
-        int displayWidth = minecraft != null && minecraft.getWindow() != null
-                ? minecraft.getWindow().getWidth()
-                : 1;
-        int displayHeight = minecraft != null && minecraft.getWindow() != null
-                ? minecraft.getWindow().getHeight()
-                : 1;
-        MetalFxTemporalScaling.Dimensions dimensions = MetalFxTemporalScaling.dimensions(
-                mode, displayWidth, displayHeight
-        );
-        if (!mode.enabled()) {
-            return Component.translatable(
-                    "metallum.options.metalfx_temporal_scaling.tooltip.off",
-                    dimensions.displayWidth(), dimensions.displayHeight()
-            );
-        }
-        if (!MetalFxTemporalScaling.isSupported() || MetalFxTemporalScaling.isRuntimeDisabled()) {
-            return Component.translatable(
-                    "metallum.options.metalfx_temporal_scaling.tooltip.unavailable",
-                    dimensions.displayWidth(), dimensions.displayHeight()
-            );
-        }
-        return Component.translatable(
-                "metallum.options.metalfx_temporal_scaling.tooltip.enabled",
-                dimensions.renderWidth(), dimensions.renderHeight(),
-                dimensions.displayWidth(), dimensions.displayHeight(),
-                mode.nominalLinearPercent(),
-                Math.round(dimensions.actualWidthScale() * 1000.0f) / 10.0f,
-                Math.round(dimensions.actualHeightScale() * 1000.0f) / 10.0f,
-                Math.round(dimensions.actualPixelScale() * 1000.0f) / 10.0f
         );
     }
 

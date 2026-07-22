@@ -193,7 +193,8 @@ public final class TemporalContractTests {
                 "Quality Temporal mip bias mismatch");
         require(Math.abs(TemporalScalingMode.PERFORMANCE.textureMipBias() + 2.0) <= 1.0e-6,
                 "Performance Temporal mip bias mismatch");
-        require(Math.abs(TemporalScalingMode.ULTRA_PERFORMANCE.textureMipBias() + 2.5849625) <= 1.0e-6,
+        double ultraMipBias = Math.log(0.40) / Math.log(2.0) - 1.0;
+        require(Math.abs(TemporalScalingMode.ULTRA_PERFORMANCE.textureMipBias() - ultraMipBias) <= 1.0e-6,
                 "Ultra Performance Temporal mip bias mismatch");
     }
 

@@ -81,6 +81,11 @@ public final class MetalNativeBridge {
             NSViewSetMetalLayer = downcall(lookup, "metallum_NSView_setMetalLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
             NSViewClearLayer = downcall(lookup, "metallum_NSView_clearLayer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             setDebugLabelsEnabled = downcall(lookup, "metallum_set_debug_labels_enabled", FunctionDescriptor.ofVoid(INT));
+            consumeDrsCompletedFrameTimeSeconds = downcallWithoutCritical(
+                    lookup,
+                    "metallum_drs_consume_completed_frame_time_seconds",
+                    FunctionDescriptor.of(DOUBLE)
+            );
             setGpuTimingBenchmarkState = downcall(
                     lookup,
                     "metallum_gpu_timing_set_benchmark_state",
@@ -699,6 +704,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle NSViewSetMetalLayer;
     private static final MethodHandle NSViewClearLayer;
     private static final MethodHandle setDebugLabelsEnabled;
+    private static final MethodHandle consumeDrsCompletedFrameTimeSeconds;
     private static final MethodHandle setGpuTimingBenchmarkState;
     private static final MethodHandle recordJavaWorkload;
     private static final MethodHandle validateFrameGraphV1;
@@ -944,6 +950,15 @@ public final class MetalNativeBridge {
             setDebugLabelsEnabled.invokeExact(enabled ? 1 : 0);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_set_debug_labels_enabled", throwable);
+        }
+    }
+
+    /** Returns and clears the newest completed presented-frame GPU duration, or zero when unavailable. */
+    public static double metallum_drs_consume_completed_frame_time_seconds() {
+        try {
+            return (double) consumeDrsCompletedFrameTimeSeconds.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_drs_consume_completed_frame_time_seconds", throwable);
         }
     }
 

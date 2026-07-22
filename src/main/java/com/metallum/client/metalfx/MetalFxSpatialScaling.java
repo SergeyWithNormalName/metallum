@@ -44,9 +44,27 @@ public final class MetalFxSpatialScaling {
     private MetalFxSpatialScaling() {
     }
 
+    public static boolean isBenchmarkOverrideActive() {
+        return benchmarkOverride != null;
+    }
+
+    public static boolean isFixedPresetActive() {
+        ensureConfigLoaded();
+        return requestedMode.isFixedPreset();
+    }
+
+    public static void requestRendererResize() {
+        RESIZE_PENDING.set(true);
+    }
+
     public static SpatialScalingMode requestedMode() {
         ensureConfigLoaded();
         return requestedMode;
+    }
+
+    public static boolean isRequested() {
+        ensureConfigLoaded();
+        return selectRequestedMode(requestedMode, benchmarkOverride).enabled();
     }
 
     public static SpatialScalingMode effectiveMode() {
@@ -91,6 +109,15 @@ public final class MetalFxSpatialScaling {
         saveMode(nonNullMode);
         if (nonNullMode.enabled()) {
             MetalFxTemporalScaling.disableForSpatialSelection();
+            if (nonNullMode.isDynamic()) {
+                MetallumDrsController.setEnabled(true);
+            } else {
+                MetallumDrsController.setEnabled(false);
+            }
+        } else {
+            if (!MetalFxTemporalScaling.isActive()) {
+                MetallumDrsController.setEnabled(false);
+            }
         }
         if (previous != nonNullMode || wasRuntimeDisabled) {
             requestRendererResize();
@@ -161,11 +188,14 @@ public final class MetalFxSpatialScaling {
         if (!safeMode.enabled()) {
             return new Dimensions(safeDisplayWidth, safeDisplayHeight, safeDisplayWidth, safeDisplayHeight);
         }
+        float scale = safeMode.isDynamic() && !isBenchmarkOverrideActive() && !isFixedPresetActive()
+                ? MetallumDrsController.currentScale()
+                : safeMode.linearScale();
         return new Dimensions(
                 safeDisplayWidth,
                 safeDisplayHeight,
-                scaledDimension(safeDisplayWidth, safeMode.linearScale()),
-                scaledDimension(safeDisplayHeight, safeMode.linearScale())
+                scaledDimension(safeDisplayWidth, scale),
+                scaledDimension(safeDisplayHeight, scale)
         );
     }
 
@@ -305,13 +335,5 @@ public final class MetalFxSpatialScaling {
 
     private static Path configPath() {
         return FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
-    }
-
-    private static void requestRendererResize() {
-        // Mode changes and native failures may be reported while the GUI is
-        // still encoding the current frame. Reallocating MainTarget there can
-        // invalidate native texture handles, so GameRenderer consumes this at
-        // the HEAD of the next frame.
-        RESIZE_PENDING.set(true);
     }
 }

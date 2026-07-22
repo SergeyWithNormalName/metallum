@@ -54,8 +54,8 @@ public final class TemporalScalingTests {
         MetalFxTemporalScaling.Dimensions ultra = MetalFxTemporalScaling.dimensions(
                 TemporalScalingMode.ULTRA_PERFORMANCE, 3024, 1964
         );
-        require(ultra.renderWidth() == 1008 && ultra.renderHeight() == 655, "ultra dimensions");
-        require(Math.abs(ultra.actualPixelScale() - 1.0f / 9.0f) < 0.0002f,
+        require(ultra.renderWidth() == 1210 && ultra.renderHeight() == 786, "ultra dimensions");
+        require(Math.abs(ultra.actualPixelScale() - 0.16f) < 0.0005f,
                 "ultra pixel workload");
     }
 

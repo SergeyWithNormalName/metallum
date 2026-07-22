@@ -54,7 +54,8 @@ public final class SpatialScalingTests {
         for (SpatialScalingMode forced : new SpatialScalingMode[] {
                 SpatialScalingMode.OFF,
                 SpatialScalingMode.QUALITY,
-                SpatialScalingMode.PERFORMANCE
+                SpatialScalingMode.PERFORMANCE,
+                SpatialScalingMode.ULTRA_PERFORMANCE
         }) {
             for (HdrOutputMode outputMode : HdrOutputMode.values()) {
                 require(
@@ -115,7 +116,8 @@ public final class SpatialScalingTests {
         for (SpatialScalingMode forced : new SpatialScalingMode[] {
                 SpatialScalingMode.OFF,
                 SpatialScalingMode.QUALITY,
-                SpatialScalingMode.PERFORMANCE
+                SpatialScalingMode.PERFORMANCE,
+                SpatialScalingMode.ULTRA_PERFORMANCE
         }) {
             require(
                     !MetalFxSpatialScaling.requiresResizeForOutputModeChange(
@@ -141,8 +143,8 @@ public final class SpatialScalingTests {
                 3024,
                 1964
         );
-        require(quality.renderWidth() == 2016 && quality.renderHeight() == 1309, "quality dimensions");
-        require(Math.abs(quality.actualPixelScale() - 0.4443f) < 0.0001f, "quality pixel workload");
+        require(quality.renderWidth() == 2268 && quality.renderHeight() == 1473, "quality dimensions");
+        require(Math.abs(quality.actualPixelScale() - 0.5625f) < 0.0001f, "quality pixel workload");
 
         MetalFxSpatialScaling.Dimensions performance = MetalFxSpatialScaling.dimensions(
                 SpatialScalingMode.PERFORMANCE,
@@ -151,6 +153,15 @@ public final class SpatialScalingTests {
         );
         require(performance.renderWidth() == 1512 && performance.renderHeight() == 982, "performance dimensions");
         require(Math.abs(performance.actualPixelScale() - 0.25f) < 0.0001f, "performance pixel workload");
+
+        MetalFxSpatialScaling.Dimensions ultra = MetalFxSpatialScaling.dimensions(
+                SpatialScalingMode.ULTRA_PERFORMANCE,
+                3024,
+                1964
+        );
+        require(ultra.renderWidth() == 1210 && ultra.renderHeight() == 786, "ultra dimensions");
+        require(Math.abs(ultra.actualPixelScale() - 0.16f) < 0.0005f, "ultra pixel workload");
+
         expectIllegalArgument(
                 () -> MetalFxSpatialScaling.dimensions(SpatialScalingMode.AUTO, 3024, 1964),
                 "unresolved auto dimensions"

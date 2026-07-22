@@ -5,8 +5,10 @@ import java.util.Locale;
 public enum SpatialScalingMode {
     OFF("metallum.options.metalfx_spatial_scaling.off"),
     AUTO("metallum.options.metalfx_spatial_scaling.auto"),
+    SPATIAL("metallum.options.metalfx_spatial_scaling.spatial"),
     QUALITY("metallum.options.metalfx_spatial_scaling.quality"),
-    PERFORMANCE("metallum.options.metalfx_spatial_scaling.performance");
+    PERFORMANCE("metallum.options.metalfx_spatial_scaling.performance"),
+    ULTRA_PERFORMANCE("metallum.options.metalfx_spatial_scaling.ultra_performance");
 
     private final String translationKey;
 
@@ -17,8 +19,10 @@ public enum SpatialScalingMode {
     public float linearScale() {
         return switch (this) {
             case OFF -> 1.0f;
-            case QUALITY -> 2.0f / 3.0f;
+            case QUALITY -> 0.75f;
             case PERFORMANCE -> 0.50f;
+            case ULTRA_PERFORMANCE -> 0.40f;
+            case SPATIAL -> MetallumDrsController.currentScale();
             case AUTO -> throw new IllegalStateException("AUTO must be resolved to a concrete MetalFX preset");
         };
     }
@@ -37,11 +41,19 @@ public enum SpatialScalingMode {
     }
 
     public boolean enabled() {
-        return this == QUALITY || this == PERFORMANCE;
+        return this == SPATIAL || this == QUALITY || this == PERFORMANCE || this == ULTRA_PERFORMANCE;
     }
 
     public boolean concrete() {
         return this != AUTO;
+    }
+
+    public boolean isDynamic() {
+        return this == SPATIAL || this == AUTO;
+    }
+
+    public boolean isFixedPreset() {
+        return this == QUALITY || this == PERFORMANCE || this == ULTRA_PERFORMANCE;
     }
 
     public static SpatialScalingMode parse(final String value) {

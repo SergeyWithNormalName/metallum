@@ -359,6 +359,14 @@ tasks.register("temporalScalingUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metalfx.TemporalScalingTests")
 }
 
+tasks.register("drsScalingUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs Dynamic Resolution Scaling (DRS) controller and hysteresis tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metalfx.DrsScalingTests")
+}
+
 def hdrValueValidationBinary = layout.buildDirectory.file("native-tests/HdrValueValidation")
 def builtinShaderLibraryValidationBinary = layout.buildDirectory.file("native-tests/BuiltinShaderLibraryValidation")
 def spatialScalingValidationBinary = layout.buildDirectory.file("native-tests/SpatialScalingValidation")
@@ -1120,6 +1128,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("staticGeometryHeapValidation"))
 	dependsOn(tasks.named("spatialScalingUnitTest"))
 	dependsOn(tasks.named("temporalScalingUnitTest"))
+	dependsOn(tasks.named("drsScalingUnitTest"))
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("builtinShaderLibraryValidation"))
 	dependsOn(tasks.named("builtinShaderFallbackValidation"))

@@ -58,6 +58,7 @@ abstract class GameRendererMetalFxMixin {
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
+        MetalFxUpscaling.updateDynamicResolution();
         int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
         int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
         if (MetalFxUpscaling.consumePendingResize()) {
