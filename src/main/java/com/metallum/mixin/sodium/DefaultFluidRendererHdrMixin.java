@@ -45,10 +45,7 @@ abstract class DefaultFluidRendererHdrMixin {
             final FluidModel fluidModel,
             final CallbackInfo ci
     ) {
-        this.metallum$fluidLightEmission = Math.max(
-                blockState.getLightEmission(),
-                fluidState.createLegacyBlock().getLightEmission()
-        );
+        this.metallum$fluidLightEmission = fluidState.createLegacyBlock().getLightEmission();
     }
 
     @Inject(

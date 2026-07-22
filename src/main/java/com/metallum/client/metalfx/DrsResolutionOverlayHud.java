@@ -5,9 +5,29 @@ import net.minecraft.client.gui.GuiGraphicsExtractor;
 
 import java.util.Locale;
 
-/** Fail-isolated HUD overlay showing real-time 3D render resolution telemetry. */
+/** Fail-isolated HUD overlay showing real-time FPS and 3D render resolution telemetry. */
 public final class DrsResolutionOverlayHud {
+    private static int frameCount = 0;
+    private static int currentFps = 0;
+    private static long lastFpsUpdateNanos = 0;
+
     private DrsResolutionOverlayHud() {
+    }
+
+    private static int calculateFps() {
+        long now = System.nanoTime();
+        frameCount++;
+        if (lastFpsUpdateNanos == 0) {
+            lastFpsUpdateNanos = now;
+        } else {
+            long elapsed = now - lastFpsUpdateNanos;
+            if (elapsed >= 500_000_000L) { // Update twice per second
+                currentFps = Math.round((frameCount * 1_000_000_000.0f) / elapsed);
+                frameCount = 0;
+                lastFpsUpdateNanos = now;
+            }
+        }
+        return currentFps;
     }
 
     public static void render(final GuiGraphicsExtractor graphics) {
@@ -20,6 +40,7 @@ public final class DrsResolutionOverlayHud {
             return;
         }
 
+        int fps = calculateFps();
         int displayWidth = minecraft.getWindow().getWidth();
         int displayHeight = minecraft.getWindow().getHeight();
         MetalFxUpscaling.Dimensions dims = MetalFxUpscaling.effectiveDimensions(displayWidth, displayHeight);
@@ -30,21 +51,22 @@ public final class DrsResolutionOverlayHud {
             label = dynamic
                     ? String.format(
                             Locale.ROOT,
-                            "DRS Render: %dx%d (%.0f%%) → %dx%d [%s, GPU %.1f ms]",
-                            dims.renderWidth(), dims.renderHeight(), dims.actualWidthScale() * 100.0f,
+                            "FPS: %d | DRS Render: %dx%d (%.0f%%) → %dx%d [%s, GPU %.1f ms]",
+                            fps, dims.renderWidth(), dims.renderHeight(), dims.actualWidthScale() * 100.0f,
                             dims.displayWidth(), dims.displayHeight(), MetalFxUpscaling.activeType().name(),
                             MetallumDrsController.emaGpuTimeMs()
                     )
                     : String.format(
                             Locale.ROOT,
-                            "MetalFX Render: %dx%d (%.0f%%) → %dx%d [%s]",
-                            dims.renderWidth(), dims.renderHeight(), dims.actualWidthScale() * 100.0f,
+                            "FPS: %d | MetalFX Render: %dx%d (%.0f%%) → %dx%d [%s]",
+                            fps, dims.renderWidth(), dims.renderHeight(), dims.actualWidthScale() * 100.0f,
                             dims.displayWidth(), dims.displayHeight(), MetalFxUpscaling.activeType().name()
                     );
         } else {
             label = String.format(
                     Locale.ROOT,
-                    "Render: %dx%d (100%% Native)",
+                    "FPS: %d | Render: %dx%d (100%% Native)",
+                    fps,
                     displayWidth,
                     displayHeight
             );

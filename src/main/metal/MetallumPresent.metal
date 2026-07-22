@@ -419,7 +419,7 @@ fragment float4 metallum_present_fs(
   float sceneSignal = max(sceneY, scenePeak * chromaticHighlightGate);
   float localY = emissionSample.a;
   float isolationDetail = max(sceneY - localY, 0.0);
-  float localIsolation = smoothstep(0.06, 0.42, isolationDetail);
+  float localIsolation = smoothstep(0.18, 0.45, isolationDetail);
   float adaptiveBreakpoint = clamp(adaptive.breakpoint, 0.34, 0.70);
   float isolatedBreakpoint = max(0.34, adaptiveBreakpoint - 0.15);
   float expansionStart = mix(adaptiveBreakpoint, isolatedBreakpoint, localIsolation);

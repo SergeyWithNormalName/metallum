@@ -641,8 +641,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                     if (selectedLevel == 3u && metallumVoxelLevelContainsV1(
                             candidate, receiverWorldRelative, lightWorldRelative)) {
                         float candidateVoxelSize = 1.0 / float(candidate.levelLayout.x);
+                        vec3 candidateCellFraction = fract(receiverWorldRelative * float(candidate.levelLayout.x));
+                        vec3 candidateAdaptiveBias = vec3(
+                                receiverWorldNormal.x > 0.5 ? (1.0 - candidateCellFraction.x + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.x < -0.5 ? -(candidateCellFraction.x + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.x * (candidateVoxelSize * 0.08),
+                                receiverWorldNormal.y > 0.5 ? (1.0 - candidateCellFraction.y + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.y < -0.5 ? -(candidateCellFraction.y + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.y * (candidateVoxelSize * 0.08),
+                                receiverWorldNormal.z > 0.5 ? (1.0 - candidateCellFraction.z + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.z < -0.5 ? -(candidateCellFraction.z + 0.08) * candidateVoxelSize
+                                : receiverWorldNormal.z * (candidateVoxelSize * 0.08));
                         vec3 candidateStartWorldRelative = receiverWorldRelative
-                                + receiverWorldNormal * (candidateVoxelSize * 0.06)
+                                + candidateAdaptiveBias
                                 + rayDirection * (candidateVoxelSize * 0.02);
                         vec3 candidateEndWorldRelative = lightWorldRelative
                                 - rayDirection * min(
@@ -961,8 +972,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                             || hitVisibility < 0.0 || hitVisibility > 1.0) {
                         return 0.0;
                     }
+                    float selfHitBias = max(0.08, 0.28 / max(abs(planeDenominator), 0.15));
                     if (isinf(hitDistance)
-                            || receiverDistance <= hitDistance + 0.08) {
+                            || receiverDistance <= hitDistance + selfHitBias) {
                         return visibility;
                     }
                     // The cache stores one centre ray per cubemap texel.  A flat receiver can
@@ -971,7 +983,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     // tangent plane before applying the cached attenuation; a real blocker is
                     // materially in front of the receiver plane and remains shadowed.
                     if (receiverPlaneValid
-                            && hitDistance + 0.08 >= receiverPlaneDistance) {
+                            && hitDistance + selfHitBias >= receiverPlaneDistance) {
                         return visibility;
                     }
                     visibility = hitVisibility;

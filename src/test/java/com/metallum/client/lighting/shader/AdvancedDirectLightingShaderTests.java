@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "c3dc251dcd5d2bef84826b55ebd15de63c7a51ea4435686547c6112fec591dfc",
+            "sodium-solid-fsh", "1fab5e84db3100e4b547f6a0b3ca43e4a39a3f37ab49ca27e4276d6e4960009d",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "4b55d4077d2a5a60254de2dfd62f67529fc6298b24e650135322dafb0e0304e6",
+            "sodium-cutout-fsh", "9c53b629bb1c8062488b25f572e7b46e6e01f8f77a06120918c458da84a73210",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "f3cc919e2340eb6c2946ffe9e71bafc462978f8a4d5182b0abbf6baa074bde0d",
+            "minecraft-entity-fsh", "88799ecb3e23ff6fffc89ba65a91638978e13344f70bd244bccea45fd004767a",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "5d05b519fe9c83602a6b0c069d323955a7f5ff6c78fc798bb75722c8f53d6df2"
+            "minecraft-end-portal-fsh", "97d72008b06103dec6700d98ec8125634715bc5e7e21d055ef8a6a4f0a6b0120"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -623,16 +623,16 @@ public final class AdvancedDirectLightingShaderTests {
                         && !sodiumFragment.contains("metallumVoxelVisibilityCache.hits.length()")
                         && !sodiumFragment.contains("metallumVoxelShadowRefBuffer.refs.length()")
                         && sodiumFragment.contains(
-                        "receiverDistance <= hitDistance + 0.08")
+                        "receiverDistance <= hitDistance + selfHitBias")
                         && sodiumFragment.contains(
                         "* (2.0 / cacheFaceEdgeFloat) - 1.0;")
                         && sodiumFragment.contains("vec3 receiverWorldNormal =")
                         && sodiumFragment.contains(
                         "mat3(metallumVoxelShadow.worldFromView) * normal")
                         && sodiumFragment.contains(
-                        "hitDistance + 0.08 >= receiverPlaneDistance")
+                        "hitDistance + selfHitBias >= receiverPlaneDistance")
                         && before(sodiumFragment,
-                        "hitDistance + 0.08 >= receiverPlaneDistance",
+                        "hitDistance + selfHitBias >= receiverPlaneDistance",
                         "visibility = hitVisibility;")
                         && sodiumFragment.contains("if (visibility <= 0.0)")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
