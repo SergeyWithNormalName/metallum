@@ -41,6 +41,7 @@ public final class RendererArchitectureTests {
         testMaterialGenerationPublication();
         testFailClosedSelection();
         testIndependentOptionalFeatureFallback();
+        testTemporalWarmStandbyContract();
         testRendererConfigDefaults();
         testGenerationManifests();
         testAdvancedLightingManifest();
@@ -327,6 +328,40 @@ public final class RendererArchitectureTests {
                         && partial.rejectionReasons().equals(EnumSet.of(
                         RendererGenerationConfig.RejectionReason.INTERPOLATION_UNAVAILABLE)),
                 "supported Spatial upscaling was removed with unsupported interpolation");
+    }
+
+    private static void testTemporalWarmStandbyContract() {
+        RendererFeatureMask standby = RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_WARM_STANDBY
+        );
+        require(standby.contains(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
+                        && !standby.contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                        && !standby.contains(RendererFeatureMask.SPATIAL_UPSCALING),
+                "Temporal warm standby must not claim an active upscaler");
+        expectIllegalArgument(() -> RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_WARM_STANDBY,
+                RendererFeatureMask.TEMPORAL_UPSCALING
+        ));
+        expectIllegalArgument(() -> RendererFeatureMask.of(
+                RendererFeatureMask.TEMPORAL_WARM_STANDBY,
+                RendererFeatureMask.SPATIAL_UPSCALING
+        ));
+        MetalCapabilities unavailable = MetalCapabilities.productionMetal3(false);
+        RendererGenerationConfig.Resolution resolution = RendererGenerationConfig.resolve(
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
+                DisplayOutputMode.SDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                standby,
+                DisplayOutputMode.SDR,
+                unavailable,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION
+        );
+        require(resolution.config().featureMask().equals(RendererFeatureMask.NONE)
+                        && resolution.rejectionReasons().contains(
+                        RendererGenerationConfig.RejectionReason.UPSCALER_UNAVAILABLE),
+                "unsupported Temporal warm standby did not fail closed to native");
     }
 
     private static void testRendererConfigDefaults() {

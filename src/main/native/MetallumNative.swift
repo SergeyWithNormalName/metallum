@@ -7885,15 +7885,21 @@ private func prepareRendererGeneration(
 
     let spatialEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.spatialBit != 0
     let temporalEnabled = snapshot.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
+    let temporalWarmStandby = snapshot.featureMask & MetallumFrameStateAbiV3.temporalWarmStandbyBit != 0
     let upscaleEnabled = spatialEnabled || temporalEnabled
+    // A Dynamic-Temporal Native fallback has no upscaler pass, but its
+    // presentation PSOs and fixed temporal resources must stay resident so
+    // policy admission cannot compile or allocate them on the render thread.
+    let upscalePresentationPrepared = upscaleEnabled || temporalWarmStandby
 
     // HDR and Spatial intermediates are generation-owned. Temporal resources
-    // are deliberately display/extent cached: a DRS generation change must
-    // never allocate a new scaler or depth history on the render thread.
+    // are display/extent cached. A Dynamic-Temporal standby deliberately
+    // retains them while rendering Native, so the next policy admission never
+    // allocates a scaler or depth history on the render thread.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
     NativeState.menuBlurWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
-    if !temporalEnabled {
+    if !temporalEnabled && !temporalWarmStandby {
         NativeState.temporalWorkspaces = NativeState.temporalWorkspaces.filter {
             $0.key.deviceAddress != key
         }
@@ -7904,7 +7910,7 @@ private func prepareRendererGeneration(
             $0.key.deviceAddress != key
         }
     }
-    if !upscaleEnabled {
+    if !upscaleEnabled && !temporalWarmStandby {
         removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
         removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
         NativeState.menuBlurPipelines.removeValue(forKey: key)
@@ -7914,8 +7920,10 @@ private func prepareRendererGeneration(
         // Both SDR generations retain only the compact SDR present contract.
         purgeLegacyHdrGeneration(deviceAddress: key)
         purgeActualHdrGeneration(deviceAddress: key)
-        removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
-        removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
+        if !temporalWarmStandby {
+            removePipelines(&NativeState.spatialPresentPipelines, deviceAddress: key)
+            removePipelines(&NativeState.spatialScreenshotPipelines, deviceAddress: key)
+        }
         if snapshot.renderContractMode == 0 {
             NativeState.uiBackdropPipelines.removeValue(forKey: key)
         }
@@ -7931,7 +7939,7 @@ private func prepareRendererGeneration(
             && ensureActualNativeWorldUiPipeline(device: device) != nil
             && ensureUiBackdropPipelines(device: device) != nil
             && ensureMenuBlurPipelines(device: device) != nil
-            && (!upscaleEnabled || (
+            && (!upscalePresentationPrepared || (
                 ensureActualWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
@@ -7945,7 +7953,7 @@ private func prepareRendererGeneration(
             && ensureMenuBlurPipelines(device: device) != nil
             && ensureHdrFallbackAdaptiveState(device: device) != nil
             && ensureHdrFallbackDepthTexture(device: device) != nil
-            && (!upscaleEnabled || (
+            && (!upscalePresentationPrepared || (
                 ensureWorldPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialPresentPipeline(device: device, colorFormat: .rgba16Float) != nil
                 && ensureSpatialScreenshotPipeline(device: device, colorFormat: .rgba8Unorm) != nil
@@ -7963,9 +7971,11 @@ private enum MetallumFrameStateAbiV3 {
     static let spatialBit: UInt64 = 1
     static let temporalBit: UInt64 = 1 << 1
     static let interpolationBit: UInt64 = 1 << 2
+    static let temporalWarmStandbyBit: UInt64 = 1 << 3
     static let knownFeatureBits: UInt64 = spatialBit
         | temporalBit
         | interpolationBit
+        | temporalWarmStandbyBit
     static let knownResetBits: UInt64 = 0x1fff
 }
 
@@ -10269,6 +10279,51 @@ public func metallum_validate_frame_graph_v1(
         }
     }
     return 1
+}
+
+/**
+ * Creates the fixed physical resources used by Dynamic Temporal while its
+ * policy is still rendering Native. This does not encode an upscale or create
+ * history contents; it only moves one-time MetalFX allocation and PSO work
+ * out of the Native -> Temporal threshold transition.
+ */
+@_cdecl("metallum_preheat_temporal_dynamic_workspace")
+public func metallum_preheat_temporal_dynamic_workspace(
+    _ device: MTLDevice,
+    _ sourcePixelFormatRaw: Int32,
+    _ displayWidth: Int32,
+    _ displayHeight: Int32
+) -> Int32 {
+    autoreleasepool {
+        guard sourcePixelFormatRaw >= 0, displayWidth > 0, displayHeight > 0 else {
+            return -1
+        }
+        guard let sourcePixelFormat = MTLPixelFormat(rawValue: UInt(sourcePixelFormatRaw)),
+              sourcePixelFormat == .rgba8Unorm || sourcePixelFormat == .rgba16Float,
+              ensureTemporalDiagnosticPipeline(device: device) != nil,
+              ensureTemporalInputDepth(
+                device: device,
+                width: Int(displayWidth),
+                height: Int(displayHeight)
+              ) != nil,
+              ensureTemporalDepthHistory(
+                device: device,
+                width: Int(displayWidth),
+                height: Int(displayHeight)
+              ) != nil,
+              ensureTemporalWorkspace(
+                device: device,
+                sourcePixelFormat: sourcePixelFormat,
+                inputWidth: Int(displayWidth),
+                inputHeight: Int(displayHeight),
+                outputWidth: Int(displayWidth),
+                outputHeight: Int(displayHeight),
+                usesDynamicInputContent: true
+              ) != nil else {
+            return 0
+        }
+        return 1
+    }
 }
 
 @_cdecl("metallum_init_pipelines")

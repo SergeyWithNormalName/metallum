@@ -28,6 +28,8 @@ stateDiagram-v2
 
 `16.5 ms` is about 60.6 FPS and `14.0 ms` is about 71.4 FPS. The completed GPU sample is the full presented command-buffer GPU duration (`gpuEndTime - gpuStartTime`), not an FPS estimate, CPU frame time, CPU-to-GPU readback, or drawable wait. CPU-bound slowdowns therefore do not by themselves admit Temporal.
 
+When Dynamic Temporal is selected but its policy is currently Native, the renderer publishes a `TEMPORAL_WARM_STANDBY` lifecycle bit. It does **not** encode a Temporal or Spatial resolve. Instead, it prepares and retains the display-sized MetalFX workspace, depth inputs/history, motion/reactive ring and the presentation PSOs needed by Temporal. The one-time allocation/compilation cost moves to selecting Dynamic Temporal (or a display/output generation change), rather than the later Native -> Temporal threshold crossing. Standby resources are released when the user chooses Off or Spatial, when the Temporal runtime fails closed, or when the Metal device is released.
+
 ## 2. Temporal frame pipeline
 
 When Temporal is active, the renderer publishes the `TEMPORAL_UPSCALING` feature bit in `RendererFeatureMask`; Spatial is excluded. `GameRendererMetalFxMixin` applies a pending resize before world rendering and publishes the matching renderer generation.
@@ -56,7 +58,7 @@ These are strong architectural choices. The scaler is integrated through the ren
 
 ## 4. What is smooth in steady state
 
-Within a continuously active Dynamic-Temporal session, the physical MetalFX workspace, display-sized input textures, Java motion/reactive ring and native depth history are keyed by display extent. Changing only `inputContentWidth/Height` does not require a new MetalFX descriptor or a new Java motion/reactive ring. MetalFX optimized initialization is requested asynchronously (`requiresSynchronousInitialization = false`), avoiding an intentional synchronous scaler-compilation wait on the render thread.
+Within a Dynamic-Temporal session — including its temporary Native fallback — the physical MetalFX workspace, display-sized input textures, Java motion/reactive ring and native depth history are keyed by display extent. Changing only `inputContentWidth/Height`, or crossing the normal Native -> Temporal policy threshold, does not require a new MetalFX descriptor, Java motion/reactive ring, staging depth/history texture or presentation PSO. MetalFX optimized initialization is requested asynchronously (`requiresSynchronousInitialization = false`), avoiding an intentional synchronous scaler-compilation wait on the render thread.
 
 GPU fences order world depth, diagnostics, packing, MetalFX and UI inside the command buffer. They are GPU dependencies, not `waitUntilCompleted` calls on the render thread. This is the correct design for normal-frame pacing.
 
@@ -65,7 +67,7 @@ GPU fences order world depth, diagnostics, packing, MetalFX and UI inside the co
 The Native <-> Temporal switch is not the same as an input-content change, so it cannot be promised perfectly smooth.
 
 1. **Minecraft target resize.** The switch requests `GameRenderer.resize`, which recreates the main world target and resizes `LevelRenderer`. This is render-thread work and can produce an isolated long frame even though no CPU readback occurs.
-2. **Generation churn.** Native and Temporal use different `RendererFeatureMask` values. The generation change invalidates generation-owned HDR/menu workspaces and changes the frame graph. On a Temporal entry the Java motion/reactive ring may be allocated and the native dynamic workspace, staging depth, depth history and MetalFX scaler may be created. On return to Native, the current code clears the Java Temporal cache and native preparation discards Temporal caches for that device. Deferred destruction avoids use-after-free and a forced GPU wait, but a later re-entry can allocate again.
+2. **Generation churn and standby cost.** Native and Temporal still use different `RendererFeatureMask` values, so the switch resets history and changes the frame graph. Dynamic standby removes the previously asymmetric cold work: it retains the Java motion/reactive ring, native workspace, staging depth, depth history and presentation PSOs while Native is active. This trades some display-sized private GPU memory for smoother admission. The cost can still occur once when Dynamic Temporal is selected, after a display/output generation change, or after standby was deliberately released.
 3. **Policy has no Native cost predictor.** Entry observes Native timing, but exit observes the already accelerated 50% Temporal timing. The 14 ms threshold is a conservative empirical proxy, not a measurement of what the same scene costs at Native. A workload where Temporal is below 14 ms but Native remains above 16.5 ms can spend roughly the holdoff periods alternating between the two modes. The thresholds prevent frame-by-frame thrash; they do not mathematically rule out multi-second oscillation.
 4. **Steady-state bandwidth is material.** Dynamic Temporal adds depth/color packing, previous-depth maintenance, motion/reactive generation and MetalFX resolve. It should not be expected to win at 75-100% input resolution. The current 50% Dynamic input choice is intentional and based on measured wins; it is not evidence that every scene benefits.
 5. **Policy state is split.** Mode admission lives in `MetalFxTemporalScaling`, generic GPU feedback in `MetallumDrsController`, renderer generation in `MetalDevice`, and physical workspaces in Swift. The contracts are explicit and tested, but the split makes transition changes easy to regress unless the whole Native -> Temporal -> Native path is tested together.
@@ -79,7 +81,7 @@ The checked-in tests prove important local contracts:
 - `temporalScalingUnitTest` verifies presets, mutual exclusion and the 100% Native <-> 50% Temporal policy constants.
 - `drsScalingUnitTest` verifies DRS bounds, hysteresis and that Dynamic Temporal does not progressively invoke Spatial scaling.
 - `temporalScalingValidation` creates and encodes the fixed MetalFX descriptor profiles.
-- `temporalDiagnosticRuntimeValidation` validates typed motion/reactive input, a `64x64 -> 48x48` input-content transition inside unchanged `96x96` physical inputs, reset behavior, depth disocclusion, HDR precompose/UI backdrop and menu blur.
+- `temporalDiagnosticRuntimeValidation` validates Dynamic-Temporal warm standby creation, typed motion/reactive input, a `64x64 -> 48x48` input-content transition inside unchanged `96x96` physical inputs, reset behavior, depth disocclusion, HDR precompose/UI backdrop and menu blur.
 
 Those tests do **not** measure a real Minecraft `Native -> Temporal -> Native` transition at the built-in display resolution. They cannot prove a p95/p99 frame-time bound, absence of one-frame target-resize hitches, or absence of policy oscillation in the Overworld and Nether.
 

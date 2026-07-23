@@ -314,6 +314,17 @@ public final class MetalNativeBridge {
                     "metallum_init_pipelines",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
             );
+            preheatTemporalDynamicWorkspace = downcallWithoutCritical(
+                    lookup,
+                    "metallum_preheat_temporal_dynamic_workspace",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            INT
+                    )
+            );
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
@@ -810,6 +821,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLBlitCommandEncoderUpdateFence;
     private static final MethodHandle MTLBlitCommandEncoderWaitForFence;
     private static final MethodHandle initPipelines;
+    private static final MethodHandle preheatTemporalDynamicWorkspace;
     private static final MethodHandle releaseDeviceCaches;
 
 
@@ -1407,6 +1419,25 @@ public final class MetalNativeBridge {
             return (int) initPipelines.invokeExact(segment(device));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_init_pipelines", throwable);
+        }
+    }
+
+    /**
+     * Creates the display-sized Dynamic-Temporal inputs before policy admission
+     * so the later Native -> Temporal transition has no cold MetalFX work.
+     */
+    public static int metallum_preheat_temporal_dynamic_workspace(
+            final MemorySegment device,
+            final int sourcePixelFormat,
+            final int displayWidth,
+            final int displayHeight
+    ) {
+        try {
+            return (int) preheatTemporalDynamicWorkspace.invokeExact(
+                    segment(device), sourcePixelFormat, displayWidth, displayHeight
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_preheat_temporal_dynamic_workspace", throwable);
         }
     }
 

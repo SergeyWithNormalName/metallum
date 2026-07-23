@@ -9,6 +9,9 @@ private enum ValidationFailure: Error, CustomStringConvertible {
 }
 
 private typealias InitializePipelines = @convention(c) (UnsafeRawPointer?) -> Int32
+private typealias PreheatDynamicTemporal = @convention(c) (
+    UnsafeRawPointer?, Int32, Int32, Int32
+) -> Int32
 private typealias SetFrameState = @convention(c) (UnsafeRawPointer?, UInt64) -> Int32
 private typealias EncodeDiagnostics = @convention(c) (
     UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?
@@ -78,6 +81,7 @@ private func framePacket(
     previousProjectionScaleX: Float = 1,
     rendererGeneration: UInt64 = 1,
     temporalProduction: Bool = false,
+    temporalWarmStandby: Bool = false,
     displayWidthOverride: Int? = nil,
     displayHeightOverride: Int? = nil,
     temporalHdrPrecompose: Bool = false,
@@ -100,7 +104,11 @@ private func framePacket(
     writeUInt64(1, at: 72, into: &bytes)
     writeUInt64(1, at: 80, into: &bytes)
     writeUInt64(resetMask, at: 88, into: &bytes)
-    writeUInt64(temporalProduction ? 1 << 1 : 0, at: 96, into: &bytes)
+    writeUInt64(
+        temporalProduction ? 1 << 1 : temporalWarmStandby ? 1 << 3 : 0,
+        at: 96,
+        into: &bytes
+    )
     writeUInt32(temporalHdrPrecompose ? 1 : 0, at: 104, into: &bytes)
     writeUInt32(temporalHdrPrecompose ? 1 : 0, at: 112, into: &bytes)
     writeUInt32(UInt32(width), at: 124, into: &bytes)
@@ -156,6 +164,7 @@ private func runCase(
     previousProjectionScaleX: Float = 1,
     rendererGeneration: UInt64 = 1,
     temporalProduction: Bool = false,
+    temporalWarmStandby: Bool = false,
     dynamicTemporalInputs: Bool = false,
     displayWidthOverride: Int? = nil,
     displayHeightOverride: Int? = nil,
@@ -174,6 +183,7 @@ private func runCase(
         previousProjectionScaleX: previousProjectionScaleX,
         rendererGeneration: rendererGeneration,
         temporalProduction: temporalProduction,
+        temporalWarmStandby: temporalWarmStandby,
         displayWidthOverride: displayWidthOverride,
         displayHeightOverride: displayHeightOverride,
         temporalHdrPrecompose: temporalHdrPrecompose,
@@ -309,6 +319,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
                         "Usage: TemporalDiagnosticRuntimeValidation <libmetallum.dylib>")
             guard let handle = dlopen(CommandLine.arguments[1], RTLD_NOW | RTLD_LOCAL),
                   let initializeSymbol = dlsym(handle, "metallum_init_pipelines"),
+                  let preheatSymbol = dlsym(handle, "metallum_preheat_temporal_dynamic_workspace"),
                   let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
                   let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v1"),
                   let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
@@ -323,6 +334,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             let initialize = unsafeBitCast(initializeSymbol, to: InitializePipelines.self)
             try require(initialize(objectPointer(device as AnyObject)) > 0,
                         "Native built-in pipeline initialization failed")
+            let preheat = unsafeBitCast(preheatSymbol, to: PreheatDynamicTemporal.self)
             let setFrameState = unsafeBitCast(setSymbol, to: SetFrameState.self)
             let encode = unsafeBitCast(encodeSymbol, to: EncodeDiagnostics.self)
             let backdrop = unsafeBitCast(backdropSymbol, to: EncodeBackdrop.self)
@@ -380,6 +392,20 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(stationary.motion.x) <= 0.01 && abs(stationary.motion.y) <= 0.01
                             && stationary.reactive == 0,
                         "Static diagnostic output mismatch")
+            try require(preheat(
+                objectPointer(device as AnyObject),
+                Int32(MTLPixelFormat.rgba8Unorm.rawValue),
+                96,
+                96
+            ) == 1, "Dynamic Temporal warm standby creation failed")
+            let standby = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, rendererGeneration: 2,
+                temporalWarmStandby: true
+            )
+            try require(abs(standby.motion.x) <= 0.01 && abs(standby.motion.y) <= 0.01
+                            && standby.reactive == 0,
+                        "Dynamic Temporal warm-standby FrameState contract mismatch")
             let production = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 64, height: 64, temporalProduction: true,
@@ -470,7 +496,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, Dynamic warm standby, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

@@ -80,6 +80,10 @@ public record RendererGenerationConfig(
                 && !capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)) {
             throw new IllegalArgumentException("Temporal upscaling is not supported");
         }
+        if (featureMask.contains(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
+                && !capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)) {
+            throw new IllegalArgumentException("Temporal warm standby is not supported");
+        }
         if (featureMask.contains(RendererFeatureMask.FRAME_INTERPOLATION)
                 && !capabilities.supports(MetalCapabilities.Feature.METALFX_FRAME_INTERPOLATION)) {
             throw new IllegalArgumentException("Frame Interpolation is not supported");
@@ -181,6 +185,12 @@ public record RendererGenerationConfig(
                 && (!capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)
                 || !capabilities.temporalProfile().diagnosticsSupported())) {
             resolvedFeatures = resolvedFeatures.withoutTemporalUpscaling();
+            reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
+        }
+        if (requestedFeatures.contains(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
+                && (!capabilities.supports(MetalCapabilities.Feature.METALFX_TEMPORAL)
+                || !capabilities.temporalProfile().diagnosticsSupported())) {
+            resolvedFeatures = resolvedFeatures.withoutTemporalWarmStandby();
             reasons.add(RejectionReason.UPSCALER_UNAVAILABLE);
         }
         if (requestedFeatures.contains(RendererFeatureMask.FRAME_INTERPOLATION)

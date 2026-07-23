@@ -5,9 +5,16 @@ public record RendererFeatureMask(long bits) {
     public static final long SPATIAL_UPSCALING = 1L << 0;
     public static final long TEMPORAL_UPSCALING = 1L << 1;
     public static final long FRAME_INTERPOLATION = 1L << 2;
+    /**
+     * Retains Dynamic-Temporal GPU resources while the policy temporarily
+     * renders at native resolution. This is a lifecycle hint, not an active
+     * upscaler: no Temporal or Spatial resolve is encoded for this bit.
+     */
+    public static final long TEMPORAL_WARM_STANDBY = 1L << 3;
     public static final long VALID_BITS = SPATIAL_UPSCALING
             | TEMPORAL_UPSCALING
-            | FRAME_INTERPOLATION;
+            | FRAME_INTERPOLATION
+            | TEMPORAL_WARM_STANDBY;
 
     public static final RendererFeatureMask NONE = new RendererFeatureMask(0L);
 
@@ -17,6 +24,10 @@ public record RendererFeatureMask(long bits) {
         }
         if ((bits & SPATIAL_UPSCALING) != 0L && (bits & TEMPORAL_UPSCALING) != 0L) {
             throw new IllegalArgumentException("Spatial and temporal upscalers are mutually exclusive");
+        }
+        if ((bits & TEMPORAL_WARM_STANDBY) != 0L
+                && (bits & (SPATIAL_UPSCALING | TEMPORAL_UPSCALING)) != 0L) {
+            throw new IllegalArgumentException("Temporal warm standby cannot enable an upscaler");
         }
     }
 
@@ -41,5 +52,9 @@ public record RendererFeatureMask(long bits) {
 
     public RendererFeatureMask withoutTemporalUpscaling() {
         return new RendererFeatureMask(this.bits & ~TEMPORAL_UPSCALING);
+    }
+
+    public RendererFeatureMask withoutTemporalWarmStandby() {
+        return new RendererFeatureMask(this.bits & ~TEMPORAL_WARM_STANDBY);
     }
 }

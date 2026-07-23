@@ -39,6 +39,7 @@ import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.AdvancedLightingLayout;
@@ -114,6 +115,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             DisplayOutputMode outputMode,
             boolean spatialActive,
             boolean temporalActive,
+            boolean temporalStandby,
             long materialCoverageEpoch,
             long advancedAdmissionEpoch
     ) {
@@ -861,6 +863,16 @@ public final class MetalDevice implements GpuDeviceBackend {
         boolean temporalActive = this.temporalScalingSupported
                 && MetalFxTemporalScaling.isActive();
         this.temporalScalingActive = temporalActive;
+        TemporalScalingMode temporalMode = MetalFxTemporalScaling.requestedMode();
+        // Dynamic Temporal is intentionally Native at 100% while its policy
+        // judges the scene cheap enough. Keep its fixed display-sized inputs
+        // and MetalFX object warm in that state, so the later Native ->
+        // Temporal admission does not allocate or compile on the render thread.
+        boolean temporalStandby = !temporalActive
+                && this.temporalScalingSupported
+                && !MetalFxTemporalScaling.isRuntimeDisabled()
+                && temporalMode.isDynamic()
+                && MetalFxTemporalScaling.isRequested();
         boolean spatialActive = MetalFxUpscaling.isSpatialPathActive();
         if (temporalActive) {
             spatialActive = false;
@@ -889,6 +901,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && currentKey.outputMode() == requestedOutput
                 && currentKey.spatialActive() == spatialActive
                 && currentKey.temporalActive() == temporalActive
+                && currentKey.temporalStandby() == temporalStandby
                 && currentKey.materialCoverageEpoch() == materialCoverageEpoch
                 && currentKey.advancedAdmissionEpoch() == advancedAdmission.epoch()) {
             return;
@@ -901,7 +914,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_UPSCALING)
                 : spatialActive
                     ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
-                    : RendererFeatureMask.NONE;
+                    : temporalStandby
+                        ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
+                        : RendererFeatureMask.NONE;
         RendererGenerationPlanner.MaterialSceneStorage materialSceneStorage = resolveMainSceneStorage(
                 HdrSceneState.isRequested(),
                 MetallumMaterialState.requiresFp16Scene()
@@ -940,15 +955,15 @@ public final class MetalDevice implements GpuDeviceBackend {
         // The production scaler consumes the same typed motion/reactive ring as
         // the optional diagnostic view.  Do not make that allocation depend on
         // METALLUM_TEMPORAL_DIAGNOSTICS: Temporal itself is the consumer here.
-        if (this.temporalDiagnosticsActive || temporalActive) {
+        if (this.temporalDiagnosticsActive || temporalActive || temporalStandby) {
             try {
                 // MetalFX Temporal's dynamic-resolution API requires fixed
                 // physical input textures. Keep the diagnostic ring at the
                 // display extent and let the native pass write only the active
                 // low-resolution rectangle. Fixed Temporal presets and the
                 // standalone diagnostic retain their exact render extent.
-                boolean dynamicTemporalInputs = temporalActive
-                        && MetalFxTemporalScaling.effectiveMode().isDynamic();
+                boolean dynamicTemporalInputs = (temporalActive || temporalStandby)
+                        && temporalMode.isDynamic();
                 int temporalInputWidth = dynamicTemporalInputs
                         ? dimensions.displayWidth()
                         : dimensions.renderWidth();
@@ -959,7 +974,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         this, temporalInputWidth, temporalInputHeight
                 );
             } catch (RuntimeException exception) {
-                if (temporalActive) {
+                if (temporalActive || temporalStandby) {
                     MetalFxTemporalScaling.disableRuntimeAfterFailure(exception);
                     this.temporalScalingActive = false;
                     this.publishRendererGenerationState(safeDisplayWidth, safeDisplayHeight);
@@ -997,6 +1012,26 @@ public final class MetalDevice implements GpuDeviceBackend {
         RendererGenerationConfig resolved = plan.resolution().config();
         RendererGenerationManifest manifest = plan.manifest();
         FrameState.ResourceBytes resourceBytes = resourceBytes(manifest);
+        if (temporalStandby) {
+            try {
+                int status = MetalNativeBridge.metallum_preheat_temporal_dynamic_workspace(
+                        this.metalDeviceHandle,
+                        temporalSourcePixelFormat(manifest),
+                        dimensions.displayWidth(),
+                        dimensions.displayHeight()
+                );
+                if (status != 1) {
+                    throw new IllegalStateException(
+                            "Native Dynamic Temporal warm standby failed with status " + status
+                    );
+                }
+            } catch (RuntimeException exception) {
+                MetalFxTemporalScaling.disableRuntimeAfterFailure(exception);
+                this.temporalScalingActive = false;
+                this.publishRendererGenerationState(safeDisplayWidth, safeDisplayHeight);
+                return;
+            }
+        }
         long plannedLightingGeneration = this.lightingGenerationId;
         if (previousGeneration == null
                 || previousGeneration.lightingModel() != resolved.lightingModel()) {
@@ -1300,6 +1335,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 requestedOutput,
                 spatialActive,
                 temporalActive,
+                temporalStandby,
                 materialCoverageEpoch,
                 committedAdvancedAdmissionEpoch
         );
@@ -3151,6 +3187,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                 manifest.resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY),
                 manifest.resourceBytes(RendererGenerationManifest.Domain.DIAGNOSTIC_ONLY)
         );
+    }
+
+    /** Source color format accepted by the Dynamic MetalFX workspace. */
+    private static int temporalSourcePixelFormat(final RendererGenerationManifest manifest) {
+        return (int) (manifest.sceneStorageContract().bytesPerPixel() == 8
+                ? MTLPixelFormat.RGBA16Float.value
+                : MTLPixelFormat.RGBA8Unorm.value);
     }
 
     private static String prepareShaderSource(final String source, final ShaderDefines defines) {
