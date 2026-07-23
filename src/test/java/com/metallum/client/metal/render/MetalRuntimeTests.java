@@ -1649,6 +1649,68 @@ public final class MetalRuntimeTests {
         require(order.equals(java.util.List.of("prepare", "cancel:71"))
                         && !shutdownBoundary.hasPendingTicket(),
                 "FI shutdown left a pending ticket behind");
+
+        java.util.List<FrameInterpolationCommitBoundary.PreparationInput> productionInputs =
+                new java.util.ArrayList<>();
+        FrameInterpolationCommitBoundary productionBoundary = new FrameInterpolationCommitBoundary(
+                new FrameInterpolationCommitBoundary.TicketBridge() {
+                    @Override
+                    public FrameInterpolationCommitBoundary.Preparation prepare(
+                            final MemorySegment commandBuffer,
+                            final long rendererGeneration
+                    ) {
+                        throw new AssertionError("production bridge lost its typed preparation input");
+                    }
+
+                    @Override
+                    public FrameInterpolationCommitBoundary.Preparation prepare(
+                            final FrameInterpolationCommitBoundary.PreparationInput input
+                    ) {
+                        productionInputs.add(input);
+                        return new FrameInterpolationCommitBoundary.Preparation(
+                                FrameInterpolationCommitBoundary.Status.PREPARED, 99L
+                        );
+                    }
+
+                    @Override
+                    public FrameInterpolationCommitBoundary.Status publish(final long ticket) {
+                        return FrameInterpolationCommitBoundary.Status.PREPARED;
+                    }
+
+                    @Override
+                    public FrameInterpolationCommitBoundary.Status cancel(final long ticket) {
+                        return FrameInterpolationCommitBoundary.Status.PREPARED;
+                    }
+                }
+        );
+        FrameInterpolationCommitBoundary.PreparationInput productionInput =
+                new FrameInterpolationCommitBoundary.PreparationInput(
+                        MemorySegment.NULL,
+                        14L,
+                        MemorySegment.NULL,
+                        MemorySegment.NULL,
+                        MemorySegment.NULL,
+                        MemorySegment.NULL,
+                        MemorySegment.NULL,
+                        MemorySegment.NULL,
+                        false,
+                        2,
+                        2,
+                        true,
+                        false,
+                        1.5f,
+                        1.0f,
+                        0.22f
+                );
+        require(productionBoundary.prepare(productionInput)
+                        == FrameInterpolationCommitBoundary.Status.PREPARED,
+                "production FI ticket did not prepare");
+        productionBoundary.commit(() -> { });
+        require(productionInputs.size() == 1
+                        && productionInputs.getFirst().uiTexture().equals(MemorySegment.NULL)
+                        && productionInputs.getFirst().outputMode() == 2
+                        && productionInputs.getFirst().materialGenerationActive(),
+                "production FI hand-off lost world/UI presentation parameters");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

@@ -355,10 +355,50 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
+            frameInterpolationCreateV2 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_create_v2",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            INT,
+                            INT,
+                            LONG,
+                            LONG
+                    )
+            );
             frameInterpolationPrepareV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_frame_interpolation_prepare_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS)
+            );
+            frameInterpolationPrepareV2 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_prepare_v2",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            INT,
+                            INT,
+                            INT,
+                            FLOAT,
+                            FLOAT,
+                            FLOAT,
+                            ValueLayout.ADDRESS
+                    )
             );
             frameInterpolationPublishCommittedV1 = downcallWithoutCritical(
                     lookup,
@@ -792,7 +832,9 @@ public final class MetalNativeBridge {
     private static final MethodHandle createSemaphore;
     private static final MethodHandle MTLCommandBufferCommitWithSignal;
     private static final MethodHandle frameInterpolationCreateV1;
+    private static final MethodHandle frameInterpolationCreateV2;
     private static final MethodHandle frameInterpolationPrepareV1;
+    private static final MethodHandle frameInterpolationPrepareV2;
     private static final MethodHandle frameInterpolationPublishCommittedV1;
     private static final MethodHandle frameInterpolationCancelV1;
     private static final MethodHandle frameInterpolationDrainV1;
@@ -1578,6 +1620,32 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static MemorySegment metallum_frame_interpolation_create_v2(
+            final MemorySegment device,
+            final MemorySegment layer,
+            final int renderWidth,
+            final int renderHeight,
+            final int displayWidth,
+            final int displayHeight,
+            final long pixelFormat,
+            final long rendererGeneration
+    ) {
+        try {
+            return (MemorySegment) frameInterpolationCreateV2.invokeExact(
+                    segment(device),
+                    segment(layer),
+                    renderWidth,
+                    renderHeight,
+                    displayWidth,
+                    displayHeight,
+                    pixelFormat,
+                    rendererGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_create_v2", throwable);
+        }
+    }
+
     public static int metallum_frame_interpolation_prepare_v1(
             final MemorySegment context,
             final MemorySegment commandBuffer,
@@ -1590,6 +1658,52 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_frame_interpolation_prepare_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_prepare_v2(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final long rendererGeneration,
+            final MemorySegment sourceTexture,
+            final MemorySegment sceneTexture,
+            final MemorySegment sceneDepthTexture,
+            final MemorySegment semanticTexture,
+            final MemorySegment uiTexture,
+            final MemorySegment globalFence,
+            final int spatialHdrPrecomposed,
+            final int outputMode,
+            final int sourceEncoding,
+            final int materialGenerationActive,
+            final int diagnosticPattern,
+            final float currentHeadroom,
+            final float hdrStrength,
+            final float bloomStrength,
+            final MemorySegment outTicket
+    ) {
+        try {
+            return (int) frameInterpolationPrepareV2.invokeExact(
+                    segment(context),
+                    segment(commandBuffer),
+                    rendererGeneration,
+                    segment(sourceTexture),
+                    segment(sceneTexture),
+                    segment(sceneDepthTexture),
+                    segment(semanticTexture),
+                    segment(uiTexture),
+                    segment(globalFence),
+                    spatialHdrPrecomposed,
+                    outputMode,
+                    sourceEncoding,
+                    materialGenerationActive,
+                    diagnosticPattern,
+                    currentHeadroom,
+                    hdrStrength,
+                    bloomStrength,
+                    segment(outTicket)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_prepare_v2", throwable);
         }
     }
 

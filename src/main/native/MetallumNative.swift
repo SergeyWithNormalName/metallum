@@ -3824,6 +3824,10 @@ private enum NativeState {
         ? MetallumGpuTimingStats()
         : nil
     static var lastMotionTexture: MTLTexture?
+    // The exact depth input that produced lastMotionTexture.  Frame
+    // interpolation copies both into its own ring before the renderer command
+    // buffer commits, so no Java-owned attachment survives into presentation.
+    static var lastTemporalInputDepthTexture: MTLTexture?
     static var lastReactiveTexture: MTLTexture?
     static var lastClassificationTexture: MTLTexture?
     static var debugVisualizationPipelines: [PresentPipelineKey: MTLRenderPipelineState] = [:]
@@ -8014,7 +8018,7 @@ private enum MetallumFrameStateAbiV3 {
     static let knownResetBits: UInt64 = 0x1fff
 }
 
-private struct MetallumRendererFrameStateSnapshot {
+struct MetallumRendererFrameStateSnapshot {
     let frameContractVersion: UInt32
     let frameGraphVersion: UInt32
     let frameId: UInt64
@@ -8145,6 +8149,23 @@ private struct MetallumRendererFrameStateSnapshot {
             ]
         ]
     }
+}
+
+/** Narrow cross-file view for the Stage-9 coordinator; NativeState stays private. */
+struct MetallumFrameInterpolationInputs {
+    let frame: MetallumRendererFrameStateSnapshot?
+    let depth: MTLTexture?
+    let motion: MTLTexture?
+    let displayMaximumFramesPerSecond: Int
+}
+
+func metallumCurrentFrameInterpolationInputs() -> MetallumFrameInterpolationInputs {
+    MetallumFrameInterpolationInputs(
+        frame: NativeState.rendererFrameState.snapshot(),
+        depth: NativeState.lastTemporalInputDepthTexture,
+        motion: NativeState.lastMotionTexture,
+        displayMaximumFramesPerSecond: NativeState.rendererDisplayMaximumFramesPerSecond
+    )
 }
 
 private final class MetallumRendererFrameStateStore: @unchecked Sendable {
@@ -8294,6 +8315,7 @@ public func metallum_encode_temporal_diagnostics_v1(
         let hasPreviousDepth = depthHistory?.isValid == true && frame.resetMask == 0
 
         NativeState.lastMotionTexture = motionTexture
+        NativeState.lastTemporalInputDepthTexture = depthTexture
         NativeState.lastReactiveTexture = reactiveTexture
         NativeState.lastClassificationTexture = classificationTexture
 

@@ -110,6 +110,8 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let layerID: ObjectIdentifier
         let width: Int
         let height: Int
+        let inputWidth: Int
+        let inputHeight: Int
         let pixelFormat: MTLPixelFormat
         let rendererGeneration: UInt64
 
@@ -135,6 +137,40 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             self.layerID = ObjectIdentifier(layer)
             self.width = width
             self.height = height
+            // The stage-4/8 validation ABI only supplied output extent.  It
+            // intentionally retains its historical half-resolution test
+            // profile; production v2 provides the exact fixed-Temporal input
+            // extent below.
+            self.inputWidth = max(width / 2, 1)
+            self.inputHeight = max(height / 2, 1)
+            self.pixelFormat = pixelFormat
+            self.rendererGeneration = rendererGeneration
+        }
+
+        init?(
+            device: MTLDevice,
+            layer: CAMetalLayer,
+            inputWidth: Int,
+            inputHeight: Int,
+            width: Int,
+            height: Int,
+            pixelFormat: MTLPixelFormat,
+            rendererGeneration: UInt64
+        ) {
+            guard inputWidth > 0,
+                  inputHeight > 0,
+                  width > 0,
+                  height > 0,
+                  pixelFormat != .invalid,
+                  layer.device === device else {
+                return nil
+            }
+            self.deviceID = ObjectIdentifier(device)
+            self.layerID = ObjectIdentifier(layer)
+            self.width = width
+            self.height = height
+            self.inputWidth = inputWidth
+            self.inputHeight = inputHeight
             self.pixelFormat = pixelFormat
             self.rendererGeneration = rendererGeneration
         }
@@ -143,6 +179,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private enum SlotState {
         case free
         case realFrameReserved
+        case history
     }
 
     /**
@@ -251,13 +288,33 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private final class Ticket {
         let slot: Int
         let commandBuffer: MTLCommandBuffer
+        let production: ProductionPresentation?
         var state: TicketState = .prepared
         var commandBufferCompleted = false
+        var productionScheduled = false
+        var generatedPresentationEncoded = false
 
-        init(slot: Int, commandBuffer: MTLCommandBuffer) {
+        init(
+            slot: Int,
+            commandBuffer: MTLCommandBuffer,
+            production: ProductionPresentation? = nil
+        ) {
             self.slot = slot
             self.commandBuffer = commandBuffer
+            self.production = production
         }
+    }
+
+    /** Exact post-world presentation settings captured with a production ticket. */
+    private struct ProductionPresentation {
+        let frame: MetallumRendererFrameStateSnapshot
+        let outputMode: Int32
+        let sourceEncoding: Int32
+        let materialGenerationActive: Int32
+        let diagnosticPattern: Int32
+        let currentHeadroom: Float
+        let hdrStrength: Float
+        let bloomStrength: Float
     }
 
     /**
@@ -315,6 +372,13 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var previousEncodedSlot: Int?
     private var primedPreviousSlot: Int?
     private var nextHistorySlot = 0
+    // Production history never aliases the stage-6 validation-only history.
+    // It owns the last real frame until a following real frame has finished
+    // presentation, so the interpolator can never read a texture reused by a
+    // still-visible frame.
+    private var productionHistorySlot: Int?
+    private var productionPrimingFrames = 0
+    private var productionPairInFlight = false
     private var reasonCounters = ReasonCounters()
     private var nextPresentationID: UInt64 = 1
     private var lastPresentationID: UInt64 = 0
@@ -401,8 +465,8 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             return
         }
 
-        let inputWidth = max(key.width / 2, 1)
-        let inputHeight = max(key.height / 2, 1)
+        let inputWidth = key.inputWidth
+        let inputHeight = key.inputHeight
         // Reuse the renderer's fixed Temporal workspace when it already exists
         // for this immutable descriptor key; the cache only creates it when
         // this validation workspace is the first owner.
@@ -478,8 +542,8 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         if #available(macOS 26.0, *), let interpolator = interpolator as? MTLFXFrameInterpolator {
             descriptor.usage.formUnion(interpolator.colorTextureUsage)
             generatedDescriptor.usage.formUnion(interpolator.outputTextureUsage)
-            let inputWidth = max(key.width / 2, 1)
-            let inputHeight = max(key.height / 2, 1)
+            let inputWidth = key.inputWidth
+            let inputHeight = key.inputHeight
             depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .depth32Float,
                 width: inputWidth,
@@ -677,6 +741,13 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         historyState = .primingFirst
         previousEncodedSlot = nil
         primedPreviousSlot = nil
+        if let productionHistorySlot,
+           slots.indices.contains(productionHistorySlot),
+           slots[productionHistorySlot].state == .history {
+            slots[productionHistorySlot].state = .free
+        }
+        productionHistorySlot = nil
+        productionPrimingFrames = 0
     }
 
     /**
@@ -753,6 +824,214 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         return .prepared
     }
 
+    /**
+     * Stage-9 production hand-off.  It builds the finished, UI-free world
+     * image and copies depth, motion and SDR UI into the coordinator's fixed
+     * ring while the renderer command buffer is still open.  The only
+     * presentation owner after a successful return is this coordinator.
+     */
+    func prepareProduction(
+        commandBuffer: MTLCommandBuffer,
+        rendererGeneration: UInt64,
+        sourceTexture: MTLTexture,
+        sceneTexture: MTLTexture?,
+        sceneDepthTexture: MTLTexture?,
+        semanticTexture: MTLTexture?,
+        uiTexture: MTLTexture?,
+        globalFence: MTLFence?,
+        spatialHdrPrecomposed: Int32,
+        outputMode: Int32,
+        sourceEncoding: Int32,
+        materialGenerationActive: Int32,
+        diagnosticPattern: Int32,
+        currentHeadroom: Float,
+        hdrStrength: Float,
+        bloomStrength: Float,
+        outTicket: UnsafeMutablePointer<UInt64>?
+    ) -> TicketStatus {
+        guard let outTicket else { return .bypassInputContract }
+        outTicket.pointee = 0
+        let temporalInputs = metallumCurrentFrameInterpolationInputs()
+        guard (0...2).contains(outputMode),
+              (0...2).contains(sourceEncoding),
+              (0...1).contains(materialGenerationActive),
+              currentHeadroom.isFinite,
+              hdrStrength.isFinite,
+              bloomStrength.isFinite,
+              commandBuffer.device === device,
+              sourceTexture.device === device,
+              sourceTexture.textureType == .type2D,
+              sourceTexture.sampleCount == 1,
+              sourceTexture.usage.contains(.shaderRead),
+              let uiTexture,
+              uiTexture.device === device,
+              uiTexture.pixelFormat == .rgba8Unorm,
+              uiTexture.textureType == .type2D,
+              uiTexture.sampleCount == 1,
+              uiTexture.width == key.width,
+              uiTexture.height == key.height,
+              let inputDepth = temporalInputs.depth,
+              let inputMotion = temporalInputs.motion,
+              inputDepth.device === device,
+              inputMotion.device === device,
+              inputDepth.pixelFormat == .depth32Float,
+              inputMotion.pixelFormat == .rg16Float,
+              inputDepth.width == key.inputWidth,
+              inputDepth.height == key.inputHeight,
+              inputMotion.width == key.inputWidth,
+              inputMotion.height == key.inputHeight,
+              let frame = temporalInputs.frame else {
+            return uiTexture == nil ? .bypassNoUi : .bypassInputContract
+        }
+        let refresh = temporalInputs.displayMaximumFramesPerSecond
+        guard refresh >= 60 else { return .bypassUnsupported }
+        let expectedRealFramesPerSecond = Double(refresh) / 2.0
+        let measuredRealFramesPerSecond = frame.deltaSeconds > 0 && frame.deltaSeconds.isFinite
+            ? 1.0 / Double(frame.deltaSeconds)
+            : 0.0
+        let minimumRealFramesPerSecond = max(30.0, expectedRealFramesPerSecond * 0.85)
+        guard measuredRealFramesPerSecond >= minimumRealFramesPerSecond,
+              measuredRealFramesPerSecond <= expectedRealFramesPerSecond * 1.05 else {
+            return .bypassCadence
+        }
+        // A production ticket is only valid for the immutable fixed-Temporal
+        // generation which declared both the feature bit and its exact native
+        // workspace bytes.  Dynamic/Spatial paths fail open here.
+        let temporalBit: UInt64 = 1 << 1
+        let interpolationBit: UInt64 = 1 << 2
+        let spatialBit: UInt64 = 1
+        guard rendererGeneration == key.rendererGeneration,
+              frame.rendererGenerationId == key.rendererGeneration,
+              frame.featureMask & temporalBit != 0,
+              frame.featureMask & interpolationBit != 0,
+              frame.featureMask & spatialBit == 0,
+              frame.interpolationResourceBytes > 0,
+              Int(frame.renderWidth) == key.inputWidth,
+              Int(frame.renderHeight) == key.inputHeight,
+              Int(frame.displayWidth) == key.width,
+              Int(frame.displayHeight) == key.height,
+              commandBuffer.status == .notEnqueued else {
+            return rendererGeneration == key.rendererGeneration
+                ? .bypassGeneration : .staleTicket
+        }
+
+        let ticket: UInt64
+        let slot: Int
+        let presentation = ProductionPresentation(
+            frame: frame,
+            outputMode: outputMode,
+            sourceEncoding: sourceEncoding,
+            materialGenerationActive: materialGenerationActive,
+            diagnosticPattern: diagnosticPattern,
+            currentHeadroom: currentHeadroom,
+            hdrStrength: hdrStrength,
+            bloomStrength: bloomStrength
+        )
+        state.lock()
+        guard !shuttingDown, acceptingFrames else {
+            state.unlock()
+            return .bypassDisabled
+        }
+        guard tickets.count < 2,
+              let reservedSlot = slots.firstIndex(where: { $0.state == .free }),
+              nextTicket != 0 else {
+            MetallumFrameInterpolationTelemetry.shared.recordBackpressureDrop()
+            state.unlock()
+            return .bypassBackpressure
+        }
+        ticket = nextTicket
+        nextTicket &+= 1
+        slot = reservedSlot
+        slots[slot].state = .realFrameReserved
+        pendingRealFrames += 1
+        tickets[ticket] = Ticket(
+            slot: slot,
+            commandBuffer: commandBuffer,
+            production: presentation
+        )
+        state.unlock()
+
+        // `metallum_encodePresentationWorld` sees the current Temporal output
+        // recorded on this exact renderer command buffer.  It performs world
+        // tone mapping/reconstruction before UI, preserving the required
+        // world-only interpolation input.
+        guard metallum_encodePresentationWorld(
+            commandBuffer,
+            slots[slot].realColor,
+            sourceTexture,
+            sceneTexture,
+            sceneDepthTexture,
+            semanticTexture,
+            globalFence,
+            spatialHdrPrecomposed,
+            outputMode,
+            sourceEncoding,
+            materialGenerationActive,
+            diagnosticPattern,
+            currentHeadroom,
+            hdrStrength,
+            bloomStrength
+        ) == 1,
+        let slotDepth = slots[slot].depth,
+        let slotMotion = slots[slot].motion,
+        let blit = commandBuffer.makeBlitCommandEncoder() else {
+            discardPreparedProductionTicket(ticket)
+            return .transientFailure
+        }
+        if let globalFence {
+            blit.waitForFence(globalFence)
+        }
+        blit.copy(
+            from: inputDepth,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: .init(),
+            sourceSize: MTLSize(width: key.inputWidth, height: key.inputHeight, depth: 1),
+            to: slotDepth,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: .init()
+        )
+        blit.copy(
+            from: inputMotion,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: .init(),
+            sourceSize: MTLSize(width: key.inputWidth, height: key.inputHeight, depth: 1),
+            to: slotMotion,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: .init()
+        )
+        blit.copy(
+            from: uiTexture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: .init(),
+            sourceSize: MTLSize(width: key.width, height: key.height, depth: 1),
+            to: slots[slot].sdrUi,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: .init()
+        )
+        if let globalFence {
+            blit.updateFence(globalFence)
+        }
+        blit.endEncoding()
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.markTicketCompleted(ticket)
+        }
+        outTicket.pointee = ticket
+        return .prepared
+    }
+
+    private func discardPreparedProductionTicket(_ ticket: UInt64) {
+        state.lock()
+        defer { state.unlock() }
+        guard let pending = tickets.removeValue(forKey: ticket) else { return }
+        releaseSlotLocked(pending.slot)
+    }
+
     /** Publishes only an already-committed renderer command buffer. */
     func publishCommitted(ticket: UInt64) -> TicketStatus {
         state.lock()
@@ -765,11 +1044,15 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             return .staleTicket
         }
         pending.state = .published
-        if pending.commandBufferCompleted {
+        let productionReady = pending.production != nil && pending.commandBufferCompleted
+        if pending.commandBufferCompleted && pending.production == nil {
             tickets.removeValue(forKey: ticket)
             releaseSlotLocked(pending.slot)
         }
         state.unlock()
+        if productionReady {
+            scheduleProductionTicket(ticket)
+        }
         return .prepared
     }
 
@@ -865,12 +1148,254 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
 
     private func markTicketCompleted(_ ticket: UInt64) {
         state.lock()
-        defer { state.unlock() }
-        guard let pending = tickets[ticket] else { return }
+        guard let pending = tickets[ticket] else {
+            state.unlock()
+            return
+        }
         pending.commandBufferCompleted = true
-        guard pending.state == .published else { return }
+        guard pending.state == .published else {
+            state.unlock()
+            return
+        }
+        if pending.production != nil {
+            state.unlock()
+            scheduleProductionTicket(ticket)
+            return
+        }
         tickets.removeValue(forKey: ticket)
         releaseSlotLocked(pending.slot)
+        state.unlock()
+    }
+
+    /** Starts the next completed production ticket in strict real-frame order. */
+    private func scheduleProductionTicket(_ ticket: UInt64) {
+        state.lock()
+        guard !shuttingDown,
+              !productionPairInFlight,
+              let pending = tickets[ticket],
+              let production = pending.production,
+              pending.state == .published,
+              pending.commandBufferCompleted,
+              !pending.productionScheduled else {
+            state.unlock()
+            return
+        }
+        pending.productionScheduled = true
+        productionPairInFlight = true
+        if production.frame.resetMask != 0 {
+            resetInterpolationHistoryLocked()
+            reasonCounters.reset += 1
+        }
+        let priorSlot = productionHistorySlot
+        let canInterpolate = production.frame.resetMask == 0
+            && productionPrimingFrames >= 2
+            && priorSlot != nil
+            && priorSlot != pending.slot
+            && production.frame.deltaSeconds.isFinite
+            && production.frame.deltaSeconds >= (1.0 / 240.0)
+            && production.frame.deltaSeconds <= (1.0 / 30.0)
+        state.unlock()
+
+        guard canInterpolate, let priorSlot else {
+            presentProductionReal(ticket)
+            return
+        }
+        if encodeProductionInterpolation(ticket: ticket, previousSlot: priorSlot) {
+            MetallumFrameInterpolationTelemetry.shared.recordAcceptedPair()
+        } else {
+            // Interpolation failure must never suppress the real member.
+            presentProductionReal(ticket)
+        }
+    }
+
+    private func encodeProductionInterpolation(ticket: UInt64, previousSlot: Int) -> Bool {
+        guard #available(macOS 26.0, *) else {
+            return false
+        }
+        state.lock()
+        guard !shuttingDown,
+              let pending = tickets[ticket],
+              let production = pending.production,
+              slots.indices.contains(previousSlot),
+              slots[previousSlot].state == .history,
+              let interpolator = interpolator as? MTLFXFrameInterpolator,
+              let queue = renderQueue,
+              let depth = slots[pending.slot].depth,
+              let motion = slots[pending.slot].motion else {
+            state.unlock()
+            return false
+        }
+        let currentSlot = pending.slot
+        let frame = production.frame
+        let verticalProjectionScale = abs(frame.currentUnjitteredProjection.columns.1.y)
+        guard verticalProjectionScale.isFinite, verticalProjectionScale > 0.0001 else {
+            state.unlock()
+            return false
+        }
+        let fieldOfView = Float(2.0 * atan(1.0 / Double(verticalProjectionScale)) * 180.0 / Double.pi)
+        guard fieldOfView.isFinite, fieldOfView > 1.0, fieldOfView < 179.0,
+              let commandBuffer = queue.makeCommandBuffer() else {
+            state.unlock()
+            return false
+        }
+        pending.generatedPresentationEncoded = true
+        let deltaSeconds = frame.deltaSeconds
+        state.unlock()
+
+        interpolator.colorTexture = slots[currentSlot].realColor
+        interpolator.prevColorTexture = slots[previousSlot].realColor
+        interpolator.depthTexture = depth
+        interpolator.motionTexture = motion
+        interpolator.outputTexture = slots[currentSlot].generatedColor
+        interpolator.deltaTime = deltaSeconds
+        interpolator.nearPlane = max(frame.nearPlane, 0.0001)
+        interpolator.farPlane = max(frame.farPlane, interpolator.nearPlane + 0.001)
+        interpolator.fieldOfView = fieldOfView
+        interpolator.aspectRatio = Float(key.width) / Float(key.height)
+        interpolator.jitterOffsetX = frame.jitterX
+        interpolator.jitterOffsetY = frame.jitterY
+        interpolator.motionVectorScaleX = 1.0
+        interpolator.motionVectorScaleY = 1.0
+        interpolator.isDepthReversed = true
+        interpolator.shouldResetHistory = false
+        interpolator.encode(commandBuffer: commandBuffer)
+        commandBuffer.addCompletedHandler { [weak self] buffer in
+            guard buffer.status == .completed, buffer.error == nil else {
+                self?.presentProductionReal(ticket)
+                return
+            }
+            self?.presentProductionGeneratedThenReal(ticket)
+        }
+        commandBuffer.commit()
+        return true
+    }
+
+    private func presentProductionGeneratedThenReal(_ ticket: UInt64) {
+        presentProductionWorld(ticket: ticket, generated: true) { [weak self] in
+            guard let self else { return }
+            self.state.lock()
+            let delta = self.tickets[ticket]?.production?.frame.deltaSeconds ?? (1.0 / 60.0)
+            let shouldContinue = !self.shuttingDown && self.tickets[ticket] != nil
+            self.state.unlock()
+            guard shouldContinue else {
+                self.finishProductionTicket(ticket)
+                return
+            }
+            // Generated N-1/2 is presented first; the real N member follows
+            // after half the measured real-frame interval.  This uses a
+            // dispatch deadline rather than a CPU busy wait/readback.
+            let bounded = min(max(Double(delta), 1.0 / 240.0), 1.0 / 30.0)
+            DispatchQueue.global(qos: .userInteractive).asyncAfter(
+                deadline: .now() + .nanoseconds(Int(bounded * 500_000_000.0))
+            ) { [weak self] in
+                self?.presentProductionReal(ticket)
+            }
+        }
+    }
+
+    private func presentProductionReal(_ ticket: UInt64) {
+        presentProductionWorld(ticket: ticket, generated: false) { [weak self] in
+            self?.finishProductionTicket(ticket)
+        }
+    }
+
+    /** Acquires a fresh drawable only when a production world frame is ready. */
+    private func presentProductionWorld(
+        ticket: UInt64,
+        generated: Bool,
+        completion: @escaping () -> Void
+    ) {
+        state.lock()
+        guard !shuttingDown,
+              let pending = tickets[ticket],
+              let production = pending.production,
+              let queue = presentationQueue,
+              slots.indices.contains(pending.slot) else {
+            state.unlock()
+            completion()
+            return
+        }
+        let slot = pending.slot
+        let world = generated ? slots[slot].generatedColor : slots[slot].realColor
+        let ui = slots[slot].sdrUi
+        state.unlock()
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let drawable = layer.nextDrawable(),
+              metallum_encodeUIComposite(
+                commandBuffer,
+                drawable.texture,
+                world,
+                ui,
+                nil,
+                production.outputMode,
+                production.sourceEncoding,
+                production.currentHeadroom,
+                production.hdrStrength,
+                production.bloomStrength,
+                production.diagnosticPattern
+              ) == 1 else {
+            if generated {
+                MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+            }
+            completion()
+            return
+        }
+        commandBuffer.present(drawable)
+        commandBuffer.addCompletedHandler { buffer in
+            if buffer.status == .completed, buffer.error == nil {
+                if generated {
+                    MetallumFrameInterpolationTelemetry.shared.recordGeneratedPresentation()
+                } else {
+                    MetallumFrameInterpolationTelemetry.shared.recordRealPresentation()
+                }
+            } else if generated {
+                MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+            }
+            completion()
+        }
+        commandBuffer.commit()
+    }
+
+    private func finishProductionTicket(_ ticket: UInt64) {
+        var nextTicket: UInt64?
+        state.lock()
+        guard let pending = tickets.removeValue(forKey: ticket) else {
+            productionPairInFlight = false
+            state.broadcast()
+            state.unlock()
+            return
+        }
+        let currentSlot = pending.slot
+        if let priorSlot = productionHistorySlot,
+           priorSlot != currentSlot,
+           slots.indices.contains(priorSlot),
+           slots[priorSlot].state == .history {
+            slots[priorSlot].state = .free
+        }
+        if slots.indices.contains(currentSlot) {
+            slots[currentSlot].state = .history
+            productionHistorySlot = currentSlot
+        }
+        if pending.generatedPresentationEncoded == false {
+            productionPrimingFrames = min(productionPrimingFrames + 1, 2)
+        }
+        pendingRealFrames -= 1
+        productionPairInFlight = false
+        nextTicket = tickets
+            .filter { _, candidate in
+                candidate.production != nil
+                    && candidate.state == .published
+                    && candidate.commandBufferCompleted
+                    && !candidate.productionScheduled
+            }
+            .map(\.key)
+            .min()
+        state.broadcast()
+        state.unlock()
+        if let nextTicket {
+            scheduleProductionTicket(nextTicket)
+        }
     }
 
     private func releaseSlotLocked(_ index: Int) {
@@ -1385,6 +1910,51 @@ public func metallum_frame_interpolation_create_v1(
     )
 }
 
+/**
+ * Production constructor with the exact fixed-Temporal input and display
+ * extents.  V1 remains the validation/lifecycle ABI so its historical tests
+ * do not accidentally become a user-facing presenter.
+ */
+@_cdecl("metallum_frame_interpolation_create_v2")
+public func metallum_frame_interpolation_create_v2(
+    _ device: MTLDevice?,
+    _ layer: CAMetalLayer?,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ displayWidth: Int32,
+    _ displayHeight: Int32,
+    _ pixelFormatRaw: UInt64,
+    _ rendererGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let device,
+              let layer,
+              inputWidth > 0,
+              inputHeight > 0,
+              displayWidth > 0,
+              displayHeight > 0,
+              let pixelFormat = MTLPixelFormat(rawValue: UInt(pixelFormatRaw)),
+              let key = MetallumFrameInterpolationCoordinator.Key(
+                device: device,
+                layer: layer,
+                inputWidth: Int(inputWidth),
+                inputHeight: Int(inputHeight),
+                width: Int(displayWidth),
+                height: Int(displayHeight),
+                pixelFormat: pixelFormat,
+                rendererGeneration: rendererGeneration
+              ),
+              let coordinator = MetallumFrameInterpolationCoordinator(
+                key: key,
+                device: device,
+                layer: layer
+              ) else {
+            return nil
+        }
+        return Unmanaged.passRetained(coordinator).toOpaque()
+    }
+}
+
 @_cdecl("metallum_frame_interpolation_prepare_v1")
 public func metallum_frame_interpolation_prepare_v1(
     _ rawContext: UnsafeMutableRawPointer?,
@@ -1398,6 +1968,54 @@ public func metallum_frame_interpolation_prepare_v1(
     return coordinator.prepare(
         commandBuffer: commandBuffer,
         rendererGeneration: rendererGeneration,
+        outTicket: outTicket
+    ).rawValue
+}
+
+/** Typed Stage-9 production ticket preparation; no CPU readback or wait. */
+@_cdecl("metallum_frame_interpolation_prepare_v2")
+public func metallum_frame_interpolation_prepare_v2(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ rendererGeneration: UInt64,
+    _ sourceTexture: MTLTexture?,
+    _ sceneTexture: MTLTexture?,
+    _ sceneDepthTexture: MTLTexture?,
+    _ semanticTexture: MTLTexture?,
+    _ uiTexture: MTLTexture?,
+    _ globalFence: MTLFence?,
+    _ spatialHdrPrecomposed: Int32,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ materialGenerationActive: Int32,
+    _ diagnosticPattern: Int32,
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float,
+    _ outTicket: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard let coordinator = coordinatorFromRawPointer(rawContext),
+          let commandBuffer,
+          let sourceTexture else {
+        return MetallumFrameInterpolationCoordinator.TicketStatus.bypassInputContract.rawValue
+    }
+    return coordinator.prepareProduction(
+        commandBuffer: commandBuffer,
+        rendererGeneration: rendererGeneration,
+        sourceTexture: sourceTexture,
+        sceneTexture: sceneTexture,
+        sceneDepthTexture: sceneDepthTexture,
+        semanticTexture: semanticTexture,
+        uiTexture: uiTexture,
+        globalFence: globalFence,
+        spatialHdrPrecomposed: spatialHdrPrecomposed,
+        outputMode: outputMode,
+        sourceEncoding: sourceEncoding,
+        materialGenerationActive: materialGenerationActive,
+        diagnosticPattern: diagnosticPattern,
+        currentHeadroom: currentHeadroom,
+        hdrStrength: hdrStrength,
+        bloomStrength: bloomStrength,
         outTicket: outTicket
     ).rawValue
 }
@@ -1831,6 +2449,78 @@ public func metallum_frame_interpolation_hdr_ui_stress_stage8(_ device: MTLDevic
                 generation: UInt64(108 + profile.offset)
             )
             guard status == 1 else { return status - Int32(profile.offset * 10) }
+        }
+        return 1
+    }
+}
+
+/**
+ * Stage-9 bridge regression: verifies the production v2 descriptor preserves
+ * its fixed input extent and that an incomplete world/UI hand-off is a clean
+ * real-frame bypass with no ticket or drawable acquisition.  Full visual
+ * cadence remains a live-game acceptance gate because CAMetalDrawable cannot
+ * be deterministically supplied by a headless validation layer.
+ */
+@_cdecl("metallum_frame_interpolation_contract_stress_stage9")
+public func metallum_frame_interpolation_contract_stress_stage9(_ device: MTLDevice) -> Int32 {
+    guard #available(macOS 26.0, *),
+          MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
+        return 2
+    }
+    return autoreleasepool {
+        let layer = CAMetalLayer()
+        layer.device = device
+        guard let rawCoordinator = metallum_frame_interpolation_create_v2(
+            device,
+            layer,
+            32,
+            24,
+            64,
+            48,
+            UInt64(MTLPixelFormat.rgba16Float.rawValue),
+            211
+        ), let coordinator = coordinatorFromRawPointer(rawCoordinator),
+              coordinator.key.inputWidth == 32,
+              coordinator.key.inputHeight == 24,
+              coordinator.key.width == 64,
+              coordinator.key.height == 48,
+              let queue = device.makeCommandQueue(),
+              let commandBuffer = queue.makeCommandBuffer(),
+              let source = device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba16Float,
+                width: 32,
+                height: 24,
+                mipmapped: false
+              )) else {
+            return -1
+        }
+        defer {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+        }
+        var ticket: UInt64 = 9
+        let status = metallum_frame_interpolation_prepare_v2(
+            rawCoordinator,
+            commandBuffer,
+            211,
+            source,
+            nil,
+            nil,
+            nil,
+            nil,
+            nil,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            1.0,
+            0.22,
+            &ticket
+        )
+        guard status == MetallumFrameInterpolationCoordinator.TicketStatus.bypassNoUi.rawValue,
+              ticket == 0 else {
+            return -2
         }
         return 1
     }

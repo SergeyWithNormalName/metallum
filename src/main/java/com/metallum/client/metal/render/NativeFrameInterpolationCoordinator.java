@@ -22,17 +22,27 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
     static Optional<NativeFrameInterpolationCoordinator> create(
             final MemorySegment device,
             final MemorySegment layer,
-            final int width,
-            final int height,
+            final int renderWidth,
+            final int renderHeight,
+            final int displayWidth,
+            final int displayHeight,
             final MTLPixelFormat pixelFormat,
             final long rendererGeneration
     ) {
         Objects.requireNonNull(pixelFormat, "pixelFormat");
-        if (width < 0 || height < 0 || rendererGeneration < 0L) {
+        if (renderWidth <= 0 || renderHeight <= 0 || displayWidth <= 0 || displayHeight <= 0
+                || rendererGeneration < 0L) {
             return Optional.empty();
         }
-        MemorySegment context = MetalNativeBridge.metallum_frame_interpolation_create_v1(
-                device, layer, width, height, pixelFormat.value, rendererGeneration
+        MemorySegment context = MetalNativeBridge.metallum_frame_interpolation_create_v2(
+                device,
+                layer,
+                renderWidth,
+                renderHeight,
+                displayWidth,
+                displayHeight,
+                pixelFormat.value,
+                rendererGeneration
         );
         return MetalNativeBridge.isNullHandle(context)
                 ? Optional.empty()
@@ -53,6 +63,44 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
             MemorySegment outTicket = arena.allocate(ValueLayout.JAVA_LONG);
             int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v1(
                     this.context, commandBuffer, rendererGeneration, outTicket
+            );
+            return new FrameInterpolationCommitBoundary.Preparation(
+                    decodeStatus(rawStatus), outTicket.get(ValueLayout.JAVA_LONG, 0L)
+            );
+        }
+    }
+
+    @Override
+    public synchronized FrameInterpolationCommitBoundary.Preparation prepare(
+            final FrameInterpolationCommitBoundary.PreparationInput input
+    ) {
+        Objects.requireNonNull(input, "input");
+        if (MetalNativeBridge.isNullHandle(this.context)) {
+            return FrameInterpolationCommitBoundary.Preparation.bypass(
+                    FrameInterpolationCommitBoundary.Status.BYPASS_DISABLED
+            );
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment outTicket = arena.allocate(ValueLayout.JAVA_LONG);
+            int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v2(
+                    this.context,
+                    input.commandBuffer(),
+                    input.rendererGeneration(),
+                    input.sourceTexture(),
+                    input.sceneTexture(),
+                    input.sceneDepthTexture(),
+                    input.semanticTexture(),
+                    input.uiTexture(),
+                    input.globalFence(),
+                    input.spatialHdrPrecomposed() ? 1 : 0,
+                    input.outputMode(),
+                    input.sourceEncoding(),
+                    input.materialGenerationActive() ? 1 : 0,
+                    input.diagnosticPattern() ? 1 : 0,
+                    input.currentHeadroom(),
+                    input.hdrStrength(),
+                    input.bloomStrength(),
+                    outTicket
             );
             return new FrameInterpolationCommitBoundary.Preparation(
                     decodeStatus(rawStatus), outTicket.get(ValueLayout.JAVA_LONG, 0L)

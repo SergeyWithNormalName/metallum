@@ -60,6 +60,7 @@ import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStatePacketRing;
 import com.metallum.client.renderer.temporal.FrameStateTracker;
+import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.metallum.client.renderer.temporal.TemporalDiagnostics;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -116,6 +117,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             boolean spatialActive,
             boolean temporalActive,
             boolean temporalStandby,
+            boolean frameInterpolationActive,
             long materialCoverageEpoch,
             long advancedAdmissionEpoch
     ) {
@@ -163,7 +165,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             LightingModel lightingModel,
             DisplayOutputMode outputMode,
             boolean spatialActive,
-            boolean temporalActive
+            boolean temporalActive,
+            boolean frameInterpolationActive
     ) {
         RendererAdmissionLogState {
             rejectionReasons = Set.copyOf(rejectionReasons);
@@ -245,6 +248,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private RendererAdmissionLogState loggedRendererAdmission;
     private boolean frameInterpolationAdmissionLogged;
+    @Nullable
+    private NativeFrameInterpolationCoordinator frameInterpolationCoordinator;
     private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
     private final EntityVelocityPacketRing entityVelocityPackets = new EntityVelocityPacketRing();
     private final FrameStateTracker frameStateTracker = new FrameStateTracker();
@@ -650,6 +655,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         SodiumLightSidecar.releaseAll();
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
+        this.replaceFrameInterpolationCoordinator(null);
         if (this.advancedLightingResources != null) {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
@@ -752,6 +758,45 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     void waitForSubmittedGpuWork() {
         this.commandEncoder.waitForSubmittedGpuWork();
+    }
+
+    /**
+     * Changes drawable ownership only after the prior generation has drained.
+     * Generation changes are rare (preset, resize, reload), so this bounded
+     * wait is intentionally outside the frame loop.  A coordinator is never
+     * destroyed while a generated/real presentation still retains its ring.
+     */
+    private void replaceFrameInterpolationCoordinator(
+            @Nullable final NativeFrameInterpolationCoordinator next
+    ) {
+        NativeFrameInterpolationCoordinator previous = this.frameInterpolationCoordinator;
+        if (previous == next) {
+            return;
+        }
+        if (previous != null) {
+            this.commandEncoder.installFrameInterpolationBridge(null);
+            this.waitForSubmittedGpuWork();
+            FrameInterpolationCommitBoundary.Status drained = previous.drain(1_000_000_000L);
+            if (drained != FrameInterpolationCommitBoundary.Status.PREPARED
+                    && drained != FrameInterpolationCommitBoundary.Status.BYPASS_DISABLED) {
+                if (next != null) {
+                    try {
+                        next.close();
+                    } catch (RuntimeException ignored) {
+                        // The next workspace was never installed; preserve the
+                        // old owner and its resources for a later safe retry.
+                    }
+                }
+                this.commandEncoder.installFrameInterpolationBridge(previous);
+                throw new IllegalStateException(
+                        "Frame Interpolation generation drain failed: " + drained
+                );
+            }
+            previous.close();
+            this.frameInterpolationCoordinator = null;
+        }
+        this.frameInterpolationCoordinator = next;
+        this.commandEncoder.installFrameInterpolationBridge(next);
     }
 
     void waitForPreviouslySubmittedGpuWork() {
@@ -877,6 +922,25 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (temporalActive) {
             spatialActive = false;
         }
+        FrameInterpolationPolicy.UpstreamMode interpolationUpstream = temporalActive
+                ? temporalMode.isFixedPreset()
+                    ? FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL
+                    : FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL
+                : spatialActive
+                    ? FrameInterpolationPolicy.UpstreamMode.SPATIAL
+                    : FrameInterpolationPolicy.UpstreamMode.NATIVE;
+        double nominalRealFramesPerSecond = Math.max(
+                this.rendererCapabilities.displayCapabilities().maximumFramesPerSecond() / 2.0,
+                30.0
+        );
+        FrameInterpolationPolicy.Evaluation interpolationPolicy = FrameInterpolationPolicy.evaluate(
+                this.rendererConfig,
+                this.rendererCapabilities,
+                interpolationUpstream,
+                nominalRealFramesPerSecond,
+                Set.of()
+        );
+        boolean frameInterpolationCandidate = interpolationPolicy.effectiveAdmitted();
         HdrOutputMode storageCompatibleOutput = MetallumMaterialState.resolveCompatibleOutput(
                 this.hdrOutputMode
         );
@@ -902,6 +966,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && currentKey.spatialActive() == spatialActive
                 && currentKey.temporalActive() == temporalActive
                 && currentKey.temporalStandby() == temporalStandby
+                && currentKey.frameInterpolationActive() == frameInterpolationCandidate
+                && (frameInterpolationCandidate == (this.frameInterpolationCoordinator != null))
                 && currentKey.materialCoverageEpoch() == materialCoverageEpoch
                 && currentKey.advancedAdmissionEpoch() == advancedAdmission.epoch()) {
             return;
@@ -911,7 +977,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                 ? LightingModel.ADVANCED
                 : LightingModel.VANILLA;
         RendererFeatureMask activeFeatures = temporalActive
-                ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_UPSCALING)
+                ? RendererFeatureMask.of(
+                        RendererFeatureMask.TEMPORAL_UPSCALING,
+                        frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L
+                )
                 : spatialActive
                     ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
                     : temporalStandby
@@ -1242,6 +1311,68 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
 
         long nextGeneration = Math.addExact(this.rendererGenerationId, 1L);
+        NativeFrameInterpolationCoordinator nextFrameInterpolationCoordinator = null;
+        if (activeFeatures.contains(RendererFeatureMask.FRAME_INTERPOLATION)) {
+            // Both coordinators configure CAMetalLayer.maximumDrawableCount.
+            // Drain and release the old owner before constructing the next
+            // immutable extent/profile workspace; otherwise an old release
+            // could restore the layer pool underneath the new owner.
+            if (this.frameInterpolationCoordinator != null) {
+                this.replaceFrameInterpolationCoordinator(null);
+            }
+            MTLPixelFormat interpolationPixelFormat = temporalSourcePixelFormat(manifest) == (int) MTLPixelFormat.RGBA16Float.value
+                    ? MTLPixelFormat.RGBA16Float
+                    : MTLPixelFormat.RGBA8Unorm;
+            try {
+                nextFrameInterpolationCoordinator = NativeFrameInterpolationCoordinator.create(
+                        this.metalDeviceHandle,
+                        this.metalLayer,
+                        dimensions.renderWidth(),
+                        dimensions.renderHeight(),
+                        dimensions.displayWidth(),
+                        dimensions.displayHeight(),
+                        interpolationPixelFormat,
+                        nextGeneration
+                ).orElse(null);
+            } catch (RuntimeException exception) {
+                Metallum.LOGGER.warn(
+                        "Frame Interpolation workspace preflight failed; preserving the single-real-frame presenter",
+                        exception
+                );
+            }
+            if (nextFrameInterpolationCoordinator == null) {
+                frameInterpolationCandidate = false;
+                activeFeatures = activeFeatures.without(RendererFeatureMask.FRAME_INTERPOLATION);
+                plan = RendererGenerationPlanner.plan(
+                        this.requestedRenderContract,
+                        requestedLighting,
+                        requestedOutput,
+                        MetalExecutorKind.METAL3,
+                        this.rendererConfig.lightingPreset(),
+                        activeFeatures,
+                        requestedOutput,
+                        generationCapabilities,
+                        new RendererGenerationPlanner.Extent(
+                                dimensions.renderWidth(), dimensions.renderHeight()),
+                        new RendererGenerationPlanner.Extent(
+                                dimensions.displayWidth(), dimensions.displayHeight()),
+                        this.temporalDiagnosticsActive,
+                        materialSceneStorage,
+                        HdrSemanticState.isRequested()
+                );
+                resolved = plan.resolution().config();
+                manifest = plan.manifest();
+                resourceBytes = resourceBytes(manifest);
+                plannedLightingGeneration = this.lightingGenerationId;
+                if (previousGeneration == null
+                        || previousGeneration.lightingModel() != resolved.lightingModel()) {
+                    plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
+                }
+                Metallum.LOGGER.warn(
+                        "Frame Interpolation requested but native fixed-Temporal workspace is unavailable; using real frames"
+                );
+            }
+        }
         long nextRenderContractGeneration = this.renderContractGenerationId;
         if (previousGeneration == null
                 || previousGeneration.renderContractMode() != resolved.renderContractMode()) {
@@ -1281,6 +1412,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.lightingGenerationId = nextLightingGeneration;
         this.outputGenerationId = nextOutputGeneration;
         this.activeRendererGeneration = resolved;
+        this.replaceFrameInterpolationCoordinator(nextFrameInterpolationCoordinator);
         MetallumMaterialState.publishGeneration(
                 resolved.renderContractMode() == RenderContractMode.METALLUM
         );
@@ -1336,6 +1468,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 spatialActive,
                 temporalActive,
                 temporalStandby,
+                nextFrameInterpolationCoordinator != null,
                 materialCoverageEpoch,
                 committedAdvancedAdmissionEpoch
         );
@@ -1346,34 +1479,46 @@ public final class MetalDevice implements GpuDeviceBackend {
                 resolved.lightingModel(),
                 resolved.outputMode(),
                 spatialActive,
-                temporalActive
+                temporalActive,
+                nextFrameInterpolationCoordinator != null
         );
         if (!admissionLogState.equals(this.loggedRendererAdmission)) {
             this.loggedRendererAdmission = admissionLogState;
             if (plan.resolution().fellBack()) {
                 Metallum.LOGGER.warn(
-                        "Renderer generation request resolved with fallback {}: contract={}, lighting={}, output={}, upscale={}, interpolation=OFF",
+                        "Renderer generation request resolved with fallback {}: contract={}, lighting={}, output={}, upscale={}, interpolation={}",
                         plan.resolution().rejectionReasons(),
                         resolved.renderContractMode(),
                         resolved.lightingModel(),
                         resolved.outputMode(),
-                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE"
+                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE",
+                        nextFrameInterpolationCoordinator == null ? "OFF" : "FIXED_TEMPORAL"
                 );
             } else {
                 Metallum.LOGGER.info(
-                        "Renderer generation admitted: contract={}, lighting={}, output={}, upscale={}, interpolation=OFF",
+                        "Renderer generation admitted: contract={}, lighting={}, output={}, upscale={}, interpolation={}",
                         resolved.renderContractMode(),
                         resolved.lightingModel(),
                         resolved.outputMode(),
-                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE"
+                        temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE",
+                        nextFrameInterpolationCoordinator == null ? "OFF" : "FIXED_TEMPORAL"
                 );
             }
         }
         if (this.rendererConfig.frameInterpolation() && !this.frameInterpolationAdmissionLogged) {
             this.frameInterpolationAdmissionLogged = true;
-            Metallum.LOGGER.warn(
-                    "Frame Interpolation was requested but remains disabled until its production admission stage"
-            );
+            if (nextFrameInterpolationCoordinator == null) {
+                Metallum.LOGGER.warn(
+                        "Frame Interpolation request is inactive: policy={} / effective={}; real-frame fallback remains active",
+                        interpolationPolicy.eligibilityReason(),
+                        interpolationPolicy.effectiveReason()
+                );
+            } else {
+                Metallum.LOGGER.info(
+                        "Frame Interpolation admitted for fixed Temporal generation {}; generated frames remain disposable",
+                        nextGeneration
+                );
+            }
         }
     }
 

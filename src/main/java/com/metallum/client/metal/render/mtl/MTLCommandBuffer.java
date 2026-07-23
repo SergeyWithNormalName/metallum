@@ -279,6 +279,19 @@ public final class MTLCommandBuffer {
         return boundary.prepare(handle(), rendererGeneration);
     }
 
+    /** Prepares a production ticket with the full world/UI hand-off. */
+    public FrameInterpolationCommitBoundary.Status prepareFrameInterpolation(
+            final FrameInterpolationCommitBoundary boundary,
+            final FrameInterpolationCommitBoundary.PreparationInput input
+    ) {
+        if (!handle().equals(input.commandBuffer())) {
+            throw new IllegalArgumentException(
+                    "Frame-interpolation input belongs to a different command buffer"
+            );
+        }
+        return boundary.prepare(input);
+    }
+
     /**
      * Commits renderer work before publishing its native interpolation ticket.
      * A commit exception cancels the ticket inside the boundary.
@@ -406,7 +419,8 @@ public final class MTLCommandBuffer {
         handle = MemorySegment.NULL;
     }
 
-    MemorySegment handle() {
+    /** Raw native command-buffer handle for typed bridge inputs. */
+    public MemorySegment handle() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             throw new IllegalStateException("MTLCommandBuffer is closed");
         }

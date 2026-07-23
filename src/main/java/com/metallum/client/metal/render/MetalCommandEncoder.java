@@ -76,9 +76,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MetalGpuTimingStage gpuTimingStage = MetalGpuTimingStage.NONE;
     private long cpuRenderSubmissionStartNanos;
     private final PendingUiSeedState<PendingUiSeed> pendingUiSeeds = new PendingUiSeedState<>();
-    // Production admission is still OFF through stage 5.  Keeping the boundary
-    // in the render encoder makes the eventual hand-off explicit without
-    // allowing a coordinator to publish before this command buffer commits.
+    // The boundary is installed only after a generation owns a fully-created
+    // native workspace.  It never lets a native presenter run before this
+    // renderer command buffer has committed.
     private final FrameInterpolationCommitBoundary frameInterpolationCommitBoundary = new FrameInterpolationCommitBoundary();
 
     MetalCommandEncoder(final MetalDevice device) {
@@ -445,13 +445,33 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return MTLCommandBuffer.PresentResult.STALE_GENERATION;
         }
         MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs(source);
-        // The stage-5 boundary is intentionally a disabled BYPASS until native
-        // descriptor/resource admission exists.  A future stale/native bypass
-        // falls through to this established single-real-frame present path.
-        commandBuffer.prepareFrameInterpolation(
+        FrameInterpolationCommitBoundary.Status interpolation = commandBuffer.prepareFrameInterpolation(
                 this.frameInterpolationCommitBoundary,
-                this.commandBufferRendererGenerationId
+                new FrameInterpolationCommitBoundary.PreparationInput(
+                        commandBuffer.handle(),
+                        this.commandBufferRendererGenerationId,
+                        source.nativeHandle(),
+                        sceneInputs.scene(),
+                        sceneInputs.depth(),
+                        sceneInputs.semantic(),
+                        sceneInputs.ui(),
+                        fence,
+                        sceneInputs.spatialHdrPrecomposed(),
+                        outputMode.nativeValue(),
+                        this.device.capturedFrameSourceEncoding(source),
+                        this.device.isMaterialGenerationActive(),
+                        hdrConfig.diagnosticPattern(),
+                        Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
+                        hdrConfig.hdrStrength(),
+                        hdrConfig.bloomStrength()
+                )
         );
+        // A prepared ticket owns both generated and real presentation.  Do
+        // not acquire a Java-side drawable here: that would create a second
+        // presenter and break the coordinator's ordered fail-open schedule.
+        if (interpolation.prepared()) {
+            return MTLCommandBuffer.PresentResult.PRESENTED;
+        }
         return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
                 source.nativeHandle(),
@@ -468,6 +488,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
                 hdrConfig.hdrStrength(),
                 hdrConfig.bloomStrength()
+        );
+    }
+
+    /** Installs or removes a fully preflighted generation-local native bridge. */
+    void installFrameInterpolationBridge(@Nullable final NativeFrameInterpolationCoordinator coordinator) {
+        this.frameInterpolationCommitBoundary.replaceBridge(
+                coordinator == null ? FrameInterpolationCommitBoundary.disabledBridge() : coordinator
         );
     }
 

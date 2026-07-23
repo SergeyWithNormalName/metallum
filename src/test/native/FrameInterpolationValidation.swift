@@ -81,6 +81,7 @@ private typealias Stage5TicketStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage6EncodeStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage7PacingStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage8HdrUiStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage9ContractStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -594,6 +595,22 @@ private enum FrameInterpolationValidation {
             exit(1)
         }
         logMsg("[PASS] Stage 8: shared UI composite, retained UI lifetime, and headroom-reset safety")
+
+        logMsg("[INFO] Testing Stage 9: production v2 typed bridge and fail-open hand-off")
+        guard let stage9ContractSymbol = dlsym(handle, "metallum_frame_interpolation_contract_stress_stage9") else {
+            logMsg("[FAIL] Stage 9: production bridge contract symbol is missing")
+            exit(1)
+        }
+        let stage9Contract = unsafeBitCast(stage9ContractSymbol, to: Stage9ContractStressFn.self)
+        switch stage9Contract(device) {
+        case 1:
+            logMsg("[PASS] Stage 9: exact fixed input extent and incomplete-input real-frame bypass")
+        case 2:
+            logMsg("[SKIP] Stage 9: MetalFX Frame Interpolator is unavailable on this device")
+        default:
+            logMsg("[FAIL] Stage 9: production bridge contract stress failed")
+            exit(1)
+        }
 
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {

@@ -562,6 +562,40 @@ public final class RendererArchitectureTests {
                         && legacySdr.manifest().hdrPipelineContract()
                         == RendererGenerationManifest.HdrPipelineContract.NONE,
                 "Legacy + SDR storage/output contract changed");
+
+        MetalCapabilities interpolationCapabilities = MetalCapabilities.fromNativeSnapshot(
+                MetalCapabilities.NATIVE_METAL3_BASE
+                        | MetalCapabilities.NATIVE_METALFX_TEMPORAL
+                        | MetalCapabilities.NATIVE_METALFX_FRAME_INTERPOLATION
+                        | MetalCapabilities.NATIVE_REQUIRED_TEXTURE_FORMATS_USAGES
+                        | MetalCapabilities.NATIVE_TEMPORAL_PROFILE
+                        | MetalCapabilities.NATIVE_FRAME_INTERPOLATION_PROFILE
+                        | MetalCapabilities.NATIVE_DISPLAY_REFRESH
+                        | (120L << MetalCapabilities.NATIVE_REFRESH_SHIFT),
+                new EdrCapabilities(1.5f, 1.5f)
+        );
+        RendererGenerationPlanner.Plan fixedTemporalInterpolation = RendererGenerationPlanner.plan(
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.of(
+                        RendererFeatureMask.TEMPORAL_UPSCALING,
+                        RendererFeatureMask.FRAME_INTERPOLATION
+                ),
+                DisplayOutputMode.HDR,
+                interpolationCapabilities,
+                render,
+                display
+        );
+        require(fixedTemporalInterpolation.resolution().config().featureMask().contains(
+                        RendererFeatureMask.FRAME_INTERPOLATION)
+                        && fixedTemporalInterpolation.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.INTERPOLATION_ONLY) > 0L
+                        && fixedTemporalInterpolation.manifest().passCount(
+                        RendererGenerationManifest.Domain.INTERPOLATION_ONLY) == 4L,
+                "fixed-Temporal interpolation generation lost its declared workspace");
         require(resourceNames(legacySdr.manifest()).equals(Set.of(
                         "main_color", "main_depth", "drawable"
                 )) && passNames(legacySdr.manifest()).equals(Set.of(

@@ -1239,6 +1239,33 @@ Gate:
 - toggle on/off, preset switch и renderer reload безопасны;
 - resource bytes и feature bit соответствуют реальному workspace.
 
+#### Реализация Stage 9 (2026-07-24)
+
+Выполнен первый production vertical slice только для **fixed Temporal + FI**:
+
+- Sodium toggle `Frame Interpolation (Experimental)` сохраняет существующий
+  `frameInterpolation` setting и требует restart;
+- admission разрешает только supported macOS 26+ fixed-Temporal profile с
+  successful native workspace preflight, известной частотой дисплея не ниже
+  60 Гц и реальной cadence внутри окна half-refresh;
+- generation key, feature bit, manifest и `FrameState.ResourceBytes` содержат
+  FI только после успешного preflight; manifest объявляет 3-slot world,
+  depth/motion, SDR-UI и composite rings;
+- v2 typed Java/Swift bridge передаёт source/scene/UI/fence только до commit.
+  Native coordinator создаёт display-ready world без UI, копирует depth/motion/
+  UI в preallocated private ring, а затем один владеет drawable/present;
+- generated member расходный, а любой input/cadence/drawable/encoder failure
+  оставляет old single-real-frame presenter; resource lifetime завершается
+  completion handlers и drain, без readback или GPU wait в frame loop;
+- native telemetry публикует accepted/generated/real/drop/backpressure counters
+  через существующий GPU JSONL report, admission/fallback логируется в Java.
+
+Automated proof: `frameInterpolationValidation` на Apple M1 Pro прошёл Stage
+4–9, включая v2 exact-extent и incomplete-input fail-open contract; unit tests
+и `clean check` также прошли. Live visual/HUD/long-session matrix из разделов
+14.3–14.4 остаётся обязательным ручным acceptance evidence перед снятием
+Experimental label или объявлением общей функции полностью готовой.
+
 ### Этап 10. Spatial Upscaling + Frame Interpolation
 
 Этот этап обязателен: Spatial и FI совместимы, но не могут совместно использовать Temporal scaler object.

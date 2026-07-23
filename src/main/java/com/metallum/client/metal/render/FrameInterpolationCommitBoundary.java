@@ -47,8 +47,68 @@ public final class FrameInterpolationCommitBoundary implements AutoCloseable {
         }
     }
 
+    /**
+     * Immutable render-thread hand-off for a production interpolation ticket.
+     *
+     * <p>This is deliberately a typed side channel rather than a FrameState
+     * ABI extension: the values are native object handles whose lifetime is
+     * bounded by the renderer command buffer, not serializable per-frame
+     * camera state.  A bridge may return a bypass for any incomplete input;
+     * callers then retain the established single-real-frame presentation.
+     * The native side copies every accepted input into its preallocated ring
+     * before the renderer command buffer is committed.</p>
+     */
+    public record PreparationInput(
+            MemorySegment commandBuffer,
+            long rendererGeneration,
+            MemorySegment sourceTexture,
+            MemorySegment sceneTexture,
+            MemorySegment sceneDepthTexture,
+            MemorySegment semanticTexture,
+            MemorySegment uiTexture,
+            MemorySegment globalFence,
+            boolean spatialHdrPrecomposed,
+            int outputMode,
+            int sourceEncoding,
+            boolean materialGenerationActive,
+            boolean diagnosticPattern,
+            float currentHeadroom,
+            float hdrStrength,
+            float bloomStrength
+    ) {
+        public PreparationInput {
+            Objects.requireNonNull(commandBuffer, "commandBuffer");
+            Objects.requireNonNull(sourceTexture, "sourceTexture");
+            Objects.requireNonNull(sceneTexture, "sceneTexture");
+            Objects.requireNonNull(sceneDepthTexture, "sceneDepthTexture");
+            Objects.requireNonNull(semanticTexture, "semanticTexture");
+            Objects.requireNonNull(uiTexture, "uiTexture");
+            Objects.requireNonNull(globalFence, "globalFence");
+            if (rendererGeneration < 0L) {
+                throw new IllegalArgumentException("rendererGeneration must be non-negative");
+            }
+            if (outputMode < 0 || outputMode > 2 || sourceEncoding < 0 || sourceEncoding > 2) {
+                throw new IllegalArgumentException("Invalid presentation encoding");
+            }
+            if (!Float.isFinite(currentHeadroom) || !Float.isFinite(hdrStrength)
+                    || !Float.isFinite(bloomStrength)) {
+                throw new IllegalArgumentException("Presentation parameters must be finite");
+            }
+        }
+    }
+
     public interface TicketBridge {
         Preparation prepare(MemorySegment commandBuffer, long rendererGeneration);
+
+        /**
+         * Production bridges override this to receive the exact world/UI
+         * hand-off.  The legacy overload remains for the stage-5 ticket
+         * lifecycle regression harness and for a strict disabled fallback.
+         */
+        default Preparation prepare(final PreparationInput input) {
+            Objects.requireNonNull(input, "input");
+            return prepare(input.commandBuffer(), input.rendererGeneration());
+        }
 
         Status publish(long ticket);
 
@@ -77,7 +137,7 @@ public final class FrameInterpolationCommitBoundary implements AutoCloseable {
         }
     };
 
-    private final TicketBridge bridge;
+    private volatile TicketBridge bridge;
     private long pendingTicket;
 
     public FrameInterpolationCommitBoundary() {
@@ -88,12 +148,38 @@ public final class FrameInterpolationCommitBoundary implements AutoCloseable {
         this.bridge = Objects.requireNonNull(bridge, "bridge");
     }
 
+    static TicketBridge disabledBridge() {
+        return DISABLED;
+    }
+
     public Status prepare(final MemorySegment commandBuffer, final long rendererGeneration) {
+        return prepare(new PreparationInput(
+                commandBuffer,
+                rendererGeneration,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                MemorySegment.NULL,
+                false,
+                0,
+                0,
+                false,
+                false,
+                1.0f,
+                0.0f,
+                0.0f
+        ));
+    }
+
+    public Status prepare(final PreparationInput input) {
+        Objects.requireNonNull(input, "input");
         if (this.pendingTicket != 0L) {
             throw new IllegalStateException("A frame-interpolation ticket is already pending commit");
         }
         Preparation preparation = Objects.requireNonNull(
-                this.bridge.prepare(commandBuffer, rendererGeneration), "bridge prepare result"
+                this.bridge.prepare(input), "bridge prepare result"
         );
         if (preparation.status().prepared()) {
             this.pendingTicket = preparation.ticket();
@@ -125,6 +211,14 @@ public final class FrameInterpolationCommitBoundary implements AutoCloseable {
 
     public boolean hasPendingTicket() {
         return this.pendingTicket != 0L;
+    }
+
+    /** Replaces the native owner only at a generation boundary with no ticket in flight. */
+    void replaceBridge(final TicketBridge bridge) {
+        if (this.pendingTicket != 0L) {
+            throw new IllegalStateException("Cannot replace frame-interpolation bridge with a pending ticket");
+        }
+        this.bridge = Objects.requireNonNull(bridge, "bridge");
     }
 
     @Override

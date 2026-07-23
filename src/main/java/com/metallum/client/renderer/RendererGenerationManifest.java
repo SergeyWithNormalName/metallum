@@ -158,6 +158,29 @@ public record RendererGenerationManifest(
                 pipelines, workQueues)) {
             throw new IllegalArgumentException("Advanced lighting requires an executable Advanced domain");
         }
+        boolean interpolationFeature = config.featureMask().contains(
+                RendererFeatureMask.FRAME_INTERPOLATION
+        );
+        boolean interpolationDomain = domainHasWork(
+                Domain.INTERPOLATION_ONLY, resources, passes, encoders, pipelines, workQueues
+        );
+        if (interpolationFeature) {
+            if (!config.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING)
+                    || config.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING)) {
+                throw new IllegalArgumentException(
+                        "Frame Interpolation requires the fixed Temporal upstream feature"
+                );
+            }
+            if (!interpolationDomain || resourceBytes(resources, Domain.INTERPOLATION_ONLY) <= 0L) {
+                throw new IllegalArgumentException(
+                        "Frame Interpolation requires owned interpolation resources and work"
+                );
+            }
+        } else if (interpolationDomain) {
+            throw new IllegalArgumentException(
+                    "Interpolation work must not exist without the Frame Interpolation feature"
+            );
+        }
     }
 
     public long resourceBytes(final Domain domain) {
@@ -235,6 +258,13 @@ public record RendererGenerationManifest(
                 || encoders.stream().anyMatch(encoder -> encoder.domain() == domain)
                 || pipelines.stream().anyMatch(pipeline -> pipeline.domain() == domain)
                 || workQueues.stream().anyMatch(queue -> queue.domain() == domain);
+    }
+
+    private static long resourceBytes(final List<Resource> resources, final Domain domain) {
+        return resources.stream()
+                .filter(resource -> !resource.external() && resource.domain() == domain)
+                .mapToLong(Resource::bytes)
+                .reduce(0L, Math::addExact);
     }
 
     private static String requireName(final String value) {

@@ -88,3 +88,12 @@ This document records the identified technical debt, safety hazards, and concurr
 - **Description**: The committed eight-scenario artifact records `fps: 0.0` and `gpu_p95: 0.0` for every entry; the baseline also has zero measured frames. Its light-density and cluster-overflow fields are useful diagnostics, but it cannot support a frame-time or FPS conclusion.
 - **Risk**: Optimizing against unmeasured or manually inferred numbers would accept regressions or attribute cost to the wrong renderer stage.
 - **Required completion**: Rerun the route with the built-in timestamp profiler, reject zero-value measurement fields, and publish whole-frame median/p95/tail data together with the captured JSONL evidence.
+
+---
+
+## 8. Frame Interpolation Requires Live Visual and Latency Acceptance Evidence
+- **Location**: `FrameInterpolation.md` sections 14.3–14.4; `MetallumFrameInterpolationCoordinator.swift`
+- **Priority**: **P2**
+- **Description**: The fixed-Temporal production path has automated Java/Swift/Metal validation, including typed hand-off, resource lifetime, fail-open fallback and native descriptor encoding. Automated harnesses cannot provide a deterministic game-owned `CAMetalDrawable`, moving entities, real HUD or player input latency.
+- **Risk**: A formally valid generated/real schedule could still show temporal artifacts, uneven presentation cadence or latency spikes in a real world, especially around UI, teleport, F3+A, fullscreen and display/headroom changes.
+- **Required completion**: Record the fixed built-in-display route with FI Off/On and profiler JSONL/HUD evidence; run the complete live matrix, including 30–60 minute gameplay, before removing the Experimental label or treating Spatial/Dynamic FI as enabled.

@@ -43,8 +43,10 @@ Dynamic Resolution alters the rendering target resolution based on GPU workload:
 ## 5. Frame Interpolation / Generation
 
 Generates synthetic intermediate frames on the GPU:
-- **Current Status**: MetalFX Frame Interpolation API доступен на поддерживаемых macOS 26+ системах. В Metallum присутствуют capability и pure-Java policy scaffolds, однако native coordinator, interpolator workspace и production admission ещё отсутствуют. Функция остаётся недоступной пользователю.
-- **What is Missing**: Native coordinator lifecycle, interpolator workspace allocation, dual-presentation pacing, and entity velocity buffer interception (Stage 2-12).
+- **Current Status**: есть experimental production profile **fixed Temporal + Frame Interpolation** для supported macOS 26+ devices. Sodium setting persists as `frameInterpolation`; admission additionally requires the validated native profile, successful fixed workspace creation, a known display refresh of at least 60 Hz and a real cadence inside the half-refresh window. Spatial, Native-resolution and Dynamic-Temporal FI remain disabled.
+- **Production path**: Java creates a generation-local v2 native coordinator only after descriptor/ring preflight. Before renderer-command commit it hands the coordinator the world-only final color path, current depth/motion and separate SDR UI. Swift GPU-copies those inputs into a preallocated three-slot private ring; after commit the coordinator owns drawable acquisition and ordered generated-then-real presentation. Generated frames are disposable; any missing UI/input, cadence mismatch, drawable failure, encoder failure, resize or drain failure falls back to the existing real-frame path. No CPU readback or synchronous GPU wait is used in the frame loop.
+- **Automated proof**: `frameInterpolationValidation` covers lifecycle, ticket ordering, fixed-Temporal encode, pacing policy, shared SDR UI, and the Stage-9 v2 exact-extent/fail-open bridge contract under Metal validation. `clean check` compiles the Java/Swift ABI and runs the broader regression suite.
+- **Remaining acceptance boundary**: the feature stays Experimental until the documented live visual/HUD/long-session matrix proves world/UI quality, cadence, latency and resource retirement. Spatial + FI, Native + FI, Dynamic Temporal + FI and live entity-buffer motion are separate later profiles, not implicit fallbacks.
 
 ---
 
