@@ -754,8 +754,15 @@ public final class VoxelShadowContractTests {
                 lightToReceiver, receiverNormal, sample.direction()
         );
         double receiverDistance = length(lightToReceiver);
+        double formerAdaptiveBias = Math.max(
+                0.08,
+                0.28 / Math.max(Math.abs(dot(receiverNormal, sample.direction())), 0.15)
+        );
         require(receiverDistance > cacheFloorEntryDistance + 0.08,
                 "receiver-plane regression no longer reproduces the former fixed-bias acne");
+        require(cacheFloorEntryDistance - 1.0 + formerAdaptiveBias
+                        >= cacheFloorEntryDistance,
+                "grazing-angle fixture no longer demonstrates the one-block leak regression");
         require(receiverSurfaceHit(
                         cacheFloorEntryDistance,
                         lightToReceiver,

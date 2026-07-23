@@ -972,7 +972,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                             || hitVisibility < 0.0 || hitVisibility > 1.0) {
                         return 0.0;
                     }
-                    float selfHitBias = max(0.08, 0.28 / max(abs(planeDenominator), 0.15));
+                    // Keep this smaller than a voxel/block thickness. Scaling it by the
+                    // grazing-angle denominator can exceed one block and classify a real
+                    // nearby wall as the receiver surface, leaking light through geometry.
+                    const float selfHitBias = 0.08;
                     if (isinf(hitDistance)
                             || receiverDistance <= hitDistance + selfHitBias) {
                         return visibility;

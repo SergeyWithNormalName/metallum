@@ -1165,6 +1165,10 @@ Stress cases:
 19. Optional Metal 4 acceleration не меняет lighting/HDR semantics.
 20. Capability checks и graph specialization не выполняются в draw/light/voxel/shader hot loops.
 21. Dual-executor dispatch не принимается при измеримой регрессии CPU p95 около `0.1 ms` и выше.
+22. L6 cached-shadow self-hit tolerance не масштабируется как `1/abs(N·L)`: на
+    скользящих углах такой bias превышает толщину блока и создаёт утечки через
+    близкую геометрию. Production bound — `0.08` блока; receiver-plane correction
+    проверяется отдельно от допуска окклюдера.
 
 ---
 

@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "1fab5e84db3100e4b547f6a0b3ca43e4a39a3f37ab49ca27e4276d6e4960009d",
+            "sodium-solid-fsh", "38202ae10c7633ffd7205b7f9bde18aa01a7bb93107297884791f37331865782",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "9c53b629bb1c8062488b25f572e7b46e6e01f8f77a06120918c458da84a73210",
+            "sodium-cutout-fsh", "863a2beee24c047001c41b51be3ed540cb88aee4c64923d0dcd8a2260a9879cc",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "88799ecb3e23ff6fffc89ba65a91638978e13344f70bd244bccea45fd004767a",
+            "minecraft-entity-fsh", "8f49f8e07c24776ef7761768edff3f985b6ea49327f538c5294f351dd4ff7bb8",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "97d72008b06103dec6700d98ec8125634715bc5e7e21d055ef8a6a4f0a6b0120"
+            "minecraft-end-portal-fsh", "f446f0144379180e1750adc274a461b6aedb120b046718d1c802ad197e71eb25"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -622,6 +622,8 @@ public final class AdvancedDirectLightingShaderTests {
                         "int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;")
                         && !sodiumFragment.contains("metallumVoxelVisibilityCache.hits.length()")
                         && !sodiumFragment.contains("metallumVoxelShadowRefBuffer.refs.length()")
+                        && sodiumFragment.contains("const float selfHitBias = 0.08;")
+                        && !sodiumFragment.contains("0.28 / max(abs(planeDenominator)")
                         && sodiumFragment.contains(
                         "receiverDistance <= hitDistance + selfHitBias")
                         && sodiumFragment.contains(
