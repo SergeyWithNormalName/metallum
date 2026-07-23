@@ -100,3 +100,15 @@ If MetalFX Spatial Upscaling is enabled, the graph is structurally different ([N
 3. **`metalfx_spatial`**: Invokes the `MTLFXSpatialScaler` to upscale the composited world to display resolution.
 4. **`ui_render_with_seed`**: Draws the GUI directly on top of the upscaled target at display resolution.
 5. **`present`**: Combines EDR upscaled world and SDR UI onto the drawable swapchain.
+
+### 4.3. Temporal Scaling and Dynamic Resolution
+
+Temporal and Spatial are exclusive feature generations. Dynamic Temporal is a two-state policy rather than a Spatial ladder: it presents either a native 100% frame or a 50% MetalFX Temporal frame. The Temporal frame has a distinct typed-input path:
+
+1. **`world_render`** runs at the active render extent.
+2. **`temporal_inputs`** derives camera/static-depth motion and reactive data after world depth is complete; optional entity replay can add packet-backed motion.
+3. **Dynamic only**: GPU blits pack the active low-resolution color and depth rectangles into display-sized private inputs. The MetalFX descriptor and its physical textures stay fixed while `inputContentWidth/Height` describe the active rectangle.
+4. **`metalfx_temporal`** resolves the display-sized history-aware output. It receives jitter, depth, motion, reactive mask, reset bit and the active input-content dimensions every frame.
+5. **`ui_render_with_seed`** and **`present`** consume the display-sized Temporal output; no Spatial resolve runs after it.
+
+History resets on first frame, display resize, internal render-scale change, renderer-generation change, world/dimension change, teleport, camera/projection change, output change and shader reload. The feature-generation switch still causes Minecraft world-target resize and can allocate/release resources, so it is safe but not guaranteed hitch-free. See [TEMPORAL_UPSCALING_DRS.md](TEMPORAL_UPSCALING_DRS.md) for the current policy, resource lifecycle, known pacing boundary and validation scope.
