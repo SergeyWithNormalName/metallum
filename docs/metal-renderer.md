@@ -77,3 +77,24 @@ To prevent the CPU from running too far ahead of the GPU (which causes input lag
    ```
 3. **Throttling Wait**: Before starting a new frame, the Java render thread waits on the semaphore using `metallum_semaphore_wait`. If the GPU has more than 2 frames in-flight, the CPU blocks until the oldest frame completes.
 4. **Detailed Telemetry**: The time spent waiting for the GPU semaphore is tracked in CPU wait telemetry ([MetallumNative.swift:L9727](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/src/main/native/MetallumNative.swift#L9727)) and output to timing JSON reports.
+
+---
+
+## 7. ProMotion and Presentation Scheduling
+
+`MetallumExtendedProMotionScheduler` is the shared presentation policy for the
+ordinary real-only path and MetalFX Frame Interpolation. It reads the active
+`NSScreen` refresh interval range at runtime, uses adaptive
+`present(afterMinimumDuration:)` only for fullscreen variable-refresh output,
+and keeps the established plain present path for fixed/windowed displays or
+VSync Off.
+
+With Frame Interpolation, one user-interactive native worker submits generated
+then real presentation work. A preallocated absolute Mach timer protects the
+midpoint, late generated frames are disposable, and real frames remain the
+fail-open member. Actual display cadence is measured from
+`MTLDrawable.presentedTime`, not command-buffer completion.
+
+The design, Apple API audit, telemetry fields, fallbacks and live validation
+boundary are documented in
+[Extended ProMotion Frame Scheduler](promotion-frame-scheduler.md).

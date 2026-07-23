@@ -542,10 +542,11 @@ Render thread не должен бесконечно ждать present system. 
 
 ### 6.6. Pacing
 
-Создать два native thread:
-
-- `MetallumPresentThread` — user-interactive priority; encode/copy/present;
-- `MetallumPacingThread` — user-interactive priority; precise midpoint timing через `kqueue` + `kevent64`, `NOTE_MACHTIME | NOTE_ABSOLUTE`, затем `MTLSharedEvent`.
+Production implementation использует один generation-local native presentation
+worker с `userInteractive` QoS. Render/interpolation encode остаётся на своих
+Metal queues, а worker последовательно владеет drawable composite/present и
+precise midpoint timing. Такое разделение оставляет один authoritative owner
+порядка generated→real и не добавляет второй ожидающий thread.
 
 Алгоритм ориентируется на Apple PresentThread helper:
 
@@ -556,7 +557,7 @@ Render thread не должен бесконечно ждать present system. 
 - никогда не использует `Thread.sleep`/`usleep` для frame pacing;
 - не удерживает mutex во время `nextDrawable`, Metal encode или commit;
 - все condition waits имеют shutdown predicate;
-- destructor/shutdown будит оба thread и `join`-ит их.
+- destructor/shutdown будит worker и bounded `join`-ит его.
 
 `CAMetalLayer.maximumDrawableCount = 3` устанавливается при активной dual presentation после проверки доступности и возвращается к безопасной конфигурации при teardown, если слой принадлежит Metallum. `nextDrawable` запрашивается как можно позже; strong drawable reference освобождается после commit present CB.
 
@@ -580,7 +581,25 @@ upperBound    = desiredRealHz * 1.05
 admit only after a stable-window EWMA lies in [lowerBound, upperBound]
 ```
 
-Для основного 120 Гц профиля целевой режим — около 60 real + 60 generated. Если игра уже рендерит 90 real FPS на 120 Гц, 2x потребовал бы 180 presentations/с; такой кадр идёт real-only BYPASS, а не вытесняет/пропускает произвольные real frames. Автоматический render cap до половины refresh не добавлять скрыто: это отдельная user-visible policy с собственным latency proof. На 60 Гц допустим 30 + 30 только после отдельного pacing proof. До такого proof можно оставить 60 Гц в real-only BYPASS и явно логировать причину. Variable Refresh Rate/ProMotion нельзя считать фиксированным только по `maximumFramesPerSecond`: telemetry и Metal HUD должны доказать фактический cadence.
+Для основного 120 Гц профиля целевой режим — около 60 real + 60 generated. Если игра уже рендерит 90 real FPS на 120 Гц, 2x потребовал бы 180 presentations/с; такой кадр идёт real-only BYPASS, а не вытесняет/пропускает произвольные real frames. Автоматический render cap до половины refresh не добавляется скрыто. На fullscreen Adaptive-Sync scheduler также поддерживает устойчивые 40→80 и 30→60; fixed/windowed display допускает только cadence, кратную физическому refresh. Variable Refresh Rate/ProMotion определяется по `NSScreen.minimumRefreshInterval`, `maximumRefreshInterval`, fullscreen state и display generation, а не только по `maximumFramesPerSecond`; telemetry и Metal HUD должны доказать фактический cadence.
+
+#### Extended ProMotion implementation (2026-07-24)
+
+- один scheduler на `CAMetalLayer` обслуживает FI Off/On;
+- real-only fullscreen VRR использует `present(afterMinimumDuration:)`, а
+  fixed/windowed и VSync Off сохраняют plain present;
+- cadence estimator объединяет real delta с completed GPU duration только для
+  real-only policy, быстро снижает target и требует подтверждения перед
+  повышением;
+- FI admission оценивает cadence обязательных real frames, не скрыто ограничивает
+  и не выбрасывает их ради 2x stream;
+- абсолютный `kqueue`/Mach timer заменил общий GCD delay в production worker;
+- `addPresentedHandler`/`presentedTime` стали источником фактических counters и
+  interval telemetry;
+- screen/fullscreen/backing/displaySync transition инвалидирует старый plan;
+  generated отбрасывается, real fail-open пересчитывается;
+- подробный Apple API audit и operational contract находятся в
+  [`docs/promotion-frame-scheduler.md`](docs/promotion-frame-scheduler.md).
 
 ---
 
@@ -1202,6 +1221,15 @@ Gate:
 - histogram имеет не более двух ожидаемых buckets;
 - нет случайных burst из двух presents;
 - input latency измерена и задокументирована.
+
+#### Расширение Stage 7: Extended ProMotion scheduler (2026-07-24)
+
+Production path теперь использует общий для FI Off/On scheduler, runtime
+`NSScreen` VRR contract, absolute Mach deadline и actual `presentedTime`.
+Автоматический stress проверяет real-only adaptive pacing, FI 60→120 и 40→80,
+fixed/windowed rejection, VSync-off bypass и смену display generation. Live
+Metal HUD histogram и input-latency evidence остаются обязательными gate, а не
+подменяются native policy test.
 
 ### Этап 8. HDR/UI integration
 

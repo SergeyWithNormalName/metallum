@@ -3422,6 +3422,8 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             }
         }
         metadata["frame_interpolation_pacing"] = MetallumFrameInterpolationTelemetry.shared.snapshot().report
+        metadata["extended_promotion_scheduler"] = MetallumExtendedProMotionSchedulerRegistry
+            .shared.report()
         metadata["static_geometry_heaps_enabled"] = NativeState.staticGeometryHeapsEnabled
         metadata["renderer_capability_mask_v1"] = String(
             format: "0x%016llx",
@@ -4148,6 +4150,34 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
             self?.refreshOnMainThread()
         })
         observers.append(center.addObserver(
+            forName: NSWindow.didChangeScreenProfileNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+        observers.append(center.addObserver(
+            forName: NSWindow.didChangeBackingPropertiesNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+        observers.append(center.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+        observers.append(center.addObserver(
+            forName: NSWindow.didExitFullScreenNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshOnMainThread()
+        })
+        observers.append(center.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
             queue: .main
@@ -4192,7 +4222,8 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
     }
 
     private func refreshOnMainThread() {
-        let screen = window?.screen
+        let currentWindow = window
+        let screen = currentWindow?.screen
         let current = Float(max(
             1.0,
             screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1.0
@@ -4210,6 +4241,10 @@ private final class MetallumEdrMonitor: NSObject, @unchecked Sendable {
         refreshScheduled = false
         lastRefreshUptime = ProcessInfo.processInfo.systemUptime
         lock.unlock()
+
+        if let currentWindow {
+            MetallumExtendedProMotionSchedulerRegistry.shared.update(window: currentWindow)
+        }
     }
 }
 
@@ -10899,10 +10934,16 @@ public func metallum_NSView_setMetalLayer(
 ) {
     view.wantsLayer = true
     view.layer = layer
+    MetallumExtendedProMotionSchedulerRegistry.shared.bind(layer: layer, view: view)
 }
 
 @_cdecl("metallum_NSView_clearLayer")
 public func metallum_NSView_clearLayer(_ view: NSView) {
+    if let layer = view.layer as? CAMetalLayer {
+        MetallumExtendedProMotionSchedulerRegistry.shared.unbind(layer: layer)
+    } else {
+        MetallumExtendedProMotionSchedulerRegistry.shared.unbind(view: view)
+    }
     view.layer = nil
     view.wantsLayer = false
 }
@@ -12413,6 +12454,8 @@ public func metallum_configure_layer(
     layer.allowsNextDrawableTimeout = true
     layer.presentsWithTransaction = false
     layer.displaySyncEnabled = immediatePresentMode == 0
+    MetallumExtendedProMotionSchedulerRegistry.shared.scheduler(for: layer)
+        .updateDisplaySyncEnabled(layer.displaySyncEnabled)
     CATransaction.commit()
     return 1
 }
@@ -13935,7 +13978,22 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             }
         }
 
-        commandBuffer.present(drawable)
+        let promotionScheduler = MetallumExtendedProMotionSchedulerRegistry.shared.scheduler(
+            for: layer
+        )
+        let renderDelta = NativeState.rendererFrameState.snapshot().map {
+            Double($0.deltaSeconds)
+        } ?? 0
+        let promotionPlan = promotionScheduler.realOnlyPlan(
+            renderDeltaSeconds: renderDelta,
+            displaySyncEnabled: layer.displaySyncEnabled
+        )
+        promotionScheduler.present(
+            commandBuffer: commandBuffer,
+            drawable: drawable,
+            kind: .realOnly,
+            plan: promotionPlan
+        )
         MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
         if NativeState.gpuTimingStats != nil {
             MetallumGpuTimingCoordinator.shared.markPresented(

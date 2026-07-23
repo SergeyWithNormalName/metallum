@@ -83,6 +83,7 @@ private typealias Stage7PacingStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage8HdrUiStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage9ContractStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage10SpatialStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias ExtendedProMotionSchedulerStressFn = @convention(c) () -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -529,6 +530,25 @@ private enum FrameInterpolationValidation {
         }
 
         logMsg("[INFO] Metal device: \(device.name)")
+        logMsg("[INFO] Testing Extended ProMotion scheduler: VRR, fixed-rate fallback, VSync-off, and Mach timer")
+        guard let promotionSchedulerSymbol = dlsym(
+            handle,
+            "metallum_extended_promotion_scheduler_stress_v1"
+        ) else {
+            logMsg("[FAIL] Extended ProMotion scheduler validation symbol is missing")
+            exit(1)
+        }
+        let promotionSchedulerStress = unsafeBitCast(
+            promotionSchedulerSymbol,
+            to: ExtendedProMotionSchedulerStressFn.self
+        )
+        let promotionSchedulerStatus = promotionSchedulerStress()
+        guard promotionSchedulerStatus == 1 else {
+            logMsg("[FAIL] Extended ProMotion scheduler stress returned \(promotionSchedulerStatus)")
+            exit(1)
+        }
+        logMsg("[PASS] Extended ProMotion scheduler: real-only adaptive pacing, FI 60->120 and 40->80, fixed/windowed rejection, VSync-off bypass, generation invalidation, and absolute deadline")
+
         logMsg("[INFO] Testing Stage 4: coordinator lifecycle (real-only; no dual presentation)")
         guard let stage4StressSymbol = dlsym(handle, "metallum_frame_interpolation_coordinator_stress_stage4") else {
             logMsg("[FAIL] Stage 4: coordinator lifecycle symbol is missing")

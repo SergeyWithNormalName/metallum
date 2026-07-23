@@ -1920,13 +1920,32 @@ GGX-материалы, полупрозрачность и отражающие
 
 Оптимизация вывода кадров на дисплеях с переменной частотой обновления.
 
+#### Реализация (2026-07-24)
+
+Extended ProMotion scheduler реализован для real-only и MetalFX FI paths:
+runtime `NSScreen` interval range, fullscreen Adaptive-Sync gating,
+`present(afterMinimumDuration:)`, absolute Mach midpoint, display-generation
+invalidation и actual `presentedTime` telemetry. `CAMetalDisplayLink` изучен,
+но намеренно не добавлен вторым drawable owner поверх GLFW; такой переход
+требует отдельной замены render-loop ownership. Автоматический native gate
+пройден, live Metal HUD/input-latency/long-session evidence остаётся открытым
+exit criterion. Подробности: `docs/promotion-frame-scheduler.md`.
+
 #### Работы
-- **Параллельное выполнение:** Этап может разрабатываться параллельно после стабилизации временного апскейлера (Этап T2).
-- **CAMetalDisplayLink & preferredFrameRateRange:** Реализовать поддержку частоты кадров дисплеев Apple ProMotion (до 120 Гц).
-- **Presentation timestamping:** Внедрить точный present pacing на основе целевых временных меток, минимизируя input lag и устраняя микрофризы при выводе кадров.
-- **Telemetry:** Добавить телеметрию пропущенных кадров (missed deadline telemetry) и предпочтительную задержку кадров (preferred frame latency).
-- **Adaptability:** Обеспечить корректную работу в оконном и полноэкранном режимах, на встроенных дисплеях MacBook и внешних мониторах.
-- **Fallback:** Поддержка отката на стандартную презентацию `CAMetalLayer` при сбоях и обработка изменения thermal/system policy операционной системы.
+- **[done] Runtime display contract:** `NSScreen` minimum/maximum interval,
+  granularity, fullscreen и display generation вместо hardcoded 120 Гц.
+- **[done] Presentation timestamping:** `present(afterMinimumDuration:)`,
+  absolute Mach midpoint для FI и фактический `presentedTime` feedback.
+- **[done] Telemetry:** missed targets, timed/plain requests, фактические
+  real/generated counters и interval histogram. `preferredFrameLatency` не
+  применяется: это свойство `CAMetalDisplayLink`, а текущий GLFW path владеет
+  drawable самостоятельно.
+- **[done] Adaptability/fallback:** windowed/fixed/VSync-Off используют
+  безопасный plain present; screen/fullscreen/system-policy change инвалидирует
+  старый plan без краша.
+- **[future architecture option] CAMetalDisplayLink:** только вместе с полной
+  передачей ему drawable/render-loop ownership; не запускать параллельно с
+  существующим `nextDrawable()` path.
 
 #### Exit criteria
 - Target presentation pacing минимизирует микрофризы и input lag при стабильной нагрузке.

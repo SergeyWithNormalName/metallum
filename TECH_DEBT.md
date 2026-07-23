@@ -92,8 +92,8 @@ This document records the identified technical debt, safety hazards, and concurr
 ---
 
 ## 8. Frame Interpolation Requires Live Visual and Latency Acceptance Evidence
-- **Location**: `FrameInterpolation.md` sections 14.3–14.4; `MetallumFrameInterpolationCoordinator.swift`
+- **Location**: `FrameInterpolation.md` sections 14.3–14.4; `docs/promotion-frame-scheduler.md`; `MetallumFrameInterpolationCoordinator.swift`
 - **Priority**: **P2**
-- **Description**: The fixed-Temporal production path has automated Java/Swift/Metal validation, including typed hand-off, resource lifetime, fail-open fallback and native descriptor encoding. Automated harnesses cannot provide a deterministic game-owned `CAMetalDrawable`, moving entities, real HUD or player input latency.
-- **Risk**: A formally valid generated/real schedule could still show temporal artifacts, uneven presentation cadence or latency spikes in a real world, especially around UI, teleport, F3+A, fullscreen and display/headroom changes.
-- **Required completion**: Record the fixed built-in-display route with FI Off/On and profiler JSONL/HUD evidence; run the complete live matrix, including 30–60 minute gameplay, before removing the Experimental label or treating Spatial/Dynamic FI as enabled.
+- **Description**: Fixed-Temporal and Spatial production paths now share an Extended ProMotion scheduler with runtime VRR timing, bounded generated→real ordering, absolute Mach deadlines, actual `MTLDrawable.presentedTime` telemetry and fail-open real presentation. Automated Java/Swift/Metal validation proves policy and resource contracts, but cannot provide a deterministic game-owned drawable stream, moving entities, a real HUD or player input latency.
+- **Risk**: A formally valid adaptive schedule can still show temporal artifacts, uneven on-panel cadence or latency spikes in a real world, especially around UI, teleport, F3+A, fullscreen/display/headroom transitions and OS power/thermal refresh changes.
+- **Required completion**: Record the fixed built-in-display route with FI Off/On and profiler JSONL plus Metal HUD evidence; publish actual real/generated/total cadence, interval buckets, missed targets and input-to-real latency; run the complete live matrix and a 30–60 minute session before removing the Experimental label. Dynamic Temporal/Native FI remain separate unsupported profiles.
