@@ -117,9 +117,10 @@ public final class MetalFxUpscaling {
         if (!dynamic) {
             return;
         }
-        updateDynamicResolution(MetalNativeBridge.metallum_drs_consume_completed_frame_time_seconds());
-        if (temporalDynamic) {
-            MetalFxTemporalScaling.updateDynamicReconstructionPolicy();
+        double completedFrameSeconds = MetalNativeBridge.metallum_drs_consume_completed_frame_time_seconds();
+        updateDynamicResolution(completedFrameSeconds);
+        if (temporalDynamic && Double.isFinite(completedFrameSeconds) && completedFrameSeconds > 0.0) {
+            MetalFxTemporalScaling.updateDynamicReconstructionPolicy((float) (completedFrameSeconds * 1_000.0));
         }
     }
 

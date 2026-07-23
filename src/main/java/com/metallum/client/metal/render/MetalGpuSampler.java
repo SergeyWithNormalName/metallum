@@ -168,7 +168,11 @@ final class MetalGpuSampler extends GpuSampler {
             case QUALITY -> this.temporalQualityHandle;
             case PERFORMANCE -> this.temporalPerformanceHandle;
             case ULTRA_PERFORMANCE -> this.temporalUltraPerformanceHandle;
-            case TEMPORAL -> this.temporalQualityHandle;
+            // Dynamic Temporal is deliberately constrained to 50-60%. The
+            // existing Performance sampler has the correct 50% mip bias and
+            // is a free handle switch, so it restores more source detail than
+            // Quality without another render or compute pass.
+            case TEMPORAL -> this.temporalPerformanceHandle;
             case OFF -> this.nativeHandle;
         };
         return MetalNativeBridge.isNullHandle(selected) ? this.nativeHandle : selected;

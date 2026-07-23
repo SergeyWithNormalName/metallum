@@ -24,6 +24,7 @@ public final class DrsScalingTests {
         testUiTargetDimensionImmutabilityMatrix();
         testEmaSmoothingAndSpikeDamping();
         testMinScaleBoundClamping();
+        testDynamicTemporalScaleRanges();
         testInvalidGpuFrameTimeIgnored();
         testNativeSecondsBoundary();
         testBreathingOscillationStressHarness();
@@ -49,6 +50,31 @@ public final class DrsScalingTests {
             MetallumDrsController.updateGpuFrameTime(16.0f);
         }
         require(Math.abs(MetallumDrsController.currentScale() - 0.50f) < 1.0e-5f, "min scale clamp 0.50");
+        MetallumDrsController.setEnabled(false);
+    }
+
+    private static void testDynamicTemporalScaleRanges() {
+        require(MetallumDrsController.SCALE_DOWN_SETTLE_FRAMES
+                        < MetallumDrsController.SCALE_UP_HOLDOFF_FRAMES,
+                "Dynamic scale-down must be faster than quality recovery");
+        MetallumDrsController.reset();
+        MetallumDrsController.setScaleBounds(0.60f, 0.95f);
+        MetallumDrsController.setEnabled(true);
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f,
+                "Native remains 100% until an overloaded sample requests Spatial");
+        MetallumDrsController.updateGpuFrameTime(16.0f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
+                "first Spatial scale is capped at 95%");
+        MetallumDrsController.setScaleForDynamicMode(0.50f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.60f) < 1.0e-5f,
+                "Spatial cannot fall below 60%");
+        MetallumDrsController.setScaleBounds(0.50f, 0.60f);
+        MetallumDrsController.setScaleForDynamicMode(0.55f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.55f) < 1.0e-5f,
+                "Temporal starts at 55%");
+        MetallumDrsController.setScaleForDynamicMode(0.70f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.60f) < 1.0e-5f,
+                "Temporal cannot grow above 60%");
         MetallumDrsController.setEnabled(false);
     }
 

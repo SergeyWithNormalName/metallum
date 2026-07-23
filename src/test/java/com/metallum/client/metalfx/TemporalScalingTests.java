@@ -13,7 +13,7 @@ public final class TemporalScalingTests {
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
         testEffectiveSelection();
-        testDynamicSpatialFallbackHysteresis();
+        testDynamicHybridTransitionContract();
         System.out.println("Native Apple MetalFX Temporal preset validation passed");
     }
 
@@ -120,22 +120,24 @@ public final class TemporalScalingTests {
                 "Unsupported devices must reject the selected Temporal mode");
     }
 
-    private static void testDynamicSpatialFallbackHysteresis() {
-        require(MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_ENTER_SCALE
-                        < MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_EXIT_SCALE,
-                "Dynamic Temporal transition requires a hysteresis gap");
-        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MIN_SCALE == 0.45f,
-                "Dynamic Temporal may use the 45% DRS floor");
-        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.70f),
-                "Spatial remains active through 70% scale");
-        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.65f),
-                "Dynamic Temporal enters reconstruction at the next 65% step");
-        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.70f),
-                "Hysteresis retains reconstruction between its two limits");
-        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.75f),
-                "Dynamic Temporal returns to Spatial/native at 75% scale");
-        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.74f),
-                "Fallback remains active below the exit threshold");
+    private static void testDynamicHybridTransitionContract() {
+        require(MetalFxTemporalScaling.DYNAMIC_SPATIAL_MIN_SCALE == 0.60f
+                        && MetalFxTemporalScaling.DYNAMIC_SPATIAL_MAX_SCALE == 0.95f,
+                "Dynamic Spatial is constrained to 60-95%");
+        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MIN_SCALE == 0.50f
+                        && MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MAX_SCALE == 0.60f,
+                "Dynamic Temporal is constrained to 50-60%");
+        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_ENTRY_SCALE == 0.55f
+                        && MetalFxTemporalScaling.DYNAMIC_SPATIAL_RETURN_SCALE == 0.70f,
+                "Hybrid transitions use 55% Temporal and 70% Spatial entries");
+        require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, true)
+                        == MetalFxTemporalScaling.SPATIAL_TO_TEMPORAL_FRAMES,
+                "45 consecutive >16.5ms samples enter Temporal");
+        require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, false) == 0,
+                "a Spatial transition sample below 16.5ms resets its counter");
+        require(MetalFxTemporalScaling.nextConsecutiveFrameCount(179, true)
+                        == MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_FRAMES,
+                "180 consecutive <13.0ms samples return to Spatial");
     }
 
     private static void require(final boolean condition, final String message) {

@@ -25,8 +25,11 @@ public final class MetallumDrsController {
     public static final float MAX_SCALE = 1.00f;
     public static final float SCALE_STEP = 0.05f;
     public static final int SCALE_UP_HOLDOFF_FRAMES = 30;
-    /** Lets the three-frame renderer ring and EMA observe a new input extent before another resize. */
-    public static final int SCALE_DOWN_SETTLE_FRAMES = 45;
+    /**
+     * The three-frame renderer ring gets several fresh samples, but downsizing
+     * remains deliberately faster than the 30-frame quality recovery.
+     */
+    public static final int SCALE_DOWN_SETTLE_FRAMES = 12;
     public static final float EMA_ALPHA = 0.10f;
 
     private static boolean enabled = false;
@@ -36,6 +39,8 @@ public final class MetallumDrsController {
     private static int scaleUpHoldoffCounter = 0;
     private static int scaleDownSettleCounter = 0;
     private static float minScaleBound = MIN_SCALE;
+    /** Dynamic Temporal narrows this without changing the normal Spatial DRS policy. */
+    private static float maxScaleBound = MAX_SCALE;
 
     private MetallumDrsController() {
     }
@@ -79,8 +84,21 @@ public final class MetallumDrsController {
         return minScaleBound;
     }
 
+    public static synchronized float maxScaleBound() {
+        return maxScaleBound;
+    }
+
     public static synchronized void setMinScaleBound(final float minBound) {
+        setScaleBounds(minBound, maxScaleBound);
+    }
+
+    /**
+     * Changes the active DRS interval without forcing native 100% down to a
+     * Spatial maximum. A later overloaded sample makes that first transition.
+     */
+    public static synchronized void setScaleBounds(final float minBound, final float maxBound) {
         minScaleBound = Math.clamp(minBound, ABSOLUTE_MIN_SCALE, MAX_SCALE);
+        maxScaleBound = Math.clamp(maxBound, minScaleBound, MAX_SCALE);
         if (currentScale < minScaleBound) {
             currentScale = minScaleBound;
             applyScaleChange();
@@ -93,12 +111,25 @@ public final class MetallumDrsController {
         scaleUpHoldoffCounter = 0;
         scaleDownSettleCounter = 0;
         minScaleBound = MIN_SCALE;
+        maxScaleBound = MAX_SCALE;
     }
 
     public static synchronized void setScaleDirectForTest(final float scale) {
         float clamped = Math.clamp(scale, ABSOLUTE_MIN_SCALE, MAX_SCALE);
         if (Math.abs(currentScale - clamped) > 1.0e-5f) {
             currentScale = clamped;
+            scaleDownSettleCounter = 0;
+            applyScaleChange();
+        }
+    }
+
+    /** Atomically enters a Dynamic Temporal range; callers have already selected its scaler path. */
+    static synchronized void setScaleForDynamicMode(final float scale) {
+        float clamped = Math.clamp(scale, minScaleBound, maxScaleBound);
+        if (Math.abs(currentScale - clamped) > 1.0e-5f) {
+            currentScale = clamped;
+            emaGpuTimeMs = 0.0f;
+            scaleUpHoldoffCounter = 0;
             scaleDownSettleCounter = 0;
             applyScaleChange();
         }
@@ -156,8 +187,8 @@ public final class MetallumDrsController {
             scaleUpHoldoffCounter++;
             if (scaleUpHoldoffCounter >= SCALE_UP_HOLDOFF_FRAMES) {
                 scaleUpHoldoffCounter = 0;
-                if (currentScale < MAX_SCALE) {
-                    float newScale = Math.min(MAX_SCALE, Math.round((currentScale + SCALE_STEP) * 100.0f) / 100.0f);
+                if (currentScale < maxScaleBound) {
+                    float newScale = Math.min(maxScaleBound, Math.round((currentScale + SCALE_STEP) * 100.0f) / 100.0f);
                     if (Math.abs(newScale - currentScale) > 1.0e-5f) {
                         currentScale = newScale;
                         applyScaleChange();
@@ -176,7 +207,7 @@ public final class MetallumDrsController {
     }
 
     private static float roundedDownScale(final float requestedScale) {
-        float bounded = Math.clamp(requestedScale, minScaleBound, MAX_SCALE);
+        float bounded = Math.clamp(requestedScale, minScaleBound, maxScaleBound);
         float stepped = (float) Math.floor((bounded + 1.0e-5f) / SCALE_STEP) * SCALE_STEP;
         return Math.max(minScaleBound, Math.round(stepped * 100.0f) / 100.0f);
     }
