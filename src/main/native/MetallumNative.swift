@@ -400,6 +400,21 @@ private final class MetallumHdrWorkspace {
     }
 }
 
+/// Display-sized world intermediate used when a title/menu frame has UI but
+/// no scene input. This deliberately stays separate from `MetallumHdrWorkspace`:
+/// UI-only frames must not allocate HDR bloom, histogram, or exposure state.
+private final class MetallumUiOnlyWorldTexture {
+    let width: Int
+    let height: Int
+    let texture: MTLTexture
+
+    init(width: Int, height: Int, texture: MTLTexture) {
+        self.width = width
+        self.height = height
+        self.texture = texture
+    }
+}
+
 private final class MetallumSpatialWorkspace {
     let sourcePixelFormat: MTLPixelFormat
     let inputWidth: Int
@@ -3781,6 +3796,7 @@ private enum NativeState {
     static var menuBlurPipelines: [UInt: MetallumMenuBlurPipelines] = [:]
     static var menuBlurWorkspaces: [UInt: MetallumMenuBlurWorkspace] = [:]
     static var hdrWorkspaces: [UInt: MetallumHdrWorkspace] = [:]
+    static var uiOnlyWorldTextures: [UInt: MetallumUiOnlyWorldTexture] = [:]
     static var hdrFallbackAdaptiveStates: [UInt: MTLBuffer] = [:]
     static var hdrFallbackDepthTextures: [UInt: MTLTexture] = [:]
     static var spatialWorkspaces: [UInt: MetallumSpatialWorkspace] = [:]
@@ -5668,6 +5684,40 @@ private func ensureHdrWorkspace(
         : "Metallum actual HDR exposure histogram"
     NativeState.hdrWorkspaces[key] = workspace
     return workspace
+}
+
+private func ensureUiOnlyWorldTexture(
+    device: MTLDevice,
+    width: Int,
+    height: Int
+) -> MTLTexture? {
+    let key = objectAddress(device)
+    if let cached = NativeState.uiOnlyWorldTextures[key],
+       cached.width == width,
+       cached.height == height {
+        return cached.texture
+    }
+
+    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: .rgba16Float,
+        width: width,
+        height: height,
+        mipmapped: false
+    )
+    descriptor.storageMode = .private
+    descriptor.hazardTrackingMode = .tracked
+    descriptor.usage = [.renderTarget, .shaderRead]
+    guard let texture = device.makeTexture(descriptor: descriptor) else {
+        NSLog("[metallum] Failed to allocate UI-only presentation world for %dx%d", width, height)
+        return nil
+    }
+    texture.label = "Metallum UI-only presentation world"
+    NativeState.uiOnlyWorldTextures[key] = MetallumUiOnlyWorldTexture(
+        width: width,
+        height: height,
+        texture: texture
+    )
+    return texture
 }
 
 private func ensureMenuBlurTextures(
@@ -7948,6 +7998,7 @@ private func prepareRendererGeneration(
     // retains them while rendering Native, so the next policy admission never
     // allocates a scaler or depth history on the render thread.
     NativeState.hdrWorkspaces.removeValue(forKey: key)
+    NativeState.uiOnlyWorldTextures.removeValue(forKey: key)
     NativeState.menuBlurWorkspaces.removeValue(forKey: key)
     NativeState.spatialWorkspaces.removeValue(forKey: key)
     if !temporalEnabled && !temporalWarmStandby {
@@ -10505,6 +10556,7 @@ public func metallum_release_device_caches(_ device: MTLDevice) {
             $0.key.deviceAddress != deviceAddress
         }
         NativeState.hdrWorkspaces.removeValue(forKey: deviceAddress)
+        NativeState.uiOnlyWorldTextures.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackAdaptiveStates.removeValue(forKey: deviceAddress)
         NativeState.hdrFallbackDepthTextures.removeValue(forKey: deviceAddress)
         NativeState.spatialWorkspaces.removeValue(forKey: deviceAddress)
@@ -13831,6 +13883,12 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
                     worldComposite = allocated
                 }
                 targetWorldTexture = worldComposite
+            } else if let uiOnlyWorld = ensureUiOnlyWorldTexture(
+                device: commandBuffer.device,
+                width: drawable.texture.width,
+                height: drawable.texture.height
+            ) {
+                targetWorldTexture = uiOnlyWorld
             } else {
                 targetWorldTexture = drawable.texture
             }

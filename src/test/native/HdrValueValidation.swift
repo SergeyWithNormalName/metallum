@@ -5448,8 +5448,12 @@ private final class ValueValidation {
         )
         let postPresentContract = generationContract(objectPointer(gpu.device as AnyObject))
         try require(
-            postPresentContract == prePresentContract && postPresentContract & (1 << 6) == 0,
+            postPresentContract & (1 << 6) == 0,
             "METALLUM HDR UI-only present allocated HDR workspace/effects state: \(postPresentContract)"
+        )
+        try require(
+            postPresentContract & (1 << 8) != 0,
+            "METALLUM HDR UI-only present did not prepare its offscreen world-to-UI composition path: \(postPresentContract)"
         )
 
         let linearUiSource = try gpu.makeRgba16FloatTexture(
@@ -5510,7 +5514,7 @@ private final class ValueValidation {
         )
         let linearPostPresentContract = generationContract(objectPointer(gpu.device as AnyObject))
         try require(
-            linearPostPresentContract == prePresentContract
+            linearPostPresentContract == postPresentContract
                 && linearPostPresentContract & (1 << 6) == 0,
             "METALLUM HDR linear UI-only present allocated HDR workspace/effects state: \(linearPostPresentContract)"
         )
