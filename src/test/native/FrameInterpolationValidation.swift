@@ -77,6 +77,7 @@ private typealias PresentTextureToDrawableFn = @convention(c) (
 ) -> Int32
 
 private typealias Stage4CoordinatorStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage5TicketStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -535,6 +536,19 @@ private enum FrameInterpolationValidation {
             exit(1)
         }
         logMsg("[PASS] Stage 4: 10,000 real-only enqueue/reset/drain cycles, bounded backpressure, and zero-size suspension")
+
+        logMsg("[INFO] Testing Stage 5: typed ticket commit boundary")
+        guard let stage5StressSymbol = dlsym(handle, "metallum_frame_interpolation_ticket_stress_stage5") else {
+            logMsg("[FAIL] Stage 5: ticket boundary symbol is missing")
+            exit(1)
+        }
+        let stage5Stress = unsafeBitCast(stage5StressSymbol, to: Stage5TicketStressFn.self)
+        let stage5Status = stage5Stress(device)
+        guard stage5Status == 1 else {
+            logMsg("[FAIL] Stage 5: ticket boundary stress returned \(stage5Status)")
+            exit(1)
+        }
+        logMsg("[PASS] Stage 5: pre-commit publish rejected, cancel succeeds, and committed ticket drains")
 
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {

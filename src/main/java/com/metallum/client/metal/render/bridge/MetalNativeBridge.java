@@ -342,6 +342,44 @@ public final class MetalNativeBridge {
             MTLCommandBufferCommit = downcall(lookup, "metallum_MTLCommandBuffer_commit", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
             createSemaphore = downcall(lookup, "metallum_create_semaphore", FunctionDescriptor.of(ValueLayout.ADDRESS));
             MTLCommandBufferCommitWithSignal = downcall(lookup, "metallum_MTLCommandBuffer_commitWithSignal", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            frameInterpolationCreateV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_create_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            INT,
+                            INT,
+                            LONG,
+                            LONG
+                    )
+            );
+            frameInterpolationPrepareV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_prepare_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS)
+            );
+            frameInterpolationPublishCommittedV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_publish_committed_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            frameInterpolationCancelV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_cancel_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            frameInterpolationDrainV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_drain_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            frameInterpolationReleaseV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_release_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
             semaphoreWait = downcallWithoutCritical(lookup, "metallum_semaphore_wait", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
             MTLCommandBufferIsCompleted = downcall(lookup, "metallum_MTLCommandBuffer_isCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             MTLCommandBufferWaitUntilCompleted = downcallWithoutCritical(lookup, "metallum_MTLCommandBuffer_waitUntilCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
@@ -753,6 +791,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferCommit;
     private static final MethodHandle createSemaphore;
     private static final MethodHandle MTLCommandBufferCommitWithSignal;
+    private static final MethodHandle frameInterpolationCreateV1;
+    private static final MethodHandle frameInterpolationPrepareV1;
+    private static final MethodHandle frameInterpolationPublishCommittedV1;
+    private static final MethodHandle frameInterpolationCancelV1;
+    private static final MethodHandle frameInterpolationDrainV1;
+    private static final MethodHandle frameInterpolationReleaseV1;
     private static final MethodHandle semaphoreWait;
     private static final MethodHandle MTLCommandBufferIsCompleted;
     private static final MethodHandle MTLCommandBufferWaitUntilCompleted;
@@ -1514,6 +1558,82 @@ public final class MetalNativeBridge {
             MTLCommandBufferCommitWithSignal.invokeExact(segment(commandBuffer), segment(semaphore));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLCommandBuffer_commitWithSignal", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_frame_interpolation_create_v1(
+            final MemorySegment device,
+            final MemorySegment layer,
+            final int width,
+            final int height,
+            final long pixelFormat,
+            final long rendererGeneration
+    ) {
+        try {
+            return (MemorySegment) frameInterpolationCreateV1.invokeExact(
+                    segment(device), segment(layer), width, height, pixelFormat, rendererGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_create_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_prepare_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final long rendererGeneration,
+            final MemorySegment outTicket
+    ) {
+        try {
+            return (int) frameInterpolationPrepareV1.invokeExact(
+                    segment(context), segment(commandBuffer), rendererGeneration, segment(outTicket)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_prepare_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_publish_committed_v1(
+            final MemorySegment context,
+            final long ticket
+    ) {
+        try {
+            return (int) frameInterpolationPublishCommittedV1.invokeExact(segment(context), ticket);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_publish_committed_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_cancel_v1(
+            final MemorySegment context,
+            final long ticket
+    ) {
+        try {
+            return (int) frameInterpolationCancelV1.invokeExact(segment(context), ticket);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_cancel_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_drain_v1(
+            final MemorySegment context,
+            final long timeoutNanoseconds
+    ) {
+        try {
+            return (int) frameInterpolationDrainV1.invokeExact(segment(context), timeoutNanoseconds);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_drain_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_release_v1(
+            final MemorySegment context,
+            final long timeoutNanoseconds
+    ) {
+        try {
+            return (int) frameInterpolationReleaseV1.invokeExact(segment(context), timeoutNanoseconds);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_release_v1", throwable);
         }
     }
 

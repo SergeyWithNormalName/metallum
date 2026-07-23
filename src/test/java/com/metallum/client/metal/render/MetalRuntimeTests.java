@@ -73,6 +73,7 @@ public final class MetalRuntimeTests {
         testJavaWorkloadTelemetryGateAndReset();
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
+        testFrameInterpolationTicketCommitBoundary();
         testResourceBindingPacketReuseAndValidation();
         testResourceBindingBatchSelector();
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
@@ -1558,6 +1559,95 @@ public final class MetalRuntimeTests {
                 "Legacy SDR FP16 compatibility clear was decoded to linear");
         require(SceneLinearClearColor.shouldDecode(true, true, false, true),
                 "resolved Legacy HDR scene-linear clear stayed gamma encoded");
+    }
+
+    private static void testFrameInterpolationTicketCommitBoundary() {
+        java.util.List<String> order = new java.util.ArrayList<>();
+        FrameInterpolationCommitBoundary.TicketBridge bridge = new FrameInterpolationCommitBoundary.TicketBridge() {
+            @Override
+            public FrameInterpolationCommitBoundary.Preparation prepare(
+                    final MemorySegment commandBuffer,
+                    final long rendererGeneration
+            ) {
+                order.add("prepare");
+                return new FrameInterpolationCommitBoundary.Preparation(
+                        FrameInterpolationCommitBoundary.Status.PREPARED, 71L
+                );
+            }
+
+            @Override
+            public FrameInterpolationCommitBoundary.Status publish(final long ticket) {
+                order.add("publish:" + ticket);
+                return FrameInterpolationCommitBoundary.Status.PREPARED;
+            }
+
+            @Override
+            public FrameInterpolationCommitBoundary.Status cancel(final long ticket) {
+                order.add("cancel:" + ticket);
+                return FrameInterpolationCommitBoundary.Status.PREPARED;
+            }
+        };
+        FrameInterpolationCommitBoundary boundary = new FrameInterpolationCommitBoundary(bridge);
+        require(boundary.prepare(MemorySegment.NULL, 11L)
+                        == FrameInterpolationCommitBoundary.Status.PREPARED,
+                "FI ticket did not prepare");
+        require(boundary.commit(() -> order.add("commit"))
+                        == FrameInterpolationCommitBoundary.Status.PREPARED,
+                "FI ticket did not publish after renderer commit");
+        require(order.equals(java.util.List.of("prepare", "commit", "publish:71")),
+                "FI ticket order must be prepare -> commit -> publish, got " + order);
+        require(!boundary.hasPendingTicket(), "published FI ticket remained pending");
+
+        order.clear();
+        FrameInterpolationCommitBoundary failingBoundary = new FrameInterpolationCommitBoundary(bridge);
+        failingBoundary.prepare(MemorySegment.NULL, 11L);
+        expectIllegalState(() -> failingBoundary.commit(() -> {
+            order.add("failed-commit");
+            throw new IllegalStateException("injected commit failure");
+        }));
+        require(order.equals(java.util.List.of("prepare", "failed-commit", "cancel:71")),
+                "failed renderer commit did not cancel its FI ticket: " + order);
+        require(!failingBoundary.hasPendingTicket(), "failed-commit FI ticket remained pending");
+
+        java.util.List<String> fallbackOrder = new java.util.ArrayList<>();
+        FrameInterpolationCommitBoundary staleBoundary = new FrameInterpolationCommitBoundary(
+                new FrameInterpolationCommitBoundary.TicketBridge() {
+                    @Override
+                    public FrameInterpolationCommitBoundary.Preparation prepare(
+                            final MemorySegment commandBuffer,
+                            final long rendererGeneration
+                    ) {
+                        fallbackOrder.add("prepare-stale");
+                        return FrameInterpolationCommitBoundary.Preparation.bypass(
+                                FrameInterpolationCommitBoundary.Status.BYPASS_GENERATION
+                        );
+                    }
+
+                    @Override
+                    public FrameInterpolationCommitBoundary.Status publish(final long ticket) {
+                        throw new AssertionError("stale FI ticket must not publish");
+                    }
+
+                    @Override
+                    public FrameInterpolationCommitBoundary.Status cancel(final long ticket) {
+                        throw new AssertionError("stale FI ticket must not cancel");
+                    }
+                }
+        );
+        require(staleBoundary.prepare(MemorySegment.NULL, 12L)
+                        == FrameInterpolationCommitBoundary.Status.BYPASS_GENERATION,
+                "stale FI generation was not bypassed");
+        staleBoundary.commit(() -> fallbackOrder.add("old-real-commit"));
+        require(fallbackOrder.equals(java.util.List.of("prepare-stale", "old-real-commit")),
+                "stale FI generation did not preserve the old real-frame fallback");
+
+        order.clear();
+        FrameInterpolationCommitBoundary shutdownBoundary = new FrameInterpolationCommitBoundary(bridge);
+        shutdownBoundary.prepare(MemorySegment.NULL, 13L);
+        shutdownBoundary.close();
+        require(order.equals(java.util.List.of("prepare", "cancel:71"))
+                        && !shutdownBoundary.hasPendingTicket(),
+                "FI shutdown left a pending ticket behind");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

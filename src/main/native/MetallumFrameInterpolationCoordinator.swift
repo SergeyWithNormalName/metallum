@@ -69,7 +69,42 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         case released = -3
     }
 
+    /** Stable Java bridge statuses.  Do not reuse lifecycle status values. */
+    enum TicketStatus: Int32 {
+        case prepared = 1
+        case bypassDisabled = 2
+        case bypassUnsupported = 3
+        case bypassPriming = 4
+        case bypassCadence = 5
+        case bypassBackpressure = 6
+        case bypassNoUi = 7
+        case bypassGeneration = 8
+        case bypassInputContract = 9
+        case noDrawable = 10
+        case staleTicket = 11
+        case transientFailure = 12
+        case fatalForGeneration = -1
+    }
+
+    private enum TicketState {
+        case prepared
+        case published
+    }
+
+    private final class Ticket {
+        let slot: Int
+        let commandBuffer: MTLCommandBuffer
+        var state: TicketState = .prepared
+        var commandBufferCompleted = false
+
+        init(slot: Int, commandBuffer: MTLCommandBuffer) {
+            self.slot = slot
+            self.commandBuffer = commandBuffer
+        }
+    }
+
     let key: Key
+    private let device: MTLDevice
     private let layer: CAMetalLayer
     private let state = NSCondition()
     private let schedulerWake = DispatchSemaphore(value: 0)
@@ -89,12 +124,15 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var pendingRealFrames = 0
     private var resetEpoch: UInt64 = 0
     private var textureAllocationCount = 0
+    private var nextTicket: UInt64 = 1
+    private var tickets: [UInt64: Ticket] = [:]
 
     init?(key: Key, device: MTLDevice, layer: CAMetalLayer) {
         guard key.deviceID == ObjectIdentifier(device), key.layerID == ObjectIdentifier(layer) else {
             return nil
         }
         self.key = key
+        self.device = device
         self.layer = layer
 
         guard let renderQueue = device.makeCommandQueue(),
@@ -202,6 +240,83 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         return .ready
     }
 
+    /**
+     * Reserves a stage-5 ticket only while the renderer command buffer is
+     * uncommitted.  The ticket strongly retains the command buffer until its
+     * completion handler releases the ring slot after publish.
+     */
+    func prepare(
+        commandBuffer: MTLCommandBuffer,
+        rendererGeneration: UInt64,
+        outTicket: UnsafeMutablePointer<UInt64>?
+    ) -> TicketStatus {
+        guard let outTicket else { return .bypassInputContract }
+        outTicket.pointee = 0
+        state.lock()
+        defer { state.unlock() }
+        guard !shuttingDown else { return .bypassDisabled }
+        guard acceptingFrames else { return .bypassDisabled }
+        guard rendererGeneration == key.rendererGeneration else { return .bypassGeneration }
+        guard commandBuffer.device === device else { return .bypassInputContract }
+        guard commandBuffer.status == .notEnqueued else { return .staleTicket }
+        // Stage 5 has no MetalFX work yet, but its ticket reservation already
+        // obeys the final in-flight bound rather than growing the ring.
+        guard tickets.count < 2 else { return .bypassBackpressure }
+        guard let slot = slots.firstIndex(where: { $0.state == .free }) else {
+            return .bypassBackpressure
+        }
+        guard nextTicket != 0 else { return .fatalForGeneration }
+        let ticket = nextTicket
+        nextTicket &+= 1
+        slots[slot].state = .realFrameReserved
+        pendingRealFrames += 1
+        tickets[ticket] = Ticket(slot: slot, commandBuffer: commandBuffer)
+        // Metal requires completion handlers to be registered before commit.
+        // The handler only records completion; publish still remains a strict
+        // post-commit transition performed by Java.
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.markTicketCompleted(ticket)
+        }
+        outTicket.pointee = ticket
+        return .prepared
+    }
+
+    /** Publishes only an already-committed renderer command buffer. */
+    func publishCommitted(ticket: UInt64) -> TicketStatus {
+        state.lock()
+        guard let pending = tickets[ticket], pending.state == .prepared else {
+            state.unlock()
+            return .staleTicket
+        }
+        guard pending.commandBuffer.status != .notEnqueued else {
+            state.unlock()
+            return .staleTicket
+        }
+        pending.state = .published
+        if pending.commandBufferCompleted {
+            tickets.removeValue(forKey: ticket)
+            releaseSlotLocked(pending.slot)
+        }
+        state.unlock()
+        return .prepared
+    }
+
+    func cancel(ticket: UInt64) -> TicketStatus {
+        state.lock()
+        guard let pending = tickets[ticket], pending.state == .prepared else {
+            state.unlock()
+            return .staleTicket
+        }
+        guard pending.commandBuffer.status == .notEnqueued else {
+            state.unlock()
+            return .staleTicket
+        }
+        tickets.removeValue(forKey: ticket)
+        releaseSlotLocked(pending.slot)
+        state.unlock()
+        return .prepared
+    }
+
     func reset(after timeoutNanoseconds: UInt64) -> LifecycleStatus {
         let drainStatus = drain(timeoutNanoseconds: timeoutNanoseconds)
         guard drainStatus == .ready || drainStatus == .suspendedZeroSize else {
@@ -272,6 +387,26 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         renderQueue = nil
         state.unlock()
         return .ready
+    }
+
+    private func markTicketCompleted(_ ticket: UInt64) {
+        state.lock()
+        defer { state.unlock() }
+        guard let pending = tickets[ticket] else { return }
+        pending.commandBufferCompleted = true
+        guard pending.state == .published else { return }
+        tickets.removeValue(forKey: ticket)
+        releaseSlotLocked(pending.slot)
+    }
+
+    private func releaseSlotLocked(_ index: Int) {
+        guard slots.indices.contains(index), slots[index].state == .realFrameReserved else {
+            assertionFailure("FI ticket attempted to release an invalid slot")
+            return
+        }
+        slots[index].state = .free
+        pendingRealFrames -= 1
+        state.broadcast()
     }
 
     func nativeTextureAllocationCount() -> Int {
@@ -371,6 +506,101 @@ public func metallum_frame_interpolation_coordinator_release_stage4(
     return status.rawValue
 }
 
+// MARK: - Stage-5 typed Java ticket bridge
+
+@_cdecl("metallum_frame_interpolation_create_v1")
+public func metallum_frame_interpolation_create_v1(
+    _ device: MTLDevice?,
+    _ layer: CAMetalLayer?,
+    _ width: Int32,
+    _ height: Int32,
+    _ pixelFormatRaw: UInt64,
+    _ rendererGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    guard let device, let layer else { return nil }
+    return metallum_frame_interpolation_coordinator_create_stage4(
+        device, layer, width, height, pixelFormatRaw, rendererGeneration
+    )
+}
+
+@_cdecl("metallum_frame_interpolation_prepare_v1")
+public func metallum_frame_interpolation_prepare_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ commandBuffer: MTLCommandBuffer?,
+    _ rendererGeneration: UInt64,
+    _ outTicket: UnsafeMutablePointer<UInt64>?
+) -> Int32 {
+    guard let coordinator = coordinatorFromRawPointer(rawContext), let commandBuffer else {
+        return MetallumFrameInterpolationCoordinator.TicketStatus.bypassInputContract.rawValue
+    }
+    return coordinator.prepare(
+        commandBuffer: commandBuffer,
+        rendererGeneration: rendererGeneration,
+        outTicket: outTicket
+    ).rawValue
+}
+
+@_cdecl("metallum_frame_interpolation_publish_committed_v1")
+public func metallum_frame_interpolation_publish_committed_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ ticket: UInt64
+) -> Int32 {
+    coordinatorFromRawPointer(rawContext)?.publishCommitted(ticket: ticket).rawValue
+        ?? MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+}
+
+@_cdecl("metallum_frame_interpolation_cancel_v1")
+public func metallum_frame_interpolation_cancel_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ ticket: UInt64
+) -> Int32 {
+    coordinatorFromRawPointer(rawContext)?.cancel(ticket: ticket).rawValue
+        ?? MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+}
+
+@_cdecl("metallum_frame_interpolation_drain_v1")
+public func metallum_frame_interpolation_drain_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ timeoutNanoseconds: UInt64
+) -> Int32 {
+    guard let coordinator = coordinatorFromRawPointer(rawContext) else {
+        return MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+    }
+    switch coordinator.drain(timeoutNanoseconds: timeoutNanoseconds) {
+    case .ready, .suspendedZeroSize:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue
+    case .drainTimedOut:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.transientFailure.rawValue
+    case .backpressure:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.bypassBackpressure.rawValue
+    case .invalidContext, .released:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+    }
+}
+
+@_cdecl("metallum_frame_interpolation_release_v1")
+public func metallum_frame_interpolation_release_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ timeoutNanoseconds: UInt64
+) -> Int32 {
+    guard let rawContext, let coordinator = coordinatorFromRawPointer(rawContext) else {
+        return MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+    }
+    switch coordinator.release(after: timeoutNanoseconds) {
+    case .ready:
+        Unmanaged<MetallumFrameInterpolationCoordinator>.fromOpaque(rawContext).release()
+        return MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue
+    case .suspendedZeroSize:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue
+    case .drainTimedOut:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.transientFailure.rawValue
+    case .backpressure:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.bypassBackpressure.rawValue
+    case .invalidContext, .released:
+        return MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue
+    }
+}
+
 /**
  * Native lifecycle/deadlock regression test for stage 4.  It performs 10,000
  * synthetic real-only enqueue/complete/reset/drain cycles after a single
@@ -444,6 +674,71 @@ public func metallum_frame_interpolation_coordinator_stress_stage4(_ device: MTL
               metallum_frame_interpolation_coordinator_reset_stage4(rawZeroCoordinator, 1_000_000) == MetallumFrameInterpolationCoordinator.LifecycleStatus.suspendedZeroSize.rawValue,
               metallum_frame_interpolation_coordinator_release_stage4(rawZeroCoordinator, 1_000_000_000) == MetallumFrameInterpolationCoordinator.LifecycleStatus.ready.rawValue else {
             return -8
+        }
+        return 1
+    }
+}
+
+/**
+ * Stage-5 ABI regression test.  It proves that a ticket cannot publish before
+ * the renderer command buffer commits, that a failed/bypassed path can cancel
+ * it, and that the completion-based drain releases every pending ticket.
+ */
+@_cdecl("metallum_frame_interpolation_ticket_stress_stage5")
+public func metallum_frame_interpolation_ticket_stress_stage5(_ device: MTLDevice) -> Int32 {
+    autoreleasepool {
+        let layer = CAMetalLayer()
+        layer.device = device
+        guard let rawCoordinator = metallum_frame_interpolation_create_v1(
+            device,
+            layer,
+            16,
+            16,
+            UInt64(MTLPixelFormat.rgba16Float.rawValue),
+            73
+        ), let queue = device.makeCommandQueue() else {
+            return -1
+        }
+
+        guard let cancelledBuffer = queue.makeCommandBuffer() else {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            return -2
+        }
+        var cancelledTicket: UInt64 = 0
+        guard metallum_frame_interpolation_prepare_v1(rawCoordinator, cancelledBuffer, 73, &cancelledTicket)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue,
+              cancelledTicket != 0,
+              metallum_frame_interpolation_publish_committed_v1(rawCoordinator, cancelledTicket)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.staleTicket.rawValue,
+              metallum_frame_interpolation_cancel_v1(rawCoordinator, cancelledTicket)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue else {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            return -3
+        }
+
+        guard let committedBuffer = queue.makeCommandBuffer() else {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            return -4
+        }
+        var committedTicket: UInt64 = 0
+        guard metallum_frame_interpolation_prepare_v1(rawCoordinator, committedBuffer, 73, &committedTicket)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue,
+              committedTicket != 0 else {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            return -5
+        }
+        committedBuffer.commit()
+        guard metallum_frame_interpolation_publish_committed_v1(rawCoordinator, committedTicket)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue else {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            return -6
+        }
+        committedBuffer.waitUntilCompleted()
+        guard metallum_frame_interpolation_drain_v1(rawCoordinator, 1_000_000_000)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue,
+              metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue else {
+            return -7
         }
         return 1
     }

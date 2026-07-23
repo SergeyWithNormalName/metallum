@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render.mtl;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.metal.render.FrameInterpolationCommitBoundary;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
 
@@ -268,6 +269,25 @@ public final class MTLCommandBuffer {
 
     public void commitWithSignal(final MemorySegment semaphore) {
         MetalNativeBridge.MTLCommandBuffer_commitWithSignal(handle(), semaphore);
+    }
+
+    /** Prepares a native interpolation ticket while this command buffer is still uncommitted. */
+    public FrameInterpolationCommitBoundary.Status prepareFrameInterpolation(
+            final FrameInterpolationCommitBoundary boundary,
+            final long rendererGeneration
+    ) {
+        return boundary.prepare(handle(), rendererGeneration);
+    }
+
+    /**
+     * Commits renderer work before publishing its native interpolation ticket.
+     * A commit exception cancels the ticket inside the boundary.
+     */
+    public FrameInterpolationCommitBoundary.Status commitWithSignalAndPublishFrameInterpolation(
+            final MemorySegment semaphore,
+            final FrameInterpolationCommitBoundary boundary
+    ) {
+        return boundary.commit(() -> MetalNativeBridge.MTLCommandBuffer_commitWithSignal(handle(), semaphore));
     }
 
     public boolean isCompleted() {

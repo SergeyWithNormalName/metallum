@@ -76,6 +76,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private MetalGpuTimingStage gpuTimingStage = MetalGpuTimingStage.NONE;
     private long cpuRenderSubmissionStartNanos;
     private final PendingUiSeedState<PendingUiSeed> pendingUiSeeds = new PendingUiSeedState<>();
+    // Production admission is still OFF through stage 5.  Keeping the boundary
+    // in the render encoder makes the eventual hand-off explicit without
+    // allowing a coordinator to publish before this command buffer commits.
+    private final FrameInterpolationCommitBoundary frameInterpolationCommitBoundary = new FrameInterpolationCommitBoundary();
 
     MetalCommandEncoder(final MetalDevice device) {
         this.device = device;
@@ -162,7 +166,10 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
 
         int slot = (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT);
         MemorySegment completedSemaphore = submitSemaphores[slot];
-        commandBuffer.commitWithSignal(completedSemaphore);
+        commandBuffer.commitWithSignalAndPublishFrameInterpolation(
+                completedSemaphore,
+                this.frameInterpolationCommitBoundary
+        );
 
         InFlight toClose = inFlight[slot];
         inFlight[slot] = new InFlight(currentSubmitIndex, commandBuffer, completedSemaphore);
@@ -438,6 +445,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return MTLCommandBuffer.PresentResult.STALE_GENERATION;
         }
         MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs(source);
+        // The stage-5 boundary is intentionally a disabled BYPASS until native
+        // descriptor/resource admission exists.  A future stale/native bypass
+        // falls through to this established single-real-frame present path.
+        commandBuffer.prepareFrameInterpolation(
+                this.frameInterpolationCommitBoundary,
+                this.commandBufferRendererGenerationId
+        );
         return commandBuffer.encodePresentTextureToDrawable(
                 drawable,
                 source.nativeHandle(),
@@ -1028,6 +1042,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         materializePendingUiSeed();
         endEncoder();
+        this.frameInterpolationCommitBoundary.close();
         for (int slot = 0; slot < inFlight.length; slot++) {
             InFlight f = inFlight[slot];
             if (f != null) {
