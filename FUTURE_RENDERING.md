@@ -43,8 +43,8 @@ Dynamic Resolution alters the rendering target resolution based on GPU workload:
 ## 5. Frame Interpolation / Generation
 
 Generates synthetic intermediate frames on the GPU:
-- **Current Status**: Metal currently does not expose a native frame interpolation API for macOS.
-- **What is Missing**: To implement a custom compute-based frame generator (or integrate FSR 3 / DLSS 3 equivalents), the engine would require highly accurate depth buffers, optical flow buffers, and UI composition isolation. The UI is already isolated to `SDR_UI_COLOR`, but the optical flow culling path is absent.
+- **Current Status**: MetalFX Frame Interpolation API доступен на поддерживаемых macOS 26+ системах. В Metallum присутствуют capability и pure-Java policy scaffolds, однако native coordinator, interpolator workspace и production admission ещё отсутствуют. Функция остаётся недоступной пользователю.
+- **What is Missing**: Native coordinator lifecycle, interpolator workspace allocation, dual-presentation pacing, and entity velocity buffer interception (Stage 2-12).
 
 ---
 
