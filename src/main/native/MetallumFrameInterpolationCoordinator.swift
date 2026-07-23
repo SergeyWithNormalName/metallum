@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import MetalFX
 import QuartzCore
 
 /**
@@ -54,10 +55,44 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         case realFrameReserved
     }
 
+    /**
+     * The MetalFX history is deliberately separate from ticket ownership.
+     * A ticket protects a renderer command buffer; this state protects the
+     * exact previous color submitted to the interpolator.
+     */
+    private enum HistoryState {
+        case primingFirst
+        case primingSecond
+        case active
+    }
+
     private struct Slot {
         let realColor: MTLTexture
         let generatedColor: MTLTexture
+        let depth: MTLTexture?
+        let motion: MTLTexture?
         var state: SlotState
+    }
+
+    private struct ReasonCounters {
+        var priming = 0
+        var unsupported = 0
+        var inputContract = 0
+        var reset = 0
+        var encoded = 0
+
+        mutating func record(_ status: TicketStatus) {
+            switch status {
+            case .bypassPriming:
+                priming += 1
+            case .bypassUnsupported:
+                unsupported += 1
+            case .bypassInputContract:
+                inputContract += 1
+            default:
+                break
+            }
+        }
     }
 
     enum LifecycleStatus: Int32 {
@@ -126,6 +161,16 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var textureAllocationCount = 0
     private var nextTicket: UInt64 = 1
     private var tickets: [UInt64: Ticket] = [:]
+    private var historyState: HistoryState = .primingFirst
+    private var previousEncodedSlot: Int?
+    private var primedPreviousSlot: Int?
+    private var nextHistorySlot = 0
+    private var reasonCounters = ReasonCounters()
+    // Keep potentially unavailable MetalFX objects erased at the macOS 14
+    // coordinator boundary.  They are conditionally cast only inside a
+    // macOS-26 availability region.
+    private var temporalScaler: AnyObject?
+    private var interpolator: AnyObject?
 
     init?(key: Key, device: MTLDevice, layer: CAMetalLayer) {
         guard key.deviceID == ObjectIdentifier(device), key.layerID == ObjectIdentifier(layer) else {
@@ -145,6 +190,12 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         self.renderQueue = renderQueue
         self.presentationQueue = presentationQueue
         self.completionEvent = completionEvent
+
+        // This is intentionally an optional preflight.  The coordinator must
+        // remain a real-only owner on macOS < 26, unsupported devices, and a
+        // nil MetalFX factory result.  No user-facing path can activate this
+        // workspace before stage 9.
+        configureFixedTemporalInterpolator()
 
         if key.isDrawableSized {
             guard allocateTextureRings(device: device) else {
@@ -172,6 +223,47 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
     }
 
+    /**
+     * Builds the fixed-Temporal Metal 3 effect pair used by the stage-6
+     * workspace validation.  Factory failure is expected capability evidence,
+     * so it never prevents the real-only coordinator from being created.
+     */
+    private func configureFixedTemporalInterpolator() {
+        guard key.isDrawableSized else { return }
+        guard #available(macOS 26.0, *),
+              MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
+            return
+        }
+
+        let inputWidth = max(key.width / 2, 1)
+        let inputHeight = max(key.height / 2, 1)
+        // Reuse the renderer's fixed Temporal workspace when it already exists
+        // for this immutable descriptor key; the cache only creates it when
+        // this validation workspace is the first owner.
+        guard let scaler = existingFixedTemporalScalerForFrameInterpolation(
+            device: device,
+            sourcePixelFormat: key.pixelFormat,
+            inputWidth: inputWidth,
+            inputHeight: inputHeight,
+            outputWidth: key.width,
+            outputHeight: key.height
+        ) as? MTLFXTemporalScaler else { return }
+
+        let descriptor = MTLFXFrameInterpolatorDescriptor()
+        descriptor.colorTextureFormat = key.pixelFormat
+        descriptor.outputTextureFormat = key.pixelFormat
+        descriptor.depthTextureFormat = .depth32Float
+        descriptor.motionTextureFormat = .rg16Float
+        descriptor.inputWidth = inputWidth
+        descriptor.inputHeight = inputHeight
+        descriptor.outputWidth = key.width
+        descriptor.outputHeight = key.height
+        descriptor.scaler = scaler
+        guard let created = descriptor.makeFrameInterpolator(device: device) else { return }
+        temporalScaler = scaler
+        interpolator = created
+    }
+
     deinit {
         // Public release drains and joins before the retained native object is
         // released.  This catches an ABI owner that bypassed that contract.
@@ -186,25 +278,211 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             mipmapped: false
         )
         descriptor.storageMode = .private
-        // Stage 6 will union the exact MetalFX-reported usages into this
-        // descriptor.  These are the producer/composite usages needed by the
-        // present path and avoid a later per-frame texture allocation.
+        // MetalFX reports its concrete requirements after construction.  The
+        // fixed ring is allocated once, with the union of producer/composite
+        // and effect usage bits; no texture is created per accepted frame.
         descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        let generatedDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: key.pixelFormat,
+            width: key.width,
+            height: key.height,
+            mipmapped: false
+        )
+        generatedDescriptor.storageMode = .private
+        generatedDescriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+
+        var depthDescriptor: MTLTextureDescriptor?
+        var motionDescriptor: MTLTextureDescriptor?
+        if #available(macOS 26.0, *), let interpolator = interpolator as? MTLFXFrameInterpolator {
+            descriptor.usage.formUnion(interpolator.colorTextureUsage)
+            generatedDescriptor.usage.formUnion(interpolator.outputTextureUsage)
+            let inputWidth = max(key.width / 2, 1)
+            let inputHeight = max(key.height / 2, 1)
+            depthDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .depth32Float,
+                width: inputWidth,
+                height: inputHeight,
+                mipmapped: false
+            )
+            depthDescriptor?.storageMode = .private
+            depthDescriptor?.usage = MTLTextureUsage.renderTarget.union(interpolator.depthTextureUsage)
+            motionDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rg16Float,
+                width: inputWidth,
+                height: inputHeight,
+                mipmapped: false
+            )
+            motionDescriptor?.storageMode = .private
+            motionDescriptor?.usage = MTLTextureUsage.renderTarget.union(interpolator.motionTextureUsage)
+        }
 
         var allocated: [Slot] = []
         allocated.reserveCapacity(Self.ringSize)
         for index in 0..<Self.ringSize {
             guard let realColor = device.makeTexture(descriptor: descriptor),
-                  let generatedColor = device.makeTexture(descriptor: descriptor) else {
+                  let generatedColor = device.makeTexture(descriptor: generatedDescriptor) else {
                 return false
+            }
+            let depth: MTLTexture?
+            if let depthDescriptor {
+                guard let allocatedDepth = device.makeTexture(descriptor: depthDescriptor) else { return false }
+                depth = allocatedDepth
+            } else {
+                depth = nil
+            }
+            let motion: MTLTexture?
+            if let motionDescriptor {
+                guard let allocatedMotion = device.makeTexture(descriptor: motionDescriptor) else { return false }
+                motion = allocatedMotion
+            } else {
+                motion = nil
             }
             realColor.label = "Metallum FI real color \(index)"
             generatedColor.label = "Metallum FI generated color \(index)"
-            allocated.append(Slot(realColor: realColor, generatedColor: generatedColor, state: .free))
+            allocated.append(Slot(
+                realColor: realColor,
+                generatedColor: generatedColor,
+                depth: depth,
+                motion: motion,
+                state: .free
+            ))
         }
         slots = allocated
         textureAllocationCount = allocated.count * 2
         return true
+    }
+
+    /**
+     * Native-only stage-6 encoder used by the validation harness.  It exercises
+     * the exact descriptor usages and per-frame MetalFX contract without
+     * changing the disabled Java production admission path.
+     */
+    func encodeValidationFrame(resetHistory: Bool, fieldOfView: Float) -> TicketStatus {
+        state.lock()
+        guard !shuttingDown, acceptingFrames else {
+            state.unlock()
+            return .bypassDisabled
+        }
+        guard #available(macOS 26.0, *),
+              let interpolator = interpolator as? MTLFXFrameInterpolator,
+              let queue = renderQueue else {
+            reasonCounters.record(.bypassUnsupported)
+            state.unlock()
+            return .bypassUnsupported
+        }
+        guard fieldOfView.isFinite, fieldOfView > 0.0, fieldOfView < 180.0 else {
+            reasonCounters.record(.bypassInputContract)
+            state.unlock()
+            return .bypassInputContract
+        }
+        if resetHistory {
+            resetInterpolationHistoryLocked()
+            reasonCounters.reset += 1
+        }
+        let current = nextHistorySlot
+        nextHistorySlot = (nextHistorySlot + 1) % slots.count
+        switch historyState {
+        case .primingFirst:
+            primedPreviousSlot = current
+            historyState = .primingSecond
+            reasonCounters.record(.bypassPriming)
+            state.unlock()
+            return .bypassPriming
+        case .primingSecond:
+            primedPreviousSlot = current
+            historyState = .active
+            reasonCounters.record(.bypassPriming)
+            state.unlock()
+            return .bypassPriming
+        case .active:
+            guard let previous = previousEncodedSlot ?? primedPreviousSlot,
+                  previous != current,
+                  let depth = slots[current].depth,
+                  let motion = slots[current].motion else {
+                reasonCounters.record(.bypassInputContract)
+                state.unlock()
+                return .bypassInputContract
+            }
+            let currentColor = slots[current].realColor
+            let previousColor = slots[previous].realColor
+            let output = slots[current].generatedColor
+            let resetForFirstEncode = previousEncodedSlot == nil
+            state.unlock()
+
+            guard let commandBuffer = queue.makeCommandBuffer() else {
+                return .transientFailure
+            }
+            guard clearValidationInputs(
+                commandBuffer: commandBuffer,
+                color: currentColor,
+                depth: depth,
+                motion: motion
+            ) else {
+                return .transientFailure
+            }
+            interpolator.colorTexture = currentColor
+            interpolator.prevColorTexture = previousColor
+            interpolator.depthTexture = depth
+            interpolator.motionTexture = motion
+            interpolator.outputTexture = output
+            // This deterministic value is confined to the native test path.
+            // The production path will use coordinator acceptance timestamps.
+            interpolator.deltaTime = 1.0 / 60.0
+            interpolator.nearPlane = 0.05
+            interpolator.farPlane = 1_000.0
+            interpolator.fieldOfView = fieldOfView
+            interpolator.aspectRatio = Float(key.width) / Float(key.height)
+            interpolator.jitterOffsetX = 0.0
+            interpolator.jitterOffsetY = 0.0
+            interpolator.motionVectorScaleX = 1.0
+            interpolator.motionVectorScaleY = 1.0
+            interpolator.isDepthReversed = true
+            interpolator.shouldResetHistory = resetForFirstEncode
+            interpolator.encode(commandBuffer: commandBuffer)
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            guard commandBuffer.status == .completed, commandBuffer.error == nil else {
+                return .transientFailure
+            }
+
+            state.lock()
+            previousEncodedSlot = current
+            reasonCounters.encoded += 1
+            state.unlock()
+            return .prepared
+        }
+    }
+
+    private func clearValidationInputs(
+        commandBuffer: MTLCommandBuffer,
+        color: MTLTexture,
+        depth: MTLTexture,
+        motion: MTLTexture
+    ) -> Bool {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = color
+        descriptor.colorAttachments[0].loadAction = .clear
+        descriptor.colorAttachments[0].storeAction = .store
+        descriptor.colorAttachments[0].clearColor = MTLClearColorMake(0.25, 0.5, 0.75, 1.0)
+        descriptor.colorAttachments[1].texture = motion
+        descriptor.colorAttachments[1].loadAction = .clear
+        descriptor.colorAttachments[1].storeAction = .store
+        descriptor.colorAttachments[1].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0)
+        descriptor.depthAttachment.texture = depth
+        descriptor.depthAttachment.loadAction = .clear
+        descriptor.depthAttachment.storeAction = .store
+        descriptor.depthAttachment.clearDepth = 0.0
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            return false
+        }
+        encoder.endEncoding()
+        return true
+    }
+
+    private func resetInterpolationHistoryLocked() {
+        historyState = .primingFirst
+        previousEncodedSlot = nil
+        primedPreviousSlot = nil
     }
 
     /**
@@ -328,6 +606,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         // The old single-present path is still responsible for the actual
         // frame.  Reset only invalidates coordinator-owned history/resources.
         resetEpoch &+= 1
+        resetInterpolationHistoryLocked()
         acceptingFrames = key.isDrawableSized
         return key.isDrawableSized ? .ready : .suspendedZeroSize
     }
@@ -419,6 +698,26 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         state.lock()
         defer { state.unlock() }
         return resetEpoch
+    }
+
+    func nativeStage6Counter(_ kind: Int) -> Int {
+        state.lock()
+        defer { state.unlock() }
+        switch kind {
+        case 0: return reasonCounters.priming
+        case 1: return reasonCounters.unsupported
+        case 2: return reasonCounters.inputContract
+        case 3: return reasonCounters.reset
+        case 4: return reasonCounters.encoded
+        default: return 0
+        }
+    }
+
+    static func currentToPreviousMotion(
+        currentPixel: SIMD2<Float>,
+        previousPixel: SIMD2<Float>
+    ) -> SIMD2<Float> {
+        previousPixel - currentPixel
     }
 
     private func runRealOnlyScheduler() {
@@ -740,6 +1039,69 @@ public func metallum_frame_interpolation_ticket_stress_stage5(_ device: MTLDevic
                 == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue else {
             return -7
         }
+        return 1
+    }
+}
+
+/**
+ * Stage-6 native proof for the fixed-Temporal Metal 3 encoder.  The return
+ * value is intentionally tri-state: 1 pass, 2 clean unsupported skip, or a
+ * negative deterministic contract failure.  It never acquires a drawable.
+ */
+@_cdecl("metallum_frame_interpolation_encode_stress_stage6")
+public func metallum_frame_interpolation_encode_stress_stage6(_ device: MTLDevice) -> Int32 {
+    guard #available(macOS 26.0, *),
+          MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
+        return 2
+    }
+    return autoreleasepool {
+        let layer = CAMetalLayer()
+        layer.device = device
+        guard let rawCoordinator = metallum_frame_interpolation_create_v1(
+            device,
+            layer,
+            64,
+            64,
+            UInt64(MTLPixelFormat.rgba16Float.rawValue),
+            106
+        ), let coordinator = coordinatorFromRawPointer(rawCoordinator) else {
+            return -1
+        }
+        defer {
+            _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+        }
+
+        let priming = MetallumFrameInterpolationCoordinator.TicketStatus.bypassPriming
+        let prepared = MetallumFrameInterpolationCoordinator.TicketStatus.prepared
+        guard coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 70.0) == priming,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 70.0) == priming,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 70.0) == prepared,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 70.0) == prepared else {
+            return -2
+        }
+
+        // A teleport/FOV-like discontinuity must re-prime and must not encode
+        // a pair that crosses the old history generation.
+        guard coordinator.encodeValidationFrame(resetHistory: true, fieldOfView: 90.0) == priming,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 90.0) == priming,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: 90.0) == prepared,
+              coordinator.encodeValidationFrame(resetHistory: false, fieldOfView: .nan)
+                == .bypassInputContract,
+              coordinator.nativeStage6Counter(0) == 4,
+              coordinator.nativeStage6Counter(2) == 1,
+              coordinator.nativeStage6Counter(3) == 1,
+              coordinator.nativeStage6Counter(4) == 3 else {
+            return -3
+        }
+
+        // Apple requires current-pixel -> previous-pixel displacement.  This
+        // known-pixel calibration rejects an accidental sign flip before live
+        // camera/entity motion calibration in a later stage.
+        let motion = MetallumFrameInterpolationCoordinator.currentToPreviousMotion(
+            currentPixel: SIMD2<Float>(10.0, 10.0),
+            previousPixel: SIMD2<Float>(0.0, 0.0)
+        )
+        guard motion == SIMD2<Float>(-10.0, -10.0) else { return -4 }
         return 1
     }
 }

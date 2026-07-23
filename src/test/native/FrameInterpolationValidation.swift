@@ -78,6 +78,7 @@ private typealias PresentTextureToDrawableFn = @convention(c) (
 
 private typealias Stage4CoordinatorStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage5TicketStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage6EncodeStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -549,6 +550,22 @@ private enum FrameInterpolationValidation {
             exit(1)
         }
         logMsg("[PASS] Stage 5: pre-commit publish rejected, cancel succeeds, and committed ticket drains")
+
+        logMsg("[INFO] Testing Stage 6: fixed-Temporal MetalFX encode and history ring")
+        guard let stage6EncodeSymbol = dlsym(handle, "metallum_frame_interpolation_encode_stress_stage6") else {
+            logMsg("[FAIL] Stage 6: MetalFX encode stress symbol is missing")
+            exit(1)
+        }
+        let stage6Encode = unsafeBitCast(stage6EncodeSymbol, to: Stage6EncodeStressFn.self)
+        switch stage6Encode(device) {
+        case 1:
+            logMsg("[PASS] Stage 6: real MetalFX encodes, two-frame priming, reset isolation, and motion sign calibration")
+        case 2:
+            logMsg("[SKIP] Stage 6: MetalFX Frame Interpolator unsupported on device \(device.name)")
+        default:
+            logMsg("[FAIL] Stage 6: fixed-Temporal encode/history validation failed")
+            exit(1)
+        }
 
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {

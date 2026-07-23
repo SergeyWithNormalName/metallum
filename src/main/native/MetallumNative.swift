@@ -2251,6 +2251,8 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
     // Append-only: Temporal input generation and optional entity replay are measured separately.
     case temporalInputs = 17
     case temporalEntityReplay = 18
+    // Append-only: MetalFX Frame Interpolator encode (present stages arrive in stage 7).
+    case frameInterpolation = 19
 
     var reportName: String {
         switch self {
@@ -2273,6 +2275,7 @@ private enum MetallumGpuTimingStage: Int, CaseIterable {
         case .dynamicLocalShadow: "dynamic local shadow"
         case .temporalInputs: "temporal inputs"
         case .temporalEntityReplay: "temporal entity replay"
+        case .frameInterpolation: "frame interpolation"
         }
     }
 
@@ -6025,6 +6028,31 @@ private func ensureTemporalWorkspace(
         scaler.outputTextureUsage.rawValue
     )
     return workspace
+}
+
+/**
+ * Gives the frame-interpolation coordinator the exact fixed Temporal scaler
+ * owned by the renderer workspace cache, without exposing the cache's private
+ * resource/lifetime implementation across native source files.
+ */
+func existingFixedTemporalScalerForFrameInterpolation(
+    device: MTLDevice,
+    sourcePixelFormat: MTLPixelFormat,
+    inputWidth: Int,
+    inputHeight: Int,
+    outputWidth: Int,
+    outputHeight: Int
+) -> AnyObject? {
+    guard #available(macOS 14.4, *) else { return nil }
+    return ensureTemporalWorkspace(
+        device: device,
+        sourcePixelFormat: sourcePixelFormat,
+        inputWidth: inputWidth,
+        inputHeight: inputHeight,
+        outputWidth: outputWidth,
+        outputHeight: outputHeight,
+        usesDynamicInputContent: false
+    )?.scaler
 }
 
 private func touchTemporalWorkspace(_ workspace: MetallumTemporalWorkspace) {
