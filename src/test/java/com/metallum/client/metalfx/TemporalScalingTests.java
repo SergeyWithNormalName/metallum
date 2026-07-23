@@ -130,6 +130,8 @@ public final class TemporalScalingTests {
         require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_ENTRY_SCALE == 0.55f
                         && MetalFxTemporalScaling.DYNAMIC_SPATIAL_RETURN_SCALE == 0.70f,
                 "Hybrid transitions use 55% Temporal and 70% Spatial entries");
+        require(MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_GPU_MS == 14.00f,
+                "Temporal returns after GPU time falls below 14.0ms");
         require(MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.60f),
                 "Spatial is valid at its 60% floor");
         require(!MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.55f),
@@ -141,7 +143,7 @@ public final class TemporalScalingTests {
                 "a Spatial transition sample below 16.5ms resets its counter");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(59, true)
                         == MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_FRAMES,
-                "60 consecutive <13.0ms samples return to Spatial");
+                "60 consecutive <14.0ms samples return to Spatial");
     }
 
     private static void require(final boolean condition, final String message) {

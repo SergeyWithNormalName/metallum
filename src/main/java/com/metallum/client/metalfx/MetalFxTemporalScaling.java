@@ -30,7 +30,8 @@ public final class MetalFxTemporalScaling {
     static final float DYNAMIC_SPATIAL_RETURN_SCALE = 0.70f;
     static final float SPATIAL_TO_TEMPORAL_GPU_MS = 16.50f;
     static final int SPATIAL_TO_TEMPORAL_FRAMES = 45;
-    static final float TEMPORAL_TO_SPATIAL_GPU_MS = 13.00f;
+    /** 14.0 ms GPU time is approximately 71.4 FPS before the return holdoff. */
+    static final float TEMPORAL_TO_SPATIAL_GPU_MS = 14.00f;
     /** One second at 60 FPS of proven headroom before leaving Temporal. */
     static final int TEMPORAL_TO_SPATIAL_FRAMES = 60;
     private static final float NATIVE_SCALE_EPSILON = 1.0e-5f;
