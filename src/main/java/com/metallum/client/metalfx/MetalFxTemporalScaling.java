@@ -23,8 +23,12 @@ public final class MetalFxTemporalScaling {
      * enter/exit points prevent a frame-time wobble from repeatedly discarding
      * Temporal history.
      */
-    static final float DYNAMIC_RECONSTRUCTION_ENTER_SCALE = 0.70f;
-    static final float DYNAMIC_RECONSTRUCTION_EXIT_SCALE = 0.80f;
+    /** The first 5%-step below Spatial's 70% floor: 65%. */
+    static final float DYNAMIC_RECONSTRUCTION_ENTER_SCALE = 0.65f;
+    /** Keep Temporal through 70% on recovery to avoid scaler churn. */
+    static final float DYNAMIC_RECONSTRUCTION_EXIT_SCALE = 0.75f;
+    /** Dynamic resolution's 5%-step lower bound while Temporal is active. */
+    static final float DYNAMIC_TEMPORAL_MIN_SCALE = 0.45f;
     private static final float NATIVE_SCALE_EPSILON = 1.0e-5f;
     public record Dimensions(int displayWidth, int displayHeight, int renderWidth, int renderHeight) {
         public float actualWidthScale() {
@@ -115,6 +119,7 @@ public final class MetalFxTemporalScaling {
         );
         if (nextFallback != dynamicSpatialFallback) {
             dynamicSpatialFallback = nextFallback;
+            applyDynamicMinimumScale(nextFallback);
             requestRendererResize();
         }
     }
@@ -143,6 +148,7 @@ public final class MetalFxTemporalScaling {
         requestedMode = selected;
         runtimeDisabled = false;
         dynamicSpatialFallback = selected.isDynamic();
+        applyDynamicMinimumScale(true);
         saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
@@ -169,6 +175,7 @@ public final class MetalFxTemporalScaling {
         requestedMode = TemporalScalingMode.OFF;
         runtimeDisabled = false;
         dynamicSpatialFallback = false;
+        applyDynamicMinimumScale(true);
         saveSettings(TemporalScalingMode.OFF);
         requestRendererResize();
     }
@@ -182,6 +189,7 @@ public final class MetalFxTemporalScaling {
         benchmarkOverride = concreteMode;
         runtimeDisabled = false;
         dynamicSpatialFallback = false;
+        applyDynamicMinimumScale(true);
         if (previous != concreteMode || wasRuntimeDisabled) {
             requestRendererResize();
         }
@@ -196,6 +204,7 @@ public final class MetalFxTemporalScaling {
         benchmarkOverride = null;
         runtimeDisabled = false;
         dynamicSpatialFallback = requestedMode.isDynamic();
+        applyDynamicMinimumScale(true);
         requestRendererResize();
     }
 
@@ -204,6 +213,7 @@ public final class MetalFxTemporalScaling {
             return;
         }
         runtimeDisabled = true;
+        applyDynamicMinimumScale(true);
         Metallum.LOGGER.error(
                 "MetalFX temporal scaling failed; falling back to native-resolution rendering",
                 cause
@@ -283,6 +293,12 @@ public final class MetalFxTemporalScaling {
             return true;
         }
         return currentFallback;
+    }
+
+    private static void applyDynamicMinimumScale(final boolean spatialFallback) {
+        MetallumDrsController.setMinScaleBound(
+                spatialFallback ? MetallumDrsController.MIN_SCALE : DYNAMIC_TEMPORAL_MIN_SCALE
+        );
     }
 
     private static int scaledDimension(final int displayDimension, final float scale) {

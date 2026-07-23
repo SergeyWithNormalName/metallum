@@ -124,13 +124,17 @@ public final class TemporalScalingTests {
         require(MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_ENTER_SCALE
                         < MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_EXIT_SCALE,
                 "Dynamic Temporal transition requires a hysteresis gap");
-        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.70f),
-                "Dynamic Temporal enters reconstruction at 70% scale");
-        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.75f),
+        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MIN_SCALE == 0.45f,
+                "Dynamic Temporal may use the 45% DRS floor");
+        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.70f),
+                "Spatial remains active through 70% scale");
+        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.65f),
+                "Dynamic Temporal enters reconstruction at the next 65% step");
+        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.70f),
                 "Hysteresis retains reconstruction between its two limits");
-        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.80f),
-                "Dynamic Temporal returns to Spatial/native at 80% scale");
-        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.79f),
+        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.75f),
+                "Dynamic Temporal returns to Spatial/native at 75% scale");
+        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.74f),
                 "Fallback remains active below the exit threshold");
     }
 
