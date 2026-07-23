@@ -13,7 +13,7 @@ public final class TemporalScalingTests {
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
         testEffectiveSelection();
-        testDynamicHybridTransitionContract();
+        testDynamicNativeTemporalTransitionContract();
         System.out.println("Native Apple MetalFX Temporal preset validation passed");
     }
 
@@ -120,30 +120,21 @@ public final class TemporalScalingTests {
                 "Unsupported devices must reject the selected Temporal mode");
     }
 
-    private static void testDynamicHybridTransitionContract() {
-        require(MetalFxTemporalScaling.DYNAMIC_SPATIAL_MIN_SCALE == 0.60f
-                        && MetalFxTemporalScaling.DYNAMIC_SPATIAL_MAX_SCALE == 0.95f,
-                "Dynamic Spatial is constrained to 60-95%");
-        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MIN_SCALE == 0.50f
-                        && MetalFxTemporalScaling.DYNAMIC_TEMPORAL_MAX_SCALE == 0.60f,
-                "Dynamic Temporal is constrained to 50-60%");
-        require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_ENTRY_SCALE == 0.55f
-                        && MetalFxTemporalScaling.DYNAMIC_SPATIAL_RETURN_SCALE == 0.70f,
-                "Hybrid transitions use 55% Temporal and 70% Spatial entries");
-        require(MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_GPU_MS == 14.00f,
-                "Temporal returns after GPU time falls below 14.0ms");
-        require(MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.60f),
-                "Spatial is valid at its 60% floor");
-        require(!MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.55f),
-                "Spatial must never resolve a Dynamic Temporal frame at 55%");
+    private static void testDynamicNativeTemporalTransitionContract() {
+        require(MetalFxTemporalScaling.DYNAMIC_NATIVE_SCALE == 1.00f
+                        && MetalFxTemporalScaling.DYNAMIC_TEMPORAL_SCALE == 0.50f,
+                "Dynamic Temporal switches only between Native 100% and Temporal 50%");
+        require(MetalFxTemporalScaling.NATIVE_TO_TEMPORAL_GPU_MS == 16.50f
+                        && MetalFxTemporalScaling.TEMPORAL_TO_NATIVE_GPU_MS == 14.00f,
+                "Temporal is admitted below 60 FPS and released with 14ms headroom");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, true)
-                        == MetalFxTemporalScaling.SPATIAL_TO_TEMPORAL_FRAMES,
-                "45 consecutive >16.5ms samples enter Temporal");
+                        == MetalFxTemporalScaling.NATIVE_TO_TEMPORAL_FRAMES,
+                "45 consecutive native samples >16.5ms enter Temporal");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, false) == 0,
-                "a Spatial transition sample below 16.5ms resets its counter");
+                "a native sample at or below 16.5ms resets Temporal admission");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(59, true)
-                        == MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_FRAMES,
-                "60 consecutive <14.0ms samples return to Spatial");
+                        == MetalFxTemporalScaling.TEMPORAL_TO_NATIVE_FRAMES,
+                "60 consecutive Temporal samples <14.0ms return to Native");
     }
 
     private static void require(final boolean condition, final String message) {

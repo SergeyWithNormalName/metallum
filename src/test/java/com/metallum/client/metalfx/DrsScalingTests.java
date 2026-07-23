@@ -58,23 +58,20 @@ public final class DrsScalingTests {
                         < MetallumDrsController.SCALE_UP_HOLDOFF_FRAMES,
                 "Dynamic scale-down must be faster than quality recovery");
         MetallumDrsController.reset();
-        MetallumDrsController.setScaleBounds(0.60f, 0.95f);
+        MetallumDrsController.setScaleBounds(1.00f, 1.00f);
         MetallumDrsController.setEnabled(true);
         require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f,
-                "Native remains 100% until an overloaded sample requests Spatial");
-        MetallumDrsController.updateGpuFrameTime(16.0f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f,
-                "first Spatial scale is capped at 95%");
+                "Native remains fixed at 100% until Temporal is admitted");
+        MetallumDrsController.updateGpuFrameTime(30.0f);
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f,
+                "Native Dynamic Temporal never invokes Spatial downscaling");
+        MetallumDrsController.setScaleBounds(0.50f, 0.50f);
         MetallumDrsController.setScaleForDynamicMode(0.50f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.60f) < 1.0e-5f,
-                "Spatial cannot fall below 60%");
-        MetallumDrsController.setScaleBounds(0.50f, 0.60f);
-        MetallumDrsController.setScaleForDynamicMode(0.55f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.55f) < 1.0e-5f,
-                "Temporal starts at 55%");
-        MetallumDrsController.setScaleForDynamicMode(0.70f);
-        require(Math.abs(MetallumDrsController.currentScale() - 0.60f) < 1.0e-5f,
-                "Temporal cannot grow above 60%");
+        require(Math.abs(MetallumDrsController.currentScale() - 0.50f) < 1.0e-5f,
+                "Temporal uses only its validated 50% input");
+        MetallumDrsController.setScaleBounds(1.00f, 1.00f);
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f,
+                "leaving Temporal restores Native 100% resolution");
         MetallumDrsController.setEnabled(false);
     }
 

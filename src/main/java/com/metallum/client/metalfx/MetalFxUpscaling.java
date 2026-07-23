@@ -42,9 +42,6 @@ public final class MetalFxUpscaling {
         if (MetalFxTemporalScaling.isActive()) {
             return Type.TEMPORAL;
         }
-        if (MetalFxTemporalScaling.isDynamicSpatialResolveActive()) {
-            return Type.SPATIAL;
-        }
         if (MetalFxSpatialScaling.isActive()) {
             return Type.SPATIAL;
         }
@@ -55,14 +52,9 @@ public final class MetalFxUpscaling {
         return activeType() != Type.NONE;
     }
 
-    /**
-     * The active Spatial implementation, including Dynamic Temporal's
-     * high-resolution fallback. Native encoders must use this rather than the
-     * persisted Spatial setting.
-     */
+    /** Spatial can be active only when the user selected the Spatial mode. */
     public static boolean isSpatialPathActive() {
-        return MetalFxTemporalScaling.isDynamicSpatialResolveActive()
-                || MetalFxSpatialScaling.isActive();
+        return MetalFxSpatialScaling.isActive();
     }
 
     public static MetalFxUpscalingMode requestedMode() {
@@ -133,9 +125,8 @@ public final class MetalFxUpscaling {
     }
 
     public static Dimensions effectiveDimensions(final int displayWidth, final int displayHeight) {
-        // A requested Dynamic Temporal session keeps its DRS dimensions even
-        // while its high-resolution fallback has temporarily disabled the
-        // costly Temporal feature bit.
+        // A requested Dynamic Temporal session owns its Native or Temporal
+        // dimensions even while Native has temporarily disabled its feature bit.
         if (MetalFxTemporalScaling.isRequested()
                 && !MetalFxTemporalScaling.isRuntimeDisabled()
                 && MetalFxTemporalScaling.requestedMode().isDynamic()) {
