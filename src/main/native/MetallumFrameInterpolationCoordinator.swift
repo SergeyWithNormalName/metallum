@@ -2610,6 +2610,13 @@ public func metallum_frame_interpolation_spatial_stress_stage10(_ device: MTLDev
         return 2
     }
     return autoreleasepool {
+        guard metallumSpatialOutputIsCurrent(
+            workspaceCommandBufferAddress: 72, commandBufferAddress: 72
+        ), !metallumSpatialOutputIsCurrent(
+            workspaceCommandBufferAddress: 72, commandBufferAddress: 73
+        ), !metallumSpatialOutputIsCurrent(
+            workspaceCommandBufferAddress: nil, commandBufferAddress: 72
+        ) else { return -3 }
         let scale = MetallumFrameInterpolationCoordinator.spatialMotionScale(
             displayWidth: 96, displayHeight: 90, renderWidth: 48, renderHeight: 30
         )

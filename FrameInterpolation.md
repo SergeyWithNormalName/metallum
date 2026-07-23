@@ -1317,6 +1317,9 @@ Gate:
 - `frameInterpolationValidation`, `frameSynthesisUnitTest` и
   `rendererArchitectureUnitTest` проверяют nil-scaler profile, non-uniform
   scale и manifest/admission contract на Apple M1 Pro.
+- Spatial workspace output принимается только если он был закодирован в том
+  же renderer command buffer. Это исключает presentation-generated pair из
+  output предыдущего real frame при задержке Spatial resolve.
 
 Ручные gate из раздела выше остаются необходимыми до снятия Experimental:
 camera/object motion calibration, HDR/UI visual parity и повторяемый benchmark

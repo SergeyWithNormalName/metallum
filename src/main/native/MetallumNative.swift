@@ -5888,7 +5888,10 @@ private func currentSpatialOutput(
     outputHeight: Int
 ) -> MTLTexture? {
     guard let workspace = NativeState.spatialWorkspaces[objectAddress(commandBuffer.device)],
-          workspace.outputCommandBufferAddress == objectAddress(commandBuffer) else {
+          metallumSpatialOutputIsCurrent(
+            workspaceCommandBufferAddress: workspace.outputCommandBufferAddress,
+            commandBufferAddress: objectAddress(commandBuffer)
+          ) else {
         return nil
     }
     return currentSpatialOutput(
@@ -5897,6 +5900,15 @@ private func currentSpatialOutput(
         outputWidth: outputWidth,
         outputHeight: outputHeight
     )
+}
+
+/** Keeps a cached Spatial workspace from crossing a renderer command-buffer boundary. */
+func metallumSpatialOutputIsCurrent(
+    workspaceCommandBufferAddress: UInt?,
+    commandBufferAddress: UInt
+) -> Bool {
+    workspaceCommandBufferAddress != nil
+        && workspaceCommandBufferAddress == commandBufferAddress
 }
 
 private func ensureTemporalWorkspace(
@@ -13261,8 +13273,13 @@ public func metallum_encodePresentationWorld(
             ? hasCompatibleActualScene
             : hasCompatibleLegacyScene
 
+        // Frame Interpolation must never consume the Spatial workspace's last
+        // completed output merely because it matches the extent.  That output
+        // can belong to N-1 while this renderer command buffer is building N,
+        // which manifests as a held/stale generated frame.  The command-buffer
+        // overload proves the Spatial resolve was encoded for this exact frame.
         let candidateSpatialOutput = currentSpatialOutput(
-            device: commandBuffer.device,
+            commandBuffer: commandBuffer,
             inputTexture: sourceTexture,
             outputWidth: targetTexture.width,
             outputHeight: targetTexture.height
