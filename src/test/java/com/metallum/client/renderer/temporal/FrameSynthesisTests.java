@@ -6,6 +6,10 @@ import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
 
+import com.metallum.client.renderer.LightingPreset;
+import com.metallum.client.renderer.RendererConfig;
+import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
+
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
@@ -25,6 +29,7 @@ public final class FrameSynthesisTests {
         testGenerationTransitionsFailClosed();
         testPresentationAndOwnershipFailures();
         testCadenceAndImmutableOwnership();
+        testFrameInterpolationPolicyAndContractRules();
         System.out.println("Frame synthesis P6 contract tests passed");
     }
 
@@ -189,11 +194,12 @@ public final class FrameSynthesisTests {
                         FrameSynthesisContract.RejectionReason.IN_FLIGHT_OWNERSHIP_INSUFFICIENT),
                 "missing generated presentation/lease did not fail closed");
 
+        // Generated N-1/2 after or equal to real N is invalid (generated ID must be < real ID)
         FrameSynthesisContract.PresentationIntent outOfOrder = new FrameSynthesisContract.PresentationIntent(
-                9L,
+                11L,
                 FrameSynthesisContract.PresentationKind.GENERATED_FRAME,
                 2L,
-                99L,
+                110L,
                 "drawable-owner"
         );
         FrameSynthesisContract.Request ordering = copy(valid, valid.current(), valid.previous(),
@@ -223,6 +229,86 @@ public final class FrameSynthesisTests {
         expectUnsupported(() -> ownership.retainedResourceIds().add("mutate"));
     }
 
+    private static void testFrameInterpolationPolicyAndContractRules() {
+        RendererConfig configOff = RendererConfig.defaults();
+        RendererConfig configOn = configOff.withFrameInterpolation(true);
+        long fiSnapshot = 1L | (1L << 10) | (1L << 14) | (120L << 48); // METAL3_BASE | METALFX_FRAME_INTERPOLATION | DISPLAY_REFRESH | 120 Hz
+        MetalCapabilities capabilitiesWithFI = MetalCapabilities.fromNativeSnapshot(
+                fiSnapshot, new com.metallum.client.hdr.EdrCapabilities(1.0f, 1.0f)
+        );
+        MetalCapabilities capabilitiesNoFI = MetalCapabilities.of(
+                MetalCapabilities.Feature.METAL3_BASE
+        );
+
+        // 1. User request disabled
+        FrameInterpolationPolicy.Evaluation evalDisabled = FrameInterpolationPolicy.evaluate(
+                configOff, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                60.0, Set.of()
+        );
+        require(!evalDisabled.requested() && !evalDisabled.profileEligible() && !evalDisabled.effectiveAdmitted()
+                        && evalDisabled.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.USER_REQUEST_DISABLED
+                        && evalDisabled.effectiveReason() == FrameInterpolationPolicy.EffectiveReason.NOT_PROFILE_ELIGIBLE,
+                "user request disabled policy test failed");
+
+        // 2. Feature unsupported on device
+        FrameInterpolationPolicy.Evaluation evalNoCap = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesNoFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                60.0, Set.of()
+        );
+        require(evalNoCap.requested() && !evalNoCap.profileEligible() && !evalNoCap.effectiveAdmitted()
+                        && evalNoCap.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.FEATURE_UNSUPPORTED,
+                "unsupported capability policy test failed");
+
+        // 3. Fixed Temporal is profileEligible, but effectiveAdmitted is unconditionally false in Stage 1
+        FrameInterpolationPolicy.Evaluation evalEligible = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                60.0, Set.of()
+        );
+        require(evalEligible.requested() && evalEligible.profileEligible() && !evalEligible.effectiveAdmitted()
+                        && evalEligible.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_FIXED_TEMPORAL
+                        && evalEligible.effectiveReason() == FrameInterpolationPolicy.EffectiveReason.PRODUCTION_ADMISSION_DISABLED,
+                "eligible Fixed Temporal policy test failed");
+
+        // 4. Upstream modes (Dynamic Temporal, Spatial, Native) rejected without Stage 10/11 adapters
+        for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(
+                FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL,
+                FrameInterpolationPolicy.UpstreamMode.SPATIAL,
+                FrameInterpolationPolicy.UpstreamMode.NATIVE)) {
+            FrameInterpolationPolicy.Evaluation evalUpstream = FrameInterpolationPolicy.evaluate(
+                    configOn, capabilitiesWithFI, mode, 60.0, Set.of()
+            );
+            require(!evalUpstream.profileEligible()
+                            && evalUpstream.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
+                    mode + " was not rejected by policy");
+        }
+
+        // 5. Cadence out of bounds (desired 60 FPS for 120 Hz display; bounds = [51, 63])
+        FrameInterpolationPolicy.Evaluation evalLowCadence = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                45.0, Set.of()
+        );
+        require(!evalLowCadence.profileEligible()
+                        && evalLowCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
+                "low cadence was not rejected");
+
+        FrameInterpolationPolicy.Evaluation evalHighCadence = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                75.0, Set.of()
+        );
+        require(!evalHighCadence.profileEligible()
+                        && evalHighCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
+                "high cadence was not rejected");
+
+        // 6. History discontinuity invalidates eligibility
+        FrameInterpolationPolicy.Evaluation evalDiscont = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                60.0, Set.of(FrameSynthesisContract.Discontinuity.RESIZE)
+        );
+        require(!evalDiscont.profileEligible()
+                        && evalDiscont.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.HISTORY_DISCONTINUITY,
+                "discontinuity was not rejected by policy");
+    }
+
     private static FrameSynthesisContract.Request validRequest(final MetalExecutorKind executor) {
         FrameSynthesisContract.RenderedFrame previous = frame(
                 1L, temporalContract(),
@@ -240,10 +326,11 @@ public final class FrameSynthesisTests {
                         RENDER_EXTENT)),
                 Optional.of(texture("current-ui", FrameSynthesisContract.TextureRole.SDR_UI, DISPLAY_EXTENT)),
                 false, Set.of());
+        // Generated N-1/2 presentation ID (9L) precedes real N presentation ID (10L)
+        FrameSynthesisContract.PresentationIntent generated = new FrameSynthesisContract.PresentationIntent(
+                9L, FrameSynthesisContract.PresentationKind.GENERATED_FRAME, 2L, 90L, "drawable-owner");
         FrameSynthesisContract.PresentationIntent real = new FrameSynthesisContract.PresentationIntent(
                 10L, FrameSynthesisContract.PresentationKind.REAL_FRAME, 2L, 100L, "drawable-owner");
-        FrameSynthesisContract.PresentationIntent generated = new FrameSynthesisContract.PresentationIntent(
-                11L, FrameSynthesisContract.PresentationKind.GENERATED_FRAME, 2L, 110L, "drawable-owner");
         Set<String> retained = new HashSet<>(current.resourceIds());
         retained.addAll(previous.resourceIds());
         MetalCapabilities capabilities = MetalCapabilities.of(
@@ -259,7 +346,7 @@ public final class FrameSynthesisTests {
                 Optional.of(generated),
                 new FrameSynthesisContract.DisplayCadence(60.0, 60.0, 120.0),
                 FrameSynthesisContract.DrawableOwnership.preparation("drawable-owner", 2),
-                new FrameSynthesisContract.InFlightGenerationOwnership(7L, 9L, 11L, retained),
+                new FrameSynthesisContract.InFlightGenerationOwnership(7L, 9L, 10L, retained),
                 capabilities,
                 executor
         );

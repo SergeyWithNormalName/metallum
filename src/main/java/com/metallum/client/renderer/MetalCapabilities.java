@@ -54,7 +54,6 @@ public final class MetalCapabilities {
         public static final FormatUsageProfile UNAVAILABLE = new FormatUsageProfile(false, false);
     }
 
-    /** One-time MetalFX Temporal + reactive-mask diagnostic admission evidence. */
     public record TemporalProfile(
             boolean metalFxTemporal,
             boolean reactiveMaskApi,
@@ -71,6 +70,19 @@ public final class MetalCapabilities {
             return this.metalFxTemporal && this.reactiveMaskApi && this.depth32Float
                     && this.rg16Float && this.r8Unorm && this.requiredTextureUsages;
         }
+    }
+
+    /** One-time Apple MetalFX Frame Interpolation admission evidence scaffold. */
+    public record FrameInterpolationProfile(
+            boolean metalFxFrameInterpolation,
+            boolean metal4FxFrameInterpolation,
+            boolean depth32Float,
+            boolean rg16Float,
+            boolean nativeProfileValidated
+    ) {
+        public static final FrameInterpolationProfile UNAVAILABLE = new FrameInterpolationProfile(
+                false, false, false, false, false
+        );
     }
 
     public record DisplayCapabilities(
@@ -122,6 +134,7 @@ public final class MetalCapabilities {
     private final Map<Feature, Evidence> evidence;
     private final FormatUsageProfile formatUsageProfile;
     private final TemporalProfile temporalProfile;
+    private final FrameInterpolationProfile frameInterpolationProfile;
     private final DisplayCapabilities displayCapabilities;
 
     private MetalCapabilities(
@@ -129,12 +142,16 @@ public final class MetalCapabilities {
             final Map<Feature, Evidence> evidence,
             final FormatUsageProfile formatUsageProfile,
             final TemporalProfile temporalProfile,
+            final FrameInterpolationProfile frameInterpolationProfile,
             final DisplayCapabilities displayCapabilities
     ) {
         Objects.requireNonNull(features, "features");
         Objects.requireNonNull(evidence, "evidence");
         this.formatUsageProfile = Objects.requireNonNull(formatUsageProfile, "formatUsageProfile");
         this.temporalProfile = Objects.requireNonNull(temporalProfile, "temporalProfile");
+        this.frameInterpolationProfile = Objects.requireNonNull(
+                frameInterpolationProfile, "frameInterpolationProfile"
+        );
         this.displayCapabilities = Objects.requireNonNull(displayCapabilities, "displayCapabilities");
         EnumSet<Feature> featureCopy = features.isEmpty()
                 ? EnumSet.noneOf(Feature.class)
@@ -158,11 +175,16 @@ public final class MetalCapabilities {
         DisplayCapabilities display = values.contains(Feature.HDR_OUTPUT)
                 ? new DisplayCapabilities(0, 1.0f, 2.0f)
                 : DisplayCapabilities.UNKNOWN_SDR;
+        boolean fiSupport = values.contains(Feature.METALFX_FRAME_INTERPOLATION);
+        boolean fi4Support = values.contains(Feature.METALFX_FRAME_INTERPOLATION_METAL4);
         return new MetalCapabilities(
                 values,
                 evidence,
                 new FormatUsageProfile(formats, false),
                 TemporalProfile.UNAVAILABLE,
+                fiSupport
+                        ? new FrameInterpolationProfile(true, fi4Support, true, true, false)
+                        : FrameInterpolationProfile.UNAVAILABLE,
                 display
         );
     }
@@ -222,6 +244,8 @@ public final class MetalCapabilities {
         int refresh = (int) ((nativeSnapshot & NATIVE_REFRESH_MASK) >>> NATIVE_REFRESH_SHIFT);
         boolean formats = features.contains(Feature.REQUIRED_TEXTURE_FORMATS_USAGES);
         boolean temporalProfile = (nativeSnapshot & NATIVE_TEMPORAL_PROFILE) != 0L;
+        boolean fiSupport = features.contains(Feature.METALFX_FRAME_INTERPOLATION);
+        boolean fi4Support = features.contains(Feature.METALFX_FRAME_INTERPOLATION_METAL4);
         return new MetalCapabilities(
                 features,
                 evidence,
@@ -229,6 +253,9 @@ public final class MetalCapabilities {
                 temporalProfile
                         ? new TemporalProfile(true, true, true, true, true, true)
                         : TemporalProfile.UNAVAILABLE,
+                fiSupport
+                        ? new FrameInterpolationProfile(true, fi4Support, true, true, false)
+                        : FrameInterpolationProfile.UNAVAILABLE,
                 new DisplayCapabilities(
                         features.contains(Feature.DISPLAY_REFRESH) ? refresh : 0,
                         edrCapabilities.currentHeadroom(),
@@ -271,6 +298,10 @@ public final class MetalCapabilities {
         return this.temporalProfile;
     }
 
+    public FrameInterpolationProfile frameInterpolationProfile() {
+        return this.frameInterpolationProfile;
+    }
+
     public DisplayCapabilities displayCapabilities() {
         return this.displayCapabilities;
     }
@@ -297,6 +328,7 @@ public final class MetalCapabilities {
                 resolvedEvidence,
                 this.formatUsageProfile,
                 this.temporalProfile,
+                this.frameInterpolationProfile,
                 this.displayCapabilities
         );
     }
@@ -335,6 +367,7 @@ public final class MetalCapabilities {
                 && this.features.equals(capabilities.features)
                 && this.evidence.equals(capabilities.evidence)
                 && this.formatUsageProfile.equals(capabilities.formatUsageProfile)
+                && this.frameInterpolationProfile.equals(capabilities.frameInterpolationProfile)
                 && this.displayCapabilities.equals(capabilities.displayCapabilities);
     }
 
@@ -344,6 +377,7 @@ public final class MetalCapabilities {
                 this.features,
                 this.evidence,
                 this.formatUsageProfile,
+                this.frameInterpolationProfile,
                 this.displayCapabilities
         );
     }
@@ -352,6 +386,7 @@ public final class MetalCapabilities {
     public String toString() {
         return "MetalCapabilities{features=" + this.features
                 + ", formatUsageProfile=" + this.formatUsageProfile
+                + ", frameInterpolationProfile=" + this.frameInterpolationProfile
                 + ", displayCapabilities=" + this.displayCapabilities + '}';
     }
 }

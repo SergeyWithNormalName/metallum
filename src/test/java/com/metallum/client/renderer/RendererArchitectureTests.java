@@ -377,10 +377,16 @@ public final class RendererArchitectureTests {
                         && !lightingEnabled.frameInterpolation()
                         && !lightingEnabled.voxelDebugChecksum(),
                 "Sodium improved-lighting toggle changed another renderer policy axis");
-        RendererConfig checksumEnabled = lightingEnabled.withVoxelDebugChecksum(true);
-        require(checksumEnabled.improvedLighting()
+        RendererConfig fiEnabled = defaults.withFrameInterpolation(true);
+        require(!fiEnabled.improvedLighting()
+                        && fiEnabled.lightingPreset() == LightingPreset.BALANCED
+                        && fiEnabled.frameInterpolation()
+                        && !fiEnabled.voxelDebugChecksum(),
+                "withFrameInterpolation helper changed another renderer policy axis");
+        RendererConfig checksumEnabled = fiEnabled.withVoxelDebugChecksum(true);
+        require(!checksumEnabled.improvedLighting()
                         && checksumEnabled.lightingPreset() == LightingPreset.BALANCED
-                        && !checksumEnabled.frameInterpolation()
+                        && checksumEnabled.frameInterpolation()
                         && checksumEnabled.voxelDebugChecksum(),
                 "Sodium L5 checksum toggle changed another renderer policy axis");
         Path temporaryDirectory = null;

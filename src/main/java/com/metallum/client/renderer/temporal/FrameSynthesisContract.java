@@ -48,7 +48,11 @@ public final class FrameSynthesisContract {
         GENERATED_PRESENTATION_NOT_DECLARED,
         PRESENTATION_ORDER_INVALID,
         DRAWABLE_OWNERSHIP_INSUFFICIENT,
-        IN_FLIGHT_OWNERSHIP_INSUFFICIENT
+        IN_FLIGHT_OWNERSHIP_INSUFFICIENT,
+        CADENCE_OUT_OF_BOUNDS,
+        UNSUPPORTED_UPSTREAM_PROFILE,
+        BACKPRESSURE_EXCEEDED,
+        PRODUCTION_ADMISSION_DISABLED
     }
 
     public record TextureInput(
@@ -311,11 +315,13 @@ public final class FrameSynthesisContract {
                 || real.sourceFrameId() != request.current().state().frameId()) {
             reasons.add(RejectionReason.PRESENTATION_ORDER_INVALID);
         }
+        // MetalFX Frame Interpolation sequence: generated intermediate N-1/2 precedes real N.
+        // Both intents must share current.frameId as sourceFrameId.
         generated.ifPresent(intent -> {
             if (intent.kind() != PresentationKind.GENERATED_FRAME
                     || intent.sourceFrameId() != request.current().state().frameId()
-                    || intent.presentationId() <= real.presentationId()
-                    || intent.targetDisplayTimeNanos() <= real.targetDisplayTimeNanos()) {
+                    || intent.presentationId() >= real.presentationId()
+                    || intent.targetDisplayTimeNanos() >= real.targetDisplayTimeNanos()) {
                 reasons.add(RejectionReason.PRESENTATION_ORDER_INVALID);
             }
         });
@@ -339,9 +345,12 @@ public final class FrameSynthesisContract {
         InFlightGenerationOwnership ownership = request.inFlightOwnership();
         Set<String> requiredResources = new HashSet<>(request.current().resourceIds());
         request.previous().ifPresent(frame -> requiredResources.addAll(frame.resourceIds()));
-        long lastPresentation = request.generatedPresentation()
-                .map(PresentationIntent::presentationId)
-                .orElse(request.realPresentation().presentationId());
+        // Reactive mask is checked above as an upstream Temporal upscaling quality gate,
+        // rather than a direct MetalFX Frame Interpolator texture parameter.
+        long lastPresentation = Math.max(
+                request.realPresentation().presentationId(),
+                request.generatedPresentation().map(PresentationIntent::presentationId).orElse(0L)
+        );
         if (ownership.rendererGeneration() != request.current().state().rendererGenerationId()
                 || ownership.inFlightGeneration() != request.current().inFlightGeneration()
                 || ownership.lastPresentationId() < lastPresentation

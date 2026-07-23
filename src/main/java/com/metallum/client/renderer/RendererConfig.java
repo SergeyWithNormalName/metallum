@@ -127,6 +127,12 @@ public record RendererConfig(
         );
     }
 
+    public RendererConfig withFrameInterpolation(final boolean enabled) {
+        return new RendererConfig(
+                this.improvedLighting, this.lightingPreset, enabled, this.voxelDebugChecksum
+        );
+    }
+
     public RendererConfig withVoxelDebugChecksum(final boolean enabled) {
         return new RendererConfig(
                 this.improvedLighting, this.lightingPreset, this.frameInterpolation, enabled
