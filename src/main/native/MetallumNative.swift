@@ -8225,7 +8225,7 @@ public func metallum_encode_temporal_diagnostics_v1(
     _ commandBuffer: MTLCommandBuffer,
     _ depthTexture: MTLTexture,
     _ motionTexture: MTLTexture,
-    _ reactiveTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture?,
     _ classificationTexture: MTLTexture?,
     _ globalFence: MTLFence
 ) -> Int32 {
@@ -8237,13 +8237,19 @@ public func metallum_encode_temporal_diagnostics_v1(
         guard let frame = NativeState.rendererFrameState.snapshot(),
               frame.diagnosticResourceBytes > 0
                 || (frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
-                    && frame.upscaleResourceBytes > 0) else { return 0 }
+                    && frame.upscaleResourceBytes > 0)
+                // Spatial + FI reuses the pre-UI-safe depth/motion generator,
+                // but does not attach a Temporal scaler or its history.
+                || (frame.featureMask & MetallumFrameStateAbiV3.interpolationBit != 0
+                    && frame.interpolationResourceBytes > 0) else { return 0 }
+        let temporalOrDiagnostic = frame.diagnosticResourceBytes > 0
+            || frame.featureMask & MetallumFrameStateAbiV3.temporalBit != 0
         guard depthTexture.pixelFormat == .depth32Float,
               motionTexture.pixelFormat == .rg16Float,
-              reactiveTexture.pixelFormat == .r8Unorm,
               objectAddress(depthTexture.device) == objectAddress(commandBuffer.device),
               objectAddress(motionTexture.device) == objectAddress(commandBuffer.device),
-              objectAddress(reactiveTexture.device) == objectAddress(commandBuffer.device) else {
+              !temporalOrDiagnostic || (reactiveTexture?.pixelFormat == .r8Unorm
+                && reactiveTexture.map { objectAddress($0.device) == objectAddress(commandBuffer.device) } == true) else {
             return -2
         }
         let renderWidth = Int(frame.renderWidth)
@@ -8252,8 +8258,8 @@ public func metallum_encode_temporal_diagnostics_v1(
         let displayHeight = Int(frame.displayHeight)
         let usesDynamicInputContent = motionTexture.width == displayWidth
             && motionTexture.height == displayHeight
-            && reactiveTexture.width == displayWidth
-            && reactiveTexture.height == displayHeight
+            && reactiveTexture?.width == displayWidth
+            && reactiveTexture?.height == displayHeight
         if let classificationTexture = classificationTexture {
             guard classificationTexture.width == motionTexture.width,
                   classificationTexture.height == motionTexture.height,
@@ -8264,8 +8270,7 @@ public func metallum_encode_temporal_diagnostics_v1(
         }
         guard depthTexture.width == renderWidth,
               depthTexture.height == renderHeight,
-              motionTexture.width == reactiveTexture.width,
-              motionTexture.height == reactiveTexture.height,
+              reactiveTexture.map({ motionTexture.width == $0.width && motionTexture.height == $0.height }) ?? true,
               (usesDynamicInputContent
                 || (motionTexture.width == renderWidth && motionTexture.height == renderHeight)) else {
             return 0
@@ -8352,9 +8357,11 @@ public func metallum_encode_temporal_diagnostics_v1(
         pass.colorAttachments[0].texture = motionTexture
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[1].texture = reactiveTexture
-        pass.colorAttachments[1].loadAction = .dontCare
-        pass.colorAttachments[1].storeAction = .store
+        if let reactiveTexture {
+            pass.colorAttachments[1].texture = reactiveTexture
+            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].storeAction = .store
+        }
         if let classificationTexture = classificationTexture {
             pass.colorAttachments[2].texture = classificationTexture
             pass.colorAttachments[2].loadAction = .dontCare

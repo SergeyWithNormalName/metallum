@@ -82,6 +82,7 @@ private typealias Stage6EncodeStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage7PacingStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage8HdrUiStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage9ContractStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage10SpatialStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -609,6 +610,22 @@ private enum FrameInterpolationValidation {
             logMsg("[SKIP] Stage 9: MetalFX Frame Interpolator is unavailable on this device")
         default:
             logMsg("[FAIL] Stage 9: production bridge contract stress failed")
+            exit(1)
+        }
+
+        logMsg("[INFO] Testing Stage 10: Spatial + Frame Interpolation standalone profile")
+        guard let stage10SpatialSymbol = dlsym(handle, "metallum_frame_interpolation_spatial_stress_stage10") else {
+            logMsg("[FAIL] Stage 10: Spatial profile symbol is missing")
+            exit(1)
+        }
+        let stage10Spatial = unsafeBitCast(stage10SpatialSymbol, to: Stage10SpatialStressFn.self)
+        switch stage10Spatial(device) {
+        case 1:
+            logMsg("[PASS] Stage 10: nil scaler descriptor and independent X/Y motion scale")
+        case 2:
+            logMsg("[SKIP] Stage 10: MetalFX Frame Interpolator is unavailable on this device")
+        default:
+            logMsg("[FAIL] Stage 10: Spatial profile validation failed")
             exit(1)
         }
 

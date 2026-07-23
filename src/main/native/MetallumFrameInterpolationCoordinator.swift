@@ -114,6 +114,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let inputHeight: Int
         let pixelFormat: MTLPixelFormat
         let rendererGeneration: UInt64
+        /// Spatial scalers are not MTLFXFrameInterpolatableScaler instances.
+        /// Keep this immutable in the generation key so history can never cross
+        /// between linked-Temporal and standalone Spatial interpolation.
+        let usesSpatialInputs: Bool
 
         var isDrawableSized: Bool {
             width > 0 && height > 0
@@ -145,6 +149,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             self.inputHeight = max(height / 2, 1)
             self.pixelFormat = pixelFormat
             self.rendererGeneration = rendererGeneration
+            self.usesSpatialInputs = false
         }
 
         init?(
@@ -155,7 +160,8 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             width: Int,
             height: Int,
             pixelFormat: MTLPixelFormat,
-            rendererGeneration: UInt64
+            rendererGeneration: UInt64,
+            usesSpatialInputs: Bool = false
         ) {
             guard inputWidth > 0,
                   inputHeight > 0,
@@ -173,6 +179,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             self.inputHeight = inputHeight
             self.pixelFormat = pixelFormat
             self.rendererGeneration = rendererGeneration
+            self.usesSpatialInputs = usesSpatialInputs
         }
     }
 
@@ -423,7 +430,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         // remain a real-only owner on macOS < 26, unsupported devices, and a
         // nil MetalFX factory result.  No user-facing path can activate this
         // workspace before stage 9.
-        configureFixedTemporalInterpolator()
+        configureInterpolator()
 
         if key.isDrawableSized {
             guard allocateTextureRings(device: device) else {
@@ -458,7 +465,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
      * workspace validation.  Factory failure is expected capability evidence,
      * so it never prevents the real-only coordinator from being created.
      */
-    private func configureFixedTemporalInterpolator() {
+    private func configureInterpolator() {
         guard key.isDrawableSized else { return }
         guard #available(macOS 26.0, *),
               MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
@@ -467,18 +474,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
 
         let inputWidth = key.inputWidth
         let inputHeight = key.inputHeight
-        // Reuse the renderer's fixed Temporal workspace when it already exists
-        // for this immutable descriptor key; the cache only creates it when
-        // this validation workspace is the first owner.
-        guard let scaler = existingFixedTemporalScalerForFrameInterpolation(
-            device: device,
-            sourcePixelFormat: key.pixelFormat,
-            inputWidth: inputWidth,
-            inputHeight: inputHeight,
-            outputWidth: key.width,
-            outputHeight: key.height
-        ) as? MTLFXTemporalScaler else { return }
-
         let descriptor = MTLFXFrameInterpolatorDescriptor()
         descriptor.colorTextureFormat = key.pixelFormat
         descriptor.outputTextureFormat = key.pixelFormat
@@ -488,9 +483,26 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         descriptor.inputHeight = inputHeight
         descriptor.outputWidth = key.width
         descriptor.outputHeight = key.height
-        descriptor.scaler = scaler
+        if key.usesSpatialInputs {
+            // Frame Interpolation is a standalone effect for Spatial. Do not
+            // cast or attach MTLFXSpatialScaler: it does not implement the
+            // FrameInterpolatableScaler protocol.
+            descriptor.scaler = nil
+        } else {
+            // Reuse the renderer's fixed Temporal workspace when it already
+            // exists for this immutable descriptor key.
+            guard let scaler = existingFixedTemporalScalerForFrameInterpolation(
+                device: device,
+                sourcePixelFormat: key.pixelFormat,
+                inputWidth: inputWidth,
+                inputHeight: inputHeight,
+                outputWidth: key.width,
+                outputHeight: key.height
+            ) as? MTLFXTemporalScaler else { return }
+            descriptor.scaler = scaler
+            temporalScaler = scaler
+        }
         guard let created = descriptor.makeFrameInterpolator(device: device) else { return }
-        temporalScaler = scaler
         interpolator = created
     }
 
@@ -894,17 +906,18 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
               measuredRealFramesPerSecond <= expectedRealFramesPerSecond * 1.05 else {
             return .bypassCadence
         }
-        // A production ticket is only valid for the immutable fixed-Temporal
-        // generation which declared both the feature bit and its exact native
-        // workspace bytes.  Dynamic/Spatial paths fail open here.
+        // A production ticket is only valid for the immutable upstream profile
+        // selected at workspace creation. Dynamic Temporal and Native paths
+        // stay fail-open until their later dedicated stages.
         let temporalBit: UInt64 = 1 << 1
         let interpolationBit: UInt64 = 1 << 2
         let spatialBit: UInt64 = 1
         guard rendererGeneration == key.rendererGeneration,
               frame.rendererGenerationId == key.rendererGeneration,
-              frame.featureMask & temporalBit != 0,
+              (key.usesSpatialInputs
+                    ? frame.featureMask & spatialBit != 0 && frame.featureMask & temporalBit == 0
+                    : frame.featureMask & temporalBit != 0 && frame.featureMask & spatialBit == 0),
               frame.featureMask & interpolationBit != 0,
-              frame.featureMask & spatialBit == 0,
               frame.interpolationResourceBytes > 0,
               Int(frame.renderWidth) == key.inputWidth,
               Int(frame.renderHeight) == key.inputHeight,
@@ -1252,10 +1265,24 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         interpolator.farPlane = max(frame.farPlane, interpolator.nearPlane + 0.001)
         interpolator.fieldOfView = fieldOfView
         interpolator.aspectRatio = Float(key.width) / Float(key.height)
-        interpolator.jitterOffsetX = frame.jitterX
-        interpolator.jitterOffsetY = frame.jitterY
-        interpolator.motionVectorScaleX = 1.0
-        interpolator.motionVectorScaleY = 1.0
+        // Spatial resolve is not jittered. Do not leak a stale Temporal Halton
+        // offset into a standalone FI profile.
+        interpolator.jitterOffsetX = key.usesSpatialInputs ? 0.0 : frame.jitterX
+        interpolator.jitterOffsetY = key.usesSpatialInputs ? 0.0 : frame.jitterY
+        if key.usesSpatialInputs {
+            // Motion is generated in render pixels while the colors are
+            // display-sized after Spatial resolve. Preserve non-uniform X/Y
+            // scaling; a single scalar breaks asymmetric extents.
+            let scale = Self.spatialMotionScale(
+                displayWidth: key.width, displayHeight: key.height,
+                renderWidth: key.inputWidth, renderHeight: key.inputHeight
+            )
+            interpolator.motionVectorScaleX = scale.x
+            interpolator.motionVectorScaleY = scale.y
+        } else {
+            interpolator.motionVectorScaleX = 1.0
+            interpolator.motionVectorScaleY = 1.0
+        }
         interpolator.isDepthReversed = true
         interpolator.shouldResetHistory = false
         interpolator.encode(commandBuffer: commandBuffer)
@@ -1268,6 +1295,23 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
         commandBuffer.commit()
         return true
+    }
+
+    static func spatialMotionScale(
+        displayWidth: Int,
+        displayHeight: Int,
+        renderWidth: Int,
+        renderHeight: Int
+    ) -> SIMD2<Float> {
+        precondition(displayWidth > 0 && displayHeight > 0 && renderWidth > 0 && renderHeight > 0)
+        return SIMD2(
+            Float(displayWidth) / Float(renderWidth),
+            Float(displayHeight) / Float(renderHeight)
+        )
+    }
+
+    func hasStandaloneSpatialInterpolatorForTests() -> Bool {
+        key.usesSpatialInputs && temporalScaler == nil && interpolator != nil
     }
 
     private func presentProductionGeneratedThenReal(_ ticket: UInt64) {
@@ -1955,6 +1999,38 @@ public func metallum_frame_interpolation_create_v2(
     }
 }
 
+/** Stage-10 constructor: Spatial uses standalone FI inputs, never a Temporal scaler. */
+@_cdecl("metallum_frame_interpolation_create_v3")
+public func metallum_frame_interpolation_create_v3(
+    _ device: MTLDevice?,
+    _ layer: CAMetalLayer?,
+    _ inputWidth: Int32,
+    _ inputHeight: Int32,
+    _ displayWidth: Int32,
+    _ displayHeight: Int32,
+    _ pixelFormatRaw: UInt64,
+    _ rendererGeneration: UInt64,
+    _ usesSpatialInputs: Int32
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let device, let layer,
+              inputWidth > 0, inputHeight > 0,
+              displayWidth > 0, displayHeight > 0,
+              (0...1).contains(usesSpatialInputs),
+              let pixelFormat = MTLPixelFormat(rawValue: UInt(pixelFormatRaw)),
+              let key = MetallumFrameInterpolationCoordinator.Key(
+                device: device, layer: layer,
+                inputWidth: Int(inputWidth), inputHeight: Int(inputHeight),
+                width: Int(displayWidth), height: Int(displayHeight),
+                pixelFormat: pixelFormat, rendererGeneration: rendererGeneration,
+                usesSpatialInputs: usesSpatialInputs != 0
+              ),
+              let coordinator = MetallumFrameInterpolationCoordinator(key: key, device: device, layer: layer)
+        else { return nil }
+        return Unmanaged.passRetained(coordinator).toOpaque()
+    }
+}
+
 @_cdecl("metallum_frame_interpolation_prepare_v1")
 public func metallum_frame_interpolation_prepare_v1(
     _ rawContext: UnsafeMutableRawPointer?,
@@ -2522,6 +2598,30 @@ public func metallum_frame_interpolation_contract_stress_stage9(_ device: MTLDev
               ticket == 0 else {
             return -2
         }
+        return 1
+    }
+}
+
+/** Stage-10 Spatial descriptor/profile regression, including non-uniform motion scale. */
+@_cdecl("metallum_frame_interpolation_spatial_stress_stage10")
+public func metallum_frame_interpolation_spatial_stress_stage10(_ device: MTLDevice) -> Int32 {
+    guard #available(macOS 26.0, *),
+          MTLFXFrameInterpolatorDescriptor.supportsDevice(device) else {
+        return 2
+    }
+    return autoreleasepool {
+        let scale = MetallumFrameInterpolationCoordinator.spatialMotionScale(
+            displayWidth: 96, displayHeight: 90, renderWidth: 48, renderHeight: 30
+        )
+        guard abs(scale.x - 2.0) < 0.0001, abs(scale.y - 3.0) < 0.0001 else { return -1 }
+        let layer = CAMetalLayer()
+        layer.device = device
+        guard let raw = metallum_frame_interpolation_create_v3(
+            device, layer, 48, 30, 96, 90,
+            UInt64(MTLPixelFormat.rgba16Float.rawValue), 312, 1
+        ), let coordinator = coordinatorFromRawPointer(raw),
+              coordinator.hasStandaloneSpatialInterpolatorForTests() else { return -2 }
+        defer { _ = metallum_frame_interpolation_release_v1(raw, 1_000_000_000) }
         return 1
     }
 }

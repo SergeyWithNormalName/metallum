@@ -5,9 +5,9 @@ import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.textures.GpuTexture;
 
 /**
- * Atomic three-slot private motion/reactive allocation owned by one physical
- * extent. Dynamic Temporal keeps it at display size and rasterizes only the
- * active DRS rectangle; fixed presets use their render extent.
+ * Atomic three-slot private motion allocation owned by one physical extent.
+ * Temporal adds its reactive attachment; standalone Spatial + FI deliberately
+ * does not allocate one.
  */
 final class TemporalDiagnosticResources implements AutoCloseable {
     record Pair(MetalGpuTexture motion, MetalGpuTexture reactive, MetalGpuTexture classification) {
@@ -21,7 +21,8 @@ final class TemporalDiagnosticResources implements AutoCloseable {
     static TemporalDiagnosticResources create(
             final MetalDevice device,
             final int width,
-            final int height
+            final int height,
+            final boolean needsReactiveMask
     ) {
         TemporalDiagnosticResources resources = new TemporalDiagnosticResources();
         int usage = GpuTexture.USAGE_RENDER_ATTACHMENT | GpuTexture.USAGE_TEXTURE_BINDING;
@@ -35,11 +36,13 @@ final class TemporalDiagnosticResources implements AutoCloseable {
                 MetalGpuTexture reactive = null;
                 MetalGpuTexture classification = null;
                 try {
-                    reactive = new MetalGpuTexture(
-                            device, usage, "Metallum temporal diagnostic reactive " + slot,
-                            GpuFormat.R8_UNORM, width, height, 1, 1
-                    );
-                    if (debugVis) {
+                    if (needsReactiveMask) {
+                        reactive = new MetalGpuTexture(
+                                device, usage, "Metallum temporal diagnostic reactive " + slot,
+                                GpuFormat.R8_UNORM, width, height, 1, 1
+                        );
+                    }
+                    if (debugVis && needsReactiveMask) {
                         classification = new MetalGpuTexture(
                                 device, usage, "Metallum temporal diagnostic classification " + slot,
                                 GpuFormat.R8_UNORM, width, height, 1, 1
@@ -76,7 +79,9 @@ final class TemporalDiagnosticResources implements AutoCloseable {
                 if (pair.classification() != null) {
                     pair.classification().close();
                 }
-                pair.reactive().close();
+                if (pair.reactive() != null) {
+                    pair.reactive().close();
+                }
                 pair.motion().close();
                 this.pairs[slot] = null;
             }

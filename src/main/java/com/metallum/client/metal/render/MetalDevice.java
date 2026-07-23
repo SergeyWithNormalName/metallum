@@ -173,7 +173,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
     }
 
-    private record TemporalDiagnosticResourceKey(int width, int height) {
+    private record TemporalDiagnosticResourceKey(int width, int height, boolean needsReactiveMask) {
     }
 
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
@@ -982,7 +982,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                         frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L
                 )
                 : spatialActive
-                    ? RendererFeatureMask.of(RendererFeatureMask.SPATIAL_UPSCALING)
+                    ? RendererFeatureMask.of(
+                            RendererFeatureMask.SPATIAL_UPSCALING,
+                            frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L
+                    )
                     : temporalStandby
                         ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
                         : RendererFeatureMask.NONE;
@@ -1021,10 +1024,11 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
 
         TemporalDiagnosticResources nextDiagnosticResources = null;
-        // The production scaler consumes the same typed motion/reactive ring as
-        // the optional diagnostic view.  Do not make that allocation depend on
-        // METALLUM_TEMPORAL_DIAGNOSTICS: Temporal itself is the consumer here.
-        if (this.temporalDiagnosticsActive || temporalActive || temporalStandby) {
+        // Temporal consumes motion/reactive inputs regardless of the optional
+        // diagnostic view. Spatial + FI takes the same safe depth/motion path
+        // but allocates no reactive mask.
+        if (this.temporalDiagnosticsActive || temporalActive || temporalStandby
+                || (spatialActive && frameInterpolationCandidate)) {
             try {
                 // MetalFX Temporal's dynamic-resolution API requires fixed
                 // physical input textures. Keep the diagnostic ring at the
@@ -1039,8 +1043,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 int temporalInputHeight = dynamicTemporalInputs
                         ? dimensions.displayHeight()
                         : dimensions.renderHeight();
+                boolean needsReactiveMask = this.temporalDiagnosticsActive || temporalActive || temporalStandby;
                 nextDiagnosticResources = this.acquireTemporalDiagnosticResources(
-                        this, temporalInputWidth, temporalInputHeight
+                        this, temporalInputWidth, temporalInputHeight, needsReactiveMask
                 );
             } catch (RuntimeException exception) {
                 if (temporalActive || temporalStandby) {
@@ -1332,7 +1337,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                         dimensions.displayWidth(),
                         dimensions.displayHeight(),
                         interpolationPixelFormat,
-                        nextGeneration
+                        nextGeneration,
+                        spatialActive
                 ).orElse(null);
             } catch (RuntimeException exception) {
                 Metallum.LOGGER.warn(
@@ -1369,7 +1375,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                     plannedLightingGeneration = Math.addExact(plannedLightingGeneration, 1L);
                 }
                 Metallum.LOGGER.warn(
-                        "Frame Interpolation requested but native fixed-Temporal workspace is unavailable; using real frames"
+                        "Frame Interpolation requested but native {} workspace is unavailable; using real frames",
+                        interpolationUpstream
                 );
             }
         }
@@ -1515,8 +1522,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             } else {
                 Metallum.LOGGER.info(
-                        "Frame Interpolation admitted for fixed Temporal generation {}; generated frames remain disposable",
-                        nextGeneration
+                        "Frame Interpolation admitted for {} generation {}; generated frames remain disposable",
+                        interpolationUpstream, nextGeneration
                 );
             }
         }
@@ -1531,7 +1538,13 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     public boolean temporalInputsActive() {
-        return this.temporalScalingActive || this.temporalDiagnosticsActive;
+        RendererGenerationConfig generation = this.activeRendererGeneration;
+        boolean spatialInterpolation = generation != null
+                && generation.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING)
+                && generation.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION);
+        // Spatial + FI uses the same pre-UI depth/motion producer, but does
+        // not depend on a Temporal scaler or its history.
+        return this.temporalScalingActive || this.temporalDiagnosticsActive || spatialInterpolation;
     }
 
     public EntityTransformTracker entityTransformTracker() {
@@ -2016,14 +2029,19 @@ public final class MetalDevice implements GpuDeviceBackend {
     private TemporalDiagnosticResources acquireTemporalDiagnosticResources(
             final MetalDevice device,
             final int width,
-            final int height
+            final int height,
+            final boolean needsReactiveMask
     ) {
-        TemporalDiagnosticResourceKey key = new TemporalDiagnosticResourceKey(width, height);
+        TemporalDiagnosticResourceKey key = new TemporalDiagnosticResourceKey(
+                width, height, needsReactiveMask
+        );
         TemporalDiagnosticResources cached = this.temporalDiagnosticResourceCache.get(key);
         if (cached != null) {
             return cached;
         }
-        TemporalDiagnosticResources created = TemporalDiagnosticResources.create(device, width, height);
+        TemporalDiagnosticResources created = TemporalDiagnosticResources.create(
+                device, width, height, needsReactiveMask
+        );
         this.temporalDiagnosticResourceCache.put(key, created);
         while (this.temporalDiagnosticResourceCache.size() > TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY) {
             Iterator<TemporalDiagnosticResources> iterator =

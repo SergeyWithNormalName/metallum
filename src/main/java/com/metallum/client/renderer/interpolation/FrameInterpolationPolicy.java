@@ -18,6 +18,7 @@ public final class FrameInterpolationPolicy {
 
     public enum EligibilityReason {
         ELIGIBLE_FIXED_TEMPORAL,
+        ELIGIBLE_SPATIAL,
         USER_REQUEST_DISABLED,
         FEATURE_UNSUPPORTED,
         REFRESH_RATE_UNSATISFIED,
@@ -28,6 +29,7 @@ public final class FrameInterpolationPolicy {
 
     public enum EffectiveReason {
         ADMITTED_FIXED_TEMPORAL,
+        ADMITTED_SPATIAL,
         NATIVE_PROFILE_UNVALIDATED,
         NOT_PROFILE_ELIGIBLE
     }
@@ -99,7 +101,7 @@ public final class FrameInterpolationPolicy {
             );
         }
 
-        if (upstreamMode != UpstreamMode.FIXED_TEMPORAL) {
+        if (upstreamMode != UpstreamMode.FIXED_TEMPORAL && upstreamMode != UpstreamMode.SPATIAL) {
             return new Evaluation(
                     true, false, false,
                     EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
@@ -118,15 +120,21 @@ public final class FrameInterpolationPolicy {
         if (!capabilities.frameInterpolationProfile().nativeProfileValidated()) {
             return new Evaluation(
                     true, true, false,
-                    EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
+                    upstreamMode == UpstreamMode.SPATIAL
+                            ? EligibilityReason.ELIGIBLE_SPATIAL
+                            : EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
                     EffectiveReason.NATIVE_PROFILE_UNVALIDATED
             );
         }
 
         return new Evaluation(
                 true, true, true,
-                EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
-                EffectiveReason.ADMITTED_FIXED_TEMPORAL
+                upstreamMode == UpstreamMode.SPATIAL
+                        ? EligibilityReason.ELIGIBLE_SPATIAL
+                        : EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
+                upstreamMode == UpstreamMode.SPATIAL
+                        ? EffectiveReason.ADMITTED_SPATIAL
+                        : EffectiveReason.ADMITTED_FIXED_TEMPORAL
         );
     }
 }

@@ -370,6 +370,15 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
+            frameInterpolationCreateV3 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_create_v3",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            INT, INT, INT, INT, LONG, LONG, INT
+                    )
+            );
             frameInterpolationPrepareV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_frame_interpolation_prepare_v1",
@@ -833,6 +842,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLCommandBufferCommitWithSignal;
     private static final MethodHandle frameInterpolationCreateV1;
     private static final MethodHandle frameInterpolationCreateV2;
+    private static final MethodHandle frameInterpolationCreateV3;
     private static final MethodHandle frameInterpolationPrepareV1;
     private static final MethodHandle frameInterpolationPrepareV2;
     private static final MethodHandle frameInterpolationPublishCommittedV1;
@@ -1643,6 +1653,28 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_frame_interpolation_create_v2", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_frame_interpolation_create_v3(
+            final MemorySegment device,
+            final MemorySegment layer,
+            final int renderWidth,
+            final int renderHeight,
+            final int displayWidth,
+            final int displayHeight,
+            final long pixelFormat,
+            final long rendererGeneration,
+            final boolean spatialInputs
+    ) {
+        try {
+            return (MemorySegment) frameInterpolationCreateV3.invokeExact(
+                    segment(device), segment(layer), renderWidth, renderHeight,
+                    displayWidth, displayHeight, pixelFormat, rendererGeneration,
+                    spatialInputs ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_create_v3", throwable);
         }
     }
 

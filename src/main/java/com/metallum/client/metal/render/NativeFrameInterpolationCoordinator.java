@@ -27,14 +27,15 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
             final int displayWidth,
             final int displayHeight,
             final MTLPixelFormat pixelFormat,
-            final long rendererGeneration
+            final long rendererGeneration,
+            final boolean spatialInputs
     ) {
         Objects.requireNonNull(pixelFormat, "pixelFormat");
         if (renderWidth <= 0 || renderHeight <= 0 || displayWidth <= 0 || displayHeight <= 0
                 || rendererGeneration < 0L) {
             return Optional.empty();
         }
-        MemorySegment context = MetalNativeBridge.metallum_frame_interpolation_create_v2(
+        MemorySegment context = MetalNativeBridge.metallum_frame_interpolation_create_v3(
                 device,
                 layer,
                 renderWidth,
@@ -42,7 +43,8 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
                 displayWidth,
                 displayHeight,
                 pixelFormat.value,
-                rendererGeneration
+                rendererGeneration,
+                spatialInputs
         );
         return MetalNativeBridge.isNullHandle(context)
                 ? Optional.empty()

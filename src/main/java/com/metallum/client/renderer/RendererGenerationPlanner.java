@@ -395,9 +395,9 @@ public final class RendererGenerationPlanner {
             passes.add(pass("metalfx_temporal", RendererGenerationManifest.Domain.UPSCALE_ONLY));
         }
         if (config.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION)) {
-            if (!temporal || spatial) {
+            if (!temporal && !spatial) {
                 throw new IllegalStateException(
-                        "Frame Interpolation V1 requires the fixed Temporal upstream profile"
+                        "Frame Interpolation requires a fixed Temporal or Spatial upstream profile"
                 );
             }
             long displayPixels = displayExtent.pixels();
@@ -417,6 +417,12 @@ public final class RendererGenerationPlanner {
             resources.add(resource("frame_interpolation_composite_ring", domain,
                     multiply(displayPixels, 8L * 2L * 3L), false));
             passes.add(pass("frame_interpolation_prepare", domain));
+            if (spatial) {
+                // Spatial has no FrameInterpolatableScaler. Its depth/motion inputs
+                // are built at render extent and the final world colors are already
+                // display-sized after the ordinary spatial resolve.
+                passes.add(pass("spatial_frame_interpolation_motion_vectors", domain));
+            }
             passes.add(pass("frame_interpolation", domain));
             passes.add(pass("generated_present", domain));
             passes.add(pass("real_present", domain));

@@ -565,6 +565,7 @@ public final class RendererArchitectureTests {
 
         MetalCapabilities interpolationCapabilities = MetalCapabilities.fromNativeSnapshot(
                 MetalCapabilities.NATIVE_METAL3_BASE
+                        | MetalCapabilities.NATIVE_METALFX_SPATIAL
                         | MetalCapabilities.NATIVE_METALFX_TEMPORAL
                         | MetalCapabilities.NATIVE_METALFX_FRAME_INTERPOLATION
                         | MetalCapabilities.NATIVE_REQUIRED_TEXTURE_FORMATS_USAGES
@@ -596,6 +597,28 @@ public final class RendererArchitectureTests {
                         && fixedTemporalInterpolation.manifest().passCount(
                         RendererGenerationManifest.Domain.INTERPOLATION_ONLY) == 4L,
                 "fixed-Temporal interpolation generation lost its declared workspace");
+        RendererGenerationPlanner.Plan spatialInterpolation = RendererGenerationPlanner.plan(
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.of(
+                        RendererFeatureMask.SPATIAL_UPSCALING,
+                        RendererFeatureMask.FRAME_INTERPOLATION
+                ),
+                DisplayOutputMode.HDR,
+                interpolationCapabilities,
+                render,
+                display
+        );
+        require(spatialInterpolation.resolution().config().featureMask().contains(
+                        RendererFeatureMask.FRAME_INTERPOLATION)
+                        && spatialInterpolation.manifest().passes().stream().anyMatch(pass ->
+                        pass.name().equals("spatial_frame_interpolation_motion_vectors"))
+                        && spatialInterpolation.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.INTERPOLATION_ONLY) > 0L,
+                "Spatial + FI generation did not declare standalone motion inputs and workspace");
         require(resourceNames(legacySdr.manifest()).equals(Set.of(
                         "main_color", "main_depth", "drawable"
                 )) && passNames(legacySdr.manifest()).equals(Set.of(

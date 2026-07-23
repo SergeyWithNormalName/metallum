@@ -1299,6 +1299,29 @@ Gate:
 - measured benefit и tails на фиксированном benchmark route;
 - switching Temporal + FI ↔ Spatial + FI создаёт новую generation, drain/reset и не переиспользует history.
 
+#### Реализация Stage 10 (2026-07-24)
+
+- Spatial + FI теперь получает самостоятельный generation/workspace profile:
+  native descriptor создаётся с `scaler = nil`, поэтому `MTLFXSpatialScaler`
+  никогда не приводится к `MTLFXFrameInterpolatableScaler`;
+- pre-UI depth/motion producer включается и для Spatial + FI; для этого
+  профиля выделяются только D32 depth и RG16F motion inputs — reactive mask
+  не создаётся;
+- final Spatial color остаётся display-resolution world-only input, UI/HDR
+  composition переиспользует уже проверенный общий path;
+- motion vector scale вычисляется отдельно как `displayWidth/renderWidth` и
+  `displayHeight/renderHeight`; Spatial jitter явно равен `0, 0`;
+- ключ workspace содержит immutable upstream profile. Переключение fixed
+  Temporal + FI и Spatial + FI заменяет coordinator после drain, поэтому
+  история не переиспользуется между profile/extent generations;
+- `frameInterpolationValidation`, `frameSynthesisUnitTest` и
+  `rendererArchitectureUnitTest` проверяют nil-scaler profile, non-uniform
+  scale и manifest/admission contract на Apple M1 Pro.
+
+Ручные gate из раздела выше остаются необходимыми до снятия Experimental:
+camera/object motion calibration, HDR/UI visual parity и повторяемый benchmark
+с FPS tails нельзя заменить headless validation.
+
 ### Этап 11. Native и Dynamic Temporal profiles
 
 #### 11A. Native + FI

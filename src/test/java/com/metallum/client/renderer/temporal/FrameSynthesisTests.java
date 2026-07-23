@@ -283,10 +283,10 @@ public final class FrameSynthesisTests {
                         == FrameInterpolationPolicy.EffectiveReason.ADMITTED_FIXED_TEMPORAL,
                 "validated Fixed Temporal profile was not admitted");
 
-        // 4. Upstream modes (Dynamic Temporal, Spatial, Native) rejected without Stage 10/11 adapters
+        // 4. Dynamic Temporal and Native remain later stages; validated Spatial
+        // is a standalone Frame Interpolation profile as of Stage 10.
         for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(
                 FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL,
-                FrameInterpolationPolicy.UpstreamMode.SPATIAL,
                 FrameInterpolationPolicy.UpstreamMode.NATIVE)) {
             FrameInterpolationPolicy.Evaluation evalUpstream = FrameInterpolationPolicy.evaluate(
                     configOn, capabilitiesWithFI, mode, 60.0, Set.of()
@@ -295,6 +295,16 @@ public final class FrameSynthesisTests {
                             && evalUpstream.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
                     mode + " was not rejected by policy");
         }
+        FrameInterpolationPolicy.Evaluation spatial = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.SPATIAL, 60.0, Set.of()
+        );
+        require(spatial.profileEligible() && spatial.effectiveAdmitted()
+                        && spatial.eligibilityReason()
+                        == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_SPATIAL
+                        && spatial.effectiveReason()
+                        == FrameInterpolationPolicy.EffectiveReason.ADMITTED_SPATIAL,
+                "validated Spatial profile was not admitted");
 
         // 5. Cadence out of bounds (desired 60 FPS for 120 Hz display; bounds = [51, 63])
         FrameInterpolationPolicy.Evaluation evalLowCadence = FrameInterpolationPolicy.evaluate(
