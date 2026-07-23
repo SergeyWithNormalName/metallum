@@ -3,17 +3,107 @@ import Metal
 import MetalFX
 import QuartzCore
 
+/** Process-wide counters emitted through the existing JSONL GPU telemetry. */
+final class MetallumFrameInterpolationTelemetry: @unchecked Sendable {
+    static let shared = MetallumFrameInterpolationTelemetry()
+
+    struct Snapshot {
+        let acceptedPairs: Int
+        let generatedPresentations: Int
+        let realPresentations: Int
+        let droppedGeneratedLate: Int
+        let backpressureDrops: Int
+        let maximumHistogramBuckets: Int
+
+        var report: [String: Any] {
+            [
+                "accepted_pairs": acceptedPairs,
+                "generated_presentations": generatedPresentations,
+                "real_presentations": realPresentations,
+                "dropped_generated_late": droppedGeneratedLate,
+                "backpressure_drops": backpressureDrops,
+                "maximum_pacing_histogram_buckets": maximumHistogramBuckets
+            ]
+        }
+    }
+
+    private let lock = NSLock()
+    private var acceptedPairs = 0
+    private var generatedPresentations = 0
+    private var realPresentations = 0
+    private var droppedGeneratedLate = 0
+    private var backpressureDrops = 0
+    private var maximumHistogramBuckets = 0
+
+    private init() {
+    }
+
+    func recordAcceptedPair() {
+        lock.lock()
+        acceptedPairs += 1
+        lock.unlock()
+    }
+
+    func recordBackpressureDrop() {
+        lock.lock()
+        backpressureDrops += 1
+        lock.unlock()
+    }
+
+    func recordGeneratedPresentation() {
+        lock.lock()
+        generatedPresentations += 1
+        lock.unlock()
+    }
+
+    func recordRealPresentation() {
+        lock.lock()
+        realPresentations += 1
+        lock.unlock()
+    }
+
+    func recordLateGeneratedDrop() {
+        lock.lock()
+        droppedGeneratedLate += 1
+        lock.unlock()
+    }
+
+    func recordHistogramBuckets(_ count: Int) {
+        lock.lock()
+        maximumHistogramBuckets = max(maximumHistogramBuckets, count)
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            acceptedPairs: acceptedPairs,
+            generatedPresentations: generatedPresentations,
+            realPresentations: realPresentations,
+            droppedGeneratedLate: droppedGeneratedLate,
+            backpressureDrops: backpressureDrops,
+            maximumHistogramBuckets: maximumHistogramBuckets
+        )
+    }
+}
+
 /**
  * Stage-4 lifecycle owner for the future MetalFX presentation path.
  *
- * This deliberately does not acquire a drawable, encode MetalFX, or call
- * `present`.  Until the ticket/commit boundary exists (stage 5), the normal
- * one-drawable Java presentation path remains the only producer of visible
- * frames.  Keeping that boundary explicit prevents an accidental second
- * present while the coordinator is being brought up.
+ * This deliberately does not acquire a drawable or call `present` from the
+ * Java render thread.  Stage 7 owns a native pacing worker and proves its
+ * ordering/back-pressure policy with synthetic work, but production admission
+ * remains disabled until the later UI and admission stages.  Keeping that
+ * boundary explicit prevents an accidental second present while the
+ * coordinator is being brought up.
  */
 private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private static let ringSize = 3
+    // One display interval is reserved for the real frame.  A generated frame
+    // that misses its own slot by more than this small scheduler tolerance is
+    // discarded instead of creating a two-present burst immediately before it.
+    private static let generatedLatenessToleranceNanoseconds: UInt64 = 1_000_000
 
     struct Key: Hashable {
         let deviceID: ObjectIdentifier
@@ -126,6 +216,32 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         case published
     }
 
+    /**
+     * Scheduler-owned presentation declaration.  The real drawable composite
+     * is intentionally added only after the Stage-8 UI path exists; this
+     * declaration still gives Stage 7 one authoritative ordering and lateness
+     * policy, instead of letting render-thread callers race to present.
+     */
+    private struct PacingWork {
+        let epoch: UInt64
+        let generatedPresentationID: UInt64
+        let realPresentationID: UInt64
+        let generatedDeadlineNanoseconds: UInt64
+        let realDeadlineNanoseconds: UInt64
+    }
+
+    private enum PacingRecordKind: Equatable {
+        case generated
+        case real
+        case droppedGeneratedLate
+    }
+
+    private struct PacingRecord {
+        let presentationID: UInt64
+        let kind: PacingRecordKind
+        let timestampNanoseconds: UInt64
+    }
+
     private final class Ticket {
         let slot: Int
         let commandBuffer: MTLCommandBuffer
@@ -157,6 +273,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var shuttingDown = false
     private var schedulerExited = false
     private var pendingRealFrames = 0
+    private var pendingPacingWorks = 0
     private var resetEpoch: UInt64 = 0
     private var textureAllocationCount = 0
     private var nextTicket: UInt64 = 1
@@ -166,6 +283,13 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var primedPreviousSlot: Int?
     private var nextHistorySlot = 0
     private var reasonCounters = ReasonCounters()
+    private var nextPresentationID: UInt64 = 1
+    private var lastPresentationID: UInt64 = 0
+    private var pacingWork: PacingWork?
+    private var pacingRecords: [PacingRecord] = []
+    private var droppedGeneratedLate = 0
+    private var maximumPacingHistogramBuckets = 0
+    private var priorMaximumDrawableCount = 0
     // Keep potentially unavailable MetalFX objects erased at the macOS 14
     // coordinator boundary.  They are conditionally cast only inside a
     // macOS-26 availability region.
@@ -191,6 +315,13 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         self.presentationQueue = presentationQueue
         self.completionEvent = completionEvent
 
+        // Active interpolation needs a generated and a real drawable while a
+        // previously presented surface may still be retained by CoreAnimation.
+        // The coordinator is the only owner allowed to change this setting;
+        // release restores the layer's previous pool size.
+        priorMaximumDrawableCount = layer.maximumDrawableCount
+        layer.maximumDrawableCount = 3
+
         // This is intentionally an optional preflight.  The coordinator must
         // remain a real-only owner on macOS < 26, unsupported devices, and a
         // nil MetalFX factory result.  No user-facing path can activate this
@@ -199,6 +330,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
 
         if key.isDrawableSized {
             guard allocateTextureRings(device: device) else {
+                layer.maximumDrawableCount = priorMaximumDrawableCount
                 self.renderQueue = nil
                 self.presentationQueue = nil
                 self.completionEvent = nil
@@ -207,7 +339,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             acceptingFrames = true
         }
 
-        schedulerThread.name = "Metallum FI real-only scheduler"
+        schedulerThread.name = "Metallum FI pacing scheduler"
         schedulerThread.qualityOfService = .userInitiated
         schedulerThread.start()
         // A bounded start wait makes creation failure deterministic without
@@ -219,6 +351,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             schedulerWake.signal()
             _ = schedulerStopped.wait(timeout: .now() + .seconds(2))
             schedulerExited = true
+            layer.maximumDrawableCount = priorMaximumDrawableCount
             return nil
         }
     }
@@ -618,14 +751,14 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             state.unlock()
             return .released
         }
-        guard pendingRealFrames > 0 else {
+        guard pendingRealFrames > 0 || pendingPacingWorks > 0 else {
             state.unlock()
             return key.isDrawableSized ? .ready : .suspendedZeroSize
         }
 
         let timeoutSeconds = Double(timeoutNanoseconds) / 1_000_000_000.0
         let deadline = Date(timeIntervalSinceNow: max(timeoutSeconds, 0.0))
-        while pendingRealFrames > 0 {
+        while pendingRealFrames > 0 || pendingPacingWorks > 0 {
             if !state.wait(until: deadline) {
                 state.unlock()
                 return .drainTimedOut
@@ -664,6 +797,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         completionEvent = nil
         presentationQueue = nil
         renderQueue = nil
+        layer.maximumDrawableCount = priorMaximumDrawableCount
         state.unlock()
         return .ready
     }
@@ -713,6 +847,164 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
     }
 
+    /**
+     * Stage-7-only scheduler input.  It is deliberately internal: no Java
+     * render path can call it until the Stage-8 drawable/UI composite is ready.
+     * The caller supplies absolute monotonic deadlines for generated N-1/2 and
+     * real N.  There can be at most one queued pair, which bounds latency and
+     * ensures a late generated frame never holds a following real frame.
+     */
+    func enqueueSyntheticPresentationPair(
+        generatedDeadlineNanoseconds: UInt64,
+        realDeadlineNanoseconds: UInt64
+    ) -> TicketStatus {
+        guard generatedDeadlineNanoseconds < realDeadlineNanoseconds else {
+            return .bypassInputContract
+        }
+        state.lock()
+        guard !shuttingDown, acceptingFrames else {
+            state.unlock()
+            return .bypassDisabled
+        }
+        guard pacingWork == nil, pendingPacingWorks == 0 else {
+            MetallumFrameInterpolationTelemetry.shared.recordBackpressureDrop()
+            state.unlock()
+            return .bypassBackpressure
+        }
+        guard nextPresentationID <= UInt64.max - 1 else {
+            state.unlock()
+            return .fatalForGeneration
+        }
+        let work = PacingWork(
+            epoch: resetEpoch,
+            generatedPresentationID: nextPresentationID,
+            realPresentationID: nextPresentationID + 1,
+            generatedDeadlineNanoseconds: generatedDeadlineNanoseconds,
+            realDeadlineNanoseconds: realDeadlineNanoseconds
+        )
+        nextPresentationID += 2
+        pacingWork = work
+        pendingPacingWorks = 1
+        MetallumFrameInterpolationTelemetry.shared.recordAcceptedPair()
+        state.unlock()
+        schedulerWake.signal()
+        return .prepared
+    }
+
+    func nativeStage7Counter(_ kind: Int) -> Int {
+        state.lock()
+        defer { state.unlock() }
+        switch kind {
+        case 0: return pacingRecords.count
+        case 1: return droppedGeneratedLate
+        case 2: return maximumPacingHistogramBuckets
+        case 3: return lastPresentationID > Int.max ? Int.max : Int(lastPresentationID)
+        default: return 0
+        }
+    }
+
+    func nativeStage7InvariantsHold() -> Bool {
+        state.lock()
+        defer { state.unlock() }
+        var priorRecordID: UInt64?
+        var priorVisibleID: UInt64 = 0
+        var expectingRealAfter: UInt64?
+        for record in pacingRecords {
+            if let priorRecordID, record.presentationID != priorRecordID + 1 {
+                return false
+            }
+            priorRecordID = record.presentationID
+            if let expected = expectingRealAfter {
+                guard record.kind == .real, record.presentationID == expected else { return false }
+                expectingRealAfter = nil
+            } else {
+                guard record.kind == .generated || record.kind == .droppedGeneratedLate else { return false }
+                expectingRealAfter = record.presentationID + 1
+            }
+            if record.kind != .droppedGeneratedLate {
+                guard record.presentationID > priorVisibleID else { return false }
+                priorVisibleID = record.presentationID
+            }
+        }
+        return expectingRealAfter == nil && priorVisibleID == lastPresentationID
+    }
+
+    private func recordPacingLocked(
+        _ kind: PacingRecordKind,
+        presentationID: UInt64,
+        timestampNanoseconds: UInt64
+    ) {
+        // A dropped generated frame is an accounting event rather than a
+        // presentation, so it must not advance the visible ID sequence.
+        if kind != .droppedGeneratedLate {
+            precondition(presentationID > lastPresentationID,
+                         "Frame-interpolation presentation IDs must be strictly increasing")
+            lastPresentationID = presentationID
+            // The pacing worker publishes a monotonically increasing shared
+            // event value.  Stage 8 will move this signal behind the actual
+            // drawable composite command buffer; keeping the event contract
+            // here prevents a second unsynchronised presenter from appearing.
+            completionEvent?.signaledValue = presentationID
+            if kind == .generated {
+                MetallumFrameInterpolationTelemetry.shared.recordGeneratedPresentation()
+            } else {
+                MetallumFrameInterpolationTelemetry.shared.recordRealPresentation()
+            }
+        } else {
+            MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+        }
+        pacingRecords.append(PacingRecord(
+            presentationID: presentationID,
+            kind: kind,
+            timestampNanoseconds: timestampNanoseconds
+        ))
+        if pacingRecords.count > 128 {
+            pacingRecords.removeFirst(pacingRecords.count - 128)
+        }
+        updatePacingHistogramLocked()
+    }
+
+    private func updatePacingHistogramLocked() {
+        var buckets = Set<UInt64>()
+        var previous: UInt64?
+        for record in pacingRecords where record.kind != .droppedGeneratedLate {
+            if let previous, record.timestampNanoseconds > previous {
+                // 0.5 ms quantization makes this a cadence diagnostic rather
+                // than a measurement of scheduler wake-up jitter.
+                let interval = record.timestampNanoseconds - previous
+                buckets.insert((interval + 250_000) / 500_000)
+            }
+            previous = record.timestampNanoseconds
+        }
+        maximumPacingHistogramBuckets = max(maximumPacingHistogramBuckets, buckets.count)
+        MetallumFrameInterpolationTelemetry.shared.recordHistogramBuckets(buckets.count)
+    }
+
+    private func waitForPacingDeadline(_ deadlineNanoseconds: UInt64, epoch: UInt64) -> Bool {
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now >= deadlineNanoseconds {
+                return true
+            }
+            let remaining = deadlineNanoseconds - now
+            let result = schedulerWake.wait(timeout: .now() + .nanoseconds(Int(min(remaining, UInt64(Int.max)))))
+            if result == .success {
+                state.lock()
+                let shouldStop = shuttingDown || resetEpoch != epoch || pacingWork == nil
+                state.unlock()
+                if shouldStop {
+                    return false
+                }
+            }
+        }
+    }
+
+    private func finishPacingWorkLocked() {
+        pacingWork = nil
+        pendingPacingWorks = 0
+        state.broadcast()
+    }
+
     static func currentToPreviousMotion(
         currentPixel: SIMD2<Float>,
         previousPixel: SIMD2<Float>
@@ -726,10 +1018,65 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             schedulerWake.wait()
             state.lock()
             let shouldStop = shuttingDown
+            let work = pacingWork
             state.unlock()
             if shouldStop {
                 break
             }
+            guard let work else { continue }
+
+            let generatedOnTime = waitForPacingDeadline(
+                work.generatedDeadlineNanoseconds,
+                epoch: work.epoch
+            )
+            state.lock()
+            guard !shuttingDown, resetEpoch == work.epoch, pacingWork?.generatedPresentationID
+                    == work.generatedPresentationID else {
+                if pacingWork != nil { finishPacingWorkLocked() }
+                state.unlock()
+                continue
+            }
+            let generatedLate = !generatedOnTime
+                || DispatchTime.now().uptimeNanoseconds
+                    > work.generatedDeadlineNanoseconds + Self.generatedLatenessToleranceNanoseconds
+            if generatedLate {
+                droppedGeneratedLate += 1
+                recordPacingLocked(
+                    .droppedGeneratedLate,
+                    presentationID: work.generatedPresentationID,
+                    timestampNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
+            } else {
+                recordPacingLocked(
+                    .generated,
+                    presentationID: work.generatedPresentationID,
+                    timestampNanoseconds: DispatchTime.now().uptimeNanoseconds
+                )
+            }
+            state.unlock()
+
+            guard waitForPacingDeadline(work.realDeadlineNanoseconds, epoch: work.epoch) else {
+                state.lock()
+                if pacingWork != nil { finishPacingWorkLocked() }
+                state.unlock()
+                continue
+            }
+            state.lock()
+            guard !shuttingDown, resetEpoch == work.epoch, pacingWork?.realPresentationID
+                    == work.realPresentationID else {
+                if pacingWork != nil { finishPacingWorkLocked() }
+                state.unlock()
+                continue
+            }
+            // A real frame is never dropped here.  It is the fail-open member
+            // of every accepted pair, even after a late generated frame.
+            recordPacingLocked(
+                .real,
+                presentationID: work.realPresentationID,
+                timestampNanoseconds: DispatchTime.now().uptimeNanoseconds
+            )
+            finishPacingWorkLocked()
+            state.unlock()
         }
         schedulerStopped.signal()
     }
@@ -1102,6 +1449,79 @@ public func metallum_frame_interpolation_encode_stress_stage6(_ device: MTLDevic
             previousPixel: SIMD2<Float>(0.0, 0.0)
         )
         guard motion == SIMD2<Float>(-10.0, -10.0) else { return -4 }
+        return 1
+    }
+}
+
+/**
+ * Stage-7 pacing regression.  This intentionally exercises scheduler policy,
+ * not a user-visible drawable path: Stage 8 owns the shared HDR/UI composite
+ * required before a generated surface can be shown.  It proves generated ->
+ * real order, one-pair backpressure, a three-drawable layer pool, and that a
+ * late generated slot drops without losing its following real frame.
+ */
+@_cdecl("metallum_frame_interpolation_pacing_stress_stage7")
+public func metallum_frame_interpolation_pacing_stress_stage7(_ device: MTLDevice) -> Int32 {
+    autoreleasepool {
+        let layer = CAMetalLayer()
+        layer.device = device
+        layer.maximumDrawableCount = 2
+        guard let rawCoordinator = metallum_frame_interpolation_create_v1(
+            device,
+            layer,
+            16,
+            16,
+            UInt64(MTLPixelFormat.rgba16Float.rawValue),
+            107
+        ), let coordinator = coordinatorFromRawPointer(rawCoordinator) else {
+            return -1
+        }
+        var released = false
+        defer {
+            if !released {
+                _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            }
+        }
+        guard layer.maximumDrawableCount == 3 else { return -2 }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard coordinator.enqueueSyntheticPresentationPair(
+            generatedDeadlineNanoseconds: now + 2_000_000,
+            realDeadlineNanoseconds: now + 4_000_000
+        ) == .prepared,
+              coordinator.enqueueSyntheticPresentationPair(
+                generatedDeadlineNanoseconds: now + 6_000_000,
+                realDeadlineNanoseconds: now + 8_000_000
+              ) == .bypassBackpressure,
+              coordinator.drain(timeoutNanoseconds: 1_000_000_000) == .ready,
+              coordinator.nativeStage7Counter(0) == 2,
+              coordinator.nativeStage7Counter(1) == 0,
+              coordinator.nativeStage7Counter(3) == 2,
+              coordinator.nativeStage7InvariantsHold() else {
+            return -3
+        }
+
+        guard coordinator.reset(after: 1_000_000_000) == .ready else { return -4 }
+        let lateNow = DispatchTime.now().uptimeNanoseconds
+        guard coordinator.enqueueSyntheticPresentationPair(
+            generatedDeadlineNanoseconds: lateNow - 10_000_000,
+            realDeadlineNanoseconds: lateNow + 2_000_000
+        ) == .prepared,
+              coordinator.drain(timeoutNanoseconds: 1_000_000_000) == .ready,
+              coordinator.nativeStage7Counter(0) == 4,
+              coordinator.nativeStage7Counter(1) == 1,
+              coordinator.nativeStage7Counter(3) == 4,
+              coordinator.nativeStage7Counter(2) <= 2,
+              coordinator.nativeStage7InvariantsHold() else {
+            return -5
+        }
+
+        guard metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue,
+              layer.maximumDrawableCount == 2 else {
+            return -6
+        }
+        released = true
         return 1
     }
 }

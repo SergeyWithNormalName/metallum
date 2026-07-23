@@ -3406,6 +3406,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
                 metadata[key] = value
             }
         }
+        metadata["frame_interpolation_pacing"] = MetallumFrameInterpolationTelemetry.shared.snapshot().report
         metadata["static_geometry_heaps_enabled"] = NativeState.staticGeometryHeapsEnabled
         metadata["renderer_capability_mask_v1"] = String(
             format: "0x%016llx",

@@ -79,6 +79,7 @@ private typealias PresentTextureToDrawableFn = @convention(c) (
 private typealias Stage4CoordinatorStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage5TicketStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage6EncodeStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage7PacingStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -566,6 +567,19 @@ private enum FrameInterpolationValidation {
             logMsg("[FAIL] Stage 6: fixed-Temporal encode/history validation failed")
             exit(1)
         }
+
+        logMsg("[INFO] Testing Stage 7: dual-presentation pacing policy")
+        guard let stage7PacingSymbol = dlsym(handle, "metallum_frame_interpolation_pacing_stress_stage7") else {
+            logMsg("[FAIL] Stage 7: pacing stress symbol is missing")
+            exit(1)
+        }
+        let stage7Pacing = unsafeBitCast(stage7PacingSymbol, to: Stage7PacingStressFn.self)
+        let stage7Status = stage7Pacing(device)
+        guard stage7Status == 1 else {
+            logMsg("[FAIL] Stage 7: pacing stress returned \(stage7Status)")
+            exit(1)
+        }
+        logMsg("[PASS] Stage 7: generated-before-real ordering, late-generated drop, bounded pair queue, and three-drawable pool")
 
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {
