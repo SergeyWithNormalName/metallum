@@ -161,6 +161,12 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let generatedColor: MTLTexture
         let depth: MTLTexture?
         let motion: MTLTexture?
+        // The UI remains an SDR texture.  Both present members consume this
+        // exact texture through the same composite path; it is never fed to
+        // MetalFX or included in world-color history.
+        let sdrUi: MTLTexture
+        let generatedPresentation: MTLTexture
+        let realPresentation: MTLTexture
         var state: SlotState
     }
 
@@ -254,6 +260,30 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
     }
 
+    /**
+     * Retains the UI and both output targets until the last GPU composite has
+     * completed.  This is deliberately distinct from a ticket: tickets own
+     * renderer command buffers, while this work item owns presentation-only
+     * consumers that may outlive renderer completion.
+     */
+    private final class UiCompositeWork {
+        let slot: Int
+        let uiTexture: MTLTexture
+        let generatedWorld: MTLTexture
+        let realWorld: MTLTexture
+        let generatedTarget: MTLTexture
+        let realTarget: MTLTexture
+
+        init(slot: Int, resources: Slot) {
+            self.slot = slot
+            self.uiTexture = resources.sdrUi
+            self.generatedWorld = resources.generatedColor
+            self.realWorld = resources.realColor
+            self.generatedTarget = resources.generatedPresentation
+            self.realTarget = resources.realPresentation
+        }
+    }
+
     let key: Key
     private let device: MTLDevice
     private let layer: CAMetalLayer
@@ -278,6 +308,9 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var textureAllocationCount = 0
     private var nextTicket: UInt64 = 1
     private var tickets: [UInt64: Ticket] = [:]
+    private var pendingUiCompositeWork: UiCompositeWork?
+    private var sharedUiCompositeEncodes = 0
+    private var presentationHeadroom: Float = 1.0
     private var historyState: HistoryState = .primingFirst
     private var previousEncodedSlot: Int?
     private var primedPreviousSlot: Int?
@@ -423,6 +456,22 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         )
         generatedDescriptor.storageMode = .private
         generatedDescriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        let uiDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: key.width,
+            height: key.height,
+            mipmapped: false
+        )
+        uiDescriptor.storageMode = .private
+        uiDescriptor.usage = [.shaderRead, .renderTarget]
+        let presentationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: key.pixelFormat,
+            width: key.width,
+            height: key.height,
+            mipmapped: false
+        )
+        presentationDescriptor.storageMode = .private
+        presentationDescriptor.usage = [.shaderRead, .renderTarget]
 
         var depthDescriptor: MTLTextureDescriptor?
         var motionDescriptor: MTLTextureDescriptor?
@@ -453,7 +502,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         allocated.reserveCapacity(Self.ringSize)
         for index in 0..<Self.ringSize {
             guard let realColor = device.makeTexture(descriptor: descriptor),
-                  let generatedColor = device.makeTexture(descriptor: generatedDescriptor) else {
+                  let generatedColor = device.makeTexture(descriptor: generatedDescriptor),
+                  let sdrUi = device.makeTexture(descriptor: uiDescriptor),
+                  let generatedPresentation = device.makeTexture(descriptor: presentationDescriptor),
+                  let realPresentation = device.makeTexture(descriptor: presentationDescriptor) else {
                 return false
             }
             let depth: MTLTexture?
@@ -472,16 +524,25 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             }
             realColor.label = "Metallum FI real color \(index)"
             generatedColor.label = "Metallum FI generated color \(index)"
+            sdrUi.label = "Metallum FI SDR UI \(index)"
+            generatedPresentation.label = "Metallum FI generated UI composite \(index)"
+            realPresentation.label = "Metallum FI real UI composite \(index)"
             allocated.append(Slot(
                 realColor: realColor,
                 generatedColor: generatedColor,
                 depth: depth,
                 motion: motion,
+                sdrUi: sdrUi,
+                generatedPresentation: generatedPresentation,
+                realPresentation: realPresentation,
                 state: .free
             ))
         }
         slots = allocated
-        textureAllocationCount = allocated.count * 2
+        // Each slot owns world history (2), one SDR UI texture, and separate
+        // generated/real composite targets.  The targets make the UI lifetime
+        // explicit and avoid sharing a drawable across the two presentations.
+        textureAllocationCount = allocated.count * 5
         return true
     }
 
@@ -845,6 +906,161 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         case 4: return reasonCounters.encoded
         default: return 0
         }
+    }
+
+    /**
+     * Stage-8 native validation path.  It encodes the exact same SDR-UI
+     * composite twice: once for generated world color and once for real world
+     * color.  The work item holds the UI until the completion handler releases
+     * both outputs, rather than releasing it at renderer-command completion.
+     *
+     * This does not acquire a drawable.  Production drawable ownership and
+     * admission remain deliberately deferred to stage 9.
+     */
+    func encodeSharedUiCompositeValidation(
+        outputMode: Int32,
+        currentHeadroom: Float
+    ) -> TicketStatus {
+        guard (0...2).contains(outputMode),
+              currentHeadroom.isFinite,
+              currentHeadroom >= 1.0,
+              currentHeadroom <= 8.0 else {
+            return .bypassInputContract
+        }
+
+        state.lock()
+        guard acceptingFrames, !shuttingDown,
+              pendingUiCompositeWork == nil,
+              let queue = presentationQueue,
+              let slot = slots.firstIndex(where: { $0.state == .free }) else {
+            state.unlock()
+            return .bypassBackpressure
+        }
+        slots[slot].state = .realFrameReserved
+        pendingRealFrames += 1
+        let work = UiCompositeWork(slot: slot, resources: slots[slot])
+        pendingUiCompositeWork = work
+        state.unlock()
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              clearUiCompositeInputs(commandBuffer: commandBuffer, work: work),
+              metallum_encodeUIComposite(
+                commandBuffer,
+                work.generatedTarget,
+                work.generatedWorld,
+                work.uiTexture,
+                nil,
+                outputMode,
+                2,
+                currentHeadroom,
+                1.0,
+                0.22,
+                0
+              ) == 1,
+              metallum_encodeUIComposite(
+                commandBuffer,
+                work.realTarget,
+                work.realWorld,
+                work.uiTexture,
+                nil,
+                outputMode,
+                2,
+                currentHeadroom,
+                1.0,
+                0.22,
+                0
+              ) == 1 else {
+            discardUiCompositeWork(work)
+            return .transientFailure
+        }
+        commandBuffer.addCompletedHandler { [weak self, work] _ in
+            self?.completeUiCompositeWork(work)
+        }
+        commandBuffer.commit()
+        return .prepared
+    }
+
+    /**
+     * EDR headroom is a present uniform, not a history-compatible value.  A
+     * change therefore drains current presentation work and resets history
+     * before the next pair can be admitted.  Pixel-format changes still need
+     * a new immutable coordinator key (and thus a full recreate).
+     */
+    func updatePresentationHeadroom(
+        _ newHeadroom: Float,
+        timeoutNanoseconds: UInt64
+    ) -> LifecycleStatus {
+        guard newHeadroom.isFinite, newHeadroom >= 1.0, newHeadroom <= 8.0 else {
+            return .invalidContext
+        }
+        state.lock()
+        let changed = abs(presentationHeadroom - newHeadroom) > 0.0001
+        state.unlock()
+        guard changed else {
+            return key.isDrawableSized ? .ready : .suspendedZeroSize
+        }
+        let resetStatus = reset(after: timeoutNanoseconds)
+        guard resetStatus == .ready || resetStatus == .suspendedZeroSize else {
+            return resetStatus
+        }
+        state.lock()
+        presentationHeadroom = newHeadroom
+        reasonCounters.reset += 1
+        state.unlock()
+        return resetStatus
+    }
+
+    func nativeStage8Counter(_ kind: Int) -> Int {
+        state.lock()
+        defer { state.unlock() }
+        switch kind {
+        case 0: return sharedUiCompositeEncodes
+        case 1: return pendingUiCompositeWork == nil ? 0 : 1
+        case 2: return reasonCounters.reset
+        default: return 0
+        }
+    }
+
+    private func clearUiCompositeInputs(
+        commandBuffer: MTLCommandBuffer,
+        work: UiCompositeWork
+    ) -> Bool {
+        let clearTargets: [(MTLTexture, MTLClearColor)] = [
+            (work.generatedWorld, MTLClearColorMake(0.20, 0.45, 1.25, 1.0)),
+            (work.realWorld, MTLClearColorMake(0.30, 0.55, 1.50, 1.0)),
+            // Transparent UI proves that both paths preserve world color;
+            // live proof covers text and overlays once admission is enabled.
+            (work.uiTexture, MTLClearColorMake(0.0, 0.0, 0.0, 0.0))
+        ]
+        for (texture, color) in clearTargets {
+            let descriptor = MTLRenderPassDescriptor()
+            descriptor.colorAttachments[0].texture = texture
+            descriptor.colorAttachments[0].loadAction = .clear
+            descriptor.colorAttachments[0].storeAction = .store
+            descriptor.colorAttachments[0].clearColor = color
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+                return false
+            }
+            encoder.endEncoding()
+        }
+        return true
+    }
+
+    private func completeUiCompositeWork(_ work: UiCompositeWork) {
+        state.lock()
+        defer { state.unlock() }
+        guard pendingUiCompositeWork === work else { return }
+        pendingUiCompositeWork = nil
+        sharedUiCompositeEncodes += 2
+        releaseSlotLocked(work.slot)
+    }
+
+    private func discardUiCompositeWork(_ work: UiCompositeWork) {
+        state.lock()
+        defer { state.unlock() }
+        guard pendingUiCompositeWork === work else { return }
+        pendingUiCompositeWork = nil
+        releaseSlotLocked(work.slot)
     }
 
     /**
@@ -1270,7 +1486,9 @@ public func metallum_frame_interpolation_coordinator_stress_stage4(_ device: MTL
         }
 
         let warmAllocationCount = coordinator.nativeTextureAllocationCount()
-        guard warmAllocationCount == 6 else { return -2 }
+        // Stage 8 adds one retained SDR UI texture and two separate composite
+        // targets per slot, alongside the real/generated world-color pair.
+        guard warmAllocationCount == 15 else { return -2 }
         for _ in 0..<10_000 {
             guard let slot = coordinator.reserveRealFrameSlot(),
                   coordinator.completeRealFrameSlot(slot) == .ready,
@@ -1522,6 +1740,98 @@ public func metallum_frame_interpolation_pacing_stress_stage7(_ device: MTLDevic
             return -6
         }
         released = true
+        return 1
+    }
+}
+
+/**
+ * Stage-8 HDR/UI regression.  It keeps SDR UI separate from both world
+ * textures, composites that UI through the common path for generated and real
+ * output, and verifies a headroom transition drains/resets before reuse.  It
+ * intentionally uses offscreen targets: live drawable and fullscreen proof
+ * belong to the production-admission phase, not this disabled validation path.
+ */
+@_cdecl("metallum_frame_interpolation_hdr_ui_stress_stage8")
+public func metallum_frame_interpolation_hdr_ui_stress_stage8(_ device: MTLDevice) -> Int32 {
+    func validateProfile(
+        pixelFormat: MTLPixelFormat,
+        outputMode: Int32,
+        initialHeadroom: Float,
+        changedHeadroom: Float,
+        generation: UInt64
+    ) -> Int32 {
+        let layer = CAMetalLayer()
+        layer.device = device
+        guard let rawCoordinator = metallum_frame_interpolation_create_v1(
+            device,
+            layer,
+            64,
+            64,
+            UInt64(pixelFormat.rawValue),
+            generation
+        ), let coordinator = coordinatorFromRawPointer(rawCoordinator) else {
+            return -1
+        }
+        var released = false
+        defer {
+            if !released {
+                _ = metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+            }
+        }
+
+        guard coordinator.nativeTextureAllocationCount() == 15,
+              coordinator.encodeSharedUiCompositeValidation(
+                outputMode: outputMode,
+                currentHeadroom: initialHeadroom
+              ) == .prepared,
+              coordinator.nativeStage8Counter(1) == 1,
+              coordinator.drain(timeoutNanoseconds: 1_000_000_000) == .ready,
+              coordinator.nativeStage8Counter(0) == 2,
+              coordinator.nativeStage8Counter(1) == 0 else {
+            return -2
+        }
+
+        guard coordinator.updatePresentationHeadroom(
+            changedHeadroom,
+            timeoutNanoseconds: 1_000_000_000
+        ) == .ready else { return -3 }
+        let headroomChanged = abs(changedHeadroom - initialHeadroom) > 0.0001
+        guard headroomChanged
+                ? coordinator.nativeStage8Counter(2) >= 1
+                : coordinator.nativeStage8Counter(2) == 0 else { return -4 }
+        guard coordinator.encodeSharedUiCompositeValidation(
+            outputMode: outputMode,
+            currentHeadroom: changedHeadroom
+        ) == .prepared else { return -5 }
+        guard coordinator.drain(timeoutNanoseconds: 1_000_000_000) == .ready else { return -6 }
+        guard coordinator.nativeStage8Counter(0) == 4 else { return -7 }
+
+        guard metallum_frame_interpolation_release_v1(rawCoordinator, 1_000_000_000)
+                == MetallumFrameInterpolationCoordinator.TicketStatus.prepared.rawValue else {
+            return -8
+        }
+        released = true
+        return 1
+    }
+
+    return autoreleasepool {
+        // SDR uses the ordinary layer format.  EDR and Enhanced/HDR share the
+        // fp16 layer format but retain distinct present modes and headroom.
+        for profile in [
+            (MTLPixelFormat.bgra8Unorm, Int32(0), Float(1.0), Float(1.25)),
+            (MTLPixelFormat.rgba16Float, Int32(1), Float(1.25), Float(1.75)),
+            (MTLPixelFormat.rgba16Float, Int32(2), Float(1.50), Float(2.25))
+        ].enumerated() {
+            let (pixelFormat, outputMode, initialHeadroom, changedHeadroom) = profile.element
+            let status = validateProfile(
+                pixelFormat: pixelFormat,
+                outputMode: outputMode,
+                initialHeadroom: initialHeadroom,
+                changedHeadroom: changedHeadroom,
+                generation: UInt64(108 + profile.offset)
+            )
+            guard status == 1 else { return status - Int32(profile.offset * 10) }
+        }
         return 1
     }
 }

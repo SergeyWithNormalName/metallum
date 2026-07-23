@@ -80,6 +80,7 @@ private typealias Stage4CoordinatorStressFn = @convention(c) (MTLDevice) -> Int3
 private typealias Stage5TicketStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage6EncodeStressFn = @convention(c) (MTLDevice) -> Int32
 private typealias Stage7PacingStressFn = @convention(c) (MTLDevice) -> Int32
+private typealias Stage8HdrUiStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -580,6 +581,19 @@ private enum FrameInterpolationValidation {
             exit(1)
         }
         logMsg("[PASS] Stage 7: generated-before-real ordering, late-generated drop, bounded pair queue, and three-drawable pool")
+
+        logMsg("[INFO] Testing Stage 8: shared SDR UI composite across SDR/EDR/Enhanced HDR")
+        guard let stage8HdrUiSymbol = dlsym(handle, "metallum_frame_interpolation_hdr_ui_stress_stage8") else {
+            logMsg("[FAIL] Stage 8: HDR/UI integration symbol is missing")
+            exit(1)
+        }
+        let stage8HdrUi = unsafeBitCast(stage8HdrUiSymbol, to: Stage8HdrUiStressFn.self)
+        let stage8Status = stage8HdrUi(device)
+        guard stage8Status == 1 else {
+            logMsg("[FAIL] Stage 8: HDR/UI integration stress returned \(stage8Status)")
+            exit(1)
+        }
+        logMsg("[PASS] Stage 8: shared UI composite, retained UI lifetime, and headroom-reset safety")
 
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {
