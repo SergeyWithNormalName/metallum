@@ -5667,14 +5667,16 @@ private func ensureMenuBlurTextures(
     width: Int,
     height: Int
 ) -> (MTLTexture, MTLTexture)? {
+    let downscaledWidth = max(width / 2, 1)
+    let downscaledHeight = max(height / 2, 1)
     let key = objectAddress(device)
     let workspace = NativeState.menuBlurWorkspaces[key] ?? MetallumMenuBlurWorkspace()
     NativeState.menuBlurWorkspaces[key] = workspace
 
     func valid(_ texture: MTLTexture?) -> Bool {
         texture != nil
-            && texture!.width == width
-            && texture!.height == height
+            && texture!.width == downscaledWidth
+            && texture!.height == downscaledHeight
             && texture!.pixelFormat == .rgba16Float
     }
     if valid(workspace.first), valid(workspace.second) {
@@ -5684,8 +5686,8 @@ private func ensureMenuBlurTextures(
     func makeTexture(label: String) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float,
-            width: width,
-            height: height,
+            width: downscaledWidth,
+            height: downscaledHeight,
             mipmapped: false
         )
         descriptor.storageMode = .private
@@ -7814,12 +7816,16 @@ private func buildPresentSampler(device: MTLDevice, filter: MTLSamplerMinMagFilt
 
 private func presentSamplers(device: MTLDevice) -> (nearest: MTLSamplerState, linear: MTLSamplerState)? {
     let key = objectAddress(device)
-    guard
-        let nearest = NativeState.presentNearestSamplers[key],
-        let linear = NativeState.presentLinearSamplers[key]
-    else {
+    if let nearest = NativeState.presentNearestSamplers[key],
+       let linear = NativeState.presentLinearSamplers[key] {
+        return (nearest, linear)
+    }
+    guard let nearest = buildPresentSampler(device: device, filter: .nearest),
+          let linear = buildPresentSampler(device: device, filter: .linear) else {
         return nil
     }
+    NativeState.presentNearestSamplers[key] = nearest
+    NativeState.presentLinearSamplers[key] = linear
     return (nearest, linear)
 }
 
@@ -12969,6 +12975,7 @@ public func metallum_MTLCommandBuffer_encodeCoherentMenuBlur(
         }
         compose.setFragmentTexture(uiTexture, index: 0)
         compose.setFragmentTexture(hdrTexture, index: 1)
+        compose.setFragmentSamplerState(samplers.linear, index: 0)
         withUnsafeBytes(of: &uniforms) { bytes in
             compose.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
         }
@@ -12977,10 +12984,7 @@ public func metallum_MTLCommandBuffer_encodeCoherentMenuBlur(
 
         let directions = [
             SIMD2<Float>(1.0, 0.0),
-            SIMD2<Float>(0.0, 1.0),
-            SIMD2<Float>(1.0, 0.0),
-            SIMD2<Float>(0.0, 1.0),
-            SIMD2<Float>(1.0, 0.0)
+            SIMD2<Float>(0.0, 1.0)
         ]
         var readTexture = blurTextures.0
         var writeTexture = blurTextures.1
@@ -13135,6 +13139,520 @@ public func metallum_MTLCommandBuffer_encodeSpatialScreenshot(
     }
 }
 
+@_cdecl("metallum_encodePresentationWorld")
+public func metallum_encodePresentationWorld(
+    _ commandBuffer: MTLCommandBuffer,
+    _ targetTexture: MTLTexture,
+    _ sourceTexture: MTLTexture,
+    _ sceneTexture: MTLTexture?,
+    _ sceneDepthTexture: MTLTexture?,
+    _ semanticTexture: MTLTexture?,
+    _ globalFence: MTLFence?,
+    _ spatialHdrPrecomposed: Int32,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ materialGenerationActive: Int32,
+    _ diagnosticPattern: Int32,
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float
+) -> Int32 {
+    return autoreleasepool {
+        guard (0...2).contains(outputMode),
+              (0...1).contains(materialGenerationActive) else {
+            return -1
+        }
+
+        let effectiveHeadroom = min(
+            max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
+            8.0
+        )
+        let materialContractActive = materialGenerationActive != 0
+        let actualHdrGeneration = materialContractActive && outputMode != 0
+        let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
+        let hasCompatibleDepth = sceneTexture != nil
+            && sceneDepthTexture != nil
+            && sceneDepthTexture!.width == sceneTexture!.width
+            && sceneDepthTexture!.height == sceneTexture!.height
+            && {
+                switch sceneDepthTexture!.pixelFormat {
+                case .depth32Float, .depth32Float_stencil8:
+                    return true
+                default:
+                    return false
+                }
+            }()
+        let hasCompatibleLegacyScene = canEnhance
+            && sceneTexture != nil
+            && hasCompatibleDepth
+        let hasCompatibleActualScene = actualHdrGeneration
+            && sceneTexture != nil
+            && sceneTexture!.pixelFormat == .rgba16Float
+            && sceneTexture!.textureType == .type2D
+            && sceneTexture!.sampleCount == 1
+            && sceneTexture!.usage.contains(.shaderRead)
+            && objectAddress(sceneTexture!.device) == objectAddress(commandBuffer.device)
+            && sourceEncoding == 2
+        let hasCompatibleScene = materialContractActive
+            ? hasCompatibleActualScene
+            : hasCompatibleLegacyScene
+
+        let candidateSpatialOutput = currentSpatialOutput(
+            device: commandBuffer.device,
+            inputTexture: sourceTexture,
+            outputWidth: targetTexture.width,
+            outputHeight: targetTexture.height
+        )
+        let candidateTemporalOutput = currentTemporalOutput(
+            commandBuffer: commandBuffer,
+            inputTexture: sourceTexture,
+            outputWidth: targetTexture.width,
+            outputHeight: targetTexture.height
+        )
+        let candidateNativeOutput = spatialHdrPrecomposed != 0
+            ? currentNativeHdrWorldComposite(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: targetTexture.width,
+                outputHeight: targetTexture.height
+            )
+            : nil
+        let candidatePrecomposedOutput = candidateNativeOutput
+            ?? candidateTemporalOutput
+            ?? candidateSpatialOutput
+
+        guard let samplers = presentSamplers(device: commandBuffer.device) else {
+            return -1
+        }
+
+        // Case 1: Precomposed output available
+        if let precomposed = candidatePrecomposedOutput {
+            if objectAddress(precomposed) == objectAddress(targetTexture) {
+                return 1
+            }
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = targetTexture
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+            guard let presentPipeline = ensurePresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat),
+                  let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+                return -1
+            }
+            if let globalFence {
+                encoder.waitForFence(globalFence, before: .fragment)
+            }
+            encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: Double(targetTexture.width), height: Double(targetTexture.height), znear: 0.0, zfar: 1.0))
+            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setFragmentTexture(precomposed, index: 0)
+            encoder.setFragmentTexture(precomposed, index: 1)
+            let requiresScaling = precomposed.width != targetTexture.width || precomposed.height != targetTexture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            var uniforms = MetallumPresentUniforms(
+                mode: 0,
+                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: 0,
+                currentHeadroom: 1.0,
+                hdrStrength: 0.0,
+                bloomStrength: 0.0,
+                sceneAvailable: 0,
+                uiAvailable: 0,
+                semanticAvailable: 0
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if let globalFence {
+                encoder.updateFence(globalFence, after: .fragment)
+            }
+            trackedEndEncoding(encoder)
+            return 1
+        }
+
+        // Case 2: Output mode 0 (SDR)
+        if outputMode == 0 {
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = targetTexture
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+            guard let presentPipeline = ensurePresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat),
+                  let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+                return -1
+            }
+            if let globalFence {
+                encoder.waitForFence(globalFence, before: .fragment)
+            }
+            encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: Double(targetTexture.width), height: Double(targetTexture.height), znear: 0.0, zfar: 1.0))
+            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setFragmentTexture(sourceTexture, index: 0)
+            encoder.setFragmentTexture(sourceTexture, index: 1)
+            let requiresScaling = sourceTexture.width != targetTexture.width || sourceTexture.height != targetTexture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            var uniforms = MetallumPresentUniforms(
+                mode: 0,
+                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+                currentHeadroom: 1.0,
+                hdrStrength: 0.0,
+                bloomStrength: 0.0,
+                sceneAvailable: 0,
+                uiAvailable: 0,
+                semanticAvailable: 0
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if let globalFence {
+                encoder.updateFence(globalFence, after: .fragment)
+            }
+            trackedEndEncoding(encoder)
+            return 1
+        }
+
+        // Case 3: HDR scene processing
+        if hasCompatibleScene, let sceneTexture {
+            let displaySceneTexture = candidatePrecomposedOutput ?? sceneTexture
+            let workspace = ensureHdrWorkspace(
+                device: commandBuffer.device,
+                renderContractMode: materialContractActive ? 1 : 0,
+                sourceWidth: sceneTexture.width,
+                sourceHeight: sceneTexture.height,
+                displayWidth: displaySceneTexture.width,
+                displayHeight: displaySceneTexture.height
+            )
+            let pipelinesReady = materialContractActive
+                ? ensureActualHdrPipelines(device: commandBuffer.device) != nil
+                : ensureHdrPipelines(device: commandBuffer.device) != nil
+            guard pipelinesReady, workspace != nil else {
+                return -1
+            }
+
+            let worldPipeline = materialContractActive
+                ? ensureActualWorldPresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat)
+                : ensureWorldPresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat)
+            guard let worldPipeline else {
+                return -1
+            }
+
+            var hdrOutputs: MetallumHdrOutputs?
+            let hasCompatibleSemantic = !materialContractActive
+                && hasCompatibleLegacyScene
+                && semanticTexture != nil
+                && semanticTexture!.width == sceneTexture.width
+                && semanticTexture!.height == sceneTexture.height
+                && semanticTexture!.pixelFormat == .rgba8Unorm
+
+            if materialContractActive {
+                hdrOutputs = encodeActualHdrEffects(
+                    commandBuffer: commandBuffer,
+                    finalTexture: sourceTexture,
+                    sceneTexture: sceneTexture,
+                    displaySceneTexture: displaySceneTexture,
+                    uiTexture: nil,
+                    globalFence: globalFence,
+                    currentHeadroom: effectiveHeadroom
+                )
+            } else if let sceneDepthTexture {
+                hdrOutputs = encodeHdrEffects(
+                    commandBuffer: commandBuffer,
+                    finalTexture: sourceTexture,
+                    sceneTexture: sceneTexture,
+                    displaySceneTexture: displaySceneTexture,
+                    sceneDepthTexture: sceneDepthTexture,
+                    semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
+                    uiTexture: nil,
+                    globalFence: globalFence,
+                    sourceEncoding: sourceEncoding,
+                    currentHeadroom: effectiveHeadroom
+                )
+            }
+            guard let hdrOutputs else {
+                return -1
+            }
+
+            let presentDepthTexture: MTLTexture?
+            if materialContractActive {
+                presentDepthTexture = nil
+            } else if let sceneDepthTexture {
+                presentDepthTexture = sceneDepthTexture
+            } else {
+                presentDepthTexture = ensureHdrFallbackDepthTexture(device: commandBuffer.device)
+                if presentDepthTexture == nil { return -1 }
+            }
+
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = targetTexture
+            renderPass.colorAttachments[0].loadAction = .dontCare
+            renderPass.colorAttachments[0].storeAction = .store
+
+            guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+                return -1
+            }
+            if let globalFence {
+                encoder.waitForFence(globalFence, before: .fragment)
+            }
+            encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: Double(targetTexture.width), height: Double(targetTexture.height), znear: 0.0, zfar: 1.0))
+            encoder.setRenderPipelineState(worldPipeline)
+
+            if materialContractActive {
+                encoder.setFragmentTexture(sceneTexture, index: 0)
+                encoder.setFragmentTexture(hdrOutputs.bloom, index: 1)
+            } else {
+                encoder.setFragmentTexture(sceneTexture, index: 0)
+                encoder.setFragmentTexture(hdrOutputs.emission, index: 1)
+                encoder.setFragmentTexture(hdrOutputs.bloom, index: 2)
+                encoder.setFragmentTexture(hasCompatibleSemantic ? semanticTexture : sceneTexture, index: 3)
+                encoder.setFragmentTexture(presentDepthTexture!, index: 4)
+            }
+
+            var uniforms = MetallumPresentUniforms(
+                mode: UInt32(clamping: max(outputMode, 0)),
+                sourceEncoding: materialContractActive ? 2 : UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+                currentHeadroom: effectiveHeadroom,
+                hdrStrength: materialContractActive ? 0.0 : (hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0),
+                bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
+                sceneAvailable: 1,
+                uiAvailable: 0,
+                semanticAvailable: materialContractActive ? 0 : (hasCompatibleSemantic ? 1 : 0)
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+            encoder.setFragmentBuffer(hdrOutputs.adaptiveState, offset: 0, index: 1)
+
+            let requiresScaling = sceneTexture.width != targetTexture.width || sceneTexture.height != targetTexture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            encoder.setFragmentSamplerState(samplers.linear, index: 1)
+
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if let globalFence {
+                encoder.updateFence(globalFence, after: .fragment)
+            }
+            trackedEndEncoding(encoder)
+            return 1
+        }
+
+        // Fallback: render sourceTexture to targetTexture
+        let renderPass = MTLRenderPassDescriptor()
+        renderPass.colorAttachments[0].texture = targetTexture
+        renderPass.colorAttachments[0].loadAction = .dontCare
+        renderPass.colorAttachments[0].storeAction = .store
+        let fallbackPipeline: MTLRenderPipelineState?
+        if materialContractActive {
+            fallbackPipeline = ensureActualHdrUiOnlyPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat)
+                ?? ensurePresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat)
+        } else {
+            fallbackPipeline = ensurePresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat)
+        }
+        guard let presentPipeline = fallbackPipeline,
+              let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+            return -1
+        }
+        if let globalFence {
+            encoder.waitForFence(globalFence, before: .fragment)
+        }
+        encoder.setViewport(MTLViewport(originX: 0.0, originY: 0.0, width: Double(targetTexture.width), height: Double(targetTexture.height), znear: 0.0, zfar: 1.0))
+        encoder.setRenderPipelineState(presentPipeline)
+        encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentTexture(sourceTexture, index: 1)
+        encoder.setFragmentSamplerState(samplers.nearest, index: 0)
+        var uniforms = MetallumPresentUniforms(
+            mode: UInt32(clamping: max(outputMode, 0)),
+            sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+            diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+            currentHeadroom: effectiveHeadroom,
+            hdrStrength: 0.0,
+            bloomStrength: 0.0,
+            sceneAvailable: 0,
+            uiAvailable: 0,
+            semanticAvailable: 0
+        )
+        withUnsafeBytes(of: &uniforms) { bytes in
+            encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
+        trackedEndEncoding(encoder)
+        return 1
+    }
+}
+
+@_cdecl("metallum_encodeUIComposite")
+public func metallum_encodeUIComposite(
+    _ commandBuffer: MTLCommandBuffer,
+    _ targetTexture: MTLTexture,
+    _ worldTexture: MTLTexture,
+    _ uiTexture: MTLTexture?,
+    _ globalFence: MTLFence?,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float,
+    _ diagnosticPattern: Int32 = 0
+) -> Int32 {
+    return autoreleasepool {
+        let effectiveHeadroom = min(
+            max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
+            8.0
+        )
+        let hasCompatibleUi = uiTexture != nil
+            && uiTexture!.pixelFormat == .rgba8Unorm
+            && uiTexture!.textureType == .type2D
+            && uiTexture!.sampleCount == 1
+            && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
+            && uiTexture!.width == targetTexture.width
+            && uiTexture!.height == targetTexture.height
+
+        guard let samplers = presentSamplers(device: commandBuffer.device) else {
+            return -1
+        }
+
+        let renderPass = MTLRenderPassDescriptor()
+        renderPass.colorAttachments[0].texture = targetTexture
+        renderPass.colorAttachments[0].loadAction = .dontCare
+        renderPass.colorAttachments[0].storeAction = .store
+
+        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
+            return -1
+        }
+        if let globalFence {
+            encoder.waitForFence(globalFence, before: .fragment)
+        }
+        encoder.setViewport(MTLViewport(
+            originX: 0.0,
+            originY: 0.0,
+            width: Double(targetTexture.width),
+            height: Double(targetTexture.height),
+            znear: 0.0,
+            zfar: 1.0
+        ))
+
+        if hasCompatibleUi, let uiTexture {
+            guard let spatialPipeline = ensureSpatialPresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat) else {
+                return -1
+            }
+            encoder.setRenderPipelineState(spatialPipeline)
+            encoder.setFragmentTexture(uiTexture, index: 0)
+            encoder.setFragmentTexture(worldTexture, index: 1)
+            var uniforms = MetallumPresentUniforms(
+                mode: UInt32(clamping: max(outputMode, 0)),
+                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+                currentHeadroom: effectiveHeadroom,
+                hdrStrength: hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
+                bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
+                sceneAvailable: 1,
+                uiAvailable: 1,
+                semanticAvailable: 0
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+        } else {
+            guard let presentPipeline = ensurePresentPipeline(device: commandBuffer.device, colorFormat: targetTexture.pixelFormat) else {
+                return -1
+            }
+            encoder.setRenderPipelineState(presentPipeline)
+            encoder.setFragmentTexture(worldTexture, index: 0)
+            encoder.setFragmentTexture(worldTexture, index: 1)
+            let requiresScaling = worldTexture.width != targetTexture.width || worldTexture.height != targetTexture.height
+            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
+            var uniforms = MetallumPresentUniforms(
+                mode: 0,
+                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
+                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
+                currentHeadroom: 1.0,
+                hdrStrength: 0.0,
+                bloomStrength: 0.0,
+                sceneAvailable: 0,
+                uiAvailable: 0,
+                semanticAvailable: 0
+            )
+            withUnsafeBytes(of: &uniforms) { bytes in
+                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+            }
+        }
+
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        if let globalFence {
+            encoder.updateFence(globalFence, after: .fragment)
+        }
+        trackedEndEncoding(encoder)
+        return 1
+    }
+}
+
+@_cdecl("encodePresentationWorld")
+public func encodePresentationWorld(
+    _ commandBuffer: MTLCommandBuffer,
+    _ targetTexture: MTLTexture,
+    _ sourceTexture: MTLTexture,
+    _ sceneTexture: MTLTexture?,
+    _ sceneDepthTexture: MTLTexture?,
+    _ semanticTexture: MTLTexture?,
+    _ globalFence: MTLFence?,
+    _ spatialHdrPrecomposed: Int32,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ materialGenerationActive: Int32,
+    _ diagnosticPattern: Int32,
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float
+) -> Int32 {
+    return metallum_encodePresentationWorld(
+        commandBuffer,
+        targetTexture,
+        sourceTexture,
+        sceneTexture,
+        sceneDepthTexture,
+        semanticTexture,
+        globalFence,
+        spatialHdrPrecomposed,
+        outputMode,
+        sourceEncoding,
+        materialGenerationActive,
+        diagnosticPattern,
+        currentHeadroom,
+        hdrStrength,
+        bloomStrength
+    )
+}
+
+@_cdecl("encodeUIComposite")
+public func encodeUIComposite(
+    _ commandBuffer: MTLCommandBuffer,
+    _ targetTexture: MTLTexture,
+    _ worldTexture: MTLTexture,
+    _ uiTexture: MTLTexture?,
+    _ globalFence: MTLFence?,
+    _ outputMode: Int32,
+    _ sourceEncoding: Int32,
+    _ currentHeadroom: Float,
+    _ hdrStrength: Float,
+    _ bloomStrength: Float,
+    _ diagnosticPattern: Int32 = 0
+) -> Int32 {
+    return metallum_encodeUIComposite(
+        commandBuffer,
+        targetTexture,
+        worldTexture,
+        uiTexture,
+        globalFence,
+        outputMode,
+        sourceEncoding,
+        currentHeadroom,
+        hdrStrength,
+        bloomStrength,
+        diagnosticPattern
+    )
+}
+
 @_cdecl("metallum_MTLCommandBuffer_encodePresentTextureToDrawable")
 public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
     _ commandBuffer: MTLCommandBuffer,
@@ -13164,139 +13682,6 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
             8.0
         )
-        let materialContractActive = materialGenerationActive != 0
-        let actualHdrGeneration = materialContractActive
-            && outputMode != 0
-        let canEnhance = outputMode == 2 && effectiveHeadroom > 1.001
-        let hasCompatibleDepth = sceneTexture != nil
-            && sceneDepthTexture != nil
-            && sceneDepthTexture!.width == sceneTexture!.width
-            && sceneDepthTexture!.height == sceneTexture!.height
-            && {
-                switch sceneDepthTexture!.pixelFormat {
-                case .depth32Float, .depth32Float_stencil8:
-                    return true
-                default:
-                    return false
-                }
-            }()
-        let hasCompatibleLegacyScene = canEnhance
-            && sceneTexture != nil
-            && hasCompatibleDepth
-        let hasCompatibleActualScene = actualHdrGeneration
-            && sceneTexture != nil
-            && sceneTexture!.pixelFormat == .rgba16Float
-            && sceneTexture!.textureType == .type2D
-            && sceneTexture!.sampleCount == 1
-            && sceneTexture!.usage.contains(.shaderRead)
-            && objectAddress(sceneTexture!.device) == objectAddress(commandBuffer.device)
-            && sourceEncoding == 2
-        let hasCompatibleScene = materialContractActive
-            ? hasCompatibleActualScene
-            : hasCompatibleLegacyScene
-        let hasCompatibleSemantic = !materialContractActive
-            && hasCompatibleLegacyScene
-            && semanticTexture != nil
-            && semanticTexture!.width == sceneTexture!.width
-            && semanticTexture!.height == sceneTexture!.height
-            && semanticTexture!.pixelFormat == .rgba8Unorm
-        // The seeded RGBA8 target is a complete SDR frame. Keep it usable
-        // independently of enhanced-scene eligibility so a headroom drop or
-        // an Enhanced-to-EDR fallback cannot make the GUI disappear.
-        let candidateSpatialOutput = uiTexture.flatMap {
-            currentSpatialOutput(
-                device: commandBuffer.device,
-                inputTexture: sourceTexture,
-                outputWidth: $0.width,
-                outputHeight: $0.height
-            )
-        }
-        let candidateTemporalOutput = uiTexture.flatMap {
-            currentTemporalOutput(
-                commandBuffer: commandBuffer,
-                inputTexture: sourceTexture,
-                outputWidth: $0.width,
-                outputHeight: $0.height
-            )
-        }
-        let candidateNativeOutput = spatialHdrPrecomposed != 0
-            ? uiTexture.flatMap {
-                currentNativeHdrWorldComposite(
-                    commandBuffer: commandBuffer,
-                    inputTexture: sourceTexture,
-                    outputWidth: $0.width,
-                    outputHeight: $0.height
-                )
-            }
-            : nil
-        // A spatial workspace can remain cached after MetalFX is disabled.
-        // The native composite is command-buffer scoped, so prefer it when it
-        // exists rather than accidentally presenting an older scaler output.
-        let candidatePrecomposedOutput = candidateNativeOutput
-            ?? candidateTemporalOutput
-            ?? candidateSpatialOutput
-        let hasCompatibleUi = uiTexture != nil
-            && uiTexture!.pixelFormat == .rgba8Unorm
-            && uiTexture!.textureType == .type2D
-            && uiTexture!.sampleCount == 1
-            && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
-            && ((uiTexture!.width == sourceTexture.width && uiTexture!.height == sourceTexture.height)
-                || candidatePrecomposedOutput != nil)
-        let actualHdrUiOnly = actualHdrGeneration
-            && !hasCompatibleScene
-            && hasCompatibleUi
-        let actualHdrLinearUiOnly = actualHdrGeneration
-            && !hasCompatibleScene
-            && !hasCompatibleUi
-            && sourceEncoding == 2
-            && sourceTexture.pixelFormat == .rgba16Float
-            && sourceTexture.textureType == .type2D
-            && sourceTexture.sampleCount == 1
-            && sourceTexture.usage.contains(.shaderRead)
-            && objectAddress(sourceTexture.device) == objectAddress(commandBuffer.device)
-        let displaySceneTexture = candidatePrecomposedOutput ?? sceneTexture ?? sourceTexture
-        let hasHdrPrecompose = spatialHdrPrecomposed != 0
-            && hasCompatibleScene
-            && hasCompatibleUi
-            && candidatePrecomposedOutput != nil
-            && candidatePrecomposedOutput!.pixelFormat == .rgba16Float
-            && sceneTexture!.pixelFormat == .rgba16Float
-            && candidatePrecomposedOutput!.width == uiTexture!.width
-            && candidatePrecomposedOutput!.height == uiTexture!.height
-
-        if hasCompatibleScene {
-            let workspace = ensureHdrWorkspace(
-                    device: commandBuffer.device,
-                    renderContractMode: materialContractActive ? 1 : 0,
-                    sourceWidth: sceneTexture!.width,
-                    sourceHeight: sceneTexture!.height,
-                    displayWidth: displaySceneTexture.width,
-                    displayHeight: displaySceneTexture.height
-                )
-            let pipelinesReady = materialContractActive
-                ? ensureActualHdrPipelines(device: commandBuffer.device) != nil
-                : ensureHdrPipelines(device: commandBuffer.device) != nil
-            guard pipelinesReady, workspace != nil else {
-                return -1
-            }
-        }
-
-        let presentPipeline = hasHdrPrecompose
-            ? ensureSpatialPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-            : outputMode == 0
-                ? ensurePresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-                : actualHdrUiOnly
-                    ? ensureActualHdrUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-                    : actualHdrLinearUiOnly
-                        ? ensureActualHdrLinearUiOnlyPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-                        : materialContractActive
-                            ? ensureActualHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-                            : ensureLegacyHdrPresentPipeline(device: commandBuffer.device, colorFormat: layer.pixelFormat)
-        guard let presentPipeline else {
-            NSLog("[metallum] No present pipeline for layer format %lu", layer.pixelFormat.rawValue)
-            return -1
-        }
-
         guard let samplers = presentSamplers(device: commandBuffer.device) else {
             NSLog("[metallum] No present samplers for Metal device")
             return -1
@@ -13371,341 +13756,112 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             return 0
         }
 
-        if actualHdrUiOnly || actualHdrLinearUiOnly {
-            let outputOnlyTexture = actualHdrUiOnly ? uiTexture! : sourceTexture
-            let renderPass = MTLRenderPassDescriptor()
-            renderPass.colorAttachments[0].texture = drawable.texture
-            renderPass.colorAttachments[0].loadAction = .dontCare
-            renderPass.colorAttachments[0].storeAction = .store
-            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
-            guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
-                return -1
-            }
-            if let globalFence {
-                encoder.waitForFence(globalFence, before: .fragment)
-            }
-            encoder.setViewport(MTLViewport(
-                originX: 0.0,
-                originY: 0.0,
-                width: Double(drawable.texture.width),
-                height: Double(drawable.texture.height),
-                znear: 0.0,
-                zfar: 1.0
-            ))
-            encoder.setRenderPipelineState(presentPipeline)
-            encoder.setFragmentTexture(outputOnlyTexture, index: 0)
-            let requiresScaling = outputOnlyTexture.width != drawable.texture.width
-                || outputOnlyTexture.height != drawable.texture.height
-            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            if let globalFence {
-                encoder.updateFence(globalFence, after: .fragment)
-            }
-            trackedEndEncoding(encoder)
-            commandBuffer.present(drawable)
-            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
-            if NativeState.gpuTimingStats != nil {
-                MetallumGpuTimingCoordinator.shared.markPresented(
-                    commandBuffer,
-                    renderWidth: outputOnlyTexture.width,
-                    renderHeight: outputOnlyTexture.height,
-                    displayWidth: drawable.texture.width,
-                    displayHeight: drawable.texture.height,
-                    outputMode: outputMode,
-                    sourceEncoding: actualHdrUiOnly ? 0 : 2,
-                    diagnosticPattern: false,
-                    hdrStrength: 0.0,
-                    bloomStrength: 0.0,
-                    currentHeadroom: effectiveHeadroom,
-                    displaySyncEnabled: layer.displaySyncEnabled
+        let hasCompatibleUi = uiTexture != nil
+            && uiTexture!.pixelFormat == .rgba8Unorm
+            && uiTexture!.textureType == .type2D
+            && uiTexture!.sampleCount == 1
+            && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
+
+        let targetWorldTexture: MTLTexture
+        if hasCompatibleUi, uiTexture != nil {
+            // Allocate or retrieve cached display-sized offscreen world texture
+            let candidateSpatialOutput = currentSpatialOutput(
+                device: commandBuffer.device,
+                inputTexture: sourceTexture,
+                outputWidth: drawable.texture.width,
+                outputHeight: drawable.texture.height
+            )
+            let candidateTemporalOutput = currentTemporalOutput(
+                commandBuffer: commandBuffer,
+                inputTexture: sourceTexture,
+                outputWidth: drawable.texture.width,
+                outputHeight: drawable.texture.height
+            )
+            let candidateNativeOutput = spatialHdrPrecomposed != 0
+                ? currentNativeHdrWorldComposite(
+                    commandBuffer: commandBuffer,
+                    inputTexture: sourceTexture,
+                    outputWidth: drawable.texture.width,
+                    outputHeight: drawable.texture.height
                 )
+                : nil
+            let precomposed = candidateNativeOutput ?? candidateTemporalOutput ?? candidateSpatialOutput
+
+            if let precomposed {
+                targetWorldTexture = precomposed
+            } else if let sceneTexture, let workspace = ensureHdrWorkspace(
+                device: commandBuffer.device,
+                renderContractMode: materialGenerationActive != 0 ? 1 : 0,
+                sourceWidth: sceneTexture.width,
+                sourceHeight: sceneTexture.height,
+                displayWidth: drawable.texture.width,
+                displayHeight: drawable.texture.height
+            ) {
+                let worldComposite: MTLTexture
+                if let existing = workspace.worldComposite {
+                    worldComposite = existing
+                } else {
+                    let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                        pixelFormat: .rgba16Float,
+                        width: drawable.texture.width,
+                        height: drawable.texture.height,
+                        mipmapped: false
+                    )
+                    descriptor.storageMode = .private
+                    descriptor.usage = [.renderTarget, .shaderRead]
+                    guard let allocated = commandBuffer.device.makeTexture(descriptor: descriptor) else {
+                        return -1
+                    }
+                    workspace.worldComposite = allocated
+                    worldComposite = allocated
+                }
+                targetWorldTexture = worldComposite
+            } else {
+                targetWorldTexture = drawable.texture
             }
-            return 1
+        } else {
+            targetWorldTexture = drawable.texture
         }
 
-        if outputMode == 0 {
-            let renderPass = MTLRenderPassDescriptor()
-            renderPass.colorAttachments[0].texture = drawable.texture
-            renderPass.colorAttachments[0].loadAction = .dontCare
-            renderPass.colorAttachments[0].storeAction = .store
-            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
-            guard let encoder = trackedMakeRenderCommandEncoder(
+        let worldStatus = metallum_encodePresentationWorld(
+            commandBuffer,
+            targetWorldTexture,
+            sourceTexture,
+            sceneTexture,
+            sceneDepthTexture,
+            semanticTexture,
+            globalFence,
+            spatialHdrPrecomposed,
+            outputMode,
+            sourceEncoding,
+            materialGenerationActive,
+            diagnosticPattern,
+            currentHeadroom,
+            hdrStrength,
+            bloomStrength
+        )
+        guard worldStatus == 1 else {
+            return -1
+        }
+
+        if hasCompatibleUi, objectAddress(targetWorldTexture) != objectAddress(drawable.texture) {
+            let uiStatus = metallum_encodeUIComposite(
                 commandBuffer,
-                descriptor: renderPass
-            ) else {
-                return -1
-            }
-            if let globalFence {
-                encoder.waitForFence(globalFence, before: .fragment)
-            }
-            encoder.setViewport(MTLViewport(
-                originX: 0.0,
-                originY: 0.0,
-                width: Double(drawable.texture.width),
-                height: Double(drawable.texture.height),
-                znear: 0.0,
-                zfar: 1.0
-            ))
-            encoder.setRenderPipelineState(presentPipeline)
-            encoder.setFragmentTexture(sourceTexture, index: 0)
-            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 1)
-            let requiresScaling = sourceTexture.width != drawable.texture.width
-                || sourceTexture.height != drawable.texture.height
-            encoder.setFragmentSamplerState(requiresScaling ? samplers.linear : samplers.nearest, index: 0)
-            var uniforms = MetallumPresentUniforms(
-                mode: 0,
-                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
-                diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
-                currentHeadroom: 1.0,
-                hdrStrength: 0.0,
-                bloomStrength: 0.0,
-                sceneAvailable: 0,
-                uiAvailable: hasCompatibleUi ? 1 : 0,
-                semanticAvailable: 0
+                drawable.texture,
+                targetWorldTexture,
+                uiTexture,
+                globalFence,
+                outputMode,
+                sourceEncoding,
+                currentHeadroom,
+                hdrStrength,
+                bloomStrength
             )
-            withUnsafeBytes(of: &uniforms) { bytes in
-                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-            }
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            if let globalFence {
-                encoder.updateFence(globalFence, after: .fragment)
-            }
-            trackedEndEncoding(encoder)
-            commandBuffer.present(drawable)
-            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
-            if NativeState.gpuTimingStats != nil {
-                MetallumGpuTimingCoordinator.shared.markPresented(
-                    commandBuffer,
-                    renderWidth: sourceTexture.width,
-                    renderHeight: sourceTexture.height,
-                    displayWidth: drawable.texture.width,
-                    displayHeight: drawable.texture.height,
-                    outputMode: 0,
-                    sourceEncoding: sourceEncoding,
-                    diagnosticPattern: diagnosticPattern != 0,
-                    hdrStrength: 0.0,
-                    bloomStrength: 0.0,
-                    currentHeadroom: 1.0,
-                    displaySyncEnabled: layer.displaySyncEnabled
-                )
-            }
-            return 1
-        }
-
-        let separatedHdrTexture = hasHdrPrecompose ? candidatePrecomposedOutput : nil
-
-        if hasCompatibleUi,
-           let uiTexture,
-           let spatialHdrTexture = separatedHdrTexture {
-            guard spatialHdrTexture.width == drawable.texture.width,
-                  spatialHdrTexture.height == drawable.texture.height,
-                  uiTexture.width == drawable.texture.width,
-                  uiTexture.height == drawable.texture.height,
-                  let separatedPresentPipeline = ensureSpatialPresentPipeline(
-                    device: commandBuffer.device,
-                    colorFormat: layer.pixelFormat
-                  ) else {
+            guard uiStatus == 1 else {
                 return -1
             }
-
-            let renderPass = MTLRenderPassDescriptor()
-            renderPass.colorAttachments[0].texture = drawable.texture
-            renderPass.colorAttachments[0].loadAction = .dontCare
-            renderPass.colorAttachments[0].storeAction = .store
-            attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
-            guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
-                return -1
-            }
-            if let globalFence {
-                encoder.waitForFence(globalFence, before: .fragment)
-            }
-            encoder.setViewport(MTLViewport(
-                originX: 0.0,
-                originY: 0.0,
-                width: Double(drawable.texture.width),
-                height: Double(drawable.texture.height),
-                znear: 0.0,
-                zfar: 1.0
-            ))
-            encoder.setRenderPipelineState(separatedPresentPipeline)
-            encoder.setFragmentTexture(uiTexture, index: 0)
-            encoder.setFragmentTexture(spatialHdrTexture, index: 1)
-            var spatialUniforms = MetallumPresentUniforms(
-                mode: UInt32(clamping: max(outputMode, 0)),
-                sourceEncoding: UInt32(clamping: max(sourceEncoding, 0)),
-                diagnosticPattern: 0,
-                currentHeadroom: effectiveHeadroom,
-                hdrStrength: 0.0,
-                bloomStrength: 0.0,
-                sceneAvailable: 1,
-                uiAvailable: 1,
-                semanticAvailable: 0
-            )
-            withUnsafeBytes(of: &spatialUniforms) { bytes in
-                encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-            }
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            if let globalFence {
-                encoder.updateFence(globalFence, after: .fragment)
-            }
-            trackedEndEncoding(encoder)
-            commandBuffer.present(drawable)
-            MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
-            if NativeState.gpuTimingStats != nil {
-                MetallumGpuTimingCoordinator.shared.markPresented(
-                    commandBuffer,
-                    renderWidth: sourceTexture.width,
-                    renderHeight: sourceTexture.height,
-                    displayWidth: drawable.texture.width,
-                    displayHeight: drawable.texture.height,
-                    outputMode: outputMode,
-                    sourceEncoding: sourceEncoding,
-                    diagnosticPattern: diagnosticPattern != 0,
-                    hdrStrength: hdrStrength.isFinite
-                        ? min(max(hdrStrength, 0.0), 2.0) : 1.0,
-                    bloomStrength: bloomStrength.isFinite
-                        ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
-                    currentHeadroom: effectiveHeadroom,
-                    displaySyncEnabled: layer.displaySyncEnabled
-                )
-            }
-            return 1
         }
 
-        var hdrOutputs: MetallumHdrOutputs?
-        var hasHdrScene = false
-        if hasCompatibleScene, let sceneTexture {
-            if materialContractActive {
-                hdrOutputs = encodeActualHdrEffects(
-                    commandBuffer: commandBuffer,
-                    finalTexture: sourceTexture,
-                    sceneTexture: sceneTexture,
-                    displaySceneTexture: displaySceneTexture,
-                    uiTexture: hasCompatibleUi ? uiTexture : nil,
-                    globalFence: globalFence,
-                    currentHeadroom: effectiveHeadroom
-                )
-            } else if let sceneDepthTexture {
-                hdrOutputs = encodeHdrEffects(
-                    commandBuffer: commandBuffer,
-                    finalTexture: sourceTexture,
-                    sceneTexture: sceneTexture,
-                    displaySceneTexture: displaySceneTexture,
-                    sceneDepthTexture: sceneDepthTexture,
-                    semanticTexture: hasCompatibleSemantic ? semanticTexture : nil,
-                    uiTexture: hasCompatibleUi ? uiTexture : nil,
-                    globalFence: globalFence,
-                    sourceEncoding: sourceEncoding,
-                    currentHeadroom: effectiveHeadroom
-                )
-            }
-            guard hdrOutputs != nil else {
-                return -1
-            }
-            hasHdrScene = true
-        }
-
-        let adaptiveState: MTLBuffer?
-        if hasHdrScene {
-            adaptiveState = hdrOutputs?.adaptiveState
-        } else if materialContractActive {
-            // A METALLUM HDR generation must never silently fall through to
-            // the Legacy inferred-reconstruction state.
-            return -1
-        } else {
-            adaptiveState = ensureHdrFallbackAdaptiveState(device: commandBuffer.device)
-        }
-        guard let adaptiveState else {
-            return -1
-        }
-
-        let presentDepthTexture: MTLTexture?
-        if materialContractActive {
-            presentDepthTexture = nil
-        } else if hasHdrScene, let sceneDepthTexture {
-            presentDepthTexture = sceneDepthTexture
-        } else {
-            presentDepthTexture = ensureHdrFallbackDepthTexture(device: commandBuffer.device)
-            if presentDepthTexture == nil { return -1 }
-        }
-
-        let renderPass = MTLRenderPassDescriptor()
-        renderPass.colorAttachments[0].texture = drawable.texture
-        renderPass.colorAttachments[0].loadAction = .dontCare
-        renderPass.colorAttachments[0].storeAction = .store
-        attachGpuTiming(renderPass, commandBuffer: commandBuffer, stage: .present)
-
-        guard let encoder = trackedMakeRenderCommandEncoder(commandBuffer, descriptor: renderPass) else {
-            return -1
-        }
-
-        if let globalFence {
-            encoder.waitForFence(globalFence, before: .fragment)
-        }
-
-        encoder.setViewport(MTLViewport(
-            originX: 0.0,
-            originY: 0.0,
-            width: Double(drawable.texture.width),
-            height: Double(drawable.texture.height),
-            znear: 0.0,
-            zfar: 1.0
-        ))
-
-        encoder.setRenderPipelineState(presentPipeline)
-        if materialContractActive {
-            encoder.setFragmentTexture(sourceTexture, index: 0)
-            encoder.setFragmentTexture(sceneTexture!, index: 1)
-            encoder.setFragmentTexture(hdrOutputs!.bloom, index: 2)
-            encoder.setFragmentTexture(hdrOutputs!.uiMask, index: 3)
-            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 4)
-        } else {
-            encoder.setFragmentTexture(sourceTexture, index: 0)
-            encoder.setFragmentTexture(hasHdrScene ? sceneTexture : sourceTexture, index: 1)
-            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.emission : sourceTexture, index: 2)
-            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.bloom : sourceTexture, index: 3)
-            encoder.setFragmentTexture(hasHdrScene ? hdrOutputs?.uiMask : sourceTexture, index: 4)
-            encoder.setFragmentTexture(hasCompatibleUi ? uiTexture : sourceTexture, index: 5)
-            encoder.setFragmentTexture(hasCompatibleSemantic ? semanticTexture : sourceTexture, index: 6)
-            encoder.setFragmentTexture(presentDepthTexture!, index: 7)
-        }
-
-        var uniforms = MetallumPresentUniforms(
-            mode: UInt32(clamping: max(outputMode, 0)),
-            sourceEncoding: materialContractActive ? 2 : UInt32(clamping: max(sourceEncoding, 0)),
-            diagnosticPattern: diagnosticPattern == 0 ? 0 : 1,
-            currentHeadroom: effectiveHeadroom,
-            hdrStrength: materialContractActive
-                ? 0.0
-                : (hdrStrength.isFinite ? min(max(hdrStrength, 0.0), 2.0) : 1.0),
-            bloomStrength: bloomStrength.isFinite ? min(max(bloomStrength, 0.0), 1.0) : 0.22,
-            sceneAvailable: hasHdrScene ? 1 : 0,
-            uiAvailable: hasCompatibleUi ? 1 : 0,
-            semanticAvailable: materialContractActive ? 0 : (hasCompatibleSemantic ? 1 : 0)
-        )
-        withUnsafeBytes(of: &uniforms) { bytes in
-            encoder.setFragmentBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-        }
-        encoder.setFragmentBuffer(adaptiveState, offset: 0, index: 1)
-
-        let requiresScaling = sourceTexture.width != drawable.texture.width ||
-                              sourceTexture.height != drawable.texture.height
-
-        let sampler = requiresScaling ? samplers.linear : samplers.nearest
-        encoder.setFragmentSamplerState(sampler, index: 0)
-        encoder.setFragmentSamplerState(samplers.linear, index: 1)
-
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 3
-        )
-
-        if let globalFence {
-            encoder.updateFence(globalFence, after: .fragment)
-        }
-
-        trackedEndEncoding(encoder)
         commandBuffer.present(drawable)
         MetallumDrsFrameTiming.shared.markPresented(commandBuffer)
         if NativeState.gpuTimingStats != nil {

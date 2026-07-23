@@ -383,6 +383,7 @@ def sodiumLightLegacyPatchValidationBinary = layout.buildDirectory.file("native-
 def metal4LifecycleValidationBinary = layout.buildDirectory.file("native-tests/Metal4LifecycleValidation")
 def lightClusterValidationBinary = layout.buildDirectory.file("native-tests/LightClusterValidation")
 def voxelOccupancyValidationBinary = layout.buildDirectory.file("native-tests/VoxelOccupancyValidation")
+def frameInterpolationValidationBinary = layout.buildDirectory.file("native-tests/FrameInterpolationValidation")
 def metal4ValidationSupported = {
 	isAppleSiliconMac && (macOsSdkVersion.get().tokenize('.')[0] as int) >= 26
 }
@@ -977,6 +978,50 @@ tasks.register("temporalScalingValidation", Exec) {
 	environment "MTL_SHADER_VALIDATION", "1"
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 	commandLine temporalScalingValidationBinary.get().asFile.absolutePath
+}
+
+tasks.register("compileFrameInterpolationValidation", Exec) {
+	group = "verification"
+	description = "Compiles the native MetalFX Frame Interpolation validation harness"
+	onlyIf { isAppleSiliconMac }
+
+	inputs.file("src/test/native/FrameInterpolationValidation.swift")
+	inputs.property("swiftCompilerVersion", swiftCompilerVersion)
+	inputs.property("macOsSdkVersion", macOsSdkVersion)
+	outputs.file(frameInterpolationValidationBinary)
+
+	doFirst {
+		frameInterpolationValidationBinary.get().asFile.parentFile.mkdirs()
+	}
+
+	commandLine "swiftc",
+		"-O",
+		"-parse-as-library",
+		"-target", "arm64-apple-macosx14.0",
+		"-framework", "Foundation",
+		"-framework", "Metal",
+		"-framework", "MetalFX",
+		"-module-cache-path", "build/tmp/clang-module-cache",
+		"-o", frameInterpolationValidationBinary.get().asFile.absolutePath,
+		"src/test/native/FrameInterpolationValidation.swift"
+}
+
+tasks.register("frameInterpolationValidation", Exec) {
+	group = "verification"
+	description = "Runs MetalFX Frame Interpolation validation harness with Metal validation"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(
+		tasks.named("buildMacNative"),
+		tasks.named("linkMacBuiltinMetallib"),
+		tasks.named("compileFrameInterpolationValidation")
+	)
+
+	inputs.file(macNativeLibrary)
+	inputs.file(macBuiltinMetallib)
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "0"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+	commandLine frameInterpolationValidationBinary.get().asFile.absolutePath, macNativeLibrary.get().asFile.absolutePath
 }
 
 tasks.register("compileHdrValueValidation", Exec) {

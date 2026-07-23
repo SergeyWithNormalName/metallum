@@ -887,14 +887,14 @@ fragment float4 metallum_menu_blur_compose_fs(
   PresentVertexOut in [[stage_in]],
   texture2d<float> uiFrame [[texture(0)]],
   texture2d<float> spatialHdrFrame [[texture(1)]],
+  sampler linearSampler [[sampler(0)]],
   constant MenuBlurUniforms& uniforms [[buffer(0)]]
 ) {
-  uint2 textureSize = uint2(uiFrame.get_width(), uiFrame.get_height());
-  uint2 maximumCoordinate = max(textureSize, uint2(1u)) - 1u;
-  uint2 coordinate = min(uint2(in.position.xy), maximumCoordinate);
+  float4 uiValue = uiFrame.sample(linearSampler, in.uv);
+  float3 hdrValue = spatialHdrFrame.sample(linearSampler, in.uv).rgb;
   float3 combinedLinear = metallum_spatial_composite_linear(
-    uiFrame.read(coordinate),
-    spatialHdrFrame.read(coordinate).rgb,
+    uiValue,
+    hdrValue,
     uniforms.currentHeadroom
   );
   return float4(metallum_linear_to_extended_srgb(combinedLinear), 1.0);
