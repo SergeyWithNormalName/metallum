@@ -127,6 +127,7 @@ public final class MetalCapabilities {
     static final long NATIVE_DISPLAY_REFRESH = 1L << 14;
     static final long NATIVE_DISPLAY_HEADROOM = 1L << 15;
     static final long NATIVE_TEMPORAL_PROFILE = 1L << 16;
+    static final long NATIVE_FRAME_INTERPOLATION_PROFILE = 1L << 17;
     static final int NATIVE_REFRESH_SHIFT = 48;
     static final long NATIVE_REFRESH_MASK = 0xffffL << NATIVE_REFRESH_SHIFT;
 
@@ -244,6 +245,8 @@ public final class MetalCapabilities {
         int refresh = (int) ((nativeSnapshot & NATIVE_REFRESH_MASK) >>> NATIVE_REFRESH_SHIFT);
         boolean formats = features.contains(Feature.REQUIRED_TEXTURE_FORMATS_USAGES);
         boolean temporalProfile = (nativeSnapshot & NATIVE_TEMPORAL_PROFILE) != 0L;
+        boolean frameInterpolationProfile = (nativeSnapshot
+                & NATIVE_FRAME_INTERPOLATION_PROFILE) != 0L;
         boolean fiSupport = features.contains(Feature.METALFX_FRAME_INTERPOLATION);
         boolean fi4Support = features.contains(Feature.METALFX_FRAME_INTERPOLATION_METAL4);
         return new MetalCapabilities(
@@ -254,7 +257,9 @@ public final class MetalCapabilities {
                         ? new TemporalProfile(true, true, true, true, true, true)
                         : TemporalProfile.UNAVAILABLE,
                 fiSupport
-                        ? new FrameInterpolationProfile(true, fi4Support, true, true, false)
+                        ? new FrameInterpolationProfile(
+                                true, fi4Support, true, true, frameInterpolationProfile
+                        )
                         : FrameInterpolationProfile.UNAVAILABLE,
                 new DisplayCapabilities(
                         features.contains(Feature.DISPLAY_REFRESH) ? refresh : 0,

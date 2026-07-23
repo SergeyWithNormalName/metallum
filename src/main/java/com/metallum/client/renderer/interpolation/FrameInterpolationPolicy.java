@@ -27,7 +27,7 @@ public final class FrameInterpolationPolicy {
     }
 
     public enum EffectiveReason {
-        PRODUCTION_ADMISSION_DISABLED,
+        ADMITTED_FIXED_TEMPORAL,
         NATIVE_PROFILE_UNVALIDATED,
         NOT_PROFILE_ELIGIBLE
     }
@@ -115,11 +115,18 @@ public final class FrameInterpolationPolicy {
             );
         }
 
-        // Profile eligible for Fixed Temporal, but effectiveAdmitted is unconditionally false in Stage 1.
+        if (!capabilities.frameInterpolationProfile().nativeProfileValidated()) {
+            return new Evaluation(
+                    true, true, false,
+                    EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
+                    EffectiveReason.NATIVE_PROFILE_UNVALIDATED
+            );
+        }
+
         return new Evaluation(
-                true, true, false,
+                true, true, true,
                 EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
-                EffectiveReason.PRODUCTION_ADMISSION_DISABLED
+                EffectiveReason.ADMITTED_FIXED_TEMPORAL
         );
     }
 }

@@ -10607,6 +10607,7 @@ private let rendererCapabilityRequiredTextureFormatsUsages: UInt64 = 1 << 13
 private let rendererCapabilityDisplayRefresh: UInt64 = 1 << 14
 private let rendererCapabilityDisplayHeadroom: UInt64 = 1 << 15
 private let rendererCapabilityTemporalProfile: UInt64 = 1 << 16
+private let rendererCapabilityFrameInterpolationProfile: UInt64 = 1 << 17
 private let rendererCapabilityRefreshShift: UInt64 = 48
 
 private func rendererCapabilityReport(_ snapshot: UInt64) -> [String: Bool] {
@@ -10629,7 +10630,9 @@ private func rendererCapabilityReport(_ snapshot: UInt64) -> [String: Bool] {
             & rendererCapabilityRequiredTextureFormatsUsages != 0,
         "display_refresh": snapshot & rendererCapabilityDisplayRefresh != 0,
         "display_headroom": snapshot & rendererCapabilityDisplayHeadroom != 0,
-        "temporal_diagnostic_profile": snapshot & rendererCapabilityTemporalProfile != 0
+        "temporal_diagnostic_profile": snapshot & rendererCapabilityTemporalProfile != 0,
+        "frame_interpolation_fixed_temporal_profile": snapshot
+            & rendererCapabilityFrameInterpolationProfile != 0
     ]
 }
 
@@ -10743,6 +10746,9 @@ public func metallum_renderer_capabilities_v1(
             }
             if MTLFXFrameInterpolatorDescriptor.supportsDevice(device) {
                 snapshot |= rendererCapabilityMetalFxFrameInterpolation
+                if snapshot & rendererCapabilityTemporalProfile != 0 {
+                    snapshot |= rendererCapabilityFrameInterpolationProfile
+                }
             }
             if MTLFXTemporalScalerDescriptor.supportsMetal4FX(device) {
                 snapshot |= rendererCapabilityMetalFxTemporalMetal4

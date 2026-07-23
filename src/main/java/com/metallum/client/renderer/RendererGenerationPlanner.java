@@ -395,7 +395,31 @@ public final class RendererGenerationPlanner {
             passes.add(pass("metalfx_temporal", RendererGenerationManifest.Domain.UPSCALE_ONLY));
         }
         if (config.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION)) {
-            throw new IllegalStateException("L0 must not create a Frame Interpolation manifest");
+            if (!temporal || spatial) {
+                throw new IllegalStateException(
+                        "Frame Interpolation V1 requires the fixed Temporal upstream profile"
+                );
+            }
+            long displayPixels = displayExtent.pixels();
+            long renderPixels = renderExtent.pixels();
+            RendererGenerationManifest.Domain domain = RendererGenerationManifest.Domain
+                    .INTERPOLATION_ONLY;
+            resources.add(resource("frame_interpolation_real_color_ring", domain,
+                    multiply(displayPixels, 8L * 3L), false));
+            resources.add(resource("frame_interpolation_generated_color_ring", domain,
+                    multiply(displayPixels, 8L * 3L), false));
+            resources.add(resource("frame_interpolation_depth_ring", domain,
+                    multiply(renderPixels, 4L * 3L), false));
+            resources.add(resource("frame_interpolation_motion_ring", domain,
+                    multiply(renderPixels, 4L * 3L), false));
+            resources.add(resource("frame_interpolation_ui_ring", domain,
+                    multiply(displayPixels, 4L * 3L), false));
+            resources.add(resource("frame_interpolation_composite_ring", domain,
+                    multiply(displayPixels, 8L * 2L * 3L), false));
+            passes.add(pass("frame_interpolation_prepare", domain));
+            passes.add(pass("frame_interpolation", domain));
+            passes.add(pass("generated_present", domain));
+            passes.add(pass("real_present", domain));
         }
         if (temporalDiagnostics && !temporal) {
             long renderPixels = renderExtent.pixels();

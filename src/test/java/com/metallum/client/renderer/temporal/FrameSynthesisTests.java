@@ -259,15 +259,29 @@ public final class FrameSynthesisTests {
                         && evalNoCap.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.FEATURE_UNSUPPORTED,
                 "unsupported capability policy test failed");
 
-        // 3. Fixed Temporal is profileEligible, but effectiveAdmitted is unconditionally false in Stage 1
+        // 3. Fixed Temporal stays fail-closed until the native fixed-profile probe succeeds.
         FrameInterpolationPolicy.Evaluation evalEligible = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
                 60.0, Set.of()
         );
         require(evalEligible.requested() && evalEligible.profileEligible() && !evalEligible.effectiveAdmitted()
                         && evalEligible.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_FIXED_TEMPORAL
-                        && evalEligible.effectiveReason() == FrameInterpolationPolicy.EffectiveReason.PRODUCTION_ADMISSION_DISABLED,
-                "eligible Fixed Temporal policy test failed");
+                        && evalEligible.effectiveReason() == FrameInterpolationPolicy.EffectiveReason.NATIVE_PROFILE_UNVALIDATED,
+                "unvalidated Fixed Temporal profile was admitted");
+
+        long validatedFiSnapshot = fiSnapshot | (1L << 17);
+        MetalCapabilities validatedCapabilitiesWithFI = MetalCapabilities.fromNativeSnapshot(
+                validatedFiSnapshot, new com.metallum.client.hdr.EdrCapabilities(1.0f, 1.0f)
+        );
+        FrameInterpolationPolicy.Evaluation evalAdmitted = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, 60.0, Set.of()
+        );
+        require(evalAdmitted.requested() && evalAdmitted.profileEligible()
+                        && evalAdmitted.effectiveAdmitted()
+                        && evalAdmitted.effectiveReason()
+                        == FrameInterpolationPolicy.EffectiveReason.ADMITTED_FIXED_TEMPORAL,
+                "validated Fixed Temporal profile was not admitted");
 
         // 4. Upstream modes (Dynamic Temporal, Spatial, Native) rejected without Stage 10/11 adapters
         for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(

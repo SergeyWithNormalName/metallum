@@ -9,6 +9,8 @@
   "metallum.options.lighting_preset.balanced": "Сбалансированный",
   "metallum.options.lighting_preset.ultra": "Ультра",
   "metallum.options.group.metalfx": "MetalFX",
+  "metallum.options.frame_interpolation.name": "Интерполяция кадров",
+  "metallum.options.frame_interpolation.tooltip": "Выкл / Авто (экспериментально). Требуются фиксированный MetalFX Temporal, дисплей от 60 Гц и поддерживаемое устройство на macOS 26+. При недоступности рендерер безопасно показывает только реальные кадры.",
   "metallum.options.metalfx_upscaling.name": "Масштабирование MetalFX",
   "metallum.options.metalfx_upscaling.off": "Выкл",
   "metallum.options.metalfx_upscaling.spatial": "Spatial (Пространственное)",

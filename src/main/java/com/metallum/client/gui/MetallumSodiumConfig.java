@@ -80,6 +80,23 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.metalfx"))
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "frame_interpolation")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.frame_interpolation.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.frame_interpolation.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setFrameInterpolation,
+                                    () -> RendererConfig.load().frameInterpolation()
+                            )
+                    )
                     .addOption(builder.createEnumOption(
                                 Identifier.fromNamespaceAndPath("metallum", "metalfx_upscaling"),
                                 MetalFxUpscalingMode.class
@@ -294,6 +311,10 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
 
     private static void setLightingPreset(final LightingPreset preset) {
         RendererConfig.load().withLightingPreset(preset).save();
+    }
+
+    private static void setFrameInterpolation(final boolean enabled) {
+        RendererConfig.load().withFrameInterpolation(enabled).save();
     }
 
     private static void setVoxelDebugChecksum(final boolean enabled) {
