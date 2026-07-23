@@ -139,9 +139,9 @@ public final class TemporalScalingTests {
                 "45 consecutive >16.5ms samples enter Temporal");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, false) == 0,
                 "a Spatial transition sample below 16.5ms resets its counter");
-        require(MetalFxTemporalScaling.nextConsecutiveFrameCount(179, true)
+        require(MetalFxTemporalScaling.nextConsecutiveFrameCount(59, true)
                         == MetalFxTemporalScaling.TEMPORAL_TO_SPATIAL_FRAMES,
-                "180 consecutive <13.0ms samples return to Spatial");
+                "60 consecutive <13.0ms samples return to Spatial");
     }
 
     private static void require(final boolean condition, final String message) {

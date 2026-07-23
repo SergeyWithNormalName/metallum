@@ -24,12 +24,13 @@ public final class MetallumDrsController {
     public static final float ABSOLUTE_MIN_SCALE = 0.40f;
     public static final float MAX_SCALE = 1.00f;
     public static final float SCALE_STEP = 0.05f;
-    public static final int SCALE_UP_HOLDOFF_FRAMES = 30;
+    /** Twelve fresh low-GPU frames before recovering one 5% resolution step. */
+    public static final int SCALE_UP_HOLDOFF_FRAMES = 12;
     /**
-     * The three-frame renderer ring gets several fresh samples, but downsizing
-     * remains deliberately faster than the 30-frame quality recovery.
+     * Two completed renderer-ring turns reject stale samples while keeping
+     * downsizing faster than the 12-frame quality recovery.
      */
-    public static final int SCALE_DOWN_SETTLE_FRAMES = 12;
+    public static final int SCALE_DOWN_SETTLE_FRAMES = 6;
     public static final float EMA_ALPHA = 0.10f;
 
     private static boolean enabled = false;
