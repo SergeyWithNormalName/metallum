@@ -1001,6 +1001,7 @@ tasks.register("compileFrameInterpolationValidation", Exec) {
 		"-framework", "Foundation",
 		"-framework", "Metal",
 		"-framework", "MetalFX",
+		"-framework", "QuartzCore",
 		"-module-cache-path", "build/tmp/clang-module-cache",
 		"-o", frameInterpolationValidationBinary.get().asFile.absolutePath,
 		"src/test/native/FrameInterpolationValidation.swift"

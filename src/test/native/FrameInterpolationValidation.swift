@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import MetalFX
+import QuartzCore
 
 private enum ValidationError: Error, CustomStringConvertible {
     case failed(String)
@@ -74,6 +75,8 @@ private typealias PresentTextureToDrawableFn = @convention(c) (
     Float,
     Float
 ) -> Int32
+
+private typealias Stage4CoordinatorStressFn = @convention(c) (MTLDevice) -> Int32
 
 struct ParityMetrics {
     let scenarioName: String
@@ -515,11 +518,24 @@ private enum FrameInterpolationValidation {
         }
 
         guard let device = MTLCreateSystemDefaultDevice() else {
-            logMsg("[FAIL] No system default Metal device available")
-            exit(1)
+            logMsg("[SKIP] No system default Metal device is available to this process")
+            exit(0)
         }
 
         logMsg("[INFO] Metal device: \(device.name)")
+        logMsg("[INFO] Testing Stage 4: coordinator lifecycle (real-only; no dual presentation)")
+        guard let stage4StressSymbol = dlsym(handle, "metallum_frame_interpolation_coordinator_stress_stage4") else {
+            logMsg("[FAIL] Stage 4: coordinator lifecycle symbol is missing")
+            exit(1)
+        }
+        let stage4Stress = unsafeBitCast(stage4StressSymbol, to: Stage4CoordinatorStressFn.self)
+        let stage4Status = stage4Stress(device)
+        guard stage4Status == 1 else {
+            logMsg("[FAIL] Stage 4: coordinator lifecycle stress returned \(stage4Status)")
+            exit(1)
+        }
+        logMsg("[PASS] Stage 4: 10,000 real-only enqueue/reset/drain cycles, bounded backpressure, and zero-size suspension")
+
         logMsg("[INFO] Testing Stage 2: MetalFX Frame Interpolator Descriptor & Scaler")
         if #available(macOS 26.0, *) {
             if MTLFXFrameInterpolatorDescriptor.supportsDevice(device) {
