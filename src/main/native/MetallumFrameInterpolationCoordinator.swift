@@ -298,6 +298,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let production: ProductionPresentation?
         var state: TicketState = .prepared
         var commandBufferCompleted = false
+        /// Monotonic point at which the real N input became available to the
+        /// interpolation/presentation path.  Pair pacing is measured from
+        /// here, never from completion of the generated drawable composite.
+        var productionReadyNanoseconds: UInt64?
         var productionScheduled = false
         var generatedPresentationEncoded = false
 
@@ -386,6 +390,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private var productionHistorySlot: Int?
     private var productionPrimingFrames = 0
     private var productionPairInFlight = false
+    /// A frame presented by the normal renderer, or a generated member that
+    /// missed its slot, breaks adjacency with coordinator-owned history.  The
+    /// next production ticket must re-prime instead of interpolating across it.
+    private var productionNeedsReprime = false
     private var reasonCounters = ReasonCounters()
     private var nextPresentationID: UInt64 = 1
     private var lastPresentationID: UInt64 = 0
@@ -945,7 +953,11 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             state.unlock()
             return .bypassDisabled
         }
-        guard tickets.count < 2,
+        // A production ticket takes ownership of presentation until its real
+        // member is shown.  Queuing another one makes N+1 wait behind N and is
+        // exactly how Spatial+FI can end up displaying an old pair.  Fall back
+        // to the normal real presenter instead; generated frames are optional.
+        guard tickets.isEmpty,
               let reservedSlot = slots.firstIndex(where: { $0.state == .free }),
               nextTicket != 0 else {
             MetallumFrameInterpolationTelemetry.shared.recordBackpressureDrop()
@@ -1166,6 +1178,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             return
         }
         pending.commandBufferCompleted = true
+        pending.productionReadyNanoseconds = DispatchTime.now().uptimeNanoseconds
         guard pending.state == .published else {
             state.unlock()
             return
@@ -1195,12 +1208,17 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
         pending.productionScheduled = true
         productionPairInFlight = true
-        if production.frame.resetMask != 0 {
+        // A normal-presented fallback is a real frame the player has seen but
+        // the coordinator did not retain.  Never use the older retained frame
+        // as its apparent predecessor on the next accepted pair.
+        let mustReprime = production.frame.resetMask != 0 || productionNeedsReprime
+        if mustReprime {
             resetInterpolationHistoryLocked()
+            productionNeedsReprime = false
             reasonCounters.reset += 1
         }
         let priorSlot = productionHistorySlot
-        let canInterpolate = production.frame.resetMask == 0
+        let canInterpolate = !mustReprime
             && productionPrimingFrames >= 2
             && priorSlot != nil
             && priorSlot != pending.slot
@@ -1315,22 +1333,60 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     }
 
     private func presentProductionGeneratedThenReal(_ ticket: UInt64) {
-        presentProductionWorld(ticket: ticket, generated: true) { [weak self] in
+        state.lock()
+        let timing = tickets[ticket].flatMap { pending -> (UInt64, Double)? in
+            guard let production = pending.production else { return nil }
+            let ready = pending.productionReadyNanoseconds ?? DispatchTime.now().uptimeNanoseconds
+            let delta = min(max(Double(production.frame.deltaSeconds), 1.0 / 240.0), 1.0 / 30.0)
+            return (ready, delta)
+        }
+        state.unlock()
+        guard let (readyNanoseconds, boundedDelta) = timing else {
+            finishProductionTicket(ticket)
+            return
+        }
+
+        // Generated N-1/2 belongs in the first half of N's measured interval.
+        // Starting the real-frame timer after the generated composite finishes
+        // adds Spatial/FI GPU time to N's age, which is visible as a held old
+        // frame.  Both deadlines are therefore absolute from real-input ready.
+        let generatedDeadline = Self.productionGeneratedDeadline(
+            readyNanoseconds: readyNanoseconds,
+            deltaSeconds: boundedDelta
+        )
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now <= generatedDeadline &+ Self.generatedLatenessToleranceNanoseconds else {
+            // The real frame is still mandatory, but this generated member is
+            // already stale.  Do not let it create a late double-present.
+            recordDroppedProductionGenerated()
+            presentProductionReal(ticket)
+            return
+        }
+
+        presentProductionWorld(
+            ticket: ticket,
+            generated: true,
+            generatedDeadlineNanoseconds: generatedDeadline
+        ) { [weak self] generatedPresented in
             guard let self else { return }
             self.state.lock()
-            let delta = self.tickets[ticket]?.production?.frame.deltaSeconds ?? (1.0 / 60.0)
             let shouldContinue = !self.shuttingDown && self.tickets[ticket] != nil
             self.state.unlock()
             guard shouldContinue else {
                 self.finishProductionTicket(ticket)
                 return
             }
-            // Generated N-1/2 is presented first; the real N member follows
-            // after half the measured real-frame interval.  This uses a
-            // dispatch deadline rather than a CPU busy wait/readback.
-            let bounded = min(max(Double(delta), 1.0 / 240.0), 1.0 / 30.0)
+            guard generatedPresented else {
+                self.presentProductionReal(ticket)
+                return
+            }
+            // The real N member follows at the absolute half-frame deadline,
+            // not half an interval after the generated GPU pass completes.
+            let delay = generatedDeadline > DispatchTime.now().uptimeNanoseconds
+                ? generatedDeadline - DispatchTime.now().uptimeNanoseconds
+                : 0
             DispatchQueue.global(qos: .userInteractive).asyncAfter(
-                deadline: .now() + .nanoseconds(Int(bounded * 500_000_000.0))
+                deadline: .now() + .nanoseconds(Int(min(delay, UInt64(Int.max))))
             ) { [weak self] in
                 self?.presentProductionReal(ticket)
             }
@@ -1338,7 +1394,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     }
 
     private func presentProductionReal(_ ticket: UInt64) {
-        presentProductionWorld(ticket: ticket, generated: false) { [weak self] in
+        presentProductionWorld(ticket: ticket, generated: false) { [weak self] _ in
             self?.finishProductionTicket(ticket)
         }
     }
@@ -1347,7 +1403,8 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     private func presentProductionWorld(
         ticket: UInt64,
         generated: Bool,
-        completion: @escaping () -> Void
+        generatedDeadlineNanoseconds: UInt64? = nil,
+        completion: @escaping (Bool) -> Void
     ) {
         state.lock()
         guard !shuttingDown,
@@ -1356,7 +1413,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
               let queue = presentationQueue,
               slots.indices.contains(pending.slot) else {
             state.unlock()
-            completion()
+            completion(false)
             return
         }
         let slot = pending.slot
@@ -1364,9 +1421,36 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let ui = slots[slot].sdrUi
         state.unlock()
 
+        if generated,
+           let generatedDeadlineNanoseconds,
+           DispatchTime.now().uptimeNanoseconds
+                > generatedDeadlineNanoseconds + Self.generatedLatenessToleranceNanoseconds {
+            recordDroppedProductionGenerated()
+            completion(false)
+            return
+        }
+
         guard let commandBuffer = queue.makeCommandBuffer(),
-              let drawable = layer.nextDrawable(),
-              metallum_encodeUIComposite(
+              let drawable = layer.nextDrawable() else {
+            if generated {
+                recordDroppedProductionGenerated()
+            }
+            completion(false)
+            return
+        }
+        // `nextDrawable()` is allowed to time out, but it may still have
+        // waited long enough to miss the generated slot.  Check again before
+        // encoding/presenting so that a delayed drawable cannot produce a
+        // stale visual member immediately before the mandatory real frame.
+        if generated,
+           let generatedDeadlineNanoseconds,
+           DispatchTime.now().uptimeNanoseconds
+                > generatedDeadlineNanoseconds + Self.generatedLatenessToleranceNanoseconds {
+            recordDroppedProductionGenerated()
+            completion(false)
+            return
+        }
+        guard metallum_encodeUIComposite(
                 commandBuffer,
                 drawable.texture,
                 world,
@@ -1380,13 +1464,13 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
                 production.diagnosticPattern
               ) == 1 else {
             if generated {
-                MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+                recordDroppedProductionGenerated()
             }
-            completion()
+            completion(false)
             return
         }
         commandBuffer.present(drawable)
-        commandBuffer.addCompletedHandler { buffer in
+        commandBuffer.addCompletedHandler { [weak self] buffer in
             if buffer.status == .completed, buffer.error == nil {
                 if generated {
                     MetallumFrameInterpolationTelemetry.shared.recordGeneratedPresentation()
@@ -1394,11 +1478,38 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
                     MetallumFrameInterpolationTelemetry.shared.recordRealPresentation()
                 }
             } else if generated {
-                MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+                self?.recordDroppedProductionGenerated()
             }
-            completion()
+            completion(buffer.status == .completed && buffer.error == nil)
         }
         commandBuffer.commit()
+    }
+
+    /** Defers reset until no interpolator command can still read its history. */
+    private func recordDroppedProductionGenerated() {
+        state.lock()
+        productionNeedsReprime = true
+        state.unlock()
+        MetallumFrameInterpolationTelemetry.shared.recordLateGeneratedDrop()
+    }
+
+    static func productionGeneratedDeadline(
+        readyNanoseconds: UInt64,
+        deltaSeconds: Double
+    ) -> UInt64 {
+        let bounded = min(max(deltaSeconds, 1.0 / 240.0), 1.0 / 30.0)
+        return readyNanoseconds &+ UInt64(bounded * 500_000_000.0)
+    }
+
+    /** Called when Java falls back to a normal real-frame presentation. */
+    func noteUnmanagedProductionFrame() {
+        state.lock()
+        guard !shuttingDown else {
+            state.unlock()
+            return
+        }
+        productionNeedsReprime = true
+        state.unlock()
     }
 
     private func finishProductionTicket(_ ticket: UInt64) {
@@ -2075,7 +2186,7 @@ public func metallum_frame_interpolation_prepare_v2(
           let sourceTexture else {
         return MetallumFrameInterpolationCoordinator.TicketStatus.bypassInputContract.rawValue
     }
-    return coordinator.prepareProduction(
+    let status = coordinator.prepareProduction(
         commandBuffer: commandBuffer,
         rendererGeneration: rendererGeneration,
         sourceTexture: sourceTexture,
@@ -2093,7 +2204,14 @@ public func metallum_frame_interpolation_prepare_v2(
         hdrStrength: hdrStrength,
         bloomStrength: bloomStrength,
         outTicket: outTicket
-    ).rawValue
+    )
+    // Any non-prepared result is presented by Java's normal real-frame path.
+    // Tell the coordinator that this visible frame is not part of its retained
+    // history, so a later accepted pair cannot interpolate across the gap.
+    if status != .prepared {
+        coordinator.noteUnmanagedProductionFrame()
+    }
+    return status.rawValue
 }
 
 @_cdecl("metallum_frame_interpolation_publish_committed_v1")
@@ -2375,6 +2493,16 @@ public func metallum_frame_interpolation_encode_stress_stage6(_ device: MTLDevic
 @_cdecl("metallum_frame_interpolation_pacing_stress_stage7")
 public func metallum_frame_interpolation_pacing_stress_stage7(_ device: MTLDevice) -> Int32 {
     autoreleasepool {
+        // Production pacing is absolute from the completed real input.  A
+        // generated composite that itself costs time must not shift the real
+        // member by another half interval.
+        let productionReady: UInt64 = 10_000_000
+        guard MetallumFrameInterpolationCoordinator.productionGeneratedDeadline(
+            readyNanoseconds: productionReady,
+            deltaSeconds: 1.0 / 60.0
+        ) == 18_333_333 else {
+            return -10
+        }
         let layer = CAMetalLayer()
         layer.device = device
         layer.maximumDrawableCount = 2
