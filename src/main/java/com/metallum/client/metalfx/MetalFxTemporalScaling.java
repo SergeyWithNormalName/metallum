@@ -162,9 +162,7 @@ public final class MetalFxTemporalScaling {
         boolean wasRuntimeDisabled = runtimeDisabled;
         requestedMode = selected;
         runtimeDisabled = false;
-        dynamicSpatialFallback = selected.isDynamic();
-        resetDynamicTransitionCounters();
-        configureDynamicScaleBounds(selected.isDynamic());
+        initializeDynamicSession(selected);
         saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
@@ -221,9 +219,7 @@ public final class MetalFxTemporalScaling {
         }
         benchmarkOverride = null;
         runtimeDisabled = false;
-        dynamicSpatialFallback = requestedMode.isDynamic();
-        resetDynamicTransitionCounters();
-        configureDynamicScaleBounds(requestedMode.isDynamic());
+        initializeDynamicSession(requestedMode);
         requestRendererResize();
     }
 
@@ -302,7 +298,15 @@ public final class MetalFxTemporalScaling {
         return selectedMode != null
                 && selectedMode.isDynamic()
                 && spatialSupported
-                && dynamicSpatialFallback;
+                && dynamicSpatialFallback
+                // This is also a fail-safe for a saved/pre-existing DRS
+                // session: Spatial is never allowed below its 60% contract.
+                // A transient low scale is instead reconstructed by Temporal.
+                && isDynamicSpatialFallbackScale(MetallumDrsController.currentScale());
+    }
+
+    static boolean isDynamicSpatialFallbackScale(final float scale) {
+        return scale >= DYNAMIC_SPATIAL_MIN_SCALE - NATIVE_SCALE_EPSILON;
     }
 
     static int nextConsecutiveFrameCount(final int currentCount, final boolean condition) {
@@ -331,6 +335,13 @@ public final class MetalFxTemporalScaling {
         } else {
             restoreDefaultScaleBounds();
         }
+    }
+
+    /** Applies the same safe initial state for persisted and menu-selected Dynamic Temporal. */
+    private static void initializeDynamicSession(final TemporalScalingMode selected) {
+        dynamicSpatialFallback = selected != null && selected.isDynamic();
+        resetDynamicTransitionCounters();
+        configureDynamicScaleBounds(dynamicSpatialFallback);
     }
 
     private static void restoreDefaultScaleBounds() {
@@ -376,7 +387,10 @@ public final class MetalFxTemporalScaling {
             if (!configLoaded) {
                 Settings settings = loadSettings();
                 requestedMode = settings.mode();
-                dynamicSpatialFallback = requestedMode.isDynamic();
+                // Loading a saved Dynamic choice bypasses setRequestedMode(),
+                // so it must still install the 60-95% Spatial bounds before
+                // the first completed GPU frame reaches the DRS controller.
+                initializeDynamicSession(requestedMode);
                 configLoaded = true;
             }
         }

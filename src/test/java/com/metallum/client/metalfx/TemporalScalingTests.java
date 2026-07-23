@@ -130,6 +130,10 @@ public final class TemporalScalingTests {
         require(MetalFxTemporalScaling.DYNAMIC_TEMPORAL_ENTRY_SCALE == 0.55f
                         && MetalFxTemporalScaling.DYNAMIC_SPATIAL_RETURN_SCALE == 0.70f,
                 "Hybrid transitions use 55% Temporal and 70% Spatial entries");
+        require(MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.60f),
+                "Spatial is valid at its 60% floor");
+        require(!MetalFxTemporalScaling.isDynamicSpatialFallbackScale(0.55f),
+                "Spatial must never resolve a Dynamic Temporal frame at 55%");
         require(MetalFxTemporalScaling.nextConsecutiveFrameCount(44, true)
                         == MetalFxTemporalScaling.SPATIAL_TO_TEMPORAL_FRAMES,
                 "45 consecutive >16.5ms samples enter Temporal");
