@@ -13,6 +13,7 @@ public final class TemporalScalingTests {
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
         testEffectiveSelection();
+        testDynamicSpatialFallbackHysteresis();
         System.out.println("Native Apple MetalFX Temporal preset validation passed");
     }
 
@@ -117,6 +118,20 @@ public final class TemporalScalingTests {
                         false
                 ) == TemporalScalingMode.OFF,
                 "Unsupported devices must reject the selected Temporal mode");
+    }
+
+    private static void testDynamicSpatialFallbackHysteresis() {
+        require(MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_ENTER_SCALE
+                        < MetalFxTemporalScaling.DYNAMIC_RECONSTRUCTION_EXIT_SCALE,
+                "Dynamic Temporal transition requires a hysteresis gap");
+        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.70f),
+                "Dynamic Temporal enters reconstruction at 70% scale");
+        require(!MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.75f),
+                "Hysteresis retains reconstruction between its two limits");
+        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(false, 0.80f),
+                "Dynamic Temporal returns to Spatial/native at 80% scale");
+        require(MetalFxTemporalScaling.nextDynamicSpatialFallback(true, 0.79f),
+                "Fallback remains active below the exit threshold");
     }
 
     private static void require(final boolean condition, final String message) {

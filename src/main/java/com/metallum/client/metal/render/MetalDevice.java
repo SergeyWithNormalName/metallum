@@ -363,8 +363,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 MetalCapabilities.Feature.METALFX_TEMPORAL
         ) && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
         this.temporalScalingActive = this.temporalScalingSupported
-                && MetalFxTemporalScaling.isRequested()
-                && !MetalFxTemporalScaling.isRuntimeDisabled();
+                && MetalFxTemporalScaling.isActive();
         this.temporalDiagnosticsActive = this.temporalDiagnosticsConfigured
                 && this.rendererCapabilities.temporalProfile().diagnosticsSupported();
         if (this.temporalDiagnosticsActive) {
@@ -860,11 +859,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 safeDisplayHeight
         );
         boolean temporalActive = this.temporalScalingSupported
-                && MetalFxTemporalScaling.isRequested()
-                && !MetalFxTemporalScaling.isRuntimeDisabled();
+                && MetalFxTemporalScaling.isActive();
         this.temporalScalingActive = temporalActive;
-        boolean spatialActive = dimensions.renderWidth() != dimensions.displayWidth()
-                || dimensions.renderHeight() != dimensions.displayHeight();
+        boolean spatialActive = MetalFxUpscaling.isSpatialPathActive();
         if (temporalActive) {
             spatialActive = false;
         }
@@ -2420,7 +2417,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MetalGpuTexture destination,
             final boolean hdrPrecomposeAllowed
     ) {
-        boolean spatial = MetalFxSpatialScaling.isActive();
+        boolean spatial = MetalFxUpscaling.isSpatialPathActive();
         boolean temporal = this.temporalScalingActive;
         boolean upscaled = spatial || temporal;
         boolean sceneReady = this.isHdrSceneReadyForUi(source);
@@ -2555,7 +2552,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final MetalGpuTexture ui,
             final MetalGpuTexture destination
     ) {
-        return MetalFxSpatialScaling.isActive()
+        return MetalFxUpscaling.isSpatialPathActive()
                 && (this.hdrEnhancedActive || this.isMaterialHdrGenerationActive())
                 && !rawScene.isClosed()
                 && !ui.isClosed()

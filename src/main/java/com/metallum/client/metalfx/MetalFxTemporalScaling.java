@@ -16,6 +16,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Persistent Temporal policy. Spatial and Temporal remain mutually exclusive renderer paths. */
 public final class MetalFxTemporalScaling {
+    /**
+     * MetalFX Temporal has a display-resolution reconstruction cost. Below this
+     * scale it can repay that cost with the world pixels it saves; above it a
+     * Dynamic session uses the cheaper Spatial/native path instead. Separate
+     * enter/exit points prevent a frame-time wobble from repeatedly discarding
+     * Temporal history.
+     */
+    static final float DYNAMIC_RECONSTRUCTION_ENTER_SCALE = 0.70f;
+    static final float DYNAMIC_RECONSTRUCTION_EXIT_SCALE = 0.80f;
+    private static final float NATIVE_SCALE_EPSILON = 1.0e-5f;
     public record Dimensions(int displayWidth, int displayHeight, int renderWidth, int renderHeight) {
         public float actualWidthScale() {
             return this.renderWidth / (float) this.displayWidth;
@@ -37,6 +47,8 @@ public final class MetalFxTemporalScaling {
     private static volatile boolean configLoaded;
     private static volatile boolean runtimeDisabled;
     private static volatile TemporalScalingMode benchmarkOverride;
+    /** True while Dynamic Temporal deliberately delegates light scenes to Spatial/native. */
+    private static volatile boolean dynamicSpatialFallback;
 
     private MetalFxTemporalScaling() {
     }
@@ -62,12 +74,15 @@ public final class MetalFxTemporalScaling {
     public static TemporalScalingMode effectiveMode() {
         ensureConfigLoaded();
         MetalDevice device = MetalDevice.getInstance();
-        return selectEffectiveMode(
+        TemporalScalingMode selected = selectEffectiveMode(
                 requestedMode,
                 benchmarkOverride,
                 runtimeDisabled,
                 device != null && device.supportsTemporalScaling()
         );
+        return dynamicSpatialFallbackActive(selected, device != null && device.supportsSpatialScaling())
+                ? TemporalScalingMode.OFF
+                : selected;
     }
 
     public static boolean isActive() {
@@ -88,6 +103,38 @@ public final class MetalFxTemporalScaling {
         return runtimeDisabled;
     }
 
+    /** Called from the render-thread DRS feedback loop after a completed GPU sample. */
+    static void updateDynamicReconstructionPolicy() {
+        ensureConfigLoaded();
+        TemporalScalingMode selected = selectRequestedMode(requestedMode, benchmarkOverride);
+        if (!selected.isDynamic() || runtimeDisabled) {
+            return;
+        }
+        boolean nextFallback = nextDynamicSpatialFallback(
+                dynamicSpatialFallback, MetallumDrsController.currentScale()
+        );
+        if (nextFallback != dynamicSpatialFallback) {
+            dynamicSpatialFallback = nextFallback;
+            requestRendererResize();
+        }
+    }
+
+    /** Whether the requested Dynamic mode currently delegates to Spatial/native. */
+    static boolean isDynamicSpatialFallbackActive() {
+        ensureConfigLoaded();
+        MetalDevice device = MetalDevice.getInstance();
+        return dynamicSpatialFallbackActive(
+                selectRequestedMode(requestedMode, benchmarkOverride),
+                device != null && device.supportsSpatialScaling()
+        );
+    }
+
+    /** True only when the fallback still needs a Spatial resolve rather than native output. */
+    static boolean isDynamicSpatialResolveActive() {
+        return isDynamicSpatialFallbackActive()
+                && MetallumDrsController.currentScale() < 1.0f - NATIVE_SCALE_EPSILON;
+    }
+
     public static void setRequestedMode(final TemporalScalingMode mode) {
         ensureConfigLoaded();
         TemporalScalingMode selected = mode == null ? TemporalScalingMode.OFF : mode;
@@ -95,6 +142,7 @@ public final class MetalFxTemporalScaling {
         boolean wasRuntimeDisabled = runtimeDisabled;
         requestedMode = selected;
         runtimeDisabled = false;
+        dynamicSpatialFallback = selected.isDynamic();
         saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
@@ -120,6 +168,7 @@ public final class MetalFxTemporalScaling {
         }
         requestedMode = TemporalScalingMode.OFF;
         runtimeDisabled = false;
+        dynamicSpatialFallback = false;
         saveSettings(TemporalScalingMode.OFF);
         requestRendererResize();
     }
@@ -132,6 +181,7 @@ public final class MetalFxTemporalScaling {
         boolean wasRuntimeDisabled = runtimeDisabled;
         benchmarkOverride = concreteMode;
         runtimeDisabled = false;
+        dynamicSpatialFallback = false;
         if (previous != concreteMode || wasRuntimeDisabled) {
             requestRendererResize();
         }
@@ -145,6 +195,7 @@ public final class MetalFxTemporalScaling {
         }
         benchmarkOverride = null;
         runtimeDisabled = false;
+        dynamicSpatialFallback = requestedMode.isDynamic();
         requestRendererResize();
     }
 
@@ -214,6 +265,26 @@ public final class MetalFxTemporalScaling {
         return disabledAtRuntime || !supportedByDevice ? TemporalScalingMode.OFF : selected;
     }
 
+    static boolean dynamicSpatialFallbackActive(
+            final TemporalScalingMode selectedMode,
+            final boolean spatialSupported
+    ) {
+        return selectedMode != null
+                && selectedMode.isDynamic()
+                && spatialSupported
+                && dynamicSpatialFallback;
+    }
+
+    static boolean nextDynamicSpatialFallback(final boolean currentFallback, final float scale) {
+        if (currentFallback && scale <= DYNAMIC_RECONSTRUCTION_ENTER_SCALE) {
+            return false;
+        }
+        if (!currentFallback && scale >= DYNAMIC_RECONSTRUCTION_EXIT_SCALE) {
+            return true;
+        }
+        return currentFallback;
+    }
+
     private static int scaledDimension(final int displayDimension, final float scale) {
         return Math.clamp(Math.round(displayDimension * scale), 1, displayDimension);
     }
@@ -248,6 +319,7 @@ public final class MetalFxTemporalScaling {
             if (!configLoaded) {
                 Settings settings = loadSettings();
                 requestedMode = settings.mode();
+                dynamicSpatialFallback = requestedMode.isDynamic();
                 configLoaded = true;
             }
         }

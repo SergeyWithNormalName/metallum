@@ -42,6 +42,9 @@ public final class MetalFxUpscaling {
         if (MetalFxTemporalScaling.isActive()) {
             return Type.TEMPORAL;
         }
+        if (MetalFxTemporalScaling.isDynamicSpatialResolveActive()) {
+            return Type.SPATIAL;
+        }
         if (MetalFxSpatialScaling.isActive()) {
             return Type.SPATIAL;
         }
@@ -50,6 +53,16 @@ public final class MetalFxUpscaling {
 
     public static boolean isActive() {
         return activeType() != Type.NONE;
+    }
+
+    /**
+     * The active Spatial implementation, including Dynamic Temporal's
+     * high-resolution fallback. Native encoders must use this rather than the
+     * persisted Spatial setting.
+     */
+    public static boolean isSpatialPathActive() {
+        return MetalFxTemporalScaling.isDynamicSpatialResolveActive()
+                || MetalFxSpatialScaling.isActive();
     }
 
     public static MetalFxUpscalingMode requestedMode() {
@@ -93,15 +106,21 @@ public final class MetalFxUpscaling {
         // frame after a client restart. Derive controller ownership from the
         // admitted scaler every frame so a persisted dynamic choice cannot
         // silently behave like a fixed preset until the user changes it again.
-        Type activeType = activeType();
-        boolean dynamic = activeType == Type.TEMPORAL
-                ? MetalFxTemporalScaling.requestedMode().isDynamic()
-                : activeType == Type.SPATIAL && MetalFxSpatialScaling.requestedMode().isDynamic();
+        boolean temporalDynamic = MetalFxTemporalScaling.isRequested()
+                && !MetalFxTemporalScaling.isRuntimeDisabled()
+                && MetalFxTemporalScaling.requestedMode().isDynamic();
+        boolean spatialDynamic = MetalFxSpatialScaling.isRequested()
+                && !MetalFxSpatialScaling.isRuntimeDisabled()
+                && MetalFxSpatialScaling.requestedMode().isDynamic();
+        boolean dynamic = temporalDynamic || spatialDynamic;
         MetallumDrsController.setEnabled(dynamic);
         if (!dynamic) {
             return;
         }
         updateDynamicResolution(MetalNativeBridge.metallum_drs_consume_completed_frame_time_seconds());
+        if (temporalDynamic) {
+            MetalFxTemporalScaling.updateDynamicReconstructionPolicy();
+        }
     }
 
     /** Package-private so the native seconds-to-milliseconds boundary stays unit-testable. */
@@ -113,6 +132,20 @@ public final class MetalFxUpscaling {
     }
 
     public static Dimensions effectiveDimensions(final int displayWidth, final int displayHeight) {
+        // A requested Dynamic Temporal session keeps its DRS dimensions even
+        // while its high-resolution fallback has temporarily disabled the
+        // costly Temporal feature bit.
+        if (MetalFxTemporalScaling.isRequested()
+                && !MetalFxTemporalScaling.isRuntimeDisabled()
+                && MetalFxTemporalScaling.requestedMode().isDynamic()) {
+            MetalFxTemporalScaling.Dimensions dimensions = MetalFxTemporalScaling.dimensions(
+                    MetalFxTemporalScaling.requestedMode(), displayWidth, displayHeight
+            );
+            return new Dimensions(
+                    dimensions.displayWidth(), dimensions.displayHeight(),
+                    dimensions.renderWidth(), dimensions.renderHeight()
+            );
+        }
         if (activeType() == Type.TEMPORAL) {
             MetalFxTemporalScaling.Dimensions dimensions = MetalFxTemporalScaling.effectiveDimensions(
                     displayWidth, displayHeight
