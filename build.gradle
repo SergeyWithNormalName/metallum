@@ -1185,6 +1185,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("lightClusterValidation"))
 	dependsOn(tasks.named("voxelOccupancyValidation"))
 	dependsOn(tasks.named("dynamicVoxelShadowValidation"))
+	dependsOn(tasks.named("frameInterpolationValidation"))
 }
 
 java {

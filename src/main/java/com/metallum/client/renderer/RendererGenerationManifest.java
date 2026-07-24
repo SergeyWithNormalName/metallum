@@ -165,13 +165,6 @@ public record RendererGenerationManifest(
                 Domain.INTERPOLATION_ONLY, resources, passes, encoders, pipelines, workQueues
         );
         if (interpolationFeature) {
-            boolean temporal = config.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING);
-            boolean spatial = config.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING);
-            if (!temporal && !spatial) {
-                throw new IllegalArgumentException(
-                        "Frame Interpolation requires a fixed Temporal or Spatial upstream feature"
-                );
-            }
             if (!interpolationDomain || resourceBytes(resources, Domain.INTERPOLATION_ONLY) <= 0L) {
                 throw new IllegalArgumentException(
                         "Frame Interpolation requires owned interpolation resources and work"

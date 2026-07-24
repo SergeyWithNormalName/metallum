@@ -2,6 +2,7 @@ package com.metallum.client.metal.render;
 
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
+import com.metallum.client.metalfx.DrsResolutionOverlayHud;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.hdr.HdrOutputMode;
@@ -466,6 +467,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         hdrConfig.bloomStrength()
                 )
         );
+        DrsResolutionOverlayHud.updateInterpolationStatus(interpolation);
         // A prepared ticket owns both generated and real presentation.  Do
         // not acquire a Java-side drawable here: that would create a second
         // presenter and break the coordinator's ordered fail-open schedule.

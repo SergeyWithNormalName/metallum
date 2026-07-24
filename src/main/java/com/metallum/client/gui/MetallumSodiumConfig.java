@@ -6,15 +6,11 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
-import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
-import com.metallum.client.metalfx.MetalFxUpscalingMode;
 import com.metallum.client.metalfx.SpatialScalingMode;
-import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
-import com.metallum.client.voxel.VoxelPreviewMode;
-import com.metallum.client.voxel.VoxelPreviewSettings;
+
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
@@ -81,34 +77,15 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.metalfx"))
                     .addOption(builder.createBooleanOption(
-                                Identifier.fromNamespaceAndPath("metallum", "frame_interpolation")
-                            )
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.frame_interpolation.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.frame_interpolation.tooltip"
-                            ))
-                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                            .setDefaultValue(false)
-                            .setBinding(
-                                    MetallumSodiumConfig::setFrameInterpolation,
-                                    () -> RendererConfig.load().frameInterpolation()
-                            )
-                    )
-                    .addOption(builder.createEnumOption(
-                                Identifier.fromNamespaceAndPath("metallum", "metalfx_upscaling"),
-                                MetalFxUpscalingMode.class
+                                Identifier.fromNamespaceAndPath("metallum", "metalfx_upscaling")
                             )
                             .setStorageHandler(STORAGE_HANDLER)
                             .setName(Component.translatable("metallum.options.metalfx_upscaling.name"))
-                            .setTooltip(MetallumSodiumConfig::upscalingTooltip)
-                            .setElementNameProvider(mode -> Component.translatable(mode.translationKey()))
-                            .setDefaultValue(MetalFxUpscalingMode.OFF)
+                            .setTooltip(Component.translatable("metallum.options.metalfx_upscaling.tooltip"))
+                            .setDefaultValue(false)
                             .setBinding(
-                                    MetalFxUpscaling::setRequestedMode,
-                                    MetalFxUpscaling::requestedMode
+                                    MetallumSodiumConfig::setSpatialUpscaling,
+                                    () -> MetalFxSpatialScaling.isRequested()
                             )
                     )
                     .addOption(builder.createBooleanOption(
@@ -178,74 +155,6 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.experimental"))
-                    .addOption(builder.createEnumOption(
-                                Identifier.fromNamespaceAndPath("metallum", "voxel_preview_mode"),
-                                VoxelPreviewMode.class
-                            )
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_mode.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_mode.tooltip"
-                            ))
-                            .setElementNameProvider(mode -> Component.translatable(
-                                    "metallum.options.voxel_preview_mode."
-                                            + mode.name().toLowerCase(Locale.ROOT)
-                            ))
-                            .setDefaultValue(VoxelPreviewMode.OFF)
-                            .setBinding(VoxelPreviewSettings::setMode,
-                                    () -> VoxelPreviewSettings.get().mode())
-                    )
-                    .addOption(builder.createIntegerOption(Identifier.fromNamespaceAndPath(
-                                    "metallum", "voxel_preview_level"
-                            ))
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_level.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_level.tooltip"
-                            ))
-                            .setDefaultValue(0)
-                            .setRange(0, 2, 1)
-                            .setValueFormatter(value -> Component.literal(Integer.toString(value)))
-                            .setBinding(VoxelPreviewSettings::setLevel,
-                                    () -> VoxelPreviewSettings.get().level())
-                    )
-                    .addOption(builder.createIntegerOption(Identifier.fromNamespaceAndPath(
-                                    "metallum", "voxel_preview_slice"
-                            ))
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_preview_slice.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_preview_slice.tooltip"
-                            ))
-                            .setDefaultValue(0)
-                            .setRange(0, 383, 1)
-                            .setValueFormatter(value -> Component.literal(Integer.toString(value)))
-                            .setBinding(VoxelPreviewSettings::setSlice,
-                                    () -> VoxelPreviewSettings.get().slice())
-                    )
-                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
-                                    "metallum", "voxel_debug_checksum"
-                            ))
-                            .setStorageHandler(STORAGE_HANDLER)
-                            .setName(Component.translatable(
-                                    "metallum.options.voxel_debug_checksum.name"
-                            ))
-                            .setTooltip(Component.translatable(
-                                    "metallum.options.voxel_debug_checksum.tooltip"
-                            ))
-                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
-                            .setDefaultValue(false)
-                            .setBinding(
-                                    MetallumSodiumConfig::setVoxelDebugChecksum,
-                                    () -> RendererConfig.load().voxelDebugChecksum()
-                            )
-                    )
                     .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath("metallum", "diagnostic_pattern"))
                         .setStorageHandler(STORAGE_HANDLER)
                         .setName(Component.translatable("metallum.options.diagnostic_pattern.name"))
@@ -271,33 +180,12 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     }
 
 
-    private static Component upscalingTooltip(final MetalFxUpscalingMode mode) {
-        Minecraft minecraft = Minecraft.getInstance();
-        int displayWidth = minecraft != null && minecraft.getWindow() != null
-                ? minecraft.getWindow().getWidth()
-                : 1;
-        int displayHeight = minecraft != null && minecraft.getWindow() != null
-                ? minecraft.getWindow().getHeight()
-                : 1;
-        if (mode == MetalFxUpscalingMode.OFF) {
-            return Component.translatable(
-                    "metallum.options.metalfx_upscaling.tooltip.off",
-                    displayWidth,
-                    displayHeight
-            );
+    private static void setSpatialUpscaling(final boolean enabled) {
+        if (enabled) {
+            MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
+        } else {
+            MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
         }
-        if (mode == MetalFxUpscalingMode.SPATIAL) {
-            return Component.translatable(
-                    "metallum.options.metalfx_upscaling.tooltip.spatial",
-                    displayWidth,
-                    displayHeight
-            );
-        }
-        return Component.translatable(
-                "metallum.options.metalfx_upscaling.tooltip.temporal",
-                displayWidth,
-                displayHeight
-        );
     }
 
     private static HdrConfig getConfig() {
@@ -311,14 +199,6 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
 
     private static void setLightingPreset(final LightingPreset preset) {
         RendererConfig.load().withLightingPreset(preset).save();
-    }
-
-    private static void setFrameInterpolation(final boolean enabled) {
-        RendererConfig.load().withFrameInterpolation(enabled).save();
-    }
-
-    private static void setVoxelDebugChecksum(final boolean enabled) {
-        RendererConfig.load().withVoxelDebugChecksum(enabled).save();
     }
 
     private static void updateConfig(java.util.function.Function<HdrConfig, HdrConfig> updater) {

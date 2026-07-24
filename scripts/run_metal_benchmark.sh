@@ -411,7 +411,7 @@ RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
 [ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
-require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
+case "$RENDERER_INTERPOLATION" in true|false) ;; *) die "renderer frameInterpolation must be true or false" ;; esac
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
 if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
     require_value "$RENDERER_LIGHTING" "true" "L6 dynamic route renderer improvedLighting"

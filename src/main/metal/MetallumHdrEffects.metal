@@ -395,6 +395,7 @@ kernel void metallum_hdr_histogram_reduce(
   bool reset = uniforms.forceReset != 0u
     || previous.valid == 0u
     || uniforms.deltaTime > 1.0
+    || abs(safeHeadroom - previous.currentHeadroom) > 0.0001
     || abs(p50Log2 - previous.medianLog2) > 2.0;
   float breakpoint = reset
     ? targetBreakpoint
@@ -495,6 +496,7 @@ kernel void metallum_actual_hdr_exposure_reduce(
   bool reset = uniforms.forceReset != 0u
     || previous.valid == 0u
     || uniforms.deltaTime > 1.0
+    || abs(safeHeadroom - previous.currentHeadroom) > 0.0001
     || abs(p50Log2 - previous.medianLog2) > 2.0;
   float exposure = targetExposure;
   if (!reset) {

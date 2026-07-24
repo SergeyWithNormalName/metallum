@@ -395,6 +395,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     /// missed its slot, breaks adjacency with coordinator-owned history.  The
     /// next production ticket must re-prime instead of interpolating across it.
     private var productionNeedsReprime = false
+    private var pendingMetalFxHistoryReset = true
     private var reasonCounters = ReasonCounters()
     private var nextPresentationID: UInt64 = 1
     private var lastPresentationID: UInt64 = 0
@@ -770,6 +771,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
         productionHistorySlot = nil
         productionPrimingFrames = 0
+        pendingMetalFxHistoryReset = true
     }
 
     /**
@@ -917,7 +919,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         )
         guard let pacingPlan = pacingDecision.plan else {
             switch pacingDecision.rejection {
-            case .disabled, .displayUnavailable, .displaySyncDisabled:
+            case .disabled, .displayUnavailable:
                 return .bypassUnsupported
             default:
                 return .bypassCadence
@@ -932,7 +934,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         guard rendererGeneration == key.rendererGeneration,
               frame.rendererGenerationId == key.rendererGeneration,
               (key.usesSpatialInputs
-                    ? frame.featureMask & spatialBit != 0 && frame.featureMask & temporalBit == 0
+                    ? frame.featureMask & temporalBit == 0
                     : frame.featureMask & temporalBit != 0 && frame.featureMask & spatialBit == 0),
               frame.featureMask & interpolationBit != 0,
               frame.interpolationResourceBytes > 0,
@@ -1248,6 +1250,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             MetallumFrameInterpolationTelemetry.shared.recordAcceptedPair()
         } else {
             // Interpolation failure must never suppress the real member.
+            state.lock()
+            productionNeedsReprime = true
+            productionPrimingFrames = 0
+            state.unlock()
             enqueueProductionPresentation(ticket: ticket, includeGenerated: false)
         }
     }
@@ -1315,17 +1321,29 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             interpolator.motionVectorScaleY = 1.0
         }
         interpolator.isDepthReversed = true
-        interpolator.shouldResetHistory = false
+        state.lock()
+        let shouldReset = pendingMetalFxHistoryReset
+        pendingMetalFxHistoryReset = false
+        state.unlock()
+        interpolator.shouldResetHistory = shouldReset
         interpolator.encode(commandBuffer: commandBuffer)
         commandBuffer.addCompletedHandler { [weak self] buffer in
             guard buffer.status == .completed, buffer.error == nil else {
-                self?.enqueueProductionPresentation(ticket: ticket, includeGenerated: false)
+                self?.recordInterpolationFailureAndFallback(ticket: ticket)
                 return
             }
             self?.enqueueProductionPresentation(ticket: ticket, includeGenerated: true)
         }
         commandBuffer.commit()
         return true
+    }
+
+    private func recordInterpolationFailureAndFallback(ticket: UInt64) {
+        state.lock()
+        productionNeedsReprime = true
+        productionPrimingFrames = 0
+        state.unlock()
+        enqueueProductionPresentation(ticket: ticket, includeGenerated: false)
     }
 
     static func spatialMotionScale(
@@ -1561,6 +1579,7 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             return
         }
         productionNeedsReprime = true
+        productionPrimingFrames = 0
         state.unlock()
     }
 
@@ -2272,6 +2291,23 @@ public func metallum_frame_interpolation_prepare_v2(
         coordinator.noteUnmanagedProductionFrame()
     }
     return status.rawValue
+}
+
+@_cdecl("metallum_frame_interpolation_telemetry_get_v1")
+public func metallum_frame_interpolation_telemetry_get_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ outTelemetry: UnsafeMutableRawPointer?
+) -> Int32 {
+    guard let outTelemetry else { return 0 }
+    let snapshot = MetallumFrameInterpolationTelemetry.shared.snapshot()
+    let ptr = outTelemetry.assumingMemoryBound(to: Int64.self)
+    ptr[0] = Int64(snapshot.acceptedPairs)
+    ptr[1] = Int64(snapshot.generatedPresentations)
+    ptr[2] = Int64(snapshot.realPresentations)
+    ptr[3] = Int64(snapshot.droppedGeneratedLate)
+    ptr[4] = Int64(snapshot.backpressureDrops)
+    ptr[5] = Int64(snapshot.maximumHistogramBuckets)
+    return 1
 }
 
 @_cdecl("metallum_frame_interpolation_publish_committed_v1")

@@ -976,19 +976,20 @@ public final class MetalDevice implements GpuDeviceBackend {
                 && this.rendererConfig.improvedLighting()
                 ? LightingModel.ADVANCED
                 : LightingModel.VANILLA;
+        long frameInterpolationFeature = frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L;
         RendererFeatureMask activeFeatures = temporalActive
                 ? RendererFeatureMask.of(
                         RendererFeatureMask.TEMPORAL_UPSCALING,
-                        frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L
+                        frameInterpolationFeature
                 )
                 : spatialActive
                     ? RendererFeatureMask.of(
                             RendererFeatureMask.SPATIAL_UPSCALING,
-                            frameInterpolationCandidate ? RendererFeatureMask.FRAME_INTERPOLATION : 0L
+                            frameInterpolationFeature
                     )
                     : temporalStandby
-                        ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_WARM_STANDBY)
-                        : RendererFeatureMask.NONE;
+                        ? RendererFeatureMask.of(RendererFeatureMask.TEMPORAL_WARM_STANDBY, frameInterpolationFeature)
+                        : RendererFeatureMask.of(frameInterpolationFeature);
         RendererGenerationPlanner.MaterialSceneStorage materialSceneStorage = resolveMainSceneStorage(
                 HdrSceneState.isRequested(),
                 MetallumMaterialState.requiresFp16Scene()
@@ -1028,7 +1029,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         // diagnostic view. Spatial + FI takes the same safe depth/motion path
         // but allocates no reactive mask.
         if (this.temporalDiagnosticsActive || temporalActive || temporalStandby
-                || (spatialActive && frameInterpolationCandidate)) {
+                || (!temporalActive && frameInterpolationCandidate)) {
             try {
                 // MetalFX Temporal's dynamic-resolution API requires fixed
                 // physical input textures. Keep the diagnostic ring at the
@@ -1338,7 +1339,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         dimensions.displayHeight(),
                         interpolationPixelFormat,
                         nextGeneration,
-                        spatialActive
+                        !temporalActive
                 ).orElse(null);
             } catch (RuntimeException exception) {
                 Metallum.LOGGER.warn(
@@ -1499,7 +1500,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         resolved.lightingModel(),
                         resolved.outputMode(),
                         temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE",
-                        nextFrameInterpolationCoordinator == null ? "OFF" : "FIXED_TEMPORAL"
+                        nextFrameInterpolationCoordinator == null ? "OFF" : (temporalActive ? "FIXED_TEMPORAL" : "STANDALONE")
                 );
             } else {
                 Metallum.LOGGER.info(
@@ -1508,7 +1509,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         resolved.lightingModel(),
                         resolved.outputMode(),
                         temporalActive ? "TEMPORAL" : spatialActive ? "SPATIAL" : "NATIVE",
-                        nextFrameInterpolationCoordinator == null ? "OFF" : "FIXED_TEMPORAL"
+                        nextFrameInterpolationCoordinator == null ? "OFF" : (temporalActive ? "FIXED_TEMPORAL" : "STANDALONE")
                 );
             }
         }
@@ -1539,12 +1540,12 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     public boolean temporalInputsActive() {
         RendererGenerationConfig generation = this.activeRendererGeneration;
-        boolean spatialInterpolation = generation != null
-                && generation.featureMask().contains(RendererFeatureMask.SPATIAL_UPSCALING)
+        boolean standaloneInterpolation = generation != null
+                && !generation.featureMask().contains(RendererFeatureMask.TEMPORAL_UPSCALING)
                 && generation.featureMask().contains(RendererFeatureMask.FRAME_INTERPOLATION);
-        // Spatial + FI uses the same pre-UI depth/motion producer, but does
-        // not depend on a Temporal scaler or its history.
-        return this.temporalScalingActive || this.temporalDiagnosticsActive || spatialInterpolation;
+        // Standalone FI (Spatial or Native + FI) uses the same pre-UI depth/motion producer,
+        // but does not depend on a Temporal scaler or its history.
+        return this.temporalScalingActive || this.temporalDiagnosticsActive || standaloneInterpolation;
     }
 
     public EntityTransformTracker entityTransformTracker() {

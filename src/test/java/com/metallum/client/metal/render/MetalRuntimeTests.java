@@ -47,6 +47,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalDouble;
 
 public final class MetalRuntimeTests {
@@ -74,6 +75,7 @@ public final class MetalRuntimeTests {
         testJavaWorkloadTelemetryDoesNotInferMappedWrites();
         testGpuTimingStageAbi();
         testFrameInterpolationTicketCommitBoundary();
+        testNativeFrameInterpolationTelemetryDowncall();
         testResourceBindingPacketReuseAndValidation();
         testResourceBindingBatchSelector();
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
@@ -1711,6 +1713,20 @@ public final class MetalRuntimeTests {
                         && productionInputs.getFirst().outputMode() == 2
                         && productionInputs.getFirst().materialGenerationActive(),
                 "production FI hand-off lost world/UI presentation parameters");
+    }
+
+    private static void testNativeFrameInterpolationTelemetryDowncall() {
+        Optional<NativeFrameInterpolationCoordinator.Telemetry> telem =
+                NativeFrameInterpolationCoordinator.queryTelemetry(MemorySegment.NULL);
+        require(telem.isPresent(), "native frame interpolation telemetry query failed");
+        NativeFrameInterpolationCoordinator.Telemetry snapshot = telem.get();
+        require(snapshot.acceptedPairs() >= 0L
+                        && snapshot.generatedPresentations() >= 0L
+                        && snapshot.realPresentations() >= 0L
+                        && snapshot.droppedGeneratedLate() >= 0L
+                        && snapshot.backpressureDrops() >= 0L
+                        && snapshot.maximumHistogramBuckets() >= 0L,
+                "native telemetry values must be non-negative");
     }
 
     private static void testTextureBindingHolderUpdatesInPlace() {

@@ -283,18 +283,24 @@ public final class FrameSynthesisTests {
                         == FrameInterpolationPolicy.EffectiveReason.ADMITTED_FIXED_TEMPORAL,
                 "validated Fixed Temporal profile was not admitted");
 
-        // 4. Dynamic Temporal and Native remain later stages; validated Spatial
-        // is a standalone Frame Interpolation profile as of Stage 10.
-        for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(
-                FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL,
-                FrameInterpolationPolicy.UpstreamMode.NATIVE)) {
-            FrameInterpolationPolicy.Evaluation evalUpstream = FrameInterpolationPolicy.evaluate(
-                    configOn, capabilitiesWithFI, mode, 60.0, Set.of()
-            );
-            require(!evalUpstream.profileEligible()
-                            && evalUpstream.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
-                    mode + " was not rejected by policy");
-        }
+        // 4. Dynamic Temporal remains unadmitted; validated Spatial and Native
+        // are standalone Frame Interpolation profiles.
+        FrameInterpolationPolicy.Evaluation evalDynamic = FrameInterpolationPolicy.evaluate(
+                configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL, 60.0, Set.of()
+        );
+        require(!evalDynamic.profileEligible()
+                        && evalDynamic.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
+                "DYNAMIC_TEMPORAL was not rejected by policy");
+
+        FrameInterpolationPolicy.Evaluation nativeEval = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.NATIVE, 60.0, Set.of()
+        );
+        require(nativeEval.profileEligible() && nativeEval.effectiveAdmitted()
+                        && nativeEval.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_NATIVE
+                        && nativeEval.effectiveReason() == FrameInterpolationPolicy.EffectiveReason.ADMITTED_NATIVE,
+                "validated Native profile was not admitted");
+
         FrameInterpolationPolicy.Evaluation spatial = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
                 FrameInterpolationPolicy.UpstreamMode.SPATIAL, 60.0, Set.of()

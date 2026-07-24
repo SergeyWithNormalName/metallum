@@ -429,6 +429,11 @@ public final class MetalNativeBridge {
                     "metallum_frame_interpolation_release_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
+            frameInterpolationTelemetryGetV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_telemetry_get_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             semaphoreWait = downcallWithoutCritical(lookup, "metallum_semaphore_wait", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
             MTLCommandBufferIsCompleted = downcall(lookup, "metallum_MTLCommandBuffer_isCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             MTLCommandBufferWaitUntilCompleted = downcallWithoutCritical(lookup, "metallum_MTLCommandBuffer_waitUntilCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
@@ -849,6 +854,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle frameInterpolationCancelV1;
     private static final MethodHandle frameInterpolationDrainV1;
     private static final MethodHandle frameInterpolationReleaseV1;
+    private static final MethodHandle frameInterpolationTelemetryGetV1;
     private static final MethodHandle semaphoreWait;
     private static final MethodHandle MTLCommandBufferIsCompleted;
     private static final MethodHandle MTLCommandBufferWaitUntilCompleted;
@@ -1780,6 +1786,17 @@ public final class MetalNativeBridge {
             return (int) frameInterpolationReleaseV1.invokeExact(segment(context), timeoutNanoseconds);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_frame_interpolation_release_v1", throwable);
+        }
+    }
+
+    public static int metallum_frame_interpolation_telemetry_get_v1(
+            final MemorySegment context,
+            final MemorySegment outTelemetry
+    ) {
+        try {
+            return (int) frameInterpolationTelemetryGetV1.invokeExact(segment(context), segment(outTelemetry));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_telemetry_get_v1", throwable);
         }
     }
 

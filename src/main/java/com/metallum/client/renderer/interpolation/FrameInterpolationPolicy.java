@@ -19,6 +19,7 @@ public final class FrameInterpolationPolicy {
     public enum EligibilityReason {
         ELIGIBLE_FIXED_TEMPORAL,
         ELIGIBLE_SPATIAL,
+        ELIGIBLE_NATIVE,
         USER_REQUEST_DISABLED,
         FEATURE_UNSUPPORTED,
         REFRESH_RATE_UNSATISFIED,
@@ -30,6 +31,7 @@ public final class FrameInterpolationPolicy {
     public enum EffectiveReason {
         ADMITTED_FIXED_TEMPORAL,
         ADMITTED_SPATIAL,
+        ADMITTED_NATIVE,
         NATIVE_PROFILE_UNVALIDATED,
         NOT_PROFILE_ELIGIBLE
     }
@@ -101,7 +103,9 @@ public final class FrameInterpolationPolicy {
             );
         }
 
-        if (upstreamMode != UpstreamMode.FIXED_TEMPORAL && upstreamMode != UpstreamMode.SPATIAL) {
+        if (upstreamMode != UpstreamMode.FIXED_TEMPORAL
+                && upstreamMode != UpstreamMode.SPATIAL
+                && upstreamMode != UpstreamMode.NATIVE) {
             return new Evaluation(
                     true, false, false,
                     EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
@@ -117,24 +121,30 @@ public final class FrameInterpolationPolicy {
             );
         }
 
+        EligibilityReason eligibilityReason = switch (upstreamMode) {
+            case SPATIAL -> EligibilityReason.ELIGIBLE_SPATIAL;
+            case NATIVE -> EligibilityReason.ELIGIBLE_NATIVE;
+            default -> EligibilityReason.ELIGIBLE_FIXED_TEMPORAL;
+        };
+
         if (!capabilities.frameInterpolationProfile().nativeProfileValidated()) {
             return new Evaluation(
                     true, true, false,
-                    upstreamMode == UpstreamMode.SPATIAL
-                            ? EligibilityReason.ELIGIBLE_SPATIAL
-                            : EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
+                    eligibilityReason,
                     EffectiveReason.NATIVE_PROFILE_UNVALIDATED
             );
         }
 
+        EffectiveReason effectiveReason = switch (upstreamMode) {
+            case SPATIAL -> EffectiveReason.ADMITTED_SPATIAL;
+            case NATIVE -> EffectiveReason.ADMITTED_NATIVE;
+            default -> EffectiveReason.ADMITTED_FIXED_TEMPORAL;
+        };
+
         return new Evaluation(
                 true, true, true,
-                upstreamMode == UpstreamMode.SPATIAL
-                        ? EligibilityReason.ELIGIBLE_SPATIAL
-                        : EligibilityReason.ELIGIBLE_FIXED_TEMPORAL,
-                upstreamMode == UpstreamMode.SPATIAL
-                        ? EffectiveReason.ADMITTED_SPATIAL
-                        : EffectiveReason.ADMITTED_FIXED_TEMPORAL
+                eligibilityReason,
+                effectiveReason
         );
     }
 }

@@ -337,6 +337,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
         defer { lock.unlock() }
         if displaySyncEnabled != enabled {
             displaySyncEnabled = enabled
+            displayGeneration &+= 1
             resetEstimatorsLocked()
         }
     }
@@ -403,17 +404,14 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
         guard display.isValid, display.maximumFramesPerSecond >= 60 else {
             return InterpolationDecision(plan: nil, rejection: .displayUnavailable)
         }
-        guard requestedDisplaySync else {
-            return InterpolationDecision(plan: nil, rejection: .displaySyncDisabled)
-        }
         guard realDeltaSeconds.isFinite, realDeltaSeconds <= 1.0 / 30.0 else {
             return InterpolationDecision(plan: nil, rejection: .realCadenceTooSlow)
         }
 
         let fastest = fastestIntervalLocked()
-        // 2x synthesis cannot accept a real stream materially faster than half
+        // Synthesis cannot accept a real stream materially faster than
         // the panel maximum without dropping mandatory real frames.
-        guard realDeltaSeconds >= fastest * 2.0 * 0.95 else {
+        guard realDeltaSeconds >= fastest * 0.95 else {
             return InterpolationDecision(plan: nil, rejection: .realCadenceTooFast)
         }
         guard interpolationCadence.observe(
@@ -443,7 +441,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
             let expectedRealInterval = candidate * 2.0
             let relativeError = abs(sustainableRealInterval - expectedRealInterval)
                 / expectedRealInterval
-            guard relativeError <= 0.05 else {
+            guard relativeError <= 0.15 else {
                 return InterpolationDecision(plan: nil, rejection: .fixedCadenceMismatch)
             }
         } else if candidate > display.maximumRefreshInterval + 0.000_001 {
@@ -475,7 +473,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
     func isCurrent(_ plan: Plan) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return enabled && displaySyncEnabled && plan.displayGeneration == displayGeneration
+        return isPlanCurrentLocked(plan)
     }
 
     func recordRenderCompletion(_ commandBuffer: MTLCommandBuffer) {
@@ -557,6 +555,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
     private func synchronizeDisplaySyncLocked(_ requested: Bool) {
         if displaySyncEnabled != requested {
             displaySyncEnabled = requested
+            displayGeneration &+= 1
             resetEstimatorsLocked()
         }
     }
@@ -600,7 +599,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
             // range, but macOS only enables Adaptive-Sync for fullscreen
             // content.  Treat it exactly like any other fixed refresh mode so
             // an 80 FPS FI stream is never advertised on a fixed 120 Hz scan.
-            return max(fastest, ceil(interval / fastest) * fastest)
+            return max(fastest, round(interval / fastest) * fastest)
         }
         let granularity = display.displayUpdateGranularity
         guard granularity.isFinite, granularity > 0 else { return interval }
@@ -646,7 +645,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
     }
 
     private func isPlanCurrentLocked(_ plan: Plan) -> Bool {
-        enabled && displaySyncEnabled && plan.displayGeneration == displayGeneration
+        enabled && plan.displayGeneration == displayGeneration
     }
 
     private func recordPresented(
@@ -908,17 +907,24 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     }
 
     let tooFast = scheduler.frameInterpolationPlan(
-        realDeltaSeconds: 1.0 / 90.0,
+        realDeltaSeconds: 1.0 / 150.0,
         displaySyncEnabled: true
     )
     guard tooFast.plan == nil, tooFast.rejection == .realCadenceTooFast else {
         return -4
     }
-    let noSync = scheduler.frameInterpolationPlan(
-        realDeltaSeconds: 1.0 / 60.0,
-        displaySyncEnabled: false
+    var noSync = MetallumExtendedProMotionScheduler.InterpolationDecision(
+        plan: nil,
+        rejection: .warmingUp
     )
-    guard noSync.plan == nil, noSync.rejection == .displaySyncDisabled else {
+    for _ in 0..<8 {
+        noSync = scheduler.frameInterpolationPlan(
+            realDeltaSeconds: 1.0 / 60.0,
+            displaySyncEnabled: false
+        )
+    }
+    guard let noSyncPlan = noSync.plan,
+          scheduler.isCurrent(noSyncPlan) else {
         return -5
     }
 

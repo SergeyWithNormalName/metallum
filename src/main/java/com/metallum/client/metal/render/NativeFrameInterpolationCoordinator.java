@@ -4,13 +4,31 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLPixelFormat;
 
 import java.lang.foreign.Arena;
+import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.Objects;
 import java.util.Optional;
 
 /** Typed Java owner for the native coordinator handle introduced in stage 5. */
-final class NativeFrameInterpolationCoordinator implements FrameInterpolationCommitBoundary.TicketBridge, AutoCloseable {
+public final class NativeFrameInterpolationCoordinator implements FrameInterpolationCommitBoundary.TicketBridge, AutoCloseable {
+    public record Telemetry(
+            long acceptedPairs,
+            long generatedPresentations,
+            long realPresentations,
+            long droppedGeneratedLate,
+            long backpressureDrops,
+            long maximumHistogramBuckets
+    ) {
+        public static final MemoryLayout LAYOUT = MemoryLayout.structLayout(
+                ValueLayout.JAVA_LONG.withName("acceptedPairs"),
+                ValueLayout.JAVA_LONG.withName("generatedPresentations"),
+                ValueLayout.JAVA_LONG.withName("realPresentations"),
+                ValueLayout.JAVA_LONG.withName("droppedGeneratedLate"),
+                ValueLayout.JAVA_LONG.withName("backpressureDrops"),
+                ValueLayout.JAVA_LONG.withName("maximumHistogramBuckets")
+        );
+    }
     private static final long DEFAULT_DRAIN_TIMEOUT_NANOS = 1_000_000_000L;
 
     private MemorySegment context;
@@ -127,6 +145,34 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
         return decodeStatus(MetalNativeBridge.metallum_frame_interpolation_drain_v1(
                 this.context, Math.max(timeoutNanoseconds, 0L)
         ));
+    }
+
+    public synchronized Optional<Telemetry> telemetry() {
+        if (MetalNativeBridge.isNullHandle(this.context)) {
+            return Optional.empty();
+        }
+        return queryTelemetry(this.context);
+    }
+
+    public static Optional<Telemetry> queryTelemetry(final MemorySegment context) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment segment = arena.allocate(Telemetry.LAYOUT);
+            int ok = MetalNativeBridge.metallum_frame_interpolation_telemetry_get_v1(
+                    MetalNativeBridge.isNullHandle(context) ? MemorySegment.NULL : context,
+                    segment
+            );
+            if (ok != 1) {
+                return Optional.empty();
+            }
+            return Optional.of(new Telemetry(
+                    segment.get(ValueLayout.JAVA_LONG, 0L),
+                    segment.get(ValueLayout.JAVA_LONG, 8L),
+                    segment.get(ValueLayout.JAVA_LONG, 16L),
+                    segment.get(ValueLayout.JAVA_LONG, 24L),
+                    segment.get(ValueLayout.JAVA_LONG, 32L),
+                    segment.get(ValueLayout.JAVA_LONG, 40L)
+            ));
+        }
     }
 
     @Override

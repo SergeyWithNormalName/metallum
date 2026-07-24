@@ -619,6 +619,33 @@ public final class RendererArchitectureTests {
                         && spatialInterpolation.manifest().resourceBytes(
                         RendererGenerationManifest.Domain.INTERPOLATION_ONLY) > 0L,
                 "Spatial + FI generation did not declare standalone motion inputs and workspace");
+
+        RendererGenerationPlanner.Plan nativeInterpolation = RendererGenerationPlanner.plan(
+                RenderContractMode.LEGACY,
+                LightingModel.VANILLA,
+                DisplayOutputMode.HDR,
+                MetalExecutorKind.METAL3,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.of(
+                        RendererFeatureMask.FRAME_INTERPOLATION
+                ),
+                DisplayOutputMode.HDR,
+                interpolationCapabilities,
+                render,
+                display
+        );
+        require(nativeInterpolation.resolution().config().featureMask().contains(
+                        RendererFeatureMask.FRAME_INTERPOLATION)
+                        && nativeInterpolation.manifest().passes().stream().anyMatch(pass ->
+                        pass.name().equals("spatial_frame_interpolation_motion_vectors"))
+                        && nativeInterpolation.manifest().resourceBytes(
+                        RendererGenerationManifest.Domain.INTERPOLATION_ONLY) > 0L,
+                "Native + FI generation did not declare standalone motion inputs and workspace");
+
+        require(legacySdr.manifest().resourceBytes(RendererGenerationManifest.Domain.INTERPOLATION_ONLY) == 0L
+                        && legacySdr.manifest().passCount(RendererGenerationManifest.Domain.INTERPOLATION_ONLY) == 0L,
+                "Legacy + SDR without FI retained interpolation resources");
+
         require(resourceNames(legacySdr.manifest()).equals(Set.of(
                         "main_color", "main_depth", "drawable"
                 )) && passNames(legacySdr.manifest()).equals(Set.of(

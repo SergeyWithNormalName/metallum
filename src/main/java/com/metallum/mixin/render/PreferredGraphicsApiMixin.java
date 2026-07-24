@@ -15,11 +15,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 abstract class PreferredGraphicsApiMixin {
     @Inject(method = "getBackendsToTry", at = @At("HEAD"), cancellable = true)
     private void metallum$injectMetalBackend(final CallbackInfoReturnable<GpuBackend[]> cir) {
-        PreferredGraphicsApi self = (PreferredGraphicsApi) (Object) this;
-        if (self != PreferredGraphicsApi.DEFAULT) {
-            return;
-        }
-
         cir.setReturnValue(new GpuBackend[]{new MetalBackend(), new VulkanBackend(), new GlBackend()});
     }
 

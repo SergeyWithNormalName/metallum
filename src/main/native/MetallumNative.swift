@@ -369,6 +369,7 @@ private final class MetallumHdrWorkspace {
     let histogram: MTLBuffer
     let adaptiveState: MTLBuffer
     var lastHistogramUptime: TimeInterval?
+    var lastHeadroom: Float?
     var histogramNeedsInitialization: Bool
 
     init(
@@ -396,6 +397,7 @@ private final class MetallumHdrWorkspace {
         self.histogram = histogram
         self.adaptiveState = adaptiveState
         self.lastHistogramUptime = nil
+        self.lastHeadroom = nil
         self.histogramNeedsInitialization = true
     }
 }
@@ -1273,6 +1275,7 @@ private final class MetallumLightingTelemetryStore: @unchecked Sendable {
     private let lock = NSLock()
     private var nextToken: UInt64 = 1
     private var latestToken: UInt64 = 0
+    private var lastPublished: MetallumLightingTelemetrySnapshotV1?
     private var latest = MetallumLightingTelemetrySnapshotV1(
         active: false,
         generation: 0,
@@ -1332,7 +1335,7 @@ private final class MetallumLightingTelemetryStore: @unchecked Sendable {
            latest.active,
            latest.generation == completed.generation,
            completed.frameId >= latest.frameId {
-            latest = MetallumLightingTelemetrySnapshotV1(
+            let snap = MetallumLightingTelemetrySnapshotV1(
                 active: true,
                 generation: completed.generation,
                 frameId: completed.frameId,
@@ -1351,6 +1354,8 @@ private final class MetallumLightingTelemetryStore: @unchecked Sendable {
                 ringHighWater: ringHighWater,
                 ringBusyRejects: ringBusyRejects
             )
+            latest = snap
+            lastPublished = snap
         }
         lock.unlock()
     }
@@ -1378,13 +1383,35 @@ private final class MetallumLightingTelemetryStore: @unchecked Sendable {
                 ringHighWater: 0,
                 ringBusyRejects: 0
             )
+            lastPublished = nil
         }
         lock.unlock()
     }
 
     func snapshot() -> MetallumLightingTelemetrySnapshotV1 {
         lock.lock()
-        let value = latest
+        var value = latest
+        if value.active && value.frameId == 0, let published = lastPublished, published.active && published.frameId > 0 {
+            value = MetallumLightingTelemetrySnapshotV1(
+                active: true,
+                generation: value.generation,
+                frameId: published.frameId,
+                lightCount: published.lightCount,
+                clusterCount: value.clusterCount > 0 ? value.clusterCount : published.clusterCount,
+                acceptedIndices: published.acceptedIndices,
+                requestedIndices: published.requestedIndices,
+                overflowClusters: published.overflowClusters,
+                droppedIndices: published.droppedIndices,
+                indexCapacityDrops: published.indexCapacityDrops,
+                admissionRejectedLights: published.admissionRejectedLights,
+                occupancyP50: published.occupancyP50,
+                occupancyP95: published.occupancyP95,
+                occupancyP99: published.occupancyP99,
+                maximumOccupancy: published.maximumOccupancy,
+                ringHighWater: published.ringHighWater,
+                ringBusyRejects: published.ringBusyRejects
+            )
+        }
         lock.unlock()
         return value
     }
@@ -5648,6 +5675,7 @@ private func ensureHdrWorkspace(
             cached.uiMaskA = nil
             cached.uiMaskB = nil
             cached.lastHistogramUptime = nil
+            cached.lastHeadroom = nil
             cached.histogramNeedsInitialization = true
         }
         return cached
@@ -6541,9 +6569,12 @@ private func encodeHdrWorldEffects(
 
     let now = ProcessInfo.processInfo.systemUptime
     let previousUptime = workspace.lastHistogramUptime
+    let previousHeadroom = workspace.lastHeadroom
     let deltaTime = previousUptime.map { max(now - $0, 0.0) } ?? 0.0
-    let forceReset = previousUptime == nil || deltaTime > 1.0
+    let headroomChanged = previousHeadroom.map { abs($0 - currentHeadroom) > 0.0001 } ?? true
+    let forceReset = previousUptime == nil || deltaTime > 1.0 || headroomChanged
     workspace.lastHistogramUptime = now
+    workspace.lastHeadroom = currentHeadroom
 
     if workspace.histogramNeedsInitialization {
         let histogramClearPass = MTLBlitPassDescriptor()
@@ -6741,9 +6772,12 @@ private func encodeActualHdrWorldEffects(
 
     let now = ProcessInfo.processInfo.systemUptime
     let previousUptime = workspace.lastHistogramUptime
+    let previousHeadroom = workspace.lastHeadroom
     let deltaTime = previousUptime.map { max(now - $0, 0.0) } ?? 0.0
-    let forceReset = previousUptime == nil || deltaTime > 1.0
+    let headroomChanged = previousHeadroom.map { abs($0 - currentHeadroom) > 0.0001 } ?? true
+    let forceReset = previousUptime == nil || deltaTime > 1.0 || headroomChanged
     workspace.lastHistogramUptime = now
+    workspace.lastHeadroom = currentHeadroom
 
     if workspace.histogramNeedsInitialization {
         let clearPass = MTLBlitPassDescriptor()
@@ -10874,9 +10908,7 @@ public func metallum_renderer_capabilities_v1(
             }
             if MTLFXFrameInterpolatorDescriptor.supportsDevice(device) {
                 snapshot |= rendererCapabilityMetalFxFrameInterpolation
-                if snapshot & rendererCapabilityTemporalProfile != 0 {
-                    snapshot |= rendererCapabilityFrameInterpolationProfile
-                }
+                snapshot |= rendererCapabilityFrameInterpolationProfile
             }
             if MTLFXTemporalScalerDescriptor.supportsMetal4FX(device) {
                 snapshot |= rendererCapabilityMetalFxTemporalMetal4
