@@ -17,6 +17,7 @@ public final class MetallumFullscreenCoordinator {
 
     private var requestedFullscreen: Bool?
     private var observerTokens: [NSObjectProtocol] = []
+    private var lastAppliedDrawableSize: CGSize?
 
     public init(window: NSWindow, layer: CAMetalLayer) {
         self.window = window
@@ -122,6 +123,9 @@ public final class MetallumFullscreenCoordinator {
     private func beginTransition(to newState: MetallumFullscreenState) {
         state = newState
         generation &+= 1
+        if let window {
+            MetallumExtendedProMotionSchedulerRegistry.shared.update(window: window)
+        }
     }
 
     private func finishTransition(fullscreen: Bool) {
@@ -149,10 +153,21 @@ public final class MetallumFullscreenCoordinator {
         let width = max(backingRect.width, 1.0)
         let height = max(backingRect.height, 1.0)
 
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.drawableSize = CGSize(width: width, height: height)
-        CATransaction.commit()
+        let nextSize = CGSize(width: width, height: height)
+        let changed = lastAppliedDrawableSize.map {
+            abs($0.width - nextSize.width) >= 0.5 || abs($0.height - nextSize.height) >= 0.5
+        } ?? true
+        if changed {
+            // Admission closes and the old fixed-size generation drains.  It
+            // cannot interpolate across a backing/monitor size transition.
+            metallumInvalidateFrameInterpolationForLayerMutation(layer)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.drawableSize = nextSize
+            CATransaction.commit()
+            lastAppliedDrawableSize = nextSize
+        }
+        MetallumExtendedProMotionSchedulerRegistry.shared.update(window: window)
     }
 
     private func processDeferredRequest() {

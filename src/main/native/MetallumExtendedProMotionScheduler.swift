@@ -21,7 +21,8 @@ struct MetallumDisplayTimingSnapshot: Sendable {
         maximumRefreshInterval: 0,
         displayUpdateGranularity: 0,
         lastDisplayUpdateTimestamp: 0,
-        fullscreen: false
+        fullscreen: false,
+        isBuiltin: false
     )
 
     let displayID: UInt32
@@ -31,6 +32,7 @@ struct MetallumDisplayTimingSnapshot: Sendable {
     let displayUpdateGranularity: Double
     let lastDisplayUpdateTimestamp: Double
     let fullscreen: Bool
+    let isBuiltin: Bool
 
     var isValid: Bool {
         maximumFramesPerSecond > 0
@@ -201,6 +203,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
         let presentedInterpolatedReal: UInt64
         let skippedPresentations: UInt64
         let stalePresentationCallbacks: UInt64
+        let outOfOrderPresentations: UInt64
         let targetMisses: UInt64
         let rateTransitions: UInt64
         let meanPresentedIntervalSeconds: Double
@@ -221,6 +224,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
                 "display_update_granularity_ms": display.displayUpdateGranularity * 1_000.0,
                 "display_last_update_timestamp": display.lastDisplayUpdateTimestamp,
                 "fullscreen": display.fullscreen,
+                "display_is_builtin": display.isBuiltin,
                 "variable_refresh_supported": display.supportsVariableRefreshRate,
                 "adaptive_scheduling_active": display.adaptiveSchedulingActive,
                 "target_presented_fps": targetFramesPerSecond,
@@ -231,6 +235,7 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
                 "presented_interpolated_real": presentedInterpolatedReal,
                 "skipped_presentations": skippedPresentations,
                 "stale_presentation_callbacks": stalePresentationCallbacks,
+                "out_of_order_presentations": outOfOrderPresentations,
                 "target_misses": targetMisses,
                 "rate_transitions": rateTransitions,
                 "mean_present_interval_ms": meanPresentedIntervalSeconds * 1_000.0,
@@ -306,6 +311,9 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
     private var presentedInterpolatedReal: UInt64 = 0
     private var skippedPresentations: UInt64 = 0
     private var stalePresentationCallbacks: UInt64 = 0
+    /// Actual CAMetalDrawable callback timestamps that regress within the
+    /// current display generation.  A correct single-queue FI path stays 0.
+    private var outOfOrderPresentations: UInt64 = 0
     private var targetMisses: UInt64 = 0
     private var rateTransitions: UInt64 = 0
     private var lastPresentedTime = 0.0
@@ -354,39 +362,21 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
             return unmanagedPlanLocked()
         }
 
-        _ = realOnlyCadence.observe(
-            renderDeltaSeconds,
-            range: (1.0 / 1_000.0)...0.250
-        )
-        let fastest = fastestIntervalLocked()
-        let slowest = adaptiveSlowestIntervalLocked(minimumTotalFramesPerSecond: 24.0)
-        let workload = max(
-            realOnlyCadence.sustainableInterval,
-            renderGpuCadence.sustainableInterval
-        )
-        let candidate = quantizedIntervalLocked(
-            min(max(workload > 0 ? workload : fastest, fastest), slowest),
-            allowFixedMultiples: true
-        )
-        realOnlySelectedInterval = stabilizedIntervalLocked(
-            current: realOnlySelectedInterval,
-            candidate: candidate,
-            fasterConfirmations: &fasterRealOnlyConfirmations
-        )
-
-        // Timed presentation is specifically useful for fullscreen
-        // Adaptive-Sync/ProMotion.  Fixed/windowed modes retain the ordinary
-        // display-synced present path and therefore preserve legacy latency.
-        let useTimed = display.adaptiveSchedulingActive
-        let mode: Mode = useTimed ? .adaptiveRefresh : .fixedRefresh
-        let interval = max(realOnlySelectedInterval, fastest)
+        // This path owns no cadence.  GLFW/CAMetalLayer's ordinary synced
+        // present already chooses the next legal vblank, while feeding the
+        // Minecraft frame delta back into `afterMinimumDuration` created a
+        // second limiter (including the historical 24-FPS floor).  Keep the
+        // display model for telemetry and FI admission, but do not throttle
+        // real-only frames here.
+        let mode: Mode = display.adaptiveSchedulingActive ? .adaptiveRefresh : .fixedRefresh
+        let interval = fastestIntervalLocked()
         publishTargetLocked(mode: mode, interval: interval)
         return Plan(
             displayGeneration: displayGeneration,
             mode: mode,
             presentationIntervalSeconds: interval,
             targetFramesPerSecond: 1.0 / interval,
-            useTimedPresentation: useTimed
+            useTimedPresentation: false
         )
     }
 
@@ -406,19 +396,12 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
         guard requestedDisplaySync else {
             return InterpolationDecision(plan: nil, rejection: .displaySyncDisabled)
         }
-        guard realDeltaSeconds.isFinite, realDeltaSeconds <= 1.0 / 30.0 else {
-            return InterpolationDecision(plan: nil, rejection: .realCadenceTooSlow)
-        }
-
         let fastest = fastestIntervalLocked()
-        // 2x synthesis cannot accept a real stream materially faster than half
-        // the panel maximum without dropping mandatory real frames.
-        guard realDeltaSeconds >= fastest * 2.0 * 0.95 else {
-            return InterpolationDecision(plan: nil, rejection: .realCadenceTooFast)
-        }
         guard interpolationCadence.observe(
             realDeltaSeconds,
-            range: (1.0 / 240.0)...(1.0 / 30.0)
+            // Admit bounded one-off 15 ms / 35 ms jitter into the estimator.
+            // Sustained cadence, not one Minecraft delta, decides ownership.
+            range: (1.0 / 240.0)...(1.0 / 20.0)
         ) else {
             return InterpolationDecision(plan: nil, rejection: .realCadenceTooSlow)
         }
@@ -431,6 +414,15 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
         // discard real frames when queues overlap, which is outside scheduler
         // ownership and would increase input latency.
         let sustainableRealInterval = interpolationCadence.sustainableInterval
+        // 2x synthesis cannot sustain a real stream materially faster than
+        // half the panel maximum, but a single 15 ms sample at 60 FPS should
+        // not force a presenter switch/re-prime.
+        guard sustainableRealInterval >= fastest * 2.0 * 0.95 else {
+            return InterpolationDecision(plan: nil, rejection: .realCadenceTooFast)
+        }
+        guard sustainableRealInterval <= 1.0 / 30.0 else {
+            return InterpolationDecision(plan: nil, rejection: .realCadenceTooSlow)
+        }
         var candidate = max(sustainableRealInterval * 0.5, fastest)
         // MetalFX input must remain at least 30 real FPS, so the synthesized
         // presentation stream never intentionally falls below 60 FPS.
@@ -464,11 +456,42 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
                 mode: mode,
                 presentationIntervalSeconds: interval,
                 targetFramesPerSecond: 1.0 / interval,
-                // Dual presentation always needs an explicit minimum interval;
-                // on fixed displays the OS rounds it to a legal vblank factor.
+                // The FI coordinator submits generated and mandatory-real
+                // consecutively to one serial presentation queue.  This is
+                // the sole pacing source for that pair; no parallel Mach-time
+                // wait or DisplayLink callback may also delay either member.
                 useTimedPresentation: true
             ),
             rejection: nil
+        )
+    }
+
+    /**
+     * While FI is armed but still priming/recovering cadence, keep mandatory
+     * real frames at a display-derived 2x base interval.  This is deliberately
+     * independent of Minecraft delta: it converges a 120-Hz producer to the
+     * 60-real/120-output contract without reintroducing the old 24-FPS loop.
+     */
+    func frameInterpolationBaseRealPlan(
+        displaySyncEnabled requestedDisplaySync: Bool
+    ) -> Plan? {
+        lock.lock()
+        defer { lock.unlock() }
+        synchronizeDisplaySyncLocked(requestedDisplaySync)
+        guard enabled, requestedDisplaySync, display.isValid,
+              display.maximumFramesPerSecond >= 60 else { return nil }
+        let interval = quantizedIntervalLocked(
+            fastestIntervalLocked() * 2.0,
+            allowFixedMultiples: true
+        )
+        let mode: Mode = display.adaptiveSchedulingActive ? .adaptiveRefresh : .fixedRefresh
+        publishTargetLocked(mode: mode, interval: interval)
+        return Plan(
+            displayGeneration: displayGeneration,
+            mode: mode,
+            presentationIntervalSeconds: interval,
+            targetFramesPerSecond: 1.0 / interval,
+            useTimedPresentation: true
         )
     }
 
@@ -546,11 +569,29 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
             presentedInterpolatedReal: presentedInterpolatedReal,
             skippedPresentations: skippedPresentations,
             stalePresentationCallbacks: stalePresentationCallbacks,
+            outOfOrderPresentations: outOfOrderPresentations,
             targetMisses: targetMisses,
             rateTransitions: rateTransitions,
             meanPresentedIntervalSeconds: presentedIntervalCount > 0
                 ? presentedIntervalSum / Double(presentedIntervalCount) : 0,
             presentationIntervals: intervals
+        )
+    }
+
+    /** Deterministic native-harness hook for the callback-order counter. */
+    func recordPresentationForTests(
+        kind: PresentationKind,
+        presentedTime: Double,
+        targetInterval: Double
+    ) {
+        lock.lock()
+        let generation = displayGeneration
+        lock.unlock()
+        recordPresented(
+            kind: kind,
+            presentedTime: presentedTime,
+            targetInterval: targetInterval,
+            planGeneration: generation
         )
     }
 
@@ -689,16 +730,23 @@ final class MetallumExtendedProMotionScheduler: @unchecked Sendable {
             return
         }
 
-        if lastPresentedTime > 0, presentedTime > lastPresentedTime {
-            let interval = presentedTime - lastPresentedTime
-            presentedIntervalSum += interval
-            presentedIntervalCount &+= 1
-            let nanoseconds = UInt64(min(interval * 1_000_000_000.0, Double(UInt64.max)))
-            intervalRing[intervalRingCursor] = nanoseconds
-            intervalRingCursor = (intervalRingCursor + 1) % Self.intervalRingSize
-            intervalRingCount = min(intervalRingCount + 1, Self.intervalRingSize)
-            if targetInterval > 0, interval > targetInterval * 1.25 {
-                targetMisses &+= 1
+        if lastPresentedTime > 0 {
+            if presentedTime + 0.000_001 < lastPresentedTime {
+                // This is an on-glass order regression, not a submission
+                // counter.  It makes hidden dual-presenter races visible in
+                // the existing scheduler telemetry export.
+                outOfOrderPresentations &+= 1
+            } else if presentedTime > lastPresentedTime {
+                let interval = presentedTime - lastPresentedTime
+                presentedIntervalSum += interval
+                presentedIntervalCount &+= 1
+                let nanoseconds = UInt64(min(interval * 1_000_000_000.0, Double(UInt64.max)))
+                intervalRing[intervalRingCursor] = nanoseconds
+                intervalRingCursor = (intervalRingCursor + 1) % Self.intervalRingSize
+                intervalRingCount = min(intervalRingCount + 1, Self.intervalRingSize)
+                if targetInterval > 0, interval > targetInterval * 1.25 {
+                    targetMisses &+= 1
+                }
             }
         }
         lastPresentedTime = max(lastPresentedTime, presentedTime)
@@ -835,8 +883,30 @@ final class MetallumExtendedProMotionSchedulerRegistry: @unchecked Sendable {
             maximumRefreshInterval: max(screen.maximumRefreshInterval, 0),
             displayUpdateGranularity: max(screen.displayUpdateGranularity, 0),
             lastDisplayUpdateTimestamp: max(screen.lastDisplayUpdateTimestamp, 0),
-            fullscreen: window.styleMask.contains(.fullScreen)
+            fullscreen: isFullscreenPresentation(window: window, screen: screen),
+            isBuiltin: rawDisplayID.map { CGDisplayIsBuiltin($0.uint32Value) != 0 } ?? false
         )
+    }
+
+    /**
+     * GLFW monitor-attached fullscreen is normally a borderless NSWindow and
+     * does not set AppKit's `.fullScreen` style bit.  Treating only that bit as
+     * authoritative disabled ProMotion exactly in the Minecraft path.  A
+     * borderless window whose frame covers its attached screen is the native
+     * contract GLFW exposes; titled maximized windows deliberately stay out.
+     */
+    private static func isFullscreenPresentation(window: NSWindow, screen: NSScreen) -> Bool {
+        if window.styleMask.contains(.fullScreen) {
+            return true
+        }
+        guard !window.styleMask.contains(.titled) else { return false }
+        let tolerance = max(1.0 / max(screen.backingScaleFactor, 1.0), 0.5)
+        let frame = window.frame
+        let screenFrame = screen.frame
+        return abs(frame.origin.x - screenFrame.origin.x) <= tolerance
+            && abs(frame.origin.y - screenFrame.origin.y) <= tolerance
+            && abs(frame.width - screenFrame.width) <= tolerance
+            && abs(frame.height - screenFrame.height) <= tolerance
     }
 }
 
@@ -850,7 +920,8 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
         maximumRefreshInterval: 1.0 / 48.0,
         displayUpdateGranularity: 0,
         lastDisplayUpdateTimestamp: 1,
-        fullscreen: true
+        fullscreen: true,
+        isBuiltin: true
     )
     let scheduler = MetallumExtendedProMotionScheduler(enabled: true)
     scheduler.updateDisplay(adaptive)
@@ -867,6 +938,7 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     }
     guard let sixtyToOneTwenty = decision.plan,
           sixtyToOneTwenty.mode == .adaptiveRefresh,
+          sixtyToOneTwenty.useTimedPresentation,
           abs(sixtyToOneTwenty.targetFramesPerSecond - 120.0) < 0.5 else {
         return -1
     }
@@ -902,24 +974,50 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
         )
     }
     guard realOnlyPlan.mode == .adaptiveRefresh,
-          realOnlyPlan.useTimedPresentation,
-          abs(realOnlyPlan.targetFramesPerSecond - 60.0) < 0.5 else {
+          !realOnlyPlan.useTimedPresentation,
+          abs(realOnlyPlan.targetFramesPerSecond - 120.0) < 0.5 else {
         return -3
     }
 
-    let tooFast = scheduler.frameInterpolationPlan(
-        realDeltaSeconds: 1.0 / 90.0,
+    guard let primingPlan = scheduler.frameInterpolationBaseRealPlan(
         displaySyncEnabled: true
-    )
-    guard tooFast.plan == nil, tooFast.rejection == .realCadenceTooFast else {
+    ), primingPlan.useTimedPresentation,
+       abs(primingPlan.targetFramesPerSecond - 60.0) < 0.5 else {
         return -4
+    }
+
+    let jitterScheduler = MetallumExtendedProMotionScheduler(enabled: true)
+    jitterScheduler.updateDisplay(adaptive)
+    var jitterDecision = MetallumExtendedProMotionScheduler.InterpolationDecision(
+        plan: nil, rejection: .warmingUp
+    )
+    for delta in [1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0,
+                  1.0 / 60.0, 1.0 / 60.0, 0.015, 0.035] {
+        jitterDecision = jitterScheduler.frameInterpolationPlan(
+            realDeltaSeconds: delta, displaySyncEnabled: true
+        )
+    }
+    guard jitterDecision.plan != nil else { return -5 }
+
+    let tooFastScheduler = MetallumExtendedProMotionScheduler(enabled: true)
+    tooFastScheduler.updateDisplay(adaptive)
+    var tooFast = MetallumExtendedProMotionScheduler.InterpolationDecision(
+        plan: nil, rejection: .warmingUp
+    )
+    for _ in 0..<8 {
+        tooFast = tooFastScheduler.frameInterpolationPlan(
+            realDeltaSeconds: 1.0 / 90.0, displaySyncEnabled: true
+        )
+    }
+    guard tooFast.plan == nil, tooFast.rejection == .realCadenceTooFast else {
+        return -6
     }
     let noSync = scheduler.frameInterpolationPlan(
         realDeltaSeconds: 1.0 / 60.0,
         displaySyncEnabled: false
     )
     guard noSync.plan == nil, noSync.rejection == .displaySyncDisabled else {
-        return -5
+        return -7
     }
 
     let unmanagedRealOnly = realOnly.realOnlyPlan(
@@ -928,7 +1026,7 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     )
     guard unmanagedRealOnly.mode == .unmanaged,
           !unmanagedRealOnly.useTimedPresentation else {
-        return -6
+        return -8
     }
 
     let windowed = MetallumDisplayTimingSnapshot(
@@ -938,7 +1036,8 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
         maximumRefreshInterval: 1.0 / 48.0,
         displayUpdateGranularity: 0,
         lastDisplayUpdateTimestamp: 2,
-        fullscreen: false
+        fullscreen: false,
+        isBuiltin: false
     )
     let windowedScheduler = MetallumExtendedProMotionScheduler(enabled: true)
     windowedScheduler.updateDisplay(windowed)
@@ -948,7 +1047,7 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     )
     guard windowedRealOnly.mode == .fixedRefresh,
           !windowedRealOnly.useTimedPresentation else {
-        return -7
+        return -9
     }
     var invalidWindowedFi = MetallumExtendedProMotionScheduler.InterpolationDecision(
         plan: nil,
@@ -962,7 +1061,7 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     }
     guard invalidWindowedFi.plan == nil,
           invalidWindowedFi.rejection == .fixedCadenceMismatch else {
-        return -8
+        return -10
     }
 
     scheduler.updateDisplay(MetallumDisplayTimingSnapshot(
@@ -972,7 +1071,8 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
         maximumRefreshInterval: 1.0 / 60.0,
         displayUpdateGranularity: 1.0 / 60.0,
         lastDisplayUpdateTimestamp: 2,
-        fullscreen: true
+        fullscreen: true,
+        isBuiltin: true
     ))
     var fixedDecision = scheduler.frameInterpolationPlan(
         realDeltaSeconds: 1.0 / 30.0,
@@ -987,9 +1087,25 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
     guard let fixedPlan = fixedDecision.plan,
           fixedPlan.mode == .fixedRefresh,
           abs(fixedPlan.targetFramesPerSecond - 60.0) < 0.5 else {
-        return -9
+        return -11
     }
-    guard !scheduler.isCurrent(sixtyToOneTwenty) else { return -10 }
+    guard !scheduler.isCurrent(sixtyToOneTwenty) else { return -12 }
+
+    let callbackOrder = MetallumExtendedProMotionScheduler(enabled: true)
+    callbackOrder.updateDisplay(adaptive)
+    callbackOrder.recordPresentationForTests(
+        kind: .generated, presentedTime: 10.0, targetInterval: 1.0 / 120.0
+    )
+    callbackOrder.recordPresentationForTests(
+        kind: .interpolatedReal, presentedTime: 10.0 + 1.0 / 120.0,
+        targetInterval: 1.0 / 120.0
+    )
+    guard callbackOrder.snapshot().outOfOrderPresentations == 0 else { return -13 }
+    callbackOrder.recordPresentationForTests(
+        kind: .generated, presentedTime: 10.0 + 0.5 / 120.0,
+        targetInterval: 1.0 / 120.0
+    )
+    guard callbackOrder.snapshot().outOfOrderPresentations == 1 else { return -14 }
 
     let timer = MetallumPrecisionDeadlineTimer()
     let start = MetallumMonotonicClock.nowNanoseconds()

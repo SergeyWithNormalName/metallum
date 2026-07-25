@@ -12431,11 +12431,22 @@ public func metallum_configure_layer(
         return 0
     }
 
+    let nextPixelFormat: MTLPixelFormat = outputMode != 0 ? .rgba16Float : .bgra8Unorm
+    let nextDisplaySyncEnabled = immediatePresentMode == 0
+    if abs(layer.drawableSize.width - CGFloat(width)) >= 0.5
+        || abs(layer.drawableSize.height - CGFloat(height)) >= 0.5
+        || layer.pixelFormat != nextPixelFormat
+        || layer.displaySyncEnabled != nextDisplaySyncEnabled {
+        // Configuration changes are renderer-generation boundaries for fixed
+        // FI rings.  Keep an active pair ordered while closing new admission.
+        metallumInvalidateFrameInterpolationForLayerMutation(layer)
+    }
+
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     layer.isOpaque = true
     layer.opacity = 1.0
-    layer.pixelFormat = useEdr ? .rgba16Float : .bgra8Unorm
+    layer.pixelFormat = nextPixelFormat
     layer.colorspace = colorSpace
     layer.edrMetadata = nil
     if #available(macOS 26.0, *) {
@@ -12453,7 +12464,7 @@ public func metallum_configure_layer(
     layer.drawableSize = CGSize(width: width, height: height)
     layer.allowsNextDrawableTimeout = true
     layer.presentsWithTransaction = false
-    layer.displaySyncEnabled = immediatePresentMode == 0
+    layer.displaySyncEnabled = nextDisplaySyncEnabled
     MetallumExtendedProMotionSchedulerRegistry.shared.scheduler(for: layer)
         .updateDisplaySyncEnabled(layer.displaySyncEnabled)
     CATransaction.commit()
@@ -13333,7 +13344,6 @@ public func metallum_encodePresentationWorld(
               (0...1).contains(materialGenerationActive) else {
             return -1
         }
-
         let effectiveHeadroom = min(
             max(1.0, currentHeadroom.isFinite ? currentHeadroom : 1.0),
             8.0
@@ -13786,6 +13796,12 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
         guard (0...2).contains(outputMode),
               (0...1).contains(materialGenerationActive) else {
             return -1
+        }
+        // FI owns generated+mandatory-real pairs on its private serial queue.
+        // Never acquire a legacy drawable for N+1 while a live pair still owns
+        // presentation; a bounded drain is safer than showing stale order.
+        guard metallumAwaitFrameInterpolationPresentationDrain(layer) else {
+            return 0
         }
 
         let effectiveHeadroom = min(

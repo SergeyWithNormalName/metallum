@@ -99,7 +99,12 @@ struct ParityMetrics {
 
 @available(macOS 26.0, *)
 private func runStage2ValidationHarness(device: MTLDevice) throws {
-    if ProcessInfo.processInfo.environment["MTL_SHADER_VALIDATION"] != nil {
+    // Gradle exports MTL_SHADER_VALIDATION=0 for this harness on M1/M2, where
+    // MetalFX's internal 1024-threadgroup trips an API-validation limitation.
+    // Treat only an affirmative value as enabled; checking merely for presence
+    // silently skipped the actual MetalFX pair test on every normal run.
+    let shaderValidation = ProcessInfo.processInfo.environment["MTL_SHADER_VALIDATION"]
+    if shaderValidation == "1" || shaderValidation?.lowercased() == "true" {
         if !device.supportsFamily(.apple8) {
             print("[SKIP] Stage 2: MetalFX scaler internal compute threadgroup (1024) exceeds M1/M2 GPU validation limit (832)")
             return
@@ -530,7 +535,7 @@ private enum FrameInterpolationValidation {
         }
 
         logMsg("[INFO] Metal device: \(device.name)")
-        logMsg("[INFO] Testing Extended ProMotion scheduler: VRR, fixed-rate fallback, VSync-off, and Mach timer")
+        logMsg("[INFO] Testing Extended ProMotion scheduler: plain real-only VSync, single-source FI pacing, callback order")
         guard let promotionSchedulerSymbol = dlsym(
             handle,
             "metallum_extended_promotion_scheduler_stress_v1"
