@@ -9,6 +9,7 @@ import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
+import com.metallum.client.metalfx.GeneratedFrameRateTracker;
 
 import java.util.HashSet;
 import java.util.Optional;
@@ -30,7 +31,36 @@ public final class FrameSynthesisTests {
         testPresentationAndOwnershipFailures();
         testCadenceAndImmutableOwnership();
         testFrameInterpolationPolicyAndContractRules();
+        testGeneratedFrameRateTracker();
         System.out.println("Frame synthesis P6 contract tests passed");
+    }
+
+    private static void testGeneratedFrameRateTracker() {
+        GeneratedFrameRateTracker tracker = new GeneratedFrameRateTracker();
+        require(tracker.shouldSample(1_000_000_000L),
+                "generated-frame tracker did not request its initial sample");
+        tracker.observe(1_000_000_000L, 100L);
+        require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 100L,
+                "initial cumulative count was mistaken for a generated-frame burst");
+        require(!tracker.shouldSample(1_500_000_000L) && tracker.shouldSample(2_000_000_000L),
+                "generated-frame tracker sampling interval drifted");
+
+        tracker.observe(2_000_000_000L, 160L);
+        require(tracker.framesPerSecond() == 60 && tracker.presentedCount() == 160L,
+                "generated-frame rate did not use the on-screen cumulative delta");
+        tracker.observe(3_000_000_000L, 160L);
+        require(tracker.framesPerSecond() == 0,
+                "stopped generated presentations retained a stale non-zero rate");
+
+        tracker.observe(7_000_000_000L, 220L);
+        require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 220L,
+                "long HUD pause produced an averaged or synthetic generated-frame rate");
+        tracker.observe(8_000_000_000L, 10L);
+        require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 10L,
+                "native counter reset produced a negative or wrapped rate");
+        tracker.observe(9_000_000_000L, 40L);
+        require(tracker.framesPerSecond() == 30,
+                "generated-frame tracker did not recover after a counter reset");
     }
 
     private static void testValidExecutorNeutralContract() {

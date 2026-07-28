@@ -89,6 +89,16 @@ final class MetallumFrameInterpolationTelemetry: @unchecked Sendable {
 }
 
 /**
+ * Read-only HUD counter. This is deliberately the on-screen presentation
+ * counter populated by CAMetalDrawable.addPresentedHandler, not the number of
+ * accepted pairs, interpolation encodes, or submitted command buffers.
+ */
+@_cdecl("metallum_frame_interpolation_presented_generated_count_v1")
+public func metallum_frame_interpolation_presented_generated_count_v1() -> UInt64 {
+    UInt64(max(MetallumFrameInterpolationTelemetry.shared.snapshot().generatedPresentations, 0))
+}
+
+/**
  * The Java renderer retains the coordinator, but the legacy real-only
  * presenter receives only a CAMetalLayer.  This narrow registry lets that
  * presenter drain a live FI pair instead of overtaking it on a second command

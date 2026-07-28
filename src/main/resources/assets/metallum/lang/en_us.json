@@ -19,7 +19,7 @@
   "metallum.options.metalfx_upscaling.tooltip.spatial": "Enables MetalFX Spatial upscaling with Dynamic Resolution Scaling (DRS) targeting 60 FPS (16.66ms). UI stays native (%dx%d).",
   "metallum.options.metalfx_upscaling.tooltip.temporal": "Enables MetalFX Temporal upscaling with Dynamic Resolution Scaling (DRS) targeting 60 FPS (16.66ms). UI stays native (%dx%d).",
   "metallum.options.metalfx_resolution_overlay.name": "Resolution Overlay",
-  "metallum.options.metalfx_resolution_overlay.tooltip": "Displays dynamic render resolution, target display resolution, and scaling percentage on screen for debugging.",
+  "metallum.options.metalfx_resolution_overlay.tooltip": "Displays render resolution, render-loop FPS, and the rate and total of generated frames confirmed as presented on screen.",
   "metallum.options.metalfx_spatial_scaling.off": "Off",
   "metallum.options.metalfx_spatial_scaling.auto": "Auto",
   "metallum.options.metalfx_spatial_scaling.quality": "Quality",

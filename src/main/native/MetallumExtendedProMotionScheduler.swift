@@ -1093,6 +1093,7 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
 
     let callbackOrder = MetallumExtendedProMotionScheduler(enabled: true)
     callbackOrder.updateDisplay(adaptive)
+    let generatedBefore = metallum_frame_interpolation_presented_generated_count_v1()
     callbackOrder.recordPresentationForTests(
         kind: .generated, presentedTime: 10.0, targetInterval: 1.0 / 120.0
     )
@@ -1106,6 +1107,17 @@ public func metallum_extended_promotion_scheduler_stress_v1() -> Int32 {
         targetInterval: 1.0 / 120.0
     )
     guard callbackOrder.snapshot().outOfOrderPresentations == 1 else { return -14 }
+    guard metallum_frame_interpolation_presented_generated_count_v1()
+            == generatedBefore + 2 else {
+        return -15
+    }
+    callbackOrder.recordPresentationForTests(
+        kind: .generated, presentedTime: 0, targetInterval: 1.0 / 120.0
+    )
+    guard metallum_frame_interpolation_presented_generated_count_v1()
+            == generatedBefore + 2 else {
+        return -16
+    }
 
     let timer = MetallumPrecisionDeadlineTimer()
     let start = MetallumMonotonicClock.nowNanoseconds()
