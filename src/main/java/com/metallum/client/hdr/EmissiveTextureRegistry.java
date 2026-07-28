@@ -48,7 +48,12 @@ public final class EmissiveTextureRegistry {
      * minimum; authored {@code *_e.png} sidecars remain byte-for-byte intact.
      */
     private static final int GENERATED_EMISSION_MINIMUM_PEAK = 128;
-    private static final int GENERATED_EMISSION_DIM_MINIMUM_PEAK = 30;
+    private static final int GENERATED_EMISSION_DIM_MINIMUM_PEAK = 18;
+    /**
+     * Saturated emissive details must retain their colour without competing
+     * with true white highlights. The cap rises smoothly towards white.
+     */
+    private static final int GENERATED_EMISSION_COLORED_MAXIMUM_PEAK = 176;
     private static final Identifier BLOCK_ATLAS_TEXTURE =
             Identifier.withDefaultNamespace("textures/atlas/blocks.png");
 
@@ -420,6 +425,7 @@ public final class EmissiveTextureRegistry {
         int green = argb >>> 8 & 0xff;
         int blue = argb & 0xff;
         int maximum = Math.max(red, Math.max(green, blue));
+        int minimum = Math.min(red, Math.min(green, blue));
         int minimumPeak = selected
                 ? GENERATED_EMISSION_MINIMUM_PEAK
                 : GENERATED_EMISSION_DIM_MINIMUM_PEAK;
@@ -427,6 +433,11 @@ public final class EmissiveTextureRegistry {
             return alpha << 24 | minimumPeak << 16 | minimumPeak << 8 | minimumPeak;
         }
         int targetPeak = Math.max(maximum, minimumPeak);
+        if (selected && minimum < maximum) {
+            int colorPreservingMaximum = GENERATED_EMISSION_COLORED_MAXIMUM_PEAK
+                    + (minimum * (255 - GENERATED_EMISSION_COLORED_MAXIMUM_PEAK) + 127) / 255;
+            targetPeak = Math.min(targetPeak, colorPreservingMaximum);
+        }
         if (targetPeak == maximum) {
             return argb;
         }
