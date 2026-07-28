@@ -18,6 +18,7 @@ public final class EmissiveTextureRegistryTests {
         testSpriteLayouts();
         testUvProjection();
         testBuiltinMasks();
+        testPartialOverlayQuadSemantics();
         System.out.println("PASS emissive terrain texture registry contracts");
     }
 
@@ -130,6 +131,23 @@ public final class EmissiveTextureRegistryTests {
                 "magma stone pixels are selected");
         require(EmissiveTextureRegistry.builtinMaskMatches(cryingObsidian, 0xff406fe0),
                 "crying-obsidian tear pixels are not selected");
+    }
+
+    private static void testPartialOverlayQuadSemantics() {
+        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 9, false, true, false) == 0,
+                "base quad of a partial overlay pair must not receive HDR emission");
+        require(!SodiumHdrSemantic.isExactTerrainQuad(false, true, false),
+                "base quad of a partial overlay pair must not be exact-emissive");
+
+        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 9, true, true, true) == 15,
+                "partial overlay quad must receive exact HDR emission");
+        require(SodiumHdrSemantic.isExactTerrainQuad(true, true, true),
+                "partial overlay quad must be exact-emissive while the pair is active");
+
+        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 9, false, false, false) == 9,
+                "ordinary terrain quad must retain its block-light emission");
+        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 0, true, false, false) == 15,
+                "existing exact-emissive mod quad must retain exact HDR emission");
     }
 
     private static boolean close(final float actual, final float expected) {

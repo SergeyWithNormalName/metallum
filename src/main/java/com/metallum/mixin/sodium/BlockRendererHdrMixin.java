@@ -52,6 +52,9 @@ abstract class BlockRendererHdrMixin {
     private TextureAtlasSprite metallum$partialEmissionOverlay;
 
     @Unique
+    private boolean metallum$bufferingPartialEmissionOverlay;
+
+    @Unique
     private boolean metallum$originalQuadEmissive;
 
     @Inject(method = "renderModel", at = @At("HEAD"), remap = false)
@@ -128,8 +131,10 @@ abstract class BlockRendererHdrMixin {
             }
             quad.setEmissive(true);
             quad.cachedSprite(overlay);
+            this.metallum$bufferingPartialEmissionOverlay = true;
             original.call(renderer, quad, METALLUM_FULL_BRIGHTNESS, metallum$overlayMaterial(material));
         } finally {
+            this.metallum$bufferingPartialEmissionOverlay = false;
             metallum$restoreQuadState(quad, base);
             this.metallum$partialEmissionOverlay = null;
         }
@@ -150,14 +155,19 @@ abstract class BlockRendererHdrMixin {
             final Material material,
             final CallbackInfo ci
     ) {
-        boolean exact = quad.emissive() && this.metallum$partialEmissionOverlay == null;
-        int emission = this.metallum$partialEmissionOverlay != null
-                ? 0
-                : SodiumHdrSemantic.surfaceEmission(
-                        this.metallum$blockState,
-                        this.metallum$blockLightEmission,
-                        exact
-                );
+        boolean partialOverlay = this.metallum$partialEmissionOverlay != null;
+        boolean exact = SodiumHdrSemantic.isExactTerrainQuad(
+                quad.emissive(),
+                partialOverlay,
+                this.metallum$bufferingPartialEmissionOverlay
+        );
+        int emission = SodiumHdrSemantic.terrainQuadSurfaceEmission(
+                this.metallum$blockState,
+                this.metallum$blockLightEmission,
+                quad.emissive(),
+                partialOverlay,
+                this.metallum$bufferingPartialEmissionOverlay
+        );
         SodiumHdrSemantic.tagQuad(this.vertices, emission, exact);
     }
 

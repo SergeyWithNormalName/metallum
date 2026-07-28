@@ -36,6 +36,48 @@ public final class SodiumHdrSemantic {
         return emission;
     }
 
+    /**
+     * Decides whether a terrain quad uses the exact HDR-emission semantic.
+     * Partial-emission textures are written twice: their base pass is normally
+     * lit, while the immediately following mask overlay is exact-emissive.
+     *
+     * <p>This stays allocation-free because Sodium calls it for every terrain
+     * quad.</p>
+     */
+    public static boolean isExactTerrainQuad(
+            final boolean quadExactEmission,
+            final boolean hasPartialEmissionOverlay,
+            final boolean bufferingPartialEmissionOverlay
+    ) {
+        return bufferingPartialEmissionOverlay || (quadExactEmission && !hasPartialEmissionOverlay);
+    }
+
+    /**
+     * Resolves surface emission for either half of a partial-emission terrain
+     * pair. The base must not emit; the overlay alone is full-bright HDR.
+     */
+    public static int terrainQuadSurfaceEmission(
+            final BlockState state,
+            final int blockLightEmission,
+            final boolean quadExactEmission,
+            final boolean hasPartialEmissionOverlay,
+            final boolean bufferingPartialEmissionOverlay
+    ) {
+        if (hasPartialEmissionOverlay && !bufferingPartialEmissionOverlay) {
+            return 0;
+        }
+
+        return surfaceEmission(
+                state,
+                blockLightEmission,
+                isExactTerrainQuad(
+                        quadExactEmission,
+                        hasPartialEmissionOverlay,
+                        bufferingPartialEmissionOverlay
+                )
+        );
+    }
+
     private static boolean isAmethystGrowth(final BlockState state) {
         return state.is(Blocks.SMALL_AMETHYST_BUD)
                 || state.is(Blocks.MEDIUM_AMETHYST_BUD)
