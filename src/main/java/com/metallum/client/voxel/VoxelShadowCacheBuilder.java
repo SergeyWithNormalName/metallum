@@ -16,6 +16,7 @@ import java.util.function.BooleanSupplier;
 /** Pure CPU builder for the bounded, update-driven L6 point-shadow cube cache. */
 public final class VoxelShadowCacheBuilder {
     private static final double DIRECTION_EPSILON = 1.0e-12;
+    private static final float[] PACKED_TRANSMITTANCE = packedTransmittanceTable();
 
     public record Result(
             byte[] payload,
@@ -132,35 +133,36 @@ public final class VoxelShadowCacheBuilder {
         VoxelClipmapSnapshot.Level level = levelIndex < 0
                 ? null : snapshot.clipmap().levels().get(levelIndex);
         boolean complete = level != null;
+        TraceScratch scratch = new TraceScratch();
         for (int face = 0; face < LocalVoxelShadowAtlasLayout.FACE_COUNT; face++) {
             for (int y = 0; y < edge; y++) {
                 for (int x = 0; x < edge; x++) {
                     if (cancelled.getAsBoolean()) {
                         throw new CancellationException("Superseded L6 shadow page build");
                     }
-                    Direction direction = cubeDirection(face, x, y, edge);
-                    Trace trace = trace(
-                            snapshot, light, level, direction, maxSteps, cancelled
+                    cubeDirection(face, x, y, edge, scratch);
+                    trace(
+                            snapshot, light, level, scratch, maxSteps, cancelled
                     );
                     totalRays++;
-                    if (!trace.valid) {
+                    if (!scratch.valid) {
                         complete = false;
                         continue;
                     }
-                    if (trace.count == 0) {
+                    if (scratch.count == 0) {
                         continue;
                     }
                     hitRays++;
                     int base = pageEntryOffset(face, x, y, 0, edge);
-                    for (int layer = 0; layer < trace.count; layer++) {
+                    for (int layer = 0; layer < scratch.count; layer++) {
                         output.putFloat(
                                 base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES,
-                                trace.distances[layer]
+                                scratch.distances[layer]
                         );
                         output.putFloat(
                                 base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
                                         + Float.BYTES,
-                                trace.visibility[layer]
+                                scratch.visibility[layer]
                         );
                     }
                 }
@@ -534,64 +536,69 @@ public final class VoxelShadowCacheBuilder {
                 && Arrays.equals(left.optical(), right.optical()));
     }
 
-    private static Trace trace(
+    private static void trace(
             final VoxelShadowCacheMirror.Snapshot snapshot,
             final AdvancedLight light,
             final VoxelClipmapSnapshot.Level level,
-            final Direction direction,
+            final TraceScratch scratch,
             final int maxSteps,
             final BooleanSupplier cancelled
     ) {
+        scratch.beginRay();
         double radius = light.radius();
         if (level == null || !(radius > 0.0) || !Double.isFinite(radius)) {
-            return Trace.INVALID;
+            return;
         }
-        Point source = new Point(light.x(), light.y(), light.z());
-        Point target = new Point(
-                light.x() + direction.x * radius,
-                light.y() + direction.y * radius,
-                light.z() + direction.z * radius
-        );
+        double sourceX = light.x();
+        double sourceY = light.y();
+        double sourceZ = light.z();
+        double targetX = light.x() + scratch.directionX * radius;
+        double targetY = light.y() + scratch.directionY * radius;
+        double targetZ = light.z() + scratch.directionZ * radius;
         double voxelSize = 1.0 / level.subdivision();
         double startDistance = Math.min(voxelSize * 0.08, radius * 0.02);
-        Point start = new Point(
-                source.x + direction.x * startDistance,
-                source.y + direction.y * startDistance,
-                source.z + direction.z * startDistance
-        );
-        if (!inside(level, start)) {
-            return Trace.INVALID;
+        double startX = sourceX + scratch.directionX * startDistance;
+        double startY = sourceY + scratch.directionY * startDistance;
+        double startZ = sourceZ + scratch.directionZ * startDistance;
+        if (!inside(level, startX, startY, startZ)) {
+            return;
         }
-        return traverse(
-                snapshot.bricks(), level, light, start, target,
-                direction, startDistance, radius, maxSteps, cancelled
+        traverse(
+                snapshot.bricks(), level, light,
+                startX, startY, startZ,
+                targetX, targetY, targetZ,
+                startDistance, radius, maxSteps, cancelled, scratch
         );
     }
 
-    private static Trace traverse(
+    private static void traverse(
             final Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> bricks,
             final VoxelClipmapSnapshot.Level level,
             final AdvancedLight light,
-            final Point start,
-            final Point end,
-            final Direction direction,
+            final double startWorldX,
+            final double startWorldY,
+            final double startWorldZ,
+            final double endWorldX,
+            final double endWorldY,
+            final double endWorldZ,
             final double startDistance,
             final double radius,
             final int maxSteps,
-            final BooleanSupplier cancelled
+            final BooleanSupplier cancelled,
+            final TraceScratch scratch
     ) {
         int scale = level.subdivision();
-        double startX = start.x * scale;
-        double startY = start.y * scale;
-        double startZ = start.z * scale;
-        double endX = end.x * scale;
-        double endY = end.y * scale;
-        double endZ = end.z * scale;
+        double startX = startWorldX * scale;
+        double startY = startWorldY * scale;
+        double startZ = startWorldZ * scale;
+        double endX = endWorldX * scale;
+        double endY = endWorldY * scale;
+        double endZ = endWorldZ * scale;
         double deltaX = endX - startX;
         double deltaY = endY - startY;
         double deltaZ = endZ - startZ;
         if (!finite(deltaX, deltaY, deltaZ)) {
-            return Trace.INVALID;
+            return;
         }
 
         int cellX = floorToInt(startX);
@@ -603,7 +610,7 @@ public final class VoxelShadowCacheBuilder {
         if (cellX == Integer.MIN_VALUE || cellY == Integer.MIN_VALUE
                 || cellZ == Integer.MIN_VALUE || endCellX == Integer.MIN_VALUE
                 || endCellY == Integer.MIN_VALUE || endCellZ == Integer.MIN_VALUE) {
-            return Trace.INVALID;
+            return;
         }
 
         int stepX = Double.compare(deltaX, 0.0);
@@ -619,59 +626,60 @@ public final class VoxelShadowCacheBuilder {
         int lastBlockY = Integer.MIN_VALUE;
         int lastBlockZ = Integer.MIN_VALUE;
         float cumulativeVisibility = 1.0f;
-        float[] distances = new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
-        float[] visibility = new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
         int hitCount = 0;
         double entryT = 0.0;
-        BrickCursor brickCursor = new BrickCursor();
 
         for (int step = 0; step < maxSteps; step++) {
             if (cancelled.getAsBoolean()) {
                 throw new CancellationException("Superseded L6 shadow ray");
             }
             if (cellX == endCellX && cellY == endCellY && cellZ == endCellZ) {
-                return new Trace(true, hitCount, distances, visibility);
+                scratch.complete(hitCount);
+                return;
             }
             int blockX = Math.floorDiv(cellX, scale);
             int blockY = Math.floorDiv(cellY, scale);
             int blockZ = Math.floorDiv(cellZ, scale);
-            Sample sample = sample(bricks, level, brickCursor, cellX, cellY, cellZ);
-            if (!sample.valid) {
-                return Trace.INVALID;
+            sample(bricks, level, scratch, cellX, cellY, cellZ);
+            if (!scratch.sampleValid) {
+                return;
             }
-            boolean emitterBlock = sample.occupied
+            boolean emitterBlock = scratch.sampleOccupied
                     && light.emitsFromBlock(blockX, blockY, blockZ);
-            if (!emitterBlock && sample.occupied
+            if (!emitterBlock && scratch.sampleOccupied
                     && (blockX != lastBlockX || blockY != lastBlockY
                     || blockZ != lastBlockZ)) {
-                cumulativeVisibility *= sample.transmittance;
+                cumulativeVisibility *= scratch.sampleTransmittance;
                 if (!Float.isFinite(cumulativeVisibility)) {
-                    return Trace.INVALID;
+                    return;
                 }
                 float hitDistance = (float) Math.max(
                         0.0,
                         startDistance + entryT * (radius - startDistance)
                 );
                 if (hitCount < LocalVoxelShadowLayout.CACHE_LAYER_COUNT) {
-                    distances[hitCount] = hitDistance;
-                    visibility[hitCount] = cumulativeVisibility;
+                    scratch.distances[hitCount] = hitDistance;
+                    scratch.visibility[hitCount] = cumulativeVisibility;
                     hitCount++;
                 } else {
-                    distances[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1] = hitDistance;
-                    visibility[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
+                    scratch.distances[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
+                            = hitDistance;
+                    scratch.visibility[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
                             = cumulativeVisibility;
                 }
                 lastBlockX = blockX;
                 lastBlockY = blockY;
                 lastBlockZ = blockZ;
                 if (cumulativeVisibility <= 0.0f) {
-                    return new Trace(true, hitCount, distances, visibility);
+                    scratch.complete(hitCount);
+                    return;
                 }
             }
 
             double next = Math.min(tMaxX, Math.min(tMaxY, tMaxZ));
             if (!Double.isFinite(next) || next > 1.0) {
-                return new Trace(true, hitCount, distances, visibility);
+                scratch.complete(hitCount);
+                return;
             }
             double tie = next + 1.0e-10;
             if (tMaxX <= tie) {
@@ -688,16 +696,16 @@ public final class VoxelShadowCacheBuilder {
             }
             entryT = next;
             if (cellX == endCellX && cellY == endCellY && cellZ == endCellZ) {
-                return new Trace(true, hitCount, distances, visibility);
+                scratch.complete(hitCount);
+                return;
             }
         }
-        return Trace.INVALID;
     }
 
-    private static Sample sample(
+    private static void sample(
             final Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> bricks,
             final VoxelClipmapSnapshot.Level level,
-            final BrickCursor cursor,
+            final TraceScratch scratch,
             final int cellX,
             final int cellY,
             final int cellZ
@@ -711,7 +719,7 @@ public final class VoxelShadowCacheBuilder {
         int logicalBrickY = Math.floorDiv(blockY, brickBlockEdge);
         int logicalBrickZ = Math.floorDiv(blockZ, brickBlockEdge);
         int dimension = level.brickDimension();
-        VoxelShadowCacheMirror.Brick brick = cursor.resolve(
+        VoxelShadowCacheMirror.Brick brick = scratch.brickCursor.resolve(
                 bricks,
                 level.level(),
                 logicalBrickX,
@@ -723,14 +731,16 @@ public final class VoxelShadowCacheBuilder {
                 || brick.logicalX() != logicalBrickX
                 || brick.logicalY() != logicalBrickY
                 || brick.logicalZ() != logicalBrickZ) {
-            return Sample.INVALID;
+            scratch.setSample(false, false, 1.0f);
+            return;
         }
         int localCellX = Math.floorMod(cellX, VoxelBrickPatch.LOGICAL_EDGE);
         int localCellY = Math.floorMod(cellY, VoxelBrickPatch.LOGICAL_EDGE);
         int localCellZ = Math.floorMod(cellZ, VoxelBrickPatch.LOGICAL_EDGE);
         int word = brick.occupancy()[localCellZ * VoxelBrickPatch.LOGICAL_EDGE + localCellY];
         if ((word & (1 << localCellX)) == 0) {
-            return Sample.EMPTY;
+            scratch.setSample(true, false, 1.0f);
+            return;
         }
         int localBlockX = Math.floorMod(blockX, brickBlockEdge);
         int localBlockY = Math.floorMod(blockY, brickBlockEdge);
@@ -739,32 +749,35 @@ public final class VoxelShadowCacheBuilder {
                 * brickBlockEdge + localBlockX;
         byte[] optical = brick.optical();
         if (opticalIndex < 0 || opticalIndex >= optical.length) {
-            return Sample.INVALID;
+            scratch.setSample(false, false, 1.0f);
+            return;
         }
-        try {
-            VoxelMaterialDescriptor material = VoxelMaterialDescriptor.fromPackedUnsignedByte(
-                    Byte.toUnsignedInt(optical[opticalIndex])
-            );
-            if (material.materialClass() == VoxelMaterialClass.AIR) {
-                return Sample.INVALID;
-            }
-            float transmittance = material.transmittance();
-            return Float.isFinite(transmittance)
-                    ? new Sample(true, true, transmittance) : Sample.INVALID;
-        } catch (IllegalArgumentException failure) {
-            return Sample.INVALID;
+        int packed = Byte.toUnsignedInt(optical[opticalIndex]);
+        if (packed >>> VoxelMaterialDescriptor.CLASS_SHIFT
+                == VoxelMaterialClass.AIR.abiId()) {
+            scratch.setSample(false, false, 1.0f);
+            return;
         }
+        float transmittance = PACKED_TRANSMITTANCE[packed];
+        scratch.setSample(
+                Float.isFinite(transmittance), true, transmittance
+        );
     }
 
-    private static boolean inside(final VoxelClipmapSnapshot.Level level, final Point point) {
+    private static boolean inside(
+            final VoxelClipmapSnapshot.Level level,
+            final double x,
+            final double y,
+            final double z
+    ) {
         int brickBlockEdge = VoxelBrickPatch.LOGICAL_EDGE / level.subdivision();
         double minimumX = (double) level.originBrickX() * brickBlockEdge;
         double minimumY = (double) level.originBrickY() * brickBlockEdge;
         double minimumZ = (double) level.originBrickZ() * brickBlockEdge;
         double span = (double) level.brickDimension() * brickBlockEdge;
-        return point.x >= minimumX && point.x < minimumX + span
-                && point.y >= minimumY && point.y < minimumY + span
-                && point.z >= minimumZ && point.z < minimumZ + span;
+        return x >= minimumX && x < minimumX + span
+                && y >= minimumY && y < minimumY + span
+                && z >= minimumZ && z < minimumZ + span;
     }
 
     private static boolean containsSphere(
@@ -794,11 +807,12 @@ public final class VoxelShadowCacheBuilder {
         return (long) Math.ceil(continuous) + 3L;
     }
 
-    private static Direction cubeDirection(
+    private static void cubeDirection(
             final int face,
             final int x,
             final int y,
-            final int edge
+            final int edge,
+            final TraceScratch scratch
     ) {
         double u = 2.0 * (x + 0.5) / edge - 1.0;
         double v = 2.0 * (y + 0.5) / edge - 1.0;
@@ -818,7 +832,9 @@ public final class VoxelShadowCacheBuilder {
         if (!(length > DIRECTION_EPSILON) || !Double.isFinite(length)) {
             throw new IllegalStateException("Invalid L6 cache cube direction");
         }
-        return new Direction(rawX / length, rawY / length, rawZ / length);
+        scratch.directionX = rawX / length;
+        scratch.directionY = rawY / length;
+        scratch.directionZ = rawZ / length;
     }
 
     private static int pageEntryOffset(
@@ -860,15 +876,13 @@ public final class VoxelShadowCacheBuilder {
         return Double.isFinite(x) && Double.isFinite(y) && Double.isFinite(z);
     }
 
-    private record Point(double x, double y, double z) {
-    }
-
-    private record Direction(double x, double y, double z) {
-    }
-
-    private record Sample(boolean valid, boolean occupied, float transmittance) {
-        private static final Sample INVALID = new Sample(false, false, 1.0f);
-        private static final Sample EMPTY = new Sample(true, false, 1.0f);
+    private static float[] packedTransmittanceTable() {
+        float[] table = new float[VoxelMaterialDescriptor.PACKED_MASK + 1];
+        for (int packed = 0; packed < table.length; packed++) {
+            table[packed] = VoxelMaterialDescriptor.fromPackedUnsignedByte(packed)
+                    .transmittance();
+        }
+        return table;
     }
 
     /** Avoids allocating and hashing one toroidal key for every DDA cell. */
@@ -906,28 +920,39 @@ public final class VoxelShadowCacheBuilder {
         }
     }
 
-    private static final class Trace {
-        private static final Trace INVALID = new Trace(
-                false, 0,
-                new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT],
-                new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT]
-        );
+    private static final class TraceScratch {
+        private final float[] distances =
+                new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
+        private final float[] visibility =
+                new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
+        private final BrickCursor brickCursor = new BrickCursor();
+        private double directionX;
+        private double directionY;
+        private double directionZ;
+        private boolean valid;
+        private int count;
+        private boolean sampleValid;
+        private boolean sampleOccupied;
+        private float sampleTransmittance;
 
-        private final boolean valid;
-        private final int count;
-        private final float[] distances;
-        private final float[] visibility;
+        private void beginRay() {
+            this.valid = false;
+            this.count = 0;
+        }
 
-        private Trace(
-                final boolean valid,
-                final int count,
-                final float[] distances,
-                final float[] visibility
+        private void complete(final int hitCount) {
+            this.valid = true;
+            this.count = hitCount;
+        }
+
+        private void setSample(
+                final boolean validSample,
+                final boolean occupied,
+                final float transmittance
         ) {
-            this.valid = valid;
-            this.count = count;
-            this.distances = distances;
-            this.visibility = visibility;
+            this.sampleValid = validSample;
+            this.sampleOccupied = occupied;
+            this.sampleTransmittance = transmittance;
         }
     }
 }

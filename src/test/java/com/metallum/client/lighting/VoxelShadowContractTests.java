@@ -14,14 +14,22 @@ import com.metallum.client.voxel.VoxelShadowTraversal;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.metallum.client.voxel.VoxelWorldToken;
 
+import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Standalone L6 CPU/ABI contracts; intentionally runnable without a Metal device. */
 public final class VoxelShadowContractTests {
@@ -405,10 +413,33 @@ public final class VoxelShadowContractTests {
             cancelled = true;
         }
         require(cancelled, "superseded L6 CPU page ignored cooperative cancellation");
+        AtomicInteger cancellationChecks = new AtomicInteger();
+        cancelled = false;
+        try {
+            VoxelShadowCacheBuilder.buildPage(
+                    snapshot, light, 64, 96,
+                    () -> cancellationChecks.incrementAndGet() >= 100
+            );
+        } catch (CancellationException expected) {
+            cancelled = true;
+        }
+        require(cancelled && cancellationChecks.get() == 100,
+                "L6 CPU page lost deterministic mid-traversal cancellation");
         for (int edge : LocalVoxelShadowAtlasLayout.PAGE_EDGES) {
             VoxelShadowCacheBuilder.PageResult page = VoxelShadowCacheBuilder.buildPage(
                     snapshot, light, edge, 96
             );
+            require(canonicalPageSha256(page.payload()).equals(
+                            expectedCanonicalPageSha256(edge)
+                    ),
+                    "L6 scratch refactor changed the canonical resident-page oracle");
+            if ("1".equals(System.getenv("METALLUM_L6_BUILDER_PROBE"))) {
+                System.out.printf(
+                        "L6_PAGE_ORACLE edge=%d canonical_sha256=%s%n",
+                        edge,
+                        canonicalPageSha256(page.payload())
+                );
+            }
             require(page.edge() == edge
                             && page.payload().length
                             == LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge)
@@ -436,6 +467,8 @@ public final class VoxelShadowContractTests {
         );
         require(Arrays.equals(legacy.payload(), page64.payload()),
                 "legacy fixed cache no longer exactly matches its 64-edge resident page");
+        verifyParallelPageBuilds(snapshot, light);
+        reportBuilderAllocation(snapshot, light);
 
         Map<VoxelShadowCacheMirror.Key, VoxelShadowCacheMirror.Brick> missingBrick =
                 new HashMap<>(snapshot.bricks());
@@ -462,6 +495,116 @@ public final class VoxelShadowContractTests {
         require(!uncoveredPage.complete() && uncoveredPage.cacheLevel() == -1,
                 "uncovered resident page could be published as a visible READY cache");
         mirror.reset();
+    }
+
+    private static void verifyParallelPageBuilds(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light
+    ) {
+        VoxelShadowCacheBuilder.PageResult expected =
+                VoxelShadowCacheBuilder.buildPage(snapshot, light, 16, 96);
+        ExecutorService workers = Executors.newFixedThreadPool(4);
+        try {
+            List<CompletableFuture<VoxelShadowCacheBuilder.PageResult>> futures =
+                    new ArrayList<>();
+            for (int index = 0; index < 8; index++) {
+                futures.add(CompletableFuture.supplyAsync(
+                        () -> VoxelShadowCacheBuilder.buildPage(
+                                snapshot, light, 16, 96
+                        ),
+                        workers
+                ));
+            }
+            for (CompletableFuture<VoxelShadowCacheBuilder.PageResult> future : futures) {
+                VoxelShadowCacheBuilder.PageResult actual;
+                try {
+                    actual = future.join();
+                } catch (CompletionException failure) {
+                    throw new AssertionError("parallel L6 page build failed", failure);
+                }
+                require(Arrays.equals(expected.payload(), actual.payload())
+                                && expected.raysWithHits() == actual.raysWithHits()
+                                && expected.totalRays() == actual.totalRays()
+                                && expected.cacheLevel() == actual.cacheLevel()
+                                && expected.complete() == actual.complete(),
+                        "parallel L6 page builds shared mutable scratch state");
+            }
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    private static void reportBuilderAllocation(
+            final VoxelShadowCacheMirror.Snapshot snapshot,
+            final AdvancedLight light
+    ) {
+        if (!"1".equals(System.getenv("METALLUM_L6_BUILDER_PROBE"))) {
+            return;
+        }
+        java.lang.management.ThreadMXBean platformBean =
+                ManagementFactory.getThreadMXBean();
+        if (!(platformBean instanceof com.sun.management.ThreadMXBean allocationBean)
+                || !allocationBean.isThreadAllocatedMemorySupported()) {
+            throw new AssertionError("Thread allocation telemetry is unavailable");
+        }
+        allocationBean.setThreadAllocatedMemoryEnabled(true);
+        for (int warmup = 0; warmup < 3; warmup++) {
+            VoxelShadowCacheBuilder.buildPage(snapshot, light, 64, 96);
+        }
+        long threadId = Thread.currentThread().threadId();
+        long allocationBefore = allocationBean.getThreadAllocatedBytes(threadId);
+        long timeBefore = System.nanoTime();
+        int iterations = 5;
+        VoxelShadowCacheBuilder.PageResult lastResult = null;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            lastResult =
+                    VoxelShadowCacheBuilder.buildPage(snapshot, light, 64, 96);
+            require(lastResult.complete(), "L6 allocation probe produced an incomplete page");
+        }
+        long elapsedNanos = System.nanoTime() - timeBefore;
+        long allocatedBytes = allocationBean.getThreadAllocatedBytes(threadId)
+                - allocationBefore;
+        System.out.printf(
+                "L6_BUILDER_PROBE iterations=%d allocated_bytes=%d bytes_per_page=%.1f "
+                        + "elapsed_ms=%.3f ms_per_page=%.3f payload_sha256=%s hits=%d/%d%n",
+                iterations,
+                allocatedBytes,
+                allocatedBytes / (double) iterations,
+                elapsedNanos / 1_000_000.0,
+                elapsedNanos / 1_000_000.0 / iterations,
+                canonicalPageSha256(lastResult.payload()),
+                lastResult.raysWithHits(),
+                lastResult.totalRays()
+        );
+    }
+
+    private static String canonicalPageSha256(final byte[] bytes) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            ByteBuffer words = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
+            for (int offset = 0; offset < bytes.length; offset += Integer.BYTES) {
+                int word = words.getInt(offset);
+                digest.update((byte) (word >>> 24));
+                digest.update((byte) (word >>> 16));
+                digest.update((byte) (word >>> 8));
+                digest.update((byte) word);
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new AssertionError("SHA-256 is unavailable", impossible);
+        }
+    }
+
+    private static String expectedCanonicalPageSha256(final int edge) {
+        return switch (edge) {
+            case 8 -> "f550023262f86d5fb114652e70ba82debb31e977067147c6e9f46f2de007a691";
+            case 16 -> "080b2d9084dfdc8980e4034631b9a9cc0d4e1a081c09e2907e6cbe64ce6ef478";
+            case 32 -> "5f102174b51d1cec5017b468fa5905998145093f29b67cd2cde57c8f26059d4d";
+            case 64 -> "6b26eb1adcae0a799902493bd37a8fb0d302576719689b66fc694b5d8683c79b";
+            default -> throw new IllegalArgumentException(
+                    "Unsupported resident L6 page edge: " + edge
+            );
+        };
     }
 
     private static void testFinePartialOpaqueOccluders() {

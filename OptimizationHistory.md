@@ -1243,3 +1243,88 @@ CPU p95/p99/max `-7.03/-13.21/-38.07%`, present p95/p99/max
 **Итог:** **ВНЕДРЕНО/accepted** как lossless архитектурная оптимизация block-change
 stutter. Не переносить packing раньше matching Sodium publication и не снижать
 CRITICAL priority уже готовой replacement geometry.
+
+## 2026-07-29 — L6: page-local DDA scratch и packed-material lookup
+
+### Причина и границы кандидата
+
+`VoxelShadowCacheBuilder.buildPage` строит для 64-edge cache page ровно
+`6 × 64² = 24 576` лучей. До изменения каждый луч создавал `Direction`, три
+`Point`, два `float[4]`, `BrickCursor` и обычно `Trace`; occupied sample дополнительно
+создавал `VoxelMaterialDescriptor`, clone `VoxelMaterialClass.values()` и `Sample`.
+Это background worker path, но burst нескольких L6 rebuild конкурирует за CPU и
+создаёт GC pressure именно при появлении/изменении локального источника и geometry.
+
+Git archaeology обнаружил старую, неслитую и не описанную в журнале ветку
+`b188498 perf: reuse L6 page ray scratch`. Она не переносилась автоматически:
+текущий код и L5/L6 contracts изменились. На актуальном `promotion` гипотеза
+перепроверена заново и расширена только в том же allocation scope: один
+page-local `TraceScratch` теперь владеет hit arrays, `BrickCursor`, direction и
+sample scalars, а packed optical byte читает precomputed transmittance LUT. LUT
+строится через прежний `VoxelMaterialDescriptor.fromPackedUnsignedByte`, поэтому
+quantization и float bits не меняются. Scratch не static/ThreadLocal и не делится
+между atlas-builder и atlas-refresh workers.
+
+Не менялись edge/LOD/maxSteps, порядок DDA arithmetic, tie handling, cancellation
+polling, emitter self-exclusion, atlas layout, payload/ABI, приоритет workers или
+качество shadows. `PageResult` defensive clone и allocation `Key` на переходе
+между bricks оставлены отдельными будущими кандидатами.
+
+### Allocation и correctness oracle
+
+Детерминированный прогретый probe измерял total thread-allocated bytes пяти
+последовательных 64-edge pages. Baseline дважды дал `7 972 329.6 B/page` и
+`10.439/10.444 ms/page`; candidate дал `3 248 425.6`, `3 248 425.6` и
+`3 248 408.0 B/page`, то есть **−59.25% allocations**. Время sparse unit fixture
+осталось практически нейтральным (`~10.44 → ~10.37 ms/page`); это не заявляется
+как DDA throughput win. Метрика включает два payload arrays из defensive clone,
+поэтому показывает conservative total allocation, а не только inner loop.
+
+Для всех page edges `8/16/32/64` добавлены endian-independent SHA-256 oracles по
+canonical 32-bit words. 64-edge result сохранил `3171/24576` hits; payload
+canonical SHA-256 остался
+`6b26eb1adcae0a799902493bd37a8fb0d302576719689b66fc694b5d8683c79b`.
+Также проходят immediate и deterministic mid-DDA cancellation, восемь concurrent
+16-edge builds против sequential byte oracle и существующие opaque/glass/slab/
+fence/missing-coverage/self-emitter contracts.
+
+### Static-L6 toggle A/B
+
+Старый `hdrtest-torch-toggle-v1` оказался невалидным для этой гипотезы:
+`resident_shadows=0`, `shadow_live_bytes=0`, ни одного фактического static L6 page.
+Добавлен `hdrtest-l6-static-toggle-v1`: тот же immutable Overworld fixture и pose,
+но torch в подтверждённой air/grass точке `[96,75,-96]`, достаточно близко к
+camera для 64-edge static shadow page. Contract прежний: Built-in Retina
+`3024×1964@120`, fullscreen HDR, Balanced, MetalFX OFF, VSync OFF, `300+900`,
+detailed timing. Временный INFO-log существующего `L6 atlas page ready` использован
+только для attribution и возвращён в DEBUG.
+
+Два baseline из detached `00cbb37` и два чистых candidate run имели одинаковые
+`26/8` rebuild requests, `14/7` meshing tasks, `16/8` outputs,
+`1 032 320` accepted bytes, zero errors/overflow и `0` dropped timing events.
+Candidate `20260728T221818Z-...-candidate-buildms-detailed-off` исключён: epoch
+пересёкся с initial chunk queue (`158` tasks).
+
+| Pair mean | FPS / min window | 1% / 0.1% low | CPU p95 / p99 / max | present p95 / p99 / max |
+|---|---:|---:|---:|---:|
+| Baseline | 61.564 / 58.951 | 38.703 / 36.186 | 5.542 / 10.123 / 19.732 ms | 19.121 / 23.196 / 32.238 ms |
+| Page scratch | 61.881 / 59.154 | 41.151 / 37.088 | 5.379 / 8.254 / 16.631 ms | 18.967 / 22.279 / 29.594 ms |
+
+Средний FPS/min-window почти нейтральны (`+0.52/+0.34%`), а stutter tails
+улучшились: 1%/0.1% low `+6.33/+2.49%`, CPU p95/p99/max
+`−2.94/−18.46/−15.71%`, present p95/p99/max `−0.80/−3.95/−8.20%`.
+Presenting GPU p95/p99 улучшились `−2.07/−2.78%`, но worst GPU был шумно хуже
+`+9.47%`; это не GPU optimization. Четыре фактических 64-edge rebuild заняли в
+среднем `19.259 → 18.817 ms` (`−2.30%`), слишком мало для отдельного latency claim.
+
+Baseline artifacts:
+`20260728T221623Z-...-l6-builder-baseline-buildms-diagnostic-off` и
+`20260728T222013Z-...-l6-builder-baseline-buildms-repeat-off`.
+Clean candidate artifacts:
+`20260728T222138Z-...-l6-builder-candidate-buildms-repeat-off` и
+`20260728T222337Z-...-l6-builder-candidate-buildms-clean-repeat-off`.
+
+**Итог:** **ВНЕДРЕНО/accepted** как lossless L6 allocation/CPU-tail optimization.
+Не заявлять рост среднего FPS или заметное ускорение самой DDA. Следующий отдельный
+кандидат — убрать `VoxelShadowCacheMirror.Key` allocation на brick transition либо
+устранить второй page payload clone с явным ownership contract; не смешивать их.
