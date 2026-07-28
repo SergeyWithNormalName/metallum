@@ -11,6 +11,14 @@ public final class SodiumHdrSemantic {
     private static final AtomicBoolean ACTIVE_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean MATERIAL_CONFLICT_LOGGED = new AtomicBoolean();
     private static final int AMETHYST_GROWTH_SURFACE_EMISSION = 2;
+    /**
+     * Gamma 1.75 remap of Minecraft's 0..15 light-source levels. Keeping it
+     * as a lookup table makes terrain meshing allocation-free and ensures
+     * level 15 remains the exact HDR reference point.
+     */
+    private static final int[] PARTIAL_OVERLAY_EMISSION_CURVE = {
+            0, 1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 13, 15
+    };
 
     private SodiumHdrSemantic() {
     }
@@ -72,7 +80,7 @@ public final class SodiumHdrSemantic {
         }
         if (bufferingPartialEmissionOverlay) {
             int sourceEmission = Math.clamp(blockLightEmission, 0, 15);
-            return sourceEmission > 0 ? sourceEmission : 15;
+            return sourceEmission > 0 ? partialOverlayEmissionStrength(sourceEmission) : 15;
         }
 
         return surfaceEmission(
@@ -84,6 +92,10 @@ public final class SodiumHdrSemantic {
                         bufferingPartialEmissionOverlay
                 )
         );
+    }
+
+    static int partialOverlayEmissionStrength(final int blockLightEmission) {
+        return PARTIAL_OVERLAY_EMISSION_CURVE[Math.clamp(blockLightEmission, 0, 15)];
     }
 
     private static boolean isAmethystGrowth(final BlockState state) {

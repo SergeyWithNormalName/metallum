@@ -148,8 +148,12 @@ public final class EmissiveTextureRegistryTests {
         require(!SodiumHdrSemantic.isExactTerrainQuad(false, true, false),
                 "base quad of a partial overlay pair must not be exact-emissive");
 
-        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 9, true, true, true) == 9,
-                "partial overlay quad did not retain its block-state emission strength");
+        require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 9, true, true, true) == 6,
+                "partial overlay quad did not apply the non-linear block-state emission curve");
+        require(SodiumHdrSemantic.partialOverlayEmissionStrength(7) == 4
+                        && SodiumHdrSemantic.partialOverlayEmissionStrength(14) == 13
+                        && SodiumHdrSemantic.partialOverlayEmissionStrength(15) == 15,
+                "partial overlay emission curve does not preserve low/high source contrast");
         require(SodiumHdrSemantic.isExactTerrainQuad(true, true, true),
                 "partial overlay quad must be exact-emissive while the pair is active");
 
