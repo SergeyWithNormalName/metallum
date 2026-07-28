@@ -18,6 +18,7 @@ public final class EmissiveTextureRegistryTests {
         testSpriteLayouts();
         testUvProjection();
         testBuiltinMasks();
+        testSoftGeneratedMaskPixels();
         testPartialOverlayQuadSemantics();
         System.out.println("PASS emissive terrain texture registry contracts");
     }
@@ -148,6 +149,38 @@ public final class EmissiveTextureRegistryTests {
                 "ordinary terrain quad must retain its block-light emission");
         require(SodiumHdrSemantic.terrainQuadSurfaceEmission(null, 0, true, false, false) == 15,
                 "existing exact-emissive mod quad must retain exact HDR emission");
+    }
+
+    private static void testSoftGeneratedMaskPixels() {
+        int darkRed = 0xff401410;
+        int direct = EmissiveTextureRegistry.generatedMaskPixel(darkRed, true, false);
+        int edge = EmissiveTextureRegistry.generatedMaskPixel(darkRed, false, true);
+        require(direct >>> 24 == 0xff && edge >>> 24 == 0xff,
+                "soft generated emissive pixels lost their source alpha");
+        require(peak(direct) >= 128 && peak(edge) >= 72 && peak(edge) < peak(direct),
+                "dark emissive details were not smoothly lifted by coverage tier");
+        require(red(direct) > green(direct) && red(direct) > blue(direct),
+                "soft generated emissive pixel did not retain its original hue");
+        require(EmissiveTextureRegistry.generatedMaskPixel(darkRed, false, false) == 0,
+                "unselected non-emissive pixel leaked into the generated overlay");
+        require(EmissiveTextureRegistry.generatedMaskPixel(0x00102030, true, false) == 0,
+                "transparent source pixel leaked into the generated overlay");
+    }
+
+    private static int peak(final int argb) {
+        return Math.max(argb >>> 16 & 0xff, Math.max(argb >>> 8 & 0xff, argb & 0xff));
+    }
+
+    private static int red(final int argb) {
+        return argb >>> 16 & 0xff;
+    }
+
+    private static int green(final int argb) {
+        return argb >>> 8 & 0xff;
+    }
+
+    private static int blue(final int argb) {
+        return argb & 0xff;
     }
 
     private static boolean close(final float actual, final float expected) {

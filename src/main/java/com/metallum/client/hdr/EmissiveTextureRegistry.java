@@ -41,6 +41,14 @@ public final class EmissiveTextureRegistry {
     private static final String EMISSIVE_PROPERTIES_PATH = "optifine/emissive.properties";
     private static final String VANILLA_PACK_ID = "vanilla";
     private static final float UV_EPSILON = 1.0e-6f;
+    /**
+     * Dark pixels that belong to an automatically detected emitter need a
+     * visible (but still clearly weaker) HDR contribution. The generated
+     * overlay keeps its original hue and lifts only its peak channel to this
+     * minimum; authored {@code *_e.png} sidecars remain byte-for-byte intact.
+     */
+    private static final int GENERATED_EMISSION_MINIMUM_PEAK = 128;
+    private static final int GENERATED_EMISSION_EDGE_MINIMUM_PEAK = 72;
     private static final Identifier BLOCK_ATLAS_TEXTURE =
             Identifier.withDefaultNamespace("textures/atlas/blocks.png");
 
@@ -398,6 +406,41 @@ public final class EmissiveTextureRegistry {
         }
     }
 
+    /**
+     * Converts one pixel of an in-memory vanilla fallback into its soft
+     * emissive counterpart. A selected dark texel retains its hue but is
+     * lifted enough to remain a dim emitter instead of becoming a black hole.
+     */
+    static int generatedMaskPixel(final int argb, final boolean selected, final boolean adjacentToSelection) {
+        if (!selected && !adjacentToSelection) {
+            return 0;
+        }
+
+        int alpha = argb >>> 24;
+        if (alpha == 0) {
+            return 0;
+        }
+        int red = argb >>> 16 & 0xff;
+        int green = argb >>> 8 & 0xff;
+        int blue = argb & 0xff;
+        int maximum = Math.max(red, Math.max(green, blue));
+        if (maximum == 0) {
+            return argb;
+        }
+
+        int minimumPeak = selected
+                ? GENERATED_EMISSION_MINIMUM_PEAK
+                : GENERATED_EMISSION_EDGE_MINIMUM_PEAK;
+        int targetPeak = Math.max(maximum, minimumPeak);
+        if (targetPeak == maximum) {
+            return argb;
+        }
+        int liftedRed = Math.min(255, (red * targetPeak + maximum / 2) / maximum);
+        int liftedGreen = Math.min(255, (green * targetPeak + maximum / 2) / maximum);
+        int liftedBlue = Math.min(255, (blue * targetPeak + maximum / 2) / maximum);
+        return alpha << 24 | liftedRed << 16 | liftedGreen << 8 | liftedBlue;
+    }
+
     @FunctionalInterface
     private interface PixelMatcher {
         boolean matches(int alpha, int red, int green, int blue);
@@ -424,7 +467,12 @@ public final class EmissiveTextureRegistry {
                 for (int y = 0; y < base.getHeight(); y++) {
                     for (int x = 0; x < base.getWidth(); x++) {
                         int pixel = base.getPixel(x, y);
-                        overlay.setPixel(x, y, this.mask.matches(pixel) ? pixel : 0);
+                        boolean selected = this.mask.matches(pixel);
+                        overlay.setPixel(x, y, generatedMaskPixel(
+                                pixel,
+                                selected,
+                                !selected && hasSelectedNeighbor(base, x, y)
+                        ));
                     }
                 }
                 ResourceMetadata metadata = this.baseResource.metadata();
@@ -451,6 +499,24 @@ public final class EmissiveTextureRegistry {
                     overlay.close();
                 }
             }
+        }
+
+        private boolean hasSelectedNeighbor(final NativeImage image, final int x, final int y) {
+            for (int offsetY = -1; offsetY <= 1; offsetY++) {
+                for (int offsetX = -1; offsetX <= 1; offsetX++) {
+                    if (offsetX == 0 && offsetY == 0) {
+                        continue;
+                    }
+                    int neighborX = x + offsetX;
+                    int neighborY = y + offsetY;
+                    if (neighborX >= 0 && neighborX < image.getWidth()
+                            && neighborY >= 0 && neighborY < image.getHeight()
+                            && this.mask.matches(image.getPixel(neighborX, neighborY))) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
     }
 }
