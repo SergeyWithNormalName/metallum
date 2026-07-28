@@ -831,9 +831,14 @@ public final class VoxelOccupancyTests {
         VoxelSectionTask staleTask = controller.beginSectionTask(
                 world, "minecraft:overworld", sectionKey
         );
+        long offeredBeforeInvalidation = controller.telemetry().dirtyQueue().offered();
         controller.markBlockDirty(world, "minecraft:overworld", 0, 64, 0);
+        require(controller.telemetry().dirtyQueue().offered() == offeredBeforeInvalidation,
+                "block invalidation enqueued bricks before matching Sodium geometry existed");
         require(!controller.publishAccepted(sectionCandidate(staleTask, 1L)),
                 "A pre-invalidation Sodium snapshot was accepted as current L5 geometry");
+        require(controller.telemetry().dirtyQueue().offered() == offeredBeforeInvalidation,
+                "stale Sodium publication released unavailable L5 brick work");
         VoxelSectionTask emptyTask = controller.beginSectionTask(
                 world, "minecraft:overworld", sectionKey
         );
@@ -842,6 +847,8 @@ public final class VoxelOccupancyTests {
         require(emptyCandidate.scannedStateCount() == 0
                         && controller.publishAccepted(emptyCandidate),
                 "Sodium's accepted empty-section fast path did not publish a zero snapshot");
+        require(controller.telemetry().dirtyQueue().offered() > offeredBeforeInvalidation,
+                "matching Sodium publication did not release deferred critical L5 work");
         VoxelUploadBatch empty = awaitBatch(controller, 70L);
         require(empty != null && empty.patches().stream().anyMatch(patch ->
                         Arrays.stream(patch.occupancyWords()).allMatch(word -> word == 0)

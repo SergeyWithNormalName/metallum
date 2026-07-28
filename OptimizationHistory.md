@@ -1159,3 +1159,87 @@ cache filter перестанет распознавать receiver plane; эт�
 пропорционально `1/abs(N·L)`: такой bias обязан оставаться существенно меньше
 толщины блока либо сопровождаться отдельным доказательством, что реальные близкие
 окклюдеры не отбрасываются.
+
+## 2026-07-29 — Nether: raw `N·L` sign reject before normalization
+
+### Гипотеза и safety contract
+
+После принятого normalized `nDotL == 0` early reject fragment loop всё ещё выполнял
+`inversesqrt` для каждого попавшего в radius источника, включая back-facing lights.
+Проверялся более ранний reject по знаку finite `dot(normal, toLight)`: положительная
+нормализация не может изменить знак. Non-finite значения fail-open проходили в прежний
+путь, а существующий normalized `nDotL == 0` оставался shading authority. ABI, light
+order/caps, cluster membership, L6 visibility и front-facing формула не менялись.
+
+`materialContractUnitTest` прошёл после синхронизации четырёх fragment-source goldens.
+Короткий detailed `300+600` A/B дал FPS `36.171 → 36.681`, но одновременно GPU p95
+`29.992 → 30.065 ms` и 0.1% low `24.780 → 23.598`; signal признан шумным и был
+проверен полным production run.
+
+### Production A/B и итог
+
+Одинаковый Nether contract: Built-in Retina `3024×1964@120`, HDR, MetalFX OFF,
+Balanced, VSync OFF, frozen simulation, `1800+3000` frames. Baseline artifact
+`20260728T213137Z-...-raw-ndotl-baseline-production-off` против candidate
+`20260728T213525Z-...-raw-ndotl-candidate-production-off`:
+
+| Variant | FPS / min window | 1% / 0.1% low | GPU p95 / p99 | worst GPU |
+|---|---:|---:|---:|---:|
+| Baseline | 36.427 / 36.178 | 29.333 / 26.111 | 30.8809 / 31.5699 ms | 34.2665 ms |
+| Raw sign reject | 36.659 / 36.557 | 29.606 / 26.961 | 30.6955 / 31.5264 ms | 33.7065 ms |
+
+Разница слишком мала для production: FPS `+0.64%`, 1% low `+0.93%`, GPU p95
+`-0.60%`, GPU p99 `-0.14%`. Это ниже требуемого заметного выигрыша и не отделяется
+от обычного межзапускового шума одним полным pair. Оба raw/summary имеют `COMPLETE`
+и `0` dropped timing events; candidate acceptance receipt не создан из-за известного
+event-order defect. Вся shader/test реализация удалена, кодового коммита нет.
+
+**Итог:** **ОТКЛОНЕНО/rejected**. Не повторять отдельный raw-sign precheck без нового
+профиля или способа избежать дублирующего dot для front-facing candidates.
+
+## 2026-07-29 — L5: publication-gated critical brick invalidation
+
+### Причина и correctness contract
+
+`markBlockDirty` раньше сразу enqueue-ил все пересекающиеся L5 bricks с CRITICAL
+priority, хотя новый immutable Sodium section snapshot ещё отсутствовал. На каждом
+следующем `leaseUploadBatch` `captureContributors` видел
+`snapshotRevision != revision`, возвращал `null`, а scheduler defer/requeue-ил ту же
+заведомо невыполнимую работу. После accepted publication этот section всё равно
+enqueue-ился повторно.
+
+Изменение оставляет block event чистой revision/invalidation операцией и запоминает
+`pendingCriticalVoxelRefresh` в section state. Ровно matching `publishAccepted`
+сбрасывает флаг и enqueue-ит bricks с прежним CRITICAL priority; обычные публикации
+остаются HIGH. Stale publication не выпускает work. Старый voxel mirror и shadows до
+accepted geometry остаются теми же, поэтому timing публикации и качество картинки не
+меняются; удалён только бесполезный pre-publication contributor scan/defer churn.
+
+`voxelOccupancyUnitTest` проверяет три границы: block invalidation не увеличивает
+queue offered, stale Sodium candidate также не выпускает work, matching empty/full
+accepted candidate выпускает deferred CRITICAL refresh. Async ownership, unload,
+retry, teleport и GPU-recovery state-machine tests сохранены.
+
+### Torch-toggle A/B
+
+Стенд: Built-in Retina `3024×1964@120`, HDR, MetalFX OFF, Balanced, VSync OFF,
+`hdrtest-torch-toggle-v1`, `300+900`, detailed timing. Placement на measured frame
+300, removal на 450, epoch end на 600. Первый baseline исключён: epoch пересёкся с
+незавершённой первичной chunk queue (`1006` tasks вместо `14`). В accepted comparison
+вошли два повторных baseline и два candidate run; все четыре имеют одинаковые
+`34/8` rebuild requests, `14/7` meshing tasks, `16/8` outputs, `1,101,760` bytes,
+zero telemetry errors/overflow и `0` dropped timing events.
+
+| Pair mean | FPS / min window | 1% / 0.1% low | CPU p95 / p99 / max | present p95 / p99 / max |
+|---|---:|---:|---:|---:|
+| Baseline | 61.938 / 59.877 | 35.946 / 30.957 | 5.432 / 9.523 / 24.160 ms | 18.769 / 22.925 / 41.581 ms |
+| Publication gate | 61.909 / 59.782 | 43.437 / 40.065 | 5.050 / 8.265 / 14.962 ms | 18.589 / 21.825 / 28.230 ms |
+
+Средний FPS и min-window нейтральны (`-0.05/-0.16%`), как ожидается для редкого
+event-path. Статтерные хвосты улучшились заметно: 1%/0.1% low `+20.84/+29.42%`,
+CPU p95/p99/max `-7.03/-13.21/-38.07%`, present p95/p99/max
+`-0.96/-4.80/-32.11%`; presenting-CB GPU p95/p99/worst `-3.03/-4.00/-6.68%`.
+
+**Итог:** **ВНЕДРЕНО/accepted** как lossless архитектурная оптимизация block-change
+stutter. Не переносить packing раньше matching Sodium publication и не снижать
+CRITICAL priority уже готовой replacement geometry.

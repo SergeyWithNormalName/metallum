@@ -209,7 +209,11 @@ public final class VoxelClipmapController {
         section.snapshot = candidate.snapshot();
         section.snapshotRevision = task.revision();
         section.acceptedOwnerToken = task.ownerToken();
-        enqueueSectionBricks(this.activeWorld, task.sectionKey(), VoxelDirtyQueue.Priority.HIGH);
+        VoxelDirtyQueue.Priority priority = section.pendingCriticalVoxelRefresh
+                ? VoxelDirtyQueue.Priority.CRITICAL
+                : VoxelDirtyQueue.Priority.HIGH;
+        section.pendingCriticalVoxelRefresh = false;
+        enqueueSectionBricks(this.activeWorld, task.sectionKey(), priority);
         this.acceptedPublications++;
         return true;
     }
@@ -242,7 +246,10 @@ public final class VoxelClipmapController {
         );
         SectionState section = world.sections.computeIfAbsent(sectionKey, ignored -> new SectionState());
         section.revision++;
-        enqueueSectionBricks(world, sectionKey, VoxelDirtyQueue.Priority.CRITICAL);
+        // Packing cannot consume this revision until Sodium publishes the matching immutable
+        // section snapshot. Remember the urgency and let publishAccepted enqueue exactly once;
+        // scheduling now only re-scans contributors and defers the same unavailable bricks.
+        section.pendingCriticalVoxelRefresh = true;
         this.blockInvalidations++;
     }
 
@@ -1321,6 +1328,7 @@ public final class VoxelClipmapController {
         private long acceptedOwnerToken;
         private long snapshotRevision;
         private VoxelSectionSnapshot snapshot;
+        private boolean pendingCriticalVoxelRefresh;
     }
 
     private record InFlightBatch(
