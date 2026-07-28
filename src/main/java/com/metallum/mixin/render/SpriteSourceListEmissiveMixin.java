@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.google.common.collect.ImmutableList;
 import com.llamalad7.mixinextras.sugar.Local;
+import com.metallum.client.hdr.EmissiveSpriteSourceListAccess;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import net.minecraft.client.renderer.texture.atlas.SpriteSource;
 import net.minecraft.client.renderer.texture.atlas.SpriteSourceList;

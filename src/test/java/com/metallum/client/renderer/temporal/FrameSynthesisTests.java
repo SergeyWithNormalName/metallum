@@ -243,7 +243,7 @@ public final class FrameSynthesisTests {
         // 1. User request disabled
         FrameInterpolationPolicy.Evaluation evalDisabled = FrameInterpolationPolicy.evaluate(
                 configOff, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                60.0, Set.of()
+                true, true, 60.0, Set.of()
         );
         require(!evalDisabled.requested() && !evalDisabled.profileEligible() && !evalDisabled.effectiveAdmitted()
                         && evalDisabled.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.USER_REQUEST_DISABLED
@@ -253,7 +253,7 @@ public final class FrameSynthesisTests {
         // 2. Feature unsupported on device
         FrameInterpolationPolicy.Evaluation evalNoCap = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesNoFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                60.0, Set.of()
+                true, true, 60.0, Set.of()
         );
         require(evalNoCap.requested() && !evalNoCap.profileEligible() && !evalNoCap.effectiveAdmitted()
                         && evalNoCap.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.FEATURE_UNSUPPORTED,
@@ -262,7 +262,7 @@ public final class FrameSynthesisTests {
         // 3. Fixed Temporal stays fail-closed until the native fixed-profile probe succeeds.
         FrameInterpolationPolicy.Evaluation evalEligible = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                60.0, Set.of()
+                true, true, 60.0, Set.of()
         );
         require(evalEligible.requested() && evalEligible.profileEligible() && !evalEligible.effectiveAdmitted()
                         && evalEligible.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_FIXED_TEMPORAL
@@ -275,7 +275,7 @@ public final class FrameSynthesisTests {
         );
         FrameInterpolationPolicy.Evaluation evalAdmitted = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, 60.0, Set.of()
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, true, true, 60.0, Set.of()
         );
         require(evalAdmitted.requested() && evalAdmitted.profileEligible()
                         && evalAdmitted.effectiveAdmitted()
@@ -283,13 +283,33 @@ public final class FrameSynthesisTests {
                         == FrameInterpolationPolicy.EffectiveReason.ADMITTED_FIXED_TEMPORAL,
                 "validated Fixed Temporal profile was not admitted");
 
+        FrameInterpolationPolicy.Evaluation evalVsyncOff = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, false, true, 60.0, Set.of()
+        );
+        require(evalVsyncOff.requested() && !evalVsyncOff.profileEligible()
+                        && !evalVsyncOff.effectiveAdmitted()
+                        && evalVsyncOff.eligibilityReason()
+                        == FrameInterpolationPolicy.EligibilityReason.DISPLAY_SYNC_DISABLED,
+                "VSync-off presentation admitted Frame Interpolation");
+
+        FrameInterpolationPolicy.Evaluation evalLiveUnvalidated = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, true, false, 60.0, Set.of()
+        );
+        require(evalLiveUnvalidated.requested() && !evalLiveUnvalidated.profileEligible()
+                        && !evalLiveUnvalidated.effectiveAdmitted()
+                        && evalLiveUnvalidated.eligibilityReason()
+                        == FrameInterpolationPolicy.EligibilityReason.LIVE_PRESENTATION_PROFILE_UNVALIDATED,
+                "unvalidated live presentation profile admitted Frame Interpolation");
+
         // 4. Dynamic Temporal and Native remain later stages; validated Spatial
         // is a standalone Frame Interpolation profile as of Stage 10.
         for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(
                 FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL,
                 FrameInterpolationPolicy.UpstreamMode.NATIVE)) {
             FrameInterpolationPolicy.Evaluation evalUpstream = FrameInterpolationPolicy.evaluate(
-                    configOn, capabilitiesWithFI, mode, 60.0, Set.of()
+                    configOn, capabilitiesWithFI, mode, true, true, 60.0, Set.of()
             );
             require(!evalUpstream.profileEligible()
                             && evalUpstream.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
@@ -297,7 +317,7 @@ public final class FrameSynthesisTests {
         }
         FrameInterpolationPolicy.Evaluation spatial = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.SPATIAL, 60.0, Set.of()
+                FrameInterpolationPolicy.UpstreamMode.SPATIAL, true, true, 60.0, Set.of()
         );
         require(spatial.profileEligible() && spatial.effectiveAdmitted()
                         && spatial.eligibilityReason()
@@ -309,7 +329,7 @@ public final class FrameSynthesisTests {
         // 5. Cadence out of bounds (desired 60 FPS for 120 Hz display; bounds = [51, 63])
         FrameInterpolationPolicy.Evaluation evalLowCadence = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                45.0, Set.of()
+                true, true, 45.0, Set.of()
         );
         require(!evalLowCadence.profileEligible()
                         && evalLowCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
@@ -317,7 +337,7 @@ public final class FrameSynthesisTests {
 
         FrameInterpolationPolicy.Evaluation evalHighCadence = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                75.0, Set.of()
+                true, true, 75.0, Set.of()
         );
         require(!evalHighCadence.profileEligible()
                         && evalHighCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
@@ -326,7 +346,7 @@ public final class FrameSynthesisTests {
         // 6. History discontinuity invalidates eligibility
         FrameInterpolationPolicy.Evaluation evalDiscont = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                60.0, Set.of(FrameSynthesisContract.Discontinuity.RESIZE)
+                true, true, 60.0, Set.of(FrameSynthesisContract.Discontinuity.RESIZE)
         );
         require(!evalDiscont.profileEligible()
                         && evalDiscont.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.HISTORY_DISCONTINUITY,

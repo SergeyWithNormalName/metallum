@@ -21,6 +21,8 @@ public final class FrameInterpolationPolicy {
         ELIGIBLE_SPATIAL,
         USER_REQUEST_DISABLED,
         FEATURE_UNSUPPORTED,
+        DISPLAY_SYNC_DISABLED,
+        LIVE_PRESENTATION_PROFILE_UNVALIDATED,
         REFRESH_RATE_UNSATISFIED,
         CADENCE_OUT_OF_BOUNDS,
         UNSUPPORTED_UPSTREAM_MODE,
@@ -54,6 +56,8 @@ public final class FrameInterpolationPolicy {
             final RendererConfig config,
             final MetalCapabilities capabilities,
             final UpstreamMode upstreamMode,
+            final boolean displaySyncEnabled,
+            final boolean livePresentationProfileValidated,
             final double renderFps,
             final Set<FrameSynthesisContract.Discontinuity> discontinuities
     ) {
@@ -75,6 +79,22 @@ public final class FrameInterpolationPolicy {
             return new Evaluation(
                     true, false, false,
                     EligibilityReason.FEATURE_UNSUPPORTED,
+                    EffectiveReason.NOT_PROFILE_ELIGIBLE
+            );
+        }
+
+        if (!displaySyncEnabled) {
+            return new Evaluation(
+                    true, false, false,
+                    EligibilityReason.DISPLAY_SYNC_DISABLED,
+                    EffectiveReason.NOT_PROFILE_ELIGIBLE
+            );
+        }
+
+        if (!livePresentationProfileValidated) {
+            return new Evaluation(
+                    true, false, false,
+                    EligibilityReason.LIVE_PRESENTATION_PROFILE_UNVALIDATED,
                     EffectiveReason.NOT_PROFILE_ELIGIBLE
             );
         }

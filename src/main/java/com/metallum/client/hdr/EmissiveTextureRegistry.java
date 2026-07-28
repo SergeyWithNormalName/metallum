@@ -84,7 +84,10 @@ public final class EmissiveTextureRegistry {
             selected.put(baseId, new OverlayCandidate(candidate.spriteId(), candidate.sourceDescription()));
         }
 
-        for (Identifier baseId : knownSprites.keySet()) {
+        // output.add(...) can update the same map supplied as knownSprites.
+        // Iterate a stable snapshot so built-in masks do not invalidate the
+        // atlas loader's HashMap iterator during resource reload.
+        for (Identifier baseId : List.copyOf(knownSprites.keySet())) {
             if (selected.containsKey(baseId)) {
                 continue;
             }
@@ -243,7 +246,10 @@ public final class EmissiveTextureRegistry {
             final Map<String, Integer> packPriority
     ) {
         Map<Identifier, SidecarCandidate> candidates = new HashMap<>();
-        resourceManager.listResources(TEXTURES_PREFIX, id -> id.getPath().endsWith(PNG_SUFFIX))
+        // ResourceManager directory prefixes must not end in '/'. Keep the
+        // slash-bearing constant for path slicing, but query the directory by
+        // its canonical identifier form.
+        resourceManager.listResources("textures", id -> id.getPath().endsWith(PNG_SUFFIX))
                 .forEach((resourceId, overlayResource) -> {
                     String suffix = suffixes.getOrDefault(resourceId.getNamespace(), DEFAULT_SUFFIX);
                     String path = resourceId.getPath();

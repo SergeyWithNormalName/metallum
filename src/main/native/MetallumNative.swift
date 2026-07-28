@@ -13887,6 +13887,16 @@ public func metallum_MTLCommandBuffer_encodePresentTextureToDrawable(
             && uiTexture!.textureType == .type2D
             && uiTexture!.sampleCount == 1
             && objectAddress(uiTexture!.device) == objectAddress(commandBuffer.device)
+            && uiTexture!.width == drawable.texture.width
+            && uiTexture!.height == drawable.texture.height
+        // A fullscreen/backing transition may briefly expose a new drawable
+        // before Java has rebuilt its display-sized UI target. Presenting the
+        // world-only fallback here produces a convincing all-black title
+        // frame. Drop this transient frame and let the settled surface
+        // configuration rebuild both resources atomically.
+        if uiTexture != nil && !hasCompatibleUi {
+            return 0
+        }
 
         let targetWorldTexture: MTLTexture
         if hasCompatibleUi, uiTexture != nil {

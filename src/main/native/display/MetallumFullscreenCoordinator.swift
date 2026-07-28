@@ -17,7 +17,7 @@ public final class MetallumFullscreenCoordinator {
 
     private var requestedFullscreen: Bool?
     private var observerTokens: [NSObjectProtocol] = []
-    private var lastAppliedDrawableSize: CGSize?
+    private var lastObservedDrawableSize: CGSize?
 
     public init(window: NSWindow, layer: CAMetalLayer) {
         self.window = window
@@ -154,18 +154,18 @@ public final class MetallumFullscreenCoordinator {
         let height = max(backingRect.height, 1.0)
 
         let nextSize = CGSize(width: width, height: height)
-        let changed = lastAppliedDrawableSize.map {
+        let changed = lastObservedDrawableSize.map {
             abs($0.width - nextSize.width) >= 0.5 || abs($0.height - nextSize.height) >= 0.5
         } ?? true
         if changed {
-            // Admission closes and the old fixed-size generation drains.  It
-            // cannot interpolate across a backing/monitor size transition.
+            // AppKit observes backing-size changes, but the render thread is
+            // the sole owner of CAMetalLayer.drawableSize through
+            // MetalSurface.configure. Mutating it here races the display-sized
+            // UI target during fullscreen animation and can present a black
+            // UI-only frame. Close FI admission now; Mojang's settled resize
+            // will reconfigure the layer and renderer resources together.
             metallumInvalidateFrameInterpolationForLayerMutation(layer)
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.drawableSize = nextSize
-            CATransaction.commit()
-            lastAppliedDrawableSize = nextSize
+            lastObservedDrawableSize = nextSize
         }
         MetallumExtendedProMotionSchedulerRegistry.shared.update(window: window)
     }

@@ -445,27 +445,34 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             return MTLCommandBuffer.PresentResult.STALE_GENERATION;
         }
         MetalDevice.HdrSceneInputs sceneInputs = this.device.consumeHdrSceneInputs(source);
-        FrameInterpolationCommitBoundary.Status interpolation = commandBuffer.prepareFrameInterpolation(
-                this.frameInterpolationCommitBoundary,
-                new FrameInterpolationCommitBoundary.PreparationInput(
-                        commandBuffer.handle(),
-                        this.commandBufferRendererGenerationId,
-                        source.nativeHandle(),
-                        sceneInputs.scene(),
-                        sceneInputs.depth(),
-                        sceneInputs.semantic(),
-                        sceneInputs.ui(),
-                        fence,
-                        sceneInputs.spatialHdrPrecomposed(),
-                        outputMode.nativeValue(),
-                        this.device.capturedFrameSourceEncoding(source),
-                        this.device.isMaterialGenerationActive(),
-                        hdrConfig.diagnosticPattern(),
-                        Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
-                        hdrConfig.hdrStrength(),
-                        hdrConfig.bloomStrength()
-                )
-        );
+        // Title, loading and other UI-only frames have no world scene. Keep
+        // them on the proven single-present path: the FI owner must never
+        // replace the offscreen-world -> UI -> drawable compositor with an
+        // interpolation ticket that has no world history.
+        FrameInterpolationCommitBoundary.Status interpolation =
+                MetalNativeBridge.isNullHandle(sceneInputs.scene())
+                        ? FrameInterpolationCommitBoundary.Status.BYPASS_INPUT_CONTRACT
+                        : commandBuffer.prepareFrameInterpolation(
+                                this.frameInterpolationCommitBoundary,
+                                new FrameInterpolationCommitBoundary.PreparationInput(
+                                        commandBuffer.handle(),
+                                        this.commandBufferRendererGenerationId,
+                                        source.nativeHandle(),
+                                        sceneInputs.scene(),
+                                        sceneInputs.depth(),
+                                        sceneInputs.semantic(),
+                                        sceneInputs.ui(),
+                                        fence,
+                                        sceneInputs.spatialHdrPrecomposed(),
+                                        outputMode.nativeValue(),
+                                        this.device.capturedFrameSourceEncoding(source),
+                                        this.device.isMaterialGenerationActive(),
+                                        hdrConfig.diagnosticPattern(),
+                                        Math.min(edrCapabilities.currentHeadroom(), HdrConfig.OUTPUT_HEADROOM),
+                                        hdrConfig.hdrStrength(),
+                                        hdrConfig.bloomStrength()
+                                )
+                        );
         // A prepared ticket owns both generated and real presentation.  Do
         // not acquire a Java-side drawable here: that would create a second
         // presenter and break the coordinator's ordered fail-open schedule.

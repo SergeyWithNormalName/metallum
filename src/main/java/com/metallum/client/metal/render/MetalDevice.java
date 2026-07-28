@@ -179,6 +179,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
     static final long VOXEL_DEBUG_CHECKSUM_CADENCE_FRAMES = 120L;
+    private static final boolean EXPERIMENTAL_FRAME_INTERPOLATION_LIVE_PROFILE = "1".equals(
+            System.getenv("METALLUM_EXPERIMENTAL_FI")
+    );
     private static volatile MetalDevice INSTANCE;
     private final MemorySegment metalDeviceHandle;
     private final MemorySegment metalLayer;
@@ -937,6 +940,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.rendererConfig,
                 this.rendererCapabilities,
                 interpolationUpstream,
+                Minecraft.getInstance().options.enableVsync().get(),
+                EXPERIMENTAL_FRAME_INTERPOLATION_LIVE_PROFILE,
                 nominalRealFramesPerSecond,
                 Set.of()
         );
