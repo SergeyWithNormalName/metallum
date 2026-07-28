@@ -48,7 +48,7 @@ public final class EmissiveTextureRegistry {
      * minimum; authored {@code *_e.png} sidecars remain byte-for-byte intact.
      */
     private static final int GENERATED_EMISSION_MINIMUM_PEAK = 128;
-    private static final int GENERATED_EMISSION_EDGE_MINIMUM_PEAK = 72;
+    private static final int GENERATED_EMISSION_DIM_MINIMUM_PEAK = 72;
     private static final Identifier BLOCK_ATLAS_TEXTURE =
             Identifier.withDefaultNamespace("textures/atlas/blocks.png");
 
@@ -407,15 +407,11 @@ public final class EmissiveTextureRegistry {
     }
 
     /**
-     * Converts one pixel of an in-memory vanilla fallback into its soft
-     * emissive counterpart. A selected dark texel retains its hue but is
-     * lifted enough to remain a dim emitter instead of becoming a black hole.
+     * Converts one opaque pixel of an in-memory vanilla fallback into its soft
+     * emissive counterpart. Every opaque texel receives an HDR contribution:
+     * selected detail is brighter, while the rest remains visibly dim.
      */
-    static int generatedMaskPixel(final int argb, final boolean selected, final boolean adjacentToSelection) {
-        if (!selected && !adjacentToSelection) {
-            return 0;
-        }
-
+    static int generatedMaskPixel(final int argb, final boolean selected) {
         int alpha = argb >>> 24;
         if (alpha == 0) {
             return 0;
@@ -424,13 +420,12 @@ public final class EmissiveTextureRegistry {
         int green = argb >>> 8 & 0xff;
         int blue = argb & 0xff;
         int maximum = Math.max(red, Math.max(green, blue));
-        if (maximum == 0) {
-            return argb;
-        }
-
         int minimumPeak = selected
                 ? GENERATED_EMISSION_MINIMUM_PEAK
-                : GENERATED_EMISSION_EDGE_MINIMUM_PEAK;
+                : GENERATED_EMISSION_DIM_MINIMUM_PEAK;
+        if (maximum == 0) {
+            return alpha << 24 | minimumPeak << 16 | minimumPeak << 8 | minimumPeak;
+        }
         int targetPeak = Math.max(maximum, minimumPeak);
         if (targetPeak == maximum) {
             return argb;
@@ -468,11 +463,7 @@ public final class EmissiveTextureRegistry {
                     for (int x = 0; x < base.getWidth(); x++) {
                         int pixel = base.getPixel(x, y);
                         boolean selected = this.mask.matches(pixel);
-                        overlay.setPixel(x, y, generatedMaskPixel(
-                                pixel,
-                                selected,
-                                !selected && hasSelectedNeighbor(base, x, y)
-                        ));
+                        overlay.setPixel(x, y, generatedMaskPixel(pixel, selected));
                     }
                 }
                 ResourceMetadata metadata = this.baseResource.metadata();
@@ -501,22 +492,5 @@ public final class EmissiveTextureRegistry {
             }
         }
 
-        private boolean hasSelectedNeighbor(final NativeImage image, final int x, final int y) {
-            for (int offsetY = -1; offsetY <= 1; offsetY++) {
-                for (int offsetX = -1; offsetX <= 1; offsetX++) {
-                    if (offsetX == 0 && offsetY == 0) {
-                        continue;
-                    }
-                    int neighborX = x + offsetX;
-                    int neighborY = y + offsetY;
-                    if (neighborX >= 0 && neighborX < image.getWidth()
-                            && neighborY >= 0 && neighborY < image.getHeight()
-                            && this.mask.matches(image.getPixel(neighborX, neighborY))) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
     }
 }
