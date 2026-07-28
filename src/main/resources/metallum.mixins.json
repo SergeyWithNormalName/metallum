@@ -42,6 +42,8 @@
     "render.KeyboardHandlerMixin",
     "render.ShaderManagerMixin",
     "render.ShaderSourceKeyAccessor",
+    "render.SpriteSourceListEmissiveMixin",
+    "render.TextureAtlasEmissiveMixin",
     "render.PreferredGraphicsApiMixin",
     "render.NativeFullscreenWindowAccessor",
     "render.NativeFullscreenToggleMixin",

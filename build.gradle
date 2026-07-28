@@ -156,6 +156,14 @@ tasks.register("hdrUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.hdr.HdrConfigTests")
 }
 
+tasks.register("emissiveTextureUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates OptiFine-style terrain emissive discovery and partial-mask contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.hdr.EmissiveTextureRegistryTests")
+}
+
 tasks.register("materialContractUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates L2 material adapters against Minecraft and Sodium runtime shader resources"
@@ -1142,6 +1150,7 @@ tasks.named("test", Test) {
 
 tasks.named("check") {
 	dependsOn(tasks.named("hdrUnitTest"))
+	dependsOn(tasks.named("emissiveTextureUnitTest"))
 	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("shadowValueValidation"))
