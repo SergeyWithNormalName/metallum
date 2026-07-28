@@ -54,7 +54,11 @@ public final class SodiumHdrSemantic {
 
     /**
      * Resolves surface emission for either half of a partial-emission terrain
-     * pair. The base must not emit; the overlay alone is full-bright HDR.
+     * pair. The base must not emit. The overlay retains exact-HDR treatment
+     * but uses the block state's emission strength whenever one exists, so a
+     * low-power source (such as a redstone torch) is visibly weaker than a
+     * normal torch. Purely visual authored sidecars on non-emitting blocks
+     * retain the established full-strength fallback.
      */
     public static int terrainQuadSurfaceEmission(
             final BlockState state,
@@ -65,6 +69,10 @@ public final class SodiumHdrSemantic {
     ) {
         if (hasPartialEmissionOverlay && !bufferingPartialEmissionOverlay) {
             return 0;
+        }
+        if (bufferingPartialEmissionOverlay) {
+            int sourceEmission = Math.clamp(blockLightEmission, 0, 15);
+            return sourceEmission > 0 ? sourceEmission : 15;
         }
 
         return surfaceEmission(
