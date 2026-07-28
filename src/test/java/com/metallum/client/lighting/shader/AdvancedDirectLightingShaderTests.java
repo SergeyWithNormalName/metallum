@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "38202ae10c7633ffd7205b7f9bde18aa01a7bb93107297884791f37331865782",
+            "sodium-solid-fsh", "11c41e876a0e8d017dc803c8e81f4f12a861c6fbab691a01310071f4cebdc568",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "863a2beee24c047001c41b51be3ed540cb88aee4c64923d0dcd8a2260a9879cc",
+            "sodium-cutout-fsh", "5bc30bba6a6beb9bf97832946eb88840d002febc4f7225f7cf7c26b22d07f49c",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "8f49f8e07c24776ef7761768edff3f985b6ea49327f538c5294f351dd4ff7bb8",
+            "minecraft-entity-fsh", "5f1b4e1e51ac78adf0126c02c3710a129980a409faead60233e0a2e1fac0b827",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "f446f0144379180e1750adc274a461b6aedb120b046718d1c802ad197e71eb25"
+            "minecraft-end-portal-fsh", "d9449ac30a4c9440f189a8c4998dd51c9b5abe84e2f780bd1f7513b244b3c991"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -547,7 +547,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFormula.contains("if (localShadowContractValid")
                         && sodiumFormula.contains("localShadowContractValid = false;")
                         && sodiumFormula.contains(
-                        "if (localShadowContractValid && nDotL > 0.0")
+                        "if (localShadowContractValid && !partialReceiverSurface && nDotL > 0.0")
                         && sodiumFormula.contains(
                         "attenuation * nDotL * 0.31830988618")
                         && sodiumFormula.contains(
@@ -639,6 +639,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("if (visibility <= 0.0)")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
                 "L6 direct lighting is not sampling variable resident-atlas pages safely");
+        require(sodiumFragment.contains("bool metallumVoxelPartialReceiverSurfaceV1(")
+                        && sodiumFragment.contains("float surfaceFraction = fract(surfaceCoordinate);")
+                        && sodiumFormula.contains(
+                        "localShadowContractValid && !partialReceiverSurface && nDotL > 0.0"),
+                "L6 did not fail open on quantized partial-block receiver surfaces");
         require(sodiumFormula.contains("if (shadowState == 0u)")
                         && sodiumFormula.contains("visibility = 1.0;")
                         && sodiumFormula.contains(

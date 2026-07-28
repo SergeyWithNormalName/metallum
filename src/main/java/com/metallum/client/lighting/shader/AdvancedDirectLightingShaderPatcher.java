@@ -925,6 +925,37 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return vec3(0.0);
             }
 
+            // L5 stores an occupied partial block in fixed 4x subcells, while the terrain
+            // receiver still has its exact model-space position. For example, a path block
+            // surface at y=15/16 shares a cached hit with the top 1/4-high voxel cell. Treating
+            // that earlier quantized hit as an occluder makes the block shadow itself in the
+            // cubemap's texel pattern. L6 is optional, so preserve the unshadowed L3 result for
+            // only this receiver surface; the same partial block remains an L5 occluder for
+            // every other surface.
+            bool metallumVoxelPartialReceiverSurfaceV1(
+                    vec3 receiverWorldRelative,
+                    vec3 receiverWorldNormal) {
+                if (!metallumFiniteVec3V1(receiverWorldRelative)
+                        || !metallumFiniteVec3V1(receiverWorldNormal)) {
+                    return false;
+                }
+                vec3 absoluteNormal = abs(receiverWorldNormal);
+                float dominantNormal = max(
+                        absoluteNormal.x, max(absoluteNormal.y, absoluteNormal.z));
+                if (!(dominantNormal > 0.000001)) {
+                    return false;
+                }
+                float surfaceCoordinate = absoluteNormal.x >= absoluteNormal.y
+                        && absoluteNormal.x >= absoluteNormal.z
+                        ? receiverWorldRelative.x
+                        : (absoluteNormal.y >= absoluteNormal.z
+                        ? receiverWorldRelative.y : receiverWorldRelative.z);
+                float surfaceFraction = fract(surfaceCoordinate);
+                const float fullBlockSurfaceEpsilon = 0.002;
+                return surfaceFraction > fullBlockSurfaceEpsilon
+                        && surfaceFraction < 1.0 - fullBlockSurfaceEpsilon;
+            }
+
             float metallumVoxelCachedTexelVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
@@ -1442,6 +1473,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 receiverCameraRelative = vec3(0.0);
                 vec3 receiverWorldRelative = vec3(0.0);
                 vec3 receiverWorldNormal = vec3(0.0);
+                bool partialReceiverSurface = false;
                 if (localShadowContractValid) {
                     receiverCameraRelative =
                             mat3(metallumVoxelShadow.worldFromView) * viewPosition;
@@ -1454,6 +1486,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                             || !metallumFiniteVec3V1(receiverWorldRelative)
                             || !metallumFiniteVec3V1(receiverWorldNormal)) {
                         localShadowContractValid = false;
+                    } else {
+                        partialReceiverSurface = metallumVoxelPartialReceiverSurfaceV1(
+                                receiverWorldRelative, receiverWorldNormal);
                     }
                 }
 
@@ -1496,7 +1531,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float visibility = 1.0;
                     bool cachedShadowCandidate = false;
                     uvec4 shadowRef = uvec4(0u);
-                    if (localShadowContractValid && nDotL > 0.0
+                    if (localShadowContractValid && !partialReceiverSurface && nDotL > 0.0
                             && any(greaterThan(radiance, vec3(0.0)))) {
                         shadowRef = metallumVoxelShadowRefBuffer.refs[lightIndex];
                         uint shadowState = shadowRef.x;
