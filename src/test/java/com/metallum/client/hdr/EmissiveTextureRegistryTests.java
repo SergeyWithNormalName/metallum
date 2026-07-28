@@ -82,6 +82,14 @@ public final class EmissiveTextureRegistryTests {
                 "a lit state was rejected from its generated vanilla emissive mask");
         require(EmissiveTextureRegistry.allowsOverlay(false, 0),
                 "a standard resource-pack sidecar was incorrectly tied to Minecraft block light");
+        Identifier redstoneOre = Identifier.withDefaultNamespace("block/redstone_ore");
+        Identifier deepslateRedstoneOre = Identifier.withDefaultNamespace("block/deepslate_redstone_ore");
+        Identifier glowBerries = Identifier.withDefaultNamespace("block/cave_vines_lit");
+        require(EmissiveTextureRegistry.requiresBlockEmissionForSidecar(redstoneOre)
+                        && EmissiveTextureRegistry.requiresBlockEmissionForSidecar(deepslateRedstoneOre),
+                "shared redstone-ore sidecar was not tied to the active block state");
+        require(!EmissiveTextureRegistry.requiresBlockEmissionForSidecar(glowBerries),
+                "ordinary authored sidecar was incorrectly tied to Minecraft block light");
     }
 
     private static void testUniversalVanillaFallback() {

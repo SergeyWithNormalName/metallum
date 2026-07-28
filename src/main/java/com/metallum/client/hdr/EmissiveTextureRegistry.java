@@ -94,7 +94,11 @@ public final class EmissiveTextureRegistry {
             if (!knownSprites.containsKey(candidate.spriteId())) {
                 output.add(candidate.spriteId(), candidate.resource());
             }
-            selected.put(baseId, new OverlayCandidate(candidate.spriteId(), candidate.sourceDescription(), false));
+            selected.put(baseId, new OverlayCandidate(
+                    candidate.spriteId(),
+                    candidate.sourceDescription(),
+                    requiresBlockEmissionForSidecar(baseId)
+            ));
         }
 
         // output.add(...) can update the same map supplied as knownSprites.
@@ -245,6 +249,20 @@ public final class EmissiveTextureRegistry {
 
     static boolean allowsOverlay(final boolean requiresBlockEmission, final int blockLightEmission) {
         return !requiresBlockEmission || blockLightEmission > 0;
+    }
+
+    /**
+     * These vanilla sprites are shared by an inactive block state and its
+     * temporary light-emitting state. A standard {@code *_e.png} sidecar has
+     * no block-state metadata, so gate it by the real state emission instead
+     * of showing it permanently. All other authored sidecars retain normal
+     * OptiFine-style always-on behavior.
+     */
+    static boolean requiresBlockEmissionForSidecar(final Identifier baseSpriteId) {
+        return switch (baseSpriteId.toString()) {
+            case "minecraft:block/redstone_ore", "minecraft:block/deepslate_redstone_ore" -> true;
+            default -> false;
+        };
     }
 
     private static Map<String, String> suffixes(final ResourceManager resourceManager) {
