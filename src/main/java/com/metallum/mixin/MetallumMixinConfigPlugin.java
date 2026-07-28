@@ -20,7 +20,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String SODIUM_RELIGHT_ORACLE_ENV = "METALLUM_SODIUM_RELIGHT_ORACLE";
     private static final String SODIUM_RELIGHT_FAST_PATH_ENV = "METALLUM_SODIUM_RELIGHT_FAST_PATH";
     private static final String SODIUM_LIGHT_PATCH_ENV = "METALLUM_SODIUM_LIGHT_PATCH";
-    private static final String PARTIAL_EMISSIVE_ENV = "METALLUM_EXPERIMENTAL_PARTIAL_EMISSIVE";
     private static final String MINECRAFT_MOD_ID = "minecraft";
     private static final String MINECRAFT_EXACT_VERSION = "26.2";
     private static final String SODIUM_MOD_ID = "sodium";
@@ -65,10 +64,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.TerrainRenderPassShadowMixin",
             "com.metallum.mixin.sodium.UniformBufferManagerShadowMixin"
     );
-    private static final Set<String> PARTIAL_EMISSIVE_MIXINS = Set.of(
-            "com.metallum.mixin.render.SpriteSourceListEmissiveMixin",
-            "com.metallum.mixin.render.TextureAtlasEmissiveMixin"
-    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -79,7 +74,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean sodiumRelightOracleEnabled;
     private boolean sodiumRelightFastPathEnabled;
     private boolean sodiumShadowCompatible;
-    private boolean partialEmissiveEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -89,7 +83,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
         this.sodiumShadowCompatible = SodiumShadowCompatibility.supportsInstalledRenderer();
-        this.partialEmissiveEnabled = isEnabled(System.getenv(PARTIAL_EMISSIVE_ENV));
         boolean exactRelightVersions = hasExactRelightOracleVersions();
         boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
         this.sodiumRelightFastPathEnabled = !relightOracleRequested
@@ -111,9 +104,6 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (!this.isMacOs) {
             return false;
-        }
-        if (PARTIAL_EMISSIVE_MIXINS.contains(mixinClassName)) {
-            return this.partialEmissiveEnabled && this.isDefaultGraphicsApi;
         }
         if (SODIUM_RELIGHT_ORACLE_MIXINS.contains(mixinClassName)) {
             return this.sodiumRelightOracleEnabled && this.isDefaultGraphicsApi;

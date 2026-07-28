@@ -51,6 +51,9 @@ abstract class BlockRendererHdrMixin {
     @Unique
     private TextureAtlasSprite metallum$partialEmissionOverlay;
 
+    @Unique
+    private boolean metallum$originalQuadEmissive;
+
     @Inject(method = "renderModel", at = @At("HEAD"), remap = false)
     private void metallum$captureBlockEmission(
             final BlockStateModel model,
@@ -80,9 +83,11 @@ abstract class BlockRendererHdrMixin {
             final Operation<Void> original
     ) {
         TextureAtlasSprite baseSprite = quad.sprite(SpriteFinderCache.forBlockAtlas());
-        this.metallum$partialEmissionOverlay = emissive
-                ? null : EmissiveTextureRegistry.overlayFor(baseSprite);
-        boolean overriddenEmissive = emissive || metallum$isSpecialEmissiveSource();
+        this.metallum$partialEmissionOverlay = EmissiveTextureRegistry.overlayFor(
+                baseSprite, this.metallum$blockLightEmission
+        );
+        boolean overriddenEmissive = this.metallum$partialEmissionOverlay == null
+                && (emissive || metallum$isSpecialEmissiveSource());
         original.call(renderer, quad, lightMode, overriddenEmissive, shadeMode);
     }
 
@@ -145,8 +150,8 @@ abstract class BlockRendererHdrMixin {
             final Material material,
             final CallbackInfo ci
     ) {
-        boolean exact = quad.emissive();
-        int emission = this.metallum$partialEmissionOverlay != null && !exact
+        boolean exact = quad.emissive() && this.metallum$partialEmissionOverlay == null;
+        int emission = this.metallum$partialEmissionOverlay != null
                 ? 0
                 : SodiumHdrSemantic.surfaceEmission(
                         this.metallum$blockState,
@@ -158,6 +163,7 @@ abstract class BlockRendererHdrMixin {
 
     @Unique
     private void metallum$saveQuadState(final MutableQuadViewImpl quad) {
+        this.metallum$originalQuadEmissive = quad.emissive();
         for (int vertex = 0; vertex < 4; vertex++) {
             int offset = vertex * 2;
             this.metallum$overlayUvs[offset] = quad.getTexU(vertex);
@@ -193,7 +199,7 @@ abstract class BlockRendererHdrMixin {
             quad.setUV(vertex, this.metallum$overlayUvs[offset], this.metallum$overlayUvs[offset + 1]);
             quad.setLight(vertex, this.metallum$overlayLights[vertex]);
         }
-        quad.setEmissive(false);
+        quad.setEmissive(this.metallum$originalQuadEmissive);
         quad.cachedSprite(base);
     }
 

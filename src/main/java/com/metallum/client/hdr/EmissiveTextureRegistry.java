@@ -46,7 +46,7 @@ public final class EmissiveTextureRegistry {
 
     private static final AtomicReference<AtlasPlan> PENDING_BLOCK_PLAN =
             new AtomicReference<>(AtlasPlan.empty());
-    private static volatile Map<Identifier, TextureAtlasSprite> stitchedOverlays = Map.of();
+    private static volatile Map<Identifier, StitchedOverlay> stitchedOverlays = Map.of();
 
     private EmissiveTextureRegistry() {
     }
@@ -81,7 +81,7 @@ public final class EmissiveTextureRegistry {
             if (!knownSprites.containsKey(candidate.spriteId())) {
                 output.add(candidate.spriteId(), candidate.resource());
             }
-            selected.put(baseId, new OverlayCandidate(candidate.spriteId(), candidate.sourceDescription()));
+            selected.put(baseId, new OverlayCandidate(candidate.spriteId(), candidate.sourceDescription(), false));
         }
 
         // output.add(...) can update the same map supplied as knownSprites.
@@ -91,17 +91,14 @@ public final class EmissiveTextureRegistry {
             if (selected.containsKey(baseId)) {
                 continue;
             }
-            BuiltinMask mask = BuiltinMask.forBaseSprite(baseId);
-            if (mask == null) {
-                continue;
-            }
             Resource baseResource = resourceManager.getResource(textureResourceId(baseId)).orElse(null);
-            if (baseResource == null || !VANILLA_PACK_ID.equals(baseResource.sourcePackId())) {
+            BuiltinMask mask = builtinMaskFor(baseId, baseResource);
+            if (mask == null) {
                 continue;
             }
             Identifier spriteId = builtinSpriteId(baseId);
             output.add(spriteId, new BuiltinMaskLoader(spriteId, baseResource, mask));
-            selected.put(baseId, new OverlayCandidate(spriteId, "built-in " + baseId));
+            selected.put(baseId, new OverlayCandidate(spriteId, "built-in " + baseId, true));
         }
 
         PENDING_BLOCK_PLAN.set(new AtlasPlan(Map.copyOf(selected)));
@@ -116,7 +113,7 @@ public final class EmissiveTextureRegistry {
             return;
         }
         AtlasPlan plan = PENDING_BLOCK_PLAN.get();
-        Map<Identifier, TextureAtlasSprite> resolved = new HashMap<>();
+        Map<Identifier, StitchedOverlay> resolved = new HashMap<>();
         for (Map.Entry<Identifier, OverlayCandidate> entry : plan.overlays().entrySet()) {
             TextureAtlasSprite overlay = preparations.regions().get(entry.getValue().spriteId());
             TextureAtlasSprite base = preparations.regions().get(entry.getKey());
@@ -134,18 +131,22 @@ public final class EmissiveTextureRegistry {
                 );
                 continue;
             }
-            resolved.put(entry.getKey(), overlay);
+            resolved.put(entry.getKey(), new StitchedOverlay(overlay, entry.getValue().requiresBlockEmission()));
         }
         stitchedOverlays = Map.copyOf(resolved);
         Metallum.LOGGER.info("Loaded {} partial emissive terrain texture overlays", stitchedOverlays.size());
     }
 
     @Nullable
-    public static TextureAtlasSprite overlayFor(final TextureAtlasSprite baseSprite) {
+    public static TextureAtlasSprite overlayFor(final TextureAtlasSprite baseSprite, final int blockLightEmission) {
         if (baseSprite == null || !BLOCK_ATLAS_TEXTURE.equals(baseSprite.atlasLocation())) {
             return null;
         }
-        return stitchedOverlays.get(baseSprite.contents().name());
+        StitchedOverlay overlay = stitchedOverlays.get(baseSprite.contents().name());
+        if (overlay == null || !allowsOverlay(overlay.requiresBlockEmission(), blockLightEmission)) {
+            return null;
+        }
+        return overlay.sprite();
     }
 
     /** Reprojects a point in the base sprite's atlas rectangle into the overlay rectangle. */
@@ -205,6 +206,16 @@ public final class EmissiveTextureRegistry {
         return BuiltinMask.forBaseSprite(baseSpriteId) != null;
     }
 
+    static boolean usesGeneratedVanillaMask(final Identifier baseSpriteId, final String sourcePackId) {
+        return VANILLA_PACK_ID.equals(sourcePackId)
+                && "minecraft".equals(baseSpriteId.getNamespace())
+                && baseSpriteId.getPath().startsWith("block/");
+    }
+
+    static boolean autoMaskMatches(final int argb) {
+        return BuiltinMask.AUTO.matches(argb);
+    }
+
     static boolean builtinMaskMatches(final Identifier baseSpriteId, final int argb) {
         BuiltinMask mask = BuiltinMask.forBaseSprite(baseSpriteId);
         return mask != null && mask.matches(argb);
@@ -217,6 +228,10 @@ public final class EmissiveTextureRegistry {
             final int overlayPriority
     ) {
         return basePackId.equals(overlayPackId) || overlayPriority >= basePriority;
+    }
+
+    static boolean allowsOverlay(final boolean requiresBlockEmission, final int blockLightEmission) {
+        return !requiresBlockEmission || blockLightEmission > 0;
     }
 
     private static Map<String, String> suffixes(final ResourceManager resourceManager) {
@@ -307,10 +322,27 @@ public final class EmissiveTextureRegistry {
         );
     }
 
+    /**
+     * Every untouched vanilla terrain sprite gets a generated fallback mask. It is only selected
+     * for a block state that actually emits Minecraft light, so a shared off-state texture never
+     * becomes emissive. Resource packs and mods must opt in with their own standard sidecar.
+     */
+    @Nullable
+    private static BuiltinMask builtinMaskFor(final Identifier baseId, @Nullable final Resource baseResource) {
+        if (baseResource == null || !usesGeneratedVanillaMask(baseId, baseResource.sourcePackId())) {
+            return null;
+        }
+        BuiltinMask exactMask = BuiltinMask.forBaseSprite(baseId);
+        return exactMask != null ? exactMask : BuiltinMask.AUTO;
+    }
+
     private record SidecarCandidate(Identifier spriteId, Resource resource, String sourceDescription) {
     }
 
-    private record OverlayCandidate(Identifier spriteId, String sourceDescription) {
+    private record OverlayCandidate(Identifier spriteId, String sourceDescription, boolean requiresBlockEmission) {
+    }
+
+    private record StitchedOverlay(TextureAtlasSprite sprite, boolean requiresBlockEmission) {
     }
 
     private record AtlasPlan(Map<Identifier, OverlayCandidate> overlays) {
@@ -326,7 +358,15 @@ public final class EmissiveTextureRegistry {
         AMETHYST((alpha, red, green, blue) -> alpha > 0 && red > green * 1.10f && blue > green * 1.10f),
         SCULK((alpha, red, green, blue) -> alpha > 0 && green >= 100 && blue >= 100 && green > red * 1.45f && blue > red * 1.45f),
         MAGMA((alpha, red, green, blue) -> alpha > 0 && red >= 140 && green >= 45 && blue <= 96 && red > green * 1.25f),
-        CRYING_OBSIDIAN((alpha, red, green, blue) -> alpha > 0 && blue >= 105 && blue > red * 1.20f && blue > green * 1.25f);
+        CRYING_OBSIDIAN((alpha, red, green, blue) -> alpha > 0 && blue >= 105 && blue > red * 1.20f && blue > green * 1.25f),
+        AUTO((alpha, red, green, blue) -> {
+            if (alpha == 0) {
+                return false;
+            }
+            int maximum = Math.max(red, Math.max(green, blue));
+            int minimum = Math.min(red, Math.min(green, blue));
+            return maximum >= 192 || maximum >= 144 && maximum - minimum >= 44;
+        });
 
         private final PixelMatcher matcher;
 

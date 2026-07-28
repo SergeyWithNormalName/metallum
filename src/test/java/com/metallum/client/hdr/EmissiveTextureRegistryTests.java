@@ -13,6 +13,8 @@ public final class EmissiveTextureRegistryTests {
     public static void main(final String[] args) {
         testSuffixSelection();
         testResourcePriority();
+        testBuiltInEmissionStateGate();
+        testUniversalVanillaFallback();
         testSpriteLayouts();
         testUvProjection();
         testBuiltinMasks();
@@ -69,6 +71,33 @@ public final class EmissiveTextureRegistryTests {
                 "animation-frame-mismatched sidecar was accepted");
         require(!EmissiveTextureRegistry.compatibleLayout(16, 16, false, still, 16, 16, true, animated),
                 "static base accepted an animated sidecar");
+    }
+
+    private static void testBuiltInEmissionStateGate() {
+        require(!EmissiveTextureRegistry.allowsOverlay(true, 0),
+                "an unlit state was allowed to use a generated vanilla emissive mask");
+        require(EmissiveTextureRegistry.allowsOverlay(true, 1),
+                "a lit state was rejected from its generated vanilla emissive mask");
+        require(EmissiveTextureRegistry.allowsOverlay(false, 0),
+                "a standard resource-pack sidecar was incorrectly tied to Minecraft block light");
+    }
+
+    private static void testUniversalVanillaFallback() {
+        Identifier torch = Identifier.withDefaultNamespace("block/torch");
+        Identifier furnaceFrontOn = Identifier.withDefaultNamespace("block/furnace_front_on");
+        Identifier modLamp = Identifier.fromNamespaceAndPath("examplemod", "block/lamp");
+        require(EmissiveTextureRegistry.usesGeneratedVanillaMask(torch, "vanilla")
+                        && EmissiveTextureRegistry.usesGeneratedVanillaMask(furnaceFrontOn, "vanilla"),
+                "an untouched vanilla light-bearing sprite has no generated fallback mask");
+        require(!EmissiveTextureRegistry.usesGeneratedVanillaMask(torch, "resourcepack")
+                        && !EmissiveTextureRegistry.usesGeneratedVanillaMask(modLamp, "vanilla"),
+                "a resource-pack or mod texture was given a guessed vanilla mask");
+        require(EmissiveTextureRegistry.autoMaskMatches(0xffffe0a0),
+                "bright automatic-emission pixels are not selected");
+        require(EmissiveTextureRegistry.autoMaskMatches(0xffbd5412),
+                "saturated warm automatic-emission pixels are not selected");
+        require(!EmissiveTextureRegistry.autoMaskMatches(0xff4a463d),
+                "dark non-emissive automatic-emission pixels are selected");
     }
 
     private static void testBuiltinMasks() {
