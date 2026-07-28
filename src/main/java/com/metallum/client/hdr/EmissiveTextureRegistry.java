@@ -48,7 +48,7 @@ public final class EmissiveTextureRegistry {
      * minimum; authored {@code *_e.png} sidecars remain byte-for-byte intact.
      */
     private static final int GENERATED_EMISSION_MINIMUM_PEAK = 128;
-    private static final int GENERATED_EMISSION_DIM_MINIMUM_PEAK = 72;
+    private static final int GENERATED_EMISSION_DIM_MINIMUM_PEAK = 30;
     private static final Identifier BLOCK_ATLAS_TEXTURE =
             Identifier.withDefaultNamespace("textures/atlas/blocks.png");
 

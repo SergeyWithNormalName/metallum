@@ -157,12 +157,12 @@ public final class EmissiveTextureRegistryTests {
         int dim = EmissiveTextureRegistry.generatedMaskPixel(darkRed, false);
         require(direct >>> 24 == 0xff && dim >>> 24 == 0xff,
                 "soft generated emissive pixels lost their source alpha");
-        require(peak(direct) >= 128 && peak(dim) >= 72 && peak(dim) < peak(direct),
+        require(peak(direct) >= 128 && peak(dim) >= 30 && peak(dim) < peak(direct),
                 "dark opaque texels were not kept below selected emissive detail");
         require(red(direct) > green(direct) && red(direct) > blue(direct),
                 "soft generated emissive pixel did not retain its original hue");
         int black = EmissiveTextureRegistry.generatedMaskPixel(0xff000000, false);
-        require(peak(black) == 72 && red(black) == green(black) && green(black) == blue(black),
+        require(peak(black) == 30 && red(black) == green(black) && green(black) == blue(black),
                 "opaque black texel did not receive a dim neutral emissive value");
         require(EmissiveTextureRegistry.generatedMaskPixel(0x00102030, true) == 0,
                 "transparent source pixel leaked into the generated overlay");
