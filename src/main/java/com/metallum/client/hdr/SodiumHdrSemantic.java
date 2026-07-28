@@ -12,12 +12,12 @@ public final class SodiumHdrSemantic {
     private static final AtomicBoolean MATERIAL_CONFLICT_LOGGED = new AtomicBoolean();
     private static final int AMETHYST_GROWTH_SURFACE_EMISSION = 2;
     /**
-     * Gamma 1.75 remap of Minecraft's 0..15 light-source levels. Keeping it
+     * Gamma 2.5 remap of Minecraft's 0..15 light-source levels. Keeping it
      * as a lookup table makes terrain meshing allocation-free and ensures
      * level 15 remains the exact HDR reference point.
      */
     private static final int[] PARTIAL_OVERLAY_EMISSION_CURVE = {
-            0, 1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 9, 10, 12, 13, 15
+            0, 1, 1, 1, 1, 1, 2, 2, 3, 4, 5, 7, 9, 10, 13, 15
     };
 
     private SodiumHdrSemantic() {
