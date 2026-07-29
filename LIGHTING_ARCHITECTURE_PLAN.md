@@ -1955,6 +1955,11 @@ GGX-материалы, полупрозрачность и отражающие
   и Metal GPU reactive-merge контракты входят в `check`. Автоматические проверки не
   заменяют финальный субъективный visual smoke воды/стекла/мокрых поверхностей на
   пользовательском мире, но незакрытого L8 code path после stage gate нет.
+- После live-проверки исправлена L8-регрессия alpha-cutout: sampled fragment alpha
+  больше не классифицирует материал как glass. Явный block policy и настоящий Sodium
+  `TRANSLUCENT` render pass фиксируются при ремеше, тогда как foliage, grass overlays
+  и их mip-уровни остаются dielectric. Это устраняет серо-серебряную glass-оптику на
+  листве и боковых гранях травы и убирает лишний L8 fragment path для этих поверхностей.
 
 ### Этап P1. ProMotion/present pacing
 

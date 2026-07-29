@@ -1798,3 +1798,22 @@ clear/load/store contract или Native/Spatial отсутствие attachment.
 не используется как доказательство. Финальный FPS loss остаётся внутри принятого
 short-run regression limit `-12%`: ущерб некритичный, но FPS win не заявляется.
 После A/B production branch восстановлен, `exclusiveFullscreen=false`.
+
+## 2026-07-29 — L8 alpha-cutout ошибочно входил в glass optics
+
+Live-скриншоты выявили серо-серебряную листву, траву и боковой overlay grass block,
+особенно вдали. Причина находилась строго в L8: untagged terrain с sampled alpha
+ниже `0.985` объявлялся glass непосредственно во fragment shader. Alpha-tested
+текстуры и усредненная mip-alpha поэтому получали transmission, environment
+refraction и GGX стекла.
+
+Fragment-alpha heuristic удален. Material fallback теперь определяется один раз при
+Sodium remesh: только настоящий `TRANSLUCENT` pass продвигает неизвестный dielectric
+в glass, а `CUTOUT`/`CUTOUT_MIPPED` остаются dielectric независимо от texture alpha.
+Регрессии фиксируют oak leaves, grass block и сохранение glass fallback для
+translucent terrain. `./gradlew clean check --console=plain` прошел полностью:
+`80` tasks, включая actual GLSL -> SPIR-V, Metal API/GPU Validation и L8 reactive
+merge. Исправление не добавляет ресурсов, проходов или fragment work; на cutout
+common path оно удаляет ветку L8. Для уже собранных chunk meshes требуется remesh
+(`F3+A`) или перезапуск; live-проверка тех же ракурсов остается пользовательским
+signoff.

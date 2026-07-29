@@ -11,8 +11,9 @@ import java.util.Objects;
  * <p>The compact Sodium vertex contract has one conditionally-free semantic bit: exact emission
  * only consumes it when surface emission is non-zero. Non-emissive terrain uses that bit together
  * with version-locked base values to distinguish metal, smooth dielectric, water, and glass.
- * Unknown translucent terrain remains glass-like, while unknown opaque materials fail safely to
- * dielectric.</p>
+ * Unknown terrain fails safely to dielectric unless the remesher identifies a genuine translucent
+ * render pass. Fragment alpha is deliberately not a material classifier: foliage, grass overlays,
+ * and their mip levels are alpha-tested but not glass.</p>
  */
 public final class SurfaceMaterialPolicy {
     public enum Kind {
@@ -96,6 +97,18 @@ public final class SurfaceMaterialPolicy {
             return SMOOTH_DIELECTRIC;
         }
         return DIELECTRIC;
+    }
+
+    /**
+     * Promotes only a genuine translucent terrain pass to the conservative glass-like fallback.
+     * Cutout and cutout-mipped materials must pass {@code false}, regardless of sampled alpha.
+     */
+    public static Descriptor forTerrain(
+            final BlockState state,
+            final boolean translucentRenderPass
+    ) {
+        Descriptor explicit = forBlock(state);
+        return explicit == DIELECTRIC && translucentRenderPass ? GLASS : explicit;
     }
 
     public static float wetRoughness(final float dryRoughness, final float wetness) {

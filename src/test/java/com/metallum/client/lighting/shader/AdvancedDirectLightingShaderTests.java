@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "8be2d65fca8643d56d9b91d1bce1fe8baecad40c39beef75f3eccc1f4c4766c5",
+            "sodium-solid-fsh", "69661374da82dc8b2a09f0face369e2bc5be9dd70ab1774c656a787104a56424",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "0ff31c0d7822e999f13a85059edebd8236185da395b26065624ec61d9d92b0cb",
+            "sodium-cutout-fsh", "38030ed1f662952bfef0857c170387bc8d57672115ed6074331b0adfc4f845a2",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "7824c9407ffe665fe7dc6da2afc50b59a70ec19cf7795ffefe3db52e6575b4b2",
+            "minecraft-entity-fsh", "93f975dd97cd49ca7aa84d13d20ba4af8bd465b0597b291c45795c31d0c6afb0",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "b613ae52f25e9afd9ac4d0158fe8bb86197c0b67c9c5e96f023dace9debe7e15"
+            "minecraft-end-portal-fsh", "b09662444b5c92f10284e9d6b00dfd60f467557010fd2445754db357f4b4c23f"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -864,14 +864,15 @@ public final class AdvancedDirectLightingShaderTests {
                 "L8 lost its mandatory stable environment fallback or introduced SSR/probe cost");
 
         require(sodiumFragment.contains("bool metallumTaggedL8Surface")
-                        && sodiumFragment.contains("bool metallumTranslucentL8Surface")
                         && sodiumFragment.contains("bool metallumRainyL8Surface")
                         && sodiumFragment.contains(
-                        "if (metallumTaggedL8Surface || metallumTranslucentL8Surface")
+                        "if (metallumTaggedL8Surface || metallumRainyL8Surface)")
+                        && !sodiumFragment.contains("metallumTranslucentL8Surface")
+                        && !sodiumFragment.contains("alpha < 0.985")
                         && before(sodiumFragment,
-                        "if (metallumTaggedL8Surface || metallumTranslucentL8Surface",
+                        "if (metallumTaggedL8Surface || metallumRainyL8Surface)",
                         "metallumResolveSurfaceMaterialV1("),
-                "ordinary dry terrain does not enter the literal legacy L3-L6 fast path");
+                "cutout alpha escaped the literal legacy L3-L6 fast path");
         require(environment.contains("vec3 metallumEvaluateMaterialEnvironmentV1(")
                         && before(environment,
                         "return albedo * diffuse * 0.31830988618;",

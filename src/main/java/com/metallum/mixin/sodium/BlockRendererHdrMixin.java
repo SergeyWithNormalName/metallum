@@ -169,8 +169,10 @@ abstract class BlockRendererHdrMixin {
                 partialOverlay,
                 this.metallum$bufferingPartialEmissionOverlay
         );
-        SurfaceMaterialPolicy.Kind surfaceKind = SurfaceMaterialPolicy.forBlock(
-                this.metallum$blockState).kind();
+        SurfaceMaterialPolicy.Kind surfaceKind = SurfaceMaterialPolicy.forTerrain(
+                this.metallum$blockState,
+                material.isTranslucent()
+        ).kind();
         int surfaceClass = switch (surfaceKind) {
             case METAL -> SodiumHdrSemantic.SURFACE_CLASS_METAL;
             case SMOOTH_DIELECTRIC -> SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC;

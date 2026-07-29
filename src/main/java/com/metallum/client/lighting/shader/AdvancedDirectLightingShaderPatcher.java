@@ -250,7 +250,6 @@ public final class AdvancedDirectLightingShaderPatcher {
 
             MetallumSurfaceMaterialV1 metallumResolveSurfaceMaterialV1(
                     uint packedMaterial,
-                    float alpha,
                     vec3 normal,
                     float skyVisibility,
                     bool terrainSurface) {
@@ -258,9 +257,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint baseMaterial = packedMaterial & 7u;
                 bool specialSurface = emissionCode == 0u
                         && ((packedMaterial >> 7u) & 1u) != 0u;
-                bool untaggedTranslucentSurface = !specialSurface
-                        && terrainSurface && emissionCode == 0u
-                        && alpha < 0.985;
                 uint kind = specialSurface && baseMaterial == 3u
                         ? METALLUM_SURFACE_WATER_V1
                         : specialSurface && baseMaterial == 2u
@@ -269,9 +265,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                                         ? METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1
                                         : specialSurface && baseMaterial == 6u
                                                 ? METALLUM_SURFACE_GLASS_V1
-                                                : untaggedTranslucentSurface
-                                                        ? METALLUM_SURFACE_GLASS_V1
-                                                        : METALLUM_SURFACE_DIELECTRIC_V1;
+                                                : METALLUM_SURFACE_DIELECTRIC_V1;
 
                 MetallumSurfaceMaterialV1 material;
                 material.kind = kind;
@@ -1949,17 +1943,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    uint metallumSurfaceEmission = (metallumMaterial >> 3u) & 15u;\n"
                     + "    bool metallumTaggedL8Surface = metallumSurfaceEmission == 0u\n"
                     + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
-                    + "    bool metallumTranslucentL8Surface = metallumSurfaceEmission == 0u\n"
-                    + "            && metallumAlbedo.a < 0.985;\n"
                     + "    bool metallumRainyL8Surface =\n"
                     + "            metallumEnvironment.materialContract.x == 1u\n"
                     + "            && metallumEnvironment.materialWeatherAndTime.x > 0.0\n"
                     + "            && metallumSkyVisibility > 0.0;\n"
-                    + "    if (metallumTaggedL8Surface || metallumTranslucentL8Surface\n"
-                    + "            || metallumRainyL8Surface) {\n"
+                    + "    if (metallumTaggedL8Surface || metallumRainyL8Surface) {\n"
                     + "        MetallumSurfaceMaterialV1 metallumSurfaceMaterial =\n"
                     + "                metallumResolveSurfaceMaterialV1(\n"
-                    + "                        metallumMaterial, metallumAlbedo.a,\n"
+                    + "                        metallumMaterial,\n"
                     + "                        metallumDirectNormal, metallumSkyVisibility, true);\n"
                     + "        bool metallumNeedsMaterialOptics =\n"
                     + "                metallumSurfaceMaterial.kind != METALLUM_SURFACE_DIELECTRIC_V1\n"

@@ -31,6 +31,17 @@ public final class SurfaceMaterialPolicyTests {
         require(SurfaceMaterialPolicy.forBlock(Blocks.GLASS.defaultBlockState())
                         == SurfaceMaterialPolicy.GLASS,
                 "glass block did not resolve the transmissive CPU policy");
+        require(SurfaceMaterialPolicy.forTerrain(
+                        Blocks.OAK_LEAVES.defaultBlockState(), false)
+                        == SurfaceMaterialPolicy.DIELECTRIC
+                        && SurfaceMaterialPolicy.forTerrain(
+                        Blocks.GRASS_BLOCK.defaultBlockState(), false)
+                        == SurfaceMaterialPolicy.DIELECTRIC,
+                "cutout foliage or grass entered the glass fallback");
+        require(SurfaceMaterialPolicy.forTerrain(
+                        Blocks.SLIME_BLOCK.defaultBlockState(), true)
+                        == SurfaceMaterialPolicy.GLASS,
+                "genuine translucent terrain lost its conservative glass fallback");
         require(SodiumHdrSemantic.SURFACE_CLASS_METAL
                         != SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
                         && SodiumHdrSemantic.SURFACE_CLASS_WATER
