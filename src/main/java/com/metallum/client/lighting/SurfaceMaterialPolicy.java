@@ -22,6 +22,8 @@ import java.util.Objects;
 public final class SurfaceMaterialPolicy {
     public static final float RAIN_FACING_START = 0.55f;
     public static final float RAIN_FACING_FULL = 0.85f;
+    public static final float RAIN_WETTING_RESPONSE_SECONDS = 0.35f;
+    public static final float RAIN_DRYING_RESPONSE_SECONDS = 4.0f;
 
     public enum Kind {
         DIELECTRIC,
@@ -204,6 +206,26 @@ public final class SurfaceMaterialPolicy {
                 1.0f
         );
         return amount * amount * (3.0f - 2.0f * amount);
+    }
+
+    /**
+     * Frame-rate-independent rain-film response for the L8 material packet. Wetting is quick,
+     * while drying retains a short visual tail so weather changes do not toggle wet optics.
+     */
+    public static float smoothRainWetness(
+            final float currentWetness,
+            final float targetRain,
+            final float deltaSeconds
+    ) {
+        float current = clampUnit(currentWetness);
+        float target = clampUnit(targetRain);
+        if (!Float.isFinite(deltaSeconds) || deltaSeconds < 0.0f) {
+            throw new IllegalArgumentException("delta seconds must be finite and non-negative");
+        }
+        float responseSeconds = target > current
+                ? RAIN_WETTING_RESPONSE_SECONDS : RAIN_DRYING_RESPONSE_SECONDS;
+        float blend = 1.0f - (float) Math.exp(-deltaSeconds / responseSeconds);
+        return mix(current, target, blend);
     }
 
     public static float schlickFresnel(final float f0, final float nDotV) {

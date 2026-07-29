@@ -1982,6 +1982,10 @@ GGX-материалы, полупрозрачность и отражающие
   крыши плавно входят в полное намокание до `normal.y = 0.85`. Rain resolver теперь
   запускается только для non-emissive rain-tagged upward surfaces, поэтому исправление
   также удаляет дождевую L8-работу с обычных стен.
+- Rain film L8 сглаживается один раз при формировании environment packet: начало дождя
+  имеет короткий response `0.35 s`, а после прекращения raw weather плавно высыхает с
+  time constant `4.0 s`. Это убирает визуальный on/off-переход roughness/Fresnel/albedo
+  без history texture, без per-pixel состояния и без ABI/resource changes.
 
 ### Этап P1. ProMotion/present pacing
 

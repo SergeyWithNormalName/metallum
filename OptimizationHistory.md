@@ -1883,3 +1883,16 @@ tagged surface. Вертикальная стена поэтому не може
 а во время дождя вертикальные стены теперь пропускают весь material resolver/GGX.
 Автоматические numerical и actual GLSL/SPIR-V проверки фиксируют пороги и gate;
 финальный visual signoff требует дождя и remesh (`F3+A`) на исходном здании.
+
+## 2026-07-29 — L8 резко выключался после окончания дождя
+
+В material packet записывался raw `EnvironmentDescriptor.rain()`. Когда vanilla
+weather переходил к нулю, roughness, Fresnel, albedo darkening и reactive weight L8
+переключались в том же кадре. Это особенно заметно на освещённых дорожках и крышах.
+
+В `SunShadowGpuResources` добавлен один persistent scalar `materialRainWetness`:
+экспоненциальный response с attack `0.35 s` и release `4.0 s` обновляется только при
+сборке существующего environment packet и записывается в уже выделенный
+`materialWeatherAndTime.x`. Шейдер и ABI не расширяются; нет texture history,
+buffers, passes, allocations или per-fragment temporal state. После остановки дождя
+влажность убывает непрерывно, но за 12 секунд опускается ниже 6%.

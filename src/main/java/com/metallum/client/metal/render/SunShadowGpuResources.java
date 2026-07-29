@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.SunShadowCache;
 import com.metallum.client.lighting.SunShadowFrame;
 import com.metallum.client.lighting.SunShadowStabilizer;
@@ -41,6 +42,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final SunShadowCache cache;
     private SunShadowFrame frame;
     private double materialTimeSeconds;
+    private float materialRainWetness;
     private SunShadowCache.Decision cacheDecision;
     private long renderedSubmitIndex = Long.MIN_VALUE;
     private boolean closed;
@@ -231,8 +233,14 @@ final class SunShadowGpuResources implements AutoCloseable {
                 this.budget.receiverNormalBiasTexels());
         this.materialTimeSeconds = (this.materialTimeSeconds
                 + Math.clamp(frameState.deltaSeconds(), 0.0, 0.25)) % 4096.0;
+        this.materialRainWetness = SurfaceMaterialPolicy.smoothRainWetness(
+                this.materialRainWetness,
+                environment.rain(),
+                (float) Math.clamp(frameState.deltaSeconds(), 0.0, 0.25)
+        );
         putVec4(packet, EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET,
-                environment.rain(), environment.thunder(), (float) this.materialTimeSeconds, 0.0f);
+                this.materialRainWetness, environment.thunder(),
+                (float) this.materialTimeSeconds, 0.0f);
         putInt4(packet, EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
