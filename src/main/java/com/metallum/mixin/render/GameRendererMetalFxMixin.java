@@ -265,9 +265,7 @@ abstract class GameRendererMetalFxMixin {
         if (skybox == DimensionType.Skybox.OVERWORLD) {
             float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
             float rain = SurfaceMaterialPolicy.rainWetnessTarget(
-                    this.minecraft.level.getRainLevel(partialTick),
-                    this.minecraft.level.isRaining()
-            );
+                    this.minecraft.level.getRainLevel(partialTick));
             float thunder = this.minecraft.level.getThunderLevel(partialTick);
             // Minecraft 26.2 publishes data-driven sky intensity, tint, and ambient separately.
             // Keep the raw coefficients: EnvironmentDescriptor converts the reflected-diffuse

@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "72226510dd83c25dc4f07d712e8bf0c5551138d0334f68fa3d4ee05dc72c09ae",
+            "sodium-solid-fsh", "4fc78efcec865a92735709f0279e6e4a4d33692fdc2df124188648c63c19f26c",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "73bd22b29d6a05f0e33b08aeba75da3b614ea4a7d5a0adbd70a8bb7eaa4c5d7e",
+            "sodium-cutout-fsh", "6fcabb1669c2b4ca88fa209eff3b11891eefea74d85219d286e23d316fe0a99c",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "12cac597059bd36ceda58d13e12376be0d2832f8b906effea3529e3fadf7e112",
+            "minecraft-entity-fsh", "3cb04e5c308af63d43c5f51c784f8bfc6f812e0d1d82aefa207ab0a23fa27bb0",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "d2360e1d7b817050df31020d9faa94c6a8acf58f11271889d3f1f4db791225fe"
+            "minecraft-end-portal-fsh", "27090b2902e259b7eba5efaecb9ea7c53c35b5e4d2c32c0c519a375db6dd4f71"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -916,6 +916,9 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float waveZ = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
+                        && sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1 = 0.01")
+                        && countOccurrences(sodiumFragment,
+                        "> METALLUM_RAIN_WETNESS_EPSILON_V1") == 2
                         && sodiumFragment.contains("float rainExposure = smoothstep(0.55, 0.85")
                         && sodiumFragment.contains("* rainExposure * rainExposure")
                         && sodiumFragment.contains("float wetRoughnessTarget")

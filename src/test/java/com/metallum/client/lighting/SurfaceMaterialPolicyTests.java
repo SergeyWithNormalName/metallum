@@ -2,6 +2,7 @@ package com.metallum.client.lighting;
 
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.sodium.SodiumRainExposureSnapshot;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.SharedConstants;
 import net.minecraft.world.level.block.Blocks;
@@ -17,6 +18,7 @@ public final class SurfaceMaterialPolicyTests {
         testVanillaDefaults();
         testCompactSemanticCoexistence();
         testFresnelAndGgx();
+        testRainExposureSnapshot();
         testWetnessAndAbsorption();
         System.out.println("PASS L8 GGX, water/glass optics, wetness, and compact material policy tests");
     }
@@ -148,14 +150,22 @@ public final class SurfaceMaterialPolicyTests {
             driedAfterTwelveSeconds = SurfaceMaterialPolicy.smoothRainWetness(
                     driedAfterTwelveSeconds, 0.0f, 0.1f);
         }
+        float driedAfterOneMinute = 1.0f;
+        for (int frame = 0; frame < 600; frame++) {
+            driedAfterOneMinute = SurfaceMaterialPolicy.smoothRainWetness(
+                    driedAfterOneMinute, 0.0f, 0.1f);
+        }
         require(firstWetFrame > 0.07f && firstWetFrame < 0.09f
                         && wetAfterThreeSeconds > 0.90f
                         && afterRainStops > 0.9f
-                        && driedAfterTwelveSeconds < 0.06f,
-                "rain film does not wet quickly and dry smoothly within its bounded tail");
-        require(close(SurfaceMaterialPolicy.rainWetnessTarget(1.0f, false), 0.0f)
-                        && close(SurfaceMaterialPolicy.rainWetnessTarget(0.75f, true), 0.75f),
-                "L8 rain target does not follow the visual rain state");
+                        && driedAfterTwelveSeconds < 0.06f
+                        && close(driedAfterOneMinute, 0.0f),
+                "rain film does not wet smoothly or finish its bounded drying tail");
+        require(close(SurfaceMaterialPolicy.rainWetnessTarget(0.0f), 0.0f)
+                        && close(SurfaceMaterialPolicy.rainWetnessTarget(0.25f), 0.85f)
+                        && close(SurfaceMaterialPolicy.rainWetnessTarget(0.75f), 0.95f)
+                        && close(SurfaceMaterialPolicy.rainWetnessTarget(1.0f), 1.0f),
+                "L8 rain target is not a mild monotonic mapping of getRainLevel()");
 
         float dryStone = SurfaceMaterialPolicy.wetRoughness(
                 SurfaceMaterialPolicy.STONE, 0.0f, 0.5f);
@@ -201,6 +211,17 @@ public final class SurfaceMaterialPolicyTests {
         float deep = SurfaceMaterialPolicy.beerLambert(0.36f, 5.0f);
         require(shallow <= 1.0f && shallow > deep && deep >= 0.0f,
                 "Beer-Lambert absorption is not energy-conserving and depth-monotonic");
+    }
+
+    private static void testRainExposureSnapshot() {
+        int[] heights = new int[SodiumRainExposureSnapshot.AREA];
+        heights[(3 << 4) | 2] = 71;
+        SodiumRainExposureSnapshot snapshot = new SodiumRainExposureSnapshot(32, -16, heights);
+        require(snapshot.canRainReach(34, 71, -13)
+                        && !snapshot.canRainReach(34, 70, -13)
+                        && !snapshot.canRainReach(31, 100, -13)
+                        && !snapshot.canRainReach(34, 100, 0),
+                "MOTION_BLOCKING rain exposure snapshot accepts a sheltered or foreign column");
     }
 
     private static boolean close(final float actual, final float expected) {

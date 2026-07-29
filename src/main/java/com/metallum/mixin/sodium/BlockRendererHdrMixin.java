@@ -5,14 +5,19 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
+import com.metallum.client.sodium.SodiumRainExposureSnapshot;
+import com.metallum.client.sodium.SodiumRainExposureSnapshotAccess;
+import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildBuffers;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.material.DefaultMaterials;
 import net.caffeinemc.mods.sodium.client.model.light.LightMode;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.material.Material;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.pipeline.BlockRenderer;
+import net.caffeinemc.mods.sodium.client.render.chunk.translucent_sorting.TranslucentGeometryCollector;
 import net.caffeinemc.mods.sodium.client.render.model.MutableQuadViewImpl;
 import net.caffeinemc.mods.sodium.client.render.model.SodiumShadeMode;
 import net.caffeinemc.mods.sodium.client.render.texture.SpriteFinderCache;
+import net.caffeinemc.mods.sodium.client.world.LevelSlice;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import net.minecraft.util.LightCoordsUtil;
 import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
@@ -42,6 +47,12 @@ abstract class BlockRendererHdrMixin {
     @Unique
     private int metallum$blockLightEmission;
 
+    @Unique
+    private SodiumRainExposureSnapshot metallum$rainExposureSnapshot;
+
+    @Unique
+    private boolean metallum$blockRainExposed;
+
     /** Reused by one Sodium block-mesher instance; never allocated in the quad hot path. */
     @Unique
     private final float[] metallum$overlayUvs = new float[8];
@@ -58,6 +69,24 @@ abstract class BlockRendererHdrMixin {
     @Unique
     private boolean metallum$originalQuadEmissive;
 
+    @Inject(method = "prepare", at = @At("HEAD"), remap = false)
+    private void metallum$captureRainExposureSnapshot(
+            final ChunkBuildBuffers buffers,
+            final LevelSlice slice,
+            final TranslucentGeometryCollector collector,
+            final CallbackInfo ci
+    ) {
+        this.metallum$rainExposureSnapshot =
+                ((SodiumRainExposureSnapshotAccess) (Object) slice)
+                        .metallum$getRainExposureSnapshot();
+    }
+
+    @Inject(method = "release", at = @At("TAIL"), remap = false)
+    private void metallum$releaseRainExposureSnapshot(final CallbackInfo ci) {
+        this.metallum$rainExposureSnapshot = null;
+        this.metallum$blockRainExposed = false;
+    }
+
     @Inject(method = "renderModel", at = @At("HEAD"), remap = false)
     private void metallum$captureBlockEmission(
             final BlockStateModel model,
@@ -68,6 +97,9 @@ abstract class BlockRendererHdrMixin {
     ) {
         this.metallum$blockState = state;
         this.metallum$blockLightEmission = state.getLightEmission();
+        SodiumRainExposureSnapshot rainExposure = this.metallum$rainExposureSnapshot;
+        this.metallum$blockRainExposed = rainExposure != null
+                && rainExposure.canRainReach(pos.getX(), pos.getY() + 1, pos.getZ());
     }
 
     @WrapOperation(
@@ -173,25 +205,28 @@ abstract class BlockRendererHdrMixin {
                 this.metallum$blockState,
                 material.isTranslucent()
         ).kind();
-        boolean rainFacing = switch (surfaceKind) {
-            case DIELECTRIC, STONE, WOOD, POROUS ->
-                    quad.faceNormal().y() > SurfaceMaterialPolicy.RAIN_FACING_START;
-            default -> false;
-        };
+        boolean upwardFace = quad.faceNormal().y() > SurfaceMaterialPolicy.RAIN_FACING_START;
+        boolean rainExposed = upwardFace && this.metallum$blockRainExposed;
         int surfaceClass = switch (surfaceKind) {
-            case METAL -> SodiumHdrSemantic.SURFACE_CLASS_METAL;
-            case SMOOTH_DIELECTRIC -> SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC;
+            // Preserve intrinsic optics on vertical faces. Upward sheltered faces are left on the
+            // legacy path because the compact byte has no independent precipitation bit.
+            case METAL -> !upwardFace || rainExposed
+                    ? SodiumHdrSemantic.SURFACE_CLASS_METAL
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
+            case SMOOTH_DIELECTRIC -> !upwardFace || rainExposed
+                    ? SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
             case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
-            case STONE -> rainFacing
+            case STONE -> rainExposed
                     ? SodiumHdrSemantic.SURFACE_CLASS_STONE
                     : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case WOOD -> rainFacing
+            case WOOD -> rainExposed
                     ? SodiumHdrSemantic.SURFACE_CLASS_WOOD
                     : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case POROUS -> rainFacing
+            case POROUS -> rainExposed
                     ? SodiumHdrSemantic.SURFACE_CLASS_POROUS
                     : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case DIELECTRIC -> rainFacing
+            case DIELECTRIC -> rainExposed
                     ? SodiumHdrSemantic.SURFACE_CLASS_DIELECTRIC
                     : SodiumHdrSemantic.SURFACE_CLASS_NONE;
             default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;

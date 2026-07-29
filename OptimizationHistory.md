@@ -1899,3 +1899,30 @@ buffers, passes, allocations или per-fragment temporal state. Его target �
 `getRainLevel()` только пока `ClientLevel.isRaining()` true; при остановке видимого
 дождя target становится нулём немедленно, а влажность убывает непрерывно и за
 12 секунд опускается ниже 6%.
+
+## 2026-07-29 — L8 rain-level, конечное высыхание и защита от дождя
+
+Повторная live-проверка выявила две ошибки прежнего transition fix. Экспоненциальный
+release асимптотически приближался к нулю, но никогда его не достигал; wet-only shader
+gate проверял `> 0.0`, поэтому даже спустя минуту оставался в material optics. Кроме
+того, eligibility использовала только upward normal и интерполированный skylight.
+Skylight не является precipitation visibility: он распространяется под крыши и в
+пещерные проёмы, из-за чего закрытые поверхности выглядели мокрыми.
+
+Источник target возвращён к единственному `ClientLevel.getRainLevel(partialTick)` без
+`isRaining()`. Ненулевой rain level отображается в узкий диапазон film strength
+`0.80..1.0`: зависимость от интенсивности сохраняется, но слабый дождь не выключает
+эффект почти полностью. Существующие attack/release `1.25/4.0 s` сохранены; CPU
+response теперь защёлкивает значение в точный target при остатке `<= 0.01`, а оба
+wet-only shader gate используют тот же epsilon. Таким образом появление остаётся
+плавным, высыхание гарантированно заканчивается нулём и сухой common path восстанавливается.
+
+Для каждого Sodium section render context на потоке подготовки сохраняется `16x16`
+снимок vanilla `MOTION_BLOCKING` heightmap. Worker переносит ссылку в переиспользуемый
+`LevelSlice`, а `BlockRenderer` делает один array lookup на блок и выдаёт wet tag только
+upward quad, чья поверхность находится не ниже precipitation height. Запросов к live
+world из worker thread, per-frame/per-fragment heightmap reads, новых GPU buffers,
+textures, passes или ABI нет. Дополнительная стоимость ограничена 256 O(1) heightmap
+чтениями и примерно 1 KiB на полную mesh-задачу; закрытые wet-only surfaces одновременно
+перестают попадать в дорогой rain GGX path. После изменения roof geometry соответствующим
+секциям нужен обычный Sodium remesh; visual signoff в игре остаётся обязательным.

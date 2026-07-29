@@ -1982,11 +1982,15 @@ GGX-материалы, полупрозрачность и отражающие
   крыши плавно входят в полное намокание до `normal.y = 0.85`. Rain resolver теперь
   запускается только для non-emissive rain-tagged upward surfaces, поэтому исправление
   также удаляет дождевую L8-работу с обычных стен.
-- Rain film L8 сглаживается один раз при формировании environment packet: target привязан к
-  visual `isRaining`, а не к запаздывающему interpolated rain level. Начало дождя имеет
-  плавный response `1.25 s`; после прекращения видимого дождя эффект высыхает с time
-  constant `4.0 s`. Это убирает визуальный on/off-переход roughness/Fresnel/albedo без
-  history texture, без per-pixel состояния и без ABI/resource changes.
+- Rain film L8 сглаживается один раз при формировании environment packet: target снова берётся
+  исключительно из interpolated `getRainLevel()`, а его диапазон `0.80..1.0` сохраняет умеренную
+  зависимость силы эффекта от интенсивности дождя. Начало имеет плавный response `1.25 s`,
+  высыхание — time constant `4.0 s`; epsilon `0.01` точно завершает tail нулём и закрывает
+  wet-only shader gate, поэтому асимптотический остаток больше не держит GGX бесконечно.
+  Rain eligibility дополнительно фиксируется при Sodium remesh по снимку vanilla
+  `MOTION_BLOCKING` heightmap: верхние поверхности под крышей и в пещерах не получают wet tag.
+  Снимок содержит только `16x16` высот на mesh-задачу и не добавляет per-frame/per-fragment
+  запросов, history textures, новых GPU resources или ABI changes.
 
 ### Этап P1. ProMotion/present pacing
 

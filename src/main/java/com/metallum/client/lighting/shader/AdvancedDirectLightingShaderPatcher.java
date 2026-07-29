@@ -238,6 +238,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             const uint METALLUM_SURFACE_STONE_V1 = 5u;
             const uint METALLUM_SURFACE_WOOD_V1 = 6u;
             const uint METALLUM_SURFACE_POROUS_V1 = 7u;
+            const float METALLUM_RAIN_WETNESS_EPSILON_V1 = 0.01;
 
             struct MetallumSurfaceMaterialV1 {
                 vec3 absorption;
@@ -2016,7 +2017,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    bool metallumRainCandidate =\n"
                     + "            metallumSurfaceEmission == 0u\n"
                     + "            && metallumEnvironment.materialContract.x == 1u\n"
-                    + "            && metallumEnvironment.materialWeatherAndTime.x > 0.0\n"
+                    + "            && metallumEnvironment.materialWeatherAndTime.x\n"
+                    + "            > METALLUM_RAIN_WETNESS_EPSILON_V1\n"
                     + "            && metallumSkyVisibility > 0.0\n"
                     + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
                     + "    float metallumRainFacing = 0.0;\n"
@@ -2041,7 +2043,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1;\n"
                     + "        bool metallumNeedsMaterialOptics =\n"
                     + "                metallumIntrinsicMaterialOptics\n"
-                    + "                || metallumSurfaceMaterial.wetness > 0.0;\n"
+                    + "                || metallumSurfaceMaterial.wetness\n"
+                    + "                > METALLUM_RAIN_WETNESS_EPSILON_V1;\n"
                     + "        if (metallumNeedsMaterialOptics) {\n"
                     + "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n"
                     + "            metallumDirectNormal = metallumWaterNormalV1(\n"

@@ -24,6 +24,8 @@ public final class SurfaceMaterialPolicy {
     public static final float RAIN_FACING_FULL = 0.85f;
     public static final float RAIN_WETTING_RESPONSE_SECONDS = 1.25f;
     public static final float RAIN_DRYING_RESPONSE_SECONDS = 4.0f;
+    public static final float RAIN_WETNESS_EPSILON = 0.01f;
+    private static final float RAIN_WETNESS_MINIMUM_INTENSITY = 0.80f;
 
     public enum Kind {
         DIELECTRIC,
@@ -225,15 +227,20 @@ public final class SurfaceMaterialPolicy {
         float responseSeconds = target > current
                 ? RAIN_WETTING_RESPONSE_SECONDS : RAIN_DRYING_RESPONSE_SECONDS;
         float blend = 1.0f - (float) Math.exp(-deltaSeconds / responseSeconds);
-        return mix(current, target, blend);
+        float next = mix(current, target, blend);
+        return Math.abs(next - target) <= RAIN_WETNESS_EPSILON ? target : next;
     }
 
     /**
-     * Minecraft's interpolated rain level can remain high after particle rain stops. L8 must use
-     * the visual weather state as its target so the drying tail begins when rain visibly ends.
+     * Maps Minecraft's interpolated rain level to a deliberately narrow L8 film range. Rain
+     * intensity remains visible without making light rain look almost dry; exact zero is retained
+     * so the smoothed film can finish drying and leave the shader's wet-only path.
      */
-    public static float rainWetnessTarget(final float interpolatedRainLevel, final boolean raining) {
-        return raining ? clampUnit(interpolatedRainLevel) : 0.0f;
+    public static float rainWetnessTarget(final float interpolatedRainLevel) {
+        float rain = clampUnit(interpolatedRainLevel);
+        return rain == 0.0f
+                ? 0.0f
+                : mix(RAIN_WETNESS_MINIMUM_INTENSITY, 1.0f, rain);
     }
 
     public static float schlickFresnel(final float f0, final float nDotV) {
