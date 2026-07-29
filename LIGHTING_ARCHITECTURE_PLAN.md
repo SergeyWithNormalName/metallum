@@ -2007,6 +2007,12 @@ GGX-материалы, полупрозрачность и отражающие
   vanilla texture × biome-tint diffuse выросла с `4%` до `18%`, а белёсое analytic environment
   reflection ограничено отдельным весом `0.58`. Procedural waves, Fresnel, refraction,
   Beer-Lambert absorption, солнечный/local GGX и Temporal reactive policy сохранены.
+- Чтобы убрать заметную синусоидальную решётку на большой воде, procedural normal теперь
+  получает один гладкий deterministic value-noise слой с 8-блочной ячейкой. Он world-space,
+  period-locked на `256` блоков и одновременно слегка смещает фазы двух волн и их амплитуду
+  (`0.065..0.090`), поэтому рисунок не зависит от screen-space/camera fraction и не скачет
+  при движении. Шум использует четыре integer-hash corner evaluations только в water gate;
+  texture samples, buffers, passes и non-water work не добавлены.
 
 ### Этап P1. ProMotion/present pacing
 

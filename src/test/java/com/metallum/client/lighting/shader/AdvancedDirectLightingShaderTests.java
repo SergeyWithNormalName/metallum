@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "428dcaacbe4b04759dc38358ec5a40173c66f5b0900c11f8ff08ac416085810b",
+            "sodium-solid-fsh", "27ce4249c92ea5f96fb7711e5d9f633f87c7682d0cf06c6b39afe4a6a54d52fb",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "08bd7edc22c5a7ac1295452b463c6a1c2f0e4f77a371502849ea688461df4f82",
+            "sodium-cutout-fsh", "019519a439f65d877032907eab56f2d4e70102783397705d1a369a9ed01f12b6",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "31b48a2a3e588691a5f422b10efb0225c39d8cd5aef3358c019afe25b9a1f724",
+            "minecraft-entity-fsh", "5a9972d944b4bff521acabcb0a564828f7587c3a7aac46c51af0cf7b0c3ca462",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "35accb7d65533d57c2384700521fd817491ec705033bb94c4a6b0f34dfe4a3fc"
+            "minecraft-end-portal-fsh", "030cdcdd1351efd52a7db4cd579790a233faa3e8be94c387c02f6a330864c51a"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -221,6 +221,8 @@ public final class AdvancedDirectLightingShaderTests {
         };
         double expectedX = waterWavePhase(0.25, -0.75, worldX, worldZ, 31, 47);
         double expectedZ = waterWavePhase(0.25, -0.75, worldX, worldZ, -53, 25);
+        double expectedNoiseX = waterNoiseCoordinate(0.25, worldX);
+        double expectedNoiseZ = waterNoiseCoordinate(-0.75, worldZ);
         for (double cameraX : cameraCoordinates) {
             for (double cameraZ : cameraCoordinates) {
                 require(Math.abs(waterWavePhase(
@@ -231,6 +233,11 @@ public final class AdvancedDirectLightingShaderTests {
                                 cameraX, cameraZ, worldX, worldZ, -53, 25) - expectedZ)
                                 < 1.0e-9,
                         "L8 water Z wave phase jumped at a camera block boundary");
+                require(Math.abs(waterNoiseCoordinate(cameraX, worldX) - expectedNoiseX)
+                                < 1.0e-9
+                                && Math.abs(waterNoiseCoordinate(cameraZ, worldZ)
+                                - expectedNoiseZ) < 1.0e-9,
+                        "L8 water noise coordinate jumped at a camera block boundary");
             }
         }
         require(Math.abs(waterWavePhase(
@@ -241,6 +248,11 @@ public final class AdvancedDirectLightingShaderTests {
                         255.999, -0.001, worldX + 256.0, worldZ - 256.0, -53, 25)
                         - expectedZ) < 1.0e-9,
                 "L8 water Z wave lost its exact 256-block large-world period");
+        require(Math.abs(waterNoiseCoordinate(255.999, worldX + 256.0)
+                        - expectedNoiseX) < 1.0e-9
+                        && Math.abs(waterNoiseCoordinate(-0.001, worldZ - 256.0)
+                        - expectedNoiseZ) < 1.0e-9,
+                "L8 water noise lost its exact 256-block large-world period");
     }
 
     private static double waterWavePhase(
@@ -267,6 +279,17 @@ public final class AdvancedDirectLightingShaderTests {
                 + cameraBlockRelativeZ * turnsZ;
         return Math.floorMod((long) Math.floor(turns), 256)
                 + turns - Math.floor(turns);
+    }
+
+    private static double waterNoiseCoordinate(
+            final double cameraCoordinate,
+            final double worldCoordinate
+    ) {
+        int block = (int) Math.floor(cameraCoordinate);
+        double fraction = cameraCoordinate - block;
+        double cameraBlockRelative = fraction + worldCoordinate - cameraCoordinate;
+        double coordinate = Math.floorMod(block, 256) + cameraBlockRelative;
+        return coordinate - Math.floor(coordinate / 256.0) * 256.0;
     }
 
     private static void testDepthSliceBoundaries() {
@@ -924,6 +947,12 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumPreparedAlbedo = metallumVanillaAlbedo;")
                         && sodiumFragment.contains(
                         "metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255)")
+                        && sodiumFragment.contains("float metallumWaterValueNoiseV1(")
+                        && sodiumFragment.contains(
+                        "ivec2 wrapped = cell & ivec2(periodMask);")
+                        && sodiumFragment.contains("vec2 waterWorldPosition = vec2(wrappedCameraBlock)")
+                        && sodiumFragment.contains(
+                        "waterWorldPosition.yx * 0.125 + vec2(19.0, 73.0), 31")
                         && sodiumFragment.contains("vec2 wavePhase = mod(waveTurns, vec2(256.0))")
                         && sodiumFragment.contains("float waveX = sin(")
                         && sodiumFragment.contains("float waveZ = cos("),

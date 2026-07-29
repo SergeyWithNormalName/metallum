@@ -361,6 +361,27 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return clamp(mix(dielectric, albedo, material.metalness), vec3(0.0), vec3(0.98));
             }
 
+            float metallumWaterHashV1(ivec2 cell, int periodMask) {
+                ivec2 wrapped = cell & ivec2(periodMask);
+                uint hash = uint(wrapped.x) * 0x9e3779b9u
+                        + uint(wrapped.y) * 0x85ebca6bu;
+                hash = (hash ^ (hash >> 16u)) * 0x7feb352du;
+                hash = (hash ^ (hash >> 15u)) * 0x846ca68bu;
+                return float((hash ^ (hash >> 16u)) & 0x00ffffffu)
+                        * 0.000000059604644775390625;
+            }
+
+            float metallumWaterValueNoiseV1(vec2 position, int periodMask) {
+                ivec2 cell = ivec2(floor(position));
+                vec2 fraction = fract(position);
+                vec2 fade = fraction * fraction * (3.0 - 2.0 * fraction);
+                float a = metallumWaterHashV1(cell, periodMask);
+                float b = metallumWaterHashV1(cell + ivec2(1, 0), periodMask);
+                float c = metallumWaterHashV1(cell + ivec2(0, 1), periodMask);
+                float d = metallumWaterHashV1(cell + ivec2(1, 1), periodMask);
+                return mix(mix(a, b, fade.x), mix(c, d, fade.x), fade.y);
+            }
+
             vec3 metallumWaterNormalV1(
                     vec3 viewPosition,
                     vec3 normal,
@@ -388,6 +409,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec2 cameraBlockRelativePosition =
                         metallumVoxelShadow.cameraFractionAndMinTrans.xz
                         + cameraRelativePosition.xz;
+                vec2 waterWorldPosition = vec2(wrappedCameraBlock)
+                        + cameraBlockRelativePosition;
                 vec2 waveTurns = vec2(
                         float(waveXBlockTurns)
                                 + dot(cameraBlockRelativePosition, vec2(waveXTurns)),
@@ -395,9 +418,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                                 + dot(cameraBlockRelativePosition, vec2(waveZTurns)));
                 vec2 wavePhase = mod(waveTurns, vec2(256.0))
                         * 0.02454369260617026;
-                float waveX = sin(wavePhase.x + time * 1.35);
-                float waveZ = cos(wavePhase.y - time * 1.08);
-                worldNormal = metallumSafeNormalV1(worldNormal + vec3(waveX, 0.0, waveZ) * 0.085);
+                float waveNoise = metallumWaterValueNoiseV1(
+                        waterWorldPosition.yx * 0.125 + vec2(19.0, 73.0), 31);
+                float noiseCentered = waveNoise - 0.5;
+                float waveX = sin(wavePhase.x + noiseCentered * 1.70 + time * 1.35);
+                float waveZ = cos(wavePhase.y - noiseCentered * 1.35 - time * 1.08);
+                float waveAmplitude = mix(0.065, 0.090,
+                        clamp(0.50 + noiseCentered * 0.80, 0.0, 1.0));
+                worldNormal = metallumSafeNormalV1(
+                        worldNormal + vec3(waveX, 0.0, waveZ) * waveAmplitude);
                 vec3 perturbed = metallumSafeNormalV1(transpose(worldFromView) * worldNormal);
                 return dot(perturbed, perturbed) == 0.0 ? normal : perturbed;
             }

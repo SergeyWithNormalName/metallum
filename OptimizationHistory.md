@@ -1971,3 +1971,20 @@ attack/release, но fragment shader при `wetness > 0.01` сразу доба
 scalar multiply только в уже активном material branch, без новых texture reads или GPU state.
 Actual-source GLSL/SPIR-V contract прошёл; окончательная субъективная плотность воды и плавность
 weather transition требуют live signoff.
+
+## 2026-07-29 — L8 устраняет повторяемую волну на воде
+
+Live-скриншот показал, что две фиксированные синусоиды образуют заметную диагональную решётку
+на большой плоской поверхности. Это было свойством procedural normal, а не texture atlas:
+частоты и амплитуда были одинаковы в каждой точке воды.
+
+В L8 добавлен один smooth value-noise слой: четыре integer-hash угла 8-блочной ячейки
+интерполируются cubic fade и детерминированно сдвигают фазы `sin/cos` и их общую амплитуду
+`0.065..0.090`. Координата собирается из modulo-256 integer camera block и camera-relative
+fractional position; и hash period, и noise scale замкнуты на 256 блоков. Поэтому изменённый
+рисунок стабилен при walking и large-world wrap, но больше не выглядит копией одной волны.
+
+Стоимость ограничена четырьмя small integer hash evaluations и несколькими scalar ALU только
+для water fragments, без texture samples, passes, buffers, allocations или работы над сушей.
+Actual-source GLSL/SPIR-V тест дополнительно проверяет 256-block periodicity и block-boundary
+continuity; live signoff остаётся нужен для субъективной плотности рисунка и fps на полной воде.
