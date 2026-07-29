@@ -638,20 +638,22 @@ def settings_values(
     sodium_mixins_path: Path,
     resourcepacks_root: Path,
     fabric_default_packs_path: Path,
+    renderer_path: Path,
+    temporal_path: Path,
 ) -> list[str]:
     spec_raw, payload = _load_strict_json(spec_path, "benchmark settings")
     spec = _object(payload, "benchmark settings root")
-    _settings_exact_keys(
-        spec,
-        "root",
-        {
-            "schema_version", "id", "options", "hdr_properties",
-            "metalfx_properties", "sodium_options", "sodium_mixin_properties",
-            "fabric_default_resource_packs", "runtime",
-        },
-    )
-    if _integer(spec.get("schema_version"), "settings.schema_version", 1) != 1:
+    schema_version = _integer(spec.get("schema_version"), "settings.schema_version", 1)
+    if schema_version not in (1, 2):
         raise FixtureError("unsupported benchmark settings schema_version")
+    expected_root_keys = {
+        "schema_version", "id", "options", "hdr_properties",
+        "metalfx_properties", "sodium_options", "sodium_mixin_properties",
+        "fabric_default_resource_packs", "runtime",
+    }
+    if schema_version == 2:
+        expected_root_keys.add("frame_interpolation")
+    _settings_exact_keys(spec, "root", expected_root_keys)
     settings_id = _string(spec.get("id"), "settings.id", SAFE_ID_RE)
     expected_options = _object(spec.get("options"), "settings.options")
     expected_hdr = _object(spec.get("hdr_properties"), "settings.hdr_properties")
@@ -699,6 +701,40 @@ def settings_values(
         "settings.runtime.sodium_chunk_builder_threads",
         1,
     )
+    if schema_version == 1:
+        frame_interpolation_enabled = False
+        temporal_mode = "unchanged"
+        frame_interpolation_overlay = False
+        minimum_generated_percent = 0
+    else:
+        expected_frame_interpolation = _object(
+            spec.get("frame_interpolation"), "settings.frame_interpolation"
+        )
+        _settings_exact_keys(
+            expected_frame_interpolation,
+            "frame_interpolation",
+            {"enabled", "temporal_mode", "overlay", "minimum_generated_percent"},
+        )
+        frame_interpolation_enabled = expected_frame_interpolation.get("enabled")
+        frame_interpolation_overlay = expected_frame_interpolation.get("overlay")
+        if not isinstance(frame_interpolation_enabled, bool):
+            raise FixtureError("benchmark settings frame_interpolation.enabled must be a boolean")
+        if not isinstance(frame_interpolation_overlay, bool):
+            raise FixtureError("benchmark settings frame_interpolation.overlay must be a boolean")
+        temporal_mode = expected_frame_interpolation.get("temporal_mode")
+        if temporal_mode not in {"quality", "performance", "ultra_performance"}:
+            raise FixtureError(
+                "benchmark settings frame_interpolation.temporal_mode must be a fixed Temporal preset"
+            )
+        minimum_generated_percent = _integer(
+            expected_frame_interpolation.get("minimum_generated_percent"),
+            "settings.frame_interpolation.minimum_generated_percent",
+            1,
+        )
+        if minimum_generated_percent > 100:
+            raise FixtureError(
+                "settings.frame_interpolation.minimum_generated_percent must be at most 100"
+            )
 
     raw_options = _parse_options(options_path)
     actual_options: dict[str, object] = {}
@@ -716,6 +752,28 @@ def settings_values(
 
     actual_hdr_all = _parse_properties(hdr_path, "HDR properties")
     actual_metalfx_all = _parse_properties(metalfx_path, "MetalFX properties")
+    actual_renderer = _parse_properties(renderer_path, "renderer properties")
+    actual_temporal = _parse_properties(temporal_path, "MetalFX Temporal properties")
+    actual_renderer_interpolation = actual_renderer.get("frameInterpolation")
+    if actual_renderer_interpolation not in {"true", "false"}:
+        raise FixtureError("renderer property frameInterpolation must be true or false")
+    expected_renderer_interpolation = "true" if frame_interpolation_enabled else "false"
+    if actual_renderer_interpolation != expected_renderer_interpolation:
+        raise FixtureError(
+            "renderer property frameInterpolation differs from "
+            f"{settings_id}: expected {expected_renderer_interpolation}, "
+            f"found {actual_renderer_interpolation}"
+        )
+    actual_temporal_mode = actual_temporal.get("mode")
+    if actual_temporal_mode not in {
+        "off", "temporal", "quality", "performance", "ultra_performance",
+    }:
+        raise FixtureError("MetalFX Temporal property mode must be a supported mode")
+    if schema_version == 2 and actual_temporal_mode != temporal_mode:
+        raise FixtureError(
+            "MetalFX Temporal property mode differs from "
+            f"{settings_id}: expected {temporal_mode}, found {actual_temporal_mode}"
+        )
 
     def selected_properties(
         expected: dict[str, object],
@@ -809,7 +867,7 @@ def settings_values(
         "active_resource_pack_ids": active_resource_pack_ids,
     }))
     resource_packs_sha256 = resource_hasher.hexdigest()
-    canonical = _canonical_json({
+    canonical_settings: dict[str, object] = {
         "schema_version": 1,
         "id": settings_id,
         "options": actual_options,
@@ -820,7 +878,16 @@ def settings_values(
         "fabric_default_resource_packs": actual_fabric_packs,
         "runtime": expected_runtime,
         "resource_packs_sha256": resource_packs_sha256,
-    })
+    }
+    if schema_version == 2:
+        canonical_settings["schema_version"] = 2
+        canonical_settings["frame_interpolation"] = {
+            "enabled": frame_interpolation_enabled,
+            "temporal_mode": temporal_mode,
+            "overlay": frame_interpolation_overlay,
+            "minimum_generated_percent": minimum_generated_percent,
+        }
+    canonical = _canonical_json(canonical_settings)
     settings_hasher = hashlib.sha256(SETTINGS_DIGEST_VERSION)
     settings_hasher.update(canonical)
 
@@ -844,7 +911,134 @@ def settings_values(
         _setting_output(actual_hdr["bloomStrength"], "hdr.bloomStrength"),
         _setting_output(actual_hdr["hdrStrength"], "hdr.hdrStrength"),
         _setting_output(actual_metalfx["mode"], "metalfx.mode"),
+        _setting_output(frame_interpolation_enabled, "frame_interpolation.enabled"),
+        _setting_output(temporal_mode, "frame_interpolation.temporal_mode"),
+        _setting_output(frame_interpolation_overlay, "frame_interpolation.overlay"),
+        _setting_output(
+            minimum_generated_percent,
+            "frame_interpolation.minimum_generated_percent",
+        ),
     ]
+
+
+def _replace_options(path: Path, updates: dict[str, object]) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as error:
+        raise FixtureError(f"cannot read Minecraft options {path}: {error}") from error
+    found: set[str] = set()
+    replaced: list[str] = []
+    for line_number, line in enumerate(lines, 1):
+        content = line[:-1] if line.endswith("\n") else line
+        if not content or ":" not in content:
+            raise FixtureError(f"invalid Minecraft option at {path}:{line_number}")
+        key, _value = content.split(":", 1)
+        if key in updates:
+            if key in found:
+                raise FixtureError(f"duplicate Minecraft option {key} at {path}:{line_number}")
+            found.add(key)
+            replaced.append(f"{key}:{_canonical_json(updates[key]).decode('utf-8')}\n")
+        else:
+            replaced.append(line)
+    missing = sorted(set(updates) - found)
+    if missing:
+        raise FixtureError("Minecraft options missing runtime setting " + ", ".join(missing))
+    try:
+        path.write_text("".join(replaced), encoding="utf-8")
+    except OSError as error:
+        raise FixtureError(f"cannot write Minecraft options {path}: {error}") from error
+
+
+def _replace_property(path: Path, description: str, key: str, value: str) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError as error:
+        raise FixtureError(f"cannot read {description} {path}: {error}") from error
+    found = False
+    replaced: list[str] = []
+    for line_number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "!")):
+            replaced.append(line)
+            continue
+        if "=" not in stripped:
+            raise FixtureError(f"invalid {description} entry at {path}:{line_number}")
+        actual_key, _actual_value = (part.strip() for part in stripped.split("=", 1))
+        if actual_key == key:
+            if found:
+                raise FixtureError(f"duplicate {description} property {key} at {path}:{line_number}")
+            found = True
+            replaced.append(f"{key}={value}\n")
+        else:
+            replaced.append(line)
+    if not found:
+        raise FixtureError(f"{description} property {key} is missing from {path}")
+    try:
+        path.write_text("".join(replaced), encoding="utf-8")
+    except OSError as error:
+        raise FixtureError(f"cannot write {description} {path}: {error}") from error
+
+
+def apply_runtime_settings(
+    spec_path: Path,
+    options_path: Path,
+    hdr_path: Path,
+    metalfx_path: Path,
+    renderer_path: Path,
+    temporal_path: Path,
+) -> None:
+    """Apply the schema-v2 FI profile without rewriting unrelated config entries."""
+    _raw, payload = _load_strict_json(spec_path, "benchmark settings")
+    spec = _object(payload, "benchmark settings root")
+    if _integer(spec.get("schema_version"), "settings.schema_version", 1) != 2:
+        raise FixtureError("runtime settings application requires benchmark settings schema_version 2")
+    _settings_exact_keys(
+        spec,
+        "root",
+        {
+            "schema_version", "id", "options", "hdr_properties",
+            "metalfx_properties", "sodium_options", "sodium_mixin_properties",
+            "fabric_default_resource_packs", "runtime", "frame_interpolation",
+        },
+    )
+    expected_options = _object(spec.get("options"), "settings.options")
+    expected_hdr = _object(spec.get("hdr_properties"), "settings.hdr_properties")
+    expected_metalfx = _object(
+        spec.get("metalfx_properties"), "settings.metalfx_properties"
+    )
+    expected_frame_interpolation = _object(
+        spec.get("frame_interpolation"), "settings.frame_interpolation"
+    )
+    _settings_exact_keys(
+        expected_frame_interpolation,
+        "frame_interpolation",
+        {"enabled", "temporal_mode", "overlay", "minimum_generated_percent"},
+    )
+    enabled = expected_frame_interpolation.get("enabled")
+    temporal_mode = expected_frame_interpolation.get("temporal_mode")
+    if not isinstance(enabled, bool) or temporal_mode not in {
+        "quality", "performance", "ultra_performance",
+    }:
+        raise FixtureError("invalid schema-v2 frame interpolation runtime settings")
+    for description, values in (
+        ("HDR properties", expected_hdr),
+        ("MetalFX properties", expected_metalfx),
+    ):
+        for key, value in values.items():
+            if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+                raise FixtureError(f"invalid {description} runtime value for {key}")
+    _replace_options(options_path, expected_options)
+    for key, value in expected_hdr.items():
+        _replace_property(hdr_path, "HDR properties", key, value)
+    for key, value in expected_metalfx.items():
+        _replace_property(metalfx_path, "MetalFX properties", key, value)
+    _replace_property(
+        renderer_path,
+        "renderer properties",
+        "frameInterpolation",
+        "true" if enabled else "false",
+    )
+    _replace_property(temporal_path, "MetalFX Temporal properties", "mode", temporal_mode)
 
 
 def _offline_player_uuid(name: str) -> str:
@@ -1366,6 +1560,9 @@ def self_test() -> None:
             "mipmapLevels:4\n"
             "biomeBlendRadius:2\n"
             "maxFps:260\n"
+            "enableVsync:false\n"
+            "fullscreen:false\n"
+            "exclusiveFullscreen:false\n"
             "ao:true\n"
             "renderClouds:\"true\"\n"
             "cloudRange:64\n"
@@ -1399,6 +1596,13 @@ def self_test() -> None:
         resourcepacks.mkdir()
         fabric_default_packs = root / "fabric_default_resource_packs.json"
         fabric_default_packs.write_text('{"values":[]}\n', encoding="utf-8")
+        renderer = root / "metallum-renderer.properties"
+        renderer.write_text(
+            "schemaVersion=3\nframeInterpolation=false\nextraRendererSetting=kept\n",
+            encoding="utf-8",
+        )
+        temporal = root / "metallum-metalfx-temporal.properties"
+        temporal.write_text("mode=quality\nextraTemporalSetting=kept\n", encoding="utf-8")
         settings = root / "settings.json"
         settings.write_text(json.dumps({
             "schema_version": 1,
@@ -1443,8 +1647,10 @@ def self_test() -> None:
         settings_output = settings_values(
             settings, options, hdr, metalfx,
             sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+            renderer, temporal,
         )
-        assert settings_output[0] == "test-hdr-v1" and len(settings_output) == 27
+        assert settings_output[0] == "test-hdr-v1" and len(settings_output) == 31
+        assert settings_output[-4:] == ["false", "unchanged", "false", "0"]
         changed = options.read_text(encoding="utf-8").replace(
             "renderDistance:16", "renderDistance:15"
         )
@@ -1453,11 +1659,62 @@ def self_test() -> None:
             settings_values(
                 settings, options, hdr, metalfx,
                 sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+                renderer, temporal,
             )
         except FixtureError as error:
             assert "renderDistance differs" in str(error)
         else:
             raise AssertionError("settings mismatch was accepted")
+
+        options.write_text(changed.replace("renderDistance:15", "renderDistance:16"), encoding="utf-8")
+        fi_settings_payload = json.loads(settings.read_text(encoding="utf-8"))
+        fi_settings_payload["schema_version"] = 2
+        fi_settings_payload["id"] = "test-fi-hdr-temporal-quality-v1"
+        fi_settings_payload["options"].update({
+            "enableVsync": True,
+            "maxFps": 60,
+            "fullscreen": True,
+            "exclusiveFullscreen": True,
+        })
+        fi_settings_payload["frame_interpolation"] = {
+            "enabled": True,
+            "temporal_mode": "quality",
+            "overlay": True,
+            "minimum_generated_percent": 80,
+        }
+        fi_settings = root / "fi-settings.json"
+        fi_settings.write_text(json.dumps(fi_settings_payload), encoding="utf-8")
+        hdr.write_text(
+            "# ignored timestamp\nmode=off\nsourceEncoding=linear\n"
+            "bloomStrength=0.75\nhdrStrength=0.25\n",
+            encoding="utf-8",
+        )
+        metalfx.write_text("# preserved comment\nmode=spatial\n", encoding="utf-8")
+        apply_runtime_settings(fi_settings, options, hdr, metalfx, renderer, temporal)
+        assert "maxFps:60\n" in options.read_text(encoding="utf-8")
+        assert "enableVsync:true\n" in options.read_text(encoding="utf-8")
+        assert "fullscreen:true\n" in options.read_text(encoding="utf-8")
+        assert "exclusiveFullscreen:true\n" in options.read_text(encoding="utf-8")
+        assert renderer.read_text(encoding="utf-8") == (
+            "schemaVersion=3\nframeInterpolation=true\nextraRendererSetting=kept\n"
+        )
+        assert temporal.read_text(encoding="utf-8") == (
+            "mode=quality\nextraTemporalSetting=kept\n"
+        )
+        assert hdr.read_text(encoding="utf-8") == (
+            "# ignored timestamp\nmode=scene\nsourceEncoding=srgb\n"
+            "bloomStrength=0.18\nhdrStrength=1.0\n"
+        )
+        assert metalfx.read_text(encoding="utf-8") == (
+            "# preserved comment\nmode=off\n"
+        )
+        fi_output = settings_values(
+            fi_settings, options, hdr, metalfx,
+            sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+            renderer, temporal,
+        )
+        assert fi_output[0] == "test-fi-hdr-temporal-quality-v1" and len(fi_output) == 31
+        assert fi_output[-4:] == ["true", "quality", "true", "80"]
     print("metal benchmark fixture self-test passed")
 
 
@@ -1493,6 +1750,15 @@ def parser() -> argparse.ArgumentParser:
     settings.add_argument("sodium_mixins", type=Path)
     settings.add_argument("resourcepacks", type=Path)
     settings.add_argument("fabric_default_packs", type=Path)
+    settings.add_argument("renderer", type=Path)
+    settings.add_argument("temporal", type=Path)
+    apply_runtime = sub.add_parser("apply-runtime-settings")
+    apply_runtime.add_argument("spec", type=Path)
+    apply_runtime.add_argument("options", type=Path)
+    apply_runtime.add_argument("hdr", type=Path)
+    apply_runtime.add_argument("metalfx", type=Path)
+    apply_runtime.add_argument("renderer", type=Path)
+    apply_runtime.add_argument("temporal", type=Path)
     sub.add_parser("self-test")
     return result
 
@@ -1518,8 +1784,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("\t".join(settings_values(
                 args.spec, args.options, args.hdr, args.metalfx,
                 args.sodium_options, args.sodium_mixins, args.resourcepacks,
-                args.fabric_default_packs,
+                args.fabric_default_packs, args.renderer, args.temporal,
             )))
+        elif args.command == "apply-runtime-settings":
+            apply_runtime_settings(
+                args.spec, args.options, args.hdr, args.metalfx,
+                args.renderer, args.temporal,
+            )
         else:
             self_test()
     except (FixtureError, OSError) as error:

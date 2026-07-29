@@ -2,7 +2,9 @@ package com.metallum.client.benchmark;
 
 import com.metallum.Metallum;
 import com.metallum.client.metal.render.MetalGpuTiming;
+import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
+import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumRelightFastPath;
@@ -328,6 +330,10 @@ public final class MetalFxBenchmarkController {
     private final String expectedCloudsMode;
     private final boolean expectedAmbientOcclusion;
     private final List<String> expectedResourcePackIds;
+    private final boolean expectedVsync;
+    private final boolean fiValidationRequired;
+    private final boolean fiOverlayRequested;
+    private final int fiMinimumGenerated;
     private final boolean useCurrentWindow;
     private final boolean captureScreenshots;
     private final List<BenchmarkScalingMode> sequence;
@@ -389,6 +395,10 @@ public final class MetalFxBenchmarkController {
     private boolean l6OriginalMainHandCaptured;
     private final List<ItemEntity> l6ProbeEntities = new ArrayList<>();
     private boolean armed;
+    private boolean resolutionOverlayOverridden;
+    private boolean originalResolutionOverlayEnabled;
+    private boolean fiGeneratedMeasurementStarted;
+    private long fiGeneratedMeasurementStart;
     private final int[] framebufferWidthScratch = new int[1];
     private final int[] framebufferHeightScratch = new int[1];
 
@@ -408,6 +418,10 @@ public final class MetalFxBenchmarkController {
         String parsedCloudsMode = "";
         boolean parsedAmbientOcclusion = false;
         List<String> parsedResourcePackIds = List.of();
+        boolean parsedExpectedVsync = false;
+        boolean parsedFiValidationRequired = "1".equals(System.getenv("METALLUM_BENCHMARK_FI_REQUIRED"));
+        boolean parsedFiOverlayRequested = false;
+        int parsedFiMinimumGenerated = 0;
         try {
             parsedRoute = RouteConfig.fromEnvironment();
             parsedMaxFps = positiveIntStrict("METALLUM_BENCHMARK_MAX_FPS");
@@ -425,6 +439,14 @@ public final class MetalFxBenchmarkController {
             parsedCloudsMode = requiredEnv("METALLUM_BENCHMARK_CLOUDS_MODE");
             parsedAmbientOcclusion = requiredBoolean("METALLUM_BENCHMARK_AO");
             parsedResourcePackIds = requiredCsv("METALLUM_BENCHMARK_ACTIVE_RESOURCE_PACKS");
+            parsedExpectedVsync = optionalBoolean("METALLUM_BENCHMARK_EXPECTED_VSYNC", false);
+            if (parsedFiValidationRequired) {
+                parsedFiOverlayRequested = optionalBoolean(
+                        "METALLUM_BENCHMARK_FI_OVERLAY",
+                        false
+                );
+                parsedFiMinimumGenerated = positiveIntStrict("METALLUM_BENCHMARK_FI_MIN_GENERATED");
+            }
         } catch (RuntimeException exception) {
             error = "invalid deterministic benchmark configuration: " + exception.getMessage();
         }
@@ -446,6 +468,10 @@ public final class MetalFxBenchmarkController {
         this.expectedCloudsMode = parsedCloudsMode;
         this.expectedAmbientOcclusion = parsedAmbientOcclusion;
         this.expectedResourcePackIds = parsedResourcePackIds;
+        this.expectedVsync = parsedExpectedVsync;
+        this.fiValidationRequired = parsedFiValidationRequired;
+        this.fiOverlayRequested = parsedFiOverlayRequested;
+        this.fiMinimumGenerated = parsedFiMinimumGenerated;
         this.useCurrentWindow = "1".equals(System.getenv("METALLUM_BENCHMARK_CURRENT_WINDOW"));
         this.captureScreenshots = "1".equals(System.getenv("METALLUM_BENCHMARK_SCREENSHOTS"));
         this.expectedFramebufferWidth = this.targetWidth;
@@ -495,6 +521,11 @@ public final class MetalFxBenchmarkController {
             return;
         }
         this.armed = true;
+        if (this.fiValidationRequired && this.fiOverlayRequested) {
+            this.originalResolutionOverlayEnabled = MetalFxUpscaling.isResolutionOverlayEnabled();
+            MetalFxUpscaling.setResolutionOverlayEnabled(true);
+            this.resolutionOverlayOverridden = true;
+        }
         this.stage = Stage.SELECT_MONITOR;
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=ARMED scope={} target={}x{} warmup={} measure={} sequence={} route={}",
@@ -603,6 +634,11 @@ public final class MetalFxBenchmarkController {
                     String l6CoverageFailure = completeL6DynamicShadowCoverage();
                     if (l6CoverageFailure != null) {
                         fail(minecraft, l6CoverageFailure);
+                        return;
+                    }
+                    if (this.fiValidationRequired
+                            && this.segmentIndex == this.sequence.size() - 1
+                            && !completeFiGeneratedValidation(minecraft)) {
                         return;
                     }
                     if (this.route != null && "nether-lava-stress-v1".equals(this.route.routeId())) {
@@ -1664,6 +1700,11 @@ public final class MetalFxBenchmarkController {
                 this.route.routeId()
         );
         if (this.boundaryCheckEvent == RouteCheckEvent.MEASURE_START) {
+            if (this.fiValidationRequired
+                    && !this.fiGeneratedMeasurementStarted
+                    && !beginFiGeneratedValidation(minecraft)) {
+                return;
+            }
             MetalGpuTiming.beginBenchmarkMeasurement(
                     this.segmentIndex,
                     this.sequence.get(this.segmentIndex).name()
@@ -2161,7 +2202,7 @@ public final class MetalFxBenchmarkController {
                 || minecraft.options.biomeBlendRadius().get() != this.expectedBiomeBlendRadius
                 || minecraft.options.cloudRange().get() != this.expectedCloudRange
                 || minecraft.options.guiScale().get() != this.expectedConfiguredGuiScale
-                || minecraft.options.enableVsync().get()
+                || minecraft.options.enableVsync().get() != this.expectedVsync
                 || minecraft.options.ambientOcclusion().get() != this.expectedAmbientOcclusion
                 || Double.compare(
                         minecraft.options.entityDistanceScaling().get(),
@@ -2401,6 +2442,85 @@ public final class MetalFxBenchmarkController {
         return null;
     }
 
+    private boolean beginFiGeneratedValidation(final Minecraft minecraft) {
+        try {
+            this.fiGeneratedMeasurementStart =
+                    MetalNativeBridge.metallum_frame_interpolation_presented_generated_count_v1();
+            this.fiGeneratedMeasurementStarted = true;
+            return true;
+        } catch (RuntimeException | LinkageError unavailable) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_GENERATED_FAIL reason=counter_unavailable"
+            );
+            fail(minecraft, "FI generated presentation counter is unavailable");
+            return false;
+        }
+    }
+
+    private boolean completeFiGeneratedValidation(final Minecraft minecraft) {
+        if (!this.fiGeneratedMeasurementStarted) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_GENERATED_FAIL reason=counter_start_missing"
+            );
+            fail(minecraft, "FI generated presentation counter was not sampled at MEASURE_START");
+            return false;
+        }
+        final long generatedEnd;
+        try {
+            generatedEnd = MetalNativeBridge
+                    .metallum_frame_interpolation_presented_generated_count_v1();
+        } catch (RuntimeException | LinkageError unavailable) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_GENERATED_FAIL reason=counter_unavailable"
+            );
+            fail(minecraft, "FI generated presentation counter is unavailable");
+            return false;
+        }
+        long generatedDelta = generatedEnd - this.fiGeneratedMeasurementStart;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_TELEMETRY generated_delta={}",
+                generatedDelta
+        );
+        if (!hasMinimumGeneratedPresentations(
+                this.fiGeneratedMeasurementStart,
+                generatedEnd,
+                this.fiMinimumGenerated
+        )) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_GENERATED_FAIL generated_delta={} minimum={}",
+                    generatedDelta,
+                    this.fiMinimumGenerated
+            );
+            fail(
+                    minecraft,
+                    "FI generated presentations below required minimum (generated_delta="
+                            + generatedDelta + ", minimum=" + this.fiMinimumGenerated + ")"
+            );
+            return false;
+        }
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_GENERATED_COMPLETE generated_delta={} minimum={}",
+                generatedDelta,
+                this.fiMinimumGenerated
+        );
+        return true;
+    }
+
+    /**
+     * The native counter advances only from CAMetalDrawable presented handlers
+     * for generated frames. It deliberately excludes the source and real
+     * frames that keep interpolation fail-open.
+     */
+    static boolean hasMinimumGeneratedPresentations(
+            final long generatedStart,
+            final long generatedEnd,
+            final long minimum
+    ) {
+        return minimum >= 0L
+                && Long.compareUnsigned(generatedEnd, generatedStart) >= 0
+                && Long.compareUnsigned(generatedEnd - generatedStart, minimum) >= 0;
+    }
+
     private void fail(final Minecraft minecraft, final String reason) {
         Metallum.LOGGER.error("METALLUM_BENCHMARK EVENT=FAIL reason={}", reason);
         finish(minecraft);
@@ -2427,6 +2547,10 @@ public final class MetalFxBenchmarkController {
         }
         minecraft.getWindow().setPreferredFullscreenVideoMode(this.originalFullscreenMode);
         BenchmarkScalingMode.clearOverrides();
+        if (this.resolutionOverlayOverridden) {
+            MetalFxUpscaling.setResolutionOverlayEnabled(this.originalResolutionOverlayEnabled);
+            this.resolutionOverlayOverridden = false;
+        }
         minecraft.stop();
     }
 
@@ -2657,6 +2781,20 @@ public final class MetalFxBenchmarkController {
 
     private static boolean requiredBoolean(final String name) {
         String value = requiredEnv(name);
+        if ("true".equals(value)) {
+            return true;
+        }
+        if ("false".equals(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(name + " must be true or false");
+    }
+
+    private static boolean optionalBoolean(final String name, final boolean defaultValue) {
+        String value = System.getenv(name);
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
         if ("true".equals(value)) {
             return true;
         }

@@ -11,6 +11,7 @@ OUTPUT_DIR="$RUN_DIR/logs/metallum-benchmarks"
 REFERENCE_OUTPUT_DIR=${METALLUM_L2_REFERENCE_OUTPUT_DIR:-"$RUN_DIR/lighting-reference/l0"}
 DEFAULT_ROUTE_SPEC="benchmark/routes/hdrtest-static-v1.json"
 DEFAULT_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-v1.json"
+FI_SETTINGS_SPEC="benchmark/settings/fi-hdr-temporal-performance-v1.json"
 ARTIFACT_CLASSES="build/classes/java/main"
 ARTIFACT_RESOURCES="build/resources/main"
 ARTIFACT_NATIVE="build/generated/metallum/natives/macos/libmetallum.dylib"
@@ -32,6 +33,9 @@ LIGHTING_PRESET="balanced"
 LABEL="baseline"
 PREFLIGHT_ONLY=0
 CAPTURE_REFERENCE=0
+FI_VALIDATION=0
+SETTINGS_SPEC_EXPLICIT=0
+METALFX_MODE_EXPLICIT=0
 
 RUN_WORLD_PATH=""
 RUN_WORLD_NAME=""
@@ -43,6 +47,13 @@ RENDERER_VALUES_BEFORE=""
 ARTIFACT_SHA256=""
 ATTEST_PENDING=0
 OPTIONS_FILE_BACKUP=""
+FI_SETTINGS_BACKUP_DIR=""
+FI_ENABLED=false
+FI_TEMPORAL_MODE=unchanged
+FI_OVERLAY=false
+FI_MINIMUM_GENERATED_PERCENT=0
+FI_MINIMUM_GENERATED_FRAMES=0
+EXPECTED_VSYNC=false
 
 usage() {
     cat <<'EOF'
@@ -66,6 +77,10 @@ Options:
   --preflight-only   validate route/config/release settings contract/immutable fixture
                      without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
+  --fi-validation    run the opt-in HDR Temporal Performance + Frame Interpolation
+                     validation profile; temporarily applies and then restores
+                     options, HDR, renderer, MetalFX, and Temporal settings
+                     byte-for-byte
   -h, --help         show this help
 
 L2 diagnostic environment:
@@ -102,6 +117,7 @@ while [ "$#" -gt 0 ]; do
         --metalfx)
             need_value "$@"
             METALFX_MODE=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
+            METALFX_MODE_EXPLICIT=1
             shift 2
             ;;
         --lighting-preset)
@@ -112,6 +128,7 @@ while [ "$#" -gt 0 ]; do
         --settings)
             need_value "$@"
             SETTINGS_SPEC_ARGUMENT=$2
+            SETTINGS_SPEC_EXPLICIT=1
             shift 2
             ;;
         --label)
@@ -127,6 +144,10 @@ while [ "$#" -gt 0 ]; do
             CAPTURE_REFERENCE=1
             shift
             ;;
+        --fi-validation)
+            FI_VALIDATION=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -136,6 +157,16 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    [ "$SETTINGS_SPEC_EXPLICIT" -eq 0 ] \
+        || die "--fi-validation selects its own settings profile; do not combine it with --settings"
+    [ "$METALFX_MODE_EXPLICIT" -eq 0 ] \
+        || die "--fi-validation selects TEMPORAL_PERFORMANCE; do not combine it with --metalfx"
+    SETTINGS_SPEC_ARGUMENT=$FI_SETTINGS_SPEC
+    METALFX_MODE=TEMPORAL_PERFORMANCE
+    EXPECTED_VSYNC=true
+fi
 
 case "$METALFX_MODE" in
     OFF|QUALITY|PERFORMANCE|TEMPORAL_QUALITY|TEMPORAL_PERFORMANCE|TEMPORAL_ULTRA_PERFORMANCE) ;;
@@ -160,6 +191,10 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required for report valida
 command -v pgrep >/dev/null 2>&1 || die "pgrep is required for process isolation"
 command -v mktemp >/dev/null 2>&1 || die "mktemp is required for isolated benchmark worlds"
 command -v uuidgen >/dev/null 2>&1 || die "uuidgen is required for isolated benchmark worlds"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    command -v cmp >/dev/null 2>&1 \
+        || die "cmp is required to verify FI runtime-settings restoration"
+fi
 [ -x "$ROOT/gradlew" ] || die "Gradle wrapper is missing or not executable"
 [ -f "$ANALYZER" ] || die "report analyzer is missing: $ANALYZER"
 [ -f "$FIXTURE_HELPER" ] || die "fixture helper is missing: $FIXTURE_HELPER"
@@ -183,6 +218,82 @@ require_value() {
 benchmark_artifact_digest() {
     python3 "$FIXTURE_HELPER" artifact-digest "$ROOT" \
         "$ARTIFACT_CLASSES" "$ARTIFACT_RESOURCES" "$ARTIFACT_NATIVE"
+}
+
+discard_fi_settings_backup() {
+    [ -n "${FI_SETTINGS_BACKUP_DIR:-}" ] || return 0
+    rm -f "$FI_SETTINGS_BACKUP_DIR/options.txt" \
+        "$FI_SETTINGS_BACKUP_DIR/metallum-hdr.properties" \
+        "$FI_SETTINGS_BACKUP_DIR/metallum-renderer.properties" \
+        "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx.properties" \
+        "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx-temporal.properties"
+    rmdir "$FI_SETTINGS_BACKUP_DIR" 2>/dev/null || return 1
+    FI_SETTINGS_BACKUP_DIR=""
+}
+
+restore_fi_runtime_settings() {
+    local retain_backup=${1:-0}
+    local restore_status=0
+
+    [ "${FI_VALIDATION:-0}" -eq 1 ] || return 0
+    if [ -z "${FI_SETTINGS_BACKUP_DIR:-}" ] \
+        || [ ! -d "$FI_SETTINGS_BACKUP_DIR" ]; then
+        echo "ERROR: FI runtime-settings backup is unavailable; restoration cannot be proven" >&2
+        return 1
+    fi
+
+    cp "$FI_SETTINGS_BACKUP_DIR/options.txt" "$OPTIONS_FILE" || restore_status=1
+    cp "$FI_SETTINGS_BACKUP_DIR/metallum-hdr.properties" \
+        "$HDR_CONFIG" || restore_status=1
+    cp "$FI_SETTINGS_BACKUP_DIR/metallum-renderer.properties" \
+        "$RENDERER_CONFIG" || restore_status=1
+    cp "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx.properties" \
+        "$METALFX_CONFIG" || restore_status=1
+    cp "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx-temporal.properties" \
+        "$TEMPORAL_CONFIG" || restore_status=1
+
+    cmp -s "$FI_SETTINGS_BACKUP_DIR/options.txt" "$OPTIONS_FILE" \
+        || restore_status=1
+    cmp -s "$FI_SETTINGS_BACKUP_DIR/metallum-hdr.properties" \
+        "$HDR_CONFIG" || restore_status=1
+    cmp -s "$FI_SETTINGS_BACKUP_DIR/metallum-renderer.properties" \
+        "$RENDERER_CONFIG" || restore_status=1
+    cmp -s "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx.properties" \
+        "$METALFX_CONFIG" || restore_status=1
+    cmp -s "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx-temporal.properties" \
+        "$TEMPORAL_CONFIG" || restore_status=1
+
+    if [ "$restore_status" -ne 0 ]; then
+        echo "ERROR: failed to restore and byte-verify FI runtime settings" >&2
+        echo "  recovery backup preserved at: $FI_SETTINGS_BACKUP_DIR" >&2
+        return 1
+    fi
+
+    if [ "$retain_backup" -eq 0 ]; then
+        discard_fi_settings_backup || {
+            echo "ERROR: FI settings were restored, but backup cleanup failed: $FI_SETTINGS_BACKUP_DIR" >&2
+            return 1
+        }
+        echo "FI runtime settings restored and byte-verified"
+    else
+        echo "FI runtime settings restored and byte-verified; recovery backup retained until process teardown"
+    fi
+}
+
+early_cleanup() {
+    local original_status=$1
+    local cleanup_status=0
+
+    trap - EXIT HUP INT TERM
+    set +e
+    restore_fi_runtime_settings || cleanup_status=2
+    if [ -n "${OPTIONS_FILE_BACKUP:-}" ]; then
+        rm -f "$OPTIONS_FILE_BACKUP" || cleanup_status=2
+    fi
+    if [ "$original_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+        original_status=$cleanup_status
+    fi
+    exit "$original_status"
 }
 
 case "$ROUTE_SPEC_ARGUMENT" in
@@ -348,6 +459,7 @@ OPTIONS_FILE="$RUN_DIR/options.txt"
 HDR_CONFIG="$RUN_DIR/config/metallum-hdr.properties"
 RENDERER_CONFIG="$RUN_DIR/config/metallum-renderer.properties"
 METALFX_CONFIG="$RUN_DIR/config/metallum-metalfx.properties"
+TEMPORAL_CONFIG="$RUN_DIR/config/metallum-metalfx-temporal.properties"
 SODIUM_OPTIONS="$RUN_DIR/config/sodium-options.json"
 SODIUM_MIXINS="$RUN_DIR/config/sodium-mixins.properties"
 RESOURCEPACKS_DIR="$RUN_DIR/resourcepacks"
@@ -362,23 +474,73 @@ FABRIC_DEFAULT_PACKS="$RUN_DIR/data/fabric_default_resource_packs.json"
 [ -f "$FABRIC_DEFAULT_PACKS" ] || die "missing Fabric default resource-pack config"
 [ -d "$RUN_DIR/saves" ] || die "missing Minecraft saves directory: run/saves"
 
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    [ -f "$TEMPORAL_CONFIG" ] || die "missing MetalFX temporal config"
+    FI_SETTINGS_BACKUP_DIR=$(mktemp -d \
+        "${TMPDIR:-/tmp}/metallum-fi-settings.XXXXXX") \
+        || die "failed to allocate FI runtime-settings backup"
+    if ! cp "$OPTIONS_FILE" "$FI_SETTINGS_BACKUP_DIR/options.txt" \
+        || ! cp "$HDR_CONFIG" \
+            "$FI_SETTINGS_BACKUP_DIR/metallum-hdr.properties" \
+        || ! cp "$RENDERER_CONFIG" \
+            "$FI_SETTINGS_BACKUP_DIR/metallum-renderer.properties" \
+        || ! cp "$METALFX_CONFIG" \
+            "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx.properties" \
+        || ! cp "$TEMPORAL_CONFIG" \
+            "$FI_SETTINGS_BACKUP_DIR/metallum-metalfx-temporal.properties"; then
+        discard_fi_settings_backup || true
+        die "failed to back up FI runtime settings"
+    fi
+
+    # Install restoration before the first mutation so preflight failures and
+    # HUP/INT/TERM all put the user's ignored runtime files back exactly.
+    trap 'early_cleanup $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    python3 "$FIXTURE_HELPER" apply-runtime-settings \
+        "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" \
+        "$METALFX_CONFIG" "$RENDERER_CONFIG" "$TEMPORAL_CONFIG" \
+        || die "failed to apply the FI validation runtime settings"
+fi
+
 settings_values=$(python3 "$FIXTURE_HELPER" settings-values \
     "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" "$METALFX_CONFIG" \
     "$SODIUM_OPTIONS" "$SODIUM_MIXINS" "$RESOURCEPACKS_DIR" \
-    "$FABRIC_DEFAULT_PACKS") \
+    "$FABRIC_DEFAULT_PACKS" "$RENDERER_CONFIG" "$TEMPORAL_CONFIG") \
     || die "runtime settings do not match the tracked benchmark contract"
 settings_field_count=$(printf '%s\n' "$settings_values" | awk -F '\t' '{ print NF; exit }')
-[ "$settings_field_count" -eq 27 ] \
-    || die "settings helper returned $settings_field_count fields instead of 27"
-IFS=$'\t' read -r \
-    SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
-    RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
-    ENTITY_DISTANCE_SCALING PARTICLE_SETTING MIPMAP_LEVELS \
-    BIOME_BLEND_RADIUS MAX_FPS AO_ENABLED CLOUDS_MODE CLOUD_RANGE \
-    TEXTURE_FILTERING MAX_ANISOTROPY_BIT IMPROVED_TRANSPARENCY \
-    CONFIGURED_GUI_SCALE RESOURCE_PACKS_SHA256 SODIUM_SETTINGS_SHA256 \
-    ACTIVE_RESOURCE_PACK_IDS SODIUM_WORKER_THREADS HDR_MODE HDR_SOURCE_ENCODING \
-    HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE <<< "$settings_values"
+case "$settings_field_count" in
+    27)
+        [ "$FI_VALIDATION" -eq 0 ] \
+            || die "FI settings helper returned the legacy 27-field contract"
+        IFS=$'\t' read -r \
+            SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
+            RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
+            ENTITY_DISTANCE_SCALING PARTICLE_SETTING MIPMAP_LEVELS \
+            BIOME_BLEND_RADIUS MAX_FPS AO_ENABLED CLOUDS_MODE CLOUD_RANGE \
+            TEXTURE_FILTERING MAX_ANISOTROPY_BIT IMPROVED_TRANSPARENCY \
+            CONFIGURED_GUI_SCALE RESOURCE_PACKS_SHA256 SODIUM_SETTINGS_SHA256 \
+            ACTIVE_RESOURCE_PACK_IDS SODIUM_WORKER_THREADS HDR_MODE HDR_SOURCE_ENCODING \
+            HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE <<< "$settings_values"
+        ;;
+    31)
+        IFS=$'\t' read -r \
+            SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
+            RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
+            ENTITY_DISTANCE_SCALING PARTICLE_SETTING MIPMAP_LEVELS \
+            BIOME_BLEND_RADIUS MAX_FPS AO_ENABLED CLOUDS_MODE CLOUD_RANGE \
+            TEXTURE_FILTERING MAX_ANISOTROPY_BIT IMPROVED_TRANSPARENCY \
+            CONFIGURED_GUI_SCALE RESOURCE_PACKS_SHA256 SODIUM_SETTINGS_SHA256 \
+            ACTIVE_RESOURCE_PACK_IDS SODIUM_WORKER_THREADS HDR_MODE HDR_SOURCE_ENCODING \
+            HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE \
+            FI_ENABLED FI_TEMPORAL_MODE FI_OVERLAY \
+            FI_MINIMUM_GENERATED_PERCENT <<< "$settings_values"
+        ;;
+    *)
+        die "settings helper returned $settings_field_count fields instead of 27 or 31"
+        ;;
+esac
 SETTINGS_VALUES_BEFORE=$settings_values
 
 case "$HDR_MODE" in
@@ -389,16 +551,36 @@ require_value "$HDR_SOURCE_ENCODING" "srgb" "HDR sourceEncoding"
 require_value "$PERSISTENT_METALFX_MODE" "off" "persistent MetalFX mode"
 if [ "$TIMING_DETAIL" -eq 0 ] \
     && [ "$METAL_VALIDATION" -eq 0 ] \
-    && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+    && [ "$CAPTURE_REFERENCE" -eq 0 ] \
+    && [ "$FI_VALIDATION" -eq 0 ]; then
     python3 "$ANALYZER" release-settings-contract "$SETTINGS_ID" \
         --hdr-mode "$HDR_MODE" \
         --configured-source-encoding "$HDR_SOURCE_ENCODING" \
         || die "release settings contract is incompatible with this benchmark profile"
 fi
 case "$MAX_FPS" in
-    ''|*[!0-9]*) die "maxFps must be an integer >= $MIN_MAX_FPS (found ${MAX_FPS:-<missing>})" ;;
+    ''|*[!0-9]*) die "maxFps must be an integer (found ${MAX_FPS:-<missing>})" ;;
 esac
-require_value "$MAX_FPS" "260" "maxFps"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    require_value "$MAX_FPS" "60" "FI validation maxFps"
+    require_value "$FI_ENABLED" "true" "FI validation frame-interpolation setting"
+    require_value "$FI_TEMPORAL_MODE" "performance" "FI validation temporal mode"
+    require_value "$FI_OVERLAY" "true" "FI validation overlay setting"
+    case "$FI_MINIMUM_GENERATED_PERCENT" in
+        ''|*[!0-9]*|0) die "FI minimum generated percent must be an integer from 1 to 100" ;;
+    esac
+    [ "$FI_MINIMUM_GENERATED_PERCENT" -le 100 ] \
+        || die "FI minimum generated percent must be an integer from 1 to 100"
+    FI_MINIMUM_GENERATED_FRAMES=$((
+        (MEASURE_FRAMES * FI_MINIMUM_GENERATED_PERCENT + 99) / 100
+    ))
+    actual_vsync=$(awk -F: '$1 == "enableVsync" { print $2 }' "$OPTIONS_FILE")
+    require_value "$actual_vsync" "true" "FI validation VSync"
+else
+    [ "$MAX_FPS" -ge "$MIN_MAX_FPS" ] \
+        || die "maxFps must be an integer >= $MIN_MAX_FPS (found $MAX_FPS)"
+    require_value "$MAX_FPS" "260" "maxFps"
+fi
 
 renderer_value() {
     local key=$1
@@ -411,7 +593,11 @@ RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
 [ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
-require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    require_value "$RENDERER_INTERPOLATION" "true" "renderer frameInterpolation"
+else
+    require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
+fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
 if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
     require_value "$RENDERER_LIGHTING" "true" "L6 dynamic route renderer improvedLighting"
@@ -454,12 +640,19 @@ ACCEPTED_JSON="$OUTPUT_DIR/$stem.accepted.json"
 
 echo "Metallum benchmark preflight passed"
 echo "  display: $MONITOR_NAME, ${WIDTH}x${HEIGHT}@${REFRESH_HZ}, exclusive fullscreen"
-echo "  pacing: VSync off, maxFps=$MAX_FPS"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    echo "  pacing: VSync on, maxFps=$MAX_FPS"
+else
+    echo "  pacing: VSync off, maxFps=$MAX_FPS"
+fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$RENDERER_LIGHTING/$LIGHTING_PRESET, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
 echo "  MetalFX: $METALFX_MODE (persistent config remains off)"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    echo "  Frame Interpolation: required, overlay=$FI_OVERLAY, minimum generated=$FI_MINIMUM_GENERATED_FRAMES/$MEASURE_FRAMES ($FI_MINIMUM_GENERATED_PERCENT%)"
+fi
 echo "  route: $ROUTE_ID ($ROUTE_SHA256)"
 case "$ROUTE_KIND" in
     TORCH_EPOCH)
@@ -509,6 +702,7 @@ echo "  artifact: $ARTIFACT_SHA256"
 cleanup() {
     local original_status=$1
     local cleanup_status=0
+    local fi_process_quiescent=1
     local fixture_after=""
     local actual_token=""
     local actual_identity=""
@@ -520,8 +714,31 @@ cleanup() {
     local renderer_after=""
     local artifact_after=""
 
-    trap - EXIT HUP INT TERM
+    trap - EXIT
+    # A second supervisor signal must not interrupt restoration. The original
+    # status is preserved and returned after teardown finishes.
+    trap '' HUP INT TERM
     set +e
+
+    # Restore before any slow digest validation. Keep the recovery copy until
+    # every client process is gone, then restore+verify once more before it is
+    # discarded so a late options.txt write cannot win the teardown race.
+    if [ "${FI_VALIDATION:-0}" -eq 1 ]; then
+        restore_fi_runtime_settings 1 || cleanup_status=2
+        for _attempt in $(seq 1 100); do
+            active_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
+            [ -n "$active_processes" ] || break
+            sleep 0.1
+        done
+        active_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
+        if [ -n "$active_processes" ]; then
+            fi_process_quiescent=0
+            echo "ERROR: preserving the FI recovery backup because a client process remains:" >&2
+            echo "$active_processes" >&2
+            echo "  recovery backup: $FI_SETTINGS_BACKUP_DIR" >&2
+            cleanup_status=2
+        fi
+    fi
 
     if [ -n "${FIXTURE_DIGEST_BEFORE:-}" ]; then
         fixture_after=$(python3 "$FIXTURE_HELPER" verify-fixture \
@@ -543,25 +760,29 @@ cleanup() {
     # Vanilla resets this ignored launch preference on orderly fullscreen exit.
     # Restore the exact launcher snapshot before validating benchmark quality
     # settings; all other tracked runtime contracts remain independently checked.
-    if [ -n "${OPTIONS_FILE_BACKUP:-}" ] && [ -f "$OPTIONS_FILE_BACKUP" ]; then
+    if [ "${FI_VALIDATION:-0}" -eq 0 ] \
+        && [ -n "${OPTIONS_FILE_BACKUP:-}" ] \
+        && [ -f "$OPTIONS_FILE_BACKUP" ]; then
         cp "$OPTIONS_FILE_BACKUP" "$OPTIONS_FILE" || cleanup_status=2
     fi
 
-    settings_after=$(python3 "$FIXTURE_HELPER" settings-values \
-        "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" "$METALFX_CONFIG" \
-        "$SODIUM_OPTIONS" "$SODIUM_MIXINS" "$RESOURCEPACKS_DIR" \
-        "$FABRIC_DEFAULT_PACKS")
-    if [ "$?" -ne 0 ] || [ "$settings_after" != "${SETTINGS_VALUES_BEFORE:-}" ]; then
-        echo "ERROR: benchmark performance/quality settings changed during the run" >&2
-        cleanup_status=2
-    fi
+    if [ "${FI_VALIDATION:-0}" -eq 0 ]; then
+        settings_after=$(python3 "$FIXTURE_HELPER" settings-values \
+            "$SETTINGS_SPEC" "$OPTIONS_FILE" "$HDR_CONFIG" "$METALFX_CONFIG" \
+            "$SODIUM_OPTIONS" "$SODIUM_MIXINS" "$RESOURCEPACKS_DIR" \
+            "$FABRIC_DEFAULT_PACKS" "$RENDERER_CONFIG" "$TEMPORAL_CONFIG")
+        if [ "$?" -ne 0 ] || [ "$settings_after" != "${SETTINGS_VALUES_BEFORE:-}" ]; then
+            echo "ERROR: benchmark performance/quality settings changed during the run" >&2
+            cleanup_status=2
+        fi
 
-    renderer_debug_after=$(renderer_value voxelDebugChecksum)
-    [ -n "$renderer_debug_after" ] || renderer_debug_after=false
-    renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
-    if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
-        echo "ERROR: renderer generation settings changed during the run" >&2
-        cleanup_status=2
+        renderer_debug_after=$(renderer_value voxelDebugChecksum)
+        [ -n "$renderer_debug_after" ] || renderer_debug_after=false
+        renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
+        if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
+            echo "ERROR: renderer generation settings changed during the run" >&2
+            cleanup_status=2
+        fi
     fi
 
     artifact_after=$(benchmark_artifact_digest)
@@ -613,6 +834,21 @@ cleanup() {
                     cleanup_status=2
                 fi
             fi
+        fi
+    fi
+
+    if [ "${FI_VALIDATION:-0}" -eq 1 ]; then
+        active_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
+        if [ -n "$active_processes" ]; then
+            fi_process_quiescent=0
+            cleanup_status=2
+        fi
+        if [ "$fi_process_quiescent" -eq 1 ]; then
+            restore_fi_runtime_settings || cleanup_status=2
+        else
+            # Re-copy the original bytes, but retain the only recovery copy
+            # because the still-live client may write its options again.
+            restore_fi_runtime_settings 1 || cleanup_status=2
         fi
     fi
 
@@ -679,7 +915,27 @@ start_epoch=$(date +%s)
 cd "$ROOT"
 echo "Running Minecraft benchmark quietly (live output would perturb frame pacing)"
 echo "  console log: $CONSOLE_LOG"
+
+FI_REQUIRED_ENV=0
+FI_OVERLAY_ENV=false
+FI_EXPERIMENTAL_GATE_ENV=0
+GPU_TIMING_ENV=1
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    FI_REQUIRED_ENV=1
+    FI_OVERLAY_ENV=$FI_OVERLAY
+    # This is an on-glass functional gate, not a renderer timing run.
+    # Coordinator-owned generated/real command buffers deliberately do not
+    # masquerade as ordinary drawable timing samples.
+    GPU_TIMING_ENV=0
+    # Temporary compatibility for the hidden live-profile gate. Delete this
+    # isolated assignment once the ungated FI validation run has passed.
+    FI_EXPERIMENTAL_GATE_ENV=1
+fi
 set +e
+METALLUM_EXPERIMENTAL_FI="$FI_EXPERIMENTAL_GATE_ENV" \
+METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
+METALLUM_BENCHMARK_FI_OVERLAY="$FI_OVERLAY_ENV" \
+METALLUM_BENCHMARK_FI_MIN_GENERATED="$FI_MINIMUM_GENERATED_FRAMES" \
 METALLUM_BENCHMARK=1 \
 METALLUM_BENCHMARK_MONITOR="$MONITOR_NAME" \
 METALLUM_BENCHMARK_WIDTH="$WIDTH" \
@@ -705,6 +961,7 @@ METALLUM_BENCHMARK_PARTICLES="$PARTICLE_SETTING" \
 METALLUM_BENCHMARK_MIPMAP_LEVELS="$MIPMAP_LEVELS" \
 METALLUM_BENCHMARK_BIOME_BLEND_RADIUS="$BIOME_BLEND_RADIUS" \
 METALLUM_BENCHMARK_MAX_FPS="$MAX_FPS" \
+METALLUM_BENCHMARK_EXPECTED_VSYNC="$EXPECTED_VSYNC" \
 METALLUM_BENCHMARK_AO="$AO_ENABLED" \
 METALLUM_BENCHMARK_CLOUDS_MODE="$CLOUDS_MODE" \
 METALLUM_BENCHMARK_CLOUD_RANGE="$CLOUD_RANGE" \
@@ -761,7 +1018,7 @@ METALLUM_BENCHMARK_L6_PROBE_ORIGIN_Z="$L6_PROBE_ORIGIN_Z" \
 METALLUM_BENCHMARK_L6_PROBE_RADIUS="$L6_PROBE_RADIUS" \
 METALLUM_BENCHMARK_L6_PROBE_VERTICAL_AMPLITUDE="$L6_PROBE_VERTICAL_AMPLITUDE" \
 METALLUM_BENCHMARK_L6_PROBE_PERIOD_FRAMES="$L6_PROBE_PERIOD_FRAMES" \
-METALLUM_GPU_TIMING=1 \
+METALLUM_GPU_TIMING="$GPU_TIMING_ENV" \
 METALLUM_GPU_TIMING_DETAIL="$TIMING_DETAIL" \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
     ./gradlew --no-daemon runClient --console=plain \
@@ -974,13 +1231,66 @@ esac
 complete="METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=$MEASURE_FRAMES framebuffer=${WIDTH}x${HEIGHT}"
 complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ "$complete_count" -eq 1 ] || die "expected exactly one matching COMPLETE marker (found $complete_count)"
+if [ "$FI_VALIDATION" -eq 1 ]; then
+    fi_generated_prefix="METALLUM_BENCHMARK EVENT=FI_GENERATED_COMPLETE generated_delta="
+    fi_generated_count=$(grep -Fc "$fi_generated_prefix" "$MINECRAFT_LOG" || true)
+    [ "$fi_generated_count" -eq 1 ] \
+        || die "expected exactly one FI_GENERATED_COMPLETE marker (found $fi_generated_count)"
+    fi_generated_marker=$(grep -F "$fi_generated_prefix" "$MINECRAFT_LOG")
+    fi_generated_delta=$(printf '%s\n' "$fi_generated_marker" \
+        | sed -E 's/.* generated_delta=([0-9]+) minimum=.*/\1/')
+    case "$fi_generated_delta" in
+        ''|*[!0-9]*) die "FI_GENERATED_COMPLETE marker has an invalid generated_delta: $fi_generated_marker" ;;
+    esac
+    case "$fi_generated_marker" in
+        *" minimum=$FI_MINIMUM_GENERATED_FRAMES") ;;
+        *) die "FI_GENERATED_COMPLETE marker has the wrong minimum: $fi_generated_marker" ;;
+    esac
+    [ "$fi_generated_delta" -ge "$FI_MINIMUM_GENERATED_FRAMES" ] \
+        || die "FI generated-frame delta $fi_generated_delta is below $FI_MINIMUM_GENERATED_FRAMES"
+
+    fi_generated_line=$(grep -nF "$fi_generated_prefix" "$MINECRAFT_LOG" | cut -d: -f1)
+    complete_line=$(grep -nF "$complete" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$measure_start_line" -lt "$fi_generated_line" ] \
+        && [ "$fi_generated_line" -lt "$complete_line" ] \
+        || die "FI generated-frame completion marker is out of order"
+
+    remaining_processes=$(pgrep -fl "$PROCESS_PATTERN" || true)
+    [ -z "$remaining_processes" ] \
+        || die "FI validation returned but a Minecraft/runClient process remains:\n$remaining_processes"
+    if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
+        captured_screenshot=""
+        captured_count=0
+        for screenshot in "$RUN_DIR"/screenshots/*.png; do
+            [ -f "$screenshot" ] || continue
+            screenshot_mtime=$(stat -f %m "$screenshot")
+            if [ "$screenshot_mtime" -ge "$start_epoch" ]; then
+                captured_screenshot=$screenshot
+                captured_count=$((captured_count + 1))
+            fi
+        done
+        [ "$captured_count" -eq 1 ] \
+            || die "FI reference run expected exactly one new PNG (found $captured_count)"
+        mkdir -p "$REFERENCE_OUTPUT_DIR"
+        reference_screenshot="$REFERENCE_OUTPUT_DIR/$stem.png"
+        cp "$captured_screenshot" "$reference_screenshot"
+        echo "FI reference capture validated: $reference_screenshot"
+        echo "  sha256: $(shasum -a 256 "$reference_screenshot" | awk '{print $1}')"
+    fi
+    echo "FI validation passed: $fi_generated_delta generated frames reached the display"
+    echo "  evidence: exact CAMetalDrawable presented-handler counter in $MINECRAFT_LOG"
+    echo "  console log: $CONSOLE_LOG"
+    ATTEST_PENDING=0
+    exit 0
+fi
 [ -s "$RAW_REPORT" ] || die "GPU timing JSONL report is missing or empty"
 
 RELEASE_ARG=""
 VALIDATION_ARG=""
 if [ "$TIMING_DETAIL" -eq 0 ] \
     && [ "$METAL_VALIDATION" -eq 0 ] \
-    && [ "$CAPTURE_REFERENCE" -eq 0 ]; then
+    && [ "$CAPTURE_REFERENCE" -eq 0 ] \
+    && [ "$FI_VALIDATION" -eq 0 ]; then
     RELEASE_ARG=--release-contract
 fi
 if [ "$METAL_VALIDATION" -eq 1 ]; then
