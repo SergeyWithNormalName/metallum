@@ -1975,6 +1975,13 @@ GGX-материалы, полупрозрачность и отражающие
   не открывают L8 optics в сухом common path; дополнительных buffers, textures,
   passes и per-frame allocations нет. Dry Sky Fresnel намеренно не расширялся по
   разрешению пользователя.
+- После live-проверки устранена дождевая вертикальная полоса на стенах: eligibility
+  намокания wet-only материалов теперь определяется стабильной world-space нормалью
+  квада при Sodium remesh, а не только screen-space derivatives во fragment shader.
+  Вертикальные/почти вертикальные грани (`normal.y <= 0.55`) не получают wet GGX;
+  крыши плавно входят в полное намокание до `normal.y = 0.85`. Rain resolver теперь
+  запускается только для non-emissive rain-tagged upward surfaces, поэтому исправление
+  также удаляет дождевую L8-работу с обычных стен.
 
 ### Этап P1. ProMotion/present pacing
 

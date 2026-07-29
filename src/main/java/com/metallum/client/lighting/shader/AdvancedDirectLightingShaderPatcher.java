@@ -257,6 +257,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     uint packedMaterial,
                     vec3 albedo,
                     vec3 normal,
+                    float rainFacing,
                     float skyVisibility,
                     bool terrainSurface) {
                 uint emissionCode = (packedMaterial >> 3u) & 15u;
@@ -304,14 +305,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                 material.opticalDepth = kind == METALLUM_SURFACE_WATER_V1 ? 1.65
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.24 : 0.0;
 
-                float upFacing = max(dot(normal, normalize(
-                        metallumEnvironment.worldUpAndMedium.xyz)), 0.0);
+                float rainExposure = smoothstep(0.55, 0.85, clamp(rainFacing, 0.0, 1.0));
                 float rain = metallumEnvironment.materialContract.x == 1u
                         ? clamp(metallumEnvironment.materialWeatherAndTime.x, 0.0, 1.0)
                         : 0.0;
                 material.wetness = terrainSurface && material.transmission == 0.0
                         ? rain * clamp(skyVisibility, 0.0, 1.0)
-                                * upFacing * upFacing * upFacing * upFacing
+                                * rainExposure * rainExposure
                         : 0.0;
                 float wetRoughnessTarget = kind == METALLUM_SURFACE_STONE_V1 ? 0.28
                         : kind == METALLUM_SURFACE_WOOD_V1 ? 0.42
@@ -2013,15 +2013,26 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
                     + "            && (metallumSurfaceBase == 2u || metallumSurfaceBase == 3u\n"
                     + "            || metallumSurfaceBase == 4u || metallumSurfaceBase == 6u);\n"
-                    + "    bool metallumRainyL8Surface =\n"
-                    + "            metallumEnvironment.materialContract.x == 1u\n"
+                    + "    bool metallumRainCandidate =\n"
+                    + "            metallumSurfaceEmission == 0u\n"
+                    + "            && metallumEnvironment.materialContract.x == 1u\n"
                     + "            && metallumEnvironment.materialWeatherAndTime.x > 0.0\n"
-                    + "            && metallumSkyVisibility > 0.0;\n"
+                    + "            && metallumSkyVisibility > 0.0\n"
+                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
+                    + "    float metallumRainFacing = 0.0;\n"
+                    + "    if (metallumRainCandidate) {\n"
+                    + "        metallumRainFacing = max(dot(\n"
+                    + "                metallumDirectNormal,\n"
+                    + "                normalize(metallumEnvironment.worldUpAndMedium.xyz)), 0.0);\n"
+                    + "    }\n"
+                    + "    bool metallumRainyL8Surface =\n"
+                    + "            metallumRainCandidate && metallumRainFacing > 0.55;\n"
                     + "    if (metallumTaggedL8Surface || metallumRainyL8Surface) {\n"
                     + "        MetallumSurfaceMaterialV1 metallumSurfaceMaterial =\n"
                     + "                metallumResolveSurfaceMaterialV1(\n"
                     + "                        metallumMaterial, metallumPreparedAlbedo,\n"
-                    + "                        metallumDirectNormal, metallumSkyVisibility, true);\n"
+                    + "                        metallumDirectNormal, metallumRainFacing,\n"
+                    + "                        metallumSkyVisibility, true);\n"
                     + "        bool metallumIntrinsicMaterialOptics =\n"
                     + "                metallumSurfaceMaterial.kind == METALLUM_SURFACE_WATER_V1\n"
                     + "                || metallumSurfaceMaterial.kind == METALLUM_SURFACE_GLASS_V1\n"

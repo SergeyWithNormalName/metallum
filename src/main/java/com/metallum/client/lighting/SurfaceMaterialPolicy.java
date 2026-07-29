@@ -20,6 +20,9 @@ import java.util.Objects;
  * and their mip levels are alpha-tested but not glass.</p>
  */
 public final class SurfaceMaterialPolicy {
+    public static final float RAIN_FACING_START = 0.55f;
+    public static final float RAIN_FACING_FULL = 0.85f;
+
     public enum Kind {
         DIELECTRIC,
         STONE,
@@ -184,6 +187,23 @@ public final class SurfaceMaterialPolicy {
 
     public static float wetDielectricF0(final float dryF0, final float wetness) {
         return mix(clampUnit(dryF0), 0.025f, clampUnit(wetness));
+    }
+
+    /**
+     * Stable remesh/shader contract for rain accumulation. Vertical and near-vertical faces are
+     * dry; upward slopes transition smoothly so roofs still receive rain without letting an
+     * unstable screen derivative activate wet optics along primitive edges.
+     */
+    public static float rainExposure(final float worldNormalY) {
+        if (!Float.isFinite(worldNormalY)) {
+            throw new IllegalArgumentException("world normal Y must be finite");
+        }
+        float amount = Math.clamp(
+                (worldNormalY - RAIN_FACING_START) / (RAIN_FACING_FULL - RAIN_FACING_START),
+                0.0f,
+                1.0f
+        );
+        return amount * amount * (3.0f - 2.0f * amount);
     }
 
     public static float schlickFresnel(final float f0, final float nDotV) {

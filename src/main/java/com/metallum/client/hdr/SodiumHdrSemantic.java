@@ -16,10 +16,11 @@ public final class SodiumHdrSemantic {
     public static final int SURFACE_CLASS_STONE = 5;
     public static final int SURFACE_CLASS_WOOD = 6;
     public static final int SURFACE_CLASS_POROUS = 7;
+    public static final int SURFACE_CLASS_DIELECTRIC = 8;
 
     /** Internal-only bits carried by the temporary Sodium vertices before final packing. */
-    private static final int SURFACE_CLASS_SHIFT = 4;
-    private static final int SURFACE_CLASS_MASK = 0x07 << SURFACE_CLASS_SHIFT;
+    private static final int SURFACE_CLASS_SHIFT = 5;
+    private static final int SURFACE_CLASS_MASK = 0x0f << SURFACE_CLASS_SHIFT;
     /** Version-locked unused base values in Sodium 0.9.1's current block shaders. */
     private static final int MATERIAL_BASE_METAL = 2;
     private static final int MATERIAL_BASE_SMOOTH_DIELECTRIC = 4;
@@ -28,6 +29,7 @@ public final class SodiumHdrSemantic {
     private static final int MATERIAL_BASE_STONE = 1;
     private static final int MATERIAL_BASE_WOOD = 5;
     private static final int MATERIAL_BASE_POROUS = 7;
+    private static final int MATERIAL_BASE_DIELECTRIC = 0;
     private static final AtomicBoolean ACTIVE_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean MATERIAL_CONFLICT_LOGGED = new AtomicBoolean();
     private static final int AMETHYST_GROWTH_SURFACE_EMISSION = 2;
@@ -146,7 +148,7 @@ public final class SodiumHdrSemantic {
     ) {
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(lightEmission, exact);
         int boundedSurfaceClass = Math.clamp(
-                surfaceClass, SURFACE_CLASS_NONE, SURFACE_CLASS_POROUS);
+                surfaceClass, SURFACE_CLASS_NONE, SURFACE_CLASS_DIELECTRIC);
         if (semantic == 0 && boundedSurfaceClass != SURFACE_CLASS_NONE) {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT
                     | (boundedSurfaceClass << SURFACE_CLASS_SHIFT);
@@ -220,6 +222,7 @@ public final class SodiumHdrSemantic {
             case SURFACE_CLASS_STONE -> MATERIAL_BASE_STONE;
             case SURFACE_CLASS_WOOD -> MATERIAL_BASE_WOOD;
             case SURFACE_CLASS_POROUS -> MATERIAL_BASE_POROUS;
+            case SURFACE_CLASS_DIELECTRIC -> MATERIAL_BASE_DIELECTRIC;
             default -> originalMaterialBits;
         };
     }

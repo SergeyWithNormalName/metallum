@@ -173,13 +173,27 @@ abstract class BlockRendererHdrMixin {
                 this.metallum$blockState,
                 material.isTranslucent()
         ).kind();
+        boolean rainFacing = switch (surfaceKind) {
+            case DIELECTRIC, STONE, WOOD, POROUS ->
+                    quad.faceNormal().y() > SurfaceMaterialPolicy.RAIN_FACING_START;
+            default -> false;
+        };
         int surfaceClass = switch (surfaceKind) {
             case METAL -> SodiumHdrSemantic.SURFACE_CLASS_METAL;
             case SMOOTH_DIELECTRIC -> SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC;
             case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
-            case STONE -> SodiumHdrSemantic.SURFACE_CLASS_STONE;
-            case WOOD -> SodiumHdrSemantic.SURFACE_CLASS_WOOD;
-            case POROUS -> SodiumHdrSemantic.SURFACE_CLASS_POROUS;
+            case STONE -> rainFacing
+                    ? SodiumHdrSemantic.SURFACE_CLASS_STONE
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
+            case WOOD -> rainFacing
+                    ? SodiumHdrSemantic.SURFACE_CLASS_WOOD
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
+            case POROUS -> rainFacing
+                    ? SodiumHdrSemantic.SURFACE_CLASS_POROUS
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
+            case DIELECTRIC -> rainFacing
+                    ? SodiumHdrSemantic.SURFACE_CLASS_DIELECTRIC
+                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
             default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
         };
         SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass);

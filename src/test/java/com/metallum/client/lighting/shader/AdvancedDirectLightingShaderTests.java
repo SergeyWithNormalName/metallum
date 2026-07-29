@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "cb57390571a60e10cfa6c47d6e9f264da7c919c3de634cb1a265afce9ebd20fe",
+            "sodium-solid-fsh", "72226510dd83c25dc4f07d712e8bf0c5551138d0334f68fa3d4ee05dc72c09ae",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "8b3c59840895508ffaf03a5bef2febcadfe6a06907e1d3d83a0f5b7812b6b2a6",
+            "sodium-cutout-fsh", "73bd22b29d6a05f0e33b08aeba75da3b614ea4a7d5a0adbd70a8bb7eaa4c5d7e",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "457a0198480483c4d7c7c661d4fa8c7de0ae102c2084bb096fe62e457556381a",
+            "minecraft-entity-fsh", "12cac597059bd36ceda58d13e12376be0d2832f8b906effea3529e3fadf7e112",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "b62035d75fbc6d9bef60c5e03323f4cadb9bf9646ca2a73aac66341e6082ea49"
+            "minecraft-end-portal-fsh", "d2360e1d7b817050df31020d9faa94c6a8acf58f11271889d3f1f4db791225fe"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -916,6 +916,8 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float waveZ = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
+                        && sodiumFragment.contains("float rainExposure = smoothstep(0.55, 0.85")
+                        && sodiumFragment.contains("* rainExposure * rainExposure")
                         && sodiumFragment.contains("float wetRoughnessTarget")
                         && sodiumFragment.contains("float albedoLuminance = dot(")
                         && sodiumFragment.contains("float texturedWetRoughness")
@@ -934,6 +936,11 @@ public final class AdvancedDirectLightingShaderTests {
 
         require(sodiumFragment.contains("bool metallumTaggedL8Surface")
                         && sodiumFragment.contains("bool metallumRainyL8Surface")
+                        && sodiumFragment.contains("bool metallumRainCandidate")
+                        && sodiumFragment.contains("if (metallumRainCandidate)")
+                        && sodiumFragment.contains("metallumRainFacing = max(dot(")
+                        && sodiumFragment.contains("metallumRainFacing > 0.55")
+                        && sodiumFragment.contains("metallumSurfaceEmission == 0u")
                         && sodiumFragment.contains(
                         "if (metallumTaggedL8Surface || metallumRainyL8Surface)")
                         && sodiumFragment.contains("bool metallumIntrinsicMaterialOptics")

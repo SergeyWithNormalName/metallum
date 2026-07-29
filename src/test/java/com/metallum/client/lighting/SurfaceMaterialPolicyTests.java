@@ -99,6 +99,9 @@ public final class SurfaceMaterialPolicyTests {
                         && SodiumHdrSemantic.materialBaseForSurfaceClass(
                         0, SodiumHdrSemantic.SURFACE_CLASS_POROUS) == 7,
                 "remesh-time L8 surface classes did not override arbitrary Sodium bases");
+        require(SodiumHdrSemantic.materialBaseForSurfaceClass(
+                        5, SodiumHdrSemantic.SURFACE_CLASS_DIELECTRIC) == 0,
+                "rain-facing dielectric did not receive the reserved compact base");
 
         int exactEmission = SodiumHdrShaderPatcher.packMaterialBits(
                 5, SodiumHdrShaderPatcher.encodeVertexSemantic(15, true));
@@ -124,6 +127,16 @@ public final class SurfaceMaterialPolicyTests {
     }
 
     private static void testWetnessAndAbsorption() {
+        float verticalExposure = SurfaceMaterialPolicy.rainExposure(0.0f);
+        float nearVerticalExposure = SurfaceMaterialPolicy.rainExposure(0.55f);
+        float roofExposure = SurfaceMaterialPolicy.rainExposure(0.70f);
+        float topExposure = SurfaceMaterialPolicy.rainExposure(1.0f);
+        require(close(verticalExposure, 0.0f)
+                        && close(nearVerticalExposure, 0.0f)
+                        && roofExposure > 0.0f && roofExposure < 1.0f
+                        && close(topExposure, 1.0f),
+                "rain-facing contract allows vertical walls or rejects upward roofs");
+
         float dryStone = SurfaceMaterialPolicy.wetRoughness(
                 SurfaceMaterialPolicy.STONE, 0.0f, 0.5f);
         float wetStone = SurfaceMaterialPolicy.wetRoughness(
