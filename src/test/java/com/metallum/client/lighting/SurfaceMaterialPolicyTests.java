@@ -211,6 +211,31 @@ public final class SurfaceMaterialPolicyTests {
         float deep = SurfaceMaterialPolicy.beerLambert(0.36f, 5.0f);
         require(shallow <= 1.0f && shallow > deep && deep >= 0.0f,
                 "Beer-Lambert absorption is not energy-conserving and depth-monotonic");
+
+        float darkRefraction = waterRefractionScale(0.40f, 0.0f);
+        float neutralRefraction = waterRefractionScale(0.40f, 0.40f);
+        float brightRefraction = waterRefractionScale(0.40f, 4.0f);
+        float vanillaRed = 0.08f;
+        float vanillaGreen = 0.24f;
+        require(close(darkRefraction, 0.919f)
+                        && close(neutralRefraction, 1.0f)
+                        && close(brightRefraction, 1.081f)
+                        && close(
+                        vanillaRed * brightRefraction / (vanillaGreen * brightRefraction),
+                        vanillaRed / vanillaGreen),
+                "bounded water refraction no longer preserves vanilla biome-tint chromaticity");
+    }
+
+    private static float waterRefractionScale(
+            final float vanillaLuminance,
+            final float refractedLuminance
+    ) {
+        float relativeGain = Math.clamp(
+                refractedLuminance / Math.max(vanillaLuminance, 0.02f),
+                0.82f,
+                1.18f
+        );
+        return 1.0f + (relativeGain - 1.0f) * 0.45f;
     }
 
     private static void testRainExposureSnapshot() {

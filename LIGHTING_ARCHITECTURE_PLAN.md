@@ -1965,6 +1965,12 @@ GGX-материалы, полупрозрачность и отражающие
   учитывала только camera fraction, поэтому при переходе игрока через block boundary
   узор скачком менял фазу. Новый split сохраняет world-space фазу без large-world
   float precision loss, дополнительных ресурсов или работы на non-water terrain.
+- После live-проверки базовый цвет воды снова принадлежит vanilla texture × biome tint.
+  L8 больше не заменяет его бледным analytic environment transmission: refracted
+  environment даёт только bounded `±8.1%` luminance modulation, не меняющую RGB
+  chromaticity. Procedural normal, Fresnel, environment/local GGX, absorption calculation
+  и Temporal reactive weight сохранены без новых samples/resources и без работы на
+  non-water terrain.
 - Wet policy разделена на remesh-time классы stone, wood, porous и общий dielectric:
   при полном намокании целевые roughness равны соответственно `0.28`, `0.42`, `0.72`
   и `0.50`, а отдельный specular scale не позволяет снегу, листве и травяным cutout

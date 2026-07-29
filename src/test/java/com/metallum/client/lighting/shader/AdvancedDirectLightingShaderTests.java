@@ -77,9 +77,9 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "4fc78efcec865a92735709f0279e6e4a4d33692fdc2df124188648c63c19f26c",
+            "sodium-solid-fsh", "4f80075acb797e54c487e0b1b421828bf6675a449214bd1983526f607930f075",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "6fcabb1669c2b4ca88fa209eff3b11891eefea74d85219d286e23d316fe0a99c",
+            "sodium-cutout-fsh", "40451c118b72527d23a68aac558f6cb4f37e0734350d850798eae579c1f7b5f5",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
             "minecraft-entity-fsh", "3cb04e5c308af63d43c5f51c784f8bfc6f812e0d1d82aefa207ab0a23fa27bb0",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
@@ -909,6 +909,14 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFragment.contains("vec3 refracted = refract(")
                         && sodiumFragment.contains("exp(-material.absorption * distance)")
                         && sodiumFragment.contains("metallumWaterNormalV1")
+                        && sodiumFragment.contains(
+                        "vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;")
+                        && sodiumFragment.contains(
+                        "float metallumWaterRefractionGain = clamp(")
+                        && sodiumFragment.contains(
+                        "1.0, metallumWaterRefractionGain, 0.45")
+                        && sodiumFragment.contains(
+                        "metallumPreparedAlbedo = metallumVanillaAlbedo;")
                         && sodiumFragment.contains(
                         "metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255)")
                         && sodiumFragment.contains("vec2 wavePhase = mod(waveTurns, vec2(256.0))")

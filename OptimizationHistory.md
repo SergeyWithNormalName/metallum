@@ -1840,6 +1840,28 @@ API/GPU Validation и Temporal runtime validation.
 signoff на том же берегу остается обязательным: автоматические тесты доказывают
 непрерывность формулы, но не заменяют наблюдение движения в игре.
 
+## 2026-07-29 — L8 выбеливал vanilla biome tint воды
+
+Live-скриншот показал бледную серо-голубую воду в сравнении с vanilla. CPU/remesh tint
+не терялся: `metallumUnlitBase` уже содержал linear atlas texel, умноженный на vanilla
+fluid vertex/biome tint. Потеря насыщенности происходила позже внутри L8: analytic
+`refractedEnvironment * transmittance` сначала занимал до `0.96 * 0.78 = 74.88%`
+prepared albedo, а затем этот результат повторно заменял до `0.96 * 0.62 = 59.52%`
+уже освещённого vanilla color.
+
+Для water базовый RGB теперь остаётся vanilla. L8 refraction используется как scalar
+luminance modulation: отношение refracted/vanilla luminance ограничено `0.82..1.18`
+и смешивается с единицей весом `0.45`, поэтому итоговый диапазон равен `0.919..1.081`,
+а RGB chromaticity biome tint математически сохраняется. После этого diffuse input
+возвращается к vanilla albedo. Glass сохраняет прежний цветной transmission path;
+water procedural normal, `refract`, Beer-Lambert calculation, Fresnel, environment/sun
+GGX, dominant local specular и Temporal reactive weight не удалены.
+
+Изменение добавляет только два dot, bounded scalar ratio и mix внутри уже активного
+water L8 gate. Новых texture samples, buffers, passes, allocations или non-water work
+нет; steady-state FPS impact ожидается ниже измеримого шума. Автоматические numerical,
+actual-source GLSL/SPIR-V и полный renderer validation не заменяют live visual signoff.
+
 ## 2026-07-29 — L8 material-aware wet response
 
 Live-скриншоты показали over-glazing: земля и дерево получали почти одинаковую
