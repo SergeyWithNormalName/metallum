@@ -645,17 +645,29 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         for (long stableId : completedUploads) {
             this.uploads.remove(stableId);
         }
-        packFrameDescriptors(
-                descriptors,
-                context.lights(),
-                context.mirror(),
-                context.submitIndex(),
-                dynamicPlan,
-                dynamicReady
-        );
-        DescriptorCoverage coverage = descriptorCoverage(
-                descriptors, context.lights().size()
-        );
+        DescriptorCoverage coverage;
+        if (descriptorRepackRequired(uploaded, dynamicReady)) {
+            packFrameDescriptors(
+                    descriptors,
+                    context.lights(),
+                    context.mirror(),
+                    context.submitIndex(),
+                    dynamicPlan,
+                    dynamicReady
+            );
+            coverage = descriptorCoverage(descriptors, context.lights().size());
+        } else {
+            // prepareFrame already packed this exact slot for the current submit. If no
+            // resident page was promoted and no dynamic page became ready, uploadPending
+            // cannot change a descriptor; preserve both bytes and the validated accounting.
+            coverage = new DescriptorCoverage(
+                    this.prepared.readyLights(),
+                    this.prepared.staleLights(),
+                    this.prepared.approximateDirectLights(),
+                    this.prepared.buildingLights(),
+                    this.prepared.failClosedLights()
+            );
+        }
         this.prepared = preparedFrame(
                 true,
                 this.prepared.proxyCount(),
@@ -669,6 +681,16 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 dynamicReady
         );
         return this.prepared;
+    }
+
+    static boolean descriptorRepackRequired(
+            final int uploadedPages,
+            final boolean dynamicReady
+    ) {
+        if (uploadedPages < 0) {
+            throw new IllegalArgumentException("Negative L6 uploaded-page count");
+        }
+        return uploadedPages != 0 || dynamicReady;
     }
 
     static void copyPagePayload(final ByteBuffer destination, final byte[] payload) {

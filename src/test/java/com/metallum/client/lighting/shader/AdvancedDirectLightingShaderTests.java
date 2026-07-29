@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "11c41e876a0e8d017dc803c8e81f4f12a861c6fbab691a01310071f4cebdc568",
+            "sodium-solid-fsh", "5980f9f9df997c03d7a6828ef3d5ffcd4a687bc8d7f822df2ab9eccf39b65d21",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "5bc30bba6a6beb9bf97832946eb88840d002febc4f7225f7cf7c26b22d07f49c",
+            "sodium-cutout-fsh", "27eca32b9413c7c548e9c7ed23d502218a7e6270cd528dd39a1d8f2a28085c1a",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "5f1b4e1e51ac78adf0126c02c3710a129980a409faead60233e0a2e1fac0b827",
+            "minecraft-entity-fsh", "3f6c34d8e51cedc4cbccb5ba6e0cf8f7f1711844c18b1a8bd98da494a7a840df",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "d9449ac30a4c9440f189a8c4998dd51c9b5abe84e2f780bd1f7513b244b3c991"
+            "minecraft-end-portal-fsh", "526932e75fd5249f8514eab36850a34006ff43cb2d521b815f0774843c66c9ef"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -467,6 +467,10 @@ public final class AdvancedDirectLightingShaderTests {
                         "float nDotL = max(dot(normal, toLight * inverseDistance), 0.0);",
                         "if (nDotL == 0.0)")
                         && before(sodiumFormula, "if (nDotL == 0.0)", "float range =")
+                        && sodiumFormula.contains("float distance = distanceSquared >= 0.000001")
+                        && sodiumFormula.contains("? distanceSquared * inverseDistance")
+                        && sodiumFormula.contains(": sqrt(max(distanceSquared, 0.0));")
+                        && sodiumFormula.contains("float range = max(1.0 - distance / radius, 0.0);")
                         && before(sodiumFormula, "if (nDotL == 0.0)", "float attenuation =")
                         && before(sodiumFormula, "if (nDotL == 0.0)", "vec3 radiance =")
                         && !sodiumFormula.contains("if (nDotL <= 0.0)"),
@@ -522,8 +526,12 @@ public final class AdvancedDirectLightingShaderTests {
         require(countOccurrences(sodiumFormula, "uint activeLightCount =") == 1,
                 "active light count is not cached once per fragment");
         require(sodiumFormula.contains(
-                        "max(light.linearColorIntensity.rgb, vec3(0.0))"),
-                "direct-light formula collapsed colored lights to a scalar");
+                        "vec3 radiance = light.linearColorIntensity.rgb;")
+                        && !sodiumFormula.contains(
+                        "max(light.linearColorIntensity.rgb, vec3(0.0))")
+                        && !sodiumFormula.contains(
+                        "max(light.linearColorIntensity.a, 0.0)"),
+                "direct-light formula does not consume the prepared scene-linear radiance");
         require(!sodiumFragment.contains("metallumVoxelShadowLightSlotV1")
                         && !sodiumFragment.contains("selected0")
                         && !sodiumFragment.contains("selected1")

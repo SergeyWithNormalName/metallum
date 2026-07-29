@@ -2140,6 +2140,11 @@ private enum LightClusterValidationMain {
                             && readFloat(compactionGpu.lights, at: visibleOffset + 8) == -8
                             && readFloat(compactionGpu.lights, at: visibleOffset + 12) == 1,
                         "Stable candidate payload moved away from gpuLights[1]")
+            try require(readFloat(compactionGpu.lights, at: visibleOffset + 16) == 0.4
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 20) == 1.8
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 24) == 0.8
+                            && readFloat(compactionGpu.lights, at: visibleOffset + 28) == 1,
+                        "Cluster prepare did not fold colored intensity into RGB radiance")
 
             // A perspective sphere bound must include tangent edge tiles. The old
             // center +/- radius/depth approximation omitted both outer X tiles here.

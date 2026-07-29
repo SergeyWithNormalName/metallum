@@ -1488,3 +1488,113 @@ COMPLETE и zero dropped events. Это не подменяется attestation.
 **Итог:** **ВНЕДРЕНО/accepted** только как quality-preserving L6
 allocation/anti-stutter architecture optimization. Не заявлять рост среднего
 FPS. Не расширять guard за пределы exact all-`STATIC_CACHE` входа.
+
+## 2026-07-29 — пять независимых dense-light гипотез: radiance prepare и L6 descriptor no-op
+
+### Контрольный baseline
+
+Все GPU-пробы использовали один `nether-lava-stress-v1` contract: native
+`3024×1964`, exclusive fullscreen HDR, Balanced, MetalFX OFF, VSync OFF,
+frozen simulation, detailed timing, `300+600`. Baseline
+`20260729T072635Z-...-five-variants-baseline-detailed-off`: FPS/min-window
+`50.552/50.406`, GPU p50/p95/p99/worst
+`21.2797/21.8185/22.6404/23.5980 ms`, 1%/0.1% low `26.628/20.056`, light
+upload + cluster build average/p95/worst `0.9044/1.0304/1.8718 ms`.
+Raw/summary COMPLETE, zero dropped timing events. В scene 2048 L3 sources,
+READY L6 pages 87 и APPROXIMATE 1961; cluster build занимает лишь около
+`0.9 ms`, поэтому дальнейшие cluster-only правки не имеют реалистичного бюджета
+на самостоятельные `+3%` всего кадра.
+
+### 1. Lazy L6 receiver context — REJECTED
+
+Receiver world transforms и partial-surface classification вычислялись только
+после встречи первого READY/STALE descriptor, а APPROXIMATE sources обходили их.
+Контракт и goldens прошли, но run
+`20260729T073103Z-...-variant-1-lazy-l6-receiver-detailed-off` дал FPS `47.818`
+(`−5.41%`), GPU p95 `23.1996 ms` (`+6.33%`) и cluster stage average
+`0.9355 ms`. Вероятная причина — дополнительная divergence/register lifetime в
+длинном fragment loop. Правка полностью откатана; не повторять lazy state machine
+внутри per-light loop.
+
+### 2. Повторное использование inverseDistance — ACCEPTED, малый эффект
+
+Для обычного `distanceSquared >= 1e-6` distance теперь восстанавливается как
+`distanceSquared * inverseDistance`, используя уже выполненный `inversesqrt`;
+epsilon-ветка сохраняет прежний `sqrt(max(distanceSquared, 0))`. Первый чистый
+run `20260729T073629Z-...-variant-2-reuse-inversedistance-detailed-off` дал FPS
+`51.461` (`+1.80%`) и GPU p50 `21.0079 ms` (`−1.28%`), но GPU p95 был почти
+нейтрален `21.8474 ms`. Повтор поверх финальных accepted changes
+`20260729T074908Z-...-repeat-2-with-accepted-4-5-detailed-off` улучшил adjacent
+FPS `51.279 → 51.680` (`+0.78%`). Направление среднего FPS повторилось дважды;
+эффект меньше 3%, поэтому не заявлять его как крупный самостоятельный выигрыш.
+
+### 3. Empty-cluster early return перед L6 contract — REJECTED
+
+Точный `countLimit == 0` return был перенесён перед optional L6 validation и
+receiver preparation. Run
+`20260729T073936Z-...-variant-3-empty-cluster-early-return-detailed-off` дал FPS
+`50.970` (`+0.83%`), но GPU p95 ухудшился до `22.2770 ms` (`+2.10%`), cluster
+p95 — до `1.3338 ms`. Dense Nether почти не имеет полезной empty-cluster доли;
+правка полностью откатана.
+
+### 4. Radiance precompute в существующем cluster prepare — ACCEPTED
+
+`metallum_cluster_prepare_v1` один раз на uploaded light вычисляет прежнее
+`max(rgb, 0) * max(intensity, 0)`. Fragment loop теперь читает готовый scene-linear
+RGB radiance вместо повторения clamp и vector×scalar для каждого contributing
+fragment/light. Новый pass, buffer и ABI не добавлены; position, radius, cluster
+membership, L6 visibility и итоговая формула не менялись. Metal compiler,
+material goldens и полный GPU validation прошли.
+
+Run `20260729T074319Z-...-variant-4-precomputed-radiance-detailed-off` дал FPS
+`52.002` (`+2.87%`), GPU p50/p95 `20.8788/21.3189 ms`
+(`−1.88/−2.29%`), 1%/0.1% low `36.695/31.758`; cluster stage average остался
+`0.9016 ms`. Это лучший отдельный кандидат, но один run недостаточен для строгого
+claim `+2.87%`; финальная совокупная пара ниже даёт более консервативную оценку.
+Native `lightClusterValidation` дополнительно readback-проверяет prepared
+`(0.2, 0.9, 0.4) × 2 → (0.4, 1.8, 0.8, marker=1)` на реальном Apple GPU.
+Предвычисление не блокирует будущий colored-glass light: RGB transmittance должна
+умножаться на prepared radiance на shadow/sample stage; для этого независимо
+потребуется RGB вместо scalar visibility/cache contract.
+
+### 5. Пропуск второго L6 descriptor repack — ACCEPTED как anti-stutter no-op removal
+
+`prepareFrame` уже упаковывает descriptor slot текущего submit. Раньше
+`uploadPending` немедленно повторно проходил и переписывал до 2048 descriptors,
+даже когда `uploadedPages == 0` и dynamic page не стала READY. Теперь повторная
+упаковка и coverage scan выполняются только при одном из этих двух точных state
+changes; иначе переиспользуются уже провалидированные coverage counters текущего
+submit. Negative-count guard и unit contract покрывают gate. Descriptor bytes,
+states/order, atlas readiness и fail-open policy не меняются.
+
+Static run `20260729T074629Z-...-variant-5-skip-l6-descriptor-repack-detailed-off`
+не доказал рост среднего FPS относительно варианта 4 (`52.002 → 51.279`, шумный
+`−1.39%`), но 1%/0.1% lows выросли `36.695/31.758 → 38.017/34.146`. Принимается
+не как FPS claim, а как детерминированное устранение лишней render-thread работы
+без изменения результата; особенно релевантно активной игре и submit-кадрам без
+новой страницы.
+
+### Финальная совокупность и граница результата
+
+Два финальных identical-source run:
+`20260729T074908Z-...-repeat-2-with-accepted-4-5-detailed-off` и
+`20260729T075113Z-...-five-variants-final-confirmation-detailed-off`. Их mean:
+FPS `51.379` против baseline `50.552` (`+1.64%`), min-window `51.197` против
+`50.406` (`+1.57%`), 1%/0.1% lows `35.627/33.849` против `26.628/20.056`
+(`+33.80/+68.77%`). GPU p50 улучшился примерно на `0.93%`, p95 практически
+нейтрален (`+0.09%`), p99/worst лучше примерно на `0.68/2.78%`. Все runs COMPLETE,
+без FAIL/screenshots и с zero dropped timing events; source/artifact финальной
+пары `1b2bbde5...` / `f62670b8...`. Known event-order issue по-прежнему не создал
+`.accepted.json`, поэтому доказательство — complete raw/summary, не receipt.
+
+`./gradlew clean check --console=plain`: `79` tasks, BUILD SUCCESSFUL; в том числе
+Metal API/GPU Validation, light-cluster, material, L6 atlas/voxel, dynamic shadow,
+ABI и HDR validation. Runtime `exclusiveFullscreen` возвращён к пользовательскому
+`false` после измерений.
+
+**Итог:** проверено пять разных кандидатов. Внедрены 2, 4 и 5; 1 и 3 полностью
+удалены. Честный подтверждённый итог — не `+3%` среднего FPS, а около `+1.6%` в
+финальной паре при существенно лучших measured lows и меньшей лишней L6 CPU-работе.
+Следующий потенциально крупный шаг требует не ещё одной микроправки fragment loop,
+а изменения представления: embedded/per-cluster READY/STALE shadow-state summary
+или compact light/index storage с отдельным quality-preserving A/B.

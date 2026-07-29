@@ -679,6 +679,15 @@ kernel void metallum_cluster_prepare_v1(
     MetallumGpuLightV1 light = lights[index];
     light.positionRadius.xyz = (source.viewRotation
         * float4(light.positionRadius.xyz, 0.0f)).xyz;
+    // Color and scalar intensity are immutable for the frame. Fold their clamps and
+    // multiplication once per uploaded light instead of once per contributing fragment.
+    // Alpha becomes an explicit marker for the prepared representation; no downstream
+    // clustered-lighting stage consumes the original scalar independently.
+    light.linearColorIntensity = float4(
+        max(light.linearColorIntensity.rgb, float3(0.0f))
+            * max(light.linearColorIntensity.a, 0.0f),
+        1.0f
+    );
     const MetallumClusterBoundsV1 bounds = metallum_cluster_bounds(light, source);
     // ABI v1 uploads at most 4096 camera-stable candidates. Preserve their exact indices
     // even when a candidate is outside the current frustum: compact cluster lists, not a

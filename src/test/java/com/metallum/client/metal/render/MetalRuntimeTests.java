@@ -236,6 +236,12 @@ public final class MetalRuntimeTests {
                         && !LocalVoxelShadowGpuResources.capacityRecoveryEvictionAllowed(1L, 0)
                         && !LocalVoxelShadowGpuResources.capacityRecoveryEvictionAllowed(0L, 1),
                 "L6 pending/upload work lost its per-frame and retained byte caps");
+        require(!LocalVoxelShadowGpuResources.descriptorRepackRequired(0, false)
+                        && LocalVoxelShadowGpuResources.descriptorRepackRequired(1, false)
+                        && LocalVoxelShadowGpuResources.descriptorRepackRequired(0, true),
+                "L6 descriptors are not repacked exactly when atlas or dynamic state changes");
+        expectIllegalArgument(() ->
+                LocalVoxelShadowGpuResources.descriptorRepackRequired(-1, false));
         require(LocalVoxelShadowGpuResources.nextBuildEdge(0, 64, false) == 64
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
                         64, 64, false) == 64
