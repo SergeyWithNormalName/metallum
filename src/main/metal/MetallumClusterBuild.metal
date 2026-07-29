@@ -203,6 +203,79 @@ inline bool metallum_sphere_strictly_outside_plane_wedge(
     return closestDistanceSquared > retainedTangentRadiusSquared;
 }
 
+inline bool metallum_sphere_strictly_outside_plane_corner_depth(
+    const float3 center,
+    const float radius,
+    const float4 firstPlane,
+    const float4 secondPlane,
+    const float4 depthPlane
+) {
+    // The cluster is contained in the intersection of these three inward
+    // half-spaces. Pair-wise wedges do not cover the active-set region whose closest
+    // point lies on the corner/depth vertex, so solve that three-constraint projection
+    // exactly. Any malformed or ill-conditioned input retains the candidate.
+    if (!(radius > 0.0f) || !isfinite(radius) || !all(isfinite(center))
+        || !all(isfinite(firstPlane)) || !all(isfinite(secondPlane))
+        || !all(isfinite(depthPlane))) {
+        return false;
+    }
+    const float3 firstNormal = firstPlane.xyz;
+    const float3 secondNormal = secondPlane.xyz;
+    const float3 depthNormal = depthPlane.xyz;
+    const float firstDistance = dot(firstNormal, center) + firstPlane.w;
+    const float secondDistance = dot(secondNormal, center) + secondPlane.w;
+    const float depthDistance = dot(depthNormal, center) + depthPlane.w;
+    if (!(firstDistance < 0.0f) || !(secondDistance < 0.0f)
+        || !(depthDistance < 0.0f) || !isfinite(firstDistance)
+        || !isfinite(secondDistance) || !isfinite(depthDistance)) {
+        return false;
+    }
+
+    const float firstSquared = dot(firstNormal, firstNormal);
+    const float secondSquared = dot(secondNormal, secondNormal);
+    const float depthSquared = dot(depthNormal, depthNormal);
+    const float firstSecond = dot(firstNormal, secondNormal);
+    const float firstDepth = dot(firstNormal, depthNormal);
+    const float secondDepth = dot(secondNormal, depthNormal);
+    const float normalProduct = firstSquared * secondSquared * depthSquared;
+    if (!(normalProduct > 0.0f) || !isfinite(normalProduct)
+        || !isfinite(firstSecond) || !isfinite(firstDepth)
+        || !isfinite(secondDepth)) {
+        return false;
+    }
+
+    const float cofactor00 = secondSquared * depthSquared - secondDepth * secondDepth;
+    const float cofactor01 = firstDepth * secondDepth - firstSecond * depthSquared;
+    const float cofactor02 = firstSecond * secondDepth - firstDepth * secondSquared;
+    const float cofactor11 = firstSquared * depthSquared - firstDepth * firstDepth;
+    const float cofactor12 = firstSecond * firstDepth - firstSquared * secondDepth;
+    const float cofactor22 = firstSquared * secondSquared - firstSecond * firstSecond;
+    const float determinant = firstSquared * cofactor00
+        + firstSecond * cofactor01 + firstDepth * cofactor02;
+    if (!(determinant > normalProduct * 1.0e-6f) || !isfinite(determinant)
+        || !isfinite(cofactor00) || !isfinite(cofactor01)
+        || !isfinite(cofactor02) || !isfinite(cofactor11)
+        || !isfinite(cofactor12) || !isfinite(cofactor22)) {
+        return false;
+    }
+
+    const float3 required = -float3(firstDistance, secondDistance, depthDistance);
+    const float3 multiplier = float3(
+        dot(float3(cofactor00, cofactor01, cofactor02), required),
+        dot(float3(cofactor01, cofactor11, cofactor12), required),
+        dot(float3(cofactor02, cofactor12, cofactor22), required)
+    ) / determinant;
+    if (!all(multiplier > float3(0.0f)) || !all(isfinite(multiplier))) {
+        return false;
+    }
+    const float closestDistanceSquared = dot(required, multiplier);
+    const float retainedTangentRadiusSquared = radius * radius * (1.0f + 1.0e-5f);
+    if (!isfinite(closestDistanceSquared) || !isfinite(retainedTangentRadiusSquared)) {
+        return false;
+    }
+    return closestDistanceSquared > retainedTangentRadiusSquared;
+}
+
 inline bool metallum_sphere_outside_cluster_side_planes(
     const float3 center,
     const float radius,
@@ -315,6 +388,21 @@ inline bool metallum_sphere_outside_cluster_side_planes(
                 center,
                 radius,
                 planes[index],
+                depthPlane
+            )) {
+            return true;
+        }
+    }
+    // A source may overlap every single plane and every pair-wise wedge while still
+    // missing the three-plane corner/depth vertex. This final exact active-set check
+    // removes only that remaining false-positive membership.
+    for (uint index = 0u; index < 4u; ++index) {
+        const uint2 pair = cornerPlanePairs[index];
+        if (metallum_sphere_strictly_outside_plane_corner_depth(
+                center,
+                radius,
+                planes[pair.x],
+                planes[pair.y],
                 depthPlane
             )) {
             return true;

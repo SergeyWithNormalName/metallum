@@ -476,6 +476,59 @@ private func sphereStrictlyOutsidePlaneWedge(
     return closestDistanceSquared > retainedTangentRadiusSquared
 }
 
+// Independent normalized-plane oracle for the three-active-constraint region. The
+// Metal kernel uses an unnormalized cofactor solve; this version normalizes first and
+// inverts the symmetric Gram matrix through simd, avoiding a duplicated implementation.
+private func sphereStrictlyOutsidePlaneCornerDepth(
+    center: SIMD3<Float>,
+    radius: Float,
+    firstPlane: SIMD4<Float>,
+    secondPlane: SIMD4<Float>,
+    depthPlane: SIMD4<Float>
+) -> Bool {
+    guard radius > 0, radius.isFinite,
+          center.x.isFinite, center.y.isFinite, center.z.isFinite else {
+        return false
+    }
+    let sourcePlanes = [firstPlane, secondPlane, depthPlane]
+    var normals: [SIMD3<Float>] = []
+    var required = SIMD3<Float>(repeating: 0)
+    for (index, plane) in sourcePlanes.enumerated() {
+        guard plane.x.isFinite, plane.y.isFinite, plane.z.isFinite, plane.w.isFinite else {
+            return false
+        }
+        let normal = SIMD3(plane.x, plane.y, plane.z)
+        let length = simd_length(normal)
+        guard length > 0, length.isFinite else { return false }
+        let unit = normal / length
+        let distance = (simd_dot(normal, center) + plane.w) / length
+        guard distance < 0, distance.isFinite else { return false }
+        normals.append(unit)
+        required[index] = -distance
+    }
+    let gram = simd_float3x3(rows: [
+        SIMD3(simd_dot(normals[0], normals[0]), simd_dot(normals[0], normals[1]),
+              simd_dot(normals[0], normals[2])),
+        SIMD3(simd_dot(normals[1], normals[0]), simd_dot(normals[1], normals[1]),
+              simd_dot(normals[1], normals[2])),
+        SIMD3(simd_dot(normals[2], normals[0]), simd_dot(normals[2], normals[1]),
+              simd_dot(normals[2], normals[2]))
+    ])
+    let determinant = simd_determinant(gram)
+    guard determinant.isFinite, determinant > 1e-6 else { return false }
+    let multiplier = simd_inverse(gram) * required
+    guard multiplier.x > 0, multiplier.y > 0, multiplier.z > 0,
+          multiplier.x.isFinite, multiplier.y.isFinite, multiplier.z.isFinite else {
+        return false
+    }
+    let closestDistanceSquared = simd_dot(required, multiplier)
+    let retainedTangentRadiusSquared = radius * radius * (1 + 1e-5)
+    guard closestDistanceSquared.isFinite, retainedTangentRadiusSquared.isFinite else {
+        return false
+    }
+    return closestDistanceSquared > retainedTangentRadiusSquared
+}
+
 private func sphereOutsideClusterSidePlanes(
     center: SIMD3<Float>,
     radius: Float,
@@ -568,6 +621,48 @@ private func sphereOutsideClusterSideDepthEdges(
     }
 }
 
+private func sphereOutsideClusterCornerDepthVertices(
+    center: SIMD3<Float>,
+    radius: Float,
+    clusterX: Int,
+    clusterY: Int,
+    clusterZ: Int,
+    width: Int,
+    height: Int,
+    projection: simd_float4x4,
+    depthBoundaries: [Float]
+) -> Bool {
+    guard clusterZ >= 0, clusterZ < depthSlices,
+          depthBoundaries.count == depthSlices + 1,
+          center.x.isFinite, center.y.isFinite, center.z.isFinite,
+          depthBoundaries.allSatisfy({ $0 > 0 && $0.isFinite }),
+          let sidePlanes = clusterSidePlanes(
+              clusterX: clusterX, clusterY: clusterY, width: width, height: height,
+              projection: projection
+          ) else {
+        return false
+    }
+    let centerDepth = -center.z
+    let depthPlane: SIMD4<Float>
+    if clusterZ > 0 && centerDepth < depthBoundaries[clusterZ] {
+        depthPlane = SIMD4(0, 0, -1, -depthBoundaries[clusterZ])
+    } else if clusterZ + 1 < depthSlices && centerDepth > depthBoundaries[clusterZ + 1] {
+        depthPlane = SIMD4(0, 0, 1, depthBoundaries[clusterZ + 1])
+    } else {
+        return false
+    }
+    let pairs = [(0, 2), (0, 3), (1, 2), (1, 3)]
+    return pairs.contains { pair in
+        sphereStrictlyOutsidePlaneCornerDepth(
+            center: center,
+            radius: radius,
+            firstPlane: sidePlanes[pair.0],
+            secondPlane: sidePlanes[pair.1],
+            depthPlane: depthPlane
+        )
+    }
+}
+
 private func closestPlaneEdgePoint(_ first: SIMD4<Float>, _ second: SIMD4<Float>) -> SIMD3<Float>? {
     let firstNormal = SIMD3(first.x, first.y, first.z)
     let secondNormal = SIMD3(second.x, second.y, second.z)
@@ -584,6 +679,22 @@ private func closestPlaneEdgePoint(_ first: SIMD4<Float>, _ second: SIMD4<Float>
     let firstMultiplier = (firstRequired * secondSquared - normalDot * secondRequired) / determinant
     let secondMultiplier = (secondRequired * firstSquared - normalDot * firstRequired) / determinant
     let point = firstMultiplier * firstNormal + secondMultiplier * secondNormal
+    return point.x.isFinite && point.y.isFinite && point.z.isFinite ? point : nil
+}
+
+private func closestPlaneCornerPoint(
+    _ first: SIMD4<Float>,
+    _ second: SIMD4<Float>,
+    _ third: SIMD4<Float>
+) -> SIMD3<Float>? {
+    let normals = simd_float3x3(rows: [
+        SIMD3(first.x, first.y, first.z),
+        SIMD3(second.x, second.y, second.z),
+        SIMD3(third.x, third.y, third.z)
+    ])
+    let determinant = simd_determinant(normals)
+    guard determinant.isFinite, abs(determinant) > 1e-6 else { return nil }
+    let point = simd_inverse(normals) * SIMD3(-first.w, -second.w, -third.w)
     return point.x.isFinite && point.y.isFinite && point.z.isFinite ? point : nil
 }
 
@@ -712,6 +823,19 @@ private func reference(
                         continue
                     }
                     if sphereOutsideClusterSideDepthEdges(
+                        center: lights[lightIndex].position,
+                        radius: lights[lightIndex].radius,
+                        clusterX: x,
+                        clusterY: y,
+                        clusterZ: z,
+                        width: width,
+                        height: height,
+                        projection: projection,
+                        depthBoundaries: depthBoundaries
+                    ) {
+                        continue
+                    }
+                    if sphereOutsideClusterCornerDepthVertices(
                         center: lights[lightIndex].position,
                         radius: lights[lightIndex].radius,
                         clusterX: x,
@@ -1332,6 +1456,76 @@ private enum LightClusterValidationMain {
                     )
                 }
             }
+            // Pair-wise wedge tests still retain a sphere whose closest point lies on
+            // the three-plane corner/depth vertex. Isolate that active-set region for
+            // every XY corner at both interior depth boundaries.
+            for (depthName, depthPlane) in depthFixtures {
+                for (cornerName, firstIndex, secondIndex, _) in cornerFixtures {
+                    let firstPlane = explicitPlanes[firstIndex]
+                    let secondPlane = explicitPlanes[secondIndex]
+                    guard let vertex = closestPlaneCornerPoint(
+                        firstPlane, secondPlane, depthPlane
+                    ) else {
+                        throw ValidationFailure.message(
+                            "Could not construct \(cornerName) \(depthName) depth vertex"
+                        )
+                    }
+                    let outward = -simd_normalize(
+                        SIMD3(firstPlane.x, firstPlane.y, firstPlane.z)
+                            / simd_length(SIMD3(firstPlane.x, firstPlane.y, firstPlane.z))
+                        + SIMD3(secondPlane.x, secondPlane.y, secondPlane.z)
+                            / simd_length(SIMD3(secondPlane.x, secondPlane.y, secondPlane.z))
+                        + SIMD3(depthPlane.x, depthPlane.y, depthPlane.z)
+                            / simd_length(SIMD3(depthPlane.x, depthPlane.y, depthPlane.z))
+                    )
+                    let insideCenter = vertex - outward * 0.05
+                    let tangentCenter = vertex + outward * fixtureRadius
+                    let outsideCenter = vertex + outward * (fixtureRadius + 0.05)
+                    try require(
+                        !sphereStrictlyOutsidePlaneCornerDepth(
+                            center: insideCenter, radius: fixtureRadius,
+                            firstPlane: firstPlane, secondPlane: secondPlane,
+                            depthPlane: depthPlane
+                        ) && !sphereStrictlyOutsidePlaneCornerDepth(
+                            center: tangentCenter, radius: fixtureRadius,
+                            firstPlane: firstPlane, secondPlane: secondPlane,
+                            depthPlane: depthPlane
+                        ),
+                        "Inside/tangent \(cornerName) \(depthName) depth vertex was rejected"
+                    )
+                    try require(
+                        !sphereStrictlyOutsidePlaneWedge(
+                            center: outsideCenter, radius: fixtureRadius,
+                            firstPlane: firstPlane, secondPlane: secondPlane
+                        ) && !sphereStrictlyOutsidePlaneWedge(
+                            center: outsideCenter, radius: fixtureRadius,
+                            firstPlane: firstPlane, secondPlane: depthPlane
+                        ) && !sphereStrictlyOutsidePlaneWedge(
+                            center: outsideCenter, radius: fixtureRadius,
+                            firstPlane: secondPlane, secondPlane: depthPlane
+                        ) && sphereStrictlyOutsidePlaneCornerDepth(
+                            center: outsideCenter, radius: fixtureRadius,
+                            firstPlane: firstPlane, secondPlane: secondPlane,
+                            depthPlane: depthPlane
+                        ),
+                        "Trihedral-only miss was not isolated for \(cornerName) \(depthName)"
+                    )
+                }
+            }
+            try require(
+                !sphereStrictlyOutsidePlaneCornerDepth(
+                    center: SIMD3(-0.7, -0.7, -0.7), radius: fixtureRadius,
+                    firstPlane: SIMD4(.nan, 0, 0, 0),
+                    secondPlane: SIMD4(0, 1, 0, 0),
+                    depthPlane: SIMD4(0, 0, 1, 0)
+                ) && !sphereStrictlyOutsidePlaneCornerDepth(
+                    center: SIMD3(-0.7, -0.7, -0.7), radius: fixtureRadius,
+                    firstPlane: SIMD4(1, 0, 0, 0),
+                    secondPlane: SIMD4(1, 0.0001, 0, 0),
+                    depthPlane: SIMD4(0, 0, 1, 0)
+                ),
+                "Invalid or near-singular trihedral input was not fail-open"
+            )
             // Endpoint clamps are part of the fragment ABI, not an approximation: a
             // hypothetical lower plane for slice 0 or upper plane for the final slice
             // must never be used by this cull.
@@ -1357,6 +1551,39 @@ private enum LightClusterValidationMain {
                         depthBoundaries: depthBoundaries
                     ),
                     "\(name) clamp endpoint was incorrectly treated as a depth half-space"
+                )
+                let clampCornerFirst = explicitPlanes[0]
+                let clampCornerSecond = explicitPlanes[2]
+                guard let vertex = closestPlaneCornerPoint(
+                    clampCornerFirst, clampCornerSecond, clampPlane
+                ) else {
+                    throw ValidationFailure.message(
+                        "Could not construct \(name) clamp corner-depth vertex"
+                    )
+                }
+                let cornerOutward = -simd_normalize(
+                    SIMD3(clampCornerFirst.x, clampCornerFirst.y, clampCornerFirst.z)
+                        / simd_length(SIMD3(
+                            clampCornerFirst.x, clampCornerFirst.y, clampCornerFirst.z
+                        ))
+                    + SIMD3(clampCornerSecond.x, clampCornerSecond.y, clampCornerSecond.z)
+                        / simd_length(SIMD3(
+                            clampCornerSecond.x, clampCornerSecond.y, clampCornerSecond.z
+                        ))
+                    + SIMD3(clampPlane.x, clampPlane.y, clampPlane.z)
+                        / simd_length(SIMD3(clampPlane.x, clampPlane.y, clampPlane.z))
+                )
+                try require(
+                    !sphereOutsideClusterCornerDepthVertices(
+                        center: vertex + cornerOutward * (fixtureRadius + 0.05),
+                        radius: fixtureRadius,
+                        clusterX: planeClusterX, clusterY: planeClusterY,
+                        clusterZ: clusterZ,
+                        width: planeWidth, height: planeHeight,
+                        projection: identityProjection,
+                        depthBoundaries: depthBoundaries
+                    ),
+                    "\(name) clamp endpoint was incorrectly treated as a corner-depth vertex"
                 )
             }
             var invalidDepthBoundaries = depthBoundaries
@@ -1450,6 +1677,17 @@ private enum LightClusterValidationMain {
                                     depthBoundaries: depthBoundaries
                                 ),
                                 "Side-depth edge false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
+                            )
+                            try require(
+                                !sphereOutsideClusterCornerDepthVertices(
+                                    center: witness, radius: 0.01,
+                                    clusterX: clusterX, clusterY: clusterY,
+                                    clusterZ: witnessSlice,
+                                    width: planeWidth, height: planeHeight,
+                                    projection: projection,
+                                    depthBoundaries: depthBoundaries
+                                ),
+                                "Corner-depth false-negative at projection \(projectionIndex), tile \(clusterX),\(clusterY), depth \(clipDepth)"
                             )
                         }
                         }
@@ -1645,6 +1883,143 @@ private enum LightClusterValidationMain {
                         try require(gpu.headers[targetCluster].y == 0,
                                     "GPU \(depthName) side-depth edge \(sideIndex) retained its target cluster")
                     }
+                }
+            }
+
+            // GPU contract for all four corner×depth vertices at both interior depth
+            // boundaries. Each sphere intersects every constituent plane and every
+            // pair-wise wedge, but misses the three-half-space intersection.
+            do {
+                let vertexClustersX = UInt32((planeWidth + tileSize - 1) / tileSize)
+                let vertexClustersY = UInt32((planeHeight + tileSize - 1) / tileSize)
+                let vertexClusterCount = Int(
+                    vertexClustersX * vertexClustersY * UInt32(depthSlices)
+                )
+                let vertexGeneration: UInt64 = 706
+                guard let vertexContext = api.createContext(
+                    objectPointer(device as AnyObject), vertexGeneration, 4,
+                    UInt32(vertexClusterCount * clusterCap),
+                    vertexClustersX, vertexClustersY, UInt32(depthSlices)
+                ) else {
+                    throw ValidationFailure.message(
+                        "Could not create corner-depth vertex validation context"
+                    )
+                }
+                defer { api.releaseContext(vertexContext) }
+                for (depthName, depthPlane) in depthFixtures {
+                    for (cornerIndex, (_, firstIndex, secondIndex, _))
+                            in cornerFixtures.enumerated() {
+                        let firstPlane = explicitPlanes[firstIndex]
+                        let secondPlane = explicitPlanes[secondIndex]
+                        guard let vertex = closestPlaneCornerPoint(
+                            firstPlane, secondPlane, depthPlane
+                        ) else {
+                            throw ValidationFailure.message(
+                                "Could not construct GPU \(depthName) vertex \(cornerIndex)"
+                            )
+                        }
+                        let outward = -simd_normalize(
+                            SIMD3(firstPlane.x, firstPlane.y, firstPlane.z)
+                                / simd_length(SIMD3(firstPlane.x, firstPlane.y, firstPlane.z))
+                            + SIMD3(secondPlane.x, secondPlane.y, secondPlane.z)
+                                / simd_length(SIMD3(secondPlane.x, secondPlane.y, secondPlane.z))
+                            + SIMD3(depthPlane.x, depthPlane.y, depthPlane.z)
+                                / simd_length(SIMD3(depthPlane.x, depthPlane.y, depthPlane.z))
+                        )
+                        let vertexLight = [Light(
+                            position: vertex + outward * (fixtureRadius + 0.05),
+                            radius: fixtureRadius,
+                            color: SIMD3(1, 0.6, 0.2),
+                            intensity: 2,
+                            stableId: UInt64(80 + cornerIndex),
+                            flags: 0
+                        )]
+                        submit += 1
+                        let gpu = try runGpu(
+                            api: api, context: vertexContext, queue: queue,
+                            generation: vertexGeneration,
+                            frameId: UInt64(90 + cornerIndex
+                                + (depthName == "upper" ? 4 : 0)),
+                            submitIndex: submit, width: planeWidth, height: planeHeight,
+                            lights: vertexLight, hdr: cornerIndex.isMultiple(of: 2),
+                            projectionOverride: identityProjection
+                        )
+                        let cpu = reference(
+                            lights: vertexLight, width: planeWidth, height: planeHeight,
+                            indexCapacity: vertexClusterCount * clusterCap,
+                            candidateCapacity: 4, projectionOverride: identityProjection
+                        )
+                        try requireMatches(
+                            gpu, cpu,
+                            context: "GPU \(depthName) corner-depth vertex \(cornerIndex)"
+                        )
+                        let targetCluster = (
+                            interiorSlice * Int(vertexClustersY) + planeClusterY
+                        ) * Int(vertexClustersX) + planeClusterX
+                        try require(
+                            gpu.headers[targetCluster].y == 0,
+                            "GPU \(depthName) corner-depth vertex \(cornerIndex) retained its target cluster"
+                        )
+                    }
+                }
+                let endpointFixtures: [(String, Int, SIMD4<Float>)] = [
+                    ("first", 0, SIMD4(0, 0, -1, -depthBoundaries[0])),
+                    ("last", depthSlices - 1,
+                     SIMD4(0, 0, 1, depthBoundaries[depthSlices]))
+                ]
+                for (endpointIndex, (name, clusterZ, hypotheticalPlane))
+                        in endpointFixtures.enumerated() {
+                    let firstPlane = explicitPlanes[0]
+                    let secondPlane = explicitPlanes[2]
+                    guard let vertex = closestPlaneCornerPoint(
+                        firstPlane, secondPlane, hypotheticalPlane
+                    ) else {
+                        throw ValidationFailure.message(
+                            "Could not construct GPU \(name) endpoint vertex"
+                        )
+                    }
+                    let outward = -simd_normalize(
+                        SIMD3(firstPlane.x, firstPlane.y, firstPlane.z)
+                            / simd_length(SIMD3(firstPlane.x, firstPlane.y, firstPlane.z))
+                        + SIMD3(secondPlane.x, secondPlane.y, secondPlane.z)
+                            / simd_length(SIMD3(secondPlane.x, secondPlane.y, secondPlane.z))
+                        + SIMD3(hypotheticalPlane.x, hypotheticalPlane.y, hypotheticalPlane.z)
+                            / simd_length(SIMD3(
+                                hypotheticalPlane.x, hypotheticalPlane.y, hypotheticalPlane.z
+                            ))
+                    )
+                    let endpointLight = [Light(
+                        position: vertex + outward * (fixtureRadius + 0.05),
+                        radius: fixtureRadius,
+                        color: SIMD3(1, 0.6, 0.2),
+                        intensity: 2,
+                        stableId: UInt64(100 + endpointIndex),
+                        flags: 0
+                    )]
+                    submit += 1
+                    let gpu = try runGpu(
+                        api: api, context: vertexContext, queue: queue,
+                        generation: vertexGeneration,
+                        frameId: UInt64(110 + endpointIndex),
+                        submitIndex: submit, width: planeWidth, height: planeHeight,
+                        lights: endpointLight, hdr: endpointIndex.isMultiple(of: 2),
+                        projectionOverride: identityProjection
+                    )
+                    let cpu = reference(
+                        lights: endpointLight, width: planeWidth, height: planeHeight,
+                        indexCapacity: vertexClusterCount * clusterCap,
+                        candidateCapacity: 4, projectionOverride: identityProjection
+                    )
+                    try requireMatches(
+                        gpu, cpu, context: "GPU \(name) corner-depth endpoint clamp"
+                    )
+                    let targetCluster = (
+                        clusterZ * Int(vertexClustersY) + planeClusterY
+                    ) * Int(vertexClustersX) + planeClusterX
+                    try require(
+                        gpu.headers[targetCluster].y == 1,
+                        "GPU \(name) endpoint used a hypothetical corner-depth plane"
+                    )
                 }
             }
 

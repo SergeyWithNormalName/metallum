@@ -1328,3 +1328,85 @@ Clean candidate artifacts:
 Не заявлять рост среднего FPS или заметное ускорение самой DDA. Следующий отдельный
 кандидат — убрать `VoxelShadowCacheMirror.Key` allocation на brick transition либо
 устранить второй page payload clone с явным ownership contract; не смешивать их.
+
+## 2026-07-29 — Nether L3: conservative corner×depth trihedral culling
+
+### Причина и correctness contract
+
+После принятых single side-plane, XY corner-wedge и side×depth-wedge проверок
+плотный Nether всё ещё имел `p99=256` lights/cluster. Оставался отдельный
+геометрический случай: sphere пересекает каждую из трёх inward half-space и каждую
+их пару, но не достигает общего пересечения двух соседних XY planes и одной
+нарушенной внутренней depth plane. Такие false-positive members не могут осветить
+ни один fragment cluster, но оставались в compact list и выполняли полный L3/L6
+fragment loop.
+
+Новый final refinement решает точную three-active-constraint projection через
+Gram/KKT. Reject разрешён только если центр нарушает все три planes, Gram matrix
+хорошо обусловлена, все три multipliers строго положительны и exact distance² до
+trihedral intersection больше inflated tangent radius². NaN/Inf, degenerate или
+near-singular Gram, non-positive multiplier и near-tangent случаи fail-open retain.
+Проверка выполняется после существующих single/pair rejects и только для той
+внутренней depth boundary, которую нарушает центр. Первый и последний logarithmic
+slice остаются незамкнутыми согласно fragment clamp contract.
+
+Не менялись light radius/color/intensity, L3/L6 photometry или visibility, cluster
+grid/caps, stable candidate order, compact-prefix semantics, buffers/ABI, uploads,
+passes/encoders и quality settings. Независимый CPU oracle нормализует planes и
+решает Gram system через matrix inverse, то есть не повторяет MSL cofactor algebra.
+Explicit fixtures покрывают `4 corners × lower/upper`, inside/tangent/
+trihedral-only miss, invalid/near-singular fail-open, representative perspective и
+view-bob witnesses. Реальные Metal GPU fixtures покрывают те же восемь vertices;
+отдельные CPU/GPU endpoint fixtures доказывают, что hypothetical first/last depth
+plane не используется. `lightClusterValidation` прошёл с Metal API/GPU Validation.
+
+### Detailed attribution
+
+Одинаковый Nether contract: Built-in Retina `3024×1964@120`, fullscreen HDR,
+Balanced, MetalFX OFF, VSync OFF, frozen simulation, `300+600`, detailed timing.
+Baseline `20260728T234425Z-...-trihedral-baseline-detailed-off` против clean
+candidate `20260728T235347Z-...-trihedral-candidate-detailed-clean-off`:
+
+- requested indices `367243 → 354495` (`−3.47%`), dropped `8345 → 8022`,
+  occupancy p50/p95/p99 `36/100/256 → 36/96/256`, overflow `72 → 70`;
+- World Opaque average `14.399 → 14.048 ms` (`−2.44%`);
+- light upload + cluster build average `0.804 → 0.928 ms` (`+15.39%`, `+0.124 ms`);
+- сумма двух stages `15.203 → 14.976 ms` (`−1.49%`), FPS `50.693 → 51.166`.
+
+Первый candidate detailed `20260728T235131Z-...-trihedral-candidate-detailed-off`
+исключён полностью: endpoint tests изменили source tree после сборки artifact, и
+attestation корректно завершила run с `source tree changed during the run`.
+
+### Production A/B и итог
+
+Два baseline и два candidate run по `1800+3000` кадров, все raw/summary `COMPLETE`,
+без FAIL/screenshots и с `0` dropped timing events:
+
+- baseline `20260728T235556Z-...-trihedral-baseline-production-1-off`,
+  `20260729T000158Z-...-trihedral-baseline-production-2-off`;
+- candidate `20260728T235858Z-...-trihedral-candidate-production-1-off`,
+  `20260729T000453Z-...-trihedral-candidate-production-2-off`.
+
+| Pair mean | FPS / min window | 1% / 0.1% low | CPU p95 / p99 / max | GPU p95 / p99 | present p95 / p99 / max |
+|---|---:|---:|---:|---:|---:|
+| Baseline | 51.149 / 50.971 | 38.312 / 32.847 | 13.878 / 15.022 / 20.825 ms | 22.631 / 23.084 ms | 20.522 / 21.937 / 31.396 ms |
+| Trihedral | 52.403 / 52.253 | 39.050 / 33.308 | 13.844 / 14.798 / 20.155 ms | 22.210 / 22.721 ms | 19.957 / 21.987 / 30.579 ms |
+
+Средний результат: FPS/min-window `+2.45/+2.51%`, 1%/0.1% low
+`+1.93/+1.40%`, CPU p95/p99/max `−0.25/−1.49/−3.22%`, GPU p95/p99
+`−1.86/−1.57%`, present p95/max `−2.75/−2.60%`; present p99 почти нейтрален
+`+0.23%`. Requested indices `368180 → 354351` (`−3.76%`), dropped
+`8450.5 → 8095.5` (`−4.20%`), overflow `73 → 70`; p95 occupancy `100 → 96`,
+p99 честно остаётся `256`.
+
+Known benchmark event-order defect снова не создал `.accepted.json` и дал launcher
+exit 2 после каждого полного run; это не скрывается и не подменяется receipt:
+каждый raw/summary содержит полные 3000 measured frames, `COMPLETE` и zero dropped
+events. Frozen route доказывает dense-light steady GPU effect, но не моделирует
+активное перемещение/chunk rebuild. Для провалов активной игры ниже 20 FPS следующий
+отдельный приоритет — static-only fast path, исключающий per-frame dynamic L6
+admission allocations при `dynamic=0/0/0`; не смешивать его с этим GPU-кандидатом.
+
+**Итог:** **ВНЕДРЕНО/accepted** как шестой раздельный quality-preserving Nether
+cluster refinement. Он даёт воспроизводимый, пусть умеренный, выигрыш без снижения
+качества; не расширять его approximate plane math или ослаблением tangent guards.
