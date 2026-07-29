@@ -1116,7 +1116,7 @@ private enum MetallumLightingAbiV1 {
     static let gpuLightBytes = 48
     static let clusterHeaderBytes = 8
     static let clusterScratchBytes = 512
-    static let lightIndexBytes = 4
+    static let lightIndexBytes = 2
     static let paramsBytes = 256
     static let statisticsBytes = 256
     static let completedStatsBytes = 128
@@ -5096,14 +5096,14 @@ private func makeLightingContext(
     let lightPayloadBytes = Int(maxLights) * MetallumLightingAbiV1.gpuLightBytes
     let headerPayloadBytes = Int(clusterCount) * MetallumLightingAbiV1.clusterHeaderBytes
     let scratchPayloadBytes = Int(clusterCount) * MetallumLightingAbiV1.clusterScratchBytes
-    let indexPayloadBytes = Int(indexCapacity) * MetallumLightingAbiV1.lightIndexBytes
     let prefixBlockCount = Int(
         (clusterCount + MetallumLightingAbiV1.prefixBlockSize - 1)
             / MetallumLightingAbiV1.prefixBlockSize
     )
-    guard prefixBlockCount * MetallumLightingAbiV1.blockStatisticsBytes <= indexPayloadBytes else {
-        return nil
-    }
+    let indexPayloadBytes = max(
+        Int(indexCapacity) * MetallumLightingAbiV1.lightIndexBytes,
+        prefixBlockCount * MetallumLightingAbiV1.blockStatisticsBytes
+    )
     let privateOptions: MTLResourceOptions = .storageModePrivate
     guard let gpuLights = device.makeBuffer(
               length: lightPayloadBytes + MetallumLightingAbiV1.guardBytes,
@@ -9224,7 +9224,12 @@ private func lightingBufferPayloadBytes(_ context: MetallumLightingContext, kind
     switch kind {
     case 0: Int(context.maxLights) * MetallumLightingAbiV1.gpuLightBytes
     case 1: Int(context.clusterCount) * MetallumLightingAbiV1.clusterHeaderBytes
-    case 2: Int(context.indexCapacity) * MetallumLightingAbiV1.lightIndexBytes
+    case 2: max(
+        Int(context.indexCapacity) * MetallumLightingAbiV1.lightIndexBytes,
+        Int((context.clusterCount + MetallumLightingAbiV1.prefixBlockSize - 1)
+            / MetallumLightingAbiV1.prefixBlockSize)
+            * MetallumLightingAbiV1.blockStatisticsBytes
+    )
     case 3: MetallumLightingAbiV1.paramsBytes
     case 4: MetallumLightingAbiV1.statisticsBytes
     case 5: Int(context.clusterCount) * MetallumLightingAbiV1.clusterScratchBytes

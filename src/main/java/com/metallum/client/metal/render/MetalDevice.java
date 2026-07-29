@@ -1837,7 +1837,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                     if (MetalGpuTiming.isReportEnabled()
                             && (submitIndex + 1L) % 300L == 0L) {
                         Metallum.LOGGER.info(
-                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
+                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, capacityWaitSkips={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
                                 localPrepared.active(),
                                 localPrepared.descriptorLights(),
                                 lightSnapshot.lights().size(),
@@ -1853,6 +1853,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 localPrepared.pendingUploads(),
                                 localPrepared.pendingPayloadBytes(),
                                 localPrepared.capacityBlockedLights(),
+                                localShadowResources.capacityWaitSkips(),
                                 localPrepared.retryBackoffLights(),
                                 localPrepared.cacheUploads(),
                                 localPrepared.cacheUploadBytes(),

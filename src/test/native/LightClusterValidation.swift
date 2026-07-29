@@ -977,7 +977,12 @@ private func runGpu(
     let headers = (0..<clusterCount).map {
         SIMD2(headerValues[$0 * 2], headerValues[$0 * 2 + 1])
     }
-    let indexCapacity = api.contextBufferBytes(context, 2) / UInt64(MemoryLayout<UInt32>.stride)
+    let indexCapacity = UInt64(
+        UnsafeRawPointer(readbacks[3].contents()).loadUnaligned(
+            fromByteOffset: 156,
+            as: UInt32.self
+        )
+    )
     var accepted: UInt64 = 0
     for (cluster, header) in headers.enumerated() {
         let offset = UInt64(header.x)
@@ -994,10 +999,10 @@ private func runGpu(
                 "Empty submission exposed a non-zero bounded compact-index range")
     let acceptedCount = Int(accepted)
     let indexValues = readbacks[2].contents().bindMemory(
-        to: UInt32.self,
+        to: UInt16.self,
         capacity: max(acceptedCount, 1)
     )
-    let indices = (0..<acceptedCount).map { indexValues[$0] }
+    let indices = (0..<acceptedCount).map { UInt32(indexValues[$0]) }
     let maskWordCount = Int(api.contextBufferBytes(context, 5) / 4)
     let maskValues = readbacks[5].contents().bindMemory(
         to: UInt32.self,
@@ -1221,7 +1226,7 @@ private enum LightClusterValidationMain {
                 api.layout($0.baseAddress, UInt64($0.count))
             } == 1, "Native lighting layout descriptor is unavailable")
             let expectedLayout: [UInt32] = [
-                1, 128, 64, 48, 256, 8, 512, 4, 256, 3,
+                1, 128, 64, 48, 256, 8, 512, 2, 256, 3,
                 UInt32(tileSize), UInt32(depthSlices), 256,
                 0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
                 27, 28, 29, 30, 64
@@ -2758,17 +2763,17 @@ private enum LightClusterValidationMain {
                 )
             }
 
-            // Prefix telemetry aliases the compact-index buffer before fill. This fixture has
-            // one prefix block and needs 160 bytes; reject 39 UInt32 indices (156 bytes).
-            let undersizedPrefixScratch = api.createContext(
+            // Prefix telemetry aliases the compact-index buffer before fill. A small logical
+            // index capacity must retain the independent 160-byte one-block scratch floor.
+            let compactPrefixPadding = api.createContext(
                 objectPointer(device as AnyObject), 700, maxLights, 39,
                 clustersX, clustersY, UInt32(depthSlices)
             )
-            if let undersizedPrefixScratch {
-                api.releaseContext(undersizedPrefixScratch)
-            }
-            try require(undersizedPrefixScratch == nil,
-                        "Context admitted an undersized prefix-summary scratch alias")
+            try require(compactPrefixPadding != nil,
+                        "Compact index context lost its prefix-summary scratch floor")
+            try require(api.contextBufferBytes(compactPrefixPadding!, 2) == 160,
+                        "Compact index padding does not cover one prefix-summary block")
+            api.releaseContext(compactPrefixPadding!)
 
             let clippedGeneration: UInt64 = 701
             guard let clippedContext = api.createContext(

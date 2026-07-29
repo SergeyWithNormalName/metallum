@@ -184,6 +184,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     private final Map<Long, Long> capacityRecoveryAfterSubmit = new HashMap<>();
     /** Visible sources intentionally evicted for recovery may consume the protected scratch. */
     private final Set<Long> evictedRecoveryTargets = new HashSet<>();
+    /** Exact steady-state snapshot which may wait for a real atlas-capacity event. */
+    private CapacityWaitSnapshot capacityWaitSnapshot;
+    /** Cumulative proof that the event-driven wait removed a redundant scheduler scan. */
+    private long capacityWaitSkips;
     private PreparedFrame prepared;
     private FrameContext frameContext;
     private VoxelOccupancyGpuResources boundVoxelResources;
@@ -311,6 +315,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         return this.budget;
     }
 
+    long capacityWaitSkips() {
+        return this.capacityWaitSkips;
+    }
+
     static long frameUploadBytes(final LocalVoxelShadowLayout.Budget budget) {
         Objects.requireNonNull(budget, "budget");
         return Math.addExact(
@@ -410,7 +418,12 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 frameLights = dynamicPlan.lights();
                 cancelBuildsBlockedByMotion(frameLights, submitIndex);
                 consumeCompletedBuilds(frameLights, mirror, submitIndex);
-                scheduleBuildsInSnapshotOrder(frameLights, mirror, submitIndex);
+                if (!canWaitForCapacityEvent(frameLights, mirror)) {
+                    scheduleBuildsInSnapshotOrder(frameLights, mirror, submitIndex);
+                    rememberCapacityWaitSnapshot(frameLights, mirror);
+                } else {
+                    this.capacityWaitSkips++;
+                }
                 packFrameDescriptors(
                         descriptors, frameLights, mirror, submitIndex,
                         dynamicPlan, false
@@ -764,6 +777,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         this.refreshLastScheduledSubmit.clear();
         this.capacityRecoveryAfterSubmit.clear();
         this.evictedRecoveryTargets.clear();
+        this.capacityWaitSnapshot = null;
         this.cacheRefreshWorkers.shutdownNow();
         this.cacheWorkers.shutdownNow();
         if (this.dynamicBackend != null) {
@@ -1583,6 +1597,89 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     submitIndex, schedule
             );
         }
+    }
+
+    private boolean canWaitForCapacityEvent(
+            final List<FrameLight> frameLights,
+            final VoxelShadowCacheMirror.Snapshot mirror
+    ) {
+        CapacityWaitSnapshot snapshot = this.capacityWaitSnapshot;
+        if (snapshot == null || mirror == null
+                || !capacityWaitStateStable(
+                this.builds.isEmpty(),
+                this.uploads.isEmpty(),
+                this.failedBuilds.isEmpty(),
+                this.capacityRecoveryAfterSubmit.isEmpty(),
+                this.evictedRecoveryTargets.isEmpty(),
+                this.residency.retiredPageCount(),
+                this.capacityBlockedBuilds.size()
+        )
+                || snapshot.mirrorRevision() != mirror.revision()
+                || snapshot.freeBytes() != this.residency.freeBytes()
+                || snapshot.blockedLights() != this.capacityBlockedBuilds.size()
+                || !snapshot.frameLights().equals(frameLights)) {
+            return false;
+        }
+        return allMissingStaticPagesCapacityBlocked(frameLights);
+    }
+
+    private void rememberCapacityWaitSnapshot(
+            final List<FrameLight> frameLights,
+            final VoxelShadowCacheMirror.Snapshot mirror
+    ) {
+        if (mirror != null && capacityWaitStateStable(
+                this.builds.isEmpty(),
+                this.uploads.isEmpty(),
+                this.failedBuilds.isEmpty(),
+                this.capacityRecoveryAfterSubmit.isEmpty(),
+                this.evictedRecoveryTargets.isEmpty(),
+                this.residency.retiredPageCount(),
+                this.capacityBlockedBuilds.size()
+        ) && allMissingStaticPagesCapacityBlocked(frameLights)) {
+            this.capacityWaitSnapshot = new CapacityWaitSnapshot(
+                    List.copyOf(frameLights),
+                    mirror.revision(),
+                    this.residency.freeBytes(),
+                    this.capacityBlockedBuilds.size()
+            );
+        } else {
+            this.capacityWaitSnapshot = null;
+        }
+    }
+
+    private boolean allMissingStaticPagesCapacityBlocked(
+            final List<FrameLight> frameLights
+    ) {
+        boolean missing = false;
+        for (FrameLight frameLight : frameLights) {
+            if (!frameLight.staticCacheEligible()
+                    || matchingResident(frameLight) != null
+                    || this.evictedRecoveryTargets.contains(frameLight.light().stableId())) {
+                continue;
+            }
+            missing = true;
+            if (!this.capacityBlockedBuilds.contains(frameLight.light().stableId())) {
+                return false;
+            }
+        }
+        return missing;
+    }
+
+    static boolean capacityWaitStateStable(
+            final boolean buildsEmpty,
+            final boolean uploadsEmpty,
+            final boolean failuresEmpty,
+            final boolean recoveryFencesEmpty,
+            final boolean evictedTargetsEmpty,
+            final int retiredPages,
+            final int blockedLights
+    ) {
+        if (retiredPages < 0 || blockedLights < 0) {
+            throw new IllegalArgumentException("Negative L6 capacity-wait accounting");
+        }
+        return buildsEmpty && uploadsEmpty && failuresEmpty
+                && recoveryFencesEmpty && evictedTargetsEmpty
+                && retiredPages == 0 && blockedLights > 0;
     }
 
     private void discardObsoletePending(
@@ -2904,6 +3001,20 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
     ) {
         boolean staticCacheEligible() {
             return this.cacheEligible && this.staticBuildAllowed;
+        }
+    }
+
+    private record CapacityWaitSnapshot(
+            List<FrameLight> frameLights,
+            long mirrorRevision,
+            long freeBytes,
+            int blockedLights
+    ) {
+        CapacityWaitSnapshot {
+            frameLights = List.copyOf(frameLights);
+            if (mirrorRevision <= 0L || freeBytes < 0L || blockedLights <= 0) {
+                throw new IllegalArgumentException("Invalid L6 capacity-wait snapshot");
+            }
         }
     }
 

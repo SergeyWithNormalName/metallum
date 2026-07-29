@@ -1130,7 +1130,7 @@ kernel void metallum_cluster_prefix_add_v1(
 kernel void metallum_cluster_fill_v1(
     device const MetallumClusterScratchV1* scratch [[buffer(0)]],
     device const MetallumClusterHeaderV1* headers [[buffer(1)]],
-    device uint* lightIndices [[buffer(2)]],
+    device ushort* lightIndices [[buffer(2)]],
     constant MetallumLightingParamsV1& params [[buffer(3)]],
     uint cluster [[thread_position_in_grid]]
 ) {
@@ -1150,7 +1150,7 @@ kernel void metallum_cluster_fill_v1(
         );
         while (membership != 0u && written < header.count) {
             const uint bit = ctz(membership);
-            lightIndices[header.offset + written] = word * 32u + bit;
+            lightIndices[header.offset + written] = ushort(word * 32u + bit);
             written += 1u;
             membership &= membership - 1u;
         }

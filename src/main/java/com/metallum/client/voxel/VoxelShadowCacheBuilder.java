@@ -34,24 +34,87 @@ public final class VoxelShadowCacheBuilder {
     }
 
     /** One variable-resolution cube page suitable for the resident shadow atlas. */
-    public record PageResult(
-            byte[] payload,
-            int edge,
-            int raysWithHits,
-            int totalRays,
-            int cacheLevel,
-            boolean complete
-    ) {
-        public PageResult {
-            payload = payload.clone();
+    public static final class PageResult {
+        private final byte[] payload;
+        private final int edge;
+        private final int raysWithHits;
+        private final int totalRays;
+        private final int cacheLevel;
+        private final boolean complete;
+
+        /** Public callers retain the old defensive-copy contract. */
+        public PageResult(
+                final byte[] payload,
+                final int edge,
+                final int raysWithHits,
+                final int totalRays,
+                final int cacheLevel,
+                final boolean complete
+        ) {
+            this(payload, edge, raysWithHits, totalRays, cacheLevel, complete, false);
+        }
+
+        private PageResult(
+                final byte[] payload,
+                final int edge,
+                final int raysWithHits,
+                final int totalRays,
+                final int cacheLevel,
+                final boolean complete,
+                final boolean takeOwnership
+        ) {
+            byte[] checkedPayload = Objects.requireNonNull(payload, "payload");
             if (!LocalVoxelShadowAtlasLayout.supportsPageEdge(edge)
-                    || payload.length != LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge)
+                    || checkedPayload.length != LocalVoxelShadowAtlasLayout.pagePayloadBytes(edge)
                     || raysWithHits < 0 || totalRays < 0 || raysWithHits > totalRays
                     || totalRays != Math.toIntExact(Math.multiplyExact(
                     (long) LocalVoxelShadowAtlasLayout.FACE_COUNT, (long) edge * edge
             )) || cacheLevel < -1 || complete && cacheLevel < 0) {
                 throw new IllegalArgumentException("Invalid resident L6 shadow page result");
             }
+            this.payload = takeOwnership ? checkedPayload : checkedPayload.clone();
+            this.edge = edge;
+            this.raysWithHits = raysWithHits;
+            this.totalRays = totalRays;
+            this.cacheLevel = cacheLevel;
+            this.complete = complete;
+        }
+
+        private static PageResult takeOwnership(
+                final byte[] payload,
+                final int edge,
+                final int raysWithHits,
+                final int totalRays,
+                final int cacheLevel,
+                final boolean complete
+        ) {
+            return new PageResult(
+                    payload, edge, raysWithHits, totalRays, cacheLevel, complete, true
+            );
+        }
+
+        public byte[] payload() {
+            return this.payload;
+        }
+
+        public int edge() {
+            return this.edge;
+        }
+
+        public int raysWithHits() {
+            return this.raysWithHits;
+        }
+
+        public int totalRays() {
+            return this.totalRays;
+        }
+
+        public int cacheLevel() {
+            return this.cacheLevel;
+        }
+
+        public boolean complete() {
+            return this.complete;
         }
     }
 
@@ -168,7 +231,11 @@ public final class VoxelShadowCacheBuilder {
                 }
             }
         }
-        return new PageResult(payload, edge, hitRays, totalRays, levelIndex, complete);
+        // The builder created this array and publishes it exactly once. Transfer that sole
+        // ownership instead of cloning up to 768 KiB at async completion time.
+        return PageResult.takeOwnership(
+                payload, edge, hitRays, totalRays, levelIndex, complete
+        );
     }
 
     /**

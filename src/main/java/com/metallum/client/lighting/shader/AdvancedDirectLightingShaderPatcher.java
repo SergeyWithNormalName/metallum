@@ -139,7 +139,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             } metallumClusterHeaderBuffer;
 
             layout(std430, binding = 30) readonly buffer MetallumClusterIndicesV1 {
-                uint indices[];
+                uint16_t indices[];
             } metallumClusterIndexBuffer;
 
             struct MetallumVoxelProxyV1 {
@@ -2030,7 +2030,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             return null;
         }
         return source.substring(0, start)
-                + "#version 430 core"
+                + "#version 430 core\n"
+                + "#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require"
                 + source.substring(end);
     }
 

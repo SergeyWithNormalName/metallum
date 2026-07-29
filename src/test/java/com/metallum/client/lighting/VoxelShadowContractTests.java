@@ -467,6 +467,19 @@ public final class VoxelShadowContractTests {
         );
         require(Arrays.equals(legacy.payload(), page64.payload()),
                 "legacy fixed cache no longer exactly matches its 64-edge resident page");
+        byte[] externallyOwned = page64.payload().clone();
+        VoxelShadowCacheBuilder.PageResult defensive = new VoxelShadowCacheBuilder.PageResult(
+                externallyOwned,
+                page64.edge(),
+                page64.raysWithHits(),
+                page64.totalRays(),
+                page64.cacheLevel(),
+                page64.complete()
+        );
+        externallyOwned[0] ^= 1;
+        require(defensive.payload()[0] != externallyOwned[0]
+                        && Arrays.equals(defensive.payload(), page64.payload()),
+                "public L6 page construction lost defensive payload ownership");
         verifyParallelPageBuilds(snapshot, light);
         reportBuilderAllocation(snapshot, light);
 

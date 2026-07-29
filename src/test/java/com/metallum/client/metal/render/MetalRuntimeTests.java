@@ -242,6 +242,19 @@ public final class MetalRuntimeTests {
                 "L6 descriptors are not repacked exactly when atlas or dynamic state changes");
         expectIllegalArgument(() ->
                 LocalVoxelShadowGpuResources.descriptorRepackRequired(-1, false));
+        require(LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                        true, true, true, true, true, 0, 1)
+                        && !LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                        false, true, true, true, true, 0, 1)
+                        && !LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                        true, true, true, false, true, 0, 1)
+                        && !LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                        true, true, true, true, true, 1, 1)
+                        && !LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                        true, true, true, true, true, 0, 0),
+                "L6 capacity wait can skip work without an exact blocked steady state");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.capacityWaitStateStable(
+                true, true, true, true, true, -1, 1));
         require(LocalVoxelShadowGpuResources.nextBuildEdge(0, 64, false) == 64
                         && LocalVoxelShadowGpuResources.nextBuildEdge(
                         64, 64, false) == 64

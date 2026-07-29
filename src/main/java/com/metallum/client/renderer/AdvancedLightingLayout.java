@@ -15,7 +15,7 @@ public final class AdvancedLightingLayout {
     public static final int CLUSTER_HEADER_STRIDE = 8;
     public static final int CLUSTER_SCRATCH_STRIDE =
             CLUSTER_MEMBERSHIP_WORDS * Integer.BYTES;
-    public static final int LIGHT_INDEX_STRIDE = Integer.BYTES;
+    public static final int LIGHT_INDEX_STRIDE = Short.BYTES;
     public static final int LIGHTING_PARAMS_BYTES = 256;
     public static final int STATISTICS_BYTES = 256;
     public static final int UPLOAD_HEADER_BYTES = 64;
@@ -98,7 +98,12 @@ public final class AdvancedLightingLayout {
         long gpuLightBytes = Math.multiplyExact((long) maxLights, GPU_LIGHT_STRIDE);
         long clusterHeaderBytes = Math.multiplyExact((long) clusterCount, CLUSTER_HEADER_STRIDE);
         long clusterScratchBytes = Math.multiplyExact((long) clusterCount, CLUSTER_SCRATCH_STRIDE);
-        long clusterIndexBytes = Math.multiplyExact((long) indexCapacity, LIGHT_INDEX_STRIDE);
+        long compactIndexBytes = Math.multiplyExact((long) indexCapacity, LIGHT_INDEX_STRIDE);
+        long prefixScratchBytes = Math.multiplyExact(
+                (long) divideRoundUp(clusterCount, 256),
+                160L
+        );
+        long clusterIndexBytes = Math.max(compactIndexBytes, prefixScratchBytes);
         long totalBytes = Math.addExact(
                 Math.addExact(uploadRingBytes, gpuLightBytes),
                 Math.addExact(

@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "5980f9f9df997c03d7a6828ef3d5ffcd4a687bc8d7f822df2ab9eccf39b65d21",
+            "sodium-solid-fsh", "01708076d8d3e3fa4483e5bd71e39247a6227c0622030bf910d3b6c640affb54",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "27eca32b9413c7c548e9c7ed23d502218a7e6270cd528dd39a1d8f2a28085c1a",
+            "sodium-cutout-fsh", "b4d61ed763c2ca6a61267c51b561bb9338df404729341f4bd2bb7909cf7c25f4",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "3f6c34d8e51cedc4cbccb5ba6e0cf8f7f1711844c18b1a8bd98da494a7a840df",
+            "minecraft-entity-fsh", "956c3e17384c12eb00b33ed89c1bbf8813d5d4b1701bd6d5b31aa62608450947",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "526932e75fd5249f8514eab36850a34006ff43cb2d521b815f0774843c66c9ef"
+            "minecraft-end-portal-fsh", "cc0d109811b46474ca4c88ef9d835075cdd479dc9594ee4ebfb3af0707aa1623"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -112,7 +112,8 @@ public final class AdvancedDirectLightingShaderTests {
         require(AdvancedLightingBindingAbi.PARAMS_BYTES == 256, "params block is not 256 bytes");
         require(AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE == 48, "GpuLight is not 48 bytes");
         require(AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE == 8, "cluster header is not uint2");
-        require(AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE == 4, "cluster index is not uint");
+        require(AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE == 2,
+                "cluster index is not compact uint16");
         require(AdvancedLightingBindingAbi.LIGHT_METADATA_OFFSET == 32,
                 "GpuLight metadata offset changed");
         require(AdvancedLightingBindingAbi.PARAMS_VIEW_ROTATION_OFFSET == 0
@@ -179,9 +180,13 @@ public final class AdvancedDirectLightingShaderTests {
                         && VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET == 240,
                 "L6 local-shadow parameter packet changed");
 
-        AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4);
-        expectIllegalArgument(() -> AdvancedLightingBindingAbi.requireCompatibleLayout(2, 256, 48, 8, 4));
-        expectIllegalArgument(() -> AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 32, 8, 4));
+        AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 2);
+        expectIllegalArgument(() ->
+                AdvancedLightingBindingAbi.requireCompatibleLayout(2, 256, 48, 8, 2));
+        expectIllegalArgument(() ->
+                AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 32, 8, 2));
+        expectIllegalArgument(() ->
+                AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4));
     }
 
     private static void testPowerOfTwoAddressingMatchesFloorArithmetic() {

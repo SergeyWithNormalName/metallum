@@ -1598,3 +1598,108 @@ ABI и HDR validation. Runtime `exclusiveFullscreen` возвращён к по�
 Следующий потенциально крупный шаг требует не ещё одной микроправки fragment loop,
 а изменения представления: embedded/per-cluster READY/STALE shadow-state summary
 или compact light/index storage с отдельным quality-preserving A/B.
+
+## 2026-07-29 — три архитектурные гипотезы: event-driven L6, uint16 L3, owned page payload
+
+### Контрольный baseline
+
+Один строгий `nether-lava-stress-v1` run
+`20260729T080551Z-...-three-architectures-baseline-detailed-off`: native
+`3024×1964`, exclusive fullscreen HDR, Balanced, MetalFX OFF, VSync OFF,
+frozen simulation, detailed timing, `300+600`. FPS/min-window `51.810/51.807`,
+GPU p50/p95/p99/worst `20.8819/21.4842/22.0714/22.8311 ms`, 1%/0.1% low
+`32.292/31.103`; light upload + cluster average/p95/worst
+`0.9064/1.0369/1.4309 ms`. COMPLETE, no FAIL/screenshots, zero dropped events.
+
+### 1. Event-driven ожидание L6 atlas capacity — ACCEPTED как bounded anti-stutter work removal
+
+При полном 64 MiB Balanced atlas 1961 видимый static source не имеет страницы и
+остаётся в `capacityBlockedBuilds`. Старый scheduler каждый кадр снова проходил
+весь snapshot и заново доказывал отсутствие места. Теперь scan можно пропустить
+только при точном immutable snapshot: тот же полный список `FrameLight`, mirror
+revision, free bytes и blocked count; нет builds/uploads/failures, recovery fences,
+evicted targets или retired pages; каждый missing eligible source уже capacity-blocked.
+Любое изменение света, L5 mirror, residency или async state немедленно возвращает
+обычный scheduler.
+
+Изолированный run
+`20260729T081143Z-...-three-architectures-1-capacity-event-wait-detailed-off`
+дал FPS `51.248` (`−1.08%`) и шумно худшие GPU tails, поэтому роста среднего FPS
+не заявляется. 1%/0.1% lows были лучше на `+22.1/+13.0%`, но одного короткого run
+недостаточно для причинного claim. Финальный production log даёт прямое
+доказательство срабатывания: cumulative `capacityWaitSkips=1494` при неизменных
+2048 descriptors, 87 READY, 1961 APPROXIMATE, 1961 capacity-blocked и zero
+FAIL_CLOSED. Внедрено как точное устранение до 2048 бесполезных scheduler checks
+и, главное, повторного построения/sort трёх candidate collections на стабильном
+кадре, не как FPS win. Exact guard сам остаётся линейным по snapshot.
+
+### 2. Компактные uint16 cluster indices — ACCEPTED, малый GPU/memory эффект
+
+L3 допускает максимум 4096 lights, поэтому каждый индекс без потерь помещается в
+`uint16`. Fill kernel теперь пишет `ushort`, все patched fragment variants читают
+`uint16_t` через явное GLSL extension, Java/native layout сообщает stride 2.
+Логические offsets/count/capacity и порядок света не изменены. Физический buffer
+имеет независимый `max(indexCapacity×2, prefixBlocks×160)` floor, потому что prefix
+passes до fill временно используют его начало для block statistics; это устраняет
+опасную зависимость scratch capacity от новой ширины элемента.
+
+Для `3024×1964` индексный payload уменьшился `9,142,272 → 4,571,136 bytes`
+(`−4.36 MiB`, ровно `−50%`). Native Metal API/GPU Validation прошла, включая
+candidate index `4095`, overflow/OOB guards, малый 160-byte prefix floor, ring и
+teardown; material variants реально скомпилированы, production log подтверждает
+active Advanced generation. Run
+`20260729T082012Z-...-three-architectures-2-compact-u16-indices-detailed-off`
+против baseline: FPS `52.229` (`+0.81%`), GPU p50/p95/p99
+`20.8110/21.2335/21.6476 ms` (`−0.34/−1.17/−1.92%`). Cluster-stage average был
+шумно хуже `0.9246 ms`. Эффект ниже 3%, но направление полезно по памяти и GPU
+tails без изменения качества, поэтому принято.
+
+### 3. Sole-owner transfer готовой CPU L6 page — ACCEPTED как allocation/stutter fix
+
+`buildPage` создавал sole-owned payload, после чего public record constructor
+безусловно клонировал его. Для edge 64 это второй массив и memcpy размером
+`786432 bytes` ровно в момент завершения фонового shadow build — плохой источник
+allocation/GC pressure после установки препятствия. `PageResult` теперь сохраняет
+старый defensive-copy public constructor, но внутренний builder публикует свой
+массив через private ownership-transfer path. Массив создаётся и передаётся один
+раз; render thread по-прежнему только загружает его и не мутирует.
+
+Canonical SHA для всех edges, exact legacy parity, cancellation, parallel builds,
+page counters/coverage и отдельный тест defensive public ownership прошли.
+Встроенный `METALLUM_L6_BUILDER_PROBE=1`, одинаковые 3 warmup + 5 measured
+64-edge pages: прежний clone-path `3,248,408 bytes/page`, final ownership path
+`2,461,960 bytes/page`; разница ровно `786,448 bytes/page` (`786,432` payload +
+16-byte array object/alignment). SHA и hits `3171/24576` идентичны. Короткое время
+`10.371 → 10.541 ms/page` шумно нейтрально, поэтому CPU-time win не заявляется.
+Отдельный steady frozen route почти не нагружает page rebuild, поэтому run
+`20260729T082313Z-...-three-architectures-3-owned-l6-payload-detailed-off`
+не используется как прямое доказательство CPU-copy gain; он служит regression
+gate. Против варианта 2 FPS `52.944` (`+1.37%`), GPU p50/p95
+`20.5611/21.1417 ms`, но это может быть обычный run-to-run шум. Доказанный эффект —
+минус одна 768 KiB allocation+copy на каждую готовую 64-edge CPU page без изменения
+байтов результата.
+
+### Совокупный результат и отклонённый следующий shortcut
+
+Финал против свежего baseline: FPS/min-window `+2.19/+2.12%`, GPU p50/p95/p99
+`−1.54/−1.59/−1.88%`, 1%/0.1% lows `+31.0/+15.1%`; последний показатель
+не заявляется как устойчивый без длинной пары. Все три runs COMPLETE, zero dropped.
+Ни одна правка отдельно не доказала ожидаемые `+3%`, но каждая имеет отдельный
+correctness/mechanical proof и не меняет radiance, radius, membership, shadow
+states, atlas samples, DDA limits или material/HDR quality.
+
+Проверенный, но **НЕ РЕАЛИЗОВАННЫЙ** shortcut — embedded/per-cluster READY/STALE
+summary в текущем L3 build. Сейчас окончательное состояние L6 появляется после
+cluster build, поэтому tag этого кадра был бы stale и мог бы ложно пропустить новую
+READY shadow (потеря качества). Дополнительно cluster prepare переиспользует все
+четыре `GpuLight.metadata` words под bounds/admission, хотя fragment L6 всё ещё
+читает `metadata.xy` как stable ID; старый комментарий «direct shaders never consume»
+этому противоречит. Перед state summary нужен отдельный correctness stage:
+сохранить stable ID в явном ABI и переставить frame order так, чтобы final L6
+descriptor state был известен до L3 summary build. Не повторять прямой tag/high-bit
+header shortcut без этой перестройки.
+
+`./gradlew clean check --console=plain`: `79` tasks, BUILD SUCCESSFUL, включая
+Metal API/GPU Validation, source-fallback и precompiled pipelines, L3 compact-list
+OOB/overflow/max-index contracts, L6 canonical pages/cancellation/atlas, ABI/HDR/L5.
+После измерений `exclusiveFullscreen` возвращён к пользовательскому `false`.
