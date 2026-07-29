@@ -385,6 +385,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         DynamicFramePlan dynamicPlan = DynamicFramePlan.empty();
         try {
             if (active) {
+                boolean staticOnly = DynamicShadowAdmission.isStaticOnly(lights);
                 mirror = VoxelShadowCacheMirror.global().snapshot(snapshot);
                 if (mirror == null) {
                     mirror = VoxelShadowCacheMirror.global().latestAcceptedSnapshot(snapshot);
@@ -403,7 +404,8 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                         mirror,
                         voxelResources,
                         frame,
-                        frame.currentCameraPosition()
+                        frame.currentCameraPosition(),
+                        staticOnly
                 );
                 frameLights = dynamicPlan.lights();
                 cancelBuildsBlockedByMotion(frameLights, submitIndex);
@@ -1113,8 +1115,14 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             final VoxelShadowCacheMirror.Snapshot mirror,
             final VoxelOccupancyGpuResources voxelResources,
             final FrameState frame,
-            final FrameState.CameraPosition camera
+            final FrameState.CameraPosition camera,
+            final boolean staticOnly
     ) {
+        if (staticOnly) {
+            return DynamicFramePlan.staticOnly(
+                    described, this.dynamicAdmission.resetForStaticOnlyFrame()
+            );
+        }
         List<DynamicShadowAdmission.Candidate> candidates = new ArrayList<>(described.size());
         for (FrameLight frameLight : described) {
             candidates.add(new DynamicShadowAdmission.Candidate(
@@ -2955,6 +2963,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             DynamicVoxelShadowGpuResources.FrameUpload upload,
             int coverageMisses
     ) {
+        private static final DynamicFramePlan EMPTY = new DynamicFramePlan(
+                List.of(), DynamicShadowAdmission.emptyResult(), List.of(), null, 0
+        );
+
         DynamicFramePlan {
             lights = List.copyOf(lights);
             Objects.requireNonNull(admission, "admission");
@@ -2967,15 +2979,14 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
 
         static DynamicFramePlan empty() {
-            return new DynamicFramePlan(
-                    List.of(),
-                    new DynamicShadowAdmission.Result(
-                            List.of(), List.of(), 0, 0, false, 0, 0
-                    ),
-                    List.of(),
-                    null,
-                    0
-            );
+            return EMPTY;
+        }
+
+        static DynamicFramePlan staticOnly(
+                final List<FrameLight> lights,
+                final DynamicShadowAdmission.Result admission
+        ) {
+            return new DynamicFramePlan(lights, admission, List.of(), null, 0);
         }
 
         DynamicPage page(final long stableId) {

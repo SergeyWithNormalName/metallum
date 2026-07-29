@@ -6,6 +6,7 @@ import com.metallum.client.lighting.LocalShadowSourceClass;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -21,6 +22,9 @@ final class DynamicShadowAdmission {
     static final int STOP_HOLD_FRAMES = 12;
     private static final double MOVEMENT_THRESHOLD_SQUARED =
             MOVEMENT_THRESHOLD * MOVEMENT_THRESHOLD;
+    private static final Result EMPTY_RESULT = new Result(
+            List.of(), List.of(), 0, 0, false, 0, 0
+    );
 
     enum Phase {
         STATIC,
@@ -98,6 +102,33 @@ final class DynamicShadowAdmission {
 
     private final Map<Long, MotionState> motion = new HashMap<>();
     private final long[] retainedSlots = new long[LocalVoxelShadowLayout.MAX_DYNAMIC_SHADOW_LIGHTS];
+
+    static boolean isStaticOnly(final List<AdvancedLight> lights) {
+        Objects.requireNonNull(lights, "lights");
+        for (int index = 0; index < lights.size(); index++) {
+            AdvancedLight light = lights.get(index);
+            if (Objects.requireNonNull(light, "lights contains null").shadowSourceClass()
+                    != LocalShadowSourceClass.STATIC_CACHE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Preserves the state transition performed by {@link #select} for an all-static frame
+     * without materializing per-light admission records. The following dynamic frame must
+     * start with neither stale motion history nor retained hero slots.
+     */
+    Result resetForStaticOnlyFrame() {
+        this.motion.clear();
+        Arrays.fill(this.retainedSlots, 0L);
+        return EMPTY_RESULT;
+    }
+
+    static Result emptyResult() {
+        return EMPTY_RESULT;
+    }
 
     Result select(
             final List<Candidate> input,

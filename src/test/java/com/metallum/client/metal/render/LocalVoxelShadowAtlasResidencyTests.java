@@ -21,11 +21,14 @@ public final class LocalVoxelShadowAtlasResidencyTests {
     public static void main(final String[] args) {
         testLayoutAccounting();
         testDynamicSuffixLayout();
+        testStaticOnlyPredicate();
+        testStaticOnlyResetMatchesLegacyFrame();
         testDynamicMotionAndPromotion();
         testSubThresholdMotionAccumulates();
         testPresetAdmissionCaps();
         testHeldAdmissionAndHysteresis();
         testDuplicateStableIdCoalescesHeldProxy();
+        reportStaticAdmissionAllocation();
         testStableResidencyAndLease();
         testReplacementDefersOldPageRetirement();
         testSameEdgeReplacementNeverOverwritesInFlightPage();
@@ -152,6 +155,83 @@ public final class LocalVoxelShadowAtlasResidencyTests {
                         && result.selected(11L) != null
                         && result.staticToDynamicTransitions() == 1,
                 "Movement did not return to a GPU page in the same frame");
+    }
+
+    private static void testStaticOnlyPredicate() {
+        require(DynamicShadowAdmission.isStaticOnly(List.of())
+                        && DynamicShadowAdmission.isStaticOnly(List.of(light(
+                        1L, 0.0, 0, LocalShadowSourceClass.STATIC_CACHE
+                )))
+                        && !DynamicShadowAdmission.isStaticOnly(List.of(light(
+                        2L, 0.0, 0, LocalShadowSourceClass.ENTITY_DYNAMIC
+                )))
+                        && !DynamicShadowAdmission.isStaticOnly(List.of(light(
+                        3L, 0.0, 0, LocalShadowSourceClass.CAMERA_HELD
+                ))),
+                "Static-only L6 guard accepted a dynamic source class");
+    }
+
+    private static void testStaticOnlyResetMatchesLegacyFrame() {
+        LocalVoxelShadowLayout.DynamicShadowBudget budget =
+                LocalVoxelShadowLayout.forPreset(LightingPreset.BALANCED).dynamicShadows();
+        DynamicShadowAdmission legacy = new DynamicShadowAdmission();
+        DynamicShadowAdmission fast = new DynamicShadowAdmission();
+        List<DynamicShadowAdmission.Candidate> initial = List.of(
+                candidate(light(501L, 2.0, 100,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false),
+                candidate(light(502L, 2.05, 100,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false)
+        );
+        DynamicShadowAdmission.Result legacyInitial = legacy.select(
+                initial, budget, 0.0, 0.0, 0.0
+        );
+        DynamicShadowAdmission.Result fastInitial = fast.select(
+                initial, budget, 0.0, 0.0, 0.0
+        );
+        require(legacyInitial.equals(fastInitial)
+                        && legacyInitial.selected(501L).heroSlot() == 0
+                        && legacyInitial.selected(502L).heroSlot() == 1,
+                "Dynamic setup did not establish matching retained hero slots");
+
+        AdvancedLight staticA = light(
+                501L, 2.0, 100, LocalShadowSourceClass.STATIC_CACHE
+        );
+        DynamicShadowAdmission.Result legacyStatic = legacy.select(
+                List.of(
+                        candidate(staticA, true),
+                        candidate(staticA, true),
+                        candidate(light(502L, 2.05, 100,
+                                LocalShadowSourceClass.STATIC_CACHE), true)
+                ),
+                budget, 0.0, 0.0, 0.0
+        );
+        DynamicShadowAdmission.Result fastStatic = fast.resetForStaticOnlyFrame();
+        require(legacyStatic.candidates() == 0
+                        && legacyStatic.selected().isEmpty()
+                        && fastStatic.candidates() == 0
+                        && fastStatic.selected().isEmpty(),
+                "Static-only reset changed legacy all-static telemetry");
+
+        List<DynamicShadowAdmission.Candidate> next = List.of(
+                candidate(light(503L, 1.99, 100,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false),
+                candidate(light(501L, 2.0, 100,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false),
+                candidate(light(502L, 2.05, 100,
+                        LocalShadowSourceClass.ENTITY_DYNAMIC), false)
+        );
+        DynamicShadowAdmission.Result legacyNext = legacy.select(
+                next, budget, 0.0, 0.0, 0.0
+        );
+        DynamicShadowAdmission.Result fastNext = fast.select(
+                next, budget, 0.0, 0.0, 0.0
+        );
+        require(legacyNext.equals(fastNext)
+                        && fastNext.staticToDynamicTransitions() == next.size()
+                        && fastNext.selected(503L).heroSlot() == 0
+                        && fastNext.selected(501L).heroSlot() == 1
+                        && fastNext.selected(502L) == null,
+                "Static-only reset retained stale motion or hero-slot state");
     }
 
     private static void testHeldAdmissionAndHysteresis() {
@@ -302,6 +382,62 @@ public final class LocalVoxelShadowAtlasResidencyTests {
                             && result.dropped() == candidates.size() - budget.heroSlots(),
                     "Dynamic admission no longer obeys the 1/2/4 preset budget");
         }
+    }
+
+    private static void reportStaticAdmissionAllocation() {
+        if (!"1".equals(System.getenv("METALLUM_L6_STATIC_ADMISSION_PROBE"))) {
+            return;
+        }
+        java.lang.management.ThreadMXBean platformBean =
+                java.lang.management.ManagementFactory.getThreadMXBean();
+        if (!(platformBean instanceof com.sun.management.ThreadMXBean allocationBean)
+                || !allocationBean.isThreadAllocatedMemorySupported()) {
+            throw new AssertionError("Thread allocation telemetry is unavailable");
+        }
+        allocationBean.setThreadAllocatedMemoryEnabled(true);
+        int lightCount = 2_048;
+        List<AdvancedLight> lights =
+                new java.util.ArrayList<>(lightCount);
+        for (int index = 0; index < lightCount; index++) {
+            lights.add(light(
+                    10_000L + index,
+                    index % 64,
+                    index,
+                    LocalShadowSourceClass.STATIC_CACHE
+            ));
+        }
+        DynamicShadowAdmission admission = new DynamicShadowAdmission();
+        for (int warmup = 0; warmup < 20; warmup++) {
+            require(DynamicShadowAdmission.isStaticOnly(lights),
+                    "Static admission allocation probe contains a dynamic source");
+            admission.resetForStaticOnlyFrame();
+        }
+        long threadId = Thread.currentThread().threadId();
+        long allocationBefore = allocationBean.getThreadAllocatedBytes(threadId);
+        long timeBefore = System.nanoTime();
+        int checksum = 0;
+        int iterations = 100;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            boolean staticOnly = DynamicShadowAdmission.isStaticOnly(lights);
+            DynamicShadowAdmission.Result result = admission.resetForStaticOnlyFrame();
+            checksum += result.tracked().size() + result.selected().size()
+                    + result.candidates() + result.dropped() + (staticOnly ? 0 : 1);
+        }
+        long elapsedNanos = System.nanoTime() - timeBefore;
+        long allocatedBytes = allocationBean.getThreadAllocatedBytes(threadId)
+                - allocationBefore;
+        System.out.printf(
+                "L6_STATIC_ADMISSION_PROBE path=fast iterations=%d lights=%d "
+                        + "allocated_bytes=%d bytes_per_frame=%.1f elapsed_ms=%.3f "
+                        + "ms_per_frame=%.3f checksum=%d%n",
+                iterations,
+                lights.size(),
+                allocatedBytes,
+                allocatedBytes / (double) iterations,
+                elapsedNanos / 1_000_000.0,
+                elapsedNanos / 1_000_000.0 / iterations,
+                checksum
+        );
     }
 
     private static DynamicShadowAdmission.Candidate candidate(

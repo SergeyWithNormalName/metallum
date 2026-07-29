@@ -1410,3 +1410,81 @@ admission allocations при `dynamic=0/0/0`; не смешивать его с 
 **Итог:** **ВНЕДРЕНО/accepted** как шестой раздельный quality-preserving Nether
 cluster refinement. Он даёт воспроизводимый, пусть умеренный, выигрыш без снижения
 качества; не расширять его approximate plane math или ослаблением tangent guards.
+
+## 2026-07-29 — L6 static-only admission fast path
+
+### Причина и correctness contract
+
+В `nether-lava-stress-v1` все 2048 L3 sources имеют
+`LocalShadowSourceClass.STATIC_CACHE`, а L6 telemetry стабильно показывает
+`dynamic=0/0/0`. Несмотря на это, каждый render frame строил 2048
+`DynamicShadowAdmission.Candidate`, `LinkedHashMap` с entries/table, 2048
+`TrackedCandidate`, несколько `HashSet`/reference arrays, а затем ещё одну
+копию 2048 `FrameLight`. Это не меняло ни admission, ни тени, но создавало
+CPU/GC pressure и периодические статтеры.
+
+Новый guard срабатывает только если **каждый** source имеет точный class
+`STATIC_CACHE`; `dynamicCoverage=false`, `selected=0` или stationary entity не
+считаются доказательством. Pre-admission `FrameLight` уже имеет точно
+те же `staticBuildAllowed=true`, `phase=STATIC`, `heroSlot=-1`, cache key/level,
+edge, distance и clipmap, поэтом список переиспользуется без пересоздания.
+Fast path обязательно очищает `motion` и все `retainedSlots`, точно как
+обычный all-static `select`; последующий dynamic frame побайтно равен свежему
+admission по phases, transitions и hero-slot order. Empty `DynamicFramePlan` также
+переведён на immutable singleton.
+
+Не менялись descriptor bytes/states/order, READY/STALE/APPROXIMATE policy,
+resident atlas, L5/L6 rays/maxSteps, light photometry/radius/color, ABI/buffers, shaders,
+GPU passes/dispatches и quality settings.
+
+### Allocation proof и тесты
+
+Env-gated `METALLUM_L6_STATIC_ADMISSION_PROBE=1`, 2048 static sources, 20 warmup +
+100 measured calls на одном render-thread-like thread:
+
+- legacy `select`: `304440 bytes/frame`, `0.291 ms/frame`, tracked checksum `204800`;
+- final strict guard + reset: `0 bytes/frame`, `0.034 ms/frame`, checksum `0`.
+
+То есть доказанно убрано 304.4 KiB JVM allocations и ~`0.257 ms`
+(`−88.3%`) admission CPU на каждом dense-static frame; в этот probe не входит
+дополнительно убранная вторая `FrameLight` copy. При 50–60 FPS это
+около 15–18 MiB/s ненужного young-generation pressure.
+
+`localShadowAtlasUnitTest` покрывает строгий predicate, duplicate stable ID,
+dynamic→static-only→dynamic motion reset и очистку hero hysteresis. Короткий
+`hdrtest-l6-dynamic-v1` (`300+900`, detailed) прошёл: held READY,
+`5/2/3` candidates/selected/dropped, `12288` rays, fallback/coverageMiss/failures = 0,
+FAIL_CLOSED=0. `./gradlew clean check --console=plain`: `79` tasks, SUCCESS.
+
+### Production evidence и честная граница
+
+Финальный source/artifact: `b2b9ce49...` / `301836c3...`. Три candidate run
+`20260729T003232Z-...-final-production-1`,
+`20260729T003519Z-...-final-production-2` и
+`20260729T004225Z-...-adjacent-candidate`; все `1800+3000`, native
+`3024×1964`, Balanced, MetalFX OFF, VSync OFF, COMPLETE, zero dropped timing events.
+Качество и резидентность идентичны: descriptors `2048`, READY `87`,
+APPROXIMATE `1961`, FAIL_CLOSED `0`, residents `87`, dynamic/fallback/failures `0`.
+
+Против предыдущей exact baseline pair candidate mean дал: FPS/min-window
+`−1.71/−2.27%`, 1%/0.1% lows `+1.88/+5.46%`, CPU p95/p99/max
+`−0.33/−0.75/+0.79%`; GPU p95/p99 был шумно хуже `+2.28/+1.84%`.
+Поэтом старый разнесённый baseline не используется для FPS claim.
+
+Свежий legacy control `20260729T003901Z-...-fresh-control` и сразу следующий
+final candidate `20260729T004225Z-...-adjacent-candidate` дали:
+FPS/min-window `−1.01/−0.33%`, 1%/0.1% lows `+1.57/+3.94%`, CPU max
+`−23.56%`, GPU p95/p99 `−0.04/−0.26%`, present max `−8.37%`; CPU p95/p99
+и present p95/p99 были шумно хуже на `+0.76/+2.51%` и `+0.95/+0.85%`.
+В frozen GPU-bound route нет воспроизводимого роста среднего FPS; есть
+умеренное улучшение lows/max tails и детерминированное устранение
+крупного per-frame GC source. Frozen simulation не моделирует активную игру с
+chunk/entity churn, где young-GC relief должен быть полезнее.
+
+Known event-order defect снова не создал `.accepted.json` для full Nether runs
+и дал launcher exit 2; raw/summary содержат все 3000 measured frames,
+COMPLETE и zero dropped events. Это не подменяется attestation.
+
+**Итог:** **ВНЕДРЕНО/accepted** только как quality-preserving L6
+allocation/anti-stutter architecture optimization. Не заявлять рост среднего
+FPS. Не расширять guard за пределы exact all-`STATIC_CACHE` входа.
