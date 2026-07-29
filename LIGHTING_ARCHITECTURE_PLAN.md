@@ -1960,6 +1960,11 @@ GGX-материалы, полупрозрачность и отражающие
   `TRANSLUCENT` render pass фиксируются при ремеше, тогда как foliage, grass overlays
   и их mip-уровни остаются dielectric. Это устраняет серо-серебряную glass-оптику на
   листве и боковых гранях травы и убирает лишний L8 fragment path для этих поверхностей.
+- Процедурная фаза волн воды привязана к точным integer camera blocks и дробной
+  camera-relative позиции через периодический 256-блочный contract. Прежняя формула
+  учитывала только camera fraction, поэтому при переходе игрока через block boundary
+  узор скачком менял фазу. Новый split сохраняет world-space фазу без large-world
+  float precision loss, дополнительных ресурсов или работы на non-water terrain.
 
 ### Этап P1. ProMotion/present pacing
 

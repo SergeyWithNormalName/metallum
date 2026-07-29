@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "69661374da82dc8b2a09f0face369e2bc5be9dd70ab1774c656a787104a56424",
+            "sodium-solid-fsh", "916ff8f449db7eda6c6a0284933787cc30e94c33a743bc9a3820986611f8c7b1",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "38030ed1f662952bfef0857c170387bc8d57672115ed6074331b0adfc4f845a2",
+            "sodium-cutout-fsh", "eb89b58e81e37742577055184f564bb2dd00f4a0bc585b017f75e786508a054e",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "93f975dd97cd49ca7aa84d13d20ba4af8bd465b0597b291c45795c31d0c6afb0",
+            "minecraft-entity-fsh", "9d87f065d026ce238f13f73f6ace13fb02de0be5176d7b6b0172c3a8fccc9ec2",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "b09662444b5c92f10284e9d6b00dfd60f467557010fd2445754db357f4b4c23f"
+            "minecraft-end-portal-fsh", "2326ec04c46d54c45e097256d72089c9169498295ece76420c2f43f0d661a49c"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -93,6 +93,7 @@ public final class AdvancedDirectLightingShaderTests {
         testVersionedBindingAbi();
         testDepthSliceBoundaries();
         testPowerOfTwoAddressingMatchesFloorArithmetic();
+        testWaterWavePhaseIsWorldStable();
         testScaleInvariantSurfaceNormal();
         testDominantSoftShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
@@ -209,6 +210,63 @@ public final class AdvancedDirectLightingShaderTests {
                         "power-of-two mask diverged from positive toroidal modulo");
             }
         }
+    }
+
+    private static void testWaterWavePhaseIsWorldStable() {
+        double worldX = 18.375;
+        double worldZ = -7.625;
+        double[] cameraCoordinates = {
+                -256.001, -255.999, -1.001, -0.999, -0.001, 0.001,
+                0.999, 1.001, 255.999, 256.001
+        };
+        double expectedX = waterWavePhase(0.25, -0.75, worldX, worldZ, 31, 47);
+        double expectedZ = waterWavePhase(0.25, -0.75, worldX, worldZ, -53, 25);
+        for (double cameraX : cameraCoordinates) {
+            for (double cameraZ : cameraCoordinates) {
+                require(Math.abs(waterWavePhase(
+                                cameraX, cameraZ, worldX, worldZ, 31, 47) - expectedX)
+                                < 1.0e-9,
+                        "L8 water X wave phase jumped at a camera block boundary");
+                require(Math.abs(waterWavePhase(
+                                cameraX, cameraZ, worldX, worldZ, -53, 25) - expectedZ)
+                                < 1.0e-9,
+                        "L8 water Z wave phase jumped at a camera block boundary");
+            }
+        }
+        require(Math.abs(waterWavePhase(
+                        255.999, -0.001, worldX + 256.0, worldZ - 256.0, 31, 47)
+                        - expectedX) < 1.0e-9,
+                "L8 water X wave lost its exact 256-block large-world period");
+        require(Math.abs(waterWavePhase(
+                        255.999, -0.001, worldX + 256.0, worldZ - 256.0, -53, 25)
+                        - expectedZ) < 1.0e-9,
+                "L8 water Z wave lost its exact 256-block large-world period");
+    }
+
+    private static double waterWavePhase(
+            final double cameraX,
+            final double cameraZ,
+            final double worldX,
+            final double worldZ,
+            final int turnsX,
+            final int turnsZ
+    ) {
+        int blockX = (int) Math.floor(cameraX);
+        int blockZ = (int) Math.floor(cameraZ);
+        double fractionX = cameraX - blockX;
+        double fractionZ = cameraZ - blockZ;
+        int blockTurns = Math.floorMod(
+                Math.floorMod(blockX, 256) * turnsX
+                        + Math.floorMod(blockZ, 256) * turnsZ,
+                256
+        );
+        double cameraBlockRelativeX = fractionX + worldX - cameraX;
+        double cameraBlockRelativeZ = fractionZ + worldZ - cameraZ;
+        double turns = blockTurns
+                + cameraBlockRelativeX * turnsX
+                + cameraBlockRelativeZ * turnsZ;
+        return Math.floorMod((long) Math.floor(turns), 256)
+                + turns - Math.floor(turns);
     }
 
     private static void testDepthSliceBoundaries() {
@@ -848,6 +906,9 @@ public final class AdvancedDirectLightingShaderTests {
         require(sodiumFragment.contains("vec3 refracted = refract(")
                         && sodiumFragment.contains("exp(-material.absorption * distance)")
                         && sodiumFragment.contains("metallumWaterNormalV1")
+                        && sodiumFragment.contains(
+                        "metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255)")
+                        && sodiumFragment.contains("vec2 wavePhase = mod(waveTurns, vec2(256.0))")
                         && sodiumFragment.contains("float waveX = sin(")
                         && sodiumFragment.contains("float waveZ = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");

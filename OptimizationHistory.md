@@ -1817,3 +1817,25 @@ merge. Исправление не добавляет ресурсов, прох
 common path оно удаляет ветку L8. Для уже собранных chunk meshes требуется remesh
 (`F3+A`) или перезапуск; live-проверка тех же ракурсов остается пользовательским
 signoff.
+
+## 2026-07-29 — L8 water wave phase прыгала при ходьбе
+
+Live-скриншот и shader audit локализовали артефакт в процедурных water normals.
+`metallumWaterNormalV1` восстанавливал позицию как camera-relative view position плюс
+только дробная camera fraction. Целый `cameraBlockAndFlags.xz`, уже находящийся в
+L6/L8 fragment packet, отсутствовал; при каждом переходе камеры через границу блока
+дробная часть сбрасывалась, и оба синусоидальных узора скачком меняли фазу.
+
+Фаза теперь разделена на integer block turns и bounded camera-block-relative часть.
+Два близких к прежним wave vector заданы целыми turns в точном 256-блочном периоде;
+это сохраняет непрерывность на положительных, отрицательных и period-wrap границах,
+не конвертируя большие absolute coordinates во float. Численная регрессия проверяет
+эти границы, actual Sodium/Minecraft GLSL компилируется в SPIR-V, а
+`./gradlew clean check --console=plain` прошел полностью: `80` tasks, включая Metal
+API/GPU Validation и Temporal runtime validation.
+
+Новых buffers, passes, textures или allocations нет. Обычный terrain path не менялся;
+несколько integer ALU и bounded phase reduction выполняются только внутри уже
+существующего water material gate рядом с двумя прежними `sin/cos`. Live walking
+signoff на том же берегу остается обязательным: автоматические тесты доказывают
+непрерывность формулы, но не заменяют наблюдение движения в игре.

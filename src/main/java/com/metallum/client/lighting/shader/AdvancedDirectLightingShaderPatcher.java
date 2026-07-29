@@ -321,16 +321,33 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return normal;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
-                vec3 worldPosition = metallumVoxelShadow.cameraFractionAndMinTrans.xyz
-                        + worldFromView * viewPosition;
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
                 vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
                 if (dot(worldNormal, worldNormal) == 0.0 || abs(worldNormal.y) < 0.55) {
                     return normal;
                 }
                 float time = metallumEnvironment.materialContract.x == 1u
                         ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
-                float waveX = sin(dot(worldPosition.xz, vec2(0.78, 1.17)) + time * 1.35);
-                float waveZ = cos(dot(worldPosition.xz, vec2(-1.31, 0.63)) - time * 1.08);
+                ivec2 wrappedCameraBlock =
+                        metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
+                ivec2 waveXTurns = ivec2(31, 47);
+                ivec2 waveZTurns = ivec2(-53, 25);
+                int waveXBlockTurns = (wrappedCameraBlock.x * waveXTurns.x
+                        + wrappedCameraBlock.y * waveXTurns.y) & 255;
+                int waveZBlockTurns = (wrappedCameraBlock.x * waveZTurns.x
+                        + wrappedCameraBlock.y * waveZTurns.y) & 255;
+                vec2 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xz
+                        + cameraRelativePosition.xz;
+                vec2 waveTurns = vec2(
+                        float(waveXBlockTurns)
+                                + dot(cameraBlockRelativePosition, vec2(waveXTurns)),
+                        float(waveZBlockTurns)
+                                + dot(cameraBlockRelativePosition, vec2(waveZTurns)));
+                vec2 wavePhase = mod(waveTurns, vec2(256.0))
+                        * 0.02454369260617026;
+                float waveX = sin(wavePhase.x + time * 1.35);
+                float waveZ = cos(wavePhase.y - time * 1.08);
                 worldNormal = metallumSafeNormalV1(worldNormal + vec3(waveX, 0.0, waveZ) * 0.085);
                 vec3 perturbed = metallumSafeNormalV1(transpose(worldFromView) * worldNormal);
                 return dot(perturbed, perturbed) == 0.0 ? normal : perturbed;
