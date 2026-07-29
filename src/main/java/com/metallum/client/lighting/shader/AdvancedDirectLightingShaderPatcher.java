@@ -238,8 +238,6 @@ public final class AdvancedDirectLightingShaderPatcher {
             const uint METALLUM_SURFACE_STONE_V1 = 5u;
             const uint METALLUM_SURFACE_WOOD_V1 = 6u;
             const uint METALLUM_SURFACE_POROUS_V1 = 7u;
-            const float METALLUM_RAIN_WETNESS_EPSILON_V1 = 0.01;
-
             struct MetallumSurfaceMaterialV1 {
                 vec3 absorption;
                 float roughness;
@@ -293,7 +291,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         : kind == METALLUM_SURFACE_POROUS_V1 ? 0.80 : 0.68;
                 material.metalness = kind == METALLUM_SURFACE_METAL_V1 ? 0.92 : 0.0;
                 material.dielectricF0 = kind == METALLUM_SURFACE_WATER_V1 ? 0.0204 : 0.04;
-                material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.96
+                material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.82
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.92 : 0.0;
                 material.absorption = kind == METALLUM_SURFACE_WATER_V1
                         ? vec3(0.36, 0.095, 0.035)
@@ -630,8 +628,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 reflectedDirection = reflect(-viewDirection, normal);
                 vec3 reflectedEnvironment = metallumEnvironmentLookupV1(reflectedDirection);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? 0.58 : 1.0;
                 vec3 result = reflectedEnvironment * environmentFresnel
-                        * environmentVisibility * (1.0 - material.roughness * 0.48);
+                        * environmentVisibility * (1.0 - material.roughness * 0.48)
+                        * environmentStyleWeight;
 
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
@@ -2018,7 +2019,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            metallumSurfaceEmission == 0u\n"
                     + "            && metallumEnvironment.materialContract.x == 1u\n"
                     + "            && metallumEnvironment.materialWeatherAndTime.x\n"
-                    + "            > METALLUM_RAIN_WETNESS_EPSILON_V1\n"
+                    + "            > 0.0\n"
                     + "            && metallumSkyVisibility > 0.0\n"
                     + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
                     + "    float metallumRainFacing = 0.0;\n"
@@ -2044,8 +2045,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "        bool metallumNeedsMaterialOptics =\n"
                     + "                metallumIntrinsicMaterialOptics\n"
                     + "                || metallumSurfaceMaterial.wetness\n"
-                    + "                > METALLUM_RAIN_WETNESS_EPSILON_V1;\n"
+                    + "                > 0.0;\n"
                     + "        if (metallumNeedsMaterialOptics) {\n"
+                    + "            float metallumMaterialOpticsWeight =\n"
+                    + "                    metallumIntrinsicMaterialOptics\n"
+                    + "                    ? 1.0 : metallumSurfaceMaterial.wetness;\n"
                     + "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n"
                     + "            metallumDirectNormal = metallumWaterNormalV1(\n"
                     + "                    metallumLightingPosition, metallumDirectNormal,\n"
@@ -2081,11 +2085,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                    (1.0 - metallumSurfaceMaterial.metalness)\n"
                     + "                    * (1.0 - metallumSurfaceMaterial.transmission);\n"
                     + "            metallumPreparedAlbedo *= metallumDiffuseWeight;\n"
-                    + "            color.rgb += metallumEvaluateMaterialEnvironmentV1(\n"
+                    + "            color.rgb += metallumMaterialOpticsWeight\n"
+                    + "                    * metallumEvaluateMaterialEnvironmentV1(\n"
                     + "                    metallumLightingPosition, metallumDirectNormal,\n"
                     + "                    metallumPreparedAlbedo, metallumSkyVisibility,\n"
                     + "                    metallumSurfaceMaterial);\n"
-                    + "            color.rgb += metallumEvaluateClusteredMaterialSpecularV1(\n"
+                    + "            color.rgb += metallumMaterialOpticsWeight\n"
+                    + "                    * metallumEvaluateClusteredMaterialSpecularV1(\n"
                     + "                    metallumLightingPosition, metallumDirectNormal,\n"
                     + "                    metallumPreparedAlbedo, metallumSurfaceMaterial);\n"
                     + "        }\n"

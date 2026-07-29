@@ -1997,6 +1997,16 @@ GGX-материалы, полупрозрачность и отражающие
   `MOTION_BLOCKING` heightmap: верхние поверхности под крышей и в пещерах не получают wet tag.
   Снимок содержит только `16x16` высот на mesh-задачу и не добавляет per-frame/per-fragment
   запросов, history textures, новых GPU resources или ABI changes.
+- Финальный live transition fix убирает fragment-side переключатель полной wet-оптики на
+  epsilon: environment и dominant-local GGX для wet-only поверхности теперь умножаются на
+  фактическую `wetness`. CPU по-прежнему защёлкивает хвост в точный ноль при `0.01`, но до этого
+  весь визуальный вклад непрерывно следует response `0..1`; intrinsic water/glass/metal optics
+  сохраняют вес `1.0`. Сухой common path по-прежнему не запускает material resolver.
+- Вода получила более ванильный stylistic balance без вмешательства в sampled alpha или
+  translucent sorting: L8 optical transmission уменьшен с `0.96` до `0.82`, поэтому доля
+  vanilla texture × biome-tint diffuse выросла с `4%` до `18%`, а белёсое analytic environment
+  reflection ограничено отдельным весом `0.58`. Procedural waves, Fresnel, refraction,
+  Beer-Lambert absorption, солнечный/local GGX и Temporal reactive policy сохранены.
 
 ### Этап P1. ProMotion/present pacing
 

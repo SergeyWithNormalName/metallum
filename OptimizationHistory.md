@@ -1948,3 +1948,26 @@ textures, passes или ABI нет. Дополнительная стоимос�
 чтениями и примерно 1 KiB на полную mesh-задачу; закрытые wet-only surfaces одновременно
 перестают попадать в дорогой rain GGX path. После изменения roof geometry соответствующим
 секциям нужен обычный Sodium remesh; visual signoff в игре остаётся обязательным.
+
+## 2026-07-29 — L8 vanilla-style water и непрерывный wet optics
+
+Повторный live-скриншот показал, что после возврата vanilla biome tint вода всё ещё выглядела
+слишком прозрачной и стеклянной: analytic environment reflection доминировал над исходной
+палитрой, а optical transmission `0.96` оставлял только `4%` diffuse-вклада. Sampled alpha и
+Sodium translucent pass при этом уже оставались ванильными, поэтому менять alpha означало бы
+ломать сортировку и ресурс-паки вместо устранения причины.
+
+Water transmission уменьшен до `0.82`, что повышает долю vanilla texture × biome tint diffuse
+до `18%`. Только гладкое environment reflection дополнительно получает stylistic вес `0.58`;
+sun GGX не масштабируется этим весом. Процедурные волны, Fresnel, `refract`, Beer-Lambert,
+bounded luminance modulation и local/solar highlights сохранены. Новых samples, ресурсов,
+passes и allocations нет; меняются только константы и один scalar multiply внутри water gate.
+
+Причина резкого начала/окончания дождевого эффекта оказалась второй: CPU wetness уже имела
+attack/release, но fragment shader при `wetness > 0.01` сразу добавлял environment и local GGX
+в полном объёме. Порог удалён из визуального смешивания. Для wet-only материалов оба optic
+вклада теперь умножаются на текущую `wetness`; intrinsic water/glass/metal/smooth optics всегда
+имеют вес `1.0`. CPU exact-zero snap остаётся, поэтому сухой common path бесплатен. Цена — два
+scalar multiply только в уже активном material branch, без новых texture reads или GPU state.
+Actual-source GLSL/SPIR-V contract прошёл; окончательная субъективная плотность воды и плавность
+weather transition требуют live signoff.

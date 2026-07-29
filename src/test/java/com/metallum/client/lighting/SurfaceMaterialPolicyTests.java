@@ -39,6 +39,11 @@ public final class SurfaceMaterialPolicyTests {
         require(SurfaceMaterialPolicy.forBlock(Blocks.GLASS.defaultBlockState())
                         == SurfaceMaterialPolicy.GLASS,
                 "glass block did not resolve the transmissive CPU policy");
+        require(close(SurfaceMaterialPolicy.WATER.transmission(), 0.82f)
+                        && close(SurfaceMaterialPolicy.GLASS.transmission(), 0.92f)
+                        && SurfaceMaterialPolicy.WATER.transmission()
+                        < SurfaceMaterialPolicy.GLASS.transmission(),
+                "water lost its vanilla-weighted diffuse/transmission balance");
         require(SurfaceMaterialPolicy.forTerrain(
                         Blocks.OAK_LEAVES.defaultBlockState(), false)
                         == SurfaceMaterialPolicy.POROUS
@@ -161,6 +166,9 @@ public final class SurfaceMaterialPolicyTests {
                         && driedAfterTwelveSeconds < 0.06f
                         && close(driedAfterOneMinute, 0.0f),
                 "rain film does not wet smoothly or finish its bounded drying tail");
+        require(firstWetFrame < 0.10f
+                        && firstWetFrame * 0.62f < 0.05f,
+                "the first wet frame can still switch on a full-strength optic response");
         require(close(SurfaceMaterialPolicy.rainWetnessTarget(0.0f), 0.0f)
                         && close(SurfaceMaterialPolicy.rainWetnessTarget(0.25f), 0.85f)
                         && close(SurfaceMaterialPolicy.rainWetnessTarget(0.75f), 0.95f)

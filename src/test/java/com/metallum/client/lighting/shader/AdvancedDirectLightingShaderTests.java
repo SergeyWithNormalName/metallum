@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "4f80075acb797e54c487e0b1b421828bf6675a449214bd1983526f607930f075",
+            "sodium-solid-fsh", "428dcaacbe4b04759dc38358ec5a40173c66f5b0900c11f8ff08ac416085810b",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "40451c118b72527d23a68aac558f6cb4f37e0734350d850798eae579c1f7b5f5",
+            "sodium-cutout-fsh", "08bd7edc22c5a7ac1295452b463c6a1c2f0e4f77a371502849ea688461df4f82",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "3cb04e5c308af63d43c5f51c784f8bfc6f812e0d1d82aefa207ab0a23fa27bb0",
+            "minecraft-entity-fsh", "31b48a2a3e588691a5f422b10efb0225c39d8cd5aef3358c019afe25b9a1f724",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "27090b2902e259b7eba5efaecb9ea7c53c35b5e4d2c32c0c519a375db6dd4f71"
+            "minecraft-end-portal-fsh", "35accb7d65533d57c2384700521fd817491ec705033bb94c4a6b0f34dfe4a3fc"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -910,6 +910,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("exp(-material.absorption * distance)")
                         && sodiumFragment.contains("metallumWaterNormalV1")
                         && sodiumFragment.contains(
+                        "material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.82")
+                        && sodiumFragment.contains(
+                        "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1")
+                        && sodiumFragment.contains("? 0.58 : 1.0;")
+                        && sodiumFragment.contains(
                         "vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;")
                         && sodiumFragment.contains(
                         "float metallumWaterRefractionGain = clamp(")
@@ -924,9 +929,9 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float waveZ = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
-                        && sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1 = 0.01")
-                        && countOccurrences(sodiumFragment,
-                        "> METALLUM_RAIN_WETNESS_EPSILON_V1") == 2
+                        && !sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1")
+                        && sodiumFragment.contains(
+                        "metallumEnvironment.materialWeatherAndTime.x\n            > 0.0")
                         && sodiumFragment.contains("float rainExposure = smoothstep(0.55, 0.85")
                         && sodiumFragment.contains("* rainExposure * rainExposure")
                         && sodiumFragment.contains("float wetRoughnessTarget")
@@ -936,6 +941,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("material.wetAlbedoScale = mix(")
                         && sodiumFragment.contains("vec3(0.025)")
                         && sodiumFragment.contains("material.wetness * 0.62")
+                        && sodiumFragment.contains("float metallumMaterialOpticsWeight =")
+                        && sodiumFragment.contains(
+                        "? 1.0 : metallumSurfaceMaterial.wetness;")
+                        && countOccurrences(sodiumFragment,
+                        "color.rgb += metallumMaterialOpticsWeight") == 2
                         && sodiumFragment.contains("color.rgb *= metallumSurfaceMaterial.wetAlbedoScale"),
                 "L8 material-aware wet roughness, albedo, specular, or reactive policy is missing");
         require(sodiumFragment.contains("vec3 metallumEnvironmentLookupV1(")

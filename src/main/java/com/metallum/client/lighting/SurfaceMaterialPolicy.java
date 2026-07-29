@@ -107,7 +107,7 @@ public final class SurfaceMaterialPolicy {
     );
     public static final Descriptor WATER = new Descriptor(
             Kind.WATER, 0.075f, 0.075f, 1.0f, 0.0f, 1.0f,
-            0.0f, 0.0204f, 0.96f,
+            0.0f, 0.0204f, 0.82f,
             0.36f, 0.095f, 0.035f, 0.94f
     );
 
