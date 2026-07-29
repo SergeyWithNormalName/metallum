@@ -282,9 +282,9 @@ public final class MetalNativeBridge {
                             LONG
                     )
             );
-            encodeTemporalDiagnosticsV1 = downcallWithoutCritical(
+            encodeTemporalDiagnosticsV2 = downcallWithoutCritical(
                     lookup,
-                    "metallum_encode_temporal_diagnostics_v1",
+                    "metallum_encode_temporal_diagnostics_v2",
                     FunctionDescriptor.of(
                             INT,
                             ValueLayout.ADDRESS,
@@ -292,6 +292,7 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            INT,
                             ValueLayout.ADDRESS
                     )
             );
@@ -836,7 +837,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle dynamicShadowCreateContextV1;
     private static final MethodHandle dynamicShadowReleaseContextV1;
     private static final MethodHandle dynamicShadowEncodeV1;
-    private static final MethodHandle encodeTemporalDiagnosticsV1;
+    private static final MethodHandle encodeTemporalDiagnosticsV2;
     private static final MethodHandle commitEntityVelocityReplay;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -1455,25 +1456,27 @@ public final class MetalNativeBridge {
         }
     }
 
-    public static int metallum_encode_temporal_diagnostics_v1(
+    public static int metallum_encode_temporal_diagnostics_v2(
             final MemorySegment commandBuffer,
             final MemorySegment depthTexture,
             final MemorySegment motionTexture,
             final MemorySegment reactiveTexture,
             final MemorySegment classificationTexture,
+            final int preserveMaterialReactive,
             final MemorySegment globalFence
     ) {
         try {
-            return (int) encodeTemporalDiagnosticsV1.invokeExact(
+            return (int) encodeTemporalDiagnosticsV2.invokeExact(
                     segment(commandBuffer),
                     segment(depthTexture),
                     segment(motionTexture),
                     segment(reactiveTexture),
                     segment(classificationTexture),
+                    preserveMaterialReactive,
                     segment(globalFence)
             );
         } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_encode_temporal_diagnostics_v1", throwable);
+            throw bridgeFailure("metallum_encode_temporal_diagnostics_v2", throwable);
         }
     }
 

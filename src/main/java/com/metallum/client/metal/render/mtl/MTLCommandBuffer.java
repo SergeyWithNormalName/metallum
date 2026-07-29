@@ -343,10 +343,12 @@ public final class MTLCommandBuffer {
             final MemorySegment motionTexture,
             final MemorySegment reactiveTexture,
             final MemorySegment classificationTexture,
+            final boolean preserveMaterialReactive,
             final MemorySegment globalFence
     ) {
-        return MetalNativeBridge.metallum_encode_temporal_diagnostics_v1(
-                handle(), depthTexture, motionTexture, reactiveTexture, classificationTexture, globalFence
+        return MetalNativeBridge.metallum_encode_temporal_diagnostics_v2(
+                handle(), depthTexture, motionTexture, reactiveTexture, classificationTexture,
+                preserveMaterialReactive ? 1 : 0, globalFence
         );
     }
 

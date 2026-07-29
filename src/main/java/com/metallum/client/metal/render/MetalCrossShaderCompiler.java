@@ -44,6 +44,10 @@ final class MetalCrossShaderCompiler {
     private static final int MSL_VERSION_4_0 = 0x040000;
     private static final Pattern VERTEX_ENTRY_PATTERN = Pattern.compile("\\bvertex\\s+\\w+\\s+(\\w+)\\s*\\(");
     private static final Pattern FRAGMENT_ENTRY_PATTERN = Pattern.compile("\\bfragment\\s+\\w+\\s+(\\w+)\\s*\\(");
+    private static final Map<String, Integer> L8_REACTIVE_OUTPUT_LOCATIONS = Map.of(
+            "fragColor", 0,
+            "metallumL8ReactiveMask", 1
+    );
     private static final String VOXEL_TRAVERSAL_LOOP_MSL =
             "    for (uint hardStep = 0u; hardStep < maxSteps; hardStep++)";
     private static final String VOXEL_TRAVERSAL_LOOP_NO_UNROLL_MSL =
@@ -143,6 +147,21 @@ final class MetalCrossShaderCompiler {
                             advanced
                     );
                     variants.put(HdrShaderFlavor.METALLUM_ADVANCED, advanced);
+                    if (isSodiumTerrainReceiverPipeline(pipeline)) {
+                        MetalCompiledRenderPipeline.ShaderVariantSource reactive = compileVariant(
+                                device,
+                                pipeline,
+                                shaderSource,
+                                HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                        );
+                        validateVariantParity(
+                                pipeline,
+                                HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE,
+                                legacy,
+                                reactive
+                        );
+                        variants.put(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE, reactive);
+                    }
                 } catch (ShaderCompileException | RuntimeException exception) {
                     AdvancedLightingPreflightGate.rejectAdvancedVariant(
                             "failed to compile METALLUM_ADVANCED receiver for "
@@ -352,11 +371,21 @@ final class MetalCrossShaderCompiler {
                 tolerateUnprovidedInputs(vertexOutputs, fragmentLayoutSpirv.inputs()),
                 layoutEntries
         );
-        MslShader fragmentMsl = spirvToMsl(fragmentSpirv.spirv(), layoutEntries.size(), Map.of());
+        MslShader fragmentMsl = spirvToMsl(
+                fragmentSpirv.spirv(),
+                layoutEntries.size(),
+                Map.of(),
+                flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                        ? L8_REACTIVE_OUTPUT_LOCATIONS
+                        : Map.of()
+        );
 
-        String fragmentSource = flavor == HdrShaderFlavor.METALLUM_ADVANCED
+        String fragmentSource = isAdvancedFlavor(flavor)
                 ? preserveVoxelShadowTraversalLoop(fragmentMsl.source())
                 : fragmentMsl.source();
+        if (flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
+            validateL8ReactiveMslOutputs(fragmentSource);
+        }
         String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
         String fragmentEntryPoint = extractEntryPoint(fragmentSource, FRAGMENT_ENTRY_PATTERN, "main0");
         List<MetalCompiledRenderPipeline.ResourceBinding> resources = List.copyOf(
@@ -446,7 +475,7 @@ final class MetalCrossShaderCompiler {
             final IntermediaryShaderModule module,
             final HdrShaderFlavor flavor
     ) {
-        if (flavor != HdrShaderFlavor.METALLUM_ADVANCED) {
+        if (!isAdvancedFlavor(flavor)) {
             return module;
         }
         var filtered = module.samplers().stream()
@@ -483,14 +512,16 @@ final class MetalCrossShaderCompiler {
             );
         }
         if (flavor == HdrShaderFlavor.METALLUM
-                || flavor == HdrShaderFlavor.METALLUM_ADVANCED) {
-            if (variant.semanticOutput()) {
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
+            boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE;
+            if (variant.semanticOutput() != reactive) {
                 throw new IllegalStateException(
-                        flavor + " variant retained a semantic attachment for pipeline "
+                        flavor + " variant has the wrong reactive attachment contract for pipeline "
                                 + pipeline.getLocation()
                 );
             }
-            if (flavor == HdrShaderFlavor.METALLUM_ADVANCED) {
+            if (isAdvancedFlavor(flavor)) {
                 validateAdvancedLightingBindings(pipeline, variant);
             }
         } else if (flavor != HdrShaderFlavor.LEGACY_HDR_SEMANTIC
@@ -645,6 +676,20 @@ final class MetalCrossShaderCompiler {
                 && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH)
                 && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.VANILLA_END_PORTAL_PATH);
         return sodiumTerrain || vanillaEntity || endPortal;
+    }
+
+    private static boolean isSodiumTerrainReceiverPipeline(final RenderPipeline pipeline) {
+        var vertex = pipeline.getVertexShader();
+        var fragment = pipeline.getFragmentShader();
+        return vertex.getNamespace().equals("sodium")
+                && fragment.getNamespace().equals("sodium")
+                && vertex.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH)
+                && fragment.getPath().equals(AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
+    }
+
+    private static boolean isAdvancedFlavor(final HdrShaderFlavor flavor) {
+        return flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE;
     }
 
     private static boolean isSunShadowCasterPipeline(final RenderPipeline pipeline) {
@@ -877,7 +922,20 @@ final class MetalCrossShaderCompiler {
         }
     }
 
-    private static MslShader spirvToMsl(final ByteBuffer spirvBytes, final int pushConstantBinding, final Map<String, GpuFormat> attributeFormats) throws ShaderCompileException {
+    private static MslShader spirvToMsl(
+            final ByteBuffer spirvBytes,
+            final int pushConstantBinding,
+            final Map<String, GpuFormat> attributeFormats
+    ) throws ShaderCompileException {
+        return spirvToMsl(spirvBytes, pushConstantBinding, attributeFormats, Map.of());
+    }
+
+    private static MslShader spirvToMsl(
+            final ByteBuffer spirvBytes,
+            final int pushConstantBinding,
+            final Map<String, GpuFormat> attributeFormats,
+            final Map<String, Integer> fragmentOutputLocations
+    ) throws ShaderCompileException {
         try (MemoryStack stack = MemoryStack.stackPush()) {
             IntBuffer spirvWords = spirvBytes.asIntBuffer();
 
@@ -921,6 +979,7 @@ final class MetalCrossShaderCompiler {
                 checkSpvc(Spvc.spvc_compiler_install_compiler_options(compiler, options), "spvc_compiler_install_compiler_options");
 
                 registerIntegerInputConversions(stack, compiler, attributeFormats);
+                bindFragmentOutputLocations(stack, compiler, fragmentOutputLocations);
 
                 PointerBuffer pActiveSet = stack.mallocPointer(1);
                 checkSpvc(Spvc.spvc_compiler_get_active_interface_variables(compiler, pActiveSet), "spvc_compiler_get_active_interface_variables");
@@ -952,6 +1011,81 @@ final class MetalCrossShaderCompiler {
     }
 
     record MslShader(String source, boolean hasPushConstants, Set<String> activeResources) {
+    }
+
+    /**
+     * Mojang's intermediary compiler compacts fragment outputs by reflected order, even when the
+     * patched GLSL declares explicit locations. Re-apply the L8 MRT locations to the copied
+     * SPIR-V before MSL emission so scene color remains color(0) and the scalar R8 mask color(1).
+     */
+    private static void bindFragmentOutputLocations(
+            final MemoryStack stack,
+            final long compiler,
+            final Map<String, Integer> locations
+    ) throws ShaderCompileException {
+        if (locations.isEmpty()) {
+            return;
+        }
+        if (new HashSet<>(locations.values()).size() != locations.size()
+                || locations.values().stream().anyMatch(location -> location < 0)) {
+            throw new ShaderCompileException("fragment output locations are invalid: " + locations);
+        }
+
+        PointerBuffer pResources = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_compiler_create_shader_resources(compiler, pResources),
+                "spvc_compiler_create_shader_resources(fragment outputs)"
+        );
+        PointerBuffer pList = stack.mallocPointer(1);
+        PointerBuffer pCount = stack.mallocPointer(1);
+        checkSpvc(
+                Spvc.spvc_resources_get_resource_list_for_type(
+                        pResources.get(0),
+                        Spvc.SPVC_RESOURCE_TYPE_STAGE_OUTPUT,
+                        pList,
+                        pCount
+                ),
+                "spvc_resources_get_resource_list_for_type(STAGE_OUTPUT)"
+        );
+        int count = (int) pCount.get(0);
+        if (count != locations.size()) {
+            throw new ShaderCompileException(
+                    "fragment output count changed: expected=" + locations.size() + ", actual=" + count
+            );
+        }
+
+        Set<String> rebound = new HashSet<>();
+        SpvcReflectedResource.Buffer outputs = SpvcReflectedResource.create(pList.get(0), count);
+        for (int index = 0; index < count; index++) {
+            SpvcReflectedResource output = outputs.get(index);
+            Integer location = locations.get(output.nameString());
+            if (location == null || !rebound.add(output.nameString())) {
+                throw new ShaderCompileException(
+                        "fragment output is not part of the canonical L8 MRT: " + output.nameString()
+                );
+            }
+            Spvc.spvc_compiler_set_decoration(
+                    compiler,
+                    output.id(),
+                    Spv.SpvDecorationLocation,
+                    location
+            );
+        }
+        if (!rebound.equals(locations.keySet())) {
+            throw new ShaderCompileException(
+                    "fragment output names changed: expected=" + locations.keySet() + ", actual=" + rebound
+            );
+        }
+    }
+
+    private static void validateL8ReactiveMslOutputs(final String source) {
+        boolean color = source.contains("float4 fragColor [[color(0)]];");
+        boolean reactive = source.contains("float metallumL8ReactiveMask [[color(1)]];");
+        if (!color || !reactive
+                || countOccurrences(source, "[[color(0)]]") != 1
+                || countOccurrences(source, "[[color(1)]]") != 1) {
+            throw new IllegalStateException("L8 reactive MSL output locations are not canonical");
+        }
     }
 
     private static Set<String> collectActiveResourceNames(final MemoryStack stack, final long compiler, final long activeSet) throws ShaderCompileException {

@@ -1703,3 +1703,98 @@ header shortcut без этой перестройки.
 Metal API/GPU Validation, source-fallback и precompiled pipelines, L3 compact-list
 OOB/overflow/max-index contracts, L6 canonical pages/cancellation/atlas, ABI/HDR/L5.
 После измерений `exclusiveFullscreen` возвращён к пользовательскому `false`.
+
+## 2026-07-29 — L8 materials/water: два отклонённых hot-path варианта и финальный gate
+
+### Scope и контроль
+
+Реализовался только L8: GGX/Schlick для metal/smooth, water/glass optics,
+rain-driven wet surfaces, analytic dimension environment fallback и production
+Temporal reactive weights. L6.5-L7 не реализовывались. SSR, depth ray marching,
+full-resolution normal buffer, новые probes/pass/texture и per-frame cubemap capture
+не добавлялись.
+
+Контроль — текущий architecture baseline
+`20260729T080551Z-gfcf6177ae911-dirty-three-architectures-baseline-detailed-off`.
+Все сравниваемые runs использовали один `nether-lava-stress-v1` contract: native
+`3024x1964`, exclusive fullscreen HDR, Balanced, MetalFX OFF, VSync OFF, frozen
+simulation, detailed timing, `300+600`. Контроль: FPS/min-window `51.810/51.807`,
+GPU p50/p95/p99/worst `20.8819/21.4842/22.0714/22.8311 ms`, 1%/0.1% low
+`32.292/31.103`.
+
+### Отклонено 1 — material resolver на каждом terrain fragment
+
+Run `20260729T093438Z-...-l8-materials-detailed-smoke`: `42.643 FPS`, GPU p95
+`25.7393 ms`. Регрессия критическая: dry dielectric платил за material struct,
+weather, view vector, transmission setup и material-aware helper state. Вариант
+полностью удалён.
+
+### Отклонено 2 — ранний material gate, но дублированные lighting branches
+
+Run `20260729T094257Z-...-l8-material-gated-detailed-smoke`: `48.677 FPS`, GPU p95
+`22.5124 ms`. Gate вернул большую часть стоимости, но две версии environment/cluster
+helpers всё ещё расширяли shader и register pressure. Примерно `-6%` FPS относительно
+контроля — неприемлемо; вариант полностью удалён.
+
+### Принято — единый буквальный L3-L6 common path и отдельные bounded L8 terms
+
+Финальный shader один раз вызывает прежние environment и clustered diffuse helpers.
+Material resolver, water normal/transmission, environment GGX и один dominant local
+GGX candidate выполняются только за coherent gate для tagged/translucent/rainy
+surface. Entity и End Portal возвращены на точный прежний L3-L6 путь.
+
+Run `20260729T094641Z-...-l8-single-legacy-call-detailed-smoke`: FPS/min-window
+`52.858/52.609`, GPU p50/p95/p99/worst
+`20.4921/20.9015/21.3232/22.6685 ms`, 1%/0.1% low `35.313/29.709`, COMPLETE,
+zero dropped events. Против контроля: FPS `+2.02%`, GPU p95 `-2.71%`, 1% low
+`+9.36%`, 0.1% low `-4.48%`. Последний tail находится внутри short-run regression
+limit `-12%`; устойчивый FPS win по одному detailed run не заявляется, но
+критического ущерба common path не обнаружено.
+
+Reactive вариант компилируется и выбирается только для Sodium terrain при активном
+Temporal, пишет в уже существующий `R8` ring и объединяется с diagnostic reactive
+через `max`. Native/Spatial/MetalFX OFF используют обычный измеренный flavor.
+Отдельный Metal runtime test подтверждает, что seeded weight `191/255` переживает
+diagnostic pass. Runtime `exclusiveFullscreen` после прогонов возвращён к
+пользовательскому `false`.
+
+### Temporal reactive MRT: исправление output ABI и отклонённый blending
+
+Первый live Temporal PSO обнаружил, что явные GLSL locations недостаточны: Mojang
+intermediary compacted outputs в reflected order, и SPIRV-Cross выдавал scalar
+`metallumL8ReactiveMask` в `color(0)`, а `fragColor` в `color(1)`. Metal закономерно
+отклонял scalar против `RGBA8Unorm`, после чего Advanced fail-closed переходил на
+Vanilla. Такие runs, включая `20260729T101906Z`, `20260729T102050Z`,
+`20260729T102209Z` и `20260729T102636Z`, недействительны как L8 performance evidence.
+
+Runtime теперь до MSL emission повторно назначает locations по точным SPIR-V output
+names, требует ровно два output и проверяет тип/слот `float4 fragColor -> color(0)`,
+`float reactive -> color(1)`. Live run `20260729T103125Z` подтвердил успешный Metal
+PSO и активный Advanced, но вариант с аппаратным `max` blending на terrain R8 дал
+`44.442 FPS / GPU p95 25.1049 ms` против Advanced+Temporal контроля
+`57.788 FPS / 20.2936 ms`: `-23.09% FPS`, поэтому полностью отклонён.
+
+### Принято — overwrite видимой terrain surface, max только при diagnostic merge
+
+Для opaque depth test оставляет видимый fragment; Sodium translucent рисуется
+back-to-front, поэтому конечный вес принадлежит ближайшей поверхности. R8 terrain
+attachment теперь пишет без blending, а необходимый `max(material, disocclusion)`
+остаётся в последующем diagnostic merge. Это не меняет resource lifetime, формат,
+clear/load/store contract или Native/Spatial отсутствие attachment.
+
+Интерливированный comparable Temporal Quality A/B на `hdrtest-static-v1`, native
+`3024x1964`, HDR, Balanced, VSync OFF, detailed `300+600`:
+
+- control без выбора reactive flavor, но с тем же Advanced+Temporal:
+  `20260729T103845Z`, FPS/min-window `55.475/53.372`, GPU p50/p95/p99/worst
+  `20.8395/22.1505/23.2338/39.5352 ms`, 1%/0.1% low `23.873/18.540`;
+- production candidate: `20260729T103720Z`, FPS/min-window `51.147/48.402`,
+  GPU `21.8299/23.9044/24.1374/26.2249 ms`, lows `32.641/30.358`, COMPLETE,
+  zero dropped events, Advanced/clustered lighting active.
+
+Разница: FPS `-7.80%`, GPU p50/p95/p99 `+4.75/+7.92/+3.89%`, 1%/0.1% lows
+`+36.73/+63.74%`; worst GPU tail ниже на `33.67%`. Один более ранний no-blend run
+был отклонён analyzer из-за нулевого clustered telemetry snapshot во втором окне и
+не используется как доказательство. Финальный FPS loss остаётся внутри принятого
+short-run regression limit `-12%`: ущерб некритичный, но FPS win не заявляется.
+После A/B production branch восстановлен, `exclusiveFullscreen=false`.

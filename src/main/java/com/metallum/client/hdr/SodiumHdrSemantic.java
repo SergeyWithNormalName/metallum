@@ -8,6 +8,20 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class SodiumHdrSemantic {
+    public static final int SURFACE_CLASS_NONE = 0;
+    public static final int SURFACE_CLASS_METAL = 1;
+    public static final int SURFACE_CLASS_SMOOTH_DIELECTRIC = 2;
+    public static final int SURFACE_CLASS_WATER = 3;
+    public static final int SURFACE_CLASS_GLASS = 4;
+
+    /** Internal-only bits carried by the temporary Sodium vertices before final packing. */
+    private static final int SURFACE_CLASS_SHIFT = 4;
+    private static final int SURFACE_CLASS_MASK = 0x07 << SURFACE_CLASS_SHIFT;
+    /** Version-locked unused base values in Sodium 0.9.1's current block shaders. */
+    private static final int MATERIAL_BASE_METAL = 2;
+    private static final int MATERIAL_BASE_SMOOTH_DIELECTRIC = 4;
+    private static final int MATERIAL_BASE_WATER = 3;
+    private static final int MATERIAL_BASE_GLASS = 6;
     private static final AtomicBoolean ACTIVE_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean MATERIAL_CONFLICT_LOGGED = new AtomicBoolean();
     private static final int AMETHYST_GROWTH_SURFACE_EMISSION = 2;
@@ -110,11 +124,32 @@ public final class SodiumHdrSemantic {
             final int lightEmission,
             final boolean exact
     ) {
+        tagQuad(vertices, lightEmission, exact, SURFACE_CLASS_NONE);
+    }
+
+    /**
+     * Carries the remesh-time L8 surface class in temporary vertex-only bits. Final packing uses
+     * the conditional exact-emission bit plus currently unused Sodium base combinations, so
+     * all existing 0..15 emission strengths survive without another terrain stream.
+     */
+    public static void tagQuad(
+            final ChunkVertexEncoder.Vertex[] vertices,
+            final int lightEmission,
+            final boolean exact,
+            final int surfaceClass
+    ) {
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(lightEmission, exact);
+        int boundedSurfaceClass = Math.clamp(
+                surfaceClass, SURFACE_CLASS_NONE, SURFACE_CLASS_GLASS);
+        if (semantic == 0 && boundedSurfaceClass != SURFACE_CLASS_NONE) {
+            semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT
+                    | (boundedSurfaceClass << SURFACE_CLASS_SHIFT);
+        }
         for (ChunkVertexEncoder.Vertex vertex : vertices) {
             ((HdrEmissionVertex) vertex).metallum$setHdrSemantic(semantic);
         }
-        if (semantic != 0 && ACTIVE_LOGGED.compareAndSet(false, true)) {
+        if ((semantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK) != 0
+                && ACTIVE_LOGGED.compareAndSet(false, true)) {
             Metallum.LOGGER.info(
                     "Sodium semantic HDR emission tagging is active (strength {}, exact {})",
                     semantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK,
@@ -138,15 +173,45 @@ public final class SodiumHdrSemantic {
 
         int emission = 0;
         boolean exact = false;
+        int surfaceClass = SURFACE_CLASS_NONE;
         for (ChunkVertexEncoder.Vertex vertex : vertices) {
             int vertexSemantic = ((HdrEmissionVertex) vertex).metallum$getHdrSemantic();
-            emission = Math.max(
-                    emission,
-                    vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK
-            );
-            exact |= (vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT) != 0;
+            int vertexEmission = vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK;
+            emission = Math.max(emission, vertexEmission);
+            exact |= vertexEmission != 0
+                    && (vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT) != 0;
+            if (vertexEmission == 0
+                    && (vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT) != 0) {
+                int vertexSurfaceClass = (vertexSemantic & SURFACE_CLASS_MASK)
+                        >> SURFACE_CLASS_SHIFT;
+                if (surfaceClass == SURFACE_CLASS_NONE) {
+                    surfaceClass = vertexSurfaceClass;
+                } else if (surfaceClass != vertexSurfaceClass) {
+                    surfaceClass = SURFACE_CLASS_NONE;
+                    break;
+                }
+            }
         }
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
-        return SodiumHdrShaderPatcher.packMaterialBits(materialBits, semantic);
+        int packedBase = materialBits;
+        if (semantic == 0 && surfaceClass != SURFACE_CLASS_NONE) {
+            semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT;
+            packedBase = materialBaseForSurfaceClass(materialBits, surfaceClass);
+        }
+        return SodiumHdrShaderPatcher.packMaterialBits(packedBase, semantic);
+    }
+
+    /** Final version-locked Sodium base used by one non-emissive L8 surface class. */
+    public static int materialBaseForSurfaceClass(
+            final int originalMaterialBits,
+            final int surfaceClass
+    ) {
+        return switch (surfaceClass) {
+            case SURFACE_CLASS_METAL -> MATERIAL_BASE_METAL;
+            case SURFACE_CLASS_SMOOTH_DIELECTRIC -> MATERIAL_BASE_SMOOTH_DIELECTRIC;
+            case SURFACE_CLASS_WATER -> MATERIAL_BASE_WATER;
+            case SURFACE_CLASS_GLASS -> MATERIAL_BASE_GLASS;
+            default -> originalMaterialBits;
+        };
     }
 }

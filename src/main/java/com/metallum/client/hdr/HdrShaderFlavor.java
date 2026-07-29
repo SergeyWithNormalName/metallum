@@ -14,5 +14,6 @@ public enum HdrShaderFlavor {
     SCENE_POST_LINEAR,
     METALLUM,
     METALLUM_ADVANCED,
+    METALLUM_ADVANCED_REACTIVE,
     SUN_SHADOW
 }

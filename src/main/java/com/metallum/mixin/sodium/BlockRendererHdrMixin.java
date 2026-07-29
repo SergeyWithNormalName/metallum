@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.material.DefaultMaterials;
 import net.caffeinemc.mods.sodium.client.model.light.LightMode;
 import net.caffeinemc.mods.sodium.client.render.chunk.terrain.material.Material;
@@ -168,7 +169,15 @@ abstract class BlockRendererHdrMixin {
                 partialOverlay,
                 this.metallum$bufferingPartialEmissionOverlay
         );
-        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact);
+        SurfaceMaterialPolicy.Kind surfaceKind = SurfaceMaterialPolicy.forBlock(
+                this.metallum$blockState).kind();
+        int surfaceClass = switch (surfaceKind) {
+            case METAL -> SodiumHdrSemantic.SURFACE_CLASS_METAL;
+            case SMOOTH_DIELECTRIC -> SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC;
+            case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
+            default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
+        };
+        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass);
     }
 
     @Unique

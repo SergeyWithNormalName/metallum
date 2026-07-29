@@ -26,6 +26,10 @@ public final class EnvironmentShadowBindingAbi {
     public static final int CONTRACT_OFFSET = 304;
     public static final int WORLD_UP_AND_MEDIUM_OFFSET = 320;
     public static final int CASCADE_NORMAL_BIAS_OFFSET = 336;
+    /** Reserved L4 tail promoted to the versioned, allocation-free L8 material environment. */
+    public static final int MATERIAL_WEATHER_AND_TIME_OFFSET = 352;
+    public static final int MATERIAL_CONTRACT_OFFSET = 368;
+    public static final int MATERIAL_CONTRACT_VERSION = 1;
 
     private static final int[] SHADOW_TEXTURE_SLOTS = {
             SHADOW_TEXTURE_0_SLOT,

@@ -5194,6 +5194,14 @@ private func ensureTemporalDiagnosticPipeline(device: MTLDevice) -> MTLRenderPip
         descriptor.fragmentFunction = fragment
         descriptor.colorAttachments[0].pixelFormat = .rg16Float
         descriptor.colorAttachments[1].pixelFormat = .r8Unorm
+        descriptor.colorAttachments[1].isBlendingEnabled = true
+        descriptor.colorAttachments[1].sourceRGBBlendFactor = .one
+        descriptor.colorAttachments[1].destinationRGBBlendFactor = .one
+        descriptor.colorAttachments[1].rgbBlendOperation = .max
+        descriptor.colorAttachments[1].sourceAlphaBlendFactor = .one
+        descriptor.colorAttachments[1].destinationAlphaBlendFactor = .one
+        descriptor.colorAttachments[1].alphaBlendOperation = .max
+        descriptor.colorAttachments[1].writeMask = .red
         if NativeState.debugVisualizationMode != 0 {
             descriptor.colorAttachments[2].pixelFormat = .r8Unorm
         }
@@ -8318,13 +8326,14 @@ private struct MetallumTemporalDiagnosticUniforms {
     var reserved1: UInt32 = 0
 }
 
-@_cdecl("metallum_encode_temporal_diagnostics_v1")
-public func metallum_encode_temporal_diagnostics_v1(
+@_cdecl("metallum_encode_temporal_diagnostics_v2")
+public func metallum_encode_temporal_diagnostics_v2(
     _ commandBuffer: MTLCommandBuffer,
     _ depthTexture: MTLTexture,
     _ motionTexture: MTLTexture,
     _ reactiveTexture: MTLTexture?,
     _ classificationTexture: MTLTexture?,
+    _ preserveMaterialReactive: Int32,
     _ globalFence: MTLFence
 ) -> Int32 {
     let result = autoreleasepool { () -> Int32 in
@@ -8457,7 +8466,8 @@ public func metallum_encode_temporal_diagnostics_v1(
         pass.colorAttachments[0].storeAction = .store
         if let reactiveTexture {
             pass.colorAttachments[1].texture = reactiveTexture
-            pass.colorAttachments[1].loadAction = .dontCare
+            pass.colorAttachments[1].loadAction = preserveMaterialReactive != 0 ? .load : .clear
+            pass.colorAttachments[1].clearColor = MTLClearColorMake(0, 0, 0, 0)
             pass.colorAttachments[1].storeAction = .store
         }
         if let classificationTexture = classificationTexture {
@@ -8520,6 +8530,27 @@ public func metallum_encode_temporal_diagnostics_v1(
         return 1
     }
     return result
+}
+
+/** Retained for older Java/native pairs; v1 never carries a material reactive seed. */
+@_cdecl("metallum_encode_temporal_diagnostics_v1")
+public func metallum_encode_temporal_diagnostics_v1(
+    _ commandBuffer: MTLCommandBuffer,
+    _ depthTexture: MTLTexture,
+    _ motionTexture: MTLTexture,
+    _ reactiveTexture: MTLTexture?,
+    _ classificationTexture: MTLTexture?,
+    _ globalFence: MTLFence
+) -> Int32 {
+    metallum_encode_temporal_diagnostics_v2(
+        commandBuffer,
+        depthTexture,
+        motionTexture,
+        reactiveTexture,
+        classificationTexture,
+        0,
+        globalFence
+    )
 }
 
 struct MetallumEntityMotionUniforms {

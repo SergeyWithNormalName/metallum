@@ -228,6 +228,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final MetalGpuTextureView colorTextureView,
             @Nullable final MetalGpuTextureView depthTextureView,
             final boolean semanticOutput,
+            final boolean reactiveOutput,
             final int viewportWidth,
             final int viewportHeight,
             final boolean clearColorEnabled,
@@ -238,6 +239,12 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final boolean clearDepthEnabled,
             final double clearDepthValue
     ) {
+        if (semanticOutput && reactiveOutput) {
+            throw new IllegalStateException(
+                    "Legacy HDR semantic and L8 reactive outputs cannot share one draw"
+            );
+        }
+        boolean auxiliaryOutput = semanticOutput || reactiveOutput;
         MemorySegment colorAttachment = colorTextureView.nativeHandle();
         PendingUiSeed seed = this.pendingUiSeeds.peek();
         boolean fusePendingSeed = seed != null
@@ -247,7 +254,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                         viewportWidth,
                         viewportHeight,
                         clearColorEnabled,
-                        semanticOutput,
+                        auxiliaryOutput,
                         currentSubmitIndex
                 );
         if (seed != null && !fusePendingSeed) {
@@ -256,7 +263,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         }
         MetalDevice.SemanticAttachment semanticAttachment = semanticOutput
                 ? this.device.prepareHdrSemanticAttachment((MetalGpuTexture) colorTextureView.texture())
-                : null;
+                : reactiveOutput
+                        ? this.device.prepareL8ReactiveAttachment(
+                                (MetalGpuTexture) colorTextureView.texture()
+                        )
+                        : null;
         MemorySegment semanticHandle = semanticAttachment == null ? MemorySegment.NULL : semanticAttachment.texture();
         MemorySegment depthAttachment = depthTextureView == null ? MemorySegment.NULL : depthTextureView.nativeHandle();
         MetalGpuTexture depthTexture = depthTextureView == null
@@ -268,7 +279,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         MTLPixelFormat stencilFormat = depthTexture == null
                 ? MTLPixelFormat.Invalid
                 : depthTexture.mtlStencilPixelFormat();
-        // The semantic mask accumulates contributions from every scene target
+        // The auxiliary mask accumulates contributions from every scene target
         // in the current submitted frame. An offscreen color/depth clear (for
         // example Fabulous translucent terrain) must not erase opaque markers
         // already written by the main target.
@@ -1142,6 +1153,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 outputs.motion().nativeHandle(),
                 reactiveHandle,
                 classificationHandle,
+                this.device.materialReactiveAvailableForCurrentSubmit(),
                 this.fence
         );
         if (status == 1) {

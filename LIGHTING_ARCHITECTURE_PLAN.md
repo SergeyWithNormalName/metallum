@@ -1882,7 +1882,7 @@ P1 (ProMotion/Present Pacing) ──> P2 (Frame Interpolation) ──> P3 (Об�
 - Нет бесконечного ghosting или ярких вспышек (white bursts) при chunk load.
 - Динамические сущности (entities) получают согласованное непрямое освещение с ландшафтом (terrain).
 
-### Этап L8. Materials, water, glass optics, reflections
+### Этап L8. Materials, water, glass optics, reflections — ✅ ВЫПОЛНЕН (2026-07-29)
 
 GGX-материалы, полупрозрачность и отражающие свойства без использования Screen Space Reflections (SSR).
 
@@ -1915,6 +1915,46 @@ GGX-материалы, полупрозрачность и отражающие
 - Корректный внешний вид PBR-материалов (металлы, гладкие блоки) и реалистичная вода без использования Screen Space Reflections (подтверждено отсутствием вызовов трассировки по буферу глубины).
 - Мокрые поверхности визуально воспринимаются влажными за счет правильного баланса Френеля, шероховатости и затемнения альбедо.
 - Вода выглядит качественно лучше ванильной, оставаясь стабильной в динамике и производительной на M1 Pro.
+
+#### Реализация (2026-07-29)
+
+- Добавлен versioned compact surface-material contract без нового terrain stream:
+  non-emissive metal, smooth dielectric, water и glass используют условно свободный
+  exact-emission bit и version-locked Sodium base values; все прежние уровни emission
+  `0..15` сохраняются без потери точности.
+- Advanced terrain path получил energy-conserving Lambert + GGX/Schlick, один
+  bounded dominant local specular candidate, analytic sky/dimension environment
+  fallback, water Fresnel/procedural waves/refraction/Beer-Lambert absorption и
+  rain-driven wet roughness/Fresnel/albedo. Entity и End Portal сохраняют прежний
+  L3-L6 hot path. SSR, depth ray marching, full-resolution normal buffer, per-frame
+  cubemap capture и новые reflection resources не добавлены; cached probes остаются
+  выключенными до отдельного профилирования, как и требовал план.
+- Полная production reactive policy записывает веса water/glass/metal/smooth/wet
+  только в уже существующий трехслотовый `R8` input активного MetalFX Temporal.
+  Native/Spatial/MetalFX OFF не выбирают reactive shader flavor и не выделяют L8
+  motion/reactive ресурсы. Diagnostic disocclusion и material weight объединяются
+  операцией `max`; native validation подтверждает сохранение предварительно записанного
+  material weight. Mojang intermediary compacted fragment outputs независимо от
+  GLSL locations, поэтому runtime повторно фиксирует SPIR-V outputs по именам перед
+  MSL emission и строго проверяет `fragColor -> color(0)`, scalar reactive -> `color(1)`.
+- Два ранних shader-варианта отклонены из-за регрессии (`51.810 -> 42.643 FPS` и
+  `51.810 -> 48.677 FPS`). Финальный coherent-gated вариант оставляет буквальный
+  L3-L6 helper path для обычного сухого terrain. На одинаковом
+  `nether-lava-stress-v1`, native `3024x1964`, HDR, Balanced, MetalFX OFF, VSync OFF,
+  detailed `300+600`: `52.858 FPS`, GPU p95 `20.9015 ms` против контроля
+  `51.810 FPS / 21.4842 ms`; 1% low `+9.36%`, 0.1% low `-4.48%`. Критического
+  ущерба common-path FPS не обнаружено. Для единственного MRT-пути выполнен отдельный
+  Temporal Quality A/B на `hdrtest-static-v1`, `300+600`: аппаратный `max` blend
+  отклонён (`57.788 -> 44.442 FPS`, `-23.09%`). Финальный depth/order-owned R8 write
+  оставляет `max` только diagnostic merge: интерливированный контроль
+  `55.475 FPS / GPU p95 22.1505 ms`, кандидат
+  `51.147 FPS / 23.9044 ms` (`-7.80% FPS`, `+7.92% p95`), 1%/0.1% lows
+  `+36.73%/+63.74%`. Регрессия остаётся внутри принятого short-run limit `-12%` и
+  не является критической; устойчивого улучшения tails по одному A/B не заявляется.
+- Численные, actual-source GLSL/SPIR-V, compact ABI, shader flavor, Java/native bridge
+  и Metal GPU reactive-merge контракты входят в `check`. Автоматические проверки не
+  заменяют финальный субъективный visual smoke воды/стекла/мокрых поверхностей на
+  пользовательском мире, но незакрытого L8 code path после stage gate нет.
 
 ### Этап P1. ProMotion/present pacing
 

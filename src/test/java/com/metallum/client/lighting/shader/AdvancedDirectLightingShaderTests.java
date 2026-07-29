@@ -32,7 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Actual-source and numeric contracts for the L3 terrain/entity/end-portal shader adapter. */
+/** Actual-source and numeric contracts for the L3-L8 terrain/entity/end-portal shader adapter. */
 public final class AdvancedDirectLightingShaderTests {
     private static final ShaderDefines SODIUM_SOLID_DEFINES = ShaderDefines.builder()
             .define("USE_VERTEX_COMPRESSION")
@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "01708076d8d3e3fa4483e5bd71e39247a6227c0622030bf910d3b6c640affb54",
+            "sodium-solid-fsh", "8be2d65fca8643d56d9b91d1bce1fe8baecad40c39beef75f3eccc1f4c4766c5",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "b4d61ed763c2ca6a61267c51b561bb9338df404729341f4bd2bb7909cf7c25f4",
+            "sodium-cutout-fsh", "0ff31c0d7822e999f13a85059edebd8236185da395b26065624ec61d9d92b0cb",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "956c3e17384c12eb00b33ed89c1bbf8813d5d4b1701bd6d5b31aa62608450947",
+            "minecraft-entity-fsh", "7824c9407ffe665fe7dc6da2afc50b59a70ec19cf7795ffefe3db52e6575b4b2",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "cc0d109811b46474ca4c88ef9d835075cdd479dc9594ee4ebfb3af0707aa1623"
+            "minecraft-end-portal-fsh", "b613ae52f25e9afd9ac4d0158fe8bb86197c0b67c9c5e96f023dace9debe7e15"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -97,6 +97,8 @@ public final class AdvancedDirectLightingShaderTests {
         testDominantSoftShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
+        testL8MaterialOpticsAndBoundedCost();
+        testL8ReactiveTemporalVariant();
         testFailClosedSourceContracts();
         testTwoPhasePreflightGate();
         testActualSourcesCompileAndMatchGoldens();
@@ -134,6 +136,9 @@ public final class AdvancedDirectLightingShaderTests {
         require(EnvironmentShadowBindingAbi.VERSION == 1
                         && EnvironmentShadowBindingAbi.PARAMS_SLOT == 26
                         && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
+                        && EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET == 352
+                        && EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET == 368
+                        && EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION == 1
                         && java.util.Arrays.equals(
                         EnvironmentShadowBindingAbi.shadowTextureSlots(),
                         new int[]{13, 14, 15})
@@ -441,7 +446,8 @@ public final class AdvancedDirectLightingShaderTests {
         require(endPortalFragment.contains("metallumPortalDerivativeNormal")
                         && endPortalFragment.contains(
                         "const vec3 metallumEndPortalReceiverAlbedo = vec3(0.18, 0.28, 0.30);")
-                        && endPortalFragment.contains("metallumPreparedAlbedo, 1.0);"),
+                        && endPortalFragment.contains(
+                        "metallumPreparedAlbedo, 1.0);"),
                 "end portal did not use its sky-exposed special-receiver lighting contract");
         require(!endPortalVertex.contains("metallumSkyVisibility")
                         && !endPortalFragment.contains("metallumSkyVisibility"),
@@ -489,14 +495,10 @@ public final class AdvancedDirectLightingShaderTests {
         require(countOccurrences(sodiumFragment,
                         "vec3 metallumDirectNormal = metallumSafeNormalV1(") == 1
                         && countOccurrences(entityFragment,
-                        "vec3 metallumDirectNormal = metallumSafeNormalV1(") == 1
-                        && countOccurrences(sodiumFragment,
-                        "metallumSafeNormalV1(") == 2
-                        && countOccurrences(entityFragment,
-                        "metallumSafeNormalV1(") == 2,
+                        "vec3 metallumDirectNormal = metallumSafeNormalV1(") == 1,
                 "surface normal is not prepared exactly once per fragment");
-        require(!sodiumEnvironment.contains("metallumSafeNormalV1("),
-                "environment helper redundantly normalizes its prepared normal");
+        require(countOccurrences(sodiumEnvironment, "metallumSafeNormalV1(-viewPosition)") == 1,
+                "environment material path does not prepare one bounded view direction");
         require(countOccurrences(sodiumFragment,
                         "vec3 metallumPreparedAlbedo =") == 1
                         && countOccurrences(entityFragment,
@@ -820,6 +822,118 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("for (int x = -1; x <= 1; ++x)")
                         && sodiumFragment.contains("smoothstep(split - blendWidth, split, viewDepth)"),
                 "terrain/entities do not share bounded PCF environment lighting with cascade blending");
+    }
+
+    private static void testL8MaterialOpticsAndBoundedCost() throws IOException {
+        ShaderCase[] sources = actualTargetSources();
+        String sodiumFragment = advancedSource(sources[1]);
+        String entityFragment = advancedSource(sources[3]);
+        String endPortalFragment = advancedSource(sources[5]);
+        String direct = materialSpecularHelper(sodiumFragment);
+        String environment = environmentHelper(sodiumFragment);
+
+        require(sodiumFragment.contains("struct MetallumSurfaceMaterialV1")
+                        && sodiumFragment.contains("METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 2u")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 4u")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 3u")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 6u")
+                        && sodiumFragment.contains("emissionCode == 0u"),
+                "L8 compact metal/smooth/water/glass classification is missing or aliases emission");
+        require(sodiumFragment.contains("metallumGgxDistributionV1")
+                        && sodiumFragment.contains("metallumGgxGeometryTermV1")
+                        && sodiumFragment.contains("metallumSchlickFresnelV1")
+                        && sodiumFragment.contains("vec3 metallumEvaluateGgxV1("),
+                "L8 GGX/Schlick material optics are incomplete");
+        require(sodiumFragment.contains("vec3 refracted = refract(")
+                        && sodiumFragment.contains("exp(-material.absorption * distance)")
+                        && sodiumFragment.contains("metallumWaterNormalV1")
+                        && sodiumFragment.contains("float waveX = sin(")
+                        && sodiumFragment.contains("float waveZ = cos("),
+                "L8 water refraction, depth absorption, or procedural waves are missing");
+        require(sodiumFragment.contains("material.wetness = terrainSurface")
+                        && sodiumFragment.contains("material.roughness * (1.0 - 0.68 * material.wetness)")
+                        && sodiumFragment.contains("material.wetness * 0.62")
+                        && sodiumFragment.contains("1.0 - 0.16 * material.wetness"),
+                "L8 rain-driven wet roughness, albedo, or reactive policy is missing");
+        require(sodiumFragment.contains("vec3 metallumEnvironmentLookupV1(")
+                        && !sodiumFragment.contains("samplerCube")
+                        && !sodiumFragment.contains("metallumSceneDepth")
+                        && !sodiumFragment.toLowerCase().contains("raymarch")
+                        && !sodiumFragment.contains("SSR"),
+                "L8 lost its mandatory stable environment fallback or introduced SSR/probe cost");
+
+        require(sodiumFragment.contains("bool metallumTaggedL8Surface")
+                        && sodiumFragment.contains("bool metallumTranslucentL8Surface")
+                        && sodiumFragment.contains("bool metallumRainyL8Surface")
+                        && sodiumFragment.contains(
+                        "if (metallumTaggedL8Surface || metallumTranslucentL8Surface")
+                        && before(sodiumFragment,
+                        "if (metallumTaggedL8Surface || metallumTranslucentL8Surface",
+                        "metallumResolveSurfaceMaterialV1("),
+                "ordinary dry terrain does not enter the literal legacy L3-L6 fast path");
+        require(environment.contains("vec3 metallumEvaluateMaterialEnvironmentV1(")
+                        && before(environment,
+                        "return albedo * diffuse * 0.31830988618;",
+                        "vec3 metallumEvaluateMaterialEnvironmentV1("),
+                "L8 changed the legacy environment helper instead of adding a gated optic term");
+        require(direct.contains("metallumEvaluateClusteredMaterialSpecularV1")
+                        && direct.contains("float dominantScore = 0.0;")
+                        && countOccurrences(direct, "metallumEvaluateGgxV1(") == 1
+                        && before(direct,
+                        "for (uint candidate = 0u; candidate < countLimit; ++candidate)",
+                        "return metallumEvaluateGgxV1("),
+                "local GGX is not bounded to one dominant-light evaluation per fragment");
+        require(countOccurrences(sodiumFragment, "metallumEvaluateGgxV1(") == 3,
+                "L8 added an unbounded GGX call site");
+        require(countOccurrences(sodiumFragment, "metallumResolveSurfaceMaterialV1(") == 2
+                        && countOccurrences(entityFragment,
+                        "metallumResolveSurfaceMaterialV1(") == 1
+                        && countOccurrences(endPortalFragment,
+                        "metallumResolveSurfaceMaterialV1(") == 1,
+                "non-terrain roles or the dry terrain path retained per-fragment material setup");
+    }
+
+    private static void testL8ReactiveTemporalVariant() throws IOException {
+        ShaderCase[] sources = actualTargetSources();
+        String sodiumVertex = advancedSource(sources[0]);
+        String sodiumFragment = advancedSource(sources[1]);
+        L8ReactiveShaderPatcher.Result reactive = L8ReactiveShaderPatcher.patch(
+                sources[1].namespace(),
+                sources[1].path(),
+                sources[1].stage(),
+                sodiumFragment
+        );
+        require(reactive.success(), "L8 reactive terrain variant failed: "
+                + reactive.failureReason());
+        require(reactive.source().contains("layout(location = 0) out vec4 fragColor;")
+                        && reactive.source().contains(
+                        "layout(location = 1) out float metallumL8ReactiveMask;")
+                        && reactive.source().contains(
+                        "metallumL8ReactiveMask = clamp(metallumL8ReactiveWeight, 0.0, 1.0);")
+                        && countOccurrences(reactive.source(), "metallumL8ReactiveMask") == 2,
+                "L8 reactive output is not a single canonical MRT contract");
+        L8ReactiveShaderPatcher.Result second = L8ReactiveShaderPatcher.patch(
+                sources[1].namespace(),
+                sources[1].path(),
+                sources[1].stage(),
+                reactive.source()
+        );
+        require(second.success() && second.source().equals(reactive.source()),
+                "L8 reactive patching is not idempotent");
+        require(!L8ReactiveShaderPatcher.patch(
+                        sources[3].namespace(),
+                        sources[3].path(),
+                        sources[3].stage(),
+                        advancedSource(sources[3])
+                ).success(),
+                "L8 reactive MRT escaped Sodium terrain");
+        compilePair(
+                "sodium-l8-reactive",
+                sodiumVertex,
+                reactive.source(),
+                SODIUM_SOLID_DEFINES
+        );
     }
 
     private static void testFailClosedSourceContracts() throws IOException {
@@ -1634,8 +1748,18 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static String directHelper(final String source) {
         int start = source.indexOf("uint metallumClusterIndexV1(");
-        int end = source.indexOf("// METALLUM_MATERIAL_LINEAR_V1", start);
+        int end = source.indexOf("vec3 metallumEvaluateClusteredMaterialSpecularV1(", start);
+        if (end < 0) {
+            end = source.indexOf("// METALLUM_MATERIAL_LINEAR_V1", start);
+        }
         require(start >= 0 && end > start, "Advanced direct helper block is missing");
+        return source.substring(start, end).strip();
+    }
+
+    private static String materialSpecularHelper(final String source) {
+        int start = source.indexOf("vec3 metallumEvaluateClusteredMaterialSpecularV1(");
+        int end = source.indexOf("// METALLUM_MATERIAL_LINEAR_V1", start);
+        require(start >= 0 && end > start, "L8 material specular helper block is missing");
         return source.substring(start, end).strip();
     }
 

@@ -81,7 +81,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                     MetallumMaterialShaderPatcher.Stage.FRAGMENT)
     );
 
-    private static final String FRAGMENT_ABI_AND_HELPERS = """
+    private static final String FRAGMENT_ABI_AND_HELPERS = buildFragmentAbiAndHelpers();
+
+    private static String buildFragmentAbiAndHelpers() {
+        return new StringBuilder(96_000).append("""
 
             // METALLUM_ADVANCED_DIRECT_LIGHTING_V1
             struct MetallumGpuLightV1 {
@@ -109,8 +112,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uvec4 contract;
                 vec4 worldUpAndMedium;
                 vec4 cascadeNormalBias;
-                vec4 reserved1;
-                vec4 reserved2;
+                vec4 materialWeatherAndTime;
+                uvec4 materialContract;
             } metallumEnvironment;
 
             layout(binding = 13) uniform sampler2DShadow metallumSunShadow0;
@@ -226,7 +229,206 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 return scaledNormal * inversesqrt(lengthSquared);
             }
+            """).append("""
+            const uint METALLUM_SURFACE_DIELECTRIC_V1 = 0u;
+            const uint METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 = 1u;
+            const uint METALLUM_SURFACE_METAL_V1 = 2u;
+            const uint METALLUM_SURFACE_GLASS_V1 = 3u;
+            const uint METALLUM_SURFACE_WATER_V1 = 4u;
 
+            struct MetallumSurfaceMaterialV1 {
+                vec3 absorption;
+                float roughness;
+                float metalness;
+                float dielectricF0;
+                float transmission;
+                float wetness;
+                float reactiveWeight;
+                float opticalDepth;
+                uint kind;
+            };
+
+            MetallumSurfaceMaterialV1 metallumResolveSurfaceMaterialV1(
+                    uint packedMaterial,
+                    float alpha,
+                    vec3 normal,
+                    float skyVisibility,
+                    bool terrainSurface) {
+                uint emissionCode = (packedMaterial >> 3u) & 15u;
+                uint baseMaterial = packedMaterial & 7u;
+                bool specialSurface = emissionCode == 0u
+                        && ((packedMaterial >> 7u) & 1u) != 0u;
+                bool untaggedTranslucentSurface = !specialSurface
+                        && terrainSurface && emissionCode == 0u
+                        && alpha < 0.985;
+                uint kind = specialSurface && baseMaterial == 3u
+                        ? METALLUM_SURFACE_WATER_V1
+                        : specialSurface && baseMaterial == 2u
+                                ? METALLUM_SURFACE_METAL_V1
+                                : specialSurface && baseMaterial == 4u
+                                        ? METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1
+                                        : specialSurface && baseMaterial == 6u
+                                                ? METALLUM_SURFACE_GLASS_V1
+                                                : untaggedTranslucentSurface
+                                                        ? METALLUM_SURFACE_GLASS_V1
+                                                        : METALLUM_SURFACE_DIELECTRIC_V1;
+
+                MetallumSurfaceMaterialV1 material;
+                material.kind = kind;
+                material.roughness = kind == METALLUM_SURFACE_WATER_V1 ? 0.075
+                        : kind == METALLUM_SURFACE_GLASS_V1 ? 0.10
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.22
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.24 : 0.68;
+                material.metalness = kind == METALLUM_SURFACE_METAL_V1 ? 0.92 : 0.0;
+                material.dielectricF0 = kind == METALLUM_SURFACE_WATER_V1 ? 0.0204 : 0.04;
+                material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.96
+                        : kind == METALLUM_SURFACE_GLASS_V1 ? 0.92 : 0.0;
+                material.absorption = kind == METALLUM_SURFACE_WATER_V1
+                        ? vec3(0.36, 0.095, 0.035)
+                        : kind == METALLUM_SURFACE_GLASS_V1
+                                ? vec3(0.08, 0.035, 0.018) : vec3(0.0);
+                material.reactiveWeight = kind == METALLUM_SURFACE_WATER_V1 ? 0.94
+                        : kind == METALLUM_SURFACE_GLASS_V1 ? 0.82
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.18
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.12 : 0.0;
+                material.opticalDepth = kind == METALLUM_SURFACE_WATER_V1 ? 1.65
+                        : kind == METALLUM_SURFACE_GLASS_V1 ? 0.24 : 0.0;
+
+                float upFacing = max(dot(normal, normalize(
+                        metallumEnvironment.worldUpAndMedium.xyz)), 0.0);
+                float rain = metallumEnvironment.materialContract.x == 1u
+                        ? clamp(metallumEnvironment.materialWeatherAndTime.x, 0.0, 1.0)
+                        : 0.0;
+                material.wetness = terrainSurface && material.transmission == 0.0
+                        ? rain * clamp(skyVisibility, 0.0, 1.0)
+                                * upFacing * upFacing * upFacing * upFacing
+                        : 0.0;
+                material.roughness = max(
+                        0.055, material.roughness * (1.0 - 0.68 * material.wetness));
+                material.reactiveWeight = max(
+                        material.reactiveWeight, material.wetness * 0.62);
+                return material;
+            }
+
+            vec3 metallumMaterialF0V1(
+                    MetallumSurfaceMaterialV1 material,
+                    vec3 albedo) {
+                vec3 dielectric = vec3(material.dielectricF0);
+                dielectric = mix(dielectric, vec3(0.075), material.wetness);
+                return clamp(mix(dielectric, albedo, material.metalness), vec3(0.0), vec3(0.98));
+            }
+
+            vec3 metallumWaterNormalV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    MetallumSurfaceMaterialV1 material) {
+                if (material.kind != METALLUM_SURFACE_WATER_V1
+                        || metallumVoxelShadow.caps.x != 3u) {
+                    return normal;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldPosition = metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + worldFromView * viewPosition;
+                vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
+                if (dot(worldNormal, worldNormal) == 0.0 || abs(worldNormal.y) < 0.55) {
+                    return normal;
+                }
+                float time = metallumEnvironment.materialContract.x == 1u
+                        ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
+                float waveX = sin(dot(worldPosition.xz, vec2(0.78, 1.17)) + time * 1.35);
+                float waveZ = cos(dot(worldPosition.xz, vec2(-1.31, 0.63)) - time * 1.08);
+                worldNormal = metallumSafeNormalV1(worldNormal + vec3(waveX, 0.0, waveZ) * 0.085);
+                vec3 perturbed = metallumSafeNormalV1(transpose(worldFromView) * worldNormal);
+                return dot(perturbed, perturbed) == 0.0 ? normal : perturbed;
+            }
+
+            float metallumGgxDistributionV1(float nDotH, float roughness) {
+                float alpha = max(roughness, 0.045);
+                alpha *= alpha;
+                float alpha2 = alpha * alpha;
+                float denominator = nDotH * nDotH * (alpha2 - 1.0) + 1.0;
+                return alpha2 / max(3.14159265359 * denominator * denominator, 0.000001);
+            }
+
+            float metallumGgxGeometryTermV1(float nDotV, float nDotL, float roughness) {
+                float r = roughness + 1.0;
+                float k = r * r * 0.125;
+                float view = nDotV / max(nDotV * (1.0 - k) + k, 0.000001);
+                float light = nDotL / max(nDotL * (1.0 - k) + k, 0.000001);
+                return view * light;
+            }
+
+            vec3 metallumSchlickFresnelV1(vec3 f0, float cosine) {
+                float grazing = 1.0 - clamp(cosine, 0.0, 1.0);
+                float grazing2 = grazing * grazing;
+                float grazing5 = grazing2 * grazing2 * grazing;
+                return f0 + (vec3(1.0) - f0) * grazing5;
+            }
+
+            vec3 metallumEvaluateGgxV1(
+                    vec3 normal,
+                    vec3 viewDirection,
+                    vec3 lightDirection,
+                    vec3 radiance,
+                    vec3 f0,
+                    float roughness) {
+                float nDotV = max(dot(normal, viewDirection), 0.0001);
+                float nDotL = max(dot(normal, lightDirection), 0.0);
+                if (nDotL == 0.0) {
+                    return vec3(0.0);
+                }
+                vec3 halfVector = metallumSafeNormalV1(viewDirection + lightDirection);
+                if (dot(halfVector, halfVector) == 0.0) {
+                    return vec3(0.0);
+                }
+                float nDotH = max(dot(normal, halfVector), 0.0);
+                float vDotH = max(dot(viewDirection, halfVector), 0.0);
+                float distribution = metallumGgxDistributionV1(nDotH, roughness);
+                float geometry = metallumGgxGeometryTermV1(nDotV, nDotL, roughness);
+                vec3 fresnel = metallumSchlickFresnelV1(f0, vDotH);
+                return radiance * fresnel
+                        * (distribution * geometry * nDotL / max(4.0 * nDotV * nDotL, 0.0001));
+            }
+
+            vec3 metallumEnvironmentLookupV1(vec3 direction) {
+                vec3 up = normalize(metallumEnvironment.worldUpAndMedium.xyz);
+                float hemisphere = clamp(dot(direction, up) * 0.5 + 0.5, 0.0, 1.0);
+                vec3 ambient = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                vec3 sky = max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0));
+                vec3 environment = ambient * 0.31830988618
+                        + sky * mix(0.12, 0.86, hemisphere);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                if (dot(toLight, toLight) > 0.0) {
+                    float celestial = pow(max(dot(direction, toLight), 0.0), 384.0);
+                    environment += max(
+                            metallumEnvironment.directionalRadiance.rgb, vec3(0.0)) * celestial;
+                }
+                return environment;
+            }
+
+            vec3 metallumTransmissionV1(
+                    vec3 albedo,
+                    vec3 viewDirection,
+                    vec3 normal,
+                    MetallumSurfaceMaterialV1 material) {
+                if (material.transmission == 0.0) {
+                    return albedo * (1.0 - 0.16 * material.wetness);
+                }
+                float nDotV = max(abs(dot(normal, viewDirection)), 0.08);
+                float eta = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? (1.0 / 1.333) : (1.0 / 1.52);
+                vec3 refracted = refract(-viewDirection, normal, eta);
+                if (dot(refracted, refracted) == 0.0) {
+                    refracted = -viewDirection;
+                }
+                float distance = material.opticalDepth / nDotV;
+                vec3 transmittance = exp(-material.absorption * distance);
+                vec3 refractedEnvironment = metallumEnvironmentLookupV1(
+                        metallumSafeNormalV1(refracted));
+                return mix(albedo, refractedEnvironment * transmittance,
+                        material.transmission * 0.78);
+            }
+            """).append("""
             float metallumPcfV1(sampler2DShadow shadowMap, vec3 coordinate) {
                 if (any(lessThan(coordinate.xy, vec2(0.0)))
                         || any(greaterThan(coordinate.xy, vec2(1.0)))
@@ -347,6 +549,42 @@ public final class AdvancedDirectLightingShaderPatcher {
                             * (directionalWeight * sunVisibility);
                 }
                 return albedo * diffuse * 0.31830988618;
+            }
+
+            vec3 metallumEvaluateMaterialEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    MetallumSurfaceMaterialV1 material) {
+                vec3 viewDirection = metallumSafeNormalV1(-viewPosition);
+                if (dot(viewDirection, viewDirection) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                vec3 f0 = metallumMaterialF0V1(material, albedo);
+                float nDotV = max(dot(normal, viewDirection), 0.0);
+                vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
+                vec3 reflectedDirection = reflect(-viewDirection, normal);
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(reflectedDirection);
+                float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                vec3 result = reflectedEnvironment * environmentFresnel
+                        * environmentVisibility * (1.0 - material.roughness * 0.48);
+
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
+                if (directionalWeight > 0.0) {
+                    float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    result += metallumEvaluateGgxV1(
+                            normal,
+                            viewDirection,
+                            toLight,
+                            max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                                    * (skyOcclusion * sunVisibility),
+                            f0,
+                            material.roughness);
+                }
+                return result;
             }
 
             bool metallumFiniteVec3V1(vec3 value) {
@@ -1592,7 +1830,89 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 return direct;
             }
-            """;
+
+            vec3 metallumEvaluateClusteredMaterialSpecularV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    MetallumSurfaceMaterialV1 material) {
+                if (metallumLighting.reserved0.w != 1u
+                        || metallumLighting.capacitiesAndFlags.w != 64u
+                        || metallumLighting.gridAndLightCount.z != 6u
+                        || dot(normal, normal) == 0.0) {
+                    return vec3(0.0);
+                }
+                uint activeLightCount = min(
+                        metallumLighting.gridAndLightCount.w,
+                        metallumLighting.capacitiesAndFlags.y);
+                uint cluster = metallumClusterIndexV1(viewPosition);
+                uint clusterCapacity = metallumLighting.capacitiesAndFlags.x;
+                if (activeLightCount == 0u || cluster >= clusterCapacity) {
+                    return vec3(0.0);
+                }
+                MetallumClusterHeaderV1 header =
+                        metallumClusterHeaderBuffer.headers[cluster];
+                uint indexCapacity = metallumLighting.capacitiesAndFlags.z;
+                if (header.offset > indexCapacity
+                        || header.count > indexCapacity - header.offset) {
+                    return vec3(0.0);
+                }
+                vec3 viewDirection = metallumSafeNormalV1(-viewPosition);
+                if (dot(viewDirection, viewDirection) == 0.0) {
+                    return vec3(0.0);
+                }
+
+                float dominantScore = 0.0;
+                vec3 dominantDirection = vec3(0.0);
+                vec3 dominantRadiance = vec3(0.0);
+                uint countLimit = min(
+                        min(header.count, metallumLighting.extentAndClusterCap.z),
+                        256u);
+                for (uint candidate = 0u; candidate < countLimit; ++candidate) {
+                    uint lightIndex = metallumClusterIndexBuffer.indices[
+                            header.offset + candidate];
+                    if (lightIndex >= activeLightCount) {
+                        continue;
+                    }
+                    MetallumGpuLightV1 light = metallumLightBuffer.lights[lightIndex];
+                    float radius = max(light.positionRadius.w, 0.0);
+                    vec3 toLight = light.positionRadius.xyz - viewPosition;
+                    float distanceSquared = dot(toLight, toLight);
+                    if (radius <= 0.0 || distanceSquared >= radius * radius) {
+                        continue;
+                    }
+                    float inverseDistance = inversesqrt(max(distanceSquared, 0.000001));
+                    vec3 lightDirection = toLight * inverseDistance;
+                    float nDotL = max(dot(normal, lightDirection), 0.0);
+                    if (nDotL == 0.0) {
+                        continue;
+                    }
+                    float distance = distanceSquared >= 0.000001
+                            ? distanceSquared * inverseDistance
+                            : sqrt(max(distanceSquared, 0.0));
+                    float range = max(1.0 - distance / radius, 0.0);
+                    float attenuation = range * range;
+                    vec3 radiance = light.linearColorIntensity.rgb * attenuation;
+                    float score = dot(radiance * nDotL, vec3(0.2126, 0.7152, 0.0722));
+                    if (score > dominantScore) {
+                        dominantScore = score;
+                        dominantDirection = lightDirection;
+                        dominantRadiance = radiance;
+                    }
+                }
+                if (dominantScore == 0.0) {
+                    return vec3(0.0);
+                }
+                return metallumEvaluateGgxV1(
+                        normal,
+                        viewDirection,
+                        dominantDirection,
+                        dominantRadiance,
+                        metallumMaterialF0V1(material, albedo),
+                        material.roughness);
+            }
+            """).toString();
+    }
 
     private static final String SODIUM_VERTEX_DECLARATION =
             "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
@@ -1625,6 +1945,53 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    vec3 metallumDirectNormal = metallumSafeNormalV1(\n"
                     + "            metallumDerivativeNormal);\n"
                     + "    vec3 metallumPreparedAlbedo = max(metallumUnlitBase, vec3(0.0));\n"
+                    + "    float metallumL8ReactiveWeight = 0.0;\n"
+                    + "    uint metallumSurfaceEmission = (metallumMaterial >> 3u) & 15u;\n"
+                    + "    bool metallumTaggedL8Surface = metallumSurfaceEmission == 0u\n"
+                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
+                    + "    bool metallumTranslucentL8Surface = metallumSurfaceEmission == 0u\n"
+                    + "            && metallumAlbedo.a < 0.985;\n"
+                    + "    bool metallumRainyL8Surface =\n"
+                    + "            metallumEnvironment.materialContract.x == 1u\n"
+                    + "            && metallumEnvironment.materialWeatherAndTime.x > 0.0\n"
+                    + "            && metallumSkyVisibility > 0.0;\n"
+                    + "    if (metallumTaggedL8Surface || metallumTranslucentL8Surface\n"
+                    + "            || metallumRainyL8Surface) {\n"
+                    + "        MetallumSurfaceMaterialV1 metallumSurfaceMaterial =\n"
+                    + "                metallumResolveSurfaceMaterialV1(\n"
+                    + "                        metallumMaterial, metallumAlbedo.a,\n"
+                    + "                        metallumDirectNormal, metallumSkyVisibility, true);\n"
+                    + "        bool metallumNeedsMaterialOptics =\n"
+                    + "                metallumSurfaceMaterial.kind != METALLUM_SURFACE_DIELECTRIC_V1\n"
+                    + "                || metallumSurfaceMaterial.wetness > 0.0;\n"
+                    + "        if (metallumNeedsMaterialOptics) {\n"
+                    + "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n"
+                    + "            metallumDirectNormal = metallumWaterNormalV1(\n"
+                    + "                    metallumLightingPosition, metallumDirectNormal,\n"
+                    + "                    metallumSurfaceMaterial);\n"
+                    + "            vec3 metallumViewDirection =\n"
+                    + "                    metallumSafeNormalV1(-metallumLightingPosition);\n"
+                    + "            metallumPreparedAlbedo = metallumTransmissionV1(\n"
+                    + "                    metallumPreparedAlbedo, metallumViewDirection,\n"
+                    + "                    metallumDirectNormal, metallumSurfaceMaterial);\n"
+                    + "            color.rgb *= 1.0 - 0.16 * metallumSurfaceMaterial.wetness;\n"
+                    + "            if (metallumSurfaceMaterial.transmission > 0.0) {\n"
+                    + "                color.rgb = mix(color.rgb, metallumPreparedAlbedo,\n"
+                    + "                        metallumSurfaceMaterial.transmission * 0.62);\n"
+                    + "            }\n"
+                    + "            float metallumDiffuseWeight =\n"
+                    + "                    (1.0 - metallumSurfaceMaterial.metalness)\n"
+                    + "                    * (1.0 - metallumSurfaceMaterial.transmission);\n"
+                    + "            metallumPreparedAlbedo *= metallumDiffuseWeight;\n"
+                    + "            color.rgb += metallumEvaluateMaterialEnvironmentV1(\n"
+                    + "                    metallumLightingPosition, metallumDirectNormal,\n"
+                    + "                    metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "                    metallumSurfaceMaterial);\n"
+                    + "            color.rgb += metallumEvaluateClusteredMaterialSpecularV1(\n"
+                    + "                    metallumLightingPosition, metallumDirectNormal,\n"
+                    + "                    metallumPreparedAlbedo, metallumSurfaceMaterial);\n"
+                    + "        }\n"
+                    + "    }\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo, metallumSkyVisibility);\n"
@@ -2106,6 +2473,16 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
             if (countOccurrences(source, "metallumEvaluateEnvironmentV1(") != 2) {
                 return Result.failure(source, "Advanced fragment marker has no environment helper");
+            }
+            int expectedMaterialCalls = isSodiumTerrain(namespace, path) ? 2 : 1;
+            if (countOccurrences(
+                    source, "metallumResolveSurfaceMaterialV1(") != expectedMaterialCalls
+                    || countOccurrences(
+                    source, "metallumEvaluateMaterialEnvironmentV1(") != expectedMaterialCalls
+                    || countOccurrences(
+                    source, "metallumEvaluateClusteredMaterialSpecularV1(")
+                    != expectedMaterialCalls) {
+                return Result.failure(source, "Advanced fragment marker has a partial L8 material ABI");
             }
             if (isSodiumTerrain(namespace, path)) {
                 if (!source.contains(SODIUM_FRAGMENT_INPUT)

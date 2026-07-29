@@ -29,6 +29,7 @@ import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.L8ReactiveShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
@@ -264,6 +265,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private FrameState.@Nullable Extent activeDisplayExtent;
     @Nullable
     private TemporalDiagnosticResources temporalDiagnosticResources;
+    private long l8ReactiveMaskClearedSubmitIndex = Long.MIN_VALUE;
+    private long l8ReactiveMaskTouchedSubmitIndex = Long.MIN_VALUE;
     /** Access-ordered so eviction releases the least-recently-used inactive extent. */
     private final LinkedHashMap<TemporalDiagnosticResourceKey, TemporalDiagnosticResources>
             temporalDiagnosticResourceCache = new LinkedHashMap<>(
@@ -1470,6 +1473,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.activeDisplayExtent = new FrameState.Extent(
                 dimensions.displayWidth(), dimensions.displayHeight()
         );
+        if (this.temporalDiagnosticResources != nextDiagnosticResources) {
+            this.l8ReactiveMaskClearedSubmitIndex = Long.MIN_VALUE;
+            this.l8ReactiveMaskTouchedSubmitIndex = Long.MIN_VALUE;
+        }
         this.temporalDiagnosticResources = nextDiagnosticResources;
         RendererGenerationKey key = new RendererGenerationKey(
                 dimensions.renderWidth(),
@@ -2066,6 +2073,8 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.temporalDiagnosticResourceCache.clear();
         this.temporalDiagnosticResources = null;
+        this.l8ReactiveMaskClearedSubmitIndex = Long.MIN_VALUE;
+        this.l8ReactiveMaskTouchedSubmitIndex = Long.MIN_VALUE;
     }
 
     private void disableTemporalInputs(final String reason, @Nullable final Throwable exception) {
@@ -2228,6 +2237,20 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.advancedLightingFrameSubmitIndex,
                 this.commandEncoder.currentSubmitIndex()
         );
+    }
+
+    /** L8 writes material reactivity only into Temporal's already-resident input ring. */
+    boolean isL8ReactiveWorldPassActive() {
+        if (!this.temporalScalingActive || !this.isAdvancedLightingWorldPassActive()) {
+            return false;
+        }
+        TemporalDiagnosticResources resources = this.temporalDiagnosticResources;
+        if (resources == null) {
+            return false;
+        }
+        int slot = (int) (this.commandEncoder.currentSubmitIndex()
+                % FrameStatePacketRing.SLOT_COUNT);
+        return resources.pair(slot).reactive() != null;
     }
 
     void bindAdvancedLighting(final MTLRenderCommandEncoder encoder) {
@@ -2406,6 +2429,39 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrSemanticMaskClearedSubmitIndex = submitIndex;
         this.hdrSemanticMaskTouchedSubmitIndex = submitIndex;
         return new SemanticAttachment(this.hdrSemanticMask.nativeHandle(), clear);
+    }
+
+    SemanticAttachment prepareL8ReactiveAttachment(final MetalGpuTexture source) {
+        if (!this.isL8ReactiveWorldPassActive()) {
+            throw new IllegalStateException(
+                    "L8 reactive attachment requires an active Advanced Temporal world pass"
+            );
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        int slot = (int) (submitIndex % FrameStatePacketRing.SLOT_COUNT);
+        TemporalDiagnosticResources resources = Objects.requireNonNull(
+                this.temporalDiagnosticResources,
+                "Temporal resources disappeared during the L8 world pass"
+        );
+        MetalGpuTexture reactive = resources.pair(slot).reactive();
+        if (reactive == null
+                || reactive.isClosed()
+                || reactive.getFormat() != GpuFormat.R8_UNORM
+                || reactive.getWidth(0) < source.getWidth(0)
+                || reactive.getHeight(0) < source.getHeight(0)) {
+            throw new IllegalStateException(
+                    "Temporal reactive texture is incompatible with the L8 scene attachment"
+            );
+        }
+        boolean clear = this.l8ReactiveMaskClearedSubmitIndex != submitIndex;
+        this.l8ReactiveMaskClearedSubmitIndex = submitIndex;
+        this.l8ReactiveMaskTouchedSubmitIndex = submitIndex;
+        return new SemanticAttachment(reactive.nativeHandle(), clear);
+    }
+
+    boolean materialReactiveAvailableForCurrentSubmit() {
+        return this.l8ReactiveMaskTouchedSubmitIndex
+                == this.commandEncoder.currentSubmitIndex();
     }
 
     void captureHdrScene(
@@ -2950,7 +3006,8 @@ public final class MetalDevice implements GpuDeviceBackend {
             return shadow.source();
         }
         if (key.flavor() == HdrShaderFlavor.METALLUM
-                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED) {
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
             MetallumMaterialShaderPatcher.Result material = MetallumMaterialShaderPatcher.patch(
                     key.id().getNamespace(),
                     key.id().getPath(),
@@ -2984,7 +3041,24 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 + advanced.failureReason()
                 );
             }
-            return advanced.source();
+            if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED) {
+                return advanced.source();
+            }
+            L8ReactiveShaderPatcher.Result reactive = L8ReactiveShaderPatcher.patch(
+                    key.id().getNamespace(),
+                    key.id().getPath(),
+                    key.type() == ShaderType.VERTEX
+                            ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                            : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                    advanced.source()
+            );
+            if (!reactive.success()) {
+                throw new IllegalStateException(
+                        "Failed to prepare L8 reactive shader " + key.id() + ": "
+                                + reactive.failureReason()
+                );
+            }
+            return reactive.source();
         }
 
         String patched = original;

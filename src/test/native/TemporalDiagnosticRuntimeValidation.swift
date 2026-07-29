@@ -14,7 +14,8 @@ private typealias PreheatDynamicTemporal = @convention(c) (
 ) -> Int32
 private typealias SetFrameState = @convention(c) (UnsafeRawPointer?, UInt64) -> Int32
 private typealias EncodeDiagnostics = @convention(c) (
-    UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?
+    UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, Int32,
+    UnsafeRawPointer?
 ) -> Int32
 private typealias EncodeBackdrop = @convention(c) (
     UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?, UnsafeRawPointer?,
@@ -172,7 +173,8 @@ private func runCase(
     depthValue: Double = 0.5,
     backdrop: EncodeBackdrop? = nil,
     coherentBlur: EncodeCoherentMenuBlur? = nil,
-    projection: simd_float4x4? = nil
+    projection: simd_float4x4? = nil,
+    reactiveSeed: UInt8? = nil
 ) throws -> (motion: SIMD2<Float>, reactive: UInt8) {
     let packet = framePacket(
         width: width,
@@ -254,9 +256,24 @@ private func runCase(
     }
     clearEncoder.updateFence(fence, after: .fragment)
     clearEncoder.endEncoding()
+    if let reactiveSeed {
+        let reactiveClear = MTLRenderPassDescriptor()
+        reactiveClear.colorAttachments[0].texture = reactive
+        reactiveClear.colorAttachments[0].loadAction = .clear
+        reactiveClear.colorAttachments[0].storeAction = .store
+        reactiveClear.colorAttachments[0].clearColor = MTLClearColorMake(
+            Double(reactiveSeed) / 255.0, 0, 0, 0
+        )
+        guard let reactiveClearEncoder = commandBuffer.makeRenderCommandEncoder(
+                descriptor: reactiveClear
+              ) else {
+            throw ValidationFailure.message("Could not seed L8 reactive input")
+        }
+        reactiveClearEncoder.endEncoding()
+    }
     try require(encode(
         objectPointer(commandBuffer), objectPointer(depth), objectPointer(motion),
-        objectPointer(reactive), nil, objectPointer(fence)
+        objectPointer(reactive), nil, reactiveSeed == nil ? 0 : 1, objectPointer(fence)
     ) == 1, "Native diagnostic render pass failed")
     if temporalProduction {
         guard let backdrop else {
@@ -321,7 +338,8 @@ private enum TemporalDiagnosticRuntimeValidationMain {
                   let initializeSymbol = dlsym(handle, "metallum_init_pipelines"),
                   let preheatSymbol = dlsym(handle, "metallum_preheat_temporal_dynamic_workspace"),
                   let setSymbol = dlsym(handle, "metallum_set_frame_state_v3"),
-                  let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v1"),
+                  dlsym(handle, "metallum_encode_temporal_diagnostics_v1") != nil,
+                  let encodeSymbol = dlsym(handle, "metallum_encode_temporal_diagnostics_v2"),
                   let backdropSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeHdrUiBackdrop"),
                   let coherentBlurSymbol = dlsym(handle, "metallum_MTLCommandBuffer_encodeCoherentMenuBlur"),
                   let createSamplerSymbol = dlsym(handle, "metallum_create_sampler") else {
@@ -383,7 +401,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(encode(
                 objectPointer(transitionCommandBuffer), objectPointer(transitionDepth),
                 objectPointer(transitionMotion), objectPointer(transitionReactive),
-                nil, objectPointer(transitionFence)
+                nil, 0, objectPointer(transitionFence)
             ) == 0, "Missing first FrameState must skip diagnostics without disabling them")
             let stationary = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
@@ -392,6 +410,12 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(stationary.motion.x) <= 0.01 && abs(stationary.motion.y) <= 0.01
                             && stationary.reactive == 0,
                         "Static diagnostic output mismatch")
+            let materialReactive = try runCase(
+                device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                width: 64, height: 64, reactiveSeed: 191
+            )
+            try require(materialReactive.reactive == 191,
+                        "Temporal diagnostics did not preserve the L8 material reactive maximum")
             try require(preheat(
                 objectPointer(device as AnyObject),
                 Int32(MTLPixelFormat.rgba8Unorm.rawValue),
@@ -496,7 +520,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, Dynamic warm standby, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, L8 reactive merge, Dynamic warm standby, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

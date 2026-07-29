@@ -40,6 +40,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final SunShadowStabilizer stabilizer;
     private final SunShadowCache cache;
     private SunShadowFrame frame;
+    private double materialTimeSeconds;
     private SunShadowCache.Decision cacheDecision;
     private long renderedSubmitIndex = Long.MIN_VALUE;
     private boolean closed;
@@ -228,6 +229,15 @@ final class SunShadowGpuResources implements AutoCloseable {
                 selected.cascadeReceiverNormalBias(1),
                 selected.cascadeReceiverNormalBias(2),
                 this.budget.receiverNormalBiasTexels());
+        this.materialTimeSeconds = (this.materialTimeSeconds
+                + Math.clamp(frameState.deltaSeconds(), 0.0, 0.25)) % 4096.0;
+        putVec4(packet, EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET,
+                environment.rain(), environment.thunder(), (float) this.materialTimeSeconds, 0.0f);
+        putInt4(packet, EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET,
+                EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
+                environment.profile().ordinal(),
+                environment.medium().ordinal(),
+                0);
         this.frame = selected;
         this.renderedSubmitIndex = selected.needsShadowPass()
                 ? Long.MIN_VALUE

@@ -14,6 +14,7 @@ import net.minecraft.client.renderer.block.FluidModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
+import net.minecraft.tags.FluidTags;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -31,6 +32,9 @@ abstract class DefaultFluidRendererHdrMixin {
     @Unique
     private int metallum$fluidLightEmission;
 
+    @Unique
+    private FluidState metallum$fluidState;
+
     @Inject(method = "render", at = @At("HEAD"), remap = false)
     private void metallum$captureFluidEmission(
             final LevelSlice slice,
@@ -45,6 +49,7 @@ abstract class DefaultFluidRendererHdrMixin {
             final FluidModel fluidModel,
             final CallbackInfo ci
     ) {
+        this.metallum$fluidState = fluidState;
         this.metallum$fluidLightEmission = fluidState.createLegacyBlock().getLightEmission();
     }
 
@@ -70,7 +75,16 @@ abstract class DefaultFluidRendererHdrMixin {
         SodiumHdrSemantic.tagQuad(
                 this.vertices,
                 this.metallum$fluidLightEmission,
-                this.metallum$fluidLightEmission > 0
+                this.metallum$fluidLightEmission > 0,
+                this.metallum$fluidLightEmission == 0
+                        && fluidIsWater(this.metallum$fluidState)
+                        ? SodiumHdrSemantic.SURFACE_CLASS_WATER
+                        : SodiumHdrSemantic.SURFACE_CLASS_NONE
         );
+    }
+
+    @Unique
+    private static boolean fluidIsWater(final FluidState state) {
+        return state != null && state.is(FluidTags.WATER);
     }
 }

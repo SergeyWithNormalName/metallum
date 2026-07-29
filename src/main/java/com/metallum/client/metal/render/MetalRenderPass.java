@@ -491,17 +491,21 @@ final class MetalRenderPass implements RenderPassBackend {
         );
         boolean materialSceneAttachment = colorAttachment.hasSceneColorClearRole()
                 && !colorAttachment.hasDisplaySdrColorRole();
+        boolean semanticOutput = this.device.isLegacyHdrSemanticGenerationActive()
+                && compiledPipeline != null && compiledPipeline.semanticOutput(
+                colorAttachment.mtlPixelFormat(), materialSceneAttachment
+        );
+        boolean reactiveOutput = compiledPipeline != null && compiledPipeline.reactiveOutput(
+                colorAttachment.mtlPixelFormat(), materialSceneAttachment
+        );
         SceneLinearClearColor.Rgb linearClear = decodeClearColor
                 ? SceneLinearClearColor.extendedSrgbToLinear(clearColor.x(), clearColor.y(), clearColor.z())
                 : null;
         MTLRenderCommandEncoder encoder = commandEncoder.renderCommandEncoder(
                 colorTextureView,
                 depthTextureView,
-                this.device.isLegacyHdrSemanticGenerationActive()
-                        && compiledPipeline != null && compiledPipeline.semanticOutput(
-                        colorAttachment.mtlPixelFormat(),
-                        materialSceneAttachment
-                ),
+                semanticOutput,
+                reactiveOutput,
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,

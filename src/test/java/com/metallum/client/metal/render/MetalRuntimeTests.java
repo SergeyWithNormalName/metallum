@@ -519,11 +519,25 @@ public final class MetalRuntimeTests {
                 afterFailure,
                 true
         );
+        HdrShaderFlavor reactiveFlavor = MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                afterFailure,
+                true,
+                true,
+                true
+        );
 
         require(beforeFailure && afterFailure
                         && firstFlavor == HdrShaderFlavor.METALLUM_ADVANCED
-                        && secondFlavor == HdrShaderFlavor.METALLUM_ADVANCED,
+                        && secondFlavor == HdrShaderFlavor.METALLUM_ADVANCED
+                        && reactiveFlavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE,
                 "failClosed changed the Advanced shader flavor inside one submit");
+        require(MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, true, false
+                ) == HdrShaderFlavor.METALLUM_ADVANCED
+                        && MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, false, true
+                ) == HdrShaderFlavor.METALLUM_ADVANCED,
+                "reactive flavor escaped its Temporal/variant availability gate");
         require(!MetalDevice.isAdvancedLightingWorldPassActive(
                         advancedGeneration,
                         true,

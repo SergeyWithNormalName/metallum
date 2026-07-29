@@ -267,7 +267,9 @@ public final class MetallumMaterialShaderPatcher {
         String fogAnchor = "    fragColor = _linearFog(color, v_FragDistance, u_FogColor, u_EnvironmentFog, u_RenderFog, fadeFactor);";
         String fogReplacement = "    uint metallumEmissionCode = (metallumMaterial >> 3u) & 15u;\n"
                 + "    if (metallumEmissionCode != 0u) {\n"
-                + "        bool metallumExactEmission = ((metallumMaterial >> 7u) & 1u) != 0u;\n"
+                + "        // With zero emission this high bit is L8's compact metal/water tag.\n"
+                + "        bool metallumExactEmission = metallumEmissionCode != 0u\n"
+                + "                && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
                 + "        float metallumEmissionStrength = float(metallumEmissionCode) / 15.0;\n"
                 + "        float metallumEmission = metallumExactEmission\n"
                 + "                ? 4.0 * metallumEmissionStrength\n"
