@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metal.render.MetalDevice;
@@ -263,7 +264,10 @@ abstract class GameRendererMetalFxMixin {
         float ambient = Math.max(this.minecraft.level.dimensionType().ambientLight(), 0.0f);
         if (skybox == DimensionType.Skybox.OVERWORLD) {
             float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
-            float rain = this.minecraft.level.getRainLevel(partialTick);
+            float rain = SurfaceMaterialPolicy.rainWetnessTarget(
+                    this.minecraft.level.getRainLevel(partialTick),
+                    this.minecraft.level.isRaining()
+            );
             float thunder = this.minecraft.level.getThunderLevel(partialTick);
             // Minecraft 26.2 publishes data-driven sky intensity, tint, and ambient separately.
             // Keep the raw coefficients: EnvironmentDescriptor converts the reflected-diffuse

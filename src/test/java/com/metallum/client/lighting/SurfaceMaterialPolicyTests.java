@@ -138,15 +138,24 @@ public final class SurfaceMaterialPolicyTests {
                 "rain-facing contract allows vertical walls or rejects upward roofs");
         float firstWetFrame = SurfaceMaterialPolicy.smoothRainWetness(0.0f, 1.0f, 0.1f);
         float afterRainStops = SurfaceMaterialPolicy.smoothRainWetness(1.0f, 0.0f, 0.1f);
+        float wetAfterThreeSeconds = 0.0f;
+        for (int frame = 0; frame < 30; frame++) {
+            wetAfterThreeSeconds = SurfaceMaterialPolicy.smoothRainWetness(
+                    wetAfterThreeSeconds, 1.0f, 0.1f);
+        }
         float driedAfterTwelveSeconds = 1.0f;
         for (int frame = 0; frame < 120; frame++) {
             driedAfterTwelveSeconds = SurfaceMaterialPolicy.smoothRainWetness(
                     driedAfterTwelveSeconds, 0.0f, 0.1f);
         }
-        require(firstWetFrame > 0.24f
+        require(firstWetFrame > 0.07f && firstWetFrame < 0.09f
+                        && wetAfterThreeSeconds > 0.90f
                         && afterRainStops > 0.9f
                         && driedAfterTwelveSeconds < 0.06f,
                 "rain film does not wet quickly and dry smoothly within its bounded tail");
+        require(close(SurfaceMaterialPolicy.rainWetnessTarget(1.0f, false), 0.0f)
+                        && close(SurfaceMaterialPolicy.rainWetnessTarget(0.75f, true), 0.75f),
+                "L8 rain target does not follow the visual rain state");
 
         float dryStone = SurfaceMaterialPolicy.wetRoughness(
                 SurfaceMaterialPolicy.STONE, 0.0f, 0.5f);

@@ -22,7 +22,7 @@ import java.util.Objects;
 public final class SurfaceMaterialPolicy {
     public static final float RAIN_FACING_START = 0.55f;
     public static final float RAIN_FACING_FULL = 0.85f;
-    public static final float RAIN_WETTING_RESPONSE_SECONDS = 0.35f;
+    public static final float RAIN_WETTING_RESPONSE_SECONDS = 1.25f;
     public static final float RAIN_DRYING_RESPONSE_SECONDS = 4.0f;
 
     public enum Kind {
@@ -226,6 +226,14 @@ public final class SurfaceMaterialPolicy {
                 ? RAIN_WETTING_RESPONSE_SECONDS : RAIN_DRYING_RESPONSE_SECONDS;
         float blend = 1.0f - (float) Math.exp(-deltaSeconds / responseSeconds);
         return mix(current, target, blend);
+    }
+
+    /**
+     * Minecraft's interpolated rain level can remain high after particle rain stops. L8 must use
+     * the visual weather state as its target so the drying tail begins when rain visibly ends.
+     */
+    public static float rainWetnessTarget(final float interpolatedRainLevel, final boolean raining) {
+        return raining ? clampUnit(interpolatedRainLevel) : 0.0f;
     }
 
     public static float schlickFresnel(final float f0, final float nDotV) {

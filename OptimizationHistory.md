@@ -1886,13 +1886,16 @@ tagged surface. Вертикальная стена поэтому не може
 
 ## 2026-07-29 — L8 резко выключался после окончания дождя
 
-В material packet записывался raw `EnvironmentDescriptor.rain()`. Когда vanilla
-weather переходил к нулю, roughness, Fresnel, albedo darkening и reactive weight L8
-переключались в том же кадре. Это особенно заметно на освещённых дорожках и крышах.
+В material packet записывался raw `EnvironmentDescriptor.rain()`. Дополнительная
+live-проверка обнаружила, что `getRainLevel()` на клиенте способен оставаться высоким
+после остановки видимых частиц, поэтому даже корректный release не начинался вовремя.
+Нужен target, соответствующий именно визуальному weather state.
 
 В `SunShadowGpuResources` добавлен один persistent scalar `materialRainWetness`:
-экспоненциальный response с attack `0.35 s` и release `4.0 s` обновляется только при
+экспоненциальный response с attack `1.25 s` и release `4.0 s` обновляется только при
 сборке существующего environment packet и записывается в уже выделенный
 `materialWeatherAndTime.x`. Шейдер и ABI не расширяются; нет texture history,
-buffers, passes, allocations или per-fragment temporal state. После остановки дождя
-влажность убывает непрерывно, но за 12 секунд опускается ниже 6%.
+buffers, passes, allocations или per-fragment temporal state. Его target равен
+`getRainLevel()` только пока `ClientLevel.isRaining()` true; при остановке видимого
+дождя target становится нулём немедленно, а влажность убывает непрерывно и за
+12 секунд опускается ниже 6%.
