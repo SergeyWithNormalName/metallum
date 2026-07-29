@@ -1965,6 +1965,16 @@ GGX-материалы, полупрозрачность и отражающие
   учитывала только camera fraction, поэтому при переходе игрока через block boundary
   узор скачком менял фазу. Новый split сохраняет world-space фазу без large-world
   float precision loss, дополнительных ресурсов или работы на non-water terrain.
+- Wet policy разделена на remesh-time классы stone, wood, porous и общий dielectric:
+  при полном намокании целевые roughness равны соответственно `0.28`, `0.42`, `0.72`
+  и `0.50`, а отдельный specular scale не позволяет снегу, листве и травяным cutout
+  превращаться в лакированное стекло. Wet dielectric F0 ограничен водяной пленкой
+  `0.025` вместо прежнего усиления до `0.075`; затемнение альбедо также зависит от
+  класса материала. Микрошероховатость модулируется яркостью уже выбранного texel
+  альбедо, поэтому не требует дополнительного texture sample. Новые wet-only классы
+  не открывают L8 optics в сухом common path; дополнительных buffers, textures,
+  passes и per-frame allocations нет. Dry Sky Fresnel намеренно не расширялся по
+  разрешению пользователя.
 
 ### Этап P1. ProMotion/present pacing
 

@@ -23,8 +23,14 @@ public final class SurfaceMaterialPolicyTests {
 
     private static void testVanillaDefaults() {
         require(SurfaceMaterialPolicy.forBlock(Blocks.STONE.defaultBlockState())
-                        == SurfaceMaterialPolicy.DIELECTRIC,
-                "ordinary terrain did not retain the dielectric fallback");
+                        == SurfaceMaterialPolicy.STONE,
+                "stone did not resolve the bounded wet-stone profile");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.OAK_PLANKS.defaultBlockState())
+                        == SurfaceMaterialPolicy.WOOD,
+                "planks did not resolve the bounded wet-wood profile");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.SNOW_BLOCK.defaultBlockState())
+                        == SurfaceMaterialPolicy.POROUS,
+                "snow did not resolve the non-glazing porous profile");
         require(SurfaceMaterialPolicy.forBlock(Blocks.IRON_BLOCK.defaultBlockState())
                         == SurfaceMaterialPolicy.METAL,
                 "iron block did not resolve the metal material");
@@ -33,11 +39,11 @@ public final class SurfaceMaterialPolicyTests {
                 "glass block did not resolve the transmissive CPU policy");
         require(SurfaceMaterialPolicy.forTerrain(
                         Blocks.OAK_LEAVES.defaultBlockState(), false)
-                        == SurfaceMaterialPolicy.DIELECTRIC
+                        == SurfaceMaterialPolicy.POROUS
                         && SurfaceMaterialPolicy.forTerrain(
                         Blocks.GRASS_BLOCK.defaultBlockState(), false)
                         == SurfaceMaterialPolicy.DIELECTRIC,
-                "cutout foliage or grass entered the glass fallback");
+                "cutout foliage or grass entered the wrong material profile");
         require(SurfaceMaterialPolicy.forTerrain(
                         Blocks.SLIME_BLOCK.defaultBlockState(), true)
                         == SurfaceMaterialPolicy.GLASS,
@@ -47,7 +53,11 @@ public final class SurfaceMaterialPolicyTests {
                         && SodiumHdrSemantic.SURFACE_CLASS_WATER
                         != SodiumHdrSemantic.SURFACE_CLASS_METAL
                         && SodiumHdrSemantic.SURFACE_CLASS_GLASS
-                        != SodiumHdrSemantic.SURFACE_CLASS_WATER,
+                        != SodiumHdrSemantic.SURFACE_CLASS_WATER
+                        && SodiumHdrSemantic.SURFACE_CLASS_STONE
+                        != SodiumHdrSemantic.SURFACE_CLASS_WOOD
+                        && SodiumHdrSemantic.SURFACE_CLASS_WOOD
+                        != SodiumHdrSemantic.SURFACE_CLASS_POROUS,
                 "compact L8 surface classes are not distinct");
     }
 
@@ -60,7 +70,14 @@ public final class SurfaceMaterialPolicyTests {
                 3, SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT);
         int glass = SodiumHdrShaderPatcher.packMaterialBits(
                 6, SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT);
-        require(metal == 130 && smooth == 132 && water == 131 && glass == 134,
+        int stone = SodiumHdrShaderPatcher.packMaterialBits(
+                1, SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT);
+        int wood = SodiumHdrShaderPatcher.packMaterialBits(
+                5, SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT);
+        int porous = SodiumHdrShaderPatcher.packMaterialBits(
+                7, SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT);
+        require(metal == 130 && smooth == 132 && water == 131 && glass == 134
+                        && stone == 129 && wood == 133 && porous == 135,
                 "non-emissive L8 classes changed their compact material encoding");
         require(((metal >> 3) & 15) == 0 && ((metal >> 7) & 1) == 1
                         && ((smooth >> 3) & 15) == 0 && ((smooth >> 7) & 1) == 1
@@ -74,7 +91,13 @@ public final class SurfaceMaterialPolicyTests {
                         && SodiumHdrSemantic.materialBaseForSurfaceClass(
                         3, SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC) == 4
                         && SodiumHdrSemantic.materialBaseForSurfaceClass(
-                        1, SodiumHdrSemantic.SURFACE_CLASS_GLASS) == 6,
+                        1, SodiumHdrSemantic.SURFACE_CLASS_GLASS) == 6
+                        && SodiumHdrSemantic.materialBaseForSurfaceClass(
+                        0, SodiumHdrSemantic.SURFACE_CLASS_STONE) == 1
+                        && SodiumHdrSemantic.materialBaseForSurfaceClass(
+                        0, SodiumHdrSemantic.SURFACE_CLASS_WOOD) == 5
+                        && SodiumHdrSemantic.materialBaseForSurfaceClass(
+                        0, SodiumHdrSemantic.SURFACE_CLASS_POROUS) == 7,
                 "remesh-time L8 surface classes did not override arbitrary Sodium bases");
 
         int exactEmission = SodiumHdrShaderPatcher.packMaterialBits(
@@ -101,13 +124,45 @@ public final class SurfaceMaterialPolicyTests {
     }
 
     private static void testWetnessAndAbsorption() {
-        float dry = SurfaceMaterialPolicy.wetRoughness(0.68f, 0.0f);
-        float wet = SurfaceMaterialPolicy.wetRoughness(0.68f, 1.0f);
-        require(wet < dry && wet >= 0.055f,
-                "rain did not lower roughness within the bounded material floor");
-        require(close(SurfaceMaterialPolicy.wetAlbedoScale(0.0f), 1.0f)
-                        && close(SurfaceMaterialPolicy.wetAlbedoScale(1.0f), 0.84f),
-                "wet albedo darkening changed");
+        float dryStone = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.STONE, 0.0f, 0.5f);
+        float wetStone = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.STONE, 1.0f, 0.5f);
+        float wetWood = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.WOOD, 1.0f, 0.5f);
+        float wetSoil = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.DIELECTRIC, 1.0f, 0.5f);
+        float wetPorous = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.POROUS, 1.0f, 0.5f);
+        require(close(dryStone, 0.70f)
+                        && close(wetStone, 0.28f)
+                        && close(wetWood, 0.42f)
+                        && close(wetSoil, 0.50f)
+                        && close(wetPorous, 0.72f)
+                        && wetStone < wetWood && wetWood < wetSoil && wetSoil < wetPorous,
+                "rain roughness profiles no longer distinguish stone, wood, soil, and porous blocks");
+        float darkStone = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.STONE, 1.0f, 0.0f);
+        float brightStone = SurfaceMaterialPolicy.wetRoughness(
+                SurfaceMaterialPolicy.STONE, 1.0f, 1.0f);
+        require(brightStone < wetStone && wetStone < darkStone
+                        && darkStone - brightStone <= 0.10001f,
+                "albedo-derived micro-roughness is missing or unbounded");
+        require(close(SurfaceMaterialPolicy.wetSpecularScale(
+                        SurfaceMaterialPolicy.STONE, 1.0f), 0.78f)
+                        && close(SurfaceMaterialPolicy.wetSpecularScale(
+                        SurfaceMaterialPolicy.POROUS, 1.0f), 0.10f),
+                "wet specular energy no longer suppresses porous glazing");
+        require(close(SurfaceMaterialPolicy.wetAlbedoScale(
+                        SurfaceMaterialPolicy.STONE, 0.0f), 1.0f)
+                        && close(SurfaceMaterialPolicy.wetAlbedoScale(
+                        SurfaceMaterialPolicy.WOOD, 1.0f), 0.82f)
+                        && close(SurfaceMaterialPolicy.wetAlbedoScale(
+                        SurfaceMaterialPolicy.POROUS, 1.0f), 0.92f),
+                "material-aware wet albedo darkening changed");
+        require(close(SurfaceMaterialPolicy.wetDielectricF0(0.04f, 0.0f), 0.04f)
+                        && close(SurfaceMaterialPolicy.wetDielectricF0(0.04f, 1.0f), 0.025f),
+                "wet dielectric F0 no longer follows the conservative water-film target");
 
         float shallow = SurfaceMaterialPolicy.beerLambert(0.36f, 0.5f);
         float deep = SurfaceMaterialPolicy.beerLambert(0.36f, 5.0f);

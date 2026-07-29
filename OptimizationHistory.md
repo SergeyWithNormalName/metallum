@@ -1839,3 +1839,26 @@ API/GPU Validation и Temporal runtime validation.
 существующего water material gate рядом с двумя прежними `sin/cos`. Live walking
 signoff на том же берегу остается обязательным: автоматические тесты доказывают
 непрерывность формулы, но не заменяют наблюдение движения в игре.
+
+## 2026-07-29 — L8 material-aware wet response
+
+Live-скриншоты показали over-glazing: земля и дерево получали почти одинаковую
+низкую roughness, а снег и растительность — слишком сильный ровный блик. Причина —
+единая fragment-side wet policy для всего sky-visible opaque terrain: при полном
+дожде обычный dielectric опускался до roughness `0.2176`, F0 одновременно рос с
+`0.04` до `0.075`, а микроструктура альбедо не влияла на блик.
+
+Приняты отдельные remesh-time классы stone/wood/porous в свободных compact base
+codes `1/5/7`. Полные wet targets: roughness `0.28/0.42/0.72`, specular scale
+`0.78/0.48/0.10`; общий грунт ограничен `0.50/0.28`. Wet F0 теперь стремится к
+`0.025`, а небольшая bounded-модуляция roughness использует luminance уже выбранного
+albedo texel. Поэтому добавочных texture samples, buffers, passes или allocations нет.
+
+Производительный dry common path сохранен буквально: wet-only stone/wood/porous
+декодируются только внутри существующего rain gate и без wetness не запускают
+environment/local GGX. В дождевом пути добавлены только несколько scalar mix/dot
+операций поверх уже загруженного albedo. Целевые material/actual-shader тесты и
+полный `clean check` являются автоматическим доказательством структуры и контрактов,
+но новый live A/B FPS и визуальный signoff на пользовательской сцене всё ещё нужны;
+неизмеренное улучшение производительности не заявляется. Dry Sky Fresnel не
+расширялся в рамках этого изменения по явному разрешению пользователя.

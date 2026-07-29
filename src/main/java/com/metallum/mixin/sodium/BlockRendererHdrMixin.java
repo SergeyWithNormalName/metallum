@@ -177,6 +177,9 @@ abstract class BlockRendererHdrMixin {
             case METAL -> SodiumHdrSemantic.SURFACE_CLASS_METAL;
             case SMOOTH_DIELECTRIC -> SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC;
             case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
+            case STONE -> SodiumHdrSemantic.SURFACE_CLASS_STONE;
+            case WOOD -> SodiumHdrSemantic.SURFACE_CLASS_WOOD;
+            case POROUS -> SodiumHdrSemantic.SURFACE_CLASS_POROUS;
             default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
         };
         SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass);

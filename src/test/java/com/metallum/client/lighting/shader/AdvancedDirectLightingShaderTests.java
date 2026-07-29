@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "916ff8f449db7eda6c6a0284933787cc30e94c33a743bc9a3820986611f8c7b1",
+            "sodium-solid-fsh", "cb57390571a60e10cfa6c47d6e9f264da7c919c3de634cb1a265afce9ebd20fe",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "eb89b58e81e37742577055184f564bb2dd00f4a0bc585b017f75e786508a054e",
+            "sodium-cutout-fsh", "8b3c59840895508ffaf03a5bef2febcadfe6a06907e1d3d83a0f5b7812b6b2a6",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "9d87f065d026ce238f13f73f6ace13fb02de0be5176d7b6b0172c3a8fccc9ec2",
+            "minecraft-entity-fsh", "457a0198480483c4d7c7c661d4fa8c7de0ae102c2084bb096fe62e457556381a",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "2326ec04c46d54c45e097256d72089c9169498295ece76420c2f43f0d661a49c"
+            "minecraft-end-portal-fsh", "b62035d75fbc6d9bef60c5e03323f4cadb9bf9646ca2a73aac66341e6082ea49"
     );
 
     private AdvancedDirectLightingShaderTests() {
@@ -896,8 +896,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("specialSurface && baseMaterial == 4u")
                         && sodiumFragment.contains("specialSurface && baseMaterial == 3u")
                         && sodiumFragment.contains("specialSurface && baseMaterial == 6u")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 1u")
+                        && sodiumFragment.contains("specialSurface && baseMaterial == 5u")
+                        && sodiumFragment.contains("baseMaterial == 7u")
                         && sodiumFragment.contains("emissionCode == 0u"),
-                "L8 compact metal/smooth/water/glass classification is missing or aliases emission");
+                "L8 compact material classification is missing or aliases emission");
         require(sodiumFragment.contains("metallumGgxDistributionV1")
                         && sodiumFragment.contains("metallumGgxGeometryTermV1")
                         && sodiumFragment.contains("metallumSchlickFresnelV1")
@@ -913,10 +916,15 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float waveZ = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
-                        && sodiumFragment.contains("material.roughness * (1.0 - 0.68 * material.wetness)")
+                        && sodiumFragment.contains("float wetRoughnessTarget")
+                        && sodiumFragment.contains("float albedoLuminance = dot(")
+                        && sodiumFragment.contains("float texturedWetRoughness")
+                        && sodiumFragment.contains("material.specularScale = mix(")
+                        && sodiumFragment.contains("material.wetAlbedoScale = mix(")
+                        && sodiumFragment.contains("vec3(0.025)")
                         && sodiumFragment.contains("material.wetness * 0.62")
-                        && sodiumFragment.contains("1.0 - 0.16 * material.wetness"),
-                "L8 rain-driven wet roughness, albedo, or reactive policy is missing");
+                        && sodiumFragment.contains("color.rgb *= metallumSurfaceMaterial.wetAlbedoScale"),
+                "L8 material-aware wet roughness, albedo, specular, or reactive policy is missing");
         require(sodiumFragment.contains("vec3 metallumEnvironmentLookupV1(")
                         && !sodiumFragment.contains("samplerCube")
                         && !sodiumFragment.contains("metallumSceneDepth")
@@ -928,6 +936,9 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("bool metallumRainyL8Surface")
                         && sodiumFragment.contains(
                         "if (metallumTaggedL8Surface || metallumRainyL8Surface)")
+                        && sodiumFragment.contains("bool metallumIntrinsicMaterialOptics")
+                        && sodiumFragment.contains("metallumSurfaceBase == 2u")
+                        && sodiumFragment.contains("metallumSurfaceBase == 6u")
                         && !sodiumFragment.contains("metallumTranslucentL8Surface")
                         && !sodiumFragment.contains("alpha < 0.985")
                         && before(sodiumFragment,
@@ -944,7 +955,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && countOccurrences(direct, "metallumEvaluateGgxV1(") == 1
                         && before(direct,
                         "for (uint candidate = 0u; candidate < countLimit; ++candidate)",
-                        "return metallumEvaluateGgxV1("),
+                        "return material.specularScale * metallumEvaluateGgxV1("),
                 "local GGX is not bounded to one dominant-light evaluation per fragment");
         require(countOccurrences(sodiumFragment, "metallumEvaluateGgxV1(") == 3,
                 "L8 added an unbounded GGX call site");

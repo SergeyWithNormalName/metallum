@@ -235,6 +235,9 @@ public final class AdvancedDirectLightingShaderPatcher {
             const uint METALLUM_SURFACE_METAL_V1 = 2u;
             const uint METALLUM_SURFACE_GLASS_V1 = 3u;
             const uint METALLUM_SURFACE_WATER_V1 = 4u;
+            const uint METALLUM_SURFACE_STONE_V1 = 5u;
+            const uint METALLUM_SURFACE_WOOD_V1 = 6u;
+            const uint METALLUM_SURFACE_POROUS_V1 = 7u;
 
             struct MetallumSurfaceMaterialV1 {
                 vec3 absorption;
@@ -243,6 +246,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float dielectricF0;
                 float transmission;
                 float wetness;
+                float specularScale;
+                float wetAlbedoScale;
                 float reactiveWeight;
                 float opticalDepth;
                 uint kind;
@@ -250,6 +255,7 @@ public final class AdvancedDirectLightingShaderPatcher {
 
             MetallumSurfaceMaterialV1 metallumResolveSurfaceMaterialV1(
                     uint packedMaterial,
+                    vec3 albedo,
                     vec3 normal,
                     float skyVisibility,
                     bool terrainSurface) {
@@ -265,14 +271,24 @@ public final class AdvancedDirectLightingShaderPatcher {
                                         ? METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1
                                         : specialSurface && baseMaterial == 6u
                                                 ? METALLUM_SURFACE_GLASS_V1
-                                                : METALLUM_SURFACE_DIELECTRIC_V1;
+                                                : specialSurface && baseMaterial == 1u
+                                                        ? METALLUM_SURFACE_STONE_V1
+                                                        : specialSurface && baseMaterial == 5u
+                                                                ? METALLUM_SURFACE_WOOD_V1
+                                                                : specialSurface
+                                                                && baseMaterial == 7u
+                                                                        ? METALLUM_SURFACE_POROUS_V1
+                                                                        : METALLUM_SURFACE_DIELECTRIC_V1;
 
                 MetallumSurfaceMaterialV1 material;
                 material.kind = kind;
                 material.roughness = kind == METALLUM_SURFACE_WATER_V1 ? 0.075
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.10
                         : kind == METALLUM_SURFACE_METAL_V1 ? 0.22
-                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.24 : 0.68;
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.24
+                        : kind == METALLUM_SURFACE_STONE_V1 ? 0.70
+                        : kind == METALLUM_SURFACE_WOOD_V1 ? 0.72
+                        : kind == METALLUM_SURFACE_POROUS_V1 ? 0.80 : 0.68;
                 material.metalness = kind == METALLUM_SURFACE_METAL_V1 ? 0.92 : 0.0;
                 material.dielectricF0 = kind == METALLUM_SURFACE_WATER_V1 ? 0.0204 : 0.04;
                 material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.96
@@ -297,8 +313,42 @@ public final class AdvancedDirectLightingShaderPatcher {
                         ? rain * clamp(skyVisibility, 0.0, 1.0)
                                 * upFacing * upFacing * upFacing * upFacing
                         : 0.0;
-                material.roughness = max(
-                        0.055, material.roughness * (1.0 - 0.68 * material.wetness));
+                float wetRoughnessTarget = kind == METALLUM_SURFACE_STONE_V1 ? 0.28
+                        : kind == METALLUM_SURFACE_WOOD_V1 ? 0.42
+                        : kind == METALLUM_SURFACE_POROUS_V1 ? 0.72
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.16
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.14 : 0.50;
+                float wetSpecularTarget = kind == METALLUM_SURFACE_STONE_V1 ? 0.78
+                        : kind == METALLUM_SURFACE_WOOD_V1 ? 0.48
+                        : kind == METALLUM_SURFACE_POROUS_V1 ? 0.10
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.85
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.95 : 0.28;
+                float wetAlbedoTarget = kind == METALLUM_SURFACE_STONE_V1 ? 0.84
+                        : kind == METALLUM_SURFACE_WOOD_V1 ? 0.82
+                        : kind == METALLUM_SURFACE_POROUS_V1 ? 0.92
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.90
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.92 : 0.80;
+                float roughnessAmplitude = kind == METALLUM_SURFACE_STONE_V1 ? 0.050
+                        : kind == METALLUM_SURFACE_WOOD_V1 ? 0.050
+                        : kind == METALLUM_SURFACE_POROUS_V1 ? 0.025
+                        : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.020
+                        : kind == METALLUM_SURFACE_METAL_V1 ? 0.015 : 0.060;
+                float albedoLuminance = dot(
+                        clamp(albedo, vec3(0.0), vec3(1.0)),
+                        vec3(0.2126, 0.7152, 0.0722));
+                float centeredLuminance = (albedoLuminance - 0.5) * 2.0;
+                float texturedWetRoughness = clamp(
+                        wetRoughnessTarget - centeredLuminance * roughnessAmplitude,
+                        0.08,
+                        0.95);
+                material.roughness = clamp(mix(
+                        material.roughness, texturedWetRoughness, material.wetness),
+                        0.08,
+                        0.95);
+                material.specularScale = mix(
+                        1.0, wetSpecularTarget, material.wetness);
+                material.wetAlbedoScale = mix(
+                        1.0, wetAlbedoTarget, material.wetness);
                 material.reactiveWeight = max(
                         material.reactiveWeight, material.wetness * 0.62);
                 return material;
@@ -308,7 +358,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     MetallumSurfaceMaterialV1 material,
                     vec3 albedo) {
                 vec3 dielectric = vec3(material.dielectricF0);
-                dielectric = mix(dielectric, vec3(0.075), material.wetness);
+                dielectric = mix(dielectric, vec3(0.025), material.wetness);
                 return clamp(mix(dielectric, albedo, material.metalness), vec3(0.0), vec3(0.98));
             }
 
@@ -423,7 +473,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 normal,
                     MetallumSurfaceMaterialV1 material) {
                 if (material.transmission == 0.0) {
-                    return albedo * (1.0 - 0.16 * material.wetness);
+                    return albedo * material.wetAlbedoScale;
                 }
                 float nDotV = max(abs(dot(normal, viewDirection)), 0.08);
                 float eta = material.kind == METALLUM_SURFACE_WATER_V1
@@ -595,7 +645,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             f0,
                             material.roughness);
                 }
-                return result;
+                return result * material.specularScale;
             }
 
             bool metallumFiniteVec3V1(vec3 value) {
@@ -1914,7 +1964,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (dominantScore == 0.0) {
                     return vec3(0.0);
                 }
-                return metallumEvaluateGgxV1(
+                return material.specularScale * metallumEvaluateGgxV1(
                         normal,
                         viewDirection,
                         dominantDirection,
@@ -1958,8 +2008,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    vec3 metallumPreparedAlbedo = max(metallumUnlitBase, vec3(0.0));\n"
                     + "    float metallumL8ReactiveWeight = 0.0;\n"
                     + "    uint metallumSurfaceEmission = (metallumMaterial >> 3u) & 15u;\n"
+                    + "    uint metallumSurfaceBase = metallumMaterial & 7u;\n"
                     + "    bool metallumTaggedL8Surface = metallumSurfaceEmission == 0u\n"
-                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u;\n"
+                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
+                    + "            && (metallumSurfaceBase == 2u || metallumSurfaceBase == 3u\n"
+                    + "            || metallumSurfaceBase == 4u || metallumSurfaceBase == 6u);\n"
                     + "    bool metallumRainyL8Surface =\n"
                     + "            metallumEnvironment.materialContract.x == 1u\n"
                     + "            && metallumEnvironment.materialWeatherAndTime.x > 0.0\n"
@@ -1967,10 +2020,16 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    if (metallumTaggedL8Surface || metallumRainyL8Surface) {\n"
                     + "        MetallumSurfaceMaterialV1 metallumSurfaceMaterial =\n"
                     + "                metallumResolveSurfaceMaterialV1(\n"
-                    + "                        metallumMaterial,\n"
+                    + "                        metallumMaterial, metallumPreparedAlbedo,\n"
                     + "                        metallumDirectNormal, metallumSkyVisibility, true);\n"
+                    + "        bool metallumIntrinsicMaterialOptics =\n"
+                    + "                metallumSurfaceMaterial.kind == METALLUM_SURFACE_WATER_V1\n"
+                    + "                || metallumSurfaceMaterial.kind == METALLUM_SURFACE_GLASS_V1\n"
+                    + "                || metallumSurfaceMaterial.kind == METALLUM_SURFACE_METAL_V1\n"
+                    + "                || metallumSurfaceMaterial.kind\n"
+                    + "                == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1;\n"
                     + "        bool metallumNeedsMaterialOptics =\n"
-                    + "                metallumSurfaceMaterial.kind != METALLUM_SURFACE_DIELECTRIC_V1\n"
+                    + "                metallumIntrinsicMaterialOptics\n"
                     + "                || metallumSurfaceMaterial.wetness > 0.0;\n"
                     + "        if (metallumNeedsMaterialOptics) {\n"
                     + "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n"
@@ -1982,7 +2041,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            metallumPreparedAlbedo = metallumTransmissionV1(\n"
                     + "                    metallumPreparedAlbedo, metallumViewDirection,\n"
                     + "                    metallumDirectNormal, metallumSurfaceMaterial);\n"
-                    + "            color.rgb *= 1.0 - 0.16 * metallumSurfaceMaterial.wetness;\n"
+                    + "            color.rgb *= metallumSurfaceMaterial.wetAlbedoScale;\n"
                     + "            if (metallumSurfaceMaterial.transmission > 0.0) {\n"
                     + "                color.rgb = mix(color.rgb, metallumPreparedAlbedo,\n"
                     + "                        metallumSurfaceMaterial.transmission * 0.62);\n"

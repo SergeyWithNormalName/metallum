@@ -1,5 +1,8 @@
 package com.metallum.client.lighting;
 
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.BushBlock;
+import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.SoundType;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -10,7 +13,8 @@ import java.util.Objects;
  *
  * <p>The compact Sodium vertex contract has one conditionally-free semantic bit: exact emission
  * only consumes it when surface emission is non-zero. Non-emissive terrain uses that bit together
- * with version-locked base values to distinguish metal, smooth dielectric, water, and glass.
+ * with version-locked base values to distinguish metal, smooth dielectric, water, glass,
+ * stone, wood, and porous surfaces.
  * Unknown terrain fails safely to dielectric unless the remesher identifies a genuine translucent
  * render pass. Fragment alpha is deliberately not a material classifier: foliage, grass overlays,
  * and their mip levels are alpha-tested but not glass.</p>
@@ -18,6 +22,9 @@ import java.util.Objects;
 public final class SurfaceMaterialPolicy {
     public enum Kind {
         DIELECTRIC,
+        STONE,
+        WOOD,
+        POROUS,
         SMOOTH_DIELECTRIC,
         METAL,
         GLASS,
@@ -27,6 +34,10 @@ public final class SurfaceMaterialPolicy {
     public record Descriptor(
             Kind kind,
             float roughness,
+            float wetRoughnessTarget,
+            float wetSpecularScale,
+            float albedoRoughnessAmplitude,
+            float wetAlbedoScale,
             float metalness,
             float dielectricF0,
             float transmission,
@@ -38,6 +49,10 @@ public final class SurfaceMaterialPolicy {
         public Descriptor {
             Objects.requireNonNull(kind, "kind");
             requireUnit(roughness, "roughness");
+            requireUnit(wetRoughnessTarget, "wet roughness target");
+            requireUnit(wetSpecularScale, "wet specular scale");
+            requireUnit(albedoRoughnessAmplitude, "albedo roughness amplitude");
+            requireUnit(wetAlbedoScale, "wet albedo scale");
             requireUnit(metalness, "metalness");
             requireUnit(dielectricF0, "dielectric F0");
             requireUnit(transmission, "transmission");
@@ -49,23 +64,43 @@ public final class SurfaceMaterialPolicy {
     }
 
     public static final Descriptor DIELECTRIC = new Descriptor(
-            Kind.DIELECTRIC, 0.68f, 0.0f, 0.04f, 0.0f,
+            Kind.DIELECTRIC, 0.68f, 0.50f, 0.28f, 0.060f, 0.80f,
+            0.0f, 0.04f, 0.0f,
+            0.0f, 0.0f, 0.0f, 0.0f
+    );
+    public static final Descriptor STONE = new Descriptor(
+            Kind.STONE, 0.70f, 0.28f, 0.78f, 0.050f, 0.84f,
+            0.0f, 0.04f, 0.0f,
+            0.0f, 0.0f, 0.0f, 0.0f
+    );
+    public static final Descriptor WOOD = new Descriptor(
+            Kind.WOOD, 0.72f, 0.42f, 0.48f, 0.050f, 0.82f,
+            0.0f, 0.04f, 0.0f,
+            0.0f, 0.0f, 0.0f, 0.0f
+    );
+    public static final Descriptor POROUS = new Descriptor(
+            Kind.POROUS, 0.80f, 0.72f, 0.10f, 0.025f, 0.92f,
+            0.0f, 0.04f, 0.0f,
             0.0f, 0.0f, 0.0f, 0.0f
     );
     public static final Descriptor SMOOTH_DIELECTRIC = new Descriptor(
-            Kind.SMOOTH_DIELECTRIC, 0.24f, 0.0f, 0.04f, 0.0f,
+            Kind.SMOOTH_DIELECTRIC, 0.24f, 0.16f, 0.85f, 0.020f, 0.90f,
+            0.0f, 0.04f, 0.0f,
             0.0f, 0.0f, 0.0f, 0.12f
     );
     public static final Descriptor METAL = new Descriptor(
-            Kind.METAL, 0.22f, 0.92f, 0.04f, 0.0f,
+            Kind.METAL, 0.22f, 0.14f, 0.95f, 0.015f, 0.92f,
+            0.92f, 0.04f, 0.0f,
             0.0f, 0.0f, 0.0f, 0.18f
     );
     public static final Descriptor GLASS = new Descriptor(
-            Kind.GLASS, 0.10f, 0.0f, 0.04f, 0.92f,
+            Kind.GLASS, 0.10f, 0.10f, 1.0f, 0.0f, 1.0f,
+            0.0f, 0.04f, 0.92f,
             0.08f, 0.035f, 0.018f, 0.82f
     );
     public static final Descriptor WATER = new Descriptor(
-            Kind.WATER, 0.075f, 0.0f, 0.0204f, 0.96f,
+            Kind.WATER, 0.075f, 0.075f, 1.0f, 0.0f, 1.0f,
+            0.0f, 0.0204f, 0.96f,
             0.36f, 0.095f, 0.035f, 0.94f
     );
 
@@ -96,6 +131,15 @@ public final class SurfaceMaterialPolicy {
                 || sound == SoundType.POLISHED_DEEPSLATE) {
             return SMOOTH_DIELECTRIC;
         }
+        if (isPorous(state, sound)) {
+            return POROUS;
+        }
+        if (isWood(state, sound)) {
+            return WOOD;
+        }
+        if (isStone(sound)) {
+            return STONE;
+        }
         return DIELECTRIC;
     }
 
@@ -111,14 +155,35 @@ public final class SurfaceMaterialPolicy {
         return explicit == DIELECTRIC && translucentRenderPass ? GLASS : explicit;
     }
 
-    public static float wetRoughness(final float dryRoughness, final float wetness) {
-        float dry = clampUnit(dryRoughness);
+    public static float wetRoughness(
+            final Descriptor material,
+            final float wetness,
+            final float albedoLuminance
+    ) {
+        Objects.requireNonNull(material, "material");
         float wet = clampUnit(wetness);
-        return Math.max(0.055f, dry * (1.0f - 0.68f * wet));
+        float centeredLuminance = (clampUnit(albedoLuminance) - 0.5f) * 2.0f;
+        float texturedTarget = material.wetRoughnessTarget()
+                - centeredLuminance * material.albedoRoughnessAmplitude();
+        return Math.clamp(
+                mix(material.roughness(), texturedTarget, wet),
+                0.08f,
+                0.95f
+        );
     }
 
-    public static float wetAlbedoScale(final float wetness) {
-        return 1.0f - 0.16f * clampUnit(wetness);
+    public static float wetSpecularScale(final Descriptor material, final float wetness) {
+        Objects.requireNonNull(material, "material");
+        return mix(1.0f, material.wetSpecularScale(), clampUnit(wetness));
+    }
+
+    public static float wetAlbedoScale(final Descriptor material, final float wetness) {
+        Objects.requireNonNull(material, "material");
+        return mix(1.0f, material.wetAlbedoScale(), clampUnit(wetness));
+    }
+
+    public static float wetDielectricF0(final float dryF0, final float wetness) {
+        return mix(clampUnit(dryF0), 0.025f, clampUnit(wetness));
     }
 
     public static float schlickFresnel(final float f0, final float nDotV) {
@@ -146,11 +211,75 @@ public final class SurfaceMaterialPolicy {
         return (float) Math.exp(-absorption * distance);
     }
 
+    private static boolean isPorous(final BlockState state, final SoundType sound) {
+        return state.getBlock() instanceof LeavesBlock
+                || state.is(BlockTags.LEAVES)
+                || state.is(BlockTags.WOOL)
+                || state.is(BlockTags.WOOL_CARPETS)
+                || state.is(BlockTags.FLOWERS)
+                || state.is(BlockTags.CROPS)
+                || state.getBlock() instanceof BushBlock
+                || sound == SoundType.SNOW
+                || sound == SoundType.POWDER_SNOW
+                || sound == SoundType.VINE
+                || sound == SoundType.CROP
+                || sound == SoundType.HARD_CROP
+                || sound == SoundType.NETHER_WART
+                || sound == SoundType.ROOTS
+                || sound == SoundType.NETHER_SPROUTS
+                || sound == SoundType.MOSS
+                || sound == SoundType.MOSS_CARPET
+                || sound == SoundType.AZALEA_LEAVES
+                || sound == SoundType.CHERRY_LEAVES;
+    }
+
+    private static boolean isWood(final BlockState state, final SoundType sound) {
+        return state.is(BlockTags.PLANKS)
+                || state.is(BlockTags.LOGS)
+                || state.is(BlockTags.WOODEN_STAIRS)
+                || state.is(BlockTags.WOODEN_SLABS)
+                || state.is(BlockTags.WOODEN_FENCES)
+                || state.is(BlockTags.WOODEN_DOORS)
+                || state.is(BlockTags.WOODEN_TRAPDOORS)
+                || sound == SoundType.WOOD
+                || sound == SoundType.BAMBOO_WOOD
+                || sound == SoundType.NETHER_WOOD
+                || sound == SoundType.CHERRY_WOOD
+                || sound == SoundType.HANGING_SIGN
+                || sound == SoundType.NETHER_WOOD_HANGING_SIGN
+                || sound == SoundType.BAMBOO_WOOD_HANGING_SIGN
+                || sound == SoundType.CHERRY_WOOD_HANGING_SIGN
+                || sound == SoundType.CHISELED_BOOKSHELF
+                || sound == SoundType.SHELF
+                || sound == SoundType.LADDER;
+    }
+
+    private static boolean isStone(final SoundType sound) {
+        return sound == SoundType.STONE
+                || sound == SoundType.DEEPSLATE
+                || sound == SoundType.DEEPSLATE_BRICKS
+                || sound == SoundType.DEEPSLATE_TILES
+                || sound == SoundType.TUFF
+                || sound == SoundType.TUFF_BRICKS
+                || sound == SoundType.CALCITE
+                || sound == SoundType.DRIPSTONE_BLOCK
+                || sound == SoundType.POINTED_DRIPSTONE
+                || sound == SoundType.BASALT
+                || sound == SoundType.NETHER_BRICKS
+                || sound == SoundType.MUD_BRICKS
+                || sound == SoundType.PACKED_MUD
+                || sound == SoundType.RESIN_BRICKS;
+    }
+
     private static float clampUnit(final float value) {
         if (!Float.isFinite(value)) {
             throw new IllegalArgumentException("value must be finite");
         }
         return Math.clamp(value, 0.0f, 1.0f);
+    }
+
+    private static float mix(final float start, final float end, final float amount) {
+        return start + (end - start) * amount;
     }
 
     private static void requireUnit(final float value, final String label) {
