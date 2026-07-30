@@ -59,6 +59,13 @@ abstract class GameRendererMetalFxMixin {
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
+        MetalDevice device = MetalDevice.getInstance();
+        if (device != null) {
+            // FI health can restore the user's ordinary scaler dimensions.
+            // Poll before consuming the pending resize so the target and the
+            // renderer generation change together in this same frame.
+            device.refreshFrameInterpolationRuntimeHealthBeforeResize();
+        }
         MetalFxUpscaling.updateDynamicResolution();
         int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
         int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
@@ -66,7 +73,6 @@ abstract class GameRendererMetalFxMixin {
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
         }
         if (!MetalFxUpscaling.isActive()) {
-            MetalDevice device = MetalDevice.getInstance();
             if (device != null) {
                 device.publishRendererGenerationState(displayWidth, displayHeight);
             }
@@ -80,7 +86,6 @@ abstract class GameRendererMetalFxMixin {
                 || this.mainRenderTarget.height != dimensions.renderHeight()) {
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
         }
-        MetalDevice device = MetalDevice.getInstance();
         if (device != null) {
             device.publishRendererGenerationState(displayWidth, displayHeight);
         }

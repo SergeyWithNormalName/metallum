@@ -22,7 +22,6 @@ public final class FrameInterpolationPolicy {
         USER_REQUEST_DISABLED,
         FEATURE_UNSUPPORTED,
         DISPLAY_SYNC_DISABLED,
-        LIVE_PRESENTATION_PROFILE_UNVALIDATED,
         REFRESH_RATE_UNSATISFIED,
         CADENCE_OUT_OF_BOUNDS,
         UNSUPPORTED_UPSTREAM_MODE,
@@ -57,7 +56,6 @@ public final class FrameInterpolationPolicy {
             final MetalCapabilities capabilities,
             final UpstreamMode upstreamMode,
             final boolean displaySyncEnabled,
-            final boolean livePresentationProfileValidated,
             final double renderFps,
             final Set<FrameSynthesisContract.Discontinuity> discontinuities
     ) {
@@ -91,14 +89,6 @@ public final class FrameInterpolationPolicy {
             );
         }
 
-        if (!livePresentationProfileValidated) {
-            return new Evaluation(
-                    true, false, false,
-                    EligibilityReason.LIVE_PRESENTATION_PROFILE_UNVALIDATED,
-                    EffectiveReason.NOT_PROFILE_ELIGIBLE
-            );
-        }
-
         MetalCapabilities.DisplayCapabilities display = capabilities.displayCapabilities();
         if (!display.refreshKnown() || display.maximumFramesPerSecond() < 60) {
             return new Evaluation(
@@ -110,7 +100,11 @@ public final class FrameInterpolationPolicy {
 
         double targetHz = display.maximumFramesPerSecond();
         double desiredRealHz = targetHz / 2.0;
-        double lowerBound = Math.max(30.0, desiredRealHz * 0.85);
+        // MetalFX requires at least 30 real FPS. The native scheduler may
+        // legitimately select 30 -> 60 or 40 -> 80 on a 120-Hz ProMotion
+        // panel; requiring exactly half the panel maximum made those supported
+        // adaptive cadences impossible at the Java admission boundary.
+        double lowerBound = 30.0;
         double upperBound = desiredRealHz * 1.05;
 
         if (!Double.isFinite(renderFps) || renderFps < lowerBound || renderFps > upperBound) {

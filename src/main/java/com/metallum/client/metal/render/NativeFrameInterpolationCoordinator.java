@@ -13,10 +13,14 @@ import java.util.Optional;
 final class NativeFrameInterpolationCoordinator implements FrameInterpolationCommitBoundary.TicketBridge, AutoCloseable {
     private static final long DEFAULT_DRAIN_TIMEOUT_NANOS = 1_000_000_000L;
 
+    private final Arena scratchArena;
+    private final MemorySegment outTicketScratch;
     private MemorySegment context;
 
     private NativeFrameInterpolationCoordinator(final MemorySegment context) {
         this.context = context;
+        this.scratchArena = Arena.ofShared();
+        this.outTicketScratch = this.scratchArena.allocate(ValueLayout.JAVA_LONG);
     }
 
     static Optional<NativeFrameInterpolationCoordinator> create(
@@ -61,15 +65,13 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
                     FrameInterpolationCommitBoundary.Status.BYPASS_DISABLED
             );
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outTicket = arena.allocate(ValueLayout.JAVA_LONG);
-            int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v1(
-                    this.context, commandBuffer, rendererGeneration, outTicket
-            );
-            return new FrameInterpolationCommitBoundary.Preparation(
-                    decodeStatus(rawStatus), outTicket.get(ValueLayout.JAVA_LONG, 0L)
-            );
-        }
+        this.outTicketScratch.set(ValueLayout.JAVA_LONG, 0L, 0L);
+        int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v1(
+                this.context, commandBuffer, rendererGeneration, this.outTicketScratch
+        );
+        return new FrameInterpolationCommitBoundary.Preparation(
+                decodeStatus(rawStatus), this.outTicketScratch.get(ValueLayout.JAVA_LONG, 0L)
+        );
     }
 
     @Override
@@ -82,32 +84,30 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
                     FrameInterpolationCommitBoundary.Status.BYPASS_DISABLED
             );
         }
-        try (Arena arena = Arena.ofConfined()) {
-            MemorySegment outTicket = arena.allocate(ValueLayout.JAVA_LONG);
-            int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v2(
-                    this.context,
-                    input.commandBuffer(),
-                    input.rendererGeneration(),
-                    input.sourceTexture(),
-                    input.sceneTexture(),
-                    input.sceneDepthTexture(),
-                    input.semanticTexture(),
-                    input.uiTexture(),
-                    input.globalFence(),
-                    input.spatialHdrPrecomposed() ? 1 : 0,
-                    input.outputMode(),
-                    input.sourceEncoding(),
-                    input.materialGenerationActive() ? 1 : 0,
-                    input.diagnosticPattern() ? 1 : 0,
-                    input.currentHeadroom(),
-                    input.hdrStrength(),
-                    input.bloomStrength(),
-                    outTicket
-            );
-            return new FrameInterpolationCommitBoundary.Preparation(
-                    decodeStatus(rawStatus), outTicket.get(ValueLayout.JAVA_LONG, 0L)
-            );
-        }
+        this.outTicketScratch.set(ValueLayout.JAVA_LONG, 0L, 0L);
+        int rawStatus = MetalNativeBridge.metallum_frame_interpolation_prepare_v2(
+                this.context,
+                input.commandBuffer(),
+                input.rendererGeneration(),
+                input.sourceTexture(),
+                input.sceneTexture(),
+                input.sceneDepthTexture(),
+                input.semanticTexture(),
+                input.uiTexture(),
+                input.globalFence(),
+                input.spatialHdrPrecomposed() ? 1 : 0,
+                input.outputMode(),
+                input.sourceEncoding(),
+                input.materialGenerationActive() ? 1 : 0,
+                input.diagnosticPattern() ? 1 : 0,
+                input.currentHeadroom(),
+                input.hdrStrength(),
+                input.bloomStrength(),
+                this.outTicketScratch
+        );
+        return new FrameInterpolationCommitBoundary.Preparation(
+                decodeStatus(rawStatus), this.outTicketScratch.get(ValueLayout.JAVA_LONG, 0L)
+        );
     }
 
     @Override
@@ -129,6 +129,13 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
         ));
     }
 
+    synchronized long runtimeStatusPacked() {
+        if (MetalNativeBridge.isNullHandle(this.context)) {
+            return 0L;
+        }
+        return MetalNativeBridge.metallum_frame_interpolation_runtime_status_v1(this.context);
+    }
+
     @Override
     public synchronized void close() {
         if (MetalNativeBridge.isNullHandle(this.context)) {
@@ -140,6 +147,7 @@ final class NativeFrameInterpolationCoordinator implements FrameInterpolationCom
         FrameInterpolationCommitBoundary.Status status = decodeStatus(rawStatus);
         if (status.prepared() || status == FrameInterpolationCommitBoundary.Status.BYPASS_DISABLED) {
             this.context = MemorySegment.NULL;
+            this.scratchArena.close();
             return;
         }
         throw new IllegalStateException("Native frame-interpolation coordinator release failed: " + status);

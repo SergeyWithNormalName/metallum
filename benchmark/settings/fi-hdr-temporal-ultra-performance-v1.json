@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "id": "fi-hdr-temporal-performance-v1",
+  "id": "fi-hdr-temporal-ultra-performance-v1",
   "options": {
     "version": 4903,
     "ao": true,
@@ -26,7 +26,7 @@
     "guiScale": 0,
     "maxAnisotropyBit": 1,
     "textureFiltering": 1,
-    "maxFps": 60,
+    "maxFps": 30,
     "improvedTransparency": false,
     "inactivityFpsLimit": "afk",
     "mipmapLevels": 4,
@@ -136,9 +136,13 @@
     ],
     "sodium_chunk_builder_threads": 4
   },
+  "renderer_properties": {
+    "improvedLighting": "false",
+    "lightingPreset": "balanced"
+  },
   "frame_interpolation": {
     "enabled": true,
-    "temporal_mode": "performance",
+    "temporal_mode": "ultra_performance",
     "overlay": true,
     "minimum_generated_percent": 80
   }

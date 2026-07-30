@@ -34,6 +34,7 @@
     "render.EntityMixin",
     "render.CubeMapHdrMixin",
     "render.FlameFeatureRendererHdrMixin",
+    "render.FramerateLimitTrackerFrameInterpolationMixin",
     "render.GuiRendererHdrMixin",
     "render.GuiVoxelPreviewMixin",
     "render.GuiDrsResolutionOverlayMixin",

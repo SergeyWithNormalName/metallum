@@ -629,6 +629,33 @@ def _setting_output(value: object, field: str) -> str:
     return result
 
 
+def _schema_v2_renderer_properties(spec: dict[str, object]) -> dict[str, str]:
+    expected = _object(
+        spec.get("renderer_properties"), "settings.renderer_properties"
+    )
+    _settings_exact_keys(
+        expected,
+        "renderer_properties",
+        {"improvedLighting", "lightingPreset"},
+    )
+    improved_lighting = expected.get("improvedLighting")
+    lighting_preset = expected.get("lightingPreset")
+    if improved_lighting not in {"true", "false"}:
+        raise FixtureError(
+            "benchmark settings renderer_properties.improvedLighting "
+            "must be true or false"
+        )
+    if lighting_preset not in {"performance", "balanced", "ultra"}:
+        raise FixtureError(
+            "benchmark settings renderer_properties.lightingPreset "
+            "must be performance, balanced, or ultra"
+        )
+    return {
+        "improvedLighting": improved_lighting,
+        "lightingPreset": lighting_preset,
+    }
+
+
 def settings_values(
     spec_path: Path,
     options_path: Path,
@@ -652,7 +679,7 @@ def settings_values(
         "fabric_default_resource_packs", "runtime",
     }
     if schema_version == 2:
-        expected_root_keys.add("frame_interpolation")
+        expected_root_keys.update({"frame_interpolation", "renderer_properties"})
     _settings_exact_keys(spec, "root", expected_root_keys)
     settings_id = _string(spec.get("id"), "settings.id", SAFE_ID_RE)
     expected_options = _object(spec.get("options"), "settings.options")
@@ -706,7 +733,9 @@ def settings_values(
         temporal_mode = "unchanged"
         frame_interpolation_overlay = False
         minimum_generated_percent = 0
+        expected_renderer_properties: dict[str, str] = {}
     else:
+        expected_renderer_properties = _schema_v2_renderer_properties(spec)
         expected_frame_interpolation = _object(
             spec.get("frame_interpolation"), "settings.frame_interpolation"
         )
@@ -764,6 +793,15 @@ def settings_values(
             f"{settings_id}: expected {expected_renderer_interpolation}, "
             f"found {actual_renderer_interpolation}"
         )
+    actual_renderer_properties: dict[str, str] = {}
+    for key, expected_value in expected_renderer_properties.items():
+        actual_value = actual_renderer.get(key)
+        if actual_value != expected_value:
+            raise FixtureError(
+                f"renderer property {key} differs from {settings_id}: "
+                f"expected {expected_value}, found {actual_value or '<missing>'}"
+            )
+        actual_renderer_properties[key] = actual_value
     actual_temporal_mode = actual_temporal.get("mode")
     if actual_temporal_mode not in {
         "off", "temporal", "quality", "performance", "ultra_performance",
@@ -881,6 +919,7 @@ def settings_values(
     }
     if schema_version == 2:
         canonical_settings["schema_version"] = 2
+        canonical_settings["renderer_properties"] = actual_renderer_properties
         canonical_settings["frame_interpolation"] = {
             "enabled": frame_interpolation_enabled,
             "temporal_mode": temporal_mode,
@@ -897,7 +936,7 @@ def settings_values(
         "biomeBlendRadius", "maxFps", "ao", "renderClouds", "cloudRange",
         "textureFiltering", "maxAnisotropyBit", "improvedTransparency", "guiScale",
     )
-    return [
+    result = [
         settings_id,
         hashlib.sha256(spec_raw).hexdigest(),
         settings_hasher.hexdigest(),
@@ -919,6 +958,18 @@ def settings_values(
             "frame_interpolation.minimum_generated_percent",
         ),
     ]
+    if schema_version == 2:
+        result.extend([
+            _setting_output(
+                actual_renderer_properties["improvedLighting"],
+                "renderer.improvedLighting",
+            ),
+            _setting_output(
+                actual_renderer_properties["lightingPreset"],
+                "renderer.lightingPreset",
+            ),
+        ])
+    return result
 
 
 def _replace_options(path: Path, updates: dict[str, object]) -> None:
@@ -999,6 +1050,7 @@ def apply_runtime_settings(
             "schema_version", "id", "options", "hdr_properties",
             "metalfx_properties", "sodium_options", "sodium_mixin_properties",
             "fabric_default_resource_packs", "runtime", "frame_interpolation",
+            "renderer_properties",
         },
     )
     expected_options = _object(spec.get("options"), "settings.options")
@@ -1009,6 +1061,7 @@ def apply_runtime_settings(
     expected_frame_interpolation = _object(
         spec.get("frame_interpolation"), "settings.frame_interpolation"
     )
+    expected_renderer_properties = _schema_v2_renderer_properties(spec)
     _settings_exact_keys(
         expected_frame_interpolation,
         "frame_interpolation",
@@ -1038,6 +1091,8 @@ def apply_runtime_settings(
         "frameInterpolation",
         "true" if enabled else "false",
     )
+    for key, value in expected_renderer_properties.items():
+        _replace_property(renderer_path, "renderer properties", key, value)
     _replace_property(temporal_path, "MetalFX Temporal properties", "mode", temporal_mode)
 
 
@@ -1598,7 +1653,8 @@ def self_test() -> None:
         fabric_default_packs.write_text('{"values":[]}\n', encoding="utf-8")
         renderer = root / "metallum-renderer.properties"
         renderer.write_text(
-            "schemaVersion=3\nframeInterpolation=false\nextraRendererSetting=kept\n",
+            "schemaVersion=3\nimprovedLighting=true\nlightingPreset=ultra\n"
+            "frameInterpolation=false\nextraRendererSetting=kept\n",
             encoding="utf-8",
         )
         temporal = root / "metallum-metalfx-temporal.properties"
@@ -1682,6 +1738,10 @@ def self_test() -> None:
             "overlay": True,
             "minimum_generated_percent": 80,
         }
+        fi_settings_payload["renderer_properties"] = {
+            "improvedLighting": "false",
+            "lightingPreset": "balanced",
+        }
         fi_settings = root / "fi-settings.json"
         fi_settings.write_text(json.dumps(fi_settings_payload), encoding="utf-8")
         hdr.write_text(
@@ -1696,7 +1756,8 @@ def self_test() -> None:
         assert "fullscreen:true\n" in options.read_text(encoding="utf-8")
         assert "exclusiveFullscreen:true\n" in options.read_text(encoding="utf-8")
         assert renderer.read_text(encoding="utf-8") == (
-            "schemaVersion=3\nframeInterpolation=true\nextraRendererSetting=kept\n"
+            "schemaVersion=3\nimprovedLighting=false\nlightingPreset=balanced\n"
+            "frameInterpolation=true\nextraRendererSetting=kept\n"
         )
         assert temporal.read_text(encoding="utf-8") == (
             "mode=quality\nextraTemporalSetting=kept\n"
@@ -1713,8 +1774,56 @@ def self_test() -> None:
             sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
             renderer, temporal,
         )
-        assert fi_output[0] == "test-fi-hdr-temporal-quality-v1" and len(fi_output) == 31
-        assert fi_output[-4:] == ["true", "quality", "true", "80"]
+        assert fi_output[0] == "test-fi-hdr-temporal-quality-v1" and len(fi_output) == 33
+        assert fi_output[-6:] == [
+            "true", "quality", "true", "80", "false", "balanced",
+        ]
+
+        renderer.write_text(
+            renderer.read_text(encoding="utf-8").replace(
+                "improvedLighting=false", "improvedLighting=true"
+            ),
+            encoding="utf-8",
+        )
+        try:
+            settings_values(
+                fi_settings, options, hdr, metalfx,
+                sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+                renderer, temporal,
+            )
+        except FixtureError as error:
+            assert "renderer property improvedLighting differs" in str(error)
+        else:
+            raise AssertionError("FI renderer lighting mismatch was accepted")
+
+        renderer.write_text(
+            renderer.read_text(encoding="utf-8")
+            .replace("improvedLighting=true", "improvedLighting=false")
+            .replace("lightingPreset=balanced", "lightingPreset=ultra"),
+            encoding="utf-8",
+        )
+        try:
+            settings_values(
+                fi_settings, options, hdr, metalfx,
+                sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+                renderer, temporal,
+            )
+        except FixtureError as error:
+            assert "renderer property lightingPreset differs" in str(error)
+        else:
+            raise AssertionError("FI renderer preset mismatch was accepted")
+
+        renderer.write_text(
+            renderer.read_text(encoding="utf-8").replace(
+                "lightingPreset=ultra", "lightingPreset=balanced"
+            ),
+            encoding="utf-8",
+        )
+        assert settings_values(
+            fi_settings, options, hdr, metalfx,
+            sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+            renderer, temporal,
+        ) == fi_output
     print("metal benchmark fixture self-test passed")
 
 

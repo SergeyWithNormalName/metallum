@@ -101,7 +101,8 @@ public final class MetalFxUpscaling {
         boolean temporalDynamic = MetalFxTemporalScaling.isRequested()
                 && !MetalFxTemporalScaling.isRuntimeDisabled()
                 && MetalFxTemporalScaling.requestedMode().isDynamic();
-        boolean spatialDynamic = MetalFxSpatialScaling.isRequested()
+        boolean spatialDynamic = !MetalFxTemporalScaling.isRequested()
+                && MetalFxSpatialScaling.isRequested()
                 && !MetalFxSpatialScaling.isRuntimeDisabled()
                 && MetalFxSpatialScaling.requestedMode().isDynamic();
         boolean dynamic = temporalDynamic || spatialDynamic;

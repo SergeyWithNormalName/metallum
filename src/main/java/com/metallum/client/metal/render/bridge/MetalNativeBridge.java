@@ -435,6 +435,16 @@ public final class MetalNativeBridge {
                     "metallum_frame_interpolation_presented_generated_count_v1",
                     FunctionDescriptor.of(LONG)
             );
+            frameInterpolationTelemetryCounterV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_telemetry_counter_v1",
+                    FunctionDescriptor.of(LONG, INT)
+            );
+            frameInterpolationRuntimeStatusV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_frame_interpolation_runtime_status_v1",
+                    FunctionDescriptor.of(LONG, ValueLayout.ADDRESS)
+            );
             semaphoreWait = downcallWithoutCritical(lookup, "metallum_semaphore_wait", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
             MTLCommandBufferIsCompleted = downcall(lookup, "metallum_MTLCommandBuffer_isCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS));
             MTLCommandBufferWaitUntilCompleted = downcallWithoutCritical(lookup, "metallum_MTLCommandBuffer_waitUntilCompleted", FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG));
@@ -856,6 +866,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle frameInterpolationDrainV1;
     private static final MethodHandle frameInterpolationReleaseV1;
     private static final MethodHandle frameInterpolationPresentedGeneratedCountV1;
+    private static final MethodHandle frameInterpolationTelemetryCounterV1;
+    private static final MethodHandle frameInterpolationRuntimeStatusV1;
     private static final MethodHandle semaphoreWait;
     private static final MethodHandle MTLCommandBufferIsCompleted;
     private static final MethodHandle MTLCommandBufferWaitUntilCompleted;
@@ -1797,6 +1809,26 @@ public final class MetalNativeBridge {
             return (long) frameInterpolationPresentedGeneratedCountV1.invokeExact();
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_frame_interpolation_presented_generated_count_v1", throwable);
+        }
+    }
+
+    /** Returns a process-lifetime FI transport counter selected by the stable v1 ABI. */
+    public static long metallum_frame_interpolation_telemetry_counter_v1(final int selector) {
+        try {
+            return (long) frameInterpolationTelemetryCounterV1.invokeExact(selector);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_telemetry_counter_v1", throwable);
+        }
+    }
+
+    /** Returns the packed state/reason for one live FI coordinator generation. */
+    public static long metallum_frame_interpolation_runtime_status_v1(
+            final MemorySegment context
+    ) {
+        try {
+            return (long) frameInterpolationRuntimeStatusV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_frame_interpolation_runtime_status_v1", throwable);
         }
     }
 

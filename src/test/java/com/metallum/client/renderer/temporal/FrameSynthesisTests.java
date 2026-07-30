@@ -9,6 +9,8 @@ import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
+import com.metallum.client.renderer.interpolation.FrameInterpolationCompatibilityProfile;
+import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.metalfx.GeneratedFrameRateTracker;
 
 import java.util.HashSet;
@@ -31,6 +33,8 @@ public final class FrameSynthesisTests {
         testPresentationAndOwnershipFailures();
         testCadenceAndImmutableOwnership();
         testFrameInterpolationPolicyAndContractRules();
+        testFrameInterpolationCompatibilityProfile();
+        testFrameInterpolationRuntimeStatus();
         testGeneratedFrameRateTracker();
         System.out.println("Frame synthesis P6 contract tests passed");
     }
@@ -39,28 +43,104 @@ public final class FrameSynthesisTests {
         GeneratedFrameRateTracker tracker = new GeneratedFrameRateTracker();
         require(tracker.shouldSample(1_000_000_000L),
                 "generated-frame tracker did not request its initial sample");
-        tracker.observe(1_000_000_000L, 100L);
+        tracker.observe(1_000_000_000L, 7L, 100L);
         require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 100L,
                 "initial cumulative count was mistaken for a generated-frame burst");
         require(!tracker.shouldSample(1_500_000_000L) && tracker.shouldSample(2_000_000_000L),
                 "generated-frame tracker sampling interval drifted");
 
-        tracker.observe(2_000_000_000L, 160L);
+        tracker.observe(2_000_000_000L, 7L, 160L);
         require(tracker.framesPerSecond() == 60 && tracker.presentedCount() == 160L,
                 "generated-frame rate did not use the on-screen cumulative delta");
-        tracker.observe(3_000_000_000L, 160L);
+        tracker.observe(3_000_000_000L, 7L, 160L);
         require(tracker.framesPerSecond() == 0,
                 "stopped generated presentations retained a stale non-zero rate");
 
-        tracker.observe(7_000_000_000L, 220L);
+        tracker.observe(7_000_000_000L, 7L, 220L);
         require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 220L,
                 "long HUD pause produced an averaged or synthetic generated-frame rate");
-        tracker.observe(8_000_000_000L, 10L);
+        tracker.observe(8_000_000_000L, 8L, 10L);
         require(tracker.framesPerSecond() == 0 && tracker.presentedCount() == 10L,
-                "native counter reset produced a negative or wrapped rate");
-        tracker.observe(9_000_000_000L, 40L);
+                "new FI session produced a negative or wrapped rate");
+        tracker.observe(9_000_000_000L, 8L, 40L);
         require(tracker.framesPerSecond() == 30,
                 "generated-frame tracker did not recover after a counter reset");
+    }
+
+    private static void testFrameInterpolationRuntimeStatus() {
+        FrameInterpolationRuntimeStatus warming =
+                FrameInterpolationRuntimeStatus.fromPackedNative(
+                        (17L << 16) | (1L << 8) | 1L,
+                        9L
+                );
+        require(warming.state() == FrameInterpolationRuntimeStatus.State.WARMING
+                        && warming.reason()
+                        == FrameInterpolationRuntimeStatus.Reason.MEASURING_ON_GLASS
+                        && warming.sessionId() == 9L
+                        && warming.presentedGeneratedCount() == 17L,
+                "packed FI warm-up/session counter status was decoded incorrectly");
+        FrameInterpolationRuntimeStatus active =
+                FrameInterpolationRuntimeStatus.fromPackedNative(
+                        (42L << 16) | 2L,
+                        9L
+                );
+        require(active.state() == FrameInterpolationRuntimeStatus.State.ACTIVE
+                        && active.reason() == FrameInterpolationRuntimeStatus.Reason.NONE
+                        && active.presentedGeneratedCount() == 42L,
+                "native FI Active was not tied to the shown-frame counter");
+        FrameInterpolationRuntimeStatus failed =
+                FrameInterpolationRuntimeStatus.fromPackedNative(
+                        (43L << 16) | (2L << 8) | 3L,
+                        9L
+                );
+        require(failed.state() == FrameInterpolationRuntimeStatus.State.UNAVAILABLE
+                        && failed.reason()
+                        == FrameInterpolationRuntimeStatus.Reason.ON_GLASS_CADENCE
+                        && failed.presentedGeneratedCount() == 43L,
+                "on-glass circuit-breaker status was not decoded fail-closed");
+        require(FrameInterpolationRuntimeStatus.fromPackedNative(99L, 9L).state()
+                        == FrameInterpolationRuntimeStatus.State.UNAVAILABLE,
+                "unknown native FI state did not fail closed");
+        FrameInterpolationRuntimeStatus awaiting =
+                FrameInterpolationRuntimeStatus.fromPackedNative(
+                        (5L << 8) | 1L,
+                        10L
+                );
+        require(awaiting.state() == FrameInterpolationRuntimeStatus.State.WARMING
+                        && awaiting.reason()
+                        == FrameInterpolationRuntimeStatus.Reason.AWAITING_PRODUCTION_SOURCE,
+                "FI workspace claimed to measure on-glass cadence before a world source");
+        require(!FrameInterpolationRuntimeStatus.warmupBudgetExhausted(
+                        FrameInterpolationRuntimeStatus.State.WARMING,
+                        FrameInterpolationRuntimeStatus.Reason.MEASURING_ON_GLASS,
+                        7_999L,
+                        8_000L
+                ),
+                "FI warm-up watchdog fired before its bounded probation ended");
+        require(FrameInterpolationRuntimeStatus.warmupBudgetExhausted(
+                        FrameInterpolationRuntimeStatus.State.WARMING,
+                        FrameInterpolationRuntimeStatus.Reason.MEASURING_ON_GLASS,
+                        8_000L,
+                        8_000L
+                ),
+                "FI warm-up watchdog did not end an indefinitely unproven session");
+        require(!FrameInterpolationRuntimeStatus.warmupBudgetExhausted(
+                        FrameInterpolationRuntimeStatus.State.ACTIVE,
+                        FrameInterpolationRuntimeStatus.Reason.NONE,
+                        80_000L,
+                        8_000L
+                ),
+                "FI warm-up watchdog quarantined an already proven session");
+        require(FrameInterpolationRuntimeStatus.boundedWarmupSample(
+                        1_000L, 51_000L, 50_000L
+                ) == 50_000L
+                        && FrameInterpolationRuntimeStatus.boundedWarmupSample(
+                        1_000L, 51_001L, 50_000L
+                ) == 50_000L
+                        && FrameInterpolationRuntimeStatus.boundedWarmupSample(
+                        2_000L, 1_000L, 50_000L
+                ) == 0L,
+                "FI warm-up failed to bound a slow active frame or counted a regressing clock");
     }
 
     private static void testValidExecutorNeutralContract() {
@@ -273,7 +353,7 @@ public final class FrameSynthesisTests {
         // 1. User request disabled
         FrameInterpolationPolicy.Evaluation evalDisabled = FrameInterpolationPolicy.evaluate(
                 configOff, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 60.0, Set.of()
+                true, 60.0, Set.of()
         );
         require(!evalDisabled.requested() && !evalDisabled.profileEligible() && !evalDisabled.effectiveAdmitted()
                         && evalDisabled.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.USER_REQUEST_DISABLED
@@ -283,7 +363,7 @@ public final class FrameSynthesisTests {
         // 2. Feature unsupported on device
         FrameInterpolationPolicy.Evaluation evalNoCap = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesNoFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 60.0, Set.of()
+                true, 60.0, Set.of()
         );
         require(evalNoCap.requested() && !evalNoCap.profileEligible() && !evalNoCap.effectiveAdmitted()
                         && evalNoCap.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.FEATURE_UNSUPPORTED,
@@ -292,7 +372,7 @@ public final class FrameSynthesisTests {
         // 3. Fixed Temporal stays fail-closed until the native fixed-profile probe succeeds.
         FrameInterpolationPolicy.Evaluation evalEligible = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 60.0, Set.of()
+                true, 60.0, Set.of()
         );
         require(evalEligible.requested() && evalEligible.profileEligible() && !evalEligible.effectiveAdmitted()
                         && evalEligible.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.ELIGIBLE_FIXED_TEMPORAL
@@ -305,7 +385,7 @@ public final class FrameSynthesisTests {
         );
         FrameInterpolationPolicy.Evaluation evalAdmitted = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, true, true, 60.0, Set.of()
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, true, 60.0, Set.of()
         );
         require(evalAdmitted.requested() && evalAdmitted.profileEligible()
                         && evalAdmitted.effectiveAdmitted()
@@ -315,7 +395,7 @@ public final class FrameSynthesisTests {
 
         FrameInterpolationPolicy.Evaluation evalVsyncOff = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, false, true, 60.0, Set.of()
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, false, 60.0, Set.of()
         );
         require(evalVsyncOff.requested() && !evalVsyncOff.profileEligible()
                         && !evalVsyncOff.effectiveAdmitted()
@@ -323,23 +403,13 @@ public final class FrameSynthesisTests {
                         == FrameInterpolationPolicy.EligibilityReason.DISPLAY_SYNC_DISABLED,
                 "VSync-off presentation admitted Frame Interpolation");
 
-        FrameInterpolationPolicy.Evaluation evalLiveUnvalidated = FrameInterpolationPolicy.evaluate(
-                configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL, true, false, 60.0, Set.of()
-        );
-        require(evalLiveUnvalidated.requested() && !evalLiveUnvalidated.profileEligible()
-                        && !evalLiveUnvalidated.effectiveAdmitted()
-                        && evalLiveUnvalidated.eligibilityReason()
-                        == FrameInterpolationPolicy.EligibilityReason.LIVE_PRESENTATION_PROFILE_UNVALIDATED,
-                "unvalidated live presentation profile admitted Frame Interpolation");
-
         // 4. Dynamic Temporal and Native remain later stages; validated Spatial
         // is a standalone Frame Interpolation profile as of Stage 10.
         for (FrameInterpolationPolicy.UpstreamMode mode : Set.of(
                 FrameInterpolationPolicy.UpstreamMode.DYNAMIC_TEMPORAL,
                 FrameInterpolationPolicy.UpstreamMode.NATIVE)) {
             FrameInterpolationPolicy.Evaluation evalUpstream = FrameInterpolationPolicy.evaluate(
-                    configOn, capabilitiesWithFI, mode, true, true, 60.0, Set.of()
+                    configOn, capabilitiesWithFI, mode, true, 60.0, Set.of()
             );
             require(!evalUpstream.profileEligible()
                             && evalUpstream.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.UNSUPPORTED_UPSTREAM_MODE,
@@ -347,7 +417,7 @@ public final class FrameSynthesisTests {
         }
         FrameInterpolationPolicy.Evaluation spatial = FrameInterpolationPolicy.evaluate(
                 configOn, validatedCapabilitiesWithFI,
-                FrameInterpolationPolicy.UpstreamMode.SPATIAL, true, true, 60.0, Set.of()
+                FrameInterpolationPolicy.UpstreamMode.SPATIAL, true, 60.0, Set.of()
         );
         require(spatial.profileEligible() && spatial.effectiveAdmitted()
                         && spatial.eligibilityReason()
@@ -356,18 +426,26 @@ public final class FrameSynthesisTests {
                         == FrameInterpolationPolicy.EffectiveReason.ADMITTED_SPATIAL,
                 "validated Spatial profile was not admitted");
 
-        // 5. Cadence out of bounds (desired 60 FPS for 120 Hz display; bounds = [51, 63])
+        // 5. Adaptive FI accepts 30 -> 60 through 60 -> 120 on a 120-Hz panel.
         FrameInterpolationPolicy.Evaluation evalLowCadence = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 45.0, Set.of()
+                true, 29.0, Set.of()
         );
         require(!evalLowCadence.profileEligible()
                         && evalLowCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
                 "low cadence was not rejected");
 
+        FrameInterpolationPolicy.Evaluation evalAdaptiveCadence = FrameInterpolationPolicy.evaluate(
+                configOn, validatedCapabilitiesWithFI,
+                FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
+                true, 40.0, Set.of()
+        );
+        require(evalAdaptiveCadence.profileEligible() && evalAdaptiveCadence.effectiveAdmitted(),
+                "valid 40 -> 80 adaptive cadence was rejected at Java admission");
+
         FrameInterpolationPolicy.Evaluation evalHighCadence = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 75.0, Set.of()
+                true, 75.0, Set.of()
         );
         require(!evalHighCadence.profileEligible()
                         && evalHighCadence.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.CADENCE_OUT_OF_BOUNDS,
@@ -376,11 +454,53 @@ public final class FrameSynthesisTests {
         // 6. History discontinuity invalidates eligibility
         FrameInterpolationPolicy.Evaluation evalDiscont = FrameInterpolationPolicy.evaluate(
                 configOn, capabilitiesWithFI, FrameInterpolationPolicy.UpstreamMode.FIXED_TEMPORAL,
-                true, true, 60.0, Set.of(FrameSynthesisContract.Discontinuity.RESIZE)
+                true, 60.0, Set.of(FrameSynthesisContract.Discontinuity.RESIZE)
         );
         require(!evalDiscont.profileEligible()
                         && evalDiscont.eligibilityReason() == FrameInterpolationPolicy.EligibilityReason.HISTORY_DISCONTINUITY,
                 "discontinuity was not rejected by policy");
+    }
+
+    private static void testFrameInterpolationCompatibilityProfile() {
+        RendererConfig configOn = RendererConfig.defaults().withFrameInterpolation(true);
+        long compatibleSnapshot = 1L
+                | (1L << 9)   // METALFX_TEMPORAL
+                | (1L << 10)  // METALFX_FRAME_INTERPOLATION
+                | (1L << 13)  // REQUIRED_TEXTURE_FORMATS_USAGES
+                | (1L << 14)  // DISPLAY_REFRESH
+                | (1L << 16)  // TEMPORAL_PROFILE
+                | (1L << 17)  // FRAME_INTERPOLATION_PROFILE
+                | (120L << 48);
+        MetalCapabilities compatible = MetalCapabilities.fromNativeSnapshot(
+                compatibleSnapshot,
+                new com.metallum.client.hdr.EdrCapabilities(1.0f, 1.0f)
+        );
+        FrameInterpolationCompatibilityProfile.Decision admitted =
+                FrameInterpolationCompatibilityProfile.evaluate(configOn, compatible, true);
+        require(admitted.active()
+                        && admitted.temporalMode()
+                        == com.metallum.client.metalfx.TemporalScalingMode.ULTRA_PERFORMANCE
+                        && admitted.sourceFrameLimit() == 30,
+                "FI Auto did not resolve the non-persistent 30 -> 60 Ultra profile");
+        require(FrameInterpolationCompatibilityProfile.applySourceLimit(60, true) == 30
+                        && FrameInterpolationCompatibilityProfile.applySourceLimit(20, true) == 20
+                        && FrameInterpolationCompatibilityProfile.applySourceLimit(60, false) == 60,
+                "FI Auto source limiter did not preserve lower/user-disabled limits");
+
+        FrameInterpolationCompatibilityProfile.Decision noSync =
+                FrameInterpolationCompatibilityProfile.evaluate(configOn, compatible, false);
+        require(!noSync.active()
+                        && noSync.reason()
+                        == FrameInterpolationCompatibilityProfile.Reason.DISPLAY_SYNC_DISABLED,
+                "FI Auto activated without VSync");
+        FrameInterpolationCompatibilityProfile.Decision disabled =
+                FrameInterpolationCompatibilityProfile.evaluate(
+                        RendererConfig.defaults(), compatible, true
+                );
+        require(!disabled.active()
+                        && disabled.reason()
+                        == FrameInterpolationCompatibilityProfile.Reason.USER_DISABLED,
+                "FI Auto changed the upstream profile while disabled");
     }
 
     private static FrameSynthesisContract.Request validRequest(final MetalExecutorKind executor) {

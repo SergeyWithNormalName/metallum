@@ -1,10 +1,12 @@
 package com.metallum.client.benchmark;
 
 import com.metallum.Metallum;
+import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
+import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
 import com.metallum.client.sodium.SodiumRelightFastPath;
@@ -71,6 +73,58 @@ public final class MetalFxBenchmarkController {
     private static final UUID BENCHMARK_PLAYER_UUID = UUID.fromString("b07a402a-d8ea-354f-9398-aaf208a798b9");
     private static final Pattern SAFE_ID = Pattern.compile("[a-z0-9][a-z0-9._-]*");
     private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
+    private static final int FI_TRANSPORT_ACCEPTED_PAIRS = 0;
+    private static final int FI_TRANSPORT_GENERATED_PRESENTATIONS = 1;
+    private static final int FI_TRANSPORT_REAL_PRESENTATIONS = 2;
+    private static final int FI_TRANSPORT_DROPPED_GENERATED_LATE = 3;
+    private static final int FI_TRANSPORT_BACKPRESSURE_DROPS = 4;
+    private static final int FI_TRANSPORT_SOURCE_ATTEMPTS = 5;
+    private static final int FI_TRANSPORT_SCHEDULER_ACCEPTED = 6;
+    private static final int FI_TRANSPORT_SCHEDULER_WARMING = 7;
+    private static final int FI_TRANSPORT_SCHEDULER_TOO_SLOW = 8;
+    private static final int FI_TRANSPORT_SCHEDULER_TOO_FAST = 9;
+    private static final int FI_TRANSPORT_COORDINATOR_REAL_ONLY = 10;
+    private static final int FI_TRANSPORT_INTERPOLATION_FAILURES = 11;
+    private static final int FI_TRANSPORT_RAW_CADENCE_TOO_SLOW = 12;
+    private static final int FI_TRANSPORT_SOURCE_DELTA_NANOS = 13;
+    private static final int FI_TRANSPORT_SOURCE_DELTA_SAMPLES = 14;
+    private static final int FI_TRANSPORT_OUT_OF_ORDER_PRESENTATIONS = 15;
+    private static final int FI_TRANSPORT_TARGET_MISSES = 16;
+    private static final int FI_TRANSPORT_TIMED_INTERVALS = 17;
+    private static final int FI_TRANSPORT_TIMED_INTERVAL_NANOS = 18;
+    private static final int FI_TRANSPORT_GENERATED_TO_REAL_INTERVALS = 19;
+    private static final int FI_TRANSPORT_GENERATED_TO_REAL_NANOS = 20;
+    private static final int FI_TRANSPORT_GENERATED_TO_REAL_MISSES = 21;
+    private static final int FI_TRANSPORT_REAL_TO_GENERATED_INTERVALS = 22;
+    private static final int FI_TRANSPORT_REAL_TO_GENERATED_NANOS = 23;
+    private static final int FI_TRANSPORT_REAL_TO_GENERATED_MISSES = 24;
+    private static final int FI_TRANSPORT_TARGET_120_INTERVALS = 25;
+    private static final int FI_TRANSPORT_TARGET_80_INTERVALS = 26;
+    private static final int FI_TRANSPORT_TARGET_60_INTERVALS = 27;
+    private static final int FI_TRANSPORT_INTERVALS_OVER_22_MS = 28;
+    private static final int FI_TRANSPORT_TIMED_TARGET_NANOS = 29;
+    private static final int FI_TRANSPORT_TIMED_MEAN_SLACK_NANOS = 30;
+    private static final int FI_TRANSPORT_SEVERE_LATE_INTERVALS = 31;
+    private static final int FI_TRANSPORT_RETARGET_BOUNDARIES = 32;
+    private static final int FI_TRANSPORT_ADMISSION_WAITS = 33;
+    private static final int FI_TRANSPORT_ADMISSION_WAIT_NANOS = 34;
+    private static final int FI_TRANSPORT_SEVERE_GENERATED_TO_REAL = 35;
+    private static final int FI_TRANSPORT_SEVERE_REAL_TO_GENERATED = 36;
+    private static final int FI_TRANSPORT_GATE_RELEASES = 37;
+    private static final int FI_TRANSPORT_GATE_LATENESS_NANOS = 38;
+    private static final int FI_TRANSPORT_GATE_LATENESS_MAX_NANOS = 39;
+    private static final int FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_SAMPLES = 40;
+    private static final int FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_NANOS = 41;
+    private static final int FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_MAX_NANOS = 42;
+    private static final int FI_TRANSPORT_REAL_DRAWABLE_WAIT_SAMPLES = 43;
+    private static final int FI_TRANSPORT_REAL_DRAWABLE_WAIT_NANOS = 44;
+    private static final int FI_TRANSPORT_REAL_DRAWABLE_WAIT_MAX_NANOS = 45;
+    private static final int FI_TRANSPORT_REAL_ONLY_PRESENTATIONS = 46;
+    private static final int FI_TRANSPORT_COUNTER_COUNT = 47;
+    /** Practical process-counter snapshot tolerance for the two-deep coordinator. */
+    private static final long FI_TRANSPORT_SNAPSHOT_TOLERANCE = 2L;
+    /** Largest valid source interval admitted by production FI (30 FPS). */
+    private static final long FI_CADENCE_SNAPSHOT_INTERVAL_NANOS = 33_333_334L;
 
     private enum Stage {
         IDLE,
@@ -399,6 +453,8 @@ public final class MetalFxBenchmarkController {
     private boolean originalResolutionOverlayEnabled;
     private boolean fiGeneratedMeasurementStarted;
     private long fiGeneratedMeasurementStart;
+    private FrameInterpolationRuntimeStatus fiRuntimeMeasurementStart;
+    private final long[] fiTransportMeasurementStart = new long[FI_TRANSPORT_COUNTER_COUNT];
     private final int[] framebufferWidthScratch = new int[1];
     private final int[] framebufferHeightScratch = new int[1];
 
@@ -629,6 +685,17 @@ public final class MetalFxBenchmarkController {
                 driveNetherLavaStress(minecraft);
                 if (this.stage != Stage.RUNNING) {
                     return;
+                }
+                if (this.captureScreenshots
+                        && this.fiValidationRequired
+                        && this.segmentIndex == this.sequence.size() - 1
+                        && this.measuredFrames == Math.max(1, this.measureFrames - 60)) {
+                    Screenshot.grab(minecraft, false);
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={} phase=MEASURE_TAIL",
+                            this.segmentIndex + 1,
+                            this.sequence.get(this.segmentIndex)
+                    );
                 }
                 if (this.measuredFrames >= this.measureFrames) {
                     String l6CoverageFailure = completeL6DynamicShadowCoverage();
@@ -1713,7 +1780,7 @@ public final class MetalFxBenchmarkController {
                 L6DynamicShadowBenchmarkTelemetry.begin();
             }
             com.metallum.client.lighting.AdvancedLightRegistry.global().resetBenchmarkTelemetry();
-            if (this.captureScreenshots) {
+            if (this.captureScreenshots && !this.fiValidationRequired) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
                         "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={}",
@@ -2444,8 +2511,28 @@ public final class MetalFxBenchmarkController {
 
     private boolean beginFiGeneratedValidation(final Minecraft minecraft) {
         try {
+            for (int selector = 0; selector < FI_TRANSPORT_COUNTER_COUNT; selector++) {
+                this.fiTransportMeasurementStart[selector] =
+                        MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(selector);
+            }
             this.fiGeneratedMeasurementStart =
-                    MetalNativeBridge.metallum_frame_interpolation_presented_generated_count_v1();
+                    this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_PRESENTATIONS];
+            MetalDevice device = MetalDevice.getInstance();
+            this.fiRuntimeMeasurementStart = device == null
+                    ? null : device.frameInterpolationRuntimeStatus();
+            if (this.fiRuntimeMeasurementStart == null) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=FI_RUNTIME_START state=MISSING reason=DEVICE_UNAVAILABLE"
+                );
+            } else {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=FI_RUNTIME_START state={} reason={} session={} session_generated_presented={}",
+                        this.fiRuntimeMeasurementStart.state(),
+                        this.fiRuntimeMeasurementStart.reason(),
+                        this.fiRuntimeMeasurementStart.sessionId(),
+                        this.fiRuntimeMeasurementStart.presentedGeneratedCount()
+                );
+            }
             this.fiGeneratedMeasurementStarted = true;
             return true;
         } catch (RuntimeException | LinkageError unavailable) {
@@ -2465,10 +2552,82 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "FI generated presentation counter was not sampled at MEASURE_START");
             return false;
         }
+        final long acceptedPairsEnd;
         final long generatedEnd;
+        final long realPresentationsEnd;
+        final long droppedGeneratedLateEnd;
+        final long backpressureDropsEnd;
+        final long sourceAttemptsEnd;
+        final long schedulerAcceptedEnd;
+        final long schedulerWarmingEnd;
+        final long schedulerTooSlowEnd;
+        final long schedulerTooFastEnd;
+        final long coordinatorRealOnlyEnd;
+        final long interpolationFailuresEnd;
+        final long rawCadenceTooSlowEnd;
+        final long sourceDeltaNanosEnd;
+        final long sourceDeltaSamplesEnd;
+        final long outOfOrderPresentationsEnd;
+        final long targetMissesEnd;
+        final long[] cadenceDiagnosticsEnd = new long[FI_TRANSPORT_COUNTER_COUNT];
         try {
-            generatedEnd = MetalNativeBridge
-                    .metallum_frame_interpolation_presented_generated_count_v1();
+            acceptedPairsEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_ACCEPTED_PAIRS
+            );
+            generatedEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_GENERATED_PRESENTATIONS
+            );
+            realPresentationsEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_REAL_PRESENTATIONS
+            );
+            droppedGeneratedLateEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_DROPPED_GENERATED_LATE
+            );
+            backpressureDropsEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_BACKPRESSURE_DROPS
+            );
+            sourceAttemptsEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SOURCE_ATTEMPTS
+            );
+            schedulerAcceptedEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SCHEDULER_ACCEPTED
+            );
+            schedulerWarmingEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SCHEDULER_WARMING
+            );
+            schedulerTooSlowEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SCHEDULER_TOO_SLOW
+            );
+            schedulerTooFastEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SCHEDULER_TOO_FAST
+            );
+            coordinatorRealOnlyEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_COORDINATOR_REAL_ONLY
+            );
+            interpolationFailuresEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_INTERPOLATION_FAILURES
+            );
+            rawCadenceTooSlowEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_RAW_CADENCE_TOO_SLOW
+            );
+            sourceDeltaNanosEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SOURCE_DELTA_NANOS
+            );
+            sourceDeltaSamplesEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_SOURCE_DELTA_SAMPLES
+            );
+            outOfOrderPresentationsEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_OUT_OF_ORDER_PRESENTATIONS
+            );
+            targetMissesEnd = MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(
+                    FI_TRANSPORT_TARGET_MISSES
+            );
+            for (int selector = FI_TRANSPORT_TIMED_INTERVALS;
+                    selector < FI_TRANSPORT_COUNTER_COUNT;
+                    selector++) {
+                cadenceDiagnosticsEnd[selector] =
+                        MetalNativeBridge.metallum_frame_interpolation_telemetry_counter_v1(selector);
+            }
         } catch (RuntimeException | LinkageError unavailable) {
             Metallum.LOGGER.error(
                     "METALLUM_BENCHMARK EVENT=FI_GENERATED_FAIL reason=counter_unavailable"
@@ -2476,11 +2635,331 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "FI generated presentation counter is unavailable");
             return false;
         }
-        long generatedDelta = generatedEnd - this.fiGeneratedMeasurementStart;
+        long acceptedPairsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_ACCEPTED_PAIRS], acceptedPairsEnd
+        );
+        long generatedDelta = frameInterpolationTransportCounterDelta(
+                this.fiGeneratedMeasurementStart, generatedEnd
+        );
+        long realPresentationsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_PRESENTATIONS], realPresentationsEnd
+        );
+        long droppedGeneratedLateDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_DROPPED_GENERATED_LATE], droppedGeneratedLateEnd
+        );
+        long backpressureDropsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_BACKPRESSURE_DROPS], backpressureDropsEnd
+        );
+        long sourceAttemptsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SOURCE_ATTEMPTS], sourceAttemptsEnd
+        );
+        long schedulerAcceptedDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SCHEDULER_ACCEPTED], schedulerAcceptedEnd
+        );
+        long schedulerWarmingDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SCHEDULER_WARMING], schedulerWarmingEnd
+        );
+        long schedulerTooSlowDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SCHEDULER_TOO_SLOW], schedulerTooSlowEnd
+        );
+        long schedulerTooFastDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SCHEDULER_TOO_FAST], schedulerTooFastEnd
+        );
+        long coordinatorRealOnlyDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_COORDINATOR_REAL_ONLY], coordinatorRealOnlyEnd
+        );
+        long interpolationFailuresDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_INTERPOLATION_FAILURES], interpolationFailuresEnd
+        );
+        long rawCadenceTooSlowDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_RAW_CADENCE_TOO_SLOW], rawCadenceTooSlowEnd
+        );
+        long sourceDeltaNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SOURCE_DELTA_NANOS], sourceDeltaNanosEnd
+        );
+        long sourceDeltaSamplesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SOURCE_DELTA_SAMPLES], sourceDeltaSamplesEnd
+        );
+        long outOfOrderPresentationsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_OUT_OF_ORDER_PRESENTATIONS],
+                outOfOrderPresentationsEnd
+        );
+        long targetMissesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TARGET_MISSES], targetMissesEnd
+        );
+        double sourceDeltaMeanMilliseconds = sourceDeltaSamplesDelta > 0L && sourceDeltaNanosDelta >= 0L
+                ? (double) sourceDeltaNanosDelta / (double) sourceDeltaSamplesDelta / 1_000_000.0
+                : -1.0;
+        long timedIntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TIMED_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TIMED_INTERVALS]
+        );
+        long timedIntervalNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TIMED_INTERVAL_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TIMED_INTERVAL_NANOS]
+        );
+        long generatedToRealIntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_TO_REAL_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_TO_REAL_INTERVALS]
+        );
+        long generatedToRealNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_TO_REAL_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_TO_REAL_NANOS]
+        );
+        long generatedToRealMissesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_TO_REAL_MISSES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_TO_REAL_MISSES]
+        );
+        long realToGeneratedIntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_TO_GENERATED_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_TO_GENERATED_INTERVALS]
+        );
+        long realToGeneratedNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_TO_GENERATED_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_TO_GENERATED_NANOS]
+        );
+        long realToGeneratedMissesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_TO_GENERATED_MISSES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_TO_GENERATED_MISSES]
+        );
+        long target120IntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TARGET_120_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TARGET_120_INTERVALS]
+        );
+        long target80IntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TARGET_80_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TARGET_80_INTERVALS]
+        );
+        long target60IntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TARGET_60_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TARGET_60_INTERVALS]
+        );
+        long intervalsOver22MillisecondsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_INTERVALS_OVER_22_MS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_INTERVALS_OVER_22_MS]
+        );
+        long timedTargetNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TIMED_TARGET_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TIMED_TARGET_NANOS]
+        );
+        long timedMeanSlackNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_TIMED_MEAN_SLACK_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_TIMED_MEAN_SLACK_NANOS]
+        );
+        long severeLateIntervalsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SEVERE_LATE_INTERVALS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_SEVERE_LATE_INTERVALS]
+        );
+        long retargetBoundariesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_RETARGET_BOUNDARIES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_RETARGET_BOUNDARIES]
+        );
+        long admissionWaitsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_ADMISSION_WAITS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_ADMISSION_WAITS]
+        );
+        long admissionWaitNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_ADMISSION_WAIT_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_ADMISSION_WAIT_NANOS]
+        );
+        long severeGeneratedToRealDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SEVERE_GENERATED_TO_REAL],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_SEVERE_GENERATED_TO_REAL]
+        );
+        long severeRealToGeneratedDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_SEVERE_REAL_TO_GENERATED],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_SEVERE_REAL_TO_GENERATED]
+        );
+        long severeOtherDelta = Math.max(
+                severeLateIntervalsDelta - severeGeneratedToRealDelta - severeRealToGeneratedDelta,
+                0L
+        );
+        long gateReleasesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GATE_RELEASES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GATE_RELEASES]
+        );
+        long gateLatenessNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GATE_LATENESS_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GATE_LATENESS_NANOS]
+        );
+        long gateLatenessMaximumNanos = cadenceDiagnosticsEnd[FI_TRANSPORT_GATE_LATENESS_MAX_NANOS];
+        long generatedDrawableWaitSamplesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_SAMPLES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_SAMPLES]
+        );
+        long generatedDrawableWaitNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_NANOS]
+        );
+        long generatedDrawableWaitMaximumNanos =
+                cadenceDiagnosticsEnd[FI_TRANSPORT_GENERATED_DRAWABLE_WAIT_MAX_NANOS];
+        long realDrawableWaitSamplesDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_DRAWABLE_WAIT_SAMPLES],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_DRAWABLE_WAIT_SAMPLES]
+        );
+        long realDrawableWaitNanosDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_DRAWABLE_WAIT_NANOS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_DRAWABLE_WAIT_NANOS]
+        );
+        long realDrawableWaitMaximumNanos =
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_DRAWABLE_WAIT_MAX_NANOS];
+        long realOnlyPresentationsDelta = frameInterpolationTransportCounterDelta(
+                this.fiTransportMeasurementStart[FI_TRANSPORT_REAL_ONLY_PRESENTATIONS],
+                cadenceDiagnosticsEnd[FI_TRANSPORT_REAL_ONLY_PRESENTATIONS]
+        );
+        double timedIntervalMeanMilliseconds = timedIntervalsDelta > 0L
+                ? (double) timedIntervalNanosDelta / (double) timedIntervalsDelta / 1_000_000.0
+                : -1.0;
+        double timedTargetMeanMilliseconds = timedIntervalsDelta > 0L
+                ? (double) timedTargetNanosDelta / (double) timedIntervalsDelta / 1_000_000.0
+                : -1.0;
+        double timedMeanSlackMilliseconds = timedIntervalsDelta > 0L
+                ? (double) timedMeanSlackNanosDelta / (double) timedIntervalsDelta / 1_000_000.0
+                : -1.0;
+        double generatedToRealMeanMilliseconds = generatedToRealIntervalsDelta > 0L
+                ? (double) generatedToRealNanosDelta
+                        / (double) generatedToRealIntervalsDelta / 1_000_000.0
+                : -1.0;
+        double realToGeneratedMeanMilliseconds = realToGeneratedIntervalsDelta > 0L
+                ? (double) realToGeneratedNanosDelta
+                        / (double) realToGeneratedIntervalsDelta / 1_000_000.0
+                : -1.0;
+        double admissionWaitMeanMilliseconds = admissionWaitsDelta > 0L
+                && admissionWaitNanosDelta >= 0L
+                ? (double) admissionWaitNanosDelta / (double) admissionWaitsDelta / 1_000_000.0
+                : 0.0;
+        double gateLatenessMeanMilliseconds = gateReleasesDelta > 0L
+                ? (double) gateLatenessNanosDelta / (double) gateReleasesDelta / 1_000_000.0
+                : 0.0;
+        double generatedDrawableWaitMeanMilliseconds = generatedDrawableWaitSamplesDelta > 0L
+                ? (double) generatedDrawableWaitNanosDelta
+                        / (double) generatedDrawableWaitSamplesDelta / 1_000_000.0
+                : 0.0;
+        double realDrawableWaitMeanMilliseconds = realDrawableWaitSamplesDelta > 0L
+                ? (double) realDrawableWaitNanosDelta
+                        / (double) realDrawableWaitSamplesDelta / 1_000_000.0
+                : 0.0;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_TRANSPORT_TELEMETRY accepted_pairs_delta={} generated_presentations_delta={} real_presentations_delta={} real_only_presentations_delta={} dropped_generated_late_delta={} backpressure_drops_delta={} out_of_order_presentations_delta={} target_misses_delta={}",
+                acceptedPairsDelta,
+                generatedDelta,
+                realPresentationsDelta,
+                realOnlyPresentationsDelta,
+                droppedGeneratedLateDelta,
+                backpressureDropsDelta,
+                outOfOrderPresentationsDelta,
+                targetMissesDelta
+        );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_ADMISSION_TELEMETRY source_attempts_delta={} source_delta_samples_delta={} scheduler_accepted_delta={} scheduler_warming_delta={} scheduler_too_slow_delta={} scheduler_too_fast_delta={} coordinator_real_only_delta={} interpolation_failures_delta={} raw_cadence_too_slow_delta={} source_delta_mean_ms={} admission_waits_delta={} admission_wait_mean_ms={}",
+                sourceAttemptsDelta,
+                sourceDeltaSamplesDelta,
+                schedulerAcceptedDelta,
+                schedulerWarmingDelta,
+                schedulerTooSlowDelta,
+                schedulerTooFastDelta,
+                coordinatorRealOnlyDelta,
+                interpolationFailuresDelta,
+                rawCadenceTooSlowDelta,
+                sourceDeltaMeanMilliseconds,
+                admissionWaitsDelta,
+                admissionWaitMeanMilliseconds
+        );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_ON_GLASS_CADENCE timed_intervals_delta={} timed_mean_ms={} target_mean_ms={} mean_slack_ms={} generated_to_real_intervals_delta={} generated_to_real_mean_ms={} generated_to_real_misses_delta={} real_to_generated_intervals_delta={} real_to_generated_mean_ms={} real_to_generated_misses_delta={} target_120_delta={} target_80_delta={} target_60_delta={} intervals_over_22_ms_delta={} severe_late_delta={} retarget_boundaries_delta={}",
+                timedIntervalsDelta,
+                timedIntervalMeanMilliseconds,
+                timedTargetMeanMilliseconds,
+                timedMeanSlackMilliseconds,
+                generatedToRealIntervalsDelta,
+                generatedToRealMeanMilliseconds,
+                generatedToRealMissesDelta,
+                realToGeneratedIntervalsDelta,
+                realToGeneratedMeanMilliseconds,
+                realToGeneratedMissesDelta,
+                target120IntervalsDelta,
+                target80IntervalsDelta,
+                target60IntervalsDelta,
+                intervalsOver22MillisecondsDelta,
+                severeLateIntervalsDelta,
+                retargetBoundariesDelta
+        );
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=FI_PHASE_DIAGNOSTICS severe_generated_to_real_delta={} severe_real_to_generated_delta={} severe_other_delta={} gate_releases_delta={} gate_lateness_mean_ms={} gate_lateness_process_max_ms={} generated_drawable_wait_samples_delta={} generated_drawable_wait_mean_ms={} generated_drawable_wait_process_max_ms={} real_drawable_wait_samples_delta={} real_drawable_wait_mean_ms={} real_drawable_wait_process_max_ms={}",
+                severeGeneratedToRealDelta,
+                severeRealToGeneratedDelta,
+                severeOtherDelta,
+                gateReleasesDelta,
+                gateLatenessMeanMilliseconds,
+                gateLatenessMaximumNanos / 1_000_000.0,
+                generatedDrawableWaitSamplesDelta,
+                generatedDrawableWaitMeanMilliseconds,
+                generatedDrawableWaitMaximumNanos / 1_000_000.0,
+                realDrawableWaitSamplesDelta,
+                realDrawableWaitMeanMilliseconds,
+                realDrawableWaitMaximumNanos / 1_000_000.0
+        );
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=FI_TELEMETRY generated_delta={}",
                 generatedDelta
         );
+        MetalDevice device = MetalDevice.getInstance();
+        FrameInterpolationRuntimeStatus runtime = device == null
+                ? null : device.frameInterpolationRuntimeStatus();
+        if (runtime != null) {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=FI_RUNTIME_STATUS state={} reason={} session={} session_generated_presented={}",
+                    runtime.state(),
+                    runtime.reason(),
+                    runtime.sessionId(),
+                    runtime.presentedGeneratedCount()
+            );
+        }
+        if (this.fiRuntimeMeasurementStart != null
+                && this.fiRuntimeMeasurementStart.state()
+                == FrameInterpolationRuntimeStatus.State.UNAVAILABLE
+                && isFrameInterpolationRuntimeFallbackReason(
+                        this.fiRuntimeMeasurementStart.reason()
+                )) {
+            boolean safeFallback = generatedDelta == 0L
+                    && realOnlyPresentationsDelta
+                    >= Math.max(0L, this.measureFrames - FI_TRANSPORT_SNAPSHOT_TOLERANCE);
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT={} generated_tail_delta={} real_only_tail_delta={} measured_frames={} boundary_skew={} reason={}",
+                    safeFallback ? "FI_FALLBACK_COMPLETE" : "FI_FALLBACK_FAIL",
+                    generatedDelta,
+                    realOnlyPresentationsDelta,
+                    this.measureFrames,
+                    FI_TRANSPORT_SNAPSHOT_TOLERANCE,
+                    this.fiRuntimeMeasurementStart.reason()
+            );
+            if (!safeFallback) {
+                fail(
+                        minecraft,
+                        "FI unavailable fallback did not preserve an uninterrupted real-only stream"
+                );
+                return false;
+            }
+        }
+        // Safe fallback is a renderer-readiness proof, not an FI success.
+        // The strict --fi-validation contract below still requires ACTIVE.
+        if (runtime == null
+                || runtime.state() != FrameInterpolationRuntimeStatus.State.ACTIVE) {
+            String state = runtime == null ? "MISSING" : runtime.state().name();
+            String reason = runtime == null ? "DEVICE_UNAVAILABLE" : runtime.reason().name();
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_RUNTIME_FAIL state={} reason={} real_only_presentations_delta={}",
+                    state,
+                    reason,
+                    realOnlyPresentationsDelta
+            );
+            fail(
+                    minecraft,
+                    "FI did not reach and retain an on-glass Active state (state="
+                            + state + ", reason=" + reason + ")"
+            );
+            return false;
+        }
         if (!hasMinimumGeneratedPresentations(
                 this.fiGeneratedMeasurementStart,
                 generatedEnd,
@@ -2498,12 +2977,209 @@ public final class MetalFxBenchmarkController {
             );
             return false;
         }
+        if (!hasHealthyFrameInterpolationTransport(
+                acceptedPairsDelta,
+                generatedDelta,
+                realPresentationsDelta,
+                droppedGeneratedLateDelta,
+                backpressureDropsDelta,
+                outOfOrderPresentationsDelta,
+                this.fiMinimumGenerated,
+                this.measureFrames,
+                FI_TRANSPORT_SNAPSHOT_TOLERANCE
+        )) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_TRANSPORT_FAIL accepted_pairs_delta={} generated_presentations_delta={} real_presentations_delta={} backpressure_drops_delta={} out_of_order_presentations_delta={} target_misses_delta={} minimum_generated={} measured_frames={} boundary_skew={}",
+                    acceptedPairsDelta,
+                    generatedDelta,
+                    realPresentationsDelta,
+                    backpressureDropsDelta,
+                    outOfOrderPresentationsDelta,
+                    targetMissesDelta,
+                    this.fiMinimumGenerated,
+                    this.measureFrames,
+                    FI_TRANSPORT_SNAPSHOT_TOLERANCE
+            );
+            fail(
+                    minecraft,
+                    "FI transport did not preserve generated/mandatory-real presentation "
+                            + "without backpressure"
+            );
+            return false;
+        }
+        if (!hasHealthyFrameInterpolationCadence(
+                generatedDelta,
+                timedIntervalsDelta,
+                timedIntervalNanosDelta,
+                timedTargetNanosDelta,
+                timedMeanSlackNanosDelta,
+                generatedToRealIntervalsDelta,
+                targetMissesDelta,
+                severeLateIntervalsDelta,
+                this.fiMinimumGenerated,
+                FI_TRANSPORT_SNAPSHOT_TOLERANCE
+        )) {
+            Metallum.LOGGER.error(
+                    "METALLUM_BENCHMARK EVENT=FI_CADENCE_FAIL generated_presentations_delta={} timed_intervals_delta={} timed_mean_ms={} target_mean_ms={} mean_slack_ms={} generated_to_real_intervals_delta={} stable_target_misses_delta={} severe_late_delta={} retarget_boundaries_delta={} minimum_generated={} boundary_skew={}",
+                    generatedDelta,
+                    timedIntervalsDelta,
+                    timedIntervalMeanMilliseconds,
+                    timedTargetMeanMilliseconds,
+                    timedMeanSlackMilliseconds,
+                    generatedToRealIntervalsDelta,
+                    targetMissesDelta,
+                    severeLateIntervalsDelta,
+                    retargetBoundariesDelta,
+                    this.fiMinimumGenerated,
+                    FI_TRANSPORT_SNAPSHOT_TOLERANCE
+            );
+            fail(minecraft, "FI on-glass cadence did not meet the stable ProMotion contract");
+            return false;
+        }
+        if (!hasPreferredFrameInterpolationMinorLateTail(
+                timedIntervalsDelta,
+                targetMissesDelta,
+                FI_TRANSPORT_SNAPSHOT_TOLERANCE
+        )) {
+            Metallum.LOGGER.warn(
+                    "METALLUM_BENCHMARK EVENT=FI_CADENCE_WARNING reason=minor_late_tail stable_target_misses_delta={} timed_intervals_delta={} preferred_maximum={}",
+                    targetMissesDelta,
+                    timedIntervalsDelta,
+                    saturatedAdd(ceilDivide(timedIntervalsDelta, 20L),
+                            FI_TRANSPORT_SNAPSHOT_TOLERANCE)
+            );
+        }
         Metallum.LOGGER.info(
                 "METALLUM_BENCHMARK EVENT=FI_GENERATED_COMPLETE generated_delta={} minimum={}",
                 generatedDelta,
                 this.fiMinimumGenerated
         );
         return true;
+    }
+
+    static boolean isFrameInterpolationRuntimeFallbackReason(
+            final FrameInterpolationRuntimeStatus.Reason reason
+    ) {
+        return reason == FrameInterpolationRuntimeStatus.Reason.ON_GLASS_CADENCE
+                || reason == FrameInterpolationRuntimeStatus.Reason.ON_GLASS_TIMESTAMP
+                || reason == FrameInterpolationRuntimeStatus.Reason.WARMUP_TIMEOUT;
+    }
+
+    /** A process-lifetime native counter must not regress inside one benchmark segment. */
+    static long frameInterpolationTransportCounterDelta(final long start, final long end) {
+        return end >= start ? end - start : -1L;
+    }
+
+    /**
+     * Requires both useful generated output and the mandatory real stream to
+     * reach glass. The tolerance accounts for a small callback tail around
+     * process-counter snapshots; it is not used as a resource-lifetime proof.
+     */
+    static boolean hasHealthyFrameInterpolationTransport(
+            final long acceptedPairs,
+            final long generatedPresentations,
+            final long realPresentations,
+            final long droppedGeneratedLate,
+            final long backpressureDrops,
+            final long outOfOrderPresentations,
+            final long minimumGenerated,
+            final long measuredFrames,
+            final long boundarySkew
+    ) {
+        if (acceptedPairs < 0L || generatedPresentations < 0L || realPresentations < 0L
+                || droppedGeneratedLate < 0L || backpressureDrops < 0L
+                || outOfOrderPresentations < 0L
+                || minimumGenerated < 0L || measuredFrames < 0L
+                || boundarySkew < 0L) {
+            return false;
+        }
+        long minimumReal = Math.max(measuredFrames - boundarySkew, 0L);
+        long minimumRealForGenerated = Math.max(generatedPresentations - boundarySkew, 0L);
+        long acceptedGeneratedDifference = acceptedPairs >= generatedPresentations
+                ? acceptedPairs - generatedPresentations
+                : generatedPresentations - acceptedPairs;
+        long maximumAcceptedGeneratedDifference = boundarySkew > Long.MAX_VALUE / 2L
+                ? Long.MAX_VALUE : boundarySkew * 2L;
+        return acceptedPairs >= minimumGenerated
+                && generatedPresentations >= minimumGenerated
+                && realPresentations >= minimumReal
+                && realPresentations >= minimumRealForGenerated
+                && acceptedGeneratedDifference <= maximumAcceptedGeneratedDifference
+                && droppedGeneratedLate == 0L
+                && backpressureDrops == 0L
+                && outOfOrderPresentations == 0L;
+    }
+
+    /**
+     * Validates only stable-target CAMetalDrawable callback intervals. Legal
+     * ProMotion step alternation is judged by its aggregate mean, while the
+     * severe p99 tail remains independently bounded. The preferred p95 minor
+     * tail is reported separately as a quality warning. Target changes are
+     * excluded natively instead of being mispriced against the newer target.
+     */
+    static boolean hasHealthyFrameInterpolationCadence(
+            final long generatedPresentations,
+            final long timedIntervals,
+            final long observedNanoseconds,
+            final long targetNanoseconds,
+            final long meanSlackNanoseconds,
+            final long generatedToRealIntervals,
+            final long stableTargetMisses,
+            final long severeLateIntervals,
+            final long minimumGenerated,
+            final long boundarySkew
+    ) {
+        if (generatedPresentations < 0L || timedIntervals < 0L
+                || observedNanoseconds < 0L || targetNanoseconds <= 0L
+                || meanSlackNanoseconds < 0L || generatedToRealIntervals < 0L
+                || stableTargetMisses < 0L || severeLateIntervals < 0L
+                || minimumGenerated < 0L || boundarySkew < 0L) {
+            return false;
+        }
+        long minimumTimedIntervals = minimumGenerated > Long.MAX_VALUE / 2L
+                ? Long.MAX_VALUE : minimumGenerated * 2L;
+        long minimumGeneratedToReal = Math.max(minimumGenerated - boundarySkew, 0L);
+        long snapshotAllowance = saturatedMultiply(
+                boundarySkew,
+                FI_CADENCE_SNAPSHOT_INTERVAL_NANOS
+        );
+        long aggregateBudget = saturatedAdd(
+                saturatedAdd(targetNanoseconds, meanSlackNanoseconds),
+                snapshotAllowance
+        );
+        long maximumSevereLate = saturatedAdd(ceilDivide(timedIntervals, 100L), boundarySkew);
+        return generatedPresentations >= minimumGenerated
+                && timedIntervals >= minimumTimedIntervals
+                && generatedToRealIntervals >= minimumGeneratedToReal
+                && observedNanoseconds <= aggregateBudget
+                && severeLateIntervals <= maximumSevereLate;
+    }
+
+    /** Preferred p95 QoS target; reported as a warning, not FI delivery failure. */
+    static boolean hasPreferredFrameInterpolationMinorLateTail(
+            final long timedIntervals,
+            final long stableTargetMisses,
+            final long boundarySkew
+    ) {
+        if (timedIntervals <= 0L || stableTargetMisses < 0L || boundarySkew < 0L) {
+            return false;
+        }
+        return stableTargetMisses <= saturatedAdd(
+                ceilDivide(timedIntervals, 20L),
+                boundarySkew
+        );
+    }
+
+    private static long ceilDivide(final long value, final long divisor) {
+        return value / divisor + (value % divisor == 0L ? 0L : 1L);
+    }
+
+    private static long saturatedAdd(final long left, final long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    private static long saturatedMultiply(final long left, final long right) {
+        return left != 0L && right > Long.MAX_VALUE / left ? Long.MAX_VALUE : left * right;
     }
 
     /**

@@ -12,6 +12,7 @@ public final class TemporalScalingTests {
         testPresetDimensions();
         testOddAndTinyDimensions();
         testBenchmarkOverrides();
+        testFrameInterpolationSessionOverridePrecedence();
         testEffectiveSelection();
         testDynamicNativeTemporalTransitionContract();
         System.out.println("Native Apple MetalFX Temporal preset validation passed");
@@ -118,6 +119,35 @@ public final class TemporalScalingTests {
                         false
                 ) == TemporalScalingMode.OFF,
                 "Unsupported devices must reject the selected Temporal mode");
+    }
+
+    private static void testFrameInterpolationSessionOverridePrecedence() {
+        require(MetalFxTemporalScaling.selectRequestedMode(
+                        TemporalScalingMode.TEMPORAL,
+                        TemporalScalingMode.ULTRA_PERFORMANCE,
+                        null
+                ) == TemporalScalingMode.ULTRA_PERFORMANCE,
+                "FI session profile must replace persisted Dynamic Temporal without saving it");
+        require(MetalFxTemporalScaling.selectRequestedMode(
+                        TemporalScalingMode.QUALITY,
+                        TemporalScalingMode.ULTRA_PERFORMANCE,
+                        TemporalScalingMode.PERFORMANCE
+                ) == TemporalScalingMode.PERFORMANCE,
+                "benchmark instrumentation must retain highest override precedence");
+        require(MetalFxTemporalScaling.selectRequestedMode(
+                        TemporalScalingMode.QUALITY,
+                        null,
+                        null
+                ) == TemporalScalingMode.QUALITY,
+                "clearing FI Auto must restore the persisted Temporal preset");
+        require(MetalFxTemporalScaling.selectEffectiveMode(
+                        TemporalScalingMode.TEMPORAL,
+                        TemporalScalingMode.ULTRA_PERFORMANCE,
+                        null,
+                        true,
+                        true
+                ) == TemporalScalingMode.OFF,
+                "runtime failure must remain fail-closed under the FI session override");
     }
 
     private static void testDynamicNativeTemporalTransitionContract() {

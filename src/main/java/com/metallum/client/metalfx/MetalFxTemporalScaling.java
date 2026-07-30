@@ -52,6 +52,8 @@ public final class MetalFxTemporalScaling {
     private static volatile TemporalScalingMode requestedMode = TemporalScalingMode.OFF;
     private static volatile boolean configLoaded;
     private static volatile boolean runtimeDisabled;
+    /** Explicit FI Auto profile; never serialized into the user's Temporal preset. */
+    private static volatile TemporalScalingMode frameInterpolationSessionOverride;
     private static volatile TemporalScalingMode benchmarkOverride;
     /** True while Dynamic Temporal deliberately uses native resolution. */
     private static volatile boolean dynamicNativeFallback;
@@ -66,8 +68,11 @@ public final class MetalFxTemporalScaling {
     }
 
     public static boolean isFixedPresetActive() {
-        ensureConfigLoaded();
-        return requestedMode.isFixedPreset();
+        return requestedMode().isFixedPreset();
+    }
+
+    public static boolean isFrameInterpolationSessionOverrideActive() {
+        return frameInterpolationSessionOverride != null;
     }
 
     public static void requestRendererResize() {
@@ -76,7 +81,9 @@ public final class MetalFxTemporalScaling {
 
     public static TemporalScalingMode requestedMode() {
         ensureConfigLoaded();
-        return selectRequestedMode(requestedMode, benchmarkOverride);
+        return selectRequestedMode(
+                requestedMode, frameInterpolationSessionOverride, benchmarkOverride
+        );
     }
 
     public static TemporalScalingMode effectiveMode() {
@@ -84,6 +91,7 @@ public final class MetalFxTemporalScaling {
         MetalDevice device = MetalDevice.getInstance();
         TemporalScalingMode selected = selectEffectiveMode(
                 requestedMode,
+                frameInterpolationSessionOverride,
                 benchmarkOverride,
                 runtimeDisabled,
                 device != null && device.supportsTemporalScaling()
@@ -99,7 +107,7 @@ public final class MetalFxTemporalScaling {
 
     public static boolean isRequested() {
         ensureConfigLoaded();
-        return selectRequestedMode(requestedMode, benchmarkOverride).enabled();
+        return requestedMode().enabled();
     }
 
     public static boolean isSupported() {
@@ -114,7 +122,7 @@ public final class MetalFxTemporalScaling {
     /** Called from the render-thread DRS feedback loop after a completed GPU sample. */
     static void updateDynamicReconstructionPolicy(final float gpuTimeMs) {
         ensureConfigLoaded();
-        TemporalScalingMode selected = selectRequestedMode(requestedMode, benchmarkOverride);
+        TemporalScalingMode selected = requestedMode();
         if (!selected.isDynamic() || runtimeDisabled || !Float.isFinite(gpuTimeMs) || gpuTimeMs <= 0.0f) {
             return;
         }
@@ -144,11 +152,11 @@ public final class MetalFxTemporalScaling {
         boolean wasRuntimeDisabled = runtimeDisabled;
         requestedMode = selected;
         runtimeDisabled = false;
-        initializeDynamicSession(selected);
+        initializeDynamicSession(requestedMode());
         saveSettings(selected);
         if (selected.enabled()) {
             MetalFxSpatialScaling.disableForTemporalSelection();
-            if (selected.isDynamic()) {
+            if (requestedMode().isDynamic()) {
                 MetallumDrsController.setEnabled(true);
             } else {
                 MetallumDrsController.setEnabled(false);
@@ -177,6 +185,25 @@ public final class MetalFxTemporalScaling {
         requestRendererResize();
     }
 
+    /**
+     * Installs the explicit, non-persistent Temporal preset required by FI
+     * Auto. Benchmark instrumentation has higher precedence; the user's saved
+     * Temporal/Spatial selection is never rewritten.
+     */
+    public static void setFrameInterpolationSessionOverride(final TemporalScalingMode mode) {
+        ensureConfigLoaded();
+        TemporalScalingMode concreteMode = mode != null && mode.isFixedPreset() ? mode : null;
+        TemporalScalingMode previous = frameInterpolationSessionOverride;
+        if (previous == concreteMode) {
+            return;
+        }
+        frameInterpolationSessionOverride = concreteMode;
+        runtimeDisabled = false;
+        initializeDynamicSession(requestedMode());
+        MetallumDrsController.setEnabled(requestedMode().isDynamic());
+        requestRendererResize();
+    }
+
     /** Installs a non-persistent concrete preset for the automated benchmark. */
     public static void setBenchmarkOverride(final TemporalScalingMode mode) {
         ensureConfigLoaded();
@@ -201,7 +228,7 @@ public final class MetalFxTemporalScaling {
         }
         benchmarkOverride = null;
         runtimeDisabled = false;
-        initializeDynamicSession(requestedMode);
+        initializeDynamicSession(requestedMode());
         requestRendererResize();
     }
 
@@ -257,9 +284,21 @@ public final class MetalFxTemporalScaling {
             final TemporalScalingMode persistedMode,
             final TemporalScalingMode overrideMode
     ) {
-        return overrideMode != null
-                ? overrideMode
-                : (persistedMode == null ? TemporalScalingMode.OFF : persistedMode);
+        return selectRequestedMode(persistedMode, null, overrideMode);
+    }
+
+    static TemporalScalingMode selectRequestedMode(
+            final TemporalScalingMode persistedMode,
+            final TemporalScalingMode frameInterpolationOverride,
+            final TemporalScalingMode benchmarkMode
+    ) {
+        if (benchmarkMode != null) {
+            return benchmarkMode;
+        }
+        if (frameInterpolationOverride != null) {
+            return frameInterpolationOverride;
+        }
+        return persistedMode == null ? TemporalScalingMode.OFF : persistedMode;
     }
 
     /** Applies the one canonical requested-mode selector before runtime admission. */
@@ -269,7 +308,21 @@ public final class MetalFxTemporalScaling {
             final boolean disabledAtRuntime,
             final boolean supportedByDevice
     ) {
-        TemporalScalingMode selected = selectRequestedMode(persistedMode, overrideMode);
+        return selectEffectiveMode(
+                persistedMode, null, overrideMode, disabledAtRuntime, supportedByDevice
+        );
+    }
+
+    static TemporalScalingMode selectEffectiveMode(
+            final TemporalScalingMode persistedMode,
+            final TemporalScalingMode frameInterpolationOverride,
+            final TemporalScalingMode benchmarkMode,
+            final boolean disabledAtRuntime,
+            final boolean supportedByDevice
+    ) {
+        TemporalScalingMode selected = selectRequestedMode(
+                persistedMode, frameInterpolationOverride, benchmarkMode
+        );
         return disabledAtRuntime || !supportedByDevice ? TemporalScalingMode.OFF : selected;
     }
 

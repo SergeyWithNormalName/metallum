@@ -11,7 +11,7 @@ OUTPUT_DIR="$RUN_DIR/logs/metallum-benchmarks"
 REFERENCE_OUTPUT_DIR=${METALLUM_L2_REFERENCE_OUTPUT_DIR:-"$RUN_DIR/lighting-reference/l0"}
 DEFAULT_ROUTE_SPEC="benchmark/routes/hdrtest-static-v1.json"
 DEFAULT_SETTINGS_SPEC="benchmark/settings/native-hdr-fancy-v1.json"
-FI_SETTINGS_SPEC="benchmark/settings/fi-hdr-temporal-performance-v1.json"
+FI_SETTINGS_SPEC="benchmark/settings/fi-hdr-temporal-ultra-performance-v1.json"
 ARTIFACT_CLASSES="build/classes/java/main"
 ARTIFACT_RESOURCES="build/resources/main"
 ARTIFACT_NATIVE="build/generated/metallum/natives/macos/libmetallum.dylib"
@@ -53,6 +53,8 @@ FI_TEMPORAL_MODE=unchanged
 FI_OVERLAY=false
 FI_MINIMUM_GENERATED_PERCENT=0
 FI_MINIMUM_GENERATED_FRAMES=0
+FI_RENDERER_IMPROVED_LIGHTING=unchanged
+FI_RENDERER_LIGHTING_PRESET=unchanged
 EXPECTED_VSYNC=false
 
 usage() {
@@ -77,7 +79,7 @@ Options:
   --preflight-only   validate route/config/release settings contract/immutable fixture
                      without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
-  --fi-validation    run the opt-in HDR Temporal Performance + Frame Interpolation
+  --fi-validation    run the opt-in HDR Temporal Ultra Performance + Frame Interpolation
                      validation profile; temporarily applies and then restores
                      options, HDR, renderer, MetalFX, and Temporal settings
                      byte-for-byte
@@ -162,9 +164,8 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
     [ "$SETTINGS_SPEC_EXPLICIT" -eq 0 ] \
         || die "--fi-validation selects its own settings profile; do not combine it with --settings"
     [ "$METALFX_MODE_EXPLICIT" -eq 0 ] \
-        || die "--fi-validation selects TEMPORAL_PERFORMANCE; do not combine it with --metalfx"
+        || die "--fi-validation selects TEMPORAL_ULTRA_PERFORMANCE; do not combine it with --metalfx"
     SETTINGS_SPEC_ARGUMENT=$FI_SETTINGS_SPEC
-    METALFX_MODE=TEMPORAL_PERFORMANCE
     EXPECTED_VSYNC=true
 fi
 
@@ -525,6 +526,8 @@ case "$settings_field_count" in
             HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE <<< "$settings_values"
         ;;
     31)
+        [ "$FI_VALIDATION" -eq 0 ] \
+            || die "FI settings helper returned the old 31-field contract"
         IFS=$'\t' read -r \
             SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
             RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
@@ -537,8 +540,24 @@ case "$settings_field_count" in
             FI_ENABLED FI_TEMPORAL_MODE FI_OVERLAY \
             FI_MINIMUM_GENERATED_PERCENT <<< "$settings_values"
         ;;
+    33)
+        [ "$FI_VALIDATION" -eq 1 ] \
+            || die "schema-v2 FI settings require --fi-validation"
+        IFS=$'\t' read -r \
+            SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
+            RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
+            ENTITY_DISTANCE_SCALING PARTICLE_SETTING MIPMAP_LEVELS \
+            BIOME_BLEND_RADIUS MAX_FPS AO_ENABLED CLOUDS_MODE CLOUD_RANGE \
+            TEXTURE_FILTERING MAX_ANISOTROPY_BIT IMPROVED_TRANSPARENCY \
+            CONFIGURED_GUI_SCALE RESOURCE_PACKS_SHA256 SODIUM_SETTINGS_SHA256 \
+            ACTIVE_RESOURCE_PACK_IDS SODIUM_WORKER_THREADS HDR_MODE HDR_SOURCE_ENCODING \
+            HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE \
+            FI_ENABLED FI_TEMPORAL_MODE FI_OVERLAY \
+            FI_MINIMUM_GENERATED_PERCENT FI_RENDERER_IMPROVED_LIGHTING \
+            FI_RENDERER_LIGHTING_PRESET <<< "$settings_values"
+        ;;
     *)
-        die "settings helper returned $settings_field_count fields instead of 27 or 31"
+        die "settings helper returned $settings_field_count fields instead of 27, 31, or 33"
         ;;
 esac
 SETTINGS_VALUES_BEFORE=$settings_values
@@ -562,10 +581,22 @@ case "$MAX_FPS" in
     ''|*[!0-9]*) die "maxFps must be an integer (found ${MAX_FPS:-<missing>})" ;;
 esac
 if [ "$FI_VALIDATION" -eq 1 ]; then
-    require_value "$MAX_FPS" "60" "FI validation maxFps"
+    require_value "$MAX_FPS" "30" "FI validation maxFps"
     require_value "$FI_ENABLED" "true" "FI validation frame-interpolation setting"
-    require_value "$FI_TEMPORAL_MODE" "performance" "FI validation temporal mode"
+    require_value "$FI_TEMPORAL_MODE" "ultra_performance" "FI validation temporal mode"
+    case "$FI_TEMPORAL_MODE" in
+        quality) METALFX_MODE=TEMPORAL_QUALITY ;;
+        performance) METALFX_MODE=TEMPORAL_PERFORMANCE ;;
+        ultra_performance) METALFX_MODE=TEMPORAL_ULTRA_PERFORMANCE ;;
+        *) die "unsupported FI validation temporal mode: $FI_TEMPORAL_MODE" ;;
+    esac
     require_value "$FI_OVERLAY" "true" "FI validation overlay setting"
+    require_value "$FI_RENDERER_IMPROVED_LIGHTING" "false" \
+        "FI validation renderer improvedLighting"
+    require_value "$FI_RENDERER_LIGHTING_PRESET" "balanced" \
+        "FI validation renderer lightingPreset"
+    require_value "$LIGHTING_PRESET" "$FI_RENDERER_LIGHTING_PRESET" \
+        "FI validation lighting preset argument"
     case "$FI_MINIMUM_GENERATED_PERCENT" in
         ''|*[!0-9]*|0) die "FI minimum generated percent must be an integer from 1 to 100" ;;
     esac
@@ -594,6 +625,10 @@ RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
 if [ "$FI_VALIDATION" -eq 1 ]; then
+    require_value "$RENDERER_LIGHTING" "$FI_RENDERER_IMPROVED_LIGHTING" \
+        "FI validation renderer improvedLighting"
+    require_value "$RENDERER_PRESET" "$FI_RENDERER_LIGHTING_PRESET" \
+        "FI validation renderer lightingPreset"
     require_value "$RENDERER_INTERPOLATION" "true" "renderer frameInterpolation"
 else
     require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
@@ -918,7 +953,6 @@ echo "  console log: $CONSOLE_LOG"
 
 FI_REQUIRED_ENV=0
 FI_OVERLAY_ENV=false
-FI_EXPERIMENTAL_GATE_ENV=0
 GPU_TIMING_ENV=1
 if [ "$FI_VALIDATION" -eq 1 ]; then
     FI_REQUIRED_ENV=1
@@ -927,12 +961,8 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
     # Coordinator-owned generated/real command buffers deliberately do not
     # masquerade as ordinary drawable timing samples.
     GPU_TIMING_ENV=0
-    # Temporary compatibility for the hidden live-profile gate. Delete this
-    # isolated assignment once the ungated FI validation run has passed.
-    FI_EXPERIMENTAL_GATE_ENV=1
 fi
 set +e
-METALLUM_EXPERIMENTAL_FI="$FI_EXPERIMENTAL_GATE_ENV" \
 METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
 METALLUM_BENCHMARK_FI_OVERLAY="$FI_OVERLAY_ENV" \
 METALLUM_BENCHMARK_FI_MIN_GENERATED="$FI_MINIMUM_GENERATED_FRAMES" \

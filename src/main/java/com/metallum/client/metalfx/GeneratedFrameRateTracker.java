@@ -3,13 +3,15 @@ package com.metallum.client.metalfx;
 /**
  * Converts a monotonic cumulative on-screen frame counter into a stable rate.
  * The cumulative value remains the source of truth; long sampling gaps and a
- * counter reset start a new window instead of reporting a synthetic spike.
+ * counter reset or coordinator-session change starts a new window instead of
+ * reporting a synthetic spike.
  */
 public final class GeneratedFrameRateTracker {
     static final long SAMPLE_INTERVAL_NANOS = 1_000_000_000L;
     static final long MAXIMUM_CONTIGUOUS_GAP_NANOS = 2_500_000_000L;
 
     private boolean initialized;
+    private long sessionId;
     private long lastSampleNanos;
     private long lastPresentedCount;
     private long presentedCount;
@@ -21,14 +23,18 @@ public final class GeneratedFrameRateTracker {
                 || nowNanos - this.lastSampleNanos >= SAMPLE_INTERVAL_NANOS;
     }
 
-    public void observe(final long nowNanos, final long cumulativePresentedCount) {
-        if (nowNanos < 0L || cumulativePresentedCount < 0L) {
+    public void observe(
+            final long nowNanos,
+            final long currentSessionId,
+            final long cumulativePresentedCount
+    ) {
+        if (nowNanos < 0L || currentSessionId < 0L || cumulativePresentedCount < 0L) {
             throw new IllegalArgumentException("Generated-frame telemetry must be non-negative");
         }
 
         this.presentedCount = cumulativePresentedCount;
-        if (!this.initialized) {
-            this.initialize(nowNanos, cumulativePresentedCount);
+        if (!this.initialized || currentSessionId != this.sessionId) {
+            this.initialize(nowNanos, currentSessionId, cumulativePresentedCount);
             return;
         }
 
@@ -56,8 +62,13 @@ public final class GeneratedFrameRateTracker {
         return this.presentedCount;
     }
 
-    private void initialize(final long nowNanos, final long cumulativePresentedCount) {
+    private void initialize(
+            final long nowNanos,
+            final long currentSessionId,
+            final long cumulativePresentedCount
+    ) {
         this.initialized = true;
+        this.sessionId = currentSessionId;
         this.lastSampleNanos = nowNanos;
         this.lastPresentedCount = cumulativePresentedCount;
         this.framesPerSecond = 0;

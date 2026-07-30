@@ -61,7 +61,9 @@ import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.FrameStatePacketRing;
 import com.metallum.client.renderer.temporal.FrameStateTracker;
+import com.metallum.client.renderer.interpolation.FrameInterpolationCompatibilityProfile;
 import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
+import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.metallum.client.renderer.temporal.TemporalDiagnostics;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -77,6 +79,7 @@ import com.mojang.blaze3d.buffers.GpuBuffer;
 import com.mojang.blaze3d.pipeline.CompiledRenderPipeline;
 import com.mojang.blaze3d.pipeline.RenderPipeline;
 import com.mojang.blaze3d.pipeline.TextureTarget;
+import com.mojang.blaze3d.platform.FramerateLimitTracker;
 import com.mojang.blaze3d.preprocessor.GlslPreprocessor;
 import com.mojang.blaze3d.shaders.GpuDebugOptions;
 import com.mojang.blaze3d.shaders.ShaderSource;
@@ -180,9 +183,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private static final Pattern BLOCK_COMMENTS = Pattern.compile("(?s)/\\*.*?\\*/");
     private static final Pattern LINE_COMMENTS = Pattern.compile("(?m)//[^\\n]*");
     static final long VOXEL_DEBUG_CHECKSUM_CADENCE_FRAMES = 120L;
-    private static final boolean EXPERIMENTAL_FRAME_INTERPOLATION_LIVE_PROFILE = "1".equals(
-            System.getenv("METALLUM_EXPERIMENTAL_FI")
-    );
+    private static final long FRAME_INTERPOLATION_WARMUP_ACTIVE_BUDGET_NANOS = 8_000_000_000L;
+    private static final long FRAME_INTERPOLATION_WARMUP_MAXIMUM_CONTRIBUTION_NANOS =
+            50_000_000L;
     private static volatile MetalDevice INSTANCE;
     private final MemorySegment metalDeviceHandle;
     private final MemorySegment metalLayer;
@@ -252,6 +255,16 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private RendererAdmissionLogState loggedRendererAdmission;
     private boolean frameInterpolationAdmissionLogged;
+    private volatile FrameInterpolationCompatibilityProfile.Decision
+            frameInterpolationCompatibilityDecision;
+    private volatile boolean frameInterpolationRuntimeQuarantined;
+    private volatile boolean frameInterpolationSourceLimitActive;
+    private FrameInterpolationRuntimeStatus.Reason frameInterpolationQuarantineReason =
+            FrameInterpolationRuntimeStatus.Reason.NATIVE_STATUS_INVALID;
+    private long frameInterpolationSessionId;
+    private long frameInterpolationPresentedGeneratedCount;
+    private long frameInterpolationWarmingActiveNanos;
+    private long frameInterpolationWarmingLastFrameNanos = Long.MIN_VALUE;
     @Nullable
     private NativeFrameInterpolationCoordinator frameInterpolationCoordinator;
     private final FrameStatePacketRing frameStatePackets = new FrameStatePacketRing();
@@ -366,6 +379,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             );
         }
         this.rendererCapabilities = discoveredCapabilities;
+        this.applyFrameInterpolationCompatibilityProfile();
         this.requestedRenderContract = requestedRenderContract();
         AdvancedLightingRuntime.configureRequested(
                 this.requestedRenderContract == RenderContractMode.METALLUM
@@ -637,6 +651,8 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public void close() {
+        this.frameInterpolationSourceLimitActive = false;
+        MetalFxTemporalScaling.setFrameInterpolationSessionOverride(null);
         this.entityTransformTracker.clear();
         HdrSemanticState.reset();
         HdrSceneState.reset();
@@ -697,6 +713,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         MetalNativeBridge.metallum_release_device_caches(this.metalDeviceHandle);
         MetalNativeBridge.metallum_release_object(this.metalDeviceHandle);
+        if (INSTANCE == this) {
+            INSTANCE = null;
+        }
     }
 
     @Nullable
@@ -780,6 +799,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             return;
         }
         if (previous != null) {
+            this.frameInterpolationSourceLimitActive = false;
             this.commandEncoder.installFrameInterpolationBridge(null);
             this.waitForSubmittedGpuWork();
             FrameInterpolationCommitBoundary.Status drained = previous.drain(1_000_000_000L);
@@ -798,11 +818,34 @@ public final class MetalDevice implements GpuDeviceBackend {
                         "Frame Interpolation generation drain failed: " + drained
                 );
             }
+            try {
+                this.frameInterpolationPresentedGeneratedCount =
+                        FrameInterpolationRuntimeStatus.fromPackedNative(
+                                previous.runtimeStatusPacked(),
+                                this.frameInterpolationSessionId
+                        ).presentedGeneratedCount();
+            } catch (RuntimeException | LinkageError unavailable) {
+                // Preserve the last confirmed session count in the HUD.
+            }
             previous.close();
             this.frameInterpolationCoordinator = null;
         }
         this.frameInterpolationCoordinator = next;
         this.commandEncoder.installFrameInterpolationBridge(next);
+        if (next != null) {
+            this.frameInterpolationSessionId = Math.addExact(
+                    this.frameInterpolationSessionId, 1L
+            );
+            this.frameInterpolationPresentedGeneratedCount = 0L;
+            this.frameInterpolationWarmingActiveNanos = 0L;
+            this.frameInterpolationWarmingLastFrameNanos = Long.MIN_VALUE;
+            this.frameInterpolationSourceLimitActive =
+                    !this.frameInterpolationRuntimeQuarantined;
+        } else {
+            this.frameInterpolationWarmingActiveNanos = 0L;
+            this.frameInterpolationWarmingLastFrameNanos = Long.MIN_VALUE;
+            this.frameInterpolationSourceLimitActive = false;
+        }
     }
 
     void waitForPreviouslySubmittedGpuWork() {
@@ -905,6 +948,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             final int displayWidth,
             final int displayHeight
     ) {
+        this.applyFrameInterpolationCompatibilityProfile();
         int safeDisplayWidth = Math.max(displayWidth, 1);
         int safeDisplayHeight = Math.max(displayHeight, 1);
         MetalFxUpscaling.Dimensions dimensions = MetalFxUpscaling.effectiveDimensions(
@@ -935,20 +979,24 @@ public final class MetalDevice implements GpuDeviceBackend {
                 : spatialActive
                     ? FrameInterpolationPolicy.UpstreamMode.SPATIAL
                     : FrameInterpolationPolicy.UpstreamMode.NATIVE;
-        double nominalRealFramesPerSecond = Math.max(
-                this.rendererCapabilities.displayCapabilities().maximumFramesPerSecond() / 2.0,
-                30.0
-        );
+        boolean compatibilitySessionEligible = this.frameInterpolationCompatibilityDecision.active()
+                && !this.frameInterpolationRuntimeQuarantined;
+        double nominalRealFramesPerSecond = compatibilitySessionEligible
+                ? this.frameInterpolationCompatibilityDecision.sourceFrameLimit()
+                : Math.max(
+                        this.rendererCapabilities.displayCapabilities().maximumFramesPerSecond() / 2.0,
+                        30.0
+                );
         FrameInterpolationPolicy.Evaluation interpolationPolicy = FrameInterpolationPolicy.evaluate(
                 this.rendererConfig,
                 this.rendererCapabilities,
                 interpolationUpstream,
                 Minecraft.getInstance().options.enableVsync().get(),
-                EXPERIMENTAL_FRAME_INTERPOLATION_LIVE_PROFILE,
                 nominalRealFramesPerSecond,
                 Set.of()
         );
-        boolean frameInterpolationCandidate = interpolationPolicy.effectiveAdmitted();
+        boolean frameInterpolationCandidate = interpolationPolicy.effectiveAdmitted()
+                && !this.frameInterpolationRuntimeQuarantined;
         HdrOutputMode storageCompatibleOutput = MetallumMaterialState.resolveCompatibleOutput(
                 this.hdrOutputMode
         );
@@ -1354,7 +1402,33 @@ public final class MetalDevice implements GpuDeviceBackend {
                         exception
                 );
             }
+            if (nextFrameInterpolationCoordinator != null) {
+                FrameInterpolationRuntimeStatus preflightStatus =
+                        FrameInterpolationRuntimeStatus.fromPackedNative(
+                                nextFrameInterpolationCoordinator.runtimeStatusPacked(),
+                                this.frameInterpolationSessionId
+                        );
+                if (preflightStatus.state()
+                        == FrameInterpolationRuntimeStatus.State.UNAVAILABLE) {
+                    try {
+                        nextFrameInterpolationCoordinator.close();
+                    } catch (RuntimeException exception) {
+                        Metallum.LOGGER.warn(
+                                "Failed to release an unavailable FI workspace during preflight",
+                                exception
+                        );
+                    } finally {
+                        nextFrameInterpolationCoordinator = null;
+                    }
+                    this.quarantineFrameInterpolation(preflightStatus.reason());
+                }
+            }
             if (nextFrameInterpolationCoordinator == null) {
+                if (!this.frameInterpolationRuntimeQuarantined) {
+                    this.quarantineFrameInterpolation(
+                            FrameInterpolationRuntimeStatus.Reason.NATIVE_FACTORY_UNAVAILABLE
+                    );
+                }
                 frameInterpolationCandidate = false;
                 activeFeatures = activeFeatures.without(RendererFeatureMask.FRAME_INTERPOLATION);
                 plan = RendererGenerationPlanner.plan(
@@ -2236,6 +2310,158 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.advancedLightingFrameReady,
                 this.advancedLightingFrameSubmitIndex,
                 this.commandEncoder.currentSubmitIndex()
+        );
+    }
+
+    public FrameInterpolationCompatibilityProfile.Decision
+            frameInterpolationCompatibilityDecision() {
+        return this.frameInterpolationCompatibilityDecision;
+    }
+
+    /** True only while a successfully installed coordinator is in probation/active service. */
+    public boolean frameInterpolationSourceLimitActive() {
+        return this.frameInterpolationSourceLimitActive;
+    }
+
+    /**
+     * Runtime truth for the HUD. Static eligibility is never reported as
+     * Active; only the coordinator's presentedTime health state may do that.
+     */
+    public synchronized FrameInterpolationRuntimeStatus frameInterpolationRuntimeStatus() {
+        if (this.frameInterpolationRuntimeQuarantined) {
+            return FrameInterpolationRuntimeStatus.unavailable(
+                    this.frameInterpolationQuarantineReason,
+                    this.frameInterpolationSessionId,
+                    this.frameInterpolationPresentedGeneratedCount
+            );
+        }
+        NativeFrameInterpolationCoordinator coordinator = this.frameInterpolationCoordinator;
+        if (coordinator == null) {
+            if (this.frameInterpolationCompatibilityDecision.active()) {
+                return FrameInterpolationRuntimeStatus.unavailable(
+                        FrameInterpolationRuntimeStatus.Reason.COORDINATOR_NOT_INSTALLED,
+                        this.frameInterpolationSessionId,
+                        this.frameInterpolationPresentedGeneratedCount
+                );
+            }
+            return FrameInterpolationRuntimeStatus.fromCompatibilityDecision(
+                    this.frameInterpolationCompatibilityDecision,
+                    this.frameInterpolationSessionId,
+                    this.frameInterpolationPresentedGeneratedCount
+            );
+        }
+        try {
+            FrameInterpolationRuntimeStatus status = FrameInterpolationRuntimeStatus.fromPackedNative(
+                    coordinator.runtimeStatusPacked(),
+                    this.frameInterpolationSessionId
+            );
+            this.frameInterpolationPresentedGeneratedCount = status.presentedGeneratedCount();
+            return status;
+        } catch (RuntimeException | LinkageError unavailable) {
+            return FrameInterpolationRuntimeStatus.unavailable(
+                    FrameInterpolationRuntimeStatus.Reason.NATIVE_STATUS_INVALID,
+                    this.frameInterpolationSessionId,
+                    this.frameInterpolationPresentedGeneratedCount
+            );
+        }
+    }
+
+    /** Called at the frame boundary, before renderer-generation admission. */
+    public synchronized void refreshFrameInterpolationRuntimeHealthBeforeResize() {
+        NativeFrameInterpolationCoordinator coordinator = this.frameInterpolationCoordinator;
+        if (coordinator == null || this.frameInterpolationRuntimeQuarantined) {
+            return;
+        }
+        FrameInterpolationRuntimeStatus status;
+        try {
+            status = FrameInterpolationRuntimeStatus.fromPackedNative(
+                    coordinator.runtimeStatusPacked(),
+                    this.frameInterpolationSessionId
+            );
+            this.frameInterpolationPresentedGeneratedCount = status.presentedGeneratedCount();
+        } catch (RuntimeException | LinkageError unavailable) {
+            status = FrameInterpolationRuntimeStatus.unavailable(
+                    FrameInterpolationRuntimeStatus.Reason.NATIVE_STATUS_INVALID,
+                    this.frameInterpolationSessionId,
+                    this.frameInterpolationPresentedGeneratedCount
+            );
+        }
+        Minecraft minecraft = Minecraft.getInstance();
+        long nowNanos = System.nanoTime();
+        boolean countWarmup = status.state() == FrameInterpolationRuntimeStatus.State.WARMING
+                && status.reason()
+                == FrameInterpolationRuntimeStatus.Reason.MEASURING_ON_GLASS
+                && minecraft != null
+                && minecraft.level != null
+                && minecraft.player != null
+                && minecraft.isWindowActive()
+                && !minecraft.isPaused()
+                && minecraft.getFramerateLimitTracker().getThrottleReason()
+                == FramerateLimitTracker.FramerateThrottleReason.NONE;
+        if (status.state() == FrameInterpolationRuntimeStatus.State.ACTIVE) {
+            this.frameInterpolationWarmingActiveNanos = 0L;
+            this.frameInterpolationWarmingLastFrameNanos = Long.MIN_VALUE;
+        } else if (countWarmup) {
+            long sample = FrameInterpolationRuntimeStatus.boundedWarmupSample(
+                    this.frameInterpolationWarmingLastFrameNanos,
+                    nowNanos,
+                    FRAME_INTERPOLATION_WARMUP_MAXIMUM_CONTRIBUTION_NANOS
+            );
+            this.frameInterpolationWarmingActiveNanos = Math.min(
+                    FRAME_INTERPOLATION_WARMUP_ACTIVE_BUDGET_NANOS,
+                    this.frameInterpolationWarmingActiveNanos + sample
+            );
+            this.frameInterpolationWarmingLastFrameNanos = nowNanos;
+        } else {
+            this.frameInterpolationWarmingLastFrameNanos = Long.MIN_VALUE;
+        }
+        if (FrameInterpolationRuntimeStatus.warmupBudgetExhausted(
+                status.state(),
+                status.reason(),
+                this.frameInterpolationWarmingActiveNanos,
+                FRAME_INTERPOLATION_WARMUP_ACTIVE_BUDGET_NANOS
+        )) {
+            status = FrameInterpolationRuntimeStatus.unavailable(
+                    FrameInterpolationRuntimeStatus.Reason.WARMUP_TIMEOUT,
+                    this.frameInterpolationSessionId,
+                    this.frameInterpolationPresentedGeneratedCount
+            );
+        }
+        if (status.state() == FrameInterpolationRuntimeStatus.State.UNAVAILABLE) {
+            this.quarantineFrameInterpolation(status.reason());
+        }
+    }
+
+    private void quarantineFrameInterpolation(
+            final FrameInterpolationRuntimeStatus.Reason reason
+    ) {
+        if (this.frameInterpolationRuntimeQuarantined) {
+            return;
+        }
+        this.frameInterpolationRuntimeQuarantined = true;
+        this.frameInterpolationQuarantineReason = reason;
+        this.frameInterpolationSourceLimitActive = false;
+        MetalFxTemporalScaling.setFrameInterpolationSessionOverride(null);
+        this.publishedRendererGeneration = null;
+        Metallum.LOGGER.warn(
+                "Frame Interpolation quarantined for this game session: {}; restoring the ordinary real-frame profile",
+                reason
+        );
+    }
+
+    private void applyFrameInterpolationCompatibilityProfile() {
+        Minecraft minecraft = Minecraft.getInstance();
+        boolean displaySyncEnabled = minecraft != null
+                && minecraft.options != null
+                && minecraft.options.enableVsync().get();
+        FrameInterpolationCompatibilityProfile.Decision decision =
+                FrameInterpolationCompatibilityProfile.evaluate(
+                        this.rendererConfig, this.rendererCapabilities, displaySyncEnabled
+        );
+        this.frameInterpolationCompatibilityDecision = decision;
+        MetalFxTemporalScaling.setFrameInterpolationSessionOverride(
+                decision.active() && !this.frameInterpolationRuntimeQuarantined
+                        ? decision.temporalMode() : null
         );
     }
 
