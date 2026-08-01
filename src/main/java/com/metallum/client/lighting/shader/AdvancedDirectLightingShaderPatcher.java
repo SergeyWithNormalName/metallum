@@ -427,7 +427,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 normal,
                     MetallumSurfaceMaterialV1 material) {
                 if (material.kind != METALLUM_SURFACE_WATER_V1
-                        || metallumVoxelShadow.caps.x != 3u) {
+                        || metallumVoxelShadow.caps.x != 4u) {
                     return normal;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
@@ -971,7 +971,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
                     uvec2 lightStableId) {
-                if (metallumVoxelShadow.caps.x != 3u
+                if (metallumVoxelShadow.caps.x != 4u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1357,7 +1357,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         && surfaceFraction < 1.0 - fullBlockSurfaceEpsilon;
             }
 
-            float metallumVoxelCachedTexelVisibilityV1(
+            vec3 metallumVoxelCachedTexelVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
                     uint face,
@@ -1367,7 +1367,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldNormal) {
                 if (face >= 6u || any(lessThan(texel, ivec2(0)))
                         || any(greaterThanEqual(texel, ivec2(int(cacheFaceEdge))))) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 float cacheFaceEdgeFloat = float(cacheFaceEdge);
                 vec2 texelUv = (vec2(texel) + vec2(0.5))
@@ -1376,7 +1376,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float cacheDirectionLengthSquared = dot(cacheDirection, cacheDirection);
                 if (!(cacheDirectionLengthSquared > 0.000001)
                         || !metallumFiniteVec3V1(cacheDirection)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 cacheDirection *= inversesqrt(cacheDirectionLengthSquared);
                 float normalLengthSquared = dot(receiverWorldNormal, receiverWorldNormal);
@@ -1394,16 +1394,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint texelIndex = (face * cacheFaceEdge + uint(texel.y))
                         * cacheFaceEdge + uint(texel.x);
                 uint firstHit = baseHitIndex + texelIndex * 4u;
-                float visibility = 1.0;
+                vec3 visibility = vec3(1.0);
                 for (uint layer = 0u; layer < 4u; ++layer) {
                     uvec2 packed = metallumVoxelVisibilityCache.hits[firstHit + layer];
                     float hitDistance = uintBitsToFloat(packed.x);
-                    float hitVisibility = uintBitsToFloat(packed.y);
+                    uint packedRgb = packed.y;
                     if (isnan(hitDistance) || hitDistance < 0.0
-                            || isnan(hitVisibility) || isinf(hitVisibility)
-                            || hitVisibility < 0.0 || hitVisibility > 1.0) {
-                        return 0.0;
+                            || (packedRgb & 0xff000000u) != 0xff000000u) {
+                        return vec3(0.0);
                     }
+                    vec3 hitVisibility = vec3(
+                            float(packedRgb & 255u),
+                            float((packedRgb >> 8u) & 255u),
+                            float((packedRgb >> 16u) & 255u)) * (1.0 / 255.0);
                     // This is a numerical coincidence tolerance, not a shadow bias. A broad
                     // self-hit allowance makes a real caster just in front of the receiver look
                     // like the receiver itself, visibly detaching its shadow (Peter-panning).
@@ -1424,8 +1427,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                         return visibility;
                     }
                     visibility = hitVisibility;
-                    if (visibility <= 0.0) {
-                        return 0.0;
+                    if (!any(greaterThan(visibility, vec3(0.0)))) {
+                        return vec3(0.0);
                     }
                 }
                 return visibility;
@@ -1464,7 +1467,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return (tap.x * cacheFaceEdge + tap.z) * cacheFaceEdge + tap.y;
             }
 
-            float metallumVoxelResolvedTapVisibilityV1(
+            vec3 metallumVoxelResolvedTapVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
                     uvec3 tap,
@@ -1472,7 +1475,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float receiverDistance,
                     vec3 receiverWorldNormal) {
                 if (tap.x >= 6u || tap.y >= cacheFaceEdge || tap.z >= cacheFaceEdge) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 return metallumVoxelCachedTexelVisibilityV1(
                         baseHitIndex,
@@ -1484,7 +1487,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverWorldNormal);
             }
 
-            float metallumVoxelCachedVisibilityV1(
+            vec3 metallumVoxelCachedVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
                     vec3 lightToReceiver,
@@ -1495,22 +1498,22 @@ public final class AdvancedDirectLightingShaderPatcher {
                         || isnan(receiverDistance) || isinf(receiverDistance)
                         || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
                         && cacheFaceEdge != 32u && cacheFaceEdge != 64u)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint faceTexels = cacheFaceEdge * cacheFaceEdge;
                 uint pageHitCount = faceTexels * 6u * 4u;
                 int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;
                 if (atlasHitCountSigned <= 0) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint atlasHitCount = uint(atlasHitCountSigned);
                 if (baseHitIndex > atlasHitCount
                         || pageHitCount > atlasHitCount - baseHitIndex) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 vec3 faceUv = metallumVoxelCubeFaceUvV1(lightToReceiver);
                 if (faceUv.x < 0.0 || faceUv.x >= 6.0) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint face = uint(faceUv.x);
                 float cacheFaceEdgeFloat = float(cacheFaceEdge);
@@ -1525,36 +1528,37 @@ public final class AdvancedDirectLightingShaderPatcher {
                         lightToReceiver, receiverDistance, receiverWorldNormal);
             }
 
-            float metallumVoxelSoftCachedVisibilityV1(
+            vec3 metallumVoxelSoftCachedVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
                     vec3 lightToReceiver,
                     float receiverDistance,
                     vec3 receiverWorldNormal,
-                    float nearestVisibility) {
+                    vec3 nearestVisibility) {
                 if (!metallumFiniteVec3V1(lightToReceiver)
                         || !(receiverDistance > 0.0001)
                         || isnan(receiverDistance) || isinf(receiverDistance)
-                        || isnan(nearestVisibility) || isinf(nearestVisibility)
-                        || nearestVisibility < 0.0 || nearestVisibility > 1.0
+                        || !metallumFiniteVec3V1(nearestVisibility)
+                        || any(lessThan(nearestVisibility, vec3(0.0)))
+                        || any(greaterThan(nearestVisibility, vec3(1.0)))
                         || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
                         && cacheFaceEdge != 32u && cacheFaceEdge != 64u)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint faceTexels = cacheFaceEdge * cacheFaceEdge;
                 uint pageHitCount = faceTexels * 6u * 4u;
                 int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;
                 if (atlasHitCountSigned <= 0) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint atlasHitCount = uint(atlasHitCountSigned);
                 if (baseHitIndex > atlasHitCount
                         || pageHitCount > atlasHitCount - baseHitIndex) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 vec3 faceUv = metallumVoxelCubeFaceUvV1(lightToReceiver);
                 if (faceUv.x < 0.0 || faceUv.x >= 6.0) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 uint face = uint(faceUv.x);
                 float cacheFaceEdgeFloat = float(cacheFaceEdge);
@@ -1641,26 +1645,28 @@ public final class AdvancedDirectLightingShaderPatcher {
                     extraTap2 = tap01;
                     extraWeight = softWeight.xyz;
                 } else {
-                    return 0.0;
+                    return vec3(0.0);
                 }
-                float visibility0 = metallumVoxelResolvedTapVisibilityV1(
+                vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(
                         baseHitIndex, cacheFaceEdge, extraTap0,
                         lightToReceiver, receiverDistance, receiverWorldNormal);
-                float visibility1 = metallumVoxelResolvedTapVisibilityV1(
+                vec3 visibility1 = metallumVoxelResolvedTapVisibilityV1(
                         baseHitIndex, cacheFaceEdge, extraTap1,
                         lightToReceiver, receiverDistance, receiverWorldNormal);
-                float visibility2 = metallumVoxelResolvedTapVisibilityV1(
+                vec3 visibility2 = metallumVoxelResolvedTapVisibilityV1(
                         baseHitIndex, cacheFaceEdge, extraTap2,
                         lightToReceiver, receiverDistance, receiverWorldNormal);
-                float visibility = nearestVisibility * nearestWeight
-                        + dot(vec3(visibility0, visibility1, visibility2), extraWeight);
-                if (isnan(visibility) || isinf(visibility)) {
-                    return 0.0;
+                vec3 visibility = nearestVisibility * nearestWeight
+                        + visibility0 * extraWeight.x
+                        + visibility1 * extraWeight.y
+                        + visibility2 * extraWeight.z;
+                if (!metallumFiniteVec3V1(visibility)) {
+                    return vec3(0.0);
                 }
-                return clamp(visibility, 0.0, 1.0);
+                return clamp(visibility, vec3(0.0), vec3(1.0));
             }
 
-            float metallumVoxelVisibilityV1(
+            vec3 metallumVoxelVisibilityV1(
                     vec3 receiverCameraRelative,
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
@@ -1673,7 +1679,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (atlasOffsetHigh != 0u || (atlasByteOffset & 255u) != 0u
                         || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
                         && cacheFaceEdge != 32u && cacheFaceEdge != 64u)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 ivec3 cameraBlock = metallumVoxelShadow.cameraBlockAndFlags.xyz;
                 if (any(lessThan(cameraBlock, ivec3(-500000000)))
@@ -1688,7 +1694,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
                         || any(greaterThanEqual(
                         metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 vec3 lightCameraRelative =
                         mat3(metallumVoxelShadow.worldFromView) * lightViewPosition;
@@ -1697,7 +1703,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         + lightCameraRelative;
                 if (!metallumFiniteVec3V1(lightCameraRelative)
                         || !metallumFiniteVec3V1(lightWorldRelative)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 bool proxyFailOpen = false;
                 if (!metallumProxyVisibilityV1(
@@ -1705,14 +1711,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                         lightCameraRelative,
                         lightStableId,
                         proxyFailOpen)) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 if (proxyFailOpen) {
-                    return 0.0;
+                    return vec3(0.0);
                 }
                 vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;
                 float receiverDistance = length(lightToReceiver);
-                float nearestVisibility = metallumVoxelCachedVisibilityV1(
+                vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(
                         atlasByteOffset >> 3u,
                         cacheFaceEdge,
                         lightToReceiver,
@@ -1767,7 +1773,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 // Its packet can be absent during a voxel/world transition, so a bad L6
                 // contract must fall back to unshadowed direct light instead of blacking out
                 // every clustered source in the fragment.
-                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 3u
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 4u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1879,7 +1885,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 unshadowedContribution = albedo
                             * radiance
                             * (attenuation * nDotL * 0.31830988618);
-                    float visibility = 1.0;
+                    vec3 visibility = vec3(1.0);
                     uvec4 shadowRef = uvec4(0u);
                     if (localShadowContractValid && !partialReceiverSurface && nDotL > 0.0
                             && any(greaterThan(radiance, vec3(0.0)))) {
@@ -1889,7 +1895,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         // is unavailable. It never enters the atlas or legacy DDA path.
                         // Only completed or retained cache pages enter the heavier atlas path.
                         if (shadowState == 0u) {
-                            visibility = 1.0;
+                            visibility = vec3(1.0);
                         } else if (shadowState == 1u || shadowState == 2u) {
                             visibility = metallumVoxelVisibilityV1(
                                     receiverCameraRelative,
@@ -1901,7 +1907,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         } else {
                             // A descriptor failure must not extinguish its L3 light. The
                             // producer will repair the page/descriptor on a later submit.
-                            visibility = 1.0;
+                            visibility = vec3(1.0);
                         }
                     }
                     direct += unshadowedContribution * visibility;
@@ -1990,7 +1996,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 // emitter behind solid terrain appear as a mirror-like glint. Require the same
                 // completed/retained L6 page that proves direct-light visibility; environment
                 // reflection remains independent of this local-light term.
-                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 3u
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 4u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -2047,14 +2053,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (dominantShadowState != 1u && dominantShadowState != 2u) {
                     return vec3(0.0);
                 }
-                float visibility = metallumVoxelVisibilityV1(
+                vec3 visibility = metallumVoxelVisibilityV1(
                         receiverCameraRelative,
                         receiverWorldRelative,
                         receiverWorldNormal,
                         dominantLight.positionRadius.xyz,
                         dominantLight.metadata.xy,
                         dominantShadowRef);
-                if (!(visibility > 0.0)) {
+                if (!any(greaterThan(visibility, vec3(0.0)))) {
                     return vec3(0.0);
                 }
                 return material.specularScale * metallumEvaluateGgxV1(
@@ -2852,7 +2858,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 || EnvironmentShadowBindingAbi.VERSION != SunShadowLayout.ABI_VERSION) {
             throw new ExceptionInInitializerError("Environment/shadow shader ABI does not match its layout");
         }
-        if (VoxelShadowBindingAbi.VERSION != 3
+        if (VoxelShadowBindingAbi.VERSION != 4
                 || VoxelShadowBindingAbi.PARAMS_BYTES != 256
                 || VoxelShadowBindingAbi.PROXY_STRIDE_BYTES != 32
                 || VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT != 14

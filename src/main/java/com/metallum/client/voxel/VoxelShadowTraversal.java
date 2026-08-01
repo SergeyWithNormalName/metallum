@@ -19,12 +19,13 @@ public final class VoxelShadowTraversal {
         }
     }
 
-    /** One CPU mirror of an exact L5 level: X-fastest dense occupancy and one optical byte/block. */
+    /** One CPU mirror of an exact L5 level: X-fastest occupancy, optical and chromatic planes. */
     public record LevelData(
             VoxelClipmapSnapshot snapshot,
             int levelIndex,
             int[] occupancyWords,
             byte[] opticalBytes,
+            byte[] chromaticBytes,
             BrickMetadata[] metadata
     ) {
         public LevelData {
@@ -34,9 +35,49 @@ public final class VoxelShadowTraversal {
             }
             occupancyWords = occupancyWords == null ? null : occupancyWords.clone();
             opticalBytes = opticalBytes == null ? null : opticalBytes.clone();
+            chromaticBytes = chromaticBytes == null ? null : chromaticBytes.clone();
             metadata = metadata == null ? null : metadata.clone();
         }
 
+        /** Legacy test/reference constructor: absent colour data is explicitly neutral. */
+        public LevelData(
+                final VoxelClipmapSnapshot snapshot,
+                final int levelIndex,
+                final int[] occupancyWords,
+                final byte[] opticalBytes,
+                final BrickMetadata[] metadata
+        ) {
+            this(
+                    snapshot,
+                    levelIndex,
+                    occupancyWords,
+                    opticalBytes,
+                    VoxelChromaticFilter.neutralPackedValues(
+                            opticalBytes == null ? 0 : opticalBytes.length
+                    ),
+                    metadata
+            );
+        }
+    }
+
+    /** Scene-linear RGB transmission returned by the chromatic L6 reference traversal. */
+    public record RgbVisibility(float red, float green, float blue) {
+        private static final RgbVisibility VISIBLE = new RgbVisibility(1.0f, 1.0f, 1.0f);
+        private static final RgbVisibility BLOCKED = new RgbVisibility(0.0f, 0.0f, 0.0f);
+
+        public RgbVisibility {
+            if (!Float.isFinite(red) || !Float.isFinite(green) || !Float.isFinite(blue)
+                    || red < 0.0f || red > 1.0f
+                    || green < 0.0f || green > 1.0f
+                    || blue < 0.0f || blue > 1.0f) {
+                throw new IllegalArgumentException("L6 RGB visibility must be finite UNORM");
+            }
+        }
+
+        /** Conservative scalar projection for callers that only understand a float. */
+        public float minimum() {
+            return Math.min(this.red, Math.min(this.green, this.blue));
+        }
     }
 
     private VoxelShadowTraversal() {
@@ -75,21 +116,34 @@ public final class VoxelShadowTraversal {
             final Point light,
             final int maxSteps
     ) {
+        return visibilityRgb(
+                data, expectedWorld, expectedClipmapGeneration, receiver, light, maxSteps
+        ).minimum();
+    }
+
+    public static RgbVisibility visibilityRgb(
+            final LevelData data,
+            final VoxelWorldToken expectedWorld,
+            final long expectedClipmapGeneration,
+            final Point receiver,
+            final Point light,
+            final int maxSteps
+    ) {
         if (data == null || expectedWorld == null || receiver == null || light == null
                 || maxSteps < 1 || maxSteps > LocalVoxelShadowLayout.MAX_DDA_STEPS
                 || !finite(receiver) || !finite(light)
                 || !data.snapshot().world().equals(expectedWorld)
                 || data.snapshot().clipmapGeneration() != expectedClipmapGeneration) {
-            return 1.0f;
+            return RgbVisibility.VISIBLE;
         }
         VoxelClipmapSnapshot.Level level = data.snapshot().levels().get(data.levelIndex());
         if (!validStructure(data, level) || !inside(level, receiver) || !inside(level, light)) {
-            return 1.0f;
+            return RgbVisibility.VISIBLE;
         }
         return traverse(data, level, receiver, light, maxSteps);
     }
 
-    private static float traverse(
+    private static RgbVisibility traverse(
             final LevelData data,
             final VoxelClipmapSnapshot.Level level,
             final Point receiver,
@@ -108,7 +162,7 @@ public final class VoxelShadowTraversal {
         double directionZ = endZ - startZ;
         if (!Double.isFinite(directionX) || !Double.isFinite(directionY) || !Double.isFinite(directionZ)
                 || (directionX == 0.0 && directionY == 0.0 && directionZ == 0.0)) {
-            return 1.0f;
+            return RgbVisibility.VISIBLE;
         }
 
         startX = Math.nextAfter(startX, endX);
@@ -125,7 +179,7 @@ public final class VoxelShadowTraversal {
         long endCellZ = floorToLong(endZ);
         if (cellX == Long.MIN_VALUE || cellY == Long.MIN_VALUE || cellZ == Long.MIN_VALUE
                 || endCellX == Long.MIN_VALUE || endCellY == Long.MIN_VALUE || endCellZ == Long.MIN_VALUE) {
-            return 1.0f;
+            return RgbVisibility.VISIBLE;
         }
 
         int stepX = directionX > 0.0 ? 1 : directionX < 0.0 ? -1 : 0;
@@ -137,7 +191,9 @@ public final class VoxelShadowTraversal {
         double nextX = nextBoundary(startX, cellX, directionX);
         double nextY = nextBoundary(startY, cellY, directionY);
         double nextZ = nextBoundary(startZ, cellZ, directionZ);
-        float visibility = 1.0f;
+        float red = 1.0f;
+        float green = 1.0f;
+        float blue = 1.0f;
         long lastOpticalBlockX = Long.MIN_VALUE;
         long lastOpticalBlockY = Long.MIN_VALUE;
         long lastOpticalBlockZ = Long.MIN_VALUE;
@@ -145,23 +201,28 @@ public final class VoxelShadowTraversal {
         for (int step = 0; step < maxSteps; step++) {
             Sample sample = sample(data, level, cellX, cellY, cellZ);
             if (sample == null) {
-                return 1.0f;
+                return RgbVisibility.VISIBLE;
             }
             long blockX = Math.floorDiv(cellX, scale);
             long blockY = Math.floorDiv(cellY, scale);
             long blockZ = Math.floorDiv(cellZ, scale);
             if (sample.occupied && (blockX != lastOpticalBlockX
                     || blockY != lastOpticalBlockY || blockZ != lastOpticalBlockZ)) {
-                visibility *= sample.transmittance;
-                if (visibility <= 0.0f) {
-                    return 0.0f;
+                red *= sample.transmittance * sample.red;
+                green *= sample.transmittance * sample.green;
+                blue *= sample.transmittance * sample.blue;
+                if (!Float.isFinite(red) || !Float.isFinite(green) || !Float.isFinite(blue)) {
+                    return RgbVisibility.VISIBLE;
+                }
+                if (red <= 0.0f && green <= 0.0f && blue <= 0.0f) {
+                    return RgbVisibility.BLOCKED;
                 }
                 lastOpticalBlockX = blockX;
                 lastOpticalBlockY = blockY;
                 lastOpticalBlockZ = blockZ;
             }
             if (cellX == endCellX && cellY == endCellY && cellZ == endCellZ) {
-                return visibility;
+                return new RgbVisibility(red, green, blue);
             }
             if (nextX <= nextY && nextX <= nextZ) {
                 cellX += stepX;
@@ -174,10 +235,10 @@ public final class VoxelShadowTraversal {
                 nextZ += deltaZ;
             }
             if (!Double.isFinite(nextX) && !Double.isFinite(nextY) && !Double.isFinite(nextZ)) {
-                return 1.0f;
+                return RgbVisibility.VISIBLE;
             }
         }
-        return 1.0f;
+        return RgbVisibility.VISIBLE;
     }
 
     private static Sample sample(
@@ -221,7 +282,18 @@ public final class VoxelShadowTraversal {
         float transmittance = VoxelMaterialDescriptor.fromPackedUnsignedByte(
                 Byte.toUnsignedInt(data.opticalBytes()[opticalIndex])
         ).transmittance();
-        return Float.isFinite(transmittance) ? new Sample(true, transmittance) : null;
+        if (!Float.isFinite(transmittance)
+                || opticalIndex >= data.chromaticBytes().length * 2) {
+            return null;
+        }
+        int chromaticId = VoxelChromaticFilter.packedId(data.chromaticBytes(), opticalIndex);
+        return new Sample(
+                true,
+                transmittance,
+                VoxelChromaticFilter.red(chromaticId),
+                VoxelChromaticFilter.green(chromaticId),
+                VoxelChromaticFilter.blue(chromaticId)
+        );
     }
 
     private static boolean validStructure(final LevelData data, final VoxelClipmapSnapshot.Level level) {
@@ -233,6 +305,9 @@ public final class VoxelShadowTraversal {
                 && blocks <= Integer.MAX_VALUE && bricks <= Integer.MAX_VALUE
                 && data.occupancyWords() != null && data.occupancyWords().length == (cells + 31L) / 32L
                 && data.opticalBytes() != null && data.opticalBytes().length == blocks
+                && data.chromaticBytes() != null
+                && data.chromaticBytes().length == VoxelChromaticFilter.packedBytesFor(
+                Math.toIntExact(blocks))
                 && data.metadata() != null && data.metadata().length == bricks;
     }
 
@@ -303,7 +378,7 @@ public final class VoxelShadowTraversal {
         return (long) Math.floor(value);
     }
 
-    private record Sample(boolean occupied, float transmittance) {
-        private static final Sample EMPTY = new Sample(false, 1.0f);
+    private record Sample(boolean occupied, float transmittance, float red, float green, float blue) {
+        private static final Sample EMPTY = new Sample(false, 1.0f, 1.0f, 1.0f, 1.0f);
     }
 }

@@ -1153,6 +1153,7 @@ public final class RendererArchitectureTests {
                 "voxel_indirect_args",
                 "voxel_occupancy",
                 "voxel_transmittance_material",
+                "voxel_chromatic_filter",
                 "voxel_brick_tags",
                 "local_shadow_params_ring",
                 "entity_shadow_proxies_ring",

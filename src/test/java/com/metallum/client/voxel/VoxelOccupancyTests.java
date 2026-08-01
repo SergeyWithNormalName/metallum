@@ -39,6 +39,7 @@ public final class VoxelOccupancyTests {
         testDirtyQueueCoalescingBoundsAgeAndActualDrain();
         testReadyPublicationFairness();
         testVanillaPartialBlockMaterialClassification();
+        testChromaticFilterPacking();
         System.out.println("L5 voxel occupancy pure-Java tests passed");
     }
 
@@ -162,6 +163,10 @@ public final class VoxelOccupancyTests {
         VoxelMaterialDescriptor glass = SodiumVoxelSectionExtractor.materialFor(
                 net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState()
         );
+        var redGlassState = net.minecraft.world.level.block.Blocks.STAINED_GLASS.red().defaultBlockState();
+        var redPaneState = net.minecraft.world.level.block.Blocks.STAINED_GLASS_PANE.red().defaultBlockState();
+        VoxelMaterialDescriptor redGlass = SodiumVoxelSectionExtractor.materialFor(redGlassState);
+        VoxelMaterialDescriptor redPane = SodiumVoxelSectionExtractor.materialFor(redPaneState);
         VoxelMaterialDescriptor slab = SodiumVoxelSectionExtractor.materialFor(
                 net.minecraft.world.level.block.Blocks.STONE_SLAB.defaultBlockState()
         );
@@ -179,6 +184,50 @@ public final class VoxelOccupancyTests {
                 "an oak fence was classified as " + fence.materialClass());
         require(glass.materialClass() == VoxelMaterialClass.GLASS,
                 "glass lost its transparent material classification");
+        require(redGlass.materialClass() == VoxelMaterialClass.GLASS
+                        && redPane.materialClass() == VoxelMaterialClass.GLASS
+                        && VoxelChromaticFilter.idFor(redGlassState, redGlass.materialClass()) == 14
+                        && VoxelChromaticFilter.idFor(redPaneState, redPane.materialClass()) == 14,
+                "red stained glass or its pane lost the L5 chromatic GLASS contract");
+    }
+
+    private static void testChromaticFilterPacking() {
+        byte[] packed = VoxelChromaticFilter.neutralPackedValues(3);
+        VoxelChromaticFilter.putPackedId(packed, 0, 14);
+        VoxelChromaticFilter.putPackedId(packed, 1, 3);
+        VoxelChromaticFilter.putPackedId(packed, 2, 13);
+        require(VoxelChromaticFilter.packedId(packed, 0) == 14
+                        && VoxelChromaticFilter.packedId(packed, 1) == 3
+                        && VoxelChromaticFilter.packedId(packed, 2) == 13,
+                "two-per-byte L5 chromatic palette packing changed");
+        int redRgb = VoxelChromaticFilter.packRgbUnorm8(
+                VoxelChromaticFilter.red(14),
+                VoxelChromaticFilter.green(14),
+                VoxelChromaticFilter.blue(14)
+        );
+        require(VoxelChromaticFilter.isValidPackedRgb(redRgb)
+                        && VoxelChromaticFilter.unpackRed(redRgb) > 0.99f
+                        && VoxelChromaticFilter.unpackGreen(redRgb) < 0.05f
+                        && VoxelChromaticFilter.unpackBlue(redRgb) < 0.03f,
+                "red stained-glass RGB filter is not scene-linear red transmission");
+
+        long[] occupancy = new long[VoxelSectionSnapshot.BLOCK_COUNT];
+        byte[] optical = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
+        byte[] chromatic = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
+        occupancy[0] = 1L;
+        optical[0] = (byte) VoxelMaterialDescriptor.defaults(
+                VoxelMaterialClass.GLASS
+        ).packedUnsignedByte();
+        chromatic[0] = 14;
+        VoxelBrickPatch patch = VoxelBrickPacker.pack(packTicket(
+                VoxelSubdivision.FOUR,
+                List.of(contributor(0, 0, 0, new VoxelSectionSnapshot(occupancy, optical, chromatic))),
+                57
+        ));
+        require(VoxelChromaticFilter.packedId(patch.chromaticPayload(), 0) == 14
+                        && patch.chromaticLength()
+                        == VoxelChromaticFilter.packedBytesFor(patch.opticalLength()),
+                "L5 brick packer lost the chromatic filter plane");
     }
 
     private static void testStairFenceAndPaneMasks() {
@@ -307,13 +356,14 @@ public final class VoxelOccupancyTests {
                 "Performance accidentally enabled the optional 32@4 level");
         require(performance.occupancyBytes() == 524_416L
                         && performance.opticalBytes() == 2_359_424L
+                        && performance.chromaticBytes() == 1_179_776L
                         && performance.metadataBytes() == 2_176L
-                        && performance.sharedUploadRingBytes() == 886_368L
-                        && performance.privatePatchRingBytes() == 886_368L
+                        && performance.sharedUploadRingBytes() == 1_279_776L
+                        && performance.privatePatchRingBytes() == 1_279_776L
                         && performance.indirectBytes() == 144L
                         && performance.parameterBytes() == 3_072L
                         && performance.debugBytes() == 24L
-                        && performance.totalDedicatedBytes() == 4_661_992L
+                        && performance.totalDedicatedBytes() == 6_628_584L
                         && performance.totalDedicatedBytes() <= performance.hardResourceBudgetBytes(),
                 "Performance resource accounting changed");
 
@@ -336,11 +386,12 @@ public final class VoxelOccupancyTests {
                 "64@4 occupancy is no longer 2 MiB");
         require(balanced.occupancyBytes() == 6_291_648L
                         && balanced.opticalBytes() == 19_136_704L
+                        && balanced.chromaticBytes() == 9_568_448L
                         && balanced.metadataBytes() == 24_768L
-                        && balanced.sharedUploadRingBytes() == 886_368L
-                        && balanced.privatePatchRingBytes() == 886_368L
+                        && balanced.sharedUploadRingBytes() == 1_279_776L
+                        && balanced.privatePatchRingBytes() == 1_279_776L
                         && balanced.indirectParamsDebugOverheadBytes() == 4_848L
-                        && balanced.totalDedicatedBytes() == 27_230_704L
+                        && balanced.totalDedicatedBytes() == 37_585_968L
                         && balanced.hardResourceBudgetBytes() == 64L << 20,
                 "Balanced resource/ring accounting changed");
 
@@ -351,11 +402,12 @@ public final class VoxelOccupancyTests {
                 "Ultra level topology changed");
         require(ultra.occupancyBytes() == 21_233_856L
                         && ultra.opticalBytes() == 64_585_920L
+                        && ultra.chromaticBytes() == 32_293_056L
                         && ultra.metadataBytes() == 83_136L
-                        && ultra.sharedUploadRingBytes() == 886_368L
-                        && ultra.privatePatchRingBytes() == 886_368L
+                        && ultra.sharedUploadRingBytes() == 1_279_776L
+                        && ultra.privatePatchRingBytes() == 1_279_776L
                         && ultra.indirectParamsDebugOverheadBytes() == 4_848L
-                        && ultra.totalDedicatedBytes() == 87_680_496L
+                        && ultra.totalDedicatedBytes() == 120_760_368L
                         && ultra.hardResourceBudgetBytes() == 128L << 20,
                 "Ultra resource/ring accounting changed");
         require(ultra.hardDrainBudget() == 8

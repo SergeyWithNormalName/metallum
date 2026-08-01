@@ -3,7 +3,7 @@
 using namespace metal;
 
 // Dynamic L6 pages deliberately use the resident-atlas payload unchanged:
-// six faces, four ordered distance/transmittance hits per ray, float2 per hit.
+// six faces, four ordered distance/RGB-transmittance hits per ray, eight bytes per hit.
 constant uint METALLUM_DYNAMIC_SHADOW_LAYERS_V1 = 4u;
 constant uint METALLUM_DYNAMIC_SHADOW_LOGICAL_BRICK_EDGE_V1 = 32u;
 
@@ -30,8 +30,15 @@ struct MetallumDynamicShadowLevelV1 {
     uint reserved0;
 };
 
+struct MetallumDynamicShadowHitV1 {
+    float distance;
+    uint packedRgb;
+};
+
 static_assert(sizeof(MetallumDynamicShadowRequestV1) == 64,
     "Dynamic shadow request ABI must remain 64 bytes");
+static_assert(sizeof(MetallumDynamicShadowHitV1) == 8,
+    "Dynamic shadow hit ABI must remain eight bytes");
 
 inline int metallum_floor_div(int value, int divisor) {
     const int quotient = value / divisor;
@@ -62,16 +69,49 @@ inline void metallum_store_visible_page(
     ulong atlasOffset,
     uint ray
 ) {
-    device float2 *entries = reinterpret_cast<device float2 *>(atlas + atlasOffset);
+    device MetallumDynamicShadowHitV1 *entries =
+        reinterpret_cast<device MetallumDynamicShadowHitV1 *>(atlas + atlasOffset);
     const uint base = ray * METALLUM_DYNAMIC_SHADOW_LAYERS_V1;
     for (uint layer = 0u; layer < METALLUM_DYNAMIC_SHADOW_LAYERS_V1; ++layer) {
-        entries[base + layer] = float2(INFINITY, 1.0f);
+        MetallumDynamicShadowHitV1 visible;
+        visible.distance = INFINITY;
+        visible.packedRgb = 0xffffffffu;
+        entries[base + layer] = visible;
     }
+}
+
+inline float3 metallum_chromatic_filter(uint paletteId) {
+    switch (paletteId & 15u) {
+        case 0u: return float3(1.000f, 1.000f, 1.000f);
+        case 1u: return float3(1.000f, 0.250f, 0.030f);
+        case 2u: return float3(1.000f, 0.080f, 0.680f);
+        case 3u: return float3(0.100f, 0.500f, 1.000f);
+        case 4u: return float3(1.000f, 0.850f, 0.050f);
+        case 5u: return float3(0.250f, 1.000f, 0.040f);
+        case 6u: return float3(1.000f, 0.250f, 0.400f);
+        case 7u: return float3(0.230f, 0.250f, 0.250f);
+        case 8u: return float3(0.600f, 0.600f, 0.580f);
+        case 9u: return float3(0.030f, 0.650f, 0.650f);
+        case 10u: return float3(0.320f, 0.040f, 0.600f);
+        case 11u: return float3(0.040f, 0.070f, 0.650f);
+        case 12u: return float3(0.200f, 0.050f, 0.015f);
+        case 13u: return float3(0.080f, 0.350f, 0.010f);
+        case 14u: return float3(1.000f, 0.040f, 0.025f);
+        default: return float3(0.005f, 0.005f, 0.006f);
+    }
+}
+
+inline uint metallum_pack_rgb_unorm8(float3 value) {
+    const uint red = uint(round(clamp(value.x, 0.0f, 1.0f) * 255.0f));
+    const uint green = uint(round(clamp(value.y, 0.0f, 1.0f) * 255.0f));
+    const uint blue = uint(round(clamp(value.z, 0.0f, 1.0f) * 255.0f));
+    return 0xff000000u | red | (green << 8u) | (blue << 16u);
 }
 
 inline bool metallum_sample_voxel(
     device const uint *occupancy,
     device const uchar *optical,
+    device const uchar *chromatic,
     device const uint4 *metadata,
     uint logicalEdge,
     uint subdivision,
@@ -80,8 +120,12 @@ inline bool metallum_sample_voxel(
     int cellY,
     int cellZ,
     thread bool &occupied,
-    thread float &transmittance
+    thread float &transmittance,
+    thread float3 &filter
 ) {
+    occupied = false;
+    transmittance = 1.0f;
+    filter = float3(1.0f);
     const int scale = int(subdivision);
     const int blockX = metallum_floor_div(cellX, scale);
     const int blockY = metallum_floor_div(cellY, scale);
@@ -111,7 +155,6 @@ inline bool metallum_sample_voxel(
         * (logicalEdge >> 5u) + (uint(physicalCellX) >> 5u)];
     occupied = (word & (1u << uint(localCellX))) != 0u;
     if (!occupied) {
-        transmittance = 1.0f;
         return true;
     }
 
@@ -132,7 +175,10 @@ inline bool metallum_sample_voxel(
         return false;
     }
     transmittance = float(packed & 31u) / 31.0f;
-    return isfinite(transmittance);
+    const uint packedChromatic = uint(chromatic[opticalIndex >> 1u]);
+    const uint paletteId = (packedChromatic >> ((opticalIndex & 1u) * 4u)) & 15u;
+    filter = metallum_chromatic_filter(paletteId);
+    return isfinite(transmittance) && all(isfinite(filter));
 }
 
 kernel void metallum_dynamic_voxel_shadow_v1(
@@ -142,12 +188,15 @@ kernel void metallum_dynamic_voxel_shadow_v1(
     device const uchar *optical0 [[buffer(3)]],
     device const uchar *optical1 [[buffer(4)]],
     device const uchar *optical2 [[buffer(5)]],
-    device const uint4 *metadata0 [[buffer(6)]],
-    device const uint4 *metadata1 [[buffer(7)]],
-    device const uint4 *metadata2 [[buffer(8)]],
-    device uchar *atlas [[buffer(9)]],
-    device const MetallumDynamicShadowRequestV1 *requests [[buffer(10)]],
-    device const MetallumDynamicShadowLevelV1 *levels [[buffer(11)]],
+    device const uchar *chromatic0 [[buffer(6)]],
+    device const uchar *chromatic1 [[buffer(7)]],
+    device const uchar *chromatic2 [[buffer(8)]],
+    device const uint4 *metadata0 [[buffer(9)]],
+    device const uint4 *metadata1 [[buffer(10)]],
+    device const uint4 *metadata2 [[buffer(11)]],
+    device uchar *atlas [[buffer(12)]],
+    device const MetallumDynamicShadowRequestV1 *requests [[buffer(13)]],
+    device const MetallumDynamicShadowLevelV1 *levels [[buffer(14)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     const uint requestIndex = gid.y;
@@ -175,6 +224,8 @@ kernel void metallum_dynamic_voxel_shadow_v1(
         : (request.levelIndex == 1u ? occupancy1 : occupancy2);
     const device uchar *optical = request.levelIndex == 0u ? optical0
         : (request.levelIndex == 1u ? optical1 : optical2);
+    const device uchar *chromatic = request.levelIndex == 0u ? chromatic0
+        : (request.levelIndex == 1u ? chromatic1 : chromatic2);
     const device uint4 *metadata = request.levelIndex == 0u ? metadata0
         : (request.levelIndex == 1u ? metadata1 : metadata2);
     // All DDA arithmetic stays near the source cell. The absolute cell is reconstructed
@@ -223,9 +274,10 @@ kernel void metallum_dynamic_voxel_shadow_v1(
     if (tMax.y < 0.0f || !isfinite(tMax.y)) { tMax.y = infinity; }
     if (tMax.z < 0.0f || !isfinite(tMax.z)) { tMax.z = infinity; }
 
-    device float2 *entries = reinterpret_cast<device float2 *>(atlas + request.atlasOffset);
+    device MetallumDynamicShadowHitV1 *entries =
+        reinterpret_cast<device MetallumDynamicShadowHitV1 *>(atlas + request.atlasOffset);
     const uint outputBase = ray * METALLUM_DYNAMIC_SHADOW_LAYERS_V1;
-    float cumulativeVisibility = 1.0f;
+    float3 cumulativeVisibility = float3(1.0f);
     uint hitCount = 0u;
     int3 lastBlock = int3(INT_MIN);
     float entryT = 0.0f;
@@ -243,10 +295,11 @@ kernel void metallum_dynamic_voxel_shadow_v1(
         );
         bool occupied = false;
         float transmittance = 1.0f;
+        float3 chromaticFilter = float3(1.0f);
         if (!metallum_sample_voxel(
-                occupancy, optical, metadata, level.logicalEdge, level.subdivision,
+                occupancy, optical, chromatic, metadata, level.logicalEdge, level.subdivision,
                 level.brickDimension, worldCell.x, worldCell.y, worldCell.z,
-                occupied, transmittance
+                occupied, transmittance, chromaticFilter
             )) {
             return;
         }
@@ -257,15 +310,18 @@ kernel void metallum_dynamic_voxel_shadow_v1(
             request.sourceBlockX, request.sourceBlockY, request.sourceBlockZ
         ));
         if (!emitterBlock && occupied && any(block != lastBlock)) {
-            cumulativeVisibility *= transmittance;
-            if (!isfinite(cumulativeVisibility)) { return; }
+            cumulativeVisibility *= transmittance * chromaticFilter;
+            if (!all(isfinite(cumulativeVisibility))) { return; }
             const float hitDistance = max(0.0f,
                 startDistance + entryT * (request.radius - startDistance));
             const uint outputLayer = min(hitCount, METALLUM_DYNAMIC_SHADOW_LAYERS_V1 - 1u);
-            entries[outputBase + outputLayer] = float2(hitDistance, cumulativeVisibility);
+            MetallumDynamicShadowHitV1 hit;
+            hit.distance = hitDistance;
+            hit.packedRgb = metallum_pack_rgb_unorm8(cumulativeVisibility);
+            entries[outputBase + outputLayer] = hit;
             hitCount = min(hitCount + 1u, METALLUM_DYNAMIC_SHADOW_LAYERS_V1);
             lastBlock = block;
-            if (cumulativeVisibility <= 0.0f) { return; }
+            if (all(cumulativeVisibility <= float3(0.0f))) { return; }
         }
 
         const float next = min(tMax.x, min(tMax.y, tMax.z));

@@ -6,6 +6,7 @@ import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.voxel.VoxelClipmapSnapshot;
 import com.metallum.client.voxel.VoxelBrickPatch;
+import com.metallum.client.voxel.VoxelChromaticFilter;
 import com.metallum.client.voxel.VoxelMaterialClass;
 import com.metallum.client.voxel.VoxelMaterialDescriptor;
 import com.metallum.client.voxel.VoxelShadowCacheBuilder;
@@ -249,6 +250,28 @@ public final class VoxelShadowContractTests {
         ).transmittance();
         require(Math.abs(oneBlockVisibility - packedGlass) <= 1.0e-6f,
                 "4x DDA multiplied one block's transmittance more than once");
+
+        VoxelShadowTraversal.RgbVisibility redGlass = VoxelShadowTraversal.visibilityRgb(
+                level(1, VoxelMaterialClass.GLASS, 14), VOXEL_WORLD, 11L,
+                new VoxelShadowTraversal.Point(0.1, 0.1, 0.1),
+                new VoxelShadowTraversal.Point(0.9, 0.1, 0.1), 96
+        );
+        require(redGlass.red() > redGlass.green() * 10.0f
+                        && redGlass.red() > redGlass.blue() * 10.0f
+                        && redGlass.red() <= 1.0f && redGlass.green() >= 0.0f
+                        && redGlass.blue() >= 0.0f,
+                "white local light through red glass did not become red-tinted");
+        VoxelShadowTraversal.RgbVisibility layered = VoxelShadowTraversal.visibilityRgb(
+                twoBlockChromaticLevel(14, 11), VOXEL_WORLD, 11L,
+                new VoxelShadowTraversal.Point(0.1, 0.1, 0.1),
+                new VoxelShadowTraversal.Point(1.9, 0.1, 0.1), 96
+        );
+        require(layered.red() <= redGlass.red()
+                        && layered.green() <= redGlass.green()
+                        && layered.blue() <= redGlass.blue()
+                        && Float.isFinite(layered.red()) && Float.isFinite(layered.green())
+                        && Float.isFinite(layered.blue()),
+                "stacked chromatic L6 filters gained light energy or produced NaN");
     }
 
     private static void testTraversalFailsOpen() {
@@ -353,7 +376,7 @@ public final class VoxelShadowContractTests {
         ByteBuffer opaquePayload = ByteBuffer.wrap(opaque.payload()).order(ByteOrder.nativeOrder());
         int centralPositiveX = cacheEntryOffset(0, 31, 31, 0);
         require(Float.isFinite(opaquePayload.getFloat(centralPositiveX))
-                        && opaquePayload.getFloat(centralPositiveX + Float.BYTES) == 0.0f,
+                        && isOpaqueRgb(packedRgb(opaquePayload, centralPositiveX)),
                 "cached +X ray did not become opaque behind the wall");
 
         VoxelBrickPatch restampedOpaque = cacheWallPatch(2, VoxelMaterialClass.OPAQUE);
@@ -372,19 +395,26 @@ public final class VoxelShadowContractTests {
                 "same-topology acknowledged L5 batch did not publish to L6 immediately");
         require(mirror.snapshot(shiftedClipmap) == null,
                 "L6 exposed incremental cache data across a shifted toroidal window");
-        mirror.acknowledge(cacheCoverageBatch(4L, glassPatch, 0, 2), clipmap);
+        VoxelBrickPatch redGlassPatch = cacheWallPatch(4, VoxelMaterialClass.GLASS, 14);
+        mirror.acknowledge(cacheCoverageBatch(4L, redGlassPatch, 0, 2), clipmap);
         VoxelShadowCacheMirror.Snapshot glassSnapshot = mirror.snapshot(clipmap);
         require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
                         restampedSnapshot, glassSnapshot, List.of(light)),
                 "relevant transmittance change did not invalidate the cached point shadow");
+        require(!VoxelShadowCacheBuilder.relevantGeometryEquals(
+                        incrementalSnapshot, glassSnapshot, List.of(light)),
+                "a hue-only L5 chromatic change did not invalidate the resident L6 page");
         VoxelShadowCacheBuilder.Result glass = VoxelShadowCacheBuilder.build(
                 glassSnapshot, List.of(light), 1, 96
         );
-        float glassVisibility = ByteBuffer.wrap(glass.payload())
+        int glassVisibility = ByteBuffer.wrap(glass.payload())
                 .order(ByteOrder.nativeOrder())
-                .getFloat(centralPositiveX + Float.BYTES);
-        require(glassVisibility > 0.0f && glassVisibility < 1.0f,
-                "cached point shadow lost voxel transmittance");
+                .getInt(centralPositiveX + Float.BYTES);
+        require(VoxelChromaticFilter.unpackRed(glassVisibility)
+                        > VoxelChromaticFilter.unpackGreen(glassVisibility) * 10.0f
+                        && VoxelChromaticFilter.unpackRed(glassVisibility)
+                        > VoxelChromaticFilter.unpackBlue(glassVisibility) * 10.0f,
+                "cached point shadow lost red stained-glass transmittance");
         mirror.reset();
         require(mirror.snapshot(clipmap) == null,
                 "L6 cache mirror retained a closed voxel generation");
@@ -426,14 +456,18 @@ public final class VoxelShadowContractTests {
         }
         require(cancelled && cancellationChecks.get() == 100,
                 "L6 CPU page lost deterministic mid-traversal cancellation");
+        StringBuilder canonicalMismatches = new StringBuilder();
         for (int edge : LocalVoxelShadowAtlasLayout.PAGE_EDGES) {
             VoxelShadowCacheBuilder.PageResult page = VoxelShadowCacheBuilder.buildPage(
                     snapshot, light, edge, 96
             );
-            require(canonicalPageSha256(page.payload()).equals(
-                            expectedCanonicalPageSha256(edge)
-                    ),
-                    "L6 scratch refactor changed the canonical resident-page oracle");
+            String actualCanonical = canonicalPageSha256(page.payload());
+            String expectedCanonical = expectedCanonicalPageSha256(edge);
+            if (!actualCanonical.equals(expectedCanonical)) {
+                canonicalMismatches.append(" edge=").append(edge)
+                        .append(" expected=").append(expectedCanonical)
+                        .append(" actual=").append(actualCanonical);
+            }
             if ("1".equals(System.getenv("METALLUM_L6_BUILDER_PROBE"))) {
                 System.out.printf(
                         "L6_PAGE_ORACLE edge=%d canonical_sha256=%s%n",
@@ -448,18 +482,20 @@ public final class VoxelShadowContractTests {
                             && page.raysWithHits() > 0
                             && page.cacheLevel() == 0
                             && page.complete(),
-                    "variable resident page did not preserve edge, bytes, rays or stable LOD");
+                            "variable resident page did not preserve edge, bytes, rays or stable LOD");
             ByteBuffer payload = ByteBuffer.wrap(page.payload()).order(ByteOrder.nativeOrder());
             int centre = edge / 2 - 1;
             int positiveX = pageEntryOffset(0, centre, centre, 0, edge);
             int negativeX = pageEntryOffset(1, centre, centre, 0, edge);
             require(Float.isFinite(payload.getFloat(positiveX))
-                            && payload.getFloat(positiveX + Float.BYTES) == 0.0f,
+                            && isOpaqueRgb(packedRgb(payload, positiveX)),
                     "variable page lost +X opaque wall cube mapping");
             require(Float.isInfinite(payload.getFloat(negativeX))
-                            && payload.getFloat(negativeX + Float.BYTES) == 1.0f,
+                            && isVisibleRgb(packedRgb(payload, negativeX)),
                     "variable page lost -X empty-ray cube mapping");
         }
+        require(canonicalMismatches.isEmpty(),
+                "L6 chromatic resident-page oracle changed:" + canonicalMismatches);
         VoxelShadowCacheBuilder.Result legacy = VoxelShadowCacheBuilder.build(
                 snapshot, List.of(light), 1, 96
         );
@@ -609,12 +645,24 @@ public final class VoxelShadowContractTests {
         }
     }
 
+    private static int packedRgb(final ByteBuffer payload, final int hitOffset) {
+        return payload.getInt(hitOffset + Float.BYTES);
+    }
+
+    private static boolean isOpaqueRgb(final int packed) {
+        return packed == VoxelChromaticFilter.PACKED_RGB_VALID_MASK;
+    }
+
+    private static boolean isVisibleRgb(final int packed) {
+        return packed == VoxelChromaticFilter.VISIBLE_PACKED_RGB;
+    }
+
     private static String expectedCanonicalPageSha256(final int edge) {
         return switch (edge) {
-            case 8 -> "f550023262f86d5fb114652e70ba82debb31e977067147c6e9f46f2de007a691";
-            case 16 -> "080b2d9084dfdc8980e4034631b9a9cc0d4e1a081c09e2907e6cbe64ce6ef478";
-            case 32 -> "5f102174b51d1cec5017b468fa5905998145093f29b67cd2cde57c8f26059d4d";
-            case 64 -> "6b26eb1adcae0a799902493bd37a8fb0d302576719689b66fc694b5d8683c79b";
+            case 8 -> "6a4279a21cf26e8903dbbb1268d677b8a169f263440df2a8aa94b2d751925478";
+            case 16 -> "a79b89c1a3ac23fa05074539a6a1e2cb532cc5b1bf7d67040b48526ca72f933e";
+            case 32 -> "f01a4e609c5c34c7e087c8b43829f063ebc51088bbeda58c4504225108197de6";
+            case 64 -> "c45004ece84a16f84051d247f330d3dfdb22293d984f9c411c3149259d891e35";
             default -> throw new IllegalArgumentException(
                     "Unsupported resident L6 page edge: " + edge
             );
@@ -645,11 +693,11 @@ public final class VoxelShadowContractTests {
         ByteBuffer slabPayload = ByteBuffer.wrap(slabPage.payload()).order(ByteOrder.nativeOrder());
         int centralPositiveX = pageEntryOffset(0, 31, 31, 0, 64);
         require(Float.isFinite(slabPayload.getFloat(centralPositiveX))
-                        && slabPayload.getFloat(centralPositiveX + Float.BYTES) == 0.0f,
+                        && isOpaqueRgb(packedRgb(slabPayload, centralPositiveX)),
                 "an occupied 4x slab cell did not cast an opaque point shadow");
         int upperPositiveX = pageEntryOffset(0, 31, 0, 0, 64);
         require(Float.isInfinite(slabPayload.getFloat(upperPositiveX))
-                        && slabPayload.getFloat(upperPositiveX + Float.BYTES) == 1.0f,
+                        && isVisibleRgb(packedRgb(slabPayload, upperPositiveX)),
                 "a point-shadow ray outside the slab incorrectly became blocked");
 
         mirror.reset();
@@ -668,7 +716,7 @@ public final class VoxelShadowContractTests {
         );
         ByteBuffer fencePayload = ByteBuffer.wrap(fencePage.payload()).order(ByteOrder.nativeOrder());
         require(Float.isFinite(fencePayload.getFloat(centralPositiveX))
-                        && fencePayload.getFloat(centralPositiveX + Float.BYTES) == 0.0f,
+                        && isOpaqueRgb(packedRgb(fencePayload, centralPositiveX)),
                 "an occupied 4x fence cell did not cast an opaque point shadow");
         mirror.reset();
     }
@@ -974,11 +1022,12 @@ public final class VoxelShadowContractTests {
         ByteBuffer payload = ByteBuffer.wrap(result.payload()).order(ByteOrder.nativeOrder());
         int fourthLayer = cacheEntryOffset(0, 31, 31, 3);
         float hitDistance = payload.getFloat(fourthLayer);
-        float visibility = payload.getFloat(fourthLayer + Float.BYTES);
+        int visibility = packedRgb(payload, fourthLayer);
         float water = VoxelMaterialDescriptor.defaults(VoxelMaterialClass.WATER).transmittance();
         require(hitDistance > 5.0f,
                 "overflowed cached layer retained the fourth hit distance instead of the latest one");
-        require(Math.abs(visibility - (float) Math.pow(water, 6.0)) <= 1.0e-5f,
+        require(Math.abs(VoxelChromaticFilter.unpackRed(visibility)
+                        - (float) Math.pow(water, 6.0)) <= 1.0f / 255.0f,
                 "overflowed cached layer lost accumulated transparent visibility");
         mirror.reset();
     }
@@ -1016,7 +1065,7 @@ public final class VoxelShadowContractTests {
         ByteBuffer aggregatePayload = ByteBuffer.wrap(aggregateCache.payload())
                 .order(ByteOrder.nativeOrder());
         require(aggregatePayload.getFloat(positiveX) > 1.8f
-                        && aggregatePayload.getFloat(positiveX + Float.BYTES) == 0.0f,
+                        && isOpaqueRgb(packedRgb(aggregatePayload, positiveX)),
                 "compacted lava cells attenuated their own cached point light");
 
         AdvancedLight ordinary = new AdvancedLight(
@@ -1028,10 +1077,11 @@ public final class VoxelShadowContractTests {
         VoxelShadowCacheBuilder.Result ordinaryCache = VoxelShadowCacheBuilder.build(
                 snapshot, List.of(ordinary), 1, 96
         );
-        float waterVisibility = ByteBuffer.wrap(ordinaryCache.payload())
+        int waterVisibility = ByteBuffer.wrap(ordinaryCache.payload())
                 .order(ByteOrder.nativeOrder())
-                .getFloat(positiveX + Float.BYTES);
-        require(waterVisibility > 0.0f && waterVisibility < 1.0f,
+                .getInt(positiveX + Float.BYTES);
+        require(VoxelChromaticFilter.unpackRed(waterVisibility) > 0.0f
+                        && VoxelChromaticFilter.unpackRed(waterVisibility) < 1.0f,
                 "non-emitter fluid stopped attenuating local shadows");
         mirror.reset();
     }
@@ -1113,6 +1163,14 @@ public final class VoxelShadowContractTests {
             final int stamp,
             final VoxelMaterialClass materialClass
     ) {
+        return cacheWallPatch(stamp, materialClass, VoxelChromaticFilter.NEUTRAL_ID);
+    }
+
+    private static VoxelBrickPatch cacheWallPatch(
+            final int stamp,
+            final VoxelMaterialClass materialClass,
+            final int chromaticId
+    ) {
         int[] occupancy = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
         for (int z = 0; z < VoxelBrickPatch.LOGICAL_EDGE; z++) {
             for (int y = 0; y < VoxelBrickPatch.LOGICAL_EDGE; y++) {
@@ -1121,15 +1179,18 @@ public final class VoxelShadowContractTests {
         }
         int blockEdge = VoxelBrickPatch.LOGICAL_EDGE / 4;
         byte[] optical = new byte[blockEdge * blockEdge * blockEdge];
+        byte[] chromatic = VoxelChromaticFilter.neutralPackedValues(optical.length);
         byte packed = (byte) VoxelMaterialDescriptor.defaults(materialClass).packedUnsignedByte();
         for (int z = 0; z < blockEdge; z++) {
             for (int y = 0; y < blockEdge; y++) {
-                optical[(z * blockEdge + y) * blockEdge + 2] = packed;
+                int index = (z * blockEdge + y) * blockEdge + 2;
+                optical[index] = packed;
+                VoxelChromaticFilter.putPackedId(chromatic, index, chromaticId);
             }
         }
         return new VoxelBrickPatch(
                 0, 0, 0, 0, 0, 0, 0, stamp,
-                VOXEL_WORLD.generation(), 11L, occupancy, optical
+                VOXEL_WORLD.generation(), 11L, occupancy, optical, chromatic
         );
     }
 
@@ -1284,6 +1345,14 @@ public final class VoxelShadowContractTests {
             final int subdivision,
             final VoxelMaterialClass material
     ) {
+        return level(subdivision, material, VoxelChromaticFilter.NEUTRAL_ID);
+    }
+
+    private static VoxelShadowTraversal.LevelData level(
+            final int subdivision,
+            final VoxelMaterialClass material,
+            final int chromaticId
+    ) {
         VoxelClipmapSnapshot snapshot = new VoxelClipmapSnapshot(
                 VOXEL_WORLD, 11L,
                 List.of(new VoxelClipmapSnapshot.Level(0, subdivision, 32, 0, 0, 0, 1))
@@ -1293,9 +1362,39 @@ public final class VoxelShadowContractTests {
         occupancy[0] = 1;
         int blockEdge = 32 / subdivision;
         byte[] optical = new byte[blockEdge * blockEdge * blockEdge];
+        byte[] chromatic = VoxelChromaticFilter.neutralPackedValues(optical.length);
         Arrays.fill(optical, (byte) VoxelMaterialDescriptor.defaults(material).packedUnsignedByte());
+        for (int index = 0; index < optical.length; index++) {
+            VoxelChromaticFilter.putPackedId(chromatic, index, chromaticId);
+        }
         return new VoxelShadowTraversal.LevelData(
-                snapshot, 0, occupancy, optical,
+                snapshot, 0, occupancy, optical, chromatic,
+                new VoxelShadowTraversal.BrickMetadata[]{
+                        new VoxelShadowTraversal.BrickMetadata(0, 0, 0, 1)
+                }
+        );
+    }
+
+    private static VoxelShadowTraversal.LevelData twoBlockChromaticLevel(
+            final int firstFilter,
+            final int secondFilter
+    ) {
+        VoxelClipmapSnapshot snapshot = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 1, 32, 0, 0, 0, 1))
+        );
+        int[] occupancy = new int[32 * 32 * 32 / 32];
+        occupancy[0] = 0b11;
+        byte[] optical = new byte[32 * 32 * 32];
+        optical[0] = (byte) VoxelMaterialDescriptor.defaults(
+                VoxelMaterialClass.GLASS
+        ).packedUnsignedByte();
+        optical[1] = optical[0];
+        byte[] chromatic = VoxelChromaticFilter.neutralPackedValues(optical.length);
+        VoxelChromaticFilter.putPackedId(chromatic, 0, firstFilter);
+        VoxelChromaticFilter.putPackedId(chromatic, 1, secondFilter);
+        return new VoxelShadowTraversal.LevelData(
+                snapshot, 0, occupancy, optical, chromatic,
                 new VoxelShadowTraversal.BrickMetadata[]{
                         new VoxelShadowTraversal.BrickMetadata(0, 0, 0, 1)
                 }

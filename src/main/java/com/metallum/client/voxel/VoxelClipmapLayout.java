@@ -10,16 +10,17 @@ import java.util.Objects;
  * <p>All levels use a fixed 32-cubed <em>logical voxel</em> brick. Thus a 4x level has an
  * 8-block world brick, a 2x level a 16-block world brick, and a 1x level a 32-block world
  * brick. The first implementation is deliberately dense and fixed-size: sparse residency is
- * not an L5 prerequisite. One optical byte per world block is budgeted alongside packed
- * occupancy, so resource estimates cannot hide transmittance/material storage.</p>
+ * not an L5 prerequisite. One optical byte plus a packed four-bit chromatic filter per world
+ * block are budgeted alongside packed occupancy, so resource estimates cannot hide direct
+ * transmittance/material storage.</p>
  */
 public final class VoxelClipmapLayout {
     public static final int LOGICAL_BRICK_VOXEL_EDGE = 32;
     public static final int OCCUPANCY_WORDS_PER_BRICK = 1_024;
     public static final int OCCUPANCY_BYTES_PER_BRICK = OCCUPANCY_WORDS_PER_BRICK * Integer.BYTES;
     public static final int PACKET_HEADER_BYTES = 96;
-    /** Native V5 patch ABI: header is 96 B and each patch record is 56 B. */
-    public static final int PATCH_RECORD_BYTES = 56;
+    /** Native L5 ABI v2 patch record: header is 96 B and each patch record is 64 B. */
+    public static final int PATCH_RECORD_BYTES = 64;
     public static final int LAYOUT_DESCRIPTOR_BYTES = 32;
     public static final int RING_SLOTS = 3;
     public static final int MAX_BRICKS_PER_SUBMIT = 8;
@@ -105,8 +106,13 @@ public final class VoxelClipmapLayout {
             return Math.multiplyExact(Math.multiplyExact(span, span), span);
         }
 
+        /** Two four-bit chromatic palette IDs per byte, one ID per world block. */
+        public long chromaticBytes() {
+            return VoxelChromaticFilter.packedBytesFor(Math.toIntExact(materialBytes()));
+        }
+
         public long privateResourceBytes() {
-            return Math.addExact(occupancyBytes(), materialBytes());
+            return Math.addExact(Math.addExact(occupancyBytes(), materialBytes()), chromaticBytes());
         }
 
         public int brickCellExtentPerAxis() {
@@ -114,12 +120,21 @@ public final class VoxelClipmapLayout {
         }
 
         public long fullBrickUploadBytes() {
-            return Math.addExact(OCCUPANCY_BYTES_PER_BRICK, opticalBytesPerBrick());
+            return Math.addExact(
+                    Math.addExact(OCCUPANCY_BYTES_PER_BRICK, opticalBytesPerBrick()),
+                    chromaticBytesPerBrick()
+            );
         }
 
         public long opticalBytesPerBrick() {
             long blockEdge = brickBlockEdge();
             return Math.multiplyExact(Math.multiplyExact(blockEdge, blockEdge), blockEdge);
+        }
+
+        public long chromaticBytesPerBrick() {
+            return VoxelChromaticFilter.packedBytesFor(
+                    Math.toIntExact(opticalBytesPerBrick())
+            );
         }
     }
 
@@ -164,6 +179,7 @@ public final class VoxelClipmapLayout {
             long largestFullBrickUploadBytes,
             long occupancyBytes,
             long opticalBytes,
+            long chromaticBytes,
             long metadataBytes,
             long sharedUploadRingBytes,
             long privatePatchRingBytes,
@@ -187,6 +203,7 @@ public final class VoxelClipmapLayout {
                 throw new IllegalArgumentException("Drain budget must fit one staging-ring submit");
             }
             if (largestFullBrickUploadBytes <= 0L || occupancyBytes <= 0L || opticalBytes <= 0L
+                    || chromaticBytes <= 0L
                     || metadataBytes <= 0L || sharedUploadRingBytes <= 0L
                     || privatePatchRingBytes <= 0L || indirectBytes <= 0L
                     || parameterBytes <= 0L || debugBytes <= 0L || totalDedicatedBytes <= 0L
@@ -194,7 +211,10 @@ public final class VoxelClipmapLayout {
                 throw new IllegalArgumentException("Clipmap resource budget is invalid or exceeds its hard cap");
             }
             long expectedTotal = Math.addExact(
-                    Math.addExact(Math.addExact(occupancyBytes, opticalBytes), metadataBytes),
+                    Math.addExact(
+                            Math.addExact(Math.addExact(occupancyBytes, opticalBytes), chromaticBytes),
+                            metadataBytes
+                    ),
                     Math.addExact(
                             Math.addExact(sharedUploadRingBytes, privatePatchRingBytes),
                             Math.addExact(Math.addExact(indirectBytes, parameterBytes), debugBytes)
@@ -205,9 +225,9 @@ public final class VoxelClipmapLayout {
             }
         }
 
-        /** Persistent occupancy plus one optical/material byte per world block, excluding tags. */
+        /** Persistent occupancy plus optical and packed chromatic data, excluding tags. */
         public long privateResourceBytes() {
-            return Math.addExact(occupancyBytes, opticalBytes);
+            return Math.addExact(Math.addExact(occupancyBytes, opticalBytes), chromaticBytes);
         }
 
         /** Backward-compatible name for the shared, CPU-visible upload packet ring. */
@@ -216,7 +236,10 @@ public final class VoxelClipmapLayout {
         }
 
         public long persistentVoxelBytes() {
-            return Math.addExact(Math.addExact(occupancyBytes, opticalBytes), metadataBytes);
+            return Math.addExact(
+                    Math.addExact(Math.addExact(occupancyBytes, opticalBytes), chromaticBytes),
+                    metadataBytes
+            );
         }
 
         public long indirectParamsDebugOverheadBytes() {
@@ -374,6 +397,7 @@ public final class VoxelClipmapLayout {
     ) {
         long occupancyBytes = 0L;
         long opticalBytes = 0L;
+        long chromaticBytes = 0L;
         long metadataBytes = 0L;
         long largestBrickUpload = 0L;
         for (Level level : levels) {
@@ -384,6 +408,10 @@ public final class VoxelClipmapLayout {
             opticalBytes = Math.addExact(
                     opticalBytes,
                     Math.addExact(level.materialBytes(), PERSISTENT_RESOURCE_GUARD_BYTES)
+            );
+            chromaticBytes = Math.addExact(
+                    chromaticBytes,
+                    Math.addExact(level.chromaticBytes(), PERSISTENT_RESOURCE_GUARD_BYTES)
             );
             long brickCount = level.brickCountPerAxis();
             metadataBytes = Math.addExact(
@@ -424,7 +452,10 @@ public final class VoxelClipmapLayout {
                 2L
         );
         long totalBytes = Math.addExact(
-                Math.addExact(Math.addExact(occupancyBytes, opticalBytes), metadataBytes),
+                Math.addExact(
+                        Math.addExact(Math.addExact(occupancyBytes, opticalBytes), chromaticBytes),
+                        metadataBytes
+                ),
                 Math.addExact(
                         Math.addExact(sharedUploadRingBytes, privatePatchRingBytes),
                         Math.addExact(Math.addExact(indirectBytes, parameterBytes), debugBytes)
@@ -441,6 +472,7 @@ public final class VoxelClipmapLayout {
                 largestBrickUpload,
                 occupancyBytes,
                 opticalBytes,
+                chromaticBytes,
                 metadataBytes,
                 sharedUploadRingBytes,
                 privatePatchRingBytes,

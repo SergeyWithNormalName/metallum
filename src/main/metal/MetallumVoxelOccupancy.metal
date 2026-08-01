@@ -15,6 +15,7 @@ struct MetallumVoxelPatchRecordV1 {
     uint payloadOffset;
     uint occupancyBytes;
     uint opticalBytes;
+    uint chromaticBytes;
     uint flags;
     uint brickGenerationLow;
     uint brickGenerationHigh;
@@ -22,6 +23,7 @@ struct MetallumVoxelPatchRecordV1 {
     int logicalBrickY;
     int logicalBrickZ;
     uint contentStamp;
+    uint reserved;
 };
 
 struct MetallumVoxelParamsV1 {
@@ -44,12 +46,12 @@ struct MetallumVoxelParamsV1 {
 struct MetallumVoxelChecksumParamsV1 {
     uint occupancyWords;
     uint opticalBytes;
+    uint chromaticBytes;
     uint threadCount;
-    uint reserved;
 };
 
-static_assert(sizeof(MetallumVoxelPatchRecordV1) == 56,
-    "Voxel patch ABI must stay 56 bytes");
+static_assert(sizeof(MetallumVoxelPatchRecordV1) == 64,
+    "Voxel patch ABI must stay 64 bytes");
 static_assert(sizeof(MetallumVoxelParamsV1) == 72,
     "Voxel params ABI must stay 72 bytes");
 static_assert(__builtin_offsetof(MetallumVoxelPatchRecordV1, payloadOffset) == 16,
@@ -69,7 +71,8 @@ kernel void metallum_voxel_apply_v1(
     constant MetallumVoxelParamsV1 &params [[buffer(1)]],
     device uint *occupancy [[buffer(2)]],
     device uchar *optical [[buffer(3)]],
-    device uint4 *brickMetadata [[buffer(4)]],
+    device uchar *chromatic [[buffer(4)]],
+    device uint4 *brickMetadata [[buffer(5)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint3 threadPosition [[thread_position_in_threadgroup]]
 ) {
@@ -121,6 +124,19 @@ kernel void metallum_voxel_apply_v1(
         optical[destination] = sourceOptical[local];
     }
 
+    // The base edge and base dimension are both even for all valid L5 levels. Each source
+    // nibble pair therefore maps to exactly one destination byte without cross-brick races.
+    const device uchar *sourceChromatic = sourceOptical + record.opticalBytes;
+    for (uint localPair = threadIndex; localPair < record.chromaticBytes; localPair += 256u) {
+        const uint firstLocalBlock = localPair * 2u;
+        const uint localX = firstLocalBlock % baseEdge;
+        const uint localY = (firstLocalBlock / baseEdge) % baseEdge;
+        const uint localZ = firstLocalBlock / (baseEdge * baseEdge);
+        const uint destinationBlock = ((brickBaseZ + localZ) * baseDimension
+            + (brickBaseY + localY)) * baseDimension + (brickBaseX + localX);
+        chromatic[destinationBlock >> 1u] = sourceChromatic[localPair];
+    }
+
     if (threadIndex == 0u) {
         const uint destinationBrick = metallum_voxel_brick_index(
             record.destinationBrickX,
@@ -145,8 +161,9 @@ kernel void metallum_voxel_apply_v1(
 kernel void metallum_voxel_checksum_v1(
     device const uint *occupancy [[buffer(0)]],
     device const uchar *optical [[buffer(1)]],
-    device atomic_uint *checksum [[buffer(2)]],
-    constant MetallumVoxelChecksumParamsV1 &params [[buffer(3)]],
+    device const uchar *chromatic [[buffer(2)]],
+    device atomic_uint *checksum [[buffer(3)]],
+    constant MetallumVoxelChecksumParamsV1 &params [[buffer(4)]],
     uint index [[thread_position_in_grid]]
 ) {
     uint value = 0u;
@@ -155,6 +172,9 @@ kernel void metallum_voxel_checksum_v1(
     }
     for (uint byteIndex = index; byteIndex < params.opticalBytes; byteIndex += params.threadCount) {
         value ^= uint(optical[byteIndex]) << ((byteIndex & 3u) * 8u);
+    }
+    for (uint byteIndex = index; byteIndex < params.chromaticBytes; byteIndex += params.threadCount) {
+        value ^= uint(chromatic[byteIndex]) << ((byteIndex & 3u) * 8u);
     }
     atomic_fetch_xor_explicit(&checksum[0], value, memory_order_relaxed);
 }

@@ -9,21 +9,41 @@ public final class VoxelSectionSnapshot {
     public static final int SOURCE_SUBDIVISION = 4;
     private static final VoxelSectionSnapshot EMPTY = new VoxelSectionSnapshot(
             new long[BLOCK_COUNT],
+            new byte[BLOCK_COUNT],
             new byte[BLOCK_COUNT]
     );
 
     private final long[] occupancyMasks;
     private final byte[] optical;
+    private final byte[] chromaticIds;
 
     public VoxelSectionSnapshot(final long[] occupancyMasks, final byte[] optical) {
+        this(occupancyMasks, optical, new byte[BLOCK_COUNT]);
+    }
+
+    public VoxelSectionSnapshot(
+            final long[] occupancyMasks,
+            final byte[] optical,
+            final byte[] chromaticIds
+    ) {
         if (occupancyMasks == null || occupancyMasks.length != BLOCK_COUNT) {
             throw new IllegalArgumentException("Voxel section requires exactly 4096 occupancy masks");
         }
         if (optical == null || optical.length != BLOCK_COUNT) {
             throw new IllegalArgumentException("Voxel section requires exactly 4096 optical values");
         }
+        if (chromaticIds == null || chromaticIds.length != BLOCK_COUNT) {
+            throw new IllegalArgumentException("Voxel section requires exactly 4096 chromatic values");
+        }
+        for (byte chromaticId : chromaticIds) {
+            int id = Byte.toUnsignedInt(chromaticId);
+            if (id > VoxelChromaticFilter.MAX_ID) {
+                throw new IllegalArgumentException("Voxel section contains an invalid chromatic palette ID");
+            }
+        }
         this.occupancyMasks = Arrays.copyOf(occupancyMasks, occupancyMasks.length);
         this.optical = Arrays.copyOf(optical, optical.length);
+        this.chromaticIds = Arrays.copyOf(chromaticIds, chromaticIds.length);
     }
 
     /** Shared immutable zero snapshot used by Sodium's no-mesh empty-section result. */
@@ -49,12 +69,25 @@ public final class VoxelSectionSnapshot {
         return Arrays.copyOf(this.optical, this.optical.length);
     }
 
+    public byte chromaticId(final int localIndex) {
+        requireLocalIndex(localIndex);
+        return this.chromaticIds[localIndex];
+    }
+
+    public byte[] chromaticIds() {
+        return Arrays.copyOf(this.chromaticIds, this.chromaticIds.length);
+    }
+
     long occupancyMaskUnchecked(final int localIndex) {
         return this.occupancyMasks[localIndex];
     }
 
     byte opticalUnchecked(final int localIndex) {
         return this.optical[localIndex];
+    }
+
+    byte chromaticIdUnchecked(final int localIndex) {
+        return this.chromaticIds[localIndex];
     }
 
     private static void requireLocalIndex(final int localIndex) {

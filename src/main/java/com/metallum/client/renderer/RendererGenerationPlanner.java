@@ -526,6 +526,9 @@ public final class RendererGenerationPlanner {
                     "voxel_transmittance_material", domain,
                     voxelBudget.opticalBytes(), false));
             resources.add(resource(
+                    "voxel_chromatic_filter", domain,
+                    voxelBudget.chromaticBytes(), false));
+            resources.add(resource(
                     "voxel_brick_tags", domain, voxelBudget.metadataBytes(), false));
             LocalVoxelShadowLayout.Budget localShadowBudget =
                     LocalVoxelShadowLayout.forPreset(config.lightingPreset());

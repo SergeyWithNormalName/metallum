@@ -88,6 +88,48 @@ private func fixtureMaterial(_ kind: FixtureKind, _ blockX: Int) -> UInt8 {
     }
 }
 
+private func fixtureChromaticId(_ kind: FixtureKind, _ blockX: Int) -> UInt8 {
+    switch kind {
+    case .layered:
+        // red stained glass, green foliage, light-blue water, then opaque neutral.
+        return [14, 13, 3, 0][blockX - 1]
+    case .slab, .fence:
+        return 0
+    }
+}
+
+private func chromaticFilter(_ paletteId: UInt8) -> SIMD3<Float> {
+    switch paletteId {
+    case 0: SIMD3(1.000, 1.000, 1.000)
+    case 1: SIMD3(1.000, 0.250, 0.030)
+    case 2: SIMD3(1.000, 0.080, 0.680)
+    case 3: SIMD3(0.100, 0.500, 1.000)
+    case 4: SIMD3(1.000, 0.850, 0.050)
+    case 5: SIMD3(0.250, 1.000, 0.040)
+    case 6: SIMD3(1.000, 0.250, 0.400)
+    case 7: SIMD3(0.230, 0.250, 0.250)
+    case 8: SIMD3(0.600, 0.600, 0.580)
+    case 9: SIMD3(0.030, 0.650, 0.650)
+    case 10: SIMD3(0.320, 0.040, 0.600)
+    case 11: SIMD3(0.040, 0.070, 0.650)
+    case 12: SIMD3(0.200, 0.050, 0.015)
+    case 13: SIMD3(0.080, 0.350, 0.010)
+    case 14: SIMD3(1.000, 0.040, 0.025)
+    default: SIMD3(0.005, 0.005, 0.006)
+    }
+}
+
+private func packRgb(_ value: SIMD3<Float>) -> UInt32 {
+    func quantize(_ component: Float) -> UInt32 {
+        UInt32(max(0, min(255, Int((max(0, min(1, component)) * 255).rounded()))))
+    }
+    return 0xff00_0000 | quantize(value.x) | (quantize(value.y) << 8) | (quantize(value.z) << 16)
+}
+
+private func multiply(_ value: SIMD3<Float>, _ scalar: Float, _ filter: SIMD3<Float>) -> SIMD3<Float> {
+    SIMD3(value.x * scalar * filter.x, value.y * scalar * filter.y, value.z * scalar * filter.z)
+}
+
 private func fixtureBlockOccupied(_ kind: FixtureKind, _ blockX: Int, _ blockY: Int, _ blockZ: Int) -> Bool {
     for z in (blockZ * 4)..<(blockZ * 4 + 4) {
         for y in (blockY * 4)..<(blockY * 4 + 4) {
@@ -103,19 +145,19 @@ private func floorMod(_ value: Int32, _ divisor: Int32) -> UInt32 {
 }
 
 private func l5PlanesPacket(_ kind: FixtureKind = .layered, logicalBrickX: Int32 = 0) -> [UInt8] {
-    let header = 96, record = 56, occupancyBytes = 4096, opticalBytes = 512
+    let header = 96, record = 64, occupancyBytes = 4096, opticalBytes = 512, chromaticBytes = 256
     let payloadOffset = header + record
-    var value = [UInt8](repeating: 0, count: payloadOffset + occupancyBytes + opticalBytes)
-    put32(0x3142_564d, 0, &value); put32(1, 4, &value); put32(UInt32(value.count), 8, &value)
+    var value = [UInt8](repeating: 0, count: payloadOffset + occupancyBytes + opticalBytes + chromaticBytes)
+    put32(0x3142_564d, 0, &value); put32(2, 4, &value); put32(UInt32(value.count), 8, &value)
     put32(UInt32(record), 16, &value); put32(1, 20, &value); put32(0, 24, &value); put32(1, 28, &value)
     put64(101, 32, &value); put64(202, 40, &value); put64(303, 48, &value); put64(1, 56, &value)
-    put32(UInt32(occupancyBytes + opticalBytes), 64, &value); put32(UInt32(payloadOffset), 68, &value)
+    put32(UInt32(occupancyBytes + opticalBytes + chromaticBytes), 64, &value); put32(UInt32(payloadOffset), 68, &value)
     let r = header
     put32(0, r, &value); put32(floorMod(logicalBrickX, 2), r + 4, &value); put32(0, r + 8, &value); put32(0, r + 12, &value)
     put32(UInt32(payloadOffset), r + 16, &value); put32(UInt32(occupancyBytes), r + 20, &value)
-    put32(UInt32(opticalBytes), r + 24, &value); put32(1, r + 52, &value)
-    put32(202, r + 32, &value); put32(0, r + 36, &value)
-    put32(UInt32(bitPattern: logicalBrickX), r + 40, &value)
+    put32(UInt32(opticalBytes), r + 24, &value); put32(UInt32(chromaticBytes), r + 28, &value)
+    put32(202, r + 36, &value); put32(0, r + 40, &value)
+    put32(UInt32(bitPattern: logicalBrickX), r + 44, &value); put32(1, r + 56, &value)
     for z in 0..<32 { for y in 0..<32 {
         let word = payloadOffset + (z * 32 + y) * 4
         var bits = read32(value, word)
@@ -124,7 +166,12 @@ private func l5PlanesPacket(_ kind: FixtureKind = .layered, logicalBrickX: Int32
     } }
     let optical = payloadOffset + occupancyBytes
     for z in 0..<8 { for y in 0..<8 { for blockX in 0..<8 where fixtureBlockOccupied(kind, blockX, y, z) {
-        value[optical + (z * 8 + y) * 8 + blockX] = fixtureMaterial(kind, max(1, blockX))
+        let index = (z * 8 + y) * 8 + blockX
+        value[optical + index] = fixtureMaterial(kind, max(1, blockX))
+        let chromatic = optical + opticalBytes + index / 2
+        let shift = (index & 1) * 4
+        value[chromatic] = (value[chromatic] & ~(UInt8(15) << UInt8(shift)))
+            | (fixtureChromaticId(kind, max(1, blockX)) << UInt8(shift))
     } } }
     return value
 }
@@ -171,7 +218,7 @@ private func cubeDirection(_ face: Int, _ x: Int, _ y: Int, _ edge: Int) -> SIMD
     return raw / sqrt(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z)
 }
 
-private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .layered) -> [(Float, Float)] {
+private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .layered) -> [(Float, UInt32)] {
     let radius = 8.0, subdivision = 4.0, startDistance = min(0.08 / subdivision, radius * 0.02)
     let source = SIMD3<Double>(repeating: 2.0)
     let start = source + direction * (startDistance * subdivision)
@@ -188,20 +235,25 @@ private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .l
         return ((Double(step > 0 ? cell + 1 : cell) - coordinate) / delta, 1.0 / abs(delta))
     }
     var x = axis(start.x, cell.x, delta.x, step.x), y = axis(start.y, cell.y, delta.y, step.y), z = axis(start.z, cell.z, delta.z, step.z)
-    var output = Array(repeating: (Float.infinity, Float(1)), count: 4)
-    var hitCount = 0, visibility: Float = 1, entry = 0.0
+    var output = Array(repeating: (Float.infinity, UInt32(0xffff_ffff)), count: 4)
+    var hitCount = 0, visibility = SIMD3<Float>(repeating: 1), entry = 0.0
     var lastBlock = SIMD3<Int>(repeating: Int.min)
     for _ in 0..<96 {
         if cell == endCell { break }
         guard (0..<32).contains(cell.x), (0..<32).contains(cell.y), (0..<32).contains(cell.z) else { break }
         let block = SIMD3<Int>(Int(floor(Double(cell.x) / subdivision)), Int(floor(Double(cell.y) / subdivision)), Int(floor(Double(cell.z) / subdivision)))
         if fixtureOccupied(kind, cell.x, cell.y, cell.z) && block != lastBlock {
-            visibility *= Float(fixtureMaterial(kind, max(1, block.x)) & 31) / 31.0
-            let hit = (Float(max(0, startDistance + entry * (radius - startDistance))), visibility)
+            let transmittance = Float(fixtureMaterial(kind, max(1, block.x)) & 31) / 31.0
+            visibility = multiply(
+                visibility,
+                transmittance,
+                chromaticFilter(fixtureChromaticId(kind, max(1, block.x)))
+            )
+            let hit = (Float(max(0, startDistance + entry * (radius - startDistance))), packRgb(visibility))
             output[min(hitCount, 3)] = hit
             hitCount += 1
             lastBlock = block
-            if visibility == 0 { break }
+            if visibility == SIMD3<Float>(repeating: 0) { break }
         }
         let next = min(x.0, min(y.0, z.0)); if !next.isFinite || next > 1 { break }
         let tie = next + 1e-10
@@ -216,13 +268,13 @@ private func compareReference(_ page: [UInt8], _ atlasOffset: Int, _ edge: Int, 
         let expected = referenceTrace(cubeDirection(face, x, y, edge), kind)
         let base = atlasOffset + ((face * edge * edge + y * edge + x) * 4 * 8)
         for layer in 0..<4 {
-            let distance = readFloat(page, base + layer * 8), visibility = readFloat(page, base + layer * 8 + 4)
+            let distance = readFloat(page, base + layer * 8), packedRgb = read32(page, base + layer * 8 + 4)
             if expected[layer].0.isFinite {
                 try require(distance.isFinite && abs(distance - expected[layer].0) < 0.04
-                                && abs(visibility - expected[layer].1) < 0.004,
+                                && packedRgb == expected[layer].1,
                             "GPU/CPU L6 mismatch face=\(face) texel=\(x),\(y) layer=\(layer)")
             } else {
-                try require(!distance.isFinite && abs(visibility - 1) < 0.0001,
+                try require(!distance.isFinite && packedRgb == 0xffff_ffff,
                             "GPU wrote an unexpected hit face=\(face) texel=\(x),\(y) layer=\(layer)")
             }
         }
@@ -250,7 +302,7 @@ private func renderSinglePage(
     _ packet: [UInt8], _ voxel: UnsafeMutableRawPointer, _ dynamic: UnsafeMutableRawPointer,
     _ device: MTLDevice, _ queue: MTLCommandQueue, _ encode: DynamicEncode
 ) throws -> [UInt8] {
-    let bytes = 196_608 // 6 * 16 * 16 * four float2 layers
+    let bytes = 196_608 // 6 * 16 * 16 * four eight-byte distance/RGB layers
     guard let atlas = device.makeBuffer(length: atlasTotalBytes, options: .storageModePrivate),
           let fence = device.makeFence(), let command = queue.makeCommandBuffer(),
           let seed = command.makeBlitCommandEncoder() else { throw Failure.message("single-page command unavailable") }
@@ -350,12 +402,16 @@ private func renderSinglePage(
         let base = ray * 4 * 8
         try require(readFloat(page, base).isFinite && readFloat(page, base) > 0,
                     "opaque/glass fixture produced no first hit")
-        try require(abs(readFloat(page, base + 4) - 23.0 / 31.0) < 0.02,
-                    "glass transmittance differs from L6 packed-material reference")
-        try require(abs(readFloat(page, base + 12) - (23.0 / 31.0) * (17.0 / 31.0)) < 0.02
-                    && abs(readFloat(page, base + 20) - (23.0 / 31.0) * (17.0 / 31.0) * (22.0 / 31.0)) < 0.02
-                    && readFloat(page, base + 28) == 0.0,
-                    "four-layer packed-material transmittance does not match L6 reference")
+        let redGlass = multiply(
+            SIMD3<Float>(repeating: 1), 23.0 / 31.0, chromaticFilter(14)
+        )
+        let foliage = multiply(redGlass, 17.0 / 31.0, chromaticFilter(13))
+        let water = multiply(foliage, 22.0 / 31.0, chromaticFilter(3))
+        try require(read32(page, base + 4) == packRgb(redGlass)
+                        && read32(page, base + 12) == packRgb(foliage)
+                        && read32(page, base + 20) == packRgb(water)
+                        && read32(page, base + 28) == 0xff00_0000,
+                    "four-layer packed RGB transmittance does not match the L6 reference")
         let secondRay = 196_608 + (15 * 32 + 15) * 4 * 8
         try require(readFloat(page, secondRay).isFinite && readFloat(page, secondRay) > 0,
                     "second request in one dynamic batch did not write its own atlas page")

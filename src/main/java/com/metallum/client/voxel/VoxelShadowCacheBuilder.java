@@ -222,10 +222,10 @@ public final class VoxelShadowCacheBuilder {
                                 base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES,
                                 scratch.distances[layer]
                         );
-                        output.putFloat(
+                        output.putInt(
                                 base + layer * LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
                                         + Float.BYTES,
-                                scratch.visibility[layer]
+                                scratch.packedVisibility[layer]
                         );
                     }
                 }
@@ -366,7 +366,7 @@ public final class VoxelShadowCacheBuilder {
         for (int offset = 0; offset < bytes;
              offset += LocalVoxelShadowLayout.CACHE_HIT_STRIDE_BYTES) {
             output.putFloat(offset, Float.POSITIVE_INFINITY);
-            output.putFloat(offset + Float.BYTES, 1.0f);
+            output.putInt(offset + Float.BYTES, VoxelChromaticFilter.VISIBLE_PACKED_RGB);
         }
         return payload;
     }
@@ -378,7 +378,7 @@ public final class VoxelShadowCacheBuilder {
         for (int offset = 0; offset < bytes;
              offset += LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES) {
             output.putFloat(offset, Float.POSITIVE_INFINITY);
-            output.putFloat(offset + Float.BYTES, 1.0f);
+            output.putInt(offset + Float.BYTES, VoxelChromaticFilter.VISIBLE_PACKED_RGB);
         }
         return payload;
     }
@@ -600,7 +600,8 @@ public final class VoxelShadowCacheBuilder {
         return left != null && right != null
                 && (left == right
                 || Arrays.equals(left.occupancy(), right.occupancy())
-                && Arrays.equals(left.optical(), right.optical()));
+                && Arrays.equals(left.optical(), right.optical())
+                && Arrays.equals(left.chromatic(), right.chromatic()));
     }
 
     private static void trace(
@@ -692,7 +693,9 @@ public final class VoxelShadowCacheBuilder {
         int lastBlockX = Integer.MIN_VALUE;
         int lastBlockY = Integer.MIN_VALUE;
         int lastBlockZ = Integer.MIN_VALUE;
-        float cumulativeVisibility = 1.0f;
+        float cumulativeRed = 1.0f;
+        float cumulativeGreen = 1.0f;
+        float cumulativeBlue = 1.0f;
         int hitCount = 0;
         double entryT = 0.0;
 
@@ -716,8 +719,12 @@ public final class VoxelShadowCacheBuilder {
             if (!emitterBlock && scratch.sampleOccupied
                     && (blockX != lastBlockX || blockY != lastBlockY
                     || blockZ != lastBlockZ)) {
-                cumulativeVisibility *= scratch.sampleTransmittance;
-                if (!Float.isFinite(cumulativeVisibility)) {
+                cumulativeRed *= scratch.sampleTransmittance * scratch.sampleRed;
+                cumulativeGreen *= scratch.sampleTransmittance * scratch.sampleGreen;
+                cumulativeBlue *= scratch.sampleTransmittance * scratch.sampleBlue;
+                if (!Float.isFinite(cumulativeRed)
+                        || !Float.isFinite(cumulativeGreen)
+                        || !Float.isFinite(cumulativeBlue)) {
                     return;
                 }
                 float hitDistance = (float) Math.max(
@@ -726,18 +733,23 @@ public final class VoxelShadowCacheBuilder {
                 );
                 if (hitCount < LocalVoxelShadowLayout.CACHE_LAYER_COUNT) {
                     scratch.distances[hitCount] = hitDistance;
-                    scratch.visibility[hitCount] = cumulativeVisibility;
+                    scratch.packedVisibility[hitCount] = VoxelChromaticFilter.packRgbUnorm8(
+                            cumulativeRed, cumulativeGreen, cumulativeBlue
+                    );
                     hitCount++;
                 } else {
                     scratch.distances[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
                             = hitDistance;
-                    scratch.visibility[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
-                            = cumulativeVisibility;
+                    scratch.packedVisibility[LocalVoxelShadowLayout.CACHE_LAYER_COUNT - 1]
+                            = VoxelChromaticFilter.packRgbUnorm8(
+                            cumulativeRed, cumulativeGreen, cumulativeBlue
+                    );
                 }
                 lastBlockX = blockX;
                 lastBlockY = blockY;
                 lastBlockZ = blockZ;
-                if (cumulativeVisibility <= 0.0f) {
+                if (cumulativeRed <= 0.0f && cumulativeGreen <= 0.0f
+                        && cumulativeBlue <= 0.0f) {
                     scratch.complete(hitCount);
                     return;
                 }
@@ -798,7 +810,7 @@ public final class VoxelShadowCacheBuilder {
                 || brick.logicalX() != logicalBrickX
                 || brick.logicalY() != logicalBrickY
                 || brick.logicalZ() != logicalBrickZ) {
-            scratch.setSample(false, false, 1.0f);
+            scratch.setSample(false, false, 1.0f, 1.0f, 1.0f, 1.0f);
             return;
         }
         int localCellX = Math.floorMod(cellX, VoxelBrickPatch.LOGICAL_EDGE);
@@ -806,7 +818,7 @@ public final class VoxelShadowCacheBuilder {
         int localCellZ = Math.floorMod(cellZ, VoxelBrickPatch.LOGICAL_EDGE);
         int word = brick.occupancy()[localCellZ * VoxelBrickPatch.LOGICAL_EDGE + localCellY];
         if ((word & (1 << localCellX)) == 0) {
-            scratch.setSample(true, false, 1.0f);
+            scratch.setSample(true, false, 1.0f, 1.0f, 1.0f, 1.0f);
             return;
         }
         int localBlockX = Math.floorMod(blockX, brickBlockEdge);
@@ -816,18 +828,27 @@ public final class VoxelShadowCacheBuilder {
                 * brickBlockEdge + localBlockX;
         byte[] optical = brick.optical();
         if (opticalIndex < 0 || opticalIndex >= optical.length) {
-            scratch.setSample(false, false, 1.0f);
+            scratch.setSample(false, false, 1.0f, 1.0f, 1.0f, 1.0f);
             return;
         }
         int packed = Byte.toUnsignedInt(optical[opticalIndex]);
         if (packed >>> VoxelMaterialDescriptor.CLASS_SHIFT
                 == VoxelMaterialClass.AIR.abiId()) {
-            scratch.setSample(false, false, 1.0f);
+            scratch.setSample(false, false, 1.0f, 1.0f, 1.0f, 1.0f);
             return;
         }
         float transmittance = PACKED_TRANSMITTANCE[packed];
+        byte[] chromatic = brick.chromatic();
+        if (opticalIndex >= chromatic.length * 2) {
+            scratch.setSample(false, false, 1.0f, 1.0f, 1.0f, 1.0f);
+            return;
+        }
+        int chromaticId = VoxelChromaticFilter.packedId(chromatic, opticalIndex);
         scratch.setSample(
-                Float.isFinite(transmittance), true, transmittance
+                Float.isFinite(transmittance), true, transmittance,
+                VoxelChromaticFilter.red(chromaticId),
+                VoxelChromaticFilter.green(chromaticId),
+                VoxelChromaticFilter.blue(chromaticId)
         );
     }
 
@@ -990,8 +1011,8 @@ public final class VoxelShadowCacheBuilder {
     private static final class TraceScratch {
         private final float[] distances =
                 new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
-        private final float[] visibility =
-                new float[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
+        private final int[] packedVisibility =
+                new int[LocalVoxelShadowLayout.CACHE_LAYER_COUNT];
         private final BrickCursor brickCursor = new BrickCursor();
         private double directionX;
         private double directionY;
@@ -1001,6 +1022,9 @@ public final class VoxelShadowCacheBuilder {
         private boolean sampleValid;
         private boolean sampleOccupied;
         private float sampleTransmittance;
+        private float sampleRed;
+        private float sampleGreen;
+        private float sampleBlue;
 
         private void beginRay() {
             this.valid = false;
@@ -1015,11 +1039,17 @@ public final class VoxelShadowCacheBuilder {
         private void setSample(
                 final boolean validSample,
                 final boolean occupied,
-                final float transmittance
+                final float transmittance,
+                final float red,
+                final float green,
+                final float blue
         ) {
             this.sampleValid = validSample;
             this.sampleOccupied = occupied;
             this.sampleTransmittance = transmittance;
+            this.sampleRed = red;
+            this.sampleGreen = green;
+            this.sampleBlue = blue;
         }
     }
 }

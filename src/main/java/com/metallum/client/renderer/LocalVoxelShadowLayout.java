@@ -5,11 +5,11 @@ import java.util.Objects;
 /** Fixed L6 local-shadow work and upload limits; no preset may exceed the compile-time caps. */
 public final class LocalVoxelShadowLayout {
     /**
-     * Version 3 makes descriptor state zero an explicit approximate-direct path rather than
-     * the retired DDA fallback. This prevents a missing resident page from blacking out a
-     * valid local light while its cache page is prepared.
+     * Version 4 stores per-hit RGB transmittance in the existing eight-byte cache stride.
+     * Descriptor state zero remains the explicit approximate-direct path, so an unavailable
+     * resident page still fails open instead of blacking out a valid local light.
      */
-    public static final int ABI_VERSION = 3;
+    public static final int ABI_VERSION = 4;
     /** Compatibility bound for the legacy contiguous builder; production uses atlas descriptors. */
     public static final int MAX_SHADOWED_LOCAL_LIGHTS = 2;
     public static final int MAX_SHADOW_DESCRIPTORS =
@@ -23,6 +23,7 @@ public final class LocalVoxelShadowLayout {
     public static final int CACHE_FACE_EDGE = 64;
     public static final int CACHE_FACE_COUNT = 6;
     public static final int CACHE_LAYER_COUNT = 4;
+    /** {@code float distance + uint RGB_UNORM8/valid-marker}; page geometry stays unchanged. */
     public static final int CACHE_HIT_STRIDE_BYTES = 8;
 
     public record Budget(

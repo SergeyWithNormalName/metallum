@@ -51,7 +51,7 @@ private struct NativeApi {
 
 private let magic: UInt32 = 0x3142_564d
 private let headerBytes = 96
-private let recordBytes = 56
+private let recordBytes = 64
 private let logicalBrickEdge = 32
 private let occupancyBytes = 4096
 private let busyStatus: Int32 = -22
@@ -119,6 +119,38 @@ private struct Patch {
     let contentStamp: UInt32
     let occupancy: [UInt32]
     let optical: [UInt8]
+    let chromatic: [UInt8]
+
+    init(
+        level: UInt32,
+        x: UInt32,
+        y: UInt32,
+        z: UInt32,
+        logicalX: Int32,
+        logicalY: Int32,
+        logicalZ: Int32,
+        contentStamp: UInt32,
+        occupancy: [UInt32],
+        optical: [UInt8],
+        chromatic: [UInt8]? = nil
+    ) {
+        let packedChromatic = chromatic ?? [UInt8](
+            repeating: 0,
+            count: (optical.count + 1) / 2
+        )
+        precondition(packedChromatic.count == (optical.count + 1) / 2)
+        self.level = level
+        self.x = x
+        self.y = y
+        self.z = z
+        self.logicalX = logicalX
+        self.logicalY = logicalY
+        self.logicalZ = logicalZ
+        self.contentStamp = contentStamp
+        self.occupancy = occupancy
+        self.optical = optical
+        self.chromatic = packedChromatic
+    }
 }
 
 private func packet(
@@ -135,10 +167,12 @@ private func packet(
 ) -> [UInt8] {
     precondition(patches.allSatisfy { $0.occupancy.count == 1024 })
     let payloadOffset = headerBytes + patches.count * recordBytes
-    let payloadBytes = patches.reduce(0) { $0 + occupancyBytes + $1.optical.count }
+    let payloadBytes = patches.reduce(0) {
+        $0 + occupancyBytes + $1.optical.count + $1.chromatic.count
+    }
     var bytes = [UInt8](repeating: 0, count: payloadOffset + payloadBytes)
     writeUInt32(magic, 0, &bytes)
-    writeUInt32(1, 4, &bytes)
+    writeUInt32(2, 4, &bytes)
     writeUInt32(UInt32(bytes.count), 8, &bytes)
     writeUInt32(flags, 12, &bytes)
     writeUInt32(UInt32(recordBytes), 16, &bytes)
@@ -163,18 +197,21 @@ private func packet(
         writeUInt32(UInt32(cursor), record + 16, &bytes)
         writeUInt32(UInt32(occupancyBytes), record + 20, &bytes)
         writeUInt32(UInt32(patch.optical.count), record + 24, &bytes)
-        writeUInt32(UInt32(truncatingIfNeeded: clipmap), record + 32, &bytes)
-        writeUInt32(UInt32(truncatingIfNeeded: clipmap >> 32), record + 36, &bytes)
-        writeUInt32(UInt32(bitPattern: patch.logicalX), record + 40, &bytes)
-        writeUInt32(UInt32(bitPattern: patch.logicalY), record + 44, &bytes)
-        writeUInt32(UInt32(bitPattern: patch.logicalZ), record + 48, &bytes)
-        writeUInt32(patch.contentStamp, record + 52, &bytes)
+        writeUInt32(UInt32(patch.chromatic.count), record + 28, &bytes)
+        writeUInt32(UInt32(truncatingIfNeeded: clipmap), record + 36, &bytes)
+        writeUInt32(UInt32(truncatingIfNeeded: clipmap >> 32), record + 40, &bytes)
+        writeUInt32(UInt32(bitPattern: patch.logicalX), record + 44, &bytes)
+        writeUInt32(UInt32(bitPattern: patch.logicalY), record + 48, &bytes)
+        writeUInt32(UInt32(bitPattern: patch.logicalZ), record + 52, &bytes)
+        writeUInt32(patch.contentStamp, record + 56, &bytes)
         for wordIndex in patch.occupancy.indices {
             writeUInt32(patch.occupancy[wordIndex], cursor + wordIndex * 4, &bytes)
         }
         cursor += occupancyBytes
         bytes.replaceSubrange(cursor..<(cursor + patch.optical.count), with: patch.optical)
         cursor += patch.optical.count
+        bytes.replaceSubrange(cursor..<(cursor + patch.chromatic.count), with: patch.chromatic)
+        cursor += patch.chromatic.count
     }
     return bytes
 }
@@ -182,7 +219,7 @@ private func packet(
 private func noPatchPacket(slot: UInt32 = 0, flags: UInt32 = 0) -> [UInt8] {
     var bytes = [UInt8](repeating: 0, count: headerBytes)
     writeUInt32(magic, 0, &bytes)
-    writeUInt32(1, 4, &bytes)
+    writeUInt32(2, 4, &bytes)
     writeUInt32(UInt32(headerBytes), 8, &bytes)
     writeUInt32(flags, 12, &bytes)
     writeUInt32(UInt32(recordBytes), 16, &bytes)
@@ -281,7 +318,7 @@ private enum VoxelOccupancyValidationMain {
             debugChecksum: try dylibSymbol(handle, "metallum_voxel_debug_checksum_v1", NativeDebugChecksum.self),
             debugReadback: try dylibSymbol(handle, "metallum_voxel_debug_readback_v1", NativeDebugReadback.self)
         )
-        try require(api.abiVersion() == 1, "Voxel ABI version mismatch")
+        try require(api.abiVersion() == 2, "Voxel ABI version mismatch")
         var layout = [UInt8](repeating: 0, count: 160)
         try require(layout.withUnsafeMutableBytes { api.layout($0.baseAddress, UInt64($0.count)) } == 1,
                     "Voxel ABI layout rejected")
@@ -314,10 +351,12 @@ private enum VoxelOccupancyValidationMain {
         var optical = [UInt8](repeating: 0, count: 512)
         optical[0] = 0x3c
         optical[511] = 0x81
+        var chromatic = [UInt8](repeating: 0, count: 256)
+        chromatic[0] = 0x0e // first block: red-glass palette ID 14.
         let patch = Patch(
             level: 0, x: 1, y: 0, z: 1,
             logicalX: 1, logicalY: 0, logicalZ: -1, contentStamp: 7,
-            occupancy: occupancy, optical: optical
+            occupancy: occupancy, optical: optical, chromatic: chromatic
         )
 
         let update = packet(patches: [patch])
@@ -351,6 +390,11 @@ private enum VoxelOccupancyValidationMain {
         let opticalRead = try privateBytes(api, context: context, kind: 1, index: 0, device: device, queue: queue)
         let toroidalOptical = ((8 * 16 + 0) * 16 + 8) // base brick edge is 8 at 4x.
         try require(opticalRead[toroidalOptical] == optical[0], "Toroidal optical destination is wrong")
+        let chromaticRead = try privateBytes(
+            api, context: context, kind: 6, index: 0, device: device, queue: queue
+        )
+        try require(chromaticRead[toroidalOptical >> 1] == chromatic[0],
+                    "Toroidal chromatic destination is wrong")
         let initialMetadata = try privateBytes(
             api, context: context, kind: 2, index: 0, device: device, queue: queue
         )
@@ -472,7 +516,7 @@ private enum VoxelOccupancyValidationMain {
         var checksum = [UInt8](repeating: 0, count: 16)
         try require(checksum.withUnsafeMutableBytes { api.debugReadback(context, $0.baseAddress, 16) } == 1,
                     "Diagnostic checksum readback failed")
-        try require(readUInt32(checksum, 0) == 1,
+        try require(readUInt32(checksum, 0) == 2,
                     "Diagnostic checksum readback ABI is invalid")
 
         var stale = update

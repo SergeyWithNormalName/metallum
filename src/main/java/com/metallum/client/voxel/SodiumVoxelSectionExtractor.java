@@ -4,6 +4,8 @@ import net.caffeinemc.mods.sodium.client.world.LevelSlice;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.StainedGlassBlock;
+import net.minecraft.world.level.block.StainedGlassPaneBlock;
 import net.minecraft.world.level.block.TransparentBlock;
 import net.minecraft.world.level.block.VegetationBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -35,6 +37,7 @@ public final class SodiumVoxelSectionExtractor {
         int originZ = SectionPos.z(task.sectionKey()) << 4;
         long[] occupancyMasks = new long[VoxelSectionSnapshot.BLOCK_COUNT];
         byte[] optical = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
+        byte[] chromaticIds = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
         BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
 
         for (int localIndex = 0; localIndex < VoxelSectionSnapshot.BLOCK_COUNT; localIndex++) {
@@ -64,6 +67,9 @@ public final class SodiumVoxelSectionExtractor {
                 );
                 occupancyMasks[localIndex] = encoded.occupancyMask();
                 optical[localIndex] = effectiveOptical(material, encoded);
+                chromaticIds[localIndex] = (byte) VoxelChromaticFilter.idFor(
+                        state, material.materialClass()
+                );
             } catch (RuntimeException ignored) {
                 // A modded shape is allowed to fail locally. Keep the L5 producer safe and
                 // conservative without propagating a failure into Sodium's accepted geometry.
@@ -71,12 +77,13 @@ public final class SodiumVoxelSectionExtractor {
                 optical[localIndex] = (byte) VoxelMaterialDescriptor.defaults(
                         VoxelMaterialClass.UNKNOWN_CONSERVATIVE
                 ).packedUnsignedByte();
+                chromaticIds[localIndex] = (byte) VoxelChromaticFilter.NEUTRAL_ID;
             }
         }
         return new VoxelSectionCandidate(
-                task,
-                new VoxelSectionSnapshot(occupancyMasks, optical),
-                VoxelSectionSnapshot.BLOCK_COUNT
+            task,
+            new VoxelSectionSnapshot(occupancyMasks, optical, chromaticIds),
+            VoxelSectionSnapshot.BLOCK_COUNT
         );
     }
 
@@ -96,7 +103,9 @@ public final class SodiumVoxelSectionExtractor {
         // Vanilla block-light propagation deliberately lets slabs, stairs and fences pass light.
         // That does not make their occupied voxel cells glass for a ray shadow: only a block
         // that is actually rendered as transparent keeps the GLASS material class.
-        if (state.getBlock() instanceof TransparentBlock) {
+        if (state.getBlock() instanceof StainedGlassBlock
+                || state.getBlock() instanceof StainedGlassPaneBlock
+                || state.getBlock() instanceof TransparentBlock) {
             return VoxelMaterialDescriptor.defaults(VoxelMaterialClass.GLASS);
         }
         if (!state.isSolidRender()) {

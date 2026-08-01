@@ -129,7 +129,9 @@ final class VoxelBrickPacker implements AutoCloseable {
         int subdivision = ticket.layout().subdivision().scale();
         int baseEdge = ticket.layout().brickBlockEdge();
         int opticalLength = Math.multiplyExact(Math.multiplyExact(baseEdge, baseEdge), baseEdge);
-        byte[] payload = new byte[VoxelBrickPatch.OCCUPANCY_BYTES + opticalLength];
+        int chromaticLength = VoxelChromaticFilter.packedBytesFor(opticalLength);
+        byte[] payload = new byte[VoxelBrickPatch.OCCUPANCY_BYTES + opticalLength + chromaticLength];
+        byte[] chromatic = new byte[chromaticLength];
         ByteBuffer littleEndian = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         long originX = Math.multiplyExact(key.brickX(), baseEdge);
         long originY = Math.multiplyExact(key.brickY(), baseEdge);
@@ -155,6 +157,14 @@ final class VoxelBrickPacker implements AutoCloseable {
                     payload[opticalOffset] = exactCellOptical(
                             packedOptical, sourceMask, subdivision
                     );
+                    int chromaticId = contributor.absent()
+                            ? VoxelChromaticFilter.NEUTRAL_ID
+                            : Byte.toUnsignedInt(contributor.snapshot().chromaticIdUnchecked(localIndex));
+                    VoxelChromaticFilter.putPackedId(
+                            chromatic,
+                            opticalOffset - VoxelBrickPatch.OCCUPANCY_BYTES,
+                            chromaticId
+                    );
                     if (sourceMask != 0L) {
                         writeOccupancy(
                                 littleEndian, sourceMask, subdivision, blockX, blockY, blockZ
@@ -163,6 +173,10 @@ final class VoxelBrickPacker implements AutoCloseable {
                 }
             }
         }
+        System.arraycopy(
+                chromatic, 0, payload, VoxelBrickPatch.OCCUPANCY_BYTES + opticalLength,
+                chromaticLength
+        );
         return VoxelBrickPatch.fromOwnedPackedPayload(
                 key.level(),
                 Math.floorMod(key.brickX(), ticket.brickDimension()),
@@ -175,7 +189,8 @@ final class VoxelBrickPacker implements AutoCloseable {
                 ticket.world().generation(),
                 ticket.clipmapGeneration(),
                 payload,
-                opticalLength
+                opticalLength,
+                chromaticLength
         );
     }
 

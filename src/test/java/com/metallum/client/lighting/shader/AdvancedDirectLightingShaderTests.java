@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "f61ecc060e027462f0a20e14863a7f9cec81f0d49aa550089fd5acbebc08424d",
+            "sodium-solid-fsh", "c3ae4133676c774703dee41e7881829bcbf7b337173238fe8a7de95e55f887c8",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "6211e92e8ad5dfea2b1fe9ec7f30f913f61113c828a72ad74f665c497b7315ba",
+            "sodium-cutout-fsh", "a0bad53261ee9efd9b5147ab59f0e7cbb24d0b5539f608af3c79027632eff9ea",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "994fa4d9995175b63592fb018da0824b4406cc072da3c16bef909e233a83937e",
+            "minecraft-entity-fsh", "fc9de41a5bdcbdabaf4777986b7fe8874e414d6ae19584e290940312ab8998e9",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "4abf7a1927f825cca2ba41f275b1cdc5fd8217f4b53886cae71a274c660b32bc"
+            "minecraft-end-portal-fsh", "246f2cc45532937dd226c4456ce8692fb2d576df74220c64584ceac9bfa8ba2b"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -146,7 +146,7 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{13, 14, 15})
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
-        require(VoxelShadowBindingAbi.VERSION == 3
+        require(VoxelShadowBindingAbi.VERSION == 4
                         && VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT == 14
                         && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
                         && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
@@ -660,11 +660,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "ivec2 lowerTexel = ivec2(floor(texelPosition));")
                         && sodiumFragment.contains(
-                        "float metallumVoxelSoftCachedVisibilityV1(")
+                        "vec3 metallumVoxelSoftCachedVisibilityV1(")
                         && !sodiumFragment.contains(
                         "float metallumVoxelSoftVisibilityV1(")
                         && sodiumFragment.contains(
-                        "float nearestVisibility = metallumVoxelCachedVisibilityV1(")
+                        "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(")
                         && sodiumFragment.contains(
                         "return metallumVoxelSoftCachedVisibilityV1(")
                         && sodiumFragment.contains("vec4 bilinearWeight = vec4(")
@@ -679,13 +679,13 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "triangleWeight, bilinearWeight, interiorWeight")
                         && countOccurrences(sodiumFragment,
-                        "float visibility0 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && countOccurrences(sodiumFragment,
-                        "float visibility1 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        "vec3 visibility1 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && countOccurrences(sodiumFragment,
-                        "float visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
+                        "vec3 visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && sodiumFragment.contains(
-                        "float visibility = nearestVisibility * nearestWeight")
+                        "vec3 visibility = nearestVisibility * nearestWeight")
                         && !sodiumFormula.contains("softShadowLightIndex")
                         && !sodiumFormula.contains("float shadowScore = dot(")
                         && before(sodiumFormula,
@@ -695,7 +695,7 @@ public final class AdvancedDirectLightingShaderTests {
                         "visibility = metallumVoxelVisibilityV1(",
                         "direct += unshadowedContribution * visibility;")
                         && before(sodiumFragment,
-                        "float nearestVisibility = metallumVoxelCachedVisibilityV1(",
+                        "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(",
                         "return metallumVoxelSoftCachedVisibilityV1(")
                         && !sodiumFragment.contains("bool filterAlongX"),
                 "L6 all-source shadow filter lost bounded full-resolution blur");
@@ -738,7 +738,8 @@ public final class AdvancedDirectLightingShaderTests {
                         && before(sodiumFragment,
                         "hitDistance + receiverCoincidenceEpsilon >= receiverPlaneDistance",
                         "visibility = hitVisibility;")
-                        && sodiumFragment.contains("if (visibility <= 0.0)")
+                        && sodiumFragment.contains(
+                        "if (!any(greaterThan(visibility, vec3(0.0))))")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
                 "L6 direct lighting is not sampling variable resident-atlas pages safely");
         require(sodiumFragment.contains("bool metallumVoxelPartialReceiverSurfaceV1(")
@@ -756,7 +757,7 @@ public final class AdvancedDirectLightingShaderTests {
                         "#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1"),
                 "entity receivers can still be mistaken for quantized partial terrain surfaces");
         require(sodiumFormula.contains("if (shadowState == 0u)")
-                        && sodiumFormula.contains("visibility = 1.0;")
+                        && sodiumFormula.contains("visibility = vec3(1.0);")
                         && sodiumFormula.contains(
                         "if (shadowState == 1u || shadowState == 2u)")
                         && before(sodiumFormula,
@@ -766,7 +767,7 @@ public final class AdvancedDirectLightingShaderTests {
                         "return metallumVoxelDdaVisibilityV1(") == 0,
                 "L6 approximate descriptors do not keep DDA unreachable or contribute directly");
         int ddaStart = sodiumFragment.indexOf("float metallumVoxelDdaVisibilityV1(");
-        int ddaEnd = sodiumFragment.indexOf("float metallumVoxelCachedVisibilityV1(", ddaStart);
+        int ddaEnd = sodiumFragment.indexOf("vec3 metallumVoxelCubeFaceUvV1(", ddaStart);
         require(ddaStart >= 0 && ddaEnd > ddaStart,
                 "L6 exact DDA fallback helper is missing");
         String ddaFormula = sodiumFragment.substring(ddaStart, ddaEnd);
@@ -813,7 +814,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && !ddaFormula.contains("receiverViewPosition")
                         && !ddaFormula.contains("receiverViewNormal"),
                 "L6 DDA lost its bounded toroidal/tag/optical fail-closed contract");
-        int visibilityStart = sodiumFragment.indexOf("float metallumVoxelVisibilityV1(");
+        int visibilityStart = sodiumFragment.indexOf("vec3 metallumVoxelVisibilityV1(");
         int visibilityEnd = sodiumFragment.indexOf(
                 "uint metallumClusterIndexV1(", visibilityStart);
         require(visibilityStart >= 0 && visibilityEnd > visibilityStart,
@@ -1055,11 +1056,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && materialSpecular.contains(
                         "if (dominantShadowState != 1u && dominantShadowState != 2u)")
                         && materialSpecular.contains(
-                        "float visibility = metallumVoxelVisibilityV1(")
+                        "vec3 visibility = metallumVoxelVisibilityV1(")
                         && materialSpecular.contains("dominantRadiance * visibility")
                         && materialSpecular.contains("return vec3(0.0);")
                         && before(materialSpecular,
-                        "float visibility = metallumVoxelVisibilityV1(",
+                        "vec3 visibility = metallumVoxelVisibilityV1(",
                         "return material.specularScale * metallumEvaluateGgxV1("),
                 "local GGX highlight can bypass verified voxel visibility");
         require(countOccurrences(sodiumFragment, "metallumEvaluateGgxV1(") == 3,

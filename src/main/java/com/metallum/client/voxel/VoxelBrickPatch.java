@@ -24,6 +24,7 @@ public final class VoxelBrickPatch {
     private final long clipmapGeneration;
     private final byte[] packedPayload;
     private final int opticalLength;
+    private final int chromaticLength;
 
     public VoxelBrickPatch(
             final int level,
@@ -38,6 +39,29 @@ public final class VoxelBrickPatch {
             final long clipmapGeneration,
             final int[] occupancyWords,
             final byte[] optical
+    ) {
+        this(
+                level, destinationBrickX, destinationBrickY, destinationBrickZ,
+                logicalBrickX, logicalBrickY, logicalBrickZ, contentStamp,
+                worldGeneration, clipmapGeneration, occupancyWords, optical,
+                VoxelChromaticFilter.neutralPackedValues(optical == null ? 0 : optical.length)
+        );
+    }
+
+    public VoxelBrickPatch(
+            final int level,
+            final int destinationBrickX,
+            final int destinationBrickY,
+            final int destinationBrickZ,
+            final int logicalBrickX,
+            final int logicalBrickY,
+            final int logicalBrickZ,
+            final int contentStamp,
+            final long worldGeneration,
+            final long clipmapGeneration,
+            final int[] occupancyWords,
+            final byte[] optical,
+            final byte[] chromatic
     ) {
         if (level < 0 || destinationBrickX < 0 || destinationBrickY < 0 || destinationBrickZ < 0) {
             throw new IllegalArgumentException("Voxel patch level and toroidal destination must be non-negative");
@@ -54,6 +78,10 @@ public final class VoxelBrickPatch {
         if (optical == null || optical.length == 0) {
             throw new IllegalArgumentException("Voxel brick optical payload must not be empty");
         }
+        if (chromatic == null
+                || chromatic.length != VoxelChromaticFilter.packedBytesFor(optical.length)) {
+            throw new IllegalArgumentException("Voxel brick chromatic payload does not match optics");
+        }
         this.level = level;
         this.destinationBrickX = destinationBrickX;
         this.destinationBrickY = destinationBrickY;
@@ -64,8 +92,9 @@ public final class VoxelBrickPatch {
         this.contentStamp = contentStamp;
         this.worldGeneration = worldGeneration;
         this.clipmapGeneration = clipmapGeneration;
-        this.packedPayload = pack(occupancyWords, optical);
+        this.packedPayload = pack(occupancyWords, optical, chromatic);
         this.opticalLength = optical.length;
+        this.chromaticLength = chromatic.length;
     }
 
     private VoxelBrickPatch(
@@ -80,12 +109,14 @@ public final class VoxelBrickPatch {
             final long worldGeneration,
             final long clipmapGeneration,
             final byte[] ownedPackedPayload,
-            final int opticalLength
+            final int opticalLength,
+            final int chromaticLength
     ) {
         if (level < 0 || destinationBrickX < 0 || destinationBrickY < 0 || destinationBrickZ < 0
                 || worldGeneration <= 0L || clipmapGeneration <= 0L || contentStamp == 0
-                || ownedPackedPayload == null || opticalLength <= 0
-                || ownedPackedPayload.length != OCCUPANCY_BYTES + opticalLength) {
+                || ownedPackedPayload == null || opticalLength <= 0 || chromaticLength <= 0
+                || chromaticLength != VoxelChromaticFilter.packedBytesFor(opticalLength)
+                || ownedPackedPayload.length != OCCUPANCY_BYTES + opticalLength + chromaticLength) {
             throw new IllegalArgumentException("Invalid worker-owned voxel patch");
         }
         this.level = level;
@@ -100,6 +131,7 @@ public final class VoxelBrickPatch {
         this.clipmapGeneration = clipmapGeneration;
         this.packedPayload = ownedPackedPayload;
         this.opticalLength = opticalLength;
+        this.chromaticLength = chromaticLength;
     }
 
     static VoxelBrickPatch fromOwnedPackedPayload(
@@ -114,12 +146,13 @@ public final class VoxelBrickPatch {
             final long worldGeneration,
             final long clipmapGeneration,
             final byte[] ownedPackedPayload,
-            final int opticalLength
+            final int opticalLength,
+            final int chromaticLength
     ) {
         return new VoxelBrickPatch(
                 level, destinationBrickX, destinationBrickY, destinationBrickZ,
                 logicalBrickX, logicalBrickY, logicalBrickZ, contentStamp,
-                worldGeneration, clipmapGeneration, ownedPackedPayload, opticalLength
+                worldGeneration, clipmapGeneration, ownedPackedPayload, opticalLength, chromaticLength
         );
     }
 
@@ -179,12 +212,24 @@ public final class VoxelBrickPatch {
 
     public byte[] opticalPayload() {
         return Arrays.copyOfRange(
-                this.packedPayload, OCCUPANCY_BYTES, this.packedPayload.length
+                this.packedPayload, OCCUPANCY_BYTES, OCCUPANCY_BYTES + this.opticalLength
         );
     }
 
     public int opticalLength() {
         return this.opticalLength;
+    }
+
+    public byte[] chromaticPayload() {
+        return Arrays.copyOfRange(
+                this.packedPayload,
+                OCCUPANCY_BYTES + this.opticalLength,
+                this.packedPayload.length
+        );
+    }
+
+    public int chromaticLength() {
+        return this.chromaticLength;
     }
 
     public int packedPayloadLength() {
@@ -203,13 +248,18 @@ public final class VoxelBrickPatch {
         );
     }
 
-    private static byte[] pack(final int[] occupancyWords, final byte[] optical) {
-        byte[] packed = new byte[OCCUPANCY_BYTES + optical.length];
+    private static byte[] pack(
+            final int[] occupancyWords,
+            final byte[] optical,
+            final byte[] chromatic
+    ) {
+        byte[] packed = new byte[OCCUPANCY_BYTES + optical.length + chromatic.length];
         ByteBuffer output = ByteBuffer.wrap(packed).order(ByteOrder.LITTLE_ENDIAN);
         for (int word : occupancyWords) {
             output.putInt(word);
         }
         output.put(optical);
+        output.put(chromatic);
         return packed;
     }
 }

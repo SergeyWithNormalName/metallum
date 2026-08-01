@@ -171,6 +171,7 @@ public final class VoxelShadowCacheMirror {
         private final int contentStamp;
         private final int[] occupancy;
         private final byte[] optical;
+        private final byte[] chromatic;
 
         private Brick(
                 final int logicalX,
@@ -178,11 +179,15 @@ public final class VoxelShadowCacheMirror {
                 final int logicalZ,
                 final int contentStamp,
                 final int[] ownedOccupancy,
-                final byte[] ownedOptical
+                final byte[] ownedOptical,
+                final byte[] ownedChromatic
         ) {
             if (contentStamp == 0 || ownedOccupancy == null
                     || ownedOccupancy.length != VoxelBrickPatch.OCCUPANCY_WORDS
-                    || ownedOptical == null || ownedOptical.length == 0) {
+                    || ownedOptical == null || ownedOptical.length == 0
+                    || ownedChromatic == null
+                    || ownedChromatic.length != VoxelChromaticFilter.packedBytesFor(
+                    ownedOptical.length)) {
                 throw new IllegalArgumentException("Invalid L6 cache-mirror brick");
             }
             this.logicalX = logicalX;
@@ -191,6 +196,7 @@ public final class VoxelShadowCacheMirror {
             this.contentStamp = contentStamp;
             this.occupancy = ownedOccupancy;
             this.optical = ownedOptical;
+            this.chromatic = ownedChromatic;
         }
 
         private static Brick fromPatch(final VoxelBrickPatch patch) {
@@ -200,7 +206,8 @@ public final class VoxelShadowCacheMirror {
                     patch.logicalBrickZ(),
                     patch.contentStamp(),
                     patch.occupancyWords(),
-                    patch.opticalPayload()
+                    patch.opticalPayload(),
+                    patch.chromaticPayload()
             );
         }
 
@@ -226,6 +233,10 @@ public final class VoxelShadowCacheMirror {
 
         public byte[] optical() {
             return this.optical;
+        }
+
+        public byte[] chromatic() {
+            return this.chromatic;
         }
     }
 

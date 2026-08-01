@@ -22,7 +22,7 @@ import java.util.Objects;
 final class VoxelOccupancyGpuResources implements AutoCloseable {
     static final int STATUS_OK = 1;
     static final int STATUS_RING_SLOT_BUSY = -22;
-    static final int ABI_VERSION = 1;
+    static final int ABI_VERSION = 2;
     static final int BATCH_MAGIC = 0x3142564d;
     static final int NATIVE_LAYOUT_BYTES = 160;
     static final int STATS_BYTES = 160;
@@ -40,6 +40,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
     private static final int BUFFER_PRIVATE_PAYLOAD = 3;
     private static final int BUFFER_INDIRECT = 4;
     private static final int BUFFER_DEBUG_READBACK = 5;
+    private static final int BUFFER_CHROMATIC = 6;
     private static final int NATIVE_INDIRECT_BYTES = 12;
     private static final ValueLayout.OfInt LE_INT = ValueLayout.JAVA_INT
             .withOrder(ByteOrder.LITTLE_ENDIAN);
@@ -377,13 +378,15 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
             putInt(packet, record + 16L, Math.toIntExact(cursor));
             putInt(packet, record + 20L, VoxelBrickPatch.OCCUPANCY_BYTES);
             putInt(packet, record + 24L, patch.opticalLength());
-            putInt(packet, record + 28L, 0);
-            putInt(packet, record + 32L, (int) this.clipmapGeneration);
-            putInt(packet, record + 36L, (int) (this.clipmapGeneration >>> 32));
-            putInt(packet, record + 40L, patch.logicalBrickX());
-            putInt(packet, record + 44L, patch.logicalBrickY());
-            putInt(packet, record + 48L, patch.logicalBrickZ());
-            putInt(packet, record + 52L, patch.contentStamp());
+            putInt(packet, record + 28L, patch.chromaticLength());
+            putInt(packet, record + 32L, 0);
+            putInt(packet, record + 36L, (int) this.clipmapGeneration);
+            putInt(packet, record + 40L, (int) (this.clipmapGeneration >>> 32));
+            putInt(packet, record + 44L, patch.logicalBrickX());
+            putInt(packet, record + 48L, patch.logicalBrickY());
+            putInt(packet, record + 52L, patch.logicalBrickZ());
+            putInt(packet, record + 56L, patch.contentStamp());
+            putInt(packet, record + 60L, 0);
 
             patch.copyPackedPayloadTo(packet, cursor);
             cursor += patch.packedPayloadLength();
@@ -499,8 +502,12 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         VoxelClipmapSnapshot.Level level = this.levels.get(patch.level());
         int expectedOptical = Math.toIntExact(
                 this.budget.levels().get(patch.level()).opticalBytesPerBrick());
+        int expectedChromatic = Math.toIntExact(
+                this.budget.levels().get(patch.level()).chromaticBytesPerBrick());
         if (patch.opticalLength() != expectedOptical
-                || patch.packedPayloadLength() != VoxelBrickPatch.OCCUPANCY_BYTES + expectedOptical
+                || patch.chromaticLength() != expectedChromatic
+                || patch.packedPayloadLength()
+                != VoxelBrickPatch.OCCUPANCY_BYTES + expectedOptical + expectedChromatic
                 || patch.destinationBrickX() != Math.floorMod(
                 patch.logicalBrickX(), level.brickDimension())
                 || patch.destinationBrickY() != Math.floorMod(
@@ -546,6 +553,8 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                     level.occupancyBytes() + NATIVE_GUARD_BYTES, "occupancy");
             MemorySegment optical = requireBuffer(context, BUFFER_OPTICAL, index,
                     level.materialBytes() + NATIVE_GUARD_BYTES, "optical");
+            requireBuffer(context, BUFFER_CHROMATIC, index,
+                    level.chromaticBytes() + NATIVE_GUARD_BYTES, "chromatic");
             long bricks = level.brickCountPerAxis();
             long metadataBytes = Math.multiplyExact(
                     Math.multiplyExact(Math.multiplyExact(bricks, bricks), bricks), 16L);

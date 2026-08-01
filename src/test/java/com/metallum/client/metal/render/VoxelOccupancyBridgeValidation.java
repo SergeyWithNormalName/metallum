@@ -12,6 +12,7 @@ import com.metallum.client.renderer.RendererFeatureMask;
 import com.metallum.client.renderer.temporal.FrameContract;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.voxel.VoxelBrickPatch;
+import com.metallum.client.voxel.VoxelChromaticFilter;
 import com.metallum.client.voxel.VoxelClipmapLayout;
 import com.metallum.client.voxel.VoxelClipmapSnapshot;
 import com.metallum.client.voxel.VoxelUploadBatch;
@@ -69,9 +70,11 @@ public final class VoxelOccupancyBridgeValidation {
                     budget.levels().getFirst().opticalBytesPerBrick()
             )];
             optical[0] = 0x20;
+            byte[] chromatic = VoxelChromaticFilter.neutralPackedValues(optical.length);
+            VoxelChromaticFilter.putPackedId(chromatic, 0, 14); // red stained glass
             VoxelBrickPatch patch = new VoxelBrickPatch(
                     0, 0, 0, 0, 0, 0, 0, 1,
-                    world.generation(), snapshot.clipmapGeneration(), occupancy, optical
+                    world.generation(), snapshot.clipmapGeneration(), occupancy, optical, chromatic
             );
 
             FrameState firstFrame = frame(3L);
@@ -79,8 +82,11 @@ public final class VoxelOccupancyBridgeValidation {
             VoxelOccupancyGpuResources.FrameUpload firstUpload = resources.encode(
                     firstBatch, snapshot, firstFrame
             );
-            require(firstUpload.patchCount() == 1 && firstUpload.uploadBytes() > 4_096L,
-                    "Java L5 bridge did not encode the exact patch payload");
+            require(firstUpload.patchCount() == 1
+                            && firstUpload.uploadBytes() == VoxelClipmapLayout.PACKET_HEADER_BYTES
+                            + VoxelClipmapLayout.PATCH_RECORD_BYTES + patch.packedPayloadLength()
+                            && VoxelChromaticFilter.packedId(patch.chromaticPayload(), 0) == 14,
+                    "Java L5 bridge did not encode the exact chromatic patch payload");
             try (CommandBufferScope command = new CommandBufferScope(queue.makeCommandBuffer(
                     "Metallum L5 Java bridge validation"
             ))) {

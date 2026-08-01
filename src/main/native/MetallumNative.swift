@@ -1673,15 +1673,15 @@ private final class MetallumLightingContext: @unchecked Sendable {
     }
 }
 
-// MARK: - L5 voxel clipmap ABI v1
+// MARK: - L5 voxel clipmap ABI v2
 //
 // This is intentionally self-contained.  L3/L4 neither allocate nor bind these
 // resources; an unavailable voxel library simply makes this context unavailable.
 private enum MetallumVoxelAbiV1 {
-    static let version: UInt32 = 1
+    static let version: UInt32 = 2
     static let magic: UInt32 = 0x3142564d // "MVB1" in little-endian memory.
     static let headerBytes = 96
-    static let recordBytes = 56
+    static let recordBytes = 64
     static let levelLayoutBytes = 32
     static let paramsBytes = 72
     // Metal constant-buffer offsets are 256-byte aligned; the ABI payload itself
@@ -1725,6 +1725,7 @@ private struct MetallumVoxelPatchRecordV1 {
     let payloadOffset: UInt32
     let occupancyBytes: UInt32
     let opticalBytes: UInt32
+    let chromaticBytes: UInt32
     let flags: UInt32
     let brickGenerationLow: UInt32
     let brickGenerationHigh: UInt32
@@ -1732,6 +1733,7 @@ private struct MetallumVoxelPatchRecordV1 {
     let logicalBrickY: Int32
     let logicalBrickZ: Int32
     let contentStamp: UInt32
+    let reserved: UInt32
 }
 
 private struct MetallumVoxelLogicalDestinationKey: Hashable {
@@ -1785,8 +1787,8 @@ private struct MetallumVoxelParamsV1 {
 private struct MetallumVoxelChecksumParamsV1 {
     var occupancyWords: UInt32
     var opticalBytes: UInt32
+    var chromaticBytes: UInt32
     var threadCount: UInt32
-    var reserved: UInt32
 }
 
 private struct MetallumVoxelPipelines {
@@ -1799,9 +1801,11 @@ private final class MetallumVoxelLevelResources {
     let brickDimension: UInt32
     let occupancyWords: Int
     let opticalBytes: Int
+    let chromaticBytes: Int
     let brickCount: Int
     let occupancy: MTLBuffer
     let optical: MTLBuffer
+    let chromatic: MTLBuffer
     let metadata: MTLBuffer
 
     var occupancyPayloadBytes: Int { occupancyWords * 4 }
@@ -1812,18 +1816,22 @@ private final class MetallumVoxelLevelResources {
         brickDimension: UInt32,
         occupancyWords: Int,
         opticalBytes: Int,
+        chromaticBytes: Int,
         brickCount: Int,
         occupancy: MTLBuffer,
         optical: MTLBuffer,
+        chromatic: MTLBuffer,
         metadata: MTLBuffer
     ) {
         self.layout = layout
         self.brickDimension = brickDimension
         self.occupancyWords = occupancyWords
         self.opticalBytes = opticalBytes
+        self.chromaticBytes = chromaticBytes
         self.brickCount = brickCount
         self.occupancy = occupancy
         self.optical = optical
+        self.chromatic = chromatic
         self.metadata = metadata
     }
 }
@@ -4879,6 +4887,8 @@ private func makeVoxelContext(
           maxPatchCount <= 65_536,
           stagingBytes >= UInt64(MetallumVoxelAbiV1.headerBytes),
           stagingBytes <= UInt64(Int.max),
+          MemoryLayout<MetallumVoxelPatchRecordV1>.size == MetallumVoxelAbiV1.recordBytes,
+          MemoryLayout<MetallumVoxelPatchRecordV1>.stride == MetallumVoxelAbiV1.recordBytes,
           MemoryLayout<MetallumVoxelParamsV1>.size == MetallumVoxelAbiV1.paramsBytes,
           MemoryLayout<MetallumVoxelParamsV1>.stride == MetallumVoxelAbiV1.paramsBytes,
           let pipelines = buildVoxelPipelines(device: device) else {
@@ -4892,7 +4902,7 @@ private func makeVoxelContext(
         let length: Int
     }
     var requests: [Request] = []
-    var levelSizes: [(occupancyWords: Int, opticalBytes: Int, brickCount: Int)] = []
+    var levelSizes: [(occupancyWords: Int, opticalBytes: Int, chromaticBytes: Int, brickCount: Int)] = []
     for (index, layout) in layouts.enumerated() {
         let edge = Int(layout.logicalEdge)
         let subdivision = Int(layout.subdivision)
@@ -4900,16 +4910,18 @@ private func makeVoxelContext(
         let baseDimension = edge / subdivision
         let occupancyWords = edge * edge * edge / 32
         let opticalBytes = baseDimension * baseDimension * baseDimension
+        let chromaticBytes = (opticalBytes + 1) / 2
         let brickCount = brickDimension * brickDimension * brickDimension
-        guard occupancyWords > 0, opticalBytes > 0, brickCount > 0,
+        guard occupancyWords > 0, opticalBytes > 0, chromaticBytes > 0, brickCount > 0,
               occupancyWords <= Int.max / 4,
               brickCount <= Int.max / 16 else { return nil }
         requests += [
             Request(name: "occupancy L\(index)", length: occupancyWords * 4 + MetallumVoxelAbiV1.guardBytes),
             Request(name: "optical L\(index)", length: opticalBytes + MetallumVoxelAbiV1.guardBytes),
+            Request(name: "chromatic L\(index)", length: chromaticBytes + MetallumVoxelAbiV1.guardBytes),
             Request(name: "metadata L\(index)", length: brickCount * 16 + MetallumVoxelAbiV1.guardBytes)
         ]
-        levelSizes.append((occupancyWords, opticalBytes, brickCount))
+        levelSizes.append((occupancyWords, opticalBytes, chromaticBytes, brickCount))
     }
     for index in 0..<MetallumVoxelAbiV1.ringSlots {
         requests += [
@@ -4957,18 +4969,21 @@ private func makeVoxelContext(
     var levels: [MetallumVoxelLevelResources] = []
     var resourceBytes: UInt64 = 0
     for index in layouts.indices {
-        guard let occupancy = allocate(), let optical = allocate(), let metadata = allocate() else {
+        guard let occupancy = allocate(), let optical = allocate(), let chromatic = allocate(),
+              let metadata = allocate() else {
             return nil
         }
-        resourceBytes &+= UInt64(occupancy.length + optical.length + metadata.length)
+        resourceBytes &+= UInt64(occupancy.length + optical.length + chromatic.length + metadata.length)
         levels.append(MetallumVoxelLevelResources(
             layout: layouts[index],
             brickDimension: layouts[index].logicalEdge / MetallumVoxelAbiV1.logicalBrickEdge,
             occupancyWords: levelSizes[index].occupancyWords,
             opticalBytes: levelSizes[index].opticalBytes,
+            chromaticBytes: levelSizes[index].chromaticBytes,
             brickCount: levelSizes[index].brickCount,
             occupancy: occupancy,
             optical: optical,
+            chromatic: chromatic,
             metadata: metadata
         ))
     }
@@ -5031,6 +5046,7 @@ private func initializeVoxelContextStorage(
     for level in levels {
         blit.fill(buffer: level.occupancy, range: 0..<level.occupancyPayloadBytes, value: 0)
         blit.fill(buffer: level.optical, range: 0..<level.opticalBytes, value: 0)
+        blit.fill(buffer: level.chromatic, range: 0..<level.chromaticBytes, value: 0)
         blit.fill(buffer: level.metadata, range: 0..<level.metadataPayloadBytes, value: 0)
         blit.fill(
             buffer: level.occupancy,
@@ -5040,6 +5056,11 @@ private func initializeVoxelContextStorage(
         blit.fill(
             buffer: level.optical,
             range: level.opticalBytes..<level.optical.length,
+            value: MetallumVoxelAbiV1.guardValue
+        )
+        blit.fill(
+            buffer: level.chromatic,
+            range: level.chromaticBytes..<level.chromatic.length,
             value: MetallumVoxelAbiV1.guardValue
         )
         blit.fill(
@@ -9128,15 +9149,17 @@ private func parseVoxelBatchV1(
               let patchOffset = reader.uint32(at: offset + 16),
               let occupancyBytes = reader.uint32(at: offset + 20),
               let opticalBytes = reader.uint32(at: offset + 24),
-              let recordFlags = reader.uint32(at: offset + 28),
-              let brickGenerationLow = reader.uint32(at: offset + 32),
-              let brickGenerationHigh = reader.uint32(at: offset + 36),
-              let logicalX = reader.int32(at: offset + 40),
-              let logicalY = reader.int32(at: offset + 44),
-              let logicalZ = reader.int32(at: offset + 48),
-              let contentStamp = reader.uint32(at: offset + 52),
+              let chromaticBytes = reader.uint32(at: offset + 28),
+              let recordFlags = reader.uint32(at: offset + 32),
+              let brickGenerationLow = reader.uint32(at: offset + 36),
+              let brickGenerationHigh = reader.uint32(at: offset + 40),
+              let logicalX = reader.int32(at: offset + 44),
+              let logicalY = reader.int32(at: offset + 48),
+              let logicalZ = reader.int32(at: offset + 52),
+              let contentStamp = reader.uint32(at: offset + 56),
+              let reserved = reader.uint32(at: offset + 60),
               level < UInt32(context.levels.count),
-              recordFlags == 0, contentStamp != 0,
+              recordFlags == 0, reserved == 0, contentStamp != 0,
               brickGenerationLow == expectedBrickGenerationLow,
               brickGenerationHigh == expectedBrickGenerationHigh else {
             return (-6, nil)
@@ -9148,11 +9171,13 @@ private func parseVoxelBatchV1(
         let resource = context.levels[Int(level)]
         let baseEdge = Int(MetallumVoxelAbiV1.logicalBrickEdge) / Int(resource.layout.subdivision)
         let expectedOpticalBytes = UInt32(baseEdge * baseEdge * baseEdge)
+        let expectedChromaticBytes = (expectedOpticalBytes + 1) / 2
         guard destinationX < resource.brickDimension,
               destinationY < resource.brickDimension,
               destinationZ < resource.brickDimension,
               occupancyBytes == MetallumVoxelAbiV1.occupancyBytesPerBrick,
               opticalBytes == expectedOpticalBytes,
+              chromaticBytes == expectedChromaticBytes,
               patchOffset >= payloadOffset,
               patchOffset.isMultiple(of: 4),
               voxelFloorMod(logicalX, resource.brickDimension) == destinationX,
@@ -9160,7 +9185,7 @@ private func parseVoxelBatchV1(
               voxelFloorMod(logicalZ, resource.brickDimension) == destinationZ else {
             return (-6, nil)
         }
-        let length = UInt64(occupancyBytes) + UInt64(opticalBytes)
+        let length = UInt64(occupancyBytes) + UInt64(opticalBytes) + UInt64(chromaticBytes)
         guard UInt64(patchOffset) <= byteSize,
               length <= byteSize - UInt64(patchOffset) else {
             return (-7, nil)
@@ -9858,15 +9883,18 @@ public func metallum_dynamic_shadow_encode_v1(
         encoder.setBuffer(boundLevels[0].optical, offset: 0, index: 3)
         encoder.setBuffer(boundLevels[1].optical, offset: 0, index: 4)
         encoder.setBuffer(boundLevels[2].optical, offset: 0, index: 5)
-        encoder.setBuffer(boundLevels[0].metadata, offset: 0, index: 6)
-        encoder.setBuffer(boundLevels[1].metadata, offset: 0, index: 7)
-        encoder.setBuffer(boundLevels[2].metadata, offset: 0, index: 8)
-        encoder.setBuffer(atlas, offset: 0, index: 9)
+        encoder.setBuffer(boundLevels[0].chromatic, offset: 0, index: 6)
+        encoder.setBuffer(boundLevels[1].chromatic, offset: 0, index: 7)
+        encoder.setBuffer(boundLevels[2].chromatic, offset: 0, index: 8)
+        encoder.setBuffer(boundLevels[0].metadata, offset: 0, index: 9)
+        encoder.setBuffer(boundLevels[1].metadata, offset: 0, index: 10)
+        encoder.setBuffer(boundLevels[2].metadata, offset: 0, index: 11)
+        encoder.setBuffer(atlas, offset: 0, index: 12)
         requests.withUnsafeBytes { bytes in
-            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 10)
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 13)
         }
         levelBytes.withUnsafeBytes { bytes in
-            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 11)
+            encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 14)
         }
         encoder.dispatchThreads(
             MTLSize(width: maxRayCount, height: requests.count, depth: 1),
@@ -9893,6 +9921,7 @@ private func voxelContextBuffer(
     case 3 where context.slots.indices.contains(value): return context.slots[value].payload
     case 4 where context.slots.indices.contains(value): return context.slots[value].indirect
     case 5 where context.slots.indices.contains(value): return context.slots[value].debugReadback
+    case 6 where context.levels.indices.contains(value): return context.levels[value].chromatic
     default: return nil
     }
 }
@@ -10002,6 +10031,7 @@ public func metallum_voxel_upload_apply_v1(
             for level in context.levels {
                 upload.fill(buffer: level.occupancy, range: 0..<level.occupancyPayloadBytes, value: 0)
                 upload.fill(buffer: level.optical, range: 0..<level.opticalBytes, value: 0)
+                upload.fill(buffer: level.chromatic, range: 0..<level.chromaticBytes, value: 0)
                 upload.fill(buffer: level.metadata, range: 0..<level.metadataPayloadBytes, value: 0)
             }
         }
@@ -10036,7 +10066,8 @@ public func metallum_voxel_upload_apply_v1(
                 compute.setBuffer(slot.params, offset: index * MetallumVoxelAbiV1.paramsStride, index: 1)
                 compute.setBuffer(level.occupancy, offset: 0, index: 2)
                 compute.setBuffer(level.optical, offset: 0, index: 3)
-                compute.setBuffer(level.metadata, offset: 0, index: 4)
+                compute.setBuffer(level.chromatic, offset: 0, index: 4)
+                compute.setBuffer(level.metadata, offset: 0, index: 5)
                 compute.dispatchThreadgroups(
                     indirectBuffer: slot.indirect,
                     indirectBufferOffset: index * MetallumVoxelAbiV1.indirectBytes,
@@ -10108,14 +10139,16 @@ public func metallum_voxel_debug_checksum_v1(
         }
         var parameters = MetallumVoxelChecksumParamsV1(
             occupancyWords: UInt32(resource.occupancyWords),
-            opticalBytes: UInt32(resource.opticalBytes), threadCount: 256, reserved: 0
+            opticalBytes: UInt32(resource.opticalBytes),
+            chromaticBytes: UInt32(resource.chromaticBytes), threadCount: 256
         )
         compute.label = "Metallum L5 voxel diagnostic checksum v1"
         compute.setComputePipelineState(context.pipelines.checksum)
         compute.setBuffer(resource.occupancy, offset: 0, index: 0)
         compute.setBuffer(resource.optical, offset: 0, index: 1)
-        compute.setBuffer(context.slots[slot].debugScratch, offset: 0, index: 2)
-        compute.setBytes(&parameters, length: MemoryLayout<MetallumVoxelChecksumParamsV1>.size, index: 3)
+        compute.setBuffer(resource.chromatic, offset: 0, index: 2)
+        compute.setBuffer(context.slots[slot].debugScratch, offset: 0, index: 3)
+        compute.setBytes(&parameters, length: MemoryLayout<MetallumVoxelChecksumParamsV1>.size, index: 4)
         compute.dispatchThreads(
             MTLSize(width: 256, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)

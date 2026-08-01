@@ -72,6 +72,9 @@ public final class AdvancedLightingFrameGraph {
     /** CPU-built resident-page data consumed by the ordered static-atlas upload blit. */
     private static final FrameGraph.ResourceId LOCAL_SHADOW_ATLAS_STAGING = resource(
             21, "local_shadow_atlas_staging");
+    /** Packed four-bit colour filters consumed by local-light visibility. */
+    private static final FrameGraph.ResourceId VOXEL_CHROMATIC = resource(
+            22, "voxel_chromatic_filter");
     private static final FrameGraph GRAPH = create();
     private static boolean initialized;
 
@@ -226,7 +229,10 @@ public final class AdvancedLightingFrameGraph {
                         buffer(LOCAL_SHADOW_ATLAS_STAGING,
                                 FrameGraph.PersistenceClass.IN_FLIGHT_FRAME,
                                 "local_shadow_atlas_staging_v1", true, whole,
-                                FrameGraph.ResourceRole.SHADOW_DATA)
+                                FrameGraph.ResourceRole.SHADOW_DATA),
+                        buffer(VOXEL_CHROMATIC, FrameGraph.PersistenceClass.WORLD_PERSISTENT,
+                                "voxel_chromatic_filter_id4_v1", true, whole,
+                                FrameGraph.ResourceRole.VOXEL_DATA)
                 ),
                 List.of(
                         new FrameGraph.PassDesc(
@@ -304,6 +310,8 @@ public final class AdvancedLightingFrameGraph {
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(VOXEL_OPTICAL, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_CHROMATIC, FrameGraph.AccessKind.WRITE,
+                                                FrameGraph.PipelineStage.COMPUTE),
                                         access(VOXEL_TAGS, FrameGraph.AccessKind.WRITE,
                                                 FrameGraph.PipelineStage.COMPUTE)
                                 ),
@@ -362,6 +370,8 @@ public final class AdvancedLightingFrameGraph {
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(VOXEL_OPTICAL, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.COMPUTE),
+                                        access(VOXEL_CHROMATIC, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.COMPUTE),
                                         access(VOXEL_TAGS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.COMPUTE),
                                         access(LOCAL_SHADOW_ATLAS,
@@ -404,6 +414,8 @@ public final class AdvancedLightingFrameGraph {
                                         access(VOXEL_OCCUPANCY, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         access(VOXEL_OPTICAL, FrameGraph.AccessKind.READ,
+                                                FrameGraph.PipelineStage.FRAGMENT),
+                                        access(VOXEL_CHROMATIC, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),
                                         access(VOXEL_TAGS, FrameGraph.AccessKind.READ,
                                                 FrameGraph.PipelineStage.FRAGMENT),

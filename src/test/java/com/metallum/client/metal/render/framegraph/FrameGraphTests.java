@@ -45,7 +45,7 @@ public final class FrameGraphTests {
 
     private static void testAdvancedLightingGraphTopology() {
         FrameGraph graph = AdvancedLightingFrameGraph.graph();
-        require(graph.resources().size() == 22 && graph.passes().size() == 11,
+        require(graph.resources().size() == 23 && graph.passes().size() == 11,
                 "Advanced lighting frame graph has the wrong topology size");
         require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
                         List.of(
@@ -60,7 +60,7 @@ public final class FrameGraphTests {
                                 "voxel_transmittance_material", "voxel_brick_tags",
                                 "local_shadow_params_ring", "entity_shadow_proxies_ring",
                                 "local_shadow_reference_ring", "local_shadow_visibility_atlas",
-                                "local_shadow_atlas_staging"
+                                "local_shadow_atlas_staging", "voxel_chromatic_filter"
                         )),
                 "Advanced lighting resources do not describe the compact index and shadow path");
         for (int index = 0; index < graph.resources().size(); index++) {
@@ -108,6 +108,9 @@ public final class FrameGraphTests {
                         access.resource().name().equals("voxel_transmittance_material")
                                 && access.kind() == FrameGraph.AccessKind.WRITE)
                         && voxelUpdate.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_chromatic_filter")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && voxelUpdate.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("voxel_brick_tags")
                                 && access.kind() == FrameGraph.AccessKind.WRITE),
                 "Voxel update does not consume its private upload and publish all L5 fields");
@@ -141,6 +144,9 @@ public final class FrameGraphTests {
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && dynamicLocalShadow.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("voxel_transmittance_material")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && dynamicLocalShadow.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_chromatic_filter")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && dynamicLocalShadow.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("voxel_brick_tags")
@@ -183,6 +189,9 @@ public final class FrameGraphTests {
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("voxel_transmittance_material")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && direct.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("voxel_chromatic_filter")
                                 && access.kind() == FrameGraph.AccessKind.READ)
                         && direct.accesses().stream().anyMatch(access ->
                         access.resource().name().equals("voxel_brick_tags")
