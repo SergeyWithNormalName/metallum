@@ -1408,12 +1408,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                             || hitVisibility < 0.0 || hitVisibility > 1.0) {
                         return 0.0;
                     }
-                    // Keep this smaller than a voxel/block thickness. Scaling it by the
-                    // grazing-angle denominator can exceed one block and classify a real
-                    // nearby wall as the receiver surface, leaking light through geometry.
-                    const float selfHitBias = 0.08;
+                    // This is a numerical coincidence tolerance, not a shadow bias. A broad
+                    // self-hit allowance makes a real caster just in front of the receiver look
+                    // like the receiver itself, visibly detaching its shadow (Peter-panning).
+                    // The tangent-plane test below already recognizes a cached ray landing on
+                    // the receiver surface; two millimetres only covers float/DDA ordering.
+                    const float receiverCoincidenceEpsilon = 0.002;
                     if (isinf(hitDistance)
-                            || receiverDistance <= hitDistance + selfHitBias) {
+                            || receiverDistance <= hitDistance + receiverCoincidenceEpsilon) {
                         return visibility;
                     }
                     // The cache stores one centre ray per cubemap texel.  A flat receiver can
@@ -1422,7 +1424,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     // tangent plane before applying the cached attenuation; a real blocker is
                     // materially in front of the receiver plane and remains shadowed.
                     if (receiverPlaneValid
-                            && hitDistance + selfHitBias >= receiverPlaneDistance) {
+                            && hitDistance + receiverCoincidenceEpsilon >= receiverPlaneDistance) {
                         return visibility;
                     }
                     visibility = hitVisibility;

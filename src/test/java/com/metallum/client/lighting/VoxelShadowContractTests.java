@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class VoxelShadowContractTests {
     private static final LightWorldToken WORLD = new LightWorldToken(7L, "minecraft:overworld");
     private static final VoxelWorldToken VOXEL_WORLD = new VoxelWorldToken(7L, "minecraft:overworld");
+    private static final double RECEIVER_COINCIDENCE_EPSILON = 0.002;
 
     private VoxelShadowContractTests() {
     }
@@ -940,6 +941,16 @@ public final class VoxelShadowContractTests {
                         sample.direction()
                 ),
                 "a blocker materially before the receiver plane was treated as self-shadow acne");
+        double casterContactDistance = cacheFloorEntryDistance - 0.04;
+        require(casterContactDistance + 0.08 >= cacheFloorEntryDistance,
+                "contact-shadow fixture no longer reproduces the former 8cm Peter-panning gap");
+        require(!receiverSurfaceHit(
+                        casterContactDistance,
+                        lightToReceiver,
+                        receiverNormal,
+                        sample.direction()
+                ),
+                "a caster four centimetres before the receiver plane lost its contact shadow");
     }
 
     private static void testCachedCubeOverflowLayerTracksLatestHit() {
@@ -1366,7 +1377,7 @@ public final class VoxelShadowContractTests {
                 lightToReceiver, receiverNormal, cacheDirection
         );
         return Double.isFinite(planeDistance) && planeDistance > 0.0
-                && hitDistance + 0.08 >= planeDistance;
+                && hitDistance + RECEIVER_COINCIDENCE_EPSILON >= planeDistance;
     }
 
     private static double receiverPlaneDistance(

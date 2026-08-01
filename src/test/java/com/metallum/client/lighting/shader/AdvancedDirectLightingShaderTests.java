@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "50481eea9868acbb16df55adc458e1ea2bdb085b5c9bf1bb84c96e3d2e689d1d",
+            "sodium-solid-fsh", "1dc71e2ef12994139ffc2d1cb2bccc946dc6065f0ea999dd89838619271336a5",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "01454fd808c4a83d533616716b9713f4488073696787b6c3fac72f23c27722c9",
+            "sodium-cutout-fsh", "950841b43381a252d2f4a22861328a9eca39159ba3a250ecea557cf3395a9c95",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "5cea995d74faf5f284b8fdcd1e1736eff4cfb620cf947f5be527a8a4bf950912",
+            "minecraft-entity-fsh", "51ce5bbb4793ffbb40f80b4dda31711decd796ba4505814160294e1e4be5d7ca",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "2ad6d82047192b868f0cf1a8482ab661ba4c4f6b5770a9bfa16eb191f9789adc"
+            "minecraft-end-portal-fsh", "c5d53af23cf34b5983f6acdb5e0b19a9b40507132085c0e3c9124952e3600d9f"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -719,19 +719,20 @@ public final class AdvancedDirectLightingShaderTests {
                         "int atlasHitCountSigned = metallumVoxelShadow.cameraBlockAndFlags.w;")
                         && !sodiumFragment.contains("metallumVoxelVisibilityCache.hits.length()")
                         && !sodiumFragment.contains("metallumVoxelShadowRefBuffer.refs.length()")
-                        && sodiumFragment.contains("const float selfHitBias = 0.08;")
+                        && sodiumFragment.contains(
+                        "const float receiverCoincidenceEpsilon = 0.002;")
                         && !sodiumFragment.contains("0.28 / max(abs(planeDenominator)")
                         && sodiumFragment.contains(
-                        "receiverDistance <= hitDistance + selfHitBias")
+                        "receiverDistance <= hitDistance + receiverCoincidenceEpsilon")
                         && sodiumFragment.contains(
                         "* (2.0 / cacheFaceEdgeFloat) - 1.0;")
                         && sodiumFragment.contains("vec3 receiverWorldNormal =")
                         && sodiumFragment.contains(
                         "mat3(metallumVoxelShadow.worldFromView) * normal")
                         && sodiumFragment.contains(
-                        "hitDistance + selfHitBias >= receiverPlaneDistance")
+                        "hitDistance + receiverCoincidenceEpsilon >= receiverPlaneDistance")
                         && before(sodiumFragment,
-                        "hitDistance + selfHitBias >= receiverPlaneDistance",
+                        "hitDistance + receiverCoincidenceEpsilon >= receiverPlaneDistance",
                         "visibility = hitVisibility;")
                         && sodiumFragment.contains("if (visibility <= 0.0)")
                         && !sodiumFormula.contains("metallumVoxelDdaVisibilityV1("),
