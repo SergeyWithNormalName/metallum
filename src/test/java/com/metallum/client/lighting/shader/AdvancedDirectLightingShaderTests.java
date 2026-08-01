@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "1dc71e2ef12994139ffc2d1cb2bccc946dc6065f0ea999dd89838619271336a5",
+            "sodium-solid-fsh", "f2bd6023fc505d754b675c55cf369fd233c346578bf97e4cc4085d5a78788fe7",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "950841b43381a252d2f4a22861328a9eca39159ba3a250ecea557cf3395a9c95",
+            "sodium-cutout-fsh", "eaf83f02673c2dfce33b66bbc0ee15bc37d2356407591e03f28ded341be93d8f",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "51ce5bbb4793ffbb40f80b4dda31711decd796ba4505814160294e1e4be5d7ca",
+            "minecraft-entity-fsh", "dd4581fd9dd5ad9db5684b5812d221eee6389801599177e4811db84397edb953",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "c5d53af23cf34b5983f6acdb5e0b19a9b40507132085c0e3c9124952e3600d9f"
+            "minecraft-end-portal-fsh", "4dd50c1638bb6457cd61a074f62f65a42b62439e5f3a1f2e205789b5e0e7a8d7"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -96,7 +96,7 @@ public final class AdvancedDirectLightingShaderTests {
         testPowerOfTwoAddressingMatchesFloorArithmetic();
         testWaterWavePhaseIsWorldStable();
         testScaleInvariantSurfaceNormal();
-        testDominantSoftShadowFilterContinuityAndBlur();
+        testL6ShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
         testL8MaterialOpticsAndBoundedCost();
@@ -344,7 +344,7 @@ public final class AdvancedDirectLightingShaderTests {
                 "invalid derivative normals did not fail closed");
     }
 
-    private static void testDominantSoftShadowFilterContinuityAndBlur() {
+    private static void testL6ShadowFilterContinuityAndBlur() {
         double epsilon = 1.0e-8;
         for (int edge : new int[]{8, 16, 32, 64}) {
             for (int face = 0; face < 6; face++) {
@@ -429,7 +429,7 @@ public final class AdvancedDirectLightingShaderTests {
             double hardVisibility = 1.0;
             require(softVisibility > 0.45 && softVisibility < 0.55
                             && Math.abs(softVisibility - hardVisibility) > 0.45,
-                    "dominant soft-shadow A/B fixture did not visibly blur a hard "
+                    "L6 shadow filter A/B fixture did not visibly blur a hard "
                             + edge + "-texel step: soft=" + softVisibility);
         }
     }
@@ -632,9 +632,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("metallumVoxelShadow.caps.w > 4096u")
                         && countOccurrences(sodiumFormula,
                         "metallumVoxelVisibilityV1(") == 1
-                        && countOccurrences(sodiumFormula,
-                        "metallumVoxelSoftVisibilityV1(") == 1
-                        && sodiumFormula.contains("shadowRef);")
+                        && !sodiumFormula.contains("metallumVoxelSoftVisibilityV1(")
                         && !sodiumFormula.contains("shadowSlot")
                         && sodiumFormula.contains(
                         "metallumVoxelShadow.caps.w != activeLightCount")
@@ -663,8 +661,12 @@ public final class AdvancedDirectLightingShaderTests {
                         "ivec2 lowerTexel = ivec2(floor(texelPosition));")
                         && sodiumFragment.contains(
                         "float metallumVoxelSoftCachedVisibilityV1(")
-                        && sodiumFragment.contains(
+                        && !sodiumFragment.contains(
                         "float metallumVoxelSoftVisibilityV1(")
+                        && sodiumFragment.contains(
+                        "float nearestVisibility = metallumVoxelCachedVisibilityV1(")
+                        && sodiumFragment.contains(
+                        "return metallumVoxelSoftCachedVisibilityV1(")
                         && sodiumFragment.contains("vec4 bilinearWeight = vec4(")
                         && sodiumFragment.contains("vec4 triangleWeight;")
                         && sodiumFragment.contains(
@@ -684,17 +686,19 @@ public final class AdvancedDirectLightingShaderTests {
                         "float visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && sodiumFragment.contains(
                         "float visibility = nearestVisibility * nearestWeight")
-                        && sodiumFormula.contains(
-                        "float shadowScore = dot(")
-                        && sodiumFormula.contains(
-                        "vec3(0.2126, 0.7152, 0.0722)")
-                        && sodiumFormula.contains(
-                        "softShadowVisibility - softShadowHardVisibility")
+                        && !sodiumFormula.contains("softShadowLightIndex")
+                        && !sodiumFormula.contains("float shadowScore = dot(")
                         && before(sodiumFormula,
                         "for (uint candidate = 0u; candidate < countLimit; ++candidate)",
-                        "metallumVoxelSoftVisibilityV1(")
+                        "visibility = metallumVoxelVisibilityV1(")
+                        && before(sodiumFormula,
+                        "visibility = metallumVoxelVisibilityV1(",
+                        "direct += unshadowedContribution * visibility;")
+                        && before(sodiumFragment,
+                        "float nearestVisibility = metallumVoxelCachedVisibilityV1(",
+                        "return metallumVoxelSoftCachedVisibilityV1(")
                         && !sodiumFragment.contains("bool filterAlongX"),
-                "L6 dominant soft-shadow filter lost bounded full-resolution blur");
+                "L6 all-source shadow filter lost bounded full-resolution blur");
         require(sodiumFragment.contains(
                         "layout(std430, binding = 14) readonly buffer MetallumVoxelVisibilityCacheV1")
                         && sodiumFragment.contains(
@@ -1192,7 +1196,6 @@ public final class AdvancedDirectLightingShaderTests {
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelSoftCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
-                "metallumVoxelSoftVisibilityV1",
                 "MetallumVoxelProxyV1"
         }) {
             String helperCollision = materialFragment.replace(

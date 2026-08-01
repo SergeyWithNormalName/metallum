@@ -1716,76 +1716,21 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;
                 float receiverDistance = length(lightToReceiver);
-                return metallumVoxelCachedVisibilityV1(
+                float nearestVisibility = metallumVoxelCachedVisibilityV1(
                         atlasByteOffset >> 3u,
                         cacheFaceEdge,
                         lightToReceiver,
                         receiverDistance,
                         receiverWorldNormal);
-            }
-
-            float metallumVoxelSoftVisibilityV1(
-                    vec3 receiverCameraRelative,
-                    vec3 receiverWorldRelative,
-                    vec3 receiverWorldNormal,
-                    vec3 lightViewPosition,
-                    uvec2 lightStableId,
-                    uvec4 shadowRef,
-                    float nearestVisibility) {
-                uint atlasByteOffset = shadowRef.y;
-                uint atlasOffsetHigh = shadowRef.z;
-                uint cacheFaceEdge = shadowRef.w;
-                if (atlasOffsetHigh != 0u || (atlasByteOffset & 255u) != 0u
-                        || (cacheFaceEdge != 8u && cacheFaceEdge != 16u
-                        && cacheFaceEdge != 32u && cacheFaceEdge != 64u)
-                        || isnan(nearestVisibility) || isinf(nearestVisibility)
-                        || nearestVisibility < 0.0 || nearestVisibility > 1.0) {
-                    return 0.0;
-                }
-                ivec3 cameraBlock = metallumVoxelShadow.cameraBlockAndFlags.xyz;
-                if (any(lessThan(cameraBlock, ivec3(-500000000)))
-                        || any(greaterThan(cameraBlock, ivec3(500000000)))
-                        || !metallumFiniteVec3V1(receiverCameraRelative)
-                        || !metallumFiniteVec3V1(receiverWorldRelative)
-                        || !metallumFiniteVec3V1(receiverWorldNormal)
-                        || !metallumFiniteVec3V1(lightViewPosition)
-                        || !metallumFiniteVec3V1(
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz)
-                        || any(lessThan(
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
-                        || any(greaterThanEqual(
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))) {
-                    return 0.0;
-                }
-                vec3 lightCameraRelative =
-                        mat3(metallumVoxelShadow.worldFromView) * lightViewPosition;
-                vec3 lightWorldRelative =
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
-                        + lightCameraRelative;
-                if (!metallumFiniteVec3V1(lightCameraRelative)
-                        || !metallumFiniteVec3V1(lightWorldRelative)) {
-                    return 0.0;
-                }
-                bool proxyFailOpen = false;
-                if (!metallumProxyVisibilityV1(
-                        receiverCameraRelative,
-                        lightCameraRelative,
-                        lightStableId,
-                        proxyFailOpen)) {
-                    return 0.0;
-                }
-                if (proxyFailOpen) {
-                    return 0.0;
-                }
-                vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;
-                float receiverDistance = length(lightToReceiver);
+                // A resident L6 page is a discretized cubemap. Filtering must happen on
+                // every valid page, not only on a later-selected brightest source: otherwise
+                // overlapping local lights retain visibly pixelated shadow silhouettes.
                 return metallumVoxelSoftCachedVisibilityV1(
                         atlasByteOffset >> 3u,
                         cacheFaceEdge,
                         lightToReceiver,
                         receiverDistance,
-                        receiverWorldNormal,
-                        nearestVisibility);
+                        receiverWorldNormal, nearestVisibility);
             }
 
             uint metallumClusterIndexV1(vec3 viewPosition) {
@@ -1906,13 +1851,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
 
                 vec3 direct = vec3(0.0);
-                uint softShadowLightIndex = 0xffffffffu;
-                float softShadowScore = 0.0;
-                vec3 softShadowContribution = vec3(0.0);
-                float softShadowHardVisibility = 1.0;
-                vec3 softShadowLightPosition = vec3(0.0);
-                uvec2 softShadowLightStableId = uvec2(0u);
-                uvec4 softShadowRef = uvec4(0u);
                 uint evaluated = 0u;
                 for (uint candidate = 0u; candidate < countLimit; ++candidate) {
                     uint lightIndex = metallumClusterIndexBuffer.indices[
@@ -1946,7 +1884,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                             * radiance
                             * (attenuation * nDotL * 0.31830988618);
                     float visibility = 1.0;
-                    bool cachedShadowCandidate = false;
                     uvec4 shadowRef = uvec4(0u);
                     if (localShadowContractValid && !partialReceiverSurface && nDotL > 0.0
                             && any(greaterThan(radiance, vec3(0.0)))) {
@@ -1965,7 +1902,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                                     light.positionRadius.xyz,
                                     light.metadata.xy,
                                     shadowRef);
-                            cachedShadowCandidate = true;
                         } else {
                             // A descriptor failure must not extinguish its L3 light. The
                             // producer will repair the page/descriptor on a later submit.
@@ -1973,35 +1909,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         }
                     }
                     direct += unshadowedContribution * visibility;
-                    if (cachedShadowCandidate) {
-                        float shadowScore = dot(
-                                unshadowedContribution,
-                                vec3(0.2126, 0.7152, 0.0722));
-                        if (shadowScore > softShadowScore
-                                || (shadowScore == softShadowScore
-                                && lightIndex < softShadowLightIndex)) {
-                            softShadowLightIndex = lightIndex;
-                            softShadowScore = shadowScore;
-                            softShadowContribution = unshadowedContribution;
-                            softShadowHardVisibility = visibility;
-                            softShadowLightPosition = light.positionRadius.xyz;
-                            softShadowLightStableId = light.metadata.xy;
-                            softShadowRef = shadowRef;
-                        }
-                    }
                     evaluated += 1u;
-                }
-                if (softShadowLightIndex != 0xffffffffu) {
-                    float softShadowVisibility = metallumVoxelSoftVisibilityV1(
-                            receiverCameraRelative,
-                            receiverWorldRelative,
-                            receiverWorldNormal,
-                            softShadowLightPosition,
-                            softShadowLightStableId,
-                            softShadowRef,
-                            softShadowHardVisibility);
-                    direct += softShadowContribution
-                            * (softShadowVisibility - softShadowHardVisibility);
                 }
                 return direct;
             }
@@ -2891,7 +2799,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelSoftCachedVisibilityV1",
                 "metallumVoxelVisibilityV1",
-                "metallumVoxelSoftVisibilityV1",
                 "metallumProxyVisibilityV1",
                 "metallumComputeWorldPosXZV1",
                 "metallumMoistureNoiseV1",
