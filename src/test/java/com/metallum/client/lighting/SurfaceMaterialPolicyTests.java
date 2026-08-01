@@ -20,6 +20,8 @@ public final class SurfaceMaterialPolicyTests {
         testFresnelAndGgx();
         testRainExposureSnapshot();
         testWetnessAndAbsorption();
+        testComprehensiveBlockClassifications();
+        testMicroPuddlesAndMoistureNoise();
         System.out.println("PASS L8 GGX, water/glass optics, wetness, and compact material policy tests");
     }
 
@@ -36,6 +38,21 @@ public final class SurfaceMaterialPolicyTests {
         require(SurfaceMaterialPolicy.forBlock(Blocks.IRON_BLOCK.defaultBlockState())
                         == SurfaceMaterialPolicy.METAL,
                 "iron block did not resolve the metal material");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().unaffected().defaultBlockState())
+                        == SurfaceMaterialPolicy.METAL,
+                "copper block did not resolve the metal material");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().oxidized().defaultBlockState())
+                        == SurfaceMaterialPolicy.STONE,
+                "oxidized copper did not resolve the stone material");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().weathered().defaultBlockState())
+                        == SurfaceMaterialPolicy.STONE,
+                "weathered copper did not resolve the stone material");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.OAK_SAPLING.defaultBlockState())
+                        == SurfaceMaterialPolicy.POROUS,
+                "oak sapling did not resolve the porous material");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.MOSS_BLOCK.defaultBlockState())
+                        == SurfaceMaterialPolicy.POROUS,
+                "moss block did not resolve the porous material");
         require(SurfaceMaterialPolicy.forBlock(Blocks.GLASS.defaultBlockState())
                         == SurfaceMaterialPolicy.GLASS,
                 "glass block did not resolve the transmissive CPU policy");
@@ -255,6 +272,86 @@ public final class SurfaceMaterialPolicyTests {
                         && !snapshot.canRainReach(31, 100, -13)
                         && !snapshot.canRainReach(34, 100, 0),
                 "MOTION_BLOCKING rain exposure snapshot accepts a sheltered or foreign column");
+    }
+
+    private static void testComprehensiveBlockClassifications() {
+        // Copper block collections via .weathering() and .waxed()
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "unaffected copper block did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "exposed copper block did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().weathered().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "weathered copper block did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.weathering().oxidized().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "oxidized copper block did not resolve STONE");
+
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.waxed().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "waxed unaffected copper block did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.waxed().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "waxed exposed copper block did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.waxed().weathered().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "waxed weathered copper block did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BLOCK.waxed().oxidized().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "waxed oxidized copper block did not resolve STONE");
+
+        // Cut copper collection
+        require(SurfaceMaterialPolicy.forBlock(Blocks.CUT_COPPER.weathering().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "unaffected cut copper did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.CUT_COPPER.weathering().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "exposed cut copper did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.CUT_COPPER.weathering().weathered().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "weathered cut copper did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.CUT_COPPER.weathering().oxidized().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "oxidized cut copper did not resolve STONE");
+
+        // Foliage, Moss, Snow
+        require(SurfaceMaterialPolicy.forBlock(Blocks.SPRUCE_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "spruce leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.BIRCH_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "birch leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.JUNGLE_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "jungle leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.ACACIA_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "acacia leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.DARK_OAK_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "dark oak leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.AZALEA_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "azalea leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.FLOWERING_AZALEA_LEAVES.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "flowering azalea leaves did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.MOSS_CARPET.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "moss carpet did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.SNOW.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "snow layer did not resolve POROUS");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.POWDER_SNOW.defaultBlockState()) == SurfaceMaterialPolicy.POROUS,
+                "powder snow did not resolve POROUS");
+
+        // Assertions for Copper Grates, Bulbs, Doors
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_GRATE.weathering().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "unaffected copper grate did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_GRATE.weathering().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "exposed copper grate did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BULB.weathering().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "unaffected copper bulb did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_BULB.weathering().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "exposed copper bulb did not resolve STONE");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_DOOR.weathering().unaffected().defaultBlockState()) == SurfaceMaterialPolicy.METAL,
+                "unaffected copper door did not resolve METAL");
+        require(SurfaceMaterialPolicy.forBlock(Blocks.COPPER_DOOR.weathering().exposed().defaultBlockState()) == SurfaceMaterialPolicy.STONE,
+                "exposed copper door did not resolve STONE");
+    }
+
+    private static void testMicroPuddlesAndMoistureNoise() {
+        // Validate material descriptors wet vs dry properties
+        require(SurfaceMaterialPolicy.STONE.wetRoughnessTarget() == 0.28f, "stone wet roughness target mismatch");
+        require(SurfaceMaterialPolicy.POROUS.wetRoughnessTarget() == 0.72f, "porous wet roughness target mismatch");
+        require(SurfaceMaterialPolicy.WOOD.wetRoughnessTarget() == 0.42f, "wood wet roughness target mismatch");
+        require(SurfaceMaterialPolicy.METAL.wetRoughnessTarget() == 0.14f, "metal wet roughness target mismatch");
+
+        // Verify wetness bounds
+        float dry = SurfaceMaterialPolicy.wetRoughness(SurfaceMaterialPolicy.STONE, 0.0f, 0.5f);
+        float wet = SurfaceMaterialPolicy.wetRoughness(SurfaceMaterialPolicy.STONE, 1.0f, 0.5f);
+        require(dry == 0.70f && wet == 0.28f, "wet roughness calculation error");
     }
 
     private static boolean close(final float actual, final float expected) {

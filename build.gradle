@@ -188,6 +188,14 @@ tasks.register("surfaceMaterialUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.SurfaceMaterialPolicyTests")
 }
 
+tasks.register("advancedDirectLightingShaderUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates Advanced direct lighting shader patcher and test contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.shader.AdvancedDirectLightingShaderTests")
+}
+
 tasks.register("shadowValueValidation", JavaExec) {
 	group = "verification"
 	description = "Validates L4 environment, cascade stability, preset and shadow ABI contracts"
@@ -1162,6 +1170,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("materialContractUnitTest"))
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("surfaceMaterialUnitTest"))
+	dependsOn(tasks.named("advancedDirectLightingShaderUnitTest"))
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))
 	dependsOn(tasks.named("localVoxelShadowUnitTest"))

@@ -161,8 +161,8 @@ public final class AdvancedLightRegistryTests {
         LightTemplate clusterLight = MinecraftLightPolicy.block(cluster, 0, 0, 0);
         require(clusterLight != null
                         && MinecraftLightPolicy.effectiveEmission(cluster) == 5
-                        && close(clusterLight.red(), 0.48F)
-                        && close(clusterLight.green(), 0.12F)
+                        && close(clusterLight.red(), 0.52F)
+                        && close(clusterLight.green(), 0.30F)
                         && close(clusterLight.blue(), 1.0F),
                 "amethyst surface HDR tuning must not change its violet direct light");
 
@@ -184,8 +184,8 @@ public final class AdvancedLightRegistryTests {
                 "unknown mod emitter did not receive the neutral compatibility fallback");
         float[] netherPortal = MinecraftLightPolicy.linearColorForIdentifier(
                 BuiltInRegistries.BLOCK.getKey(Blocks.NETHER_PORTAL));
-        require(close(netherPortal[0], 0.48F)
-                        && close(netherPortal[1], 0.12F)
+        require(close(netherPortal[0], 0.58F)
+                        && close(netherPortal[1], 0.025F)
                         && close(netherPortal[2], 1.0F),
                 "nether portal block does not emit a purple hue");
         require(MinecraftLightPolicy.priorityForEmission(1)

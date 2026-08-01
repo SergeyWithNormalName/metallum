@@ -205,8 +205,47 @@ public final class MinecraftLightPolicy {
         if (path.contains("soul_")) {
             return new float[]{0.035F, 0.34F, 1.0F};
         }
-        if (path.equals("redstone_torch") || path.equals("redstone_wall_torch")) {
-            return new float[]{1.0F, 0.012F, 0.003F};
+        if (path.contains("redstone_lamp")) {
+            return new float[]{1.00F, 0.34F, 0.045F};
+        }
+        if (path.equals("redstone_torch") || path.equals("redstone_wall_torch") || path.contains("redstone_ore")) {
+            return new float[]{1.00F, 0.012F, 0.003F};
+        }
+        if (path.contains("copper_bulb")) {
+            return new float[]{1.00F, 0.42F, 0.075F};
+        }
+        if (path.contains("beacon")) {
+            return new float[]{0.72F, 0.88F, 1.00F};
+        }
+        if (path.contains("sea_pickle")) {
+            return new float[]{0.38F, 1.00F, 0.20F};
+        }
+        if (path.contains("cave_vines") || path.contains("glow_berries")) {
+            return new float[]{1.00F, 0.58F, 0.055F};
+        }
+        if (path.contains("ender_chest") || path.contains("end_portal") || path.contains("end_gateway")) {
+            return new float[]{0.045F, 0.82F, 0.42F};
+        }
+        if (path.contains("crying_obsidian") || path.contains("respawn_anchor")) {
+            return new float[]{0.35F, 0.025F, 0.90F};
+        }
+        if (path.contains("amethyst")) {
+            return new float[]{0.52F, 0.30F, 1.00F};
+        }
+        if (path.contains("portal")) {
+            return new float[]{0.58F, 0.025F, 1.00F};
+        }
+        if (path.contains("glowstone")) {
+            return new float[]{1.00F, 0.58F, 0.13F};
+        }
+        if (path.contains("shroomlight")) {
+            return new float[]{1.00F, 0.22F, 0.045F};
+        }
+        if (path.contains("furnace") || path.contains("smoker")) {
+            return new float[]{1.00F, 0.13F, 0.008F};
+        }
+        if (path.contains("candle")) {
+            return new float[]{1.00F, 0.33F, 0.055F};
         }
         if (path.contains("ochre_froglight")) {
             return new float[]{1.0F, 0.48F, 0.09F};
@@ -232,12 +271,6 @@ public final class MinecraftLightPolicy {
         if (path.contains("sculk")) {
             return new float[]{0.006F, 0.28F, 0.52F};
         }
-        if (path.contains("amethyst")) {
-            return new float[]{0.48F, 0.12F, 1.0F};
-        }
-        if (path.contains("portal")) {
-            return new float[]{0.48F, 0.12F, 1.0F};
-        }
         return new float[]{1.0F, 0.26F, 0.035F};
     }
 
@@ -245,17 +278,29 @@ public final class MinecraftLightPolicy {
         if (path.contains("lightning_bolt")) {
             return new EntityProfile(16.0F, 0.63F, 0.78F, 1.0F, 4.0F, 512);
         }
-        if (path.contains("fireball") || path.contains("dragon_fireball")) {
+        if (path.contains("dragon_fireball")) {
+            return new EntityProfile(12.0F, 0.50F, 0.035F, 1.00F, 3.2F, 448);
+        }
+        if (path.contains("fireball")) {
             return new EntityProfile(12.0F, 1.0F, 0.08F, 0.004F, 3.2F, 448);
+        }
+        if (path.contains("end_crystal")) {
+            return new EntityProfile(10.0F, 0.62F, 0.20F, 1.00F, 2.5F, 400);
         }
         if (path.contains("blaze")) {
             return new EntityProfile(10.0F, 1.0F, 0.18F, 0.012F, 2.4F, 384);
+        }
+        if (path.contains("warden")) {
+            return new EntityProfile(8.0F, 0.005F, 0.38F, 0.68F, 1.5F, 336);
         }
         if (path.contains("magma_cube")) {
             return new EntityProfile(8.0F, 1.0F, 0.035F, 0.002F, 1.7F, 352);
         }
         if (path.contains("glow_squid")) {
             return new EntityProfile(7.0F, 0.018F, 0.53F, 1.0F, 1.0F, 320);
+        }
+        if (path.contains("shulker_bullet")) {
+            return new EntityProfile(6.0F, 0.48F, 0.16F, 1.00F, 1.0F, 288);
         }
         if (path.contains("experience_orb")) {
             return new EntityProfile(6.0F, 0.18F, 1.0F, 0.09F, 0.85F, 288);

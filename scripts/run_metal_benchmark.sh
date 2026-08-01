@@ -17,9 +17,9 @@ ARTIFACT_RESOURCES="build/resources/main"
 ARTIFACT_NATIVE="build/generated/metallum/natives/macos/libmetallum.dylib"
 
 MONITOR_NAME="Built-in Retina Display"
-WIDTH=3024
-HEIGHT=1964
-REFRESH_HZ=120
+WIDTH=${METALLUM_L2_WIDTH:-3024}
+HEIGHT=${METALLUM_L2_HEIGHT:-1964}
+REFRESH_HZ=${METALLUM_L2_REFRESH_HZ:-120}
 WARMUP_FRAMES=${METALLUM_L2_WARMUP_FRAMES:-1800}
 MEASURE_FRAMES=${METALLUM_L2_MEASURE_FRAMES:-3000}
 TIMING_DETAIL=${METALLUM_L2_TIMING_DETAIL:-0}
@@ -62,8 +62,8 @@ usage() {
 Usage: scripts/run_metal_benchmark.sh [options]
 
 Runs Minecraft without GUI automation or screenshots, moves it to the built-in
-Retina panel at 3024x1964 fullscreen, warms up for 1800 presented frames, and
-measures 3000 frames into a unique ignored JSONL report.
+Retina panel at 3024x1964 fullscreen by default, warms up for 1800 presented
+frames, and measures 3000 frames into a unique ignored JSONL report.
 
 Options:
   --route FILE       tracked deterministic route specification
@@ -86,6 +86,8 @@ Options:
   -h, --help         show this help
 
 L2 diagnostic environment:
+  METALLUM_L2_WIDTH / METALLUM_L2_HEIGHT / METALLUM_L2_REFRESH_HZ
+      override the exact fullscreen video mode (default: 3024x1964@120)
   METALLUM_L2_WARMUP_FRAMES / METALLUM_L2_MEASURE_FRAMES
       override the 300-frame-aligned run lengths
   METALLUM_L2_TIMING_DETAIL=1
@@ -181,6 +183,12 @@ esac
 case "$WARMUP_FRAMES:$MEASURE_FRAMES:$TIMING_DETAIL:$METAL_VALIDATION" in
     *[!0-9:]*|::*|:*:|*::* ) die "L2 frame/detail/validation overrides must be non-negative integers" ;;
 esac
+case "$WIDTH" in ''|*[!0-9]*) die "METALLUM_L2_WIDTH must be a positive integer" ;; esac
+case "$HEIGHT" in ''|*[!0-9]*) die "METALLUM_L2_HEIGHT must be a positive integer" ;; esac
+case "$REFRESH_HZ" in ''|*[!0-9]*) die "METALLUM_L2_REFRESH_HZ must be a positive integer" ;; esac
+[ "$WIDTH" -gt 0 ] || die "METALLUM_L2_WIDTH must be a positive integer"
+[ "$HEIGHT" -gt 0 ] || die "METALLUM_L2_HEIGHT must be a positive integer"
+[ "$REFRESH_HZ" -gt 0 ] || die "METALLUM_L2_REFRESH_HZ must be a positive integer"
 [ "$WARMUP_FRAMES" -ge 300 ] && [ $((WARMUP_FRAMES % 300)) -eq 0 ] \
     || die "METALLUM_L2_WARMUP_FRAMES must be a multiple of 300 and at least 300"
 [ "$MEASURE_FRAMES" -ge 300 ] && [ $((MEASURE_FRAMES % 300)) -eq 0 ] \

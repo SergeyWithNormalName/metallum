@@ -77,16 +77,17 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "27ce4249c92ea5f96fb7711e5d9f633f87c7682d0cf06c6b39afe4a6a54d52fb",
+            "sodium-solid-fsh", "a97d4111d45d48d408055ab13847b8c38bda691ec780720ae32d325417a3adf4",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "019519a439f65d877032907eab56f2d4e70102783397705d1a369a9ed01f12b6",
+            "sodium-cutout-fsh", "2116441b86582ccb7b3811d45d22e410d84ab86a2358aa4926b2e18b4d97795f",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "5a9972d944b4bff521acabcb0a564828f7587c3a7aac46c51af0cf7b0c3ca462",
+            "minecraft-entity-fsh", "0f7cd5589e28a5d2c6c025f00602596a86fba7bd400d69a54548898147873a63",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "030cdcdd1351efd52a7db4cd579790a233faa3e8be94c387c02f6a330864c51a"
+            "minecraft-end-portal-fsh", "a762e9c6f6a25348d7f6fd6c8f646e1ef2bc0ac0b97f9c25a00f7946967b0e97"
     );
 
-    private AdvancedDirectLightingShaderTests() {
+    public static void main(final String[] args) throws IOException {
+        runAll();
     }
 
     public static void runAll() throws IOException {
@@ -737,9 +738,18 @@ public final class AdvancedDirectLightingShaderTests {
                 "L6 direct lighting is not sampling variable resident-atlas pages safely");
         require(sodiumFragment.contains("bool metallumVoxelPartialReceiverSurfaceV1(")
                         && sodiumFragment.contains("float surfaceFraction = fract(surfaceCoordinate);")
+                        && sodiumFragment.contains("#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1")
+                        && !entityFragment.contains("#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1")
                         && sodiumFormula.contains(
                         "localShadowContractValid && !partialReceiverSurface && nDotL > 0.0"),
                 "L6 did not fail open on quantized partial-block receiver surfaces");
+        require(entityFormula.contains(
+                        "localShadowContractValid && !partialReceiverSurface && nDotL > 0.0")
+                        && entityFragment.contains(
+                        "#ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1")
+                        && !entityFragment.contains(
+                        "#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1"),
+                "entity receivers can still be mistaken for quantized partial terrain surfaces");
         require(sodiumFormula.contains("if (shadowState == 0u)")
                         && sodiumFormula.contains("visibility = 1.0;")
                         && sodiumFormula.contains(
@@ -936,7 +946,7 @@ public final class AdvancedDirectLightingShaderTests {
                         "material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.82")
                         && sodiumFragment.contains(
                         "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1")
-                        && sodiumFragment.contains("? 0.58 : 1.0;")
+                        && sodiumFragment.contains("? 0.92 : 1.0;")
                         && sodiumFragment.contains(
                         "vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;")
                         && sodiumFragment.contains(
@@ -951,11 +961,10 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "ivec2 wrapped = cell & ivec2(periodMask);")
                         && sodiumFragment.contains("vec2 waterWorldPosition = vec2(wrappedCameraBlock)")
-                        && sodiumFragment.contains(
-                        "waterWorldPosition.yx * 0.125 + vec2(19.0, 73.0), 31")
-                        && sodiumFragment.contains("vec2 wavePhase = mod(waveTurns, vec2(256.0))")
-                        && sodiumFragment.contains("float waveX = sin(")
-                        && sodiumFragment.contains("float waveZ = cos("),
+                        && sodiumFragment.contains("vec2 domainWarp = vec2(")
+                        && sodiumFragment.contains("float microNoise1 = metallumWaterValueNoiseV1(")
+                        && sodiumFragment.contains("float wave1 = sin(")
+                        && sodiumFragment.contains("float wave2 = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
                         && !sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1")
@@ -983,6 +992,19 @@ public final class AdvancedDirectLightingShaderTests {
                         && !sodiumFragment.toLowerCase().contains("raymarch")
                         && !sodiumFragment.contains("SSR"),
                 "L8 lost its mandatory stable environment fallback or introduced SSR/probe cost");
+
+        require(sodiumFragment.contains("vec2 metallumComputeWorldPosXZV1(vec3 viewPosition)")
+                        && sodiumFragment.contains("float metallumMoistureNoiseV1(vec2 worldPos)")
+                        && sodiumFragment.contains("float puddleMask = kind != METALLUM_SURFACE_POROUS_V1")
+                        && sodiumFragment.contains("texturedWetRoughness = mix(texturedWetRoughness, 0.055, puddleMask)"),
+                "R2 micro-puddles or world-space moisture noise is missing");
+        require(sodiumFragment.contains("vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness)")
+                        && sodiumFragment.contains("mix(direction, normal, roughness * 0.55)")
+                        && sodiumFragment.contains("float p = clamp(2.0 / (safeRoughness * safeRoughness) - 2.0, 2.0, 384.0)")
+                        && sodiumFragment.contains("mix(sharpSky, 0.49, roughness * 0.80)")
+                        && sodiumFragment.contains("reflectedEnvironment = metallumEnvironmentLookupV1(")
+                        && sodiumFragment.contains("reflectedDirection, normal, material.roughness)"),
+                "R3 roughness-based environment reflection blurring overload is missing");
 
         require(sodiumFragment.contains("bool metallumTaggedL8Surface")
                         && sodiumFragment.contains("bool metallumRainyL8Surface")

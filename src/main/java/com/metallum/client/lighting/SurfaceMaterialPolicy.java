@@ -3,7 +3,9 @@ package com.metallum.client.lighting;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.BushBlock;
 import net.minecraft.world.level.block.LeavesBlock;
+import net.minecraft.world.level.block.SaplingBlock;
 import net.minecraft.world.level.block.SoundType;
+import net.minecraft.world.level.block.WeatheringCopper;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Objects;
@@ -120,9 +122,14 @@ public final class SurfaceMaterialPolicy {
             return DIELECTRIC;
         }
         SoundType sound = state.getSoundType();
+        if (isPatinatedCopper(state, sound)) {
+            return STONE;
+        }
         if (sound == SoundType.METAL
                 || sound == SoundType.IRON
                 || sound == SoundType.COPPER
+                || sound == SoundType.COPPER_GRATE
+                || sound == SoundType.COPPER_BULB
                 || sound == SoundType.NETHERITE_BLOCK
                 || sound == SoundType.ANVIL
                 || sound == SoundType.CHAIN
@@ -268,9 +275,32 @@ public final class SurfaceMaterialPolicy {
         return (float) Math.exp(-absorption * distance);
     }
 
+    private static boolean isPatinatedCopper(final BlockState state, final SoundType sound) {
+        if (sound != SoundType.COPPER
+                && sound != SoundType.COPPER_GRATE
+                && sound != SoundType.COPPER_BULB) {
+            return false;
+        }
+        if (state.getBlock() instanceof WeatheringCopper weathering) {
+            WeatheringCopper.WeatherState age = weathering.getAge();
+            if (age == WeatheringCopper.WeatherState.OXIDIZED
+                    || age == WeatheringCopper.WeatherState.WEATHERED
+                    || age == WeatheringCopper.WeatherState.EXPOSED) {
+                return true;
+            }
+        }
+        String descriptionId = state.getBlock().getDescriptionId();
+        if (descriptionId != null) {
+            String id = descriptionId.toLowerCase(java.util.Locale.ROOT);
+            return id.contains("oxidized") || id.contains("weathered") || id.contains("exposed");
+        }
+        return false;
+    }
+
     private static boolean isPorous(final BlockState state, final SoundType sound) {
         return state.getBlock() instanceof LeavesBlock
                 || state.is(BlockTags.LEAVES)
+                || state.getBlock() instanceof SaplingBlock
                 || state.is(BlockTags.WOOL)
                 || state.is(BlockTags.WOOL_CARPETS)
                 || state.is(BlockTags.FLOWERS)
@@ -286,6 +316,10 @@ public final class SurfaceMaterialPolicy {
                 || sound == SoundType.NETHER_SPROUTS
                 || sound == SoundType.MOSS
                 || sound == SoundType.MOSS_CARPET
+                || sound == SoundType.GLOW_LICHEN
+                || sound == SoundType.HANGING_ROOTS
+                || sound == SoundType.SPORE_BLOSSOM
+                || sound == SoundType.CAVE_VINES
                 || sound == SoundType.AZALEA_LEAVES
                 || sound == SoundType.CHERRY_LEAVES;
     }

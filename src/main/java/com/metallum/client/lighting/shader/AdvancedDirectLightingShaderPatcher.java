@@ -229,6 +229,48 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 return scaledNormal * inversesqrt(lengthSquared);
             }
+
+            float metallumWaterHashV1(ivec2 cell, int periodMask) {
+                ivec2 wrapped = cell & ivec2(periodMask);
+                uint hash = uint(wrapped.x) * 0x9e3779b9u
+                        + uint(wrapped.y) * 0x85ebca6bu;
+                hash = (hash ^ (hash >> 16u)) * 0x7feb352du;
+                hash = (hash ^ (hash >> 15u)) * 0x846ca68bu;
+                return float((hash ^ (hash >> 16u)) & 0x00ffffffu)
+                        * 0.000000059604644775390625;
+            }
+
+            float metallumWaterValueNoiseV1(vec2 position, int periodMask) {
+                ivec2 cell = ivec2(floor(position));
+                vec2 fraction = fract(position);
+                vec2 fade = fraction * fraction * (3.0 - 2.0 * fraction);
+                float a = metallumWaterHashV1(cell, periodMask);
+                float b = metallumWaterHashV1(cell + ivec2(1, 0), periodMask);
+                float c = metallumWaterHashV1(cell + ivec2(0, 1), periodMask);
+                float d = metallumWaterHashV1(cell + ivec2(1, 1), periodMask);
+                return mix(mix(a, b, fade.x), mix(c, d, fade.x), fade.y);
+            }
+
+            vec2 metallumComputeWorldPosXZV1(vec3 viewPosition) {
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                ivec2 wrappedCameraBlock =
+                        metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
+                vec2 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xz
+                        + cameraRelativePosition.xz;
+                return vec2(wrappedCameraBlock) + cameraBlockRelativePosition;
+            }
+
+            float metallumMoistureNoiseV1(vec2 worldPos) {
+                float n1 = metallumWaterValueNoiseV1(
+                        worldPos * 0.085, 255);
+                float n2 = metallumWaterValueNoiseV1(
+                        worldPos * 0.22 + vec2(17.3, 31.7), 255);
+                float n3 = metallumWaterValueNoiseV1(
+                        worldPos * 0.58 + vec2(43.1, 19.4), 255);
+                return clamp(n1 * 0.50 + n2 * 0.30 + n3 * 0.20, 0.0, 1.0);
+            }
             """).append("""
             const uint METALLUM_SURFACE_DIELECTRIC_V1 = 0u;
             const uint METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 = 1u;
@@ -258,7 +300,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 normal,
                     float rainFacing,
                     float skyVisibility,
-                    bool terrainSurface) {
+                    bool terrainSurface,
+                    vec3 viewPosition) {
                 uint emissionCode = (packedMaterial >> 3u) & 15u;
                 uint baseMaterial = packedMaterial & 7u;
                 bool specialSurface = emissionCode == 0u
@@ -282,7 +325,7 @@ public final class AdvancedDirectLightingShaderPatcher {
 
                 MetallumSurfaceMaterialV1 material;
                 material.kind = kind;
-                material.roughness = kind == METALLUM_SURFACE_WATER_V1 ? 0.075
+                material.roughness = kind == METALLUM_SURFACE_WATER_V1 ? 0.055
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.10
                         : kind == METALLUM_SURFACE_METAL_V1 ? 0.22
                         : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.24
@@ -340,9 +383,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                         wetRoughnessTarget - centeredLuminance * roughnessAmplitude,
                         0.08,
                         0.95);
+                if (material.wetness > 0.0) {
+                    vec2 worldPos = metallumComputeWorldPosXZV1(viewPosition);
+                    float moistureNoise = metallumMoistureNoiseV1(worldPos);
+                    material.wetness = clamp(material.wetness * (0.60 + 0.80 * moistureNoise), 0.0, 1.0);
+                    float puddleThreshold = mix(0.68, 0.38, material.wetness);
+                    float puddleMask = kind != METALLUM_SURFACE_POROUS_V1
+                            ? smoothstep(puddleThreshold - 0.10, puddleThreshold + 0.10, moistureNoise) * smoothstep(0.05, 0.35, material.wetness)
+                            : 0.0;
+                    texturedWetRoughness = mix(texturedWetRoughness, 0.055, puddleMask);
+                }
                 material.roughness = clamp(mix(
                         material.roughness, texturedWetRoughness, material.wetness),
-                        0.08,
+                        0.045,
                         0.95);
                 material.specularScale = mix(
                         1.0, wetSpecularTarget, material.wetness);
@@ -359,27 +412,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 dielectric = vec3(material.dielectricF0);
                 dielectric = mix(dielectric, vec3(0.025), material.wetness);
                 return clamp(mix(dielectric, albedo, material.metalness), vec3(0.0), vec3(0.98));
-            }
-
-            float metallumWaterHashV1(ivec2 cell, int periodMask) {
-                ivec2 wrapped = cell & ivec2(periodMask);
-                uint hash = uint(wrapped.x) * 0x9e3779b9u
-                        + uint(wrapped.y) * 0x85ebca6bu;
-                hash = (hash ^ (hash >> 16u)) * 0x7feb352du;
-                hash = (hash ^ (hash >> 15u)) * 0x846ca68bu;
-                return float((hash ^ (hash >> 16u)) & 0x00ffffffu)
-                        * 0.000000059604644775390625;
-            }
-
-            float metallumWaterValueNoiseV1(vec2 position, int periodMask) {
-                ivec2 cell = ivec2(floor(position));
-                vec2 fraction = fract(position);
-                vec2 fade = fraction * fraction * (3.0 - 2.0 * fraction);
-                float a = metallumWaterHashV1(cell, periodMask);
-                float b = metallumWaterHashV1(cell + ivec2(1, 0), periodMask);
-                float c = metallumWaterHashV1(cell + ivec2(0, 1), periodMask);
-                float d = metallumWaterHashV1(cell + ivec2(1, 1), periodMask);
-                return mix(mix(a, b, fade.x), mix(c, d, fade.x), fade.y);
             }
 
             vec3 metallumWaterNormalV1(
@@ -400,33 +432,48 @@ public final class AdvancedDirectLightingShaderPatcher {
                         ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
                 ivec2 wrappedCameraBlock =
                         metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
-                ivec2 waveXTurns = ivec2(31, 47);
-                ivec2 waveZTurns = ivec2(-53, 25);
-                int waveXBlockTurns = (wrappedCameraBlock.x * waveXTurns.x
-                        + wrappedCameraBlock.y * waveXTurns.y) & 255;
-                int waveZBlockTurns = (wrappedCameraBlock.x * waveZTurns.x
-                        + wrappedCameraBlock.y * waveZTurns.y) & 255;
                 vec2 cameraBlockRelativePosition =
                         metallumVoxelShadow.cameraFractionAndMinTrans.xz
                         + cameraRelativePosition.xz;
                 vec2 waterWorldPosition = vec2(wrappedCameraBlock)
                         + cameraBlockRelativePosition;
-                vec2 waveTurns = vec2(
-                        float(waveXBlockTurns)
-                                + dot(cameraBlockRelativePosition, vec2(waveXTurns)),
-                        float(waveZBlockTurns)
-                                + dot(cameraBlockRelativePosition, vec2(waveZTurns)));
-                vec2 wavePhase = mod(waveTurns, vec2(256.0))
-                        * 0.02454369260617026;
-                float waveNoise = metallumWaterValueNoiseV1(
-                        waterWorldPosition.yx * 0.125 + vec2(19.0, 73.0), 31);
-                float noiseCentered = waveNoise - 0.5;
-                float waveX = sin(wavePhase.x + noiseCentered * 1.70 + time * 1.35);
-                float waveZ = cos(wavePhase.y - noiseCentered * 1.35 - time * 1.08);
-                float waveAmplitude = mix(0.065, 0.090,
-                        clamp(0.50 + noiseCentered * 0.80, 0.0, 1.0));
+
+                float macroNoise1 = metallumWaterValueNoiseV1(
+                        waterWorldPosition * 0.0625 + vec2(time * 0.08, -time * 0.06), 255);
+                float macroNoise2 = metallumWaterValueNoiseV1(
+                        waterWorldPosition.yx * 0.0625 + vec2(-time * 0.07, time * 0.09) + vec2(17.3, 31.7), 255);
+                vec2 domainWarp = vec2(macroNoise1 - 0.5, macroNoise2 - 0.5) * 3.2;
+                vec2 warpedPos = waterWorldPosition + domainWarp;
+
+                float phase1 = dot(warpedPos, vec2(0.7071, 0.7071)) * 0.28 + time * 1.25;
+                float phase2 = dot(warpedPos, vec2(-0.5000, 0.8660)) * 0.42 - time * 1.05;
+                float phase3 = dot(warpedPos, vec2(0.9239, -0.3827)) * 0.65 + time * 1.60;
+
+                float medNoise = metallumWaterValueNoiseV1(
+                        warpedPos * 0.25 + vec2(-time * 0.20, time * 0.15), 255);
+                float medCentered = medNoise - 0.5;
+
+                float wave1 = sin(phase1 + medCentered * 1.8);
+                float wave2 = cos(phase2 - medCentered * 1.4);
+                float wave3 = sin(phase3 + medCentered * 1.2);
+
+                float slopeX = wave1 * 0.7071 - wave2 * 0.5000 + wave3 * 0.9239;
+                float slopeZ = wave1 * 0.7071 + wave2 * 0.8660 - wave3 * 0.3827;
+
+                float microNoise1 = metallumWaterValueNoiseV1(
+                        warpedPos * 0.65 + vec2(time * 0.45, time * 0.35), 255);
+                float microNoise2 = metallumWaterValueNoiseV1(
+                        warpedPos.yx * 0.65 + vec2(-time * 0.40, time * 0.50) + vec2(43.1, 19.4), 255);
+                vec2 microSlope = vec2(microNoise1 - 0.5, microNoise2 - 0.5) * 0.65;
+
+                float localAmplitude = mix(0.055, 0.095, macroNoise1);
+                vec2 totalSlope = (vec2(slopeX, slopeZ) * 0.60 + microSlope) * localAmplitude;
+                float crest = clamp((wave1 * 0.35 + wave2 * 0.30 + wave3 * 0.30 + medCentered * 0.40 - 0.28) * 3.2, 0.0, 1.0);
+
                 worldNormal = metallumSafeNormalV1(
-                        worldNormal + vec3(waveX, 0.0, waveZ) * waveAmplitude);
+                        worldNormal + vec3(totalSlope.x, 0.0, totalSlope.y));
+                worldNormal = metallumSafeNormalV1(
+                        mix(worldNormal, vec3(0.0, 1.0, 0.0), crest * 0.07));
                 vec3 perturbed = metallumSafeNormalV1(transpose(worldFromView) * worldNormal);
                 return dot(perturbed, perturbed) == 0.0 ? normal : perturbed;
             }
@@ -479,20 +526,33 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * (distribution * geometry * nDotL / max(4.0 * nDotV * nDotL, 0.0001));
             }
 
-            vec3 metallumEnvironmentLookupV1(vec3 direction) {
+            vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness) {
+                vec3 scattered = metallumSafeNormalV1(mix(direction, normal, roughness * 0.55));
+                if (dot(scattered, scattered) == 0.0) {
+                    scattered = direction;
+                }
                 vec3 up = normalize(metallumEnvironment.worldUpAndMedium.xyz);
-                float hemisphere = clamp(dot(direction, up) * 0.5 + 0.5, 0.0, 1.0);
+                float hemisphere = clamp(dot(scattered, up) * 0.5 + 0.5, 0.0, 1.0);
                 vec3 ambient = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
                 vec3 sky = max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0));
+                float sharpSky = mix(0.12, 0.86, hemisphere);
+                float skyFactor = mix(sharpSky, 0.49, roughness * 0.80);
                 vec3 environment = ambient * 0.31830988618
-                        + sky * mix(0.12, 0.86, hemisphere);
+                        + sky * skyFactor;
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
                 if (dot(toLight, toLight) > 0.0) {
-                    float celestial = pow(max(dot(direction, toLight), 0.0), 384.0);
+                    float safeRoughness = max(roughness, 0.045);
+                    float p = clamp(2.0 / (safeRoughness * safeRoughness) - 2.0, 2.0, 384.0);
+                    float norm = (p + 2.0) / 386.0;
+                    float celestial = pow(max(dot(scattered, toLight), 0.0), p) * norm;
                     environment += max(
                             metallumEnvironment.directionalRadiance.rgb, vec3(0.0)) * celestial;
                 }
                 return environment;
+            }
+
+            vec3 metallumEnvironmentLookupV1(vec3 direction) {
+                return metallumEnvironmentLookupV1(direction, vec3(0.0), 0.05);
             }
 
             vec3 metallumTransmissionV1(
@@ -512,6 +572,17 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 float distance = material.opticalDepth / nDotV;
                 vec3 transmittance = exp(-material.absorption * distance);
+                if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    ivec2 wrappedCameraBlock =
+                            metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
+                    vec2 waterWorldPos = vec2(wrappedCameraBlock)
+                            + metallumVoxelShadow.cameraFractionAndMinTrans.xz;
+                    float time = metallumEnvironment.materialContract.x == 1u
+                            ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
+                    float caustic = metallumWaterValueNoiseV1(
+                            waterWorldPos * 0.40 + vec2(time * 0.35, -time * 0.25), 255);
+                    transmittance *= (1.0 + (caustic - 0.40) * 0.20);
+                }
                 vec3 refractedEnvironment = metallumEnvironmentLookupV1(
                         metallumSafeNormalV1(refracted));
                 return mix(albedo, refractedEnvironment * transmittance,
@@ -655,10 +726,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float nDotV = max(dot(normal, viewDirection), 0.0);
                 vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
                 vec3 reflectedDirection = reflect(-viewDirection, normal);
-                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(reflectedDirection);
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
+                        reflectedDirection, normal, material.roughness);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
-                        ? 0.58 : 1.0;
+                        ? 0.92 : 1.0;
                 vec3 result = reflectedEnvironment * environmentFresnel
                         * environmentVisibility * (1.0 - material.roughness * 0.48)
                         * environmentStyleWeight;
@@ -1803,6 +1875,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 receiverCameraRelative = vec3(0.0);
                 vec3 receiverWorldRelative = vec3(0.0);
                 vec3 receiverWorldNormal = vec3(0.0);
+                // Only Sodium terrain has L5's quantized partial-block receiver geometry.
+                // Entity vertices are free-form model surfaces, so treating any fractional
+                // coordinate as a partial block would skip their L6 occlusion entirely.
                 bool partialReceiverSurface = false;
                 if (localShadowContractValid) {
                     receiverCameraRelative =
@@ -1816,10 +1891,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                             || !metallumFiniteVec3V1(receiverWorldRelative)
                             || !metallumFiniteVec3V1(receiverWorldNormal)) {
                         localShadowContractValid = false;
-                    } else {
+                    }
+            #ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
+                    else {
                         partialReceiverSurface = metallumVoxelPartialReceiverSurfaceV1(
                                 receiverWorldRelative, receiverWorldNormal);
                     }
+            #endif
                 }
 
                 vec3 direct = vec3(0.0);
@@ -2064,7 +2142,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                metallumResolveSurfaceMaterialV1(\n"
                     + "                        metallumMaterial, metallumPreparedAlbedo,\n"
                     + "                        metallumDirectNormal, metallumRainFacing,\n"
-                    + "                        metallumSkyVisibility, true);\n"
+                    + "                        metallumSkyVisibility, true,\n"
+                    + "                        metallumLightingPosition);\n"
                     + "        bool metallumIntrinsicMaterialOptics =\n"
                     + "                metallumSurfaceMaterial.kind == METALLUM_SURFACE_WATER_V1\n"
                     + "                || metallumSurfaceMaterial.kind == METALLUM_SURFACE_GLASS_V1\n"
@@ -2111,18 +2190,18 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                }\n"
                     + "            }\n"
                     + "            float metallumDiffuseWeight =\n"
-                    + "                    (1.0 - metallumSurfaceMaterial.metalness)\n"
+                    + "                    (1.0 - metallumSurfaceMaterial.metalness * 0.52)\n"
                     + "                    * (1.0 - metallumSurfaceMaterial.transmission);\n"
                     + "            metallumPreparedAlbedo *= metallumDiffuseWeight;\n"
                     + "            color.rgb += metallumMaterialOpticsWeight\n"
                     + "                    * metallumEvaluateMaterialEnvironmentV1(\n"
                     + "                    metallumLightingPosition, metallumDirectNormal,\n"
-                    + "                    metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "                    metallumVanillaAlbedo, metallumSkyVisibility,\n"
                     + "                    metallumSurfaceMaterial);\n"
                     + "            color.rgb += metallumMaterialOpticsWeight\n"
                     + "                    * metallumEvaluateClusteredMaterialSpecularV1(\n"
                     + "                    metallumLightingPosition, metallumDirectNormal,\n"
-                    + "                    metallumPreparedAlbedo, metallumSurfaceMaterial);\n"
+                    + "                    metallumVanillaAlbedo, metallumSurfaceMaterial);\n"
                     + "        }\n"
                     + "    }\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
@@ -2399,7 +2478,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec2 v_TexCoord;",
                 SODIUM_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched);
+        patched = installFragmentAbi(patched, true);
         patched = replaceExactlyOnce(patched, SODIUM_FOG_ANCHOR, SODIUM_DIRECT_BLOCK);
         if (patched == null
                 || !patched.contains("dFdx(metallumLightingPosition)")
@@ -2449,7 +2528,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec2 texCoord0;",
                 ENTITY_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched);
+        patched = installFragmentAbi(patched, false);
         patched = replaceExactlyOnce(patched, ENTITY_COLOR_ANCHOR, ENTITY_DIRECT_ALBEDO);
         patched = replaceExactlyOnce(
                 patched,
@@ -2498,7 +2577,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec4 texProj0;",
                 END_PORTAL_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched);
+        patched = installFragmentAbi(patched, false);
         patched = replaceExactlyOnce(patched, END_PORTAL_FOG_ANCHOR, END_PORTAL_DIRECT_BLOCK);
         if (patched == null
                 || !patched.contains("metallumPortalDerivativeNormal")
@@ -2508,14 +2587,18 @@ public final class AdvancedDirectLightingShaderPatcher {
         return Result.success(patched);
     }
 
-    private static String installFragmentAbi(final String source) {
+    private static String installFragmentAbi(final String source, final boolean terrainReceiver) {
         if (source == null) {
             return null;
         }
         return replaceExactlyOnce(
                 source,
                 "out vec4 fragColor;",
-                "out vec4 fragColor;" + FRAGMENT_ABI_AND_HELPERS
+                "out vec4 fragColor;"
+                        + (terrainReceiver
+                        ? "\n#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1\n"
+                        : "")
+                        + FRAGMENT_ABI_AND_HELPERS
         );
     }
 
@@ -2730,6 +2813,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumVoxelVisibilityV1",
                 "metallumVoxelSoftVisibilityV1",
                 "metallumProxyVisibilityV1",
+                "metallumComputeWorldPosXZV1",
+                "metallumMoistureNoiseV1",
                 SHADOW_SAMPLER_0,
                 SHADOW_SAMPLER_1,
                 SHADOW_SAMPLER_2
