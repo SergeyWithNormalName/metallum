@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "d885cf4d5856e104d4dd8d5d0cb8ae5deb2a310aa3367a3e2258024f9c54a846",
+            "sodium-solid-fsh", "50481eea9868acbb16df55adc458e1ea2bdb085b5c9bf1bb84c96e3d2e689d1d",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "c3cfcd63dc6fc225ca7be56183eb47dd595dda332c30f16252c1353f31ec7fb2",
+            "sodium-cutout-fsh", "01454fd808c4a83d533616716b9713f4488073696787b6c3fac72f23c27722c9",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "020d7b8a3b68a7a406ae0dbeaae7e3dbba7a67f15e16f9aa07bba1ec332448bb",
+            "minecraft-entity-fsh", "5cea995d74faf5f284b8fdcd1e1736eff4cfb620cf947f5be527a8a4bf950912",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "a5145f63ba511059d092755067e6a65e0fe52c50abab14ab0dc363f26b8b0862"
+            "minecraft-end-portal-fsh", "2ad6d82047192b868f0cf1a8482ab661ba4c4f6b5770a9bfa16eb191f9789adc"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -943,7 +943,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("exp(-material.absorption * distance)")
                         && sodiumFragment.contains("metallumWaterNormalV1")
                         && sodiumFragment.contains(
-                        "material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.82")
+                        "material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.30")
                         && sodiumFragment.contains(
                         "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1")
                         && sodiumFragment.contains("? 0.92 : 1.0;")
@@ -952,7 +952,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "float metallumWaterRefractionGain = clamp(")
                         && sodiumFragment.contains(
-                        "1.0, metallumWaterRefractionGain, 0.45")
+                        "1.0, metallumWaterRefractionGain, 0.28")
                         && sodiumFragment.contains(
                         "metallumPreparedAlbedo = metallumVanillaAlbedo;")
                         && sodiumFragment.contains(

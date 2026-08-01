@@ -334,17 +334,20 @@ public final class AdvancedDirectLightingShaderPatcher {
                         : kind == METALLUM_SURFACE_POROUS_V1 ? 0.80 : 0.68;
                 material.metalness = kind == METALLUM_SURFACE_METAL_V1 ? 0.92 : 0.0;
                 material.dielectricF0 = kind == METALLUM_SURFACE_WATER_V1 ? 0.0204 : 0.04;
-                material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.82
+                // Vanilla's biome-tinted albedo remains the primary water appearance.  The
+                // optical layer is deliberately bounded, while waves, caustics and direct-light
+                // specular remain fully enabled below.
+                material.transmission = kind == METALLUM_SURFACE_WATER_V1 ? 0.30
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.92 : 0.0;
                 material.absorption = kind == METALLUM_SURFACE_WATER_V1
-                        ? vec3(0.36, 0.095, 0.035)
+                        ? vec3(0.15, 0.040, 0.015)
                         : kind == METALLUM_SURFACE_GLASS_V1
                                 ? vec3(0.08, 0.035, 0.018) : vec3(0.0);
                 material.reactiveWeight = kind == METALLUM_SURFACE_WATER_V1 ? 0.94
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.82
                         : kind == METALLUM_SURFACE_METAL_V1 ? 0.18
                         : kind == METALLUM_SURFACE_SMOOTH_DIELECTRIC_V1 ? 0.12 : 0.0;
-                material.opticalDepth = kind == METALLUM_SURFACE_WATER_V1 ? 1.65
+                material.opticalDepth = kind == METALLUM_SURFACE_WATER_V1 ? 0.85
                         : kind == METALLUM_SURFACE_GLASS_V1 ? 0.24 : 0.0;
 
                 float rainExposure = smoothstep(0.55, 0.85, clamp(rainFacing, 0.0, 1.0));
@@ -581,7 +584,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
                     float caustic = metallumWaterValueNoiseV1(
                             waterWorldPos * 0.40 + vec2(time * 0.35, -time * 0.25), 255);
-                    transmittance *= (1.0 + (caustic - 0.40) * 0.20);
+                    transmittance *= (1.0 + (caustic - 0.40) * 0.10);
                 }
                 vec3 refractedEnvironment = metallumEnvironmentLookupV1(
                         metallumSafeNormalV1(refracted));
@@ -2255,9 +2258,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                            vec3(0.2126, 0.7152, 0.0722));\n"
                     + "                    float metallumWaterRefractionGain = clamp(\n"
                     + "                            metallumRefractedWaterLuminance\n"
-                    + "                            / metallumVanillaWaterLuminance, 0.82, 1.18);\n"
+                    + "                            / metallumVanillaWaterLuminance, 0.90, 1.10);\n"
                     + "                    color.rgb *= mix(\n"
-                    + "                            1.0, metallumWaterRefractionGain, 0.45);\n"
+                    + "                            1.0, metallumWaterRefractionGain, 0.28);\n"
                     + "                    metallumPreparedAlbedo = metallumVanillaAlbedo;\n"
                     + "                } else {\n"
                     + "                    color.rgb = mix(color.rgb, metallumPreparedAlbedo,\n"

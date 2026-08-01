@@ -109,8 +109,11 @@ public final class SurfaceMaterialPolicy {
     );
     public static final Descriptor WATER = new Descriptor(
             Kind.WATER, 0.075f, 0.075f, 1.0f, 0.0f, 1.0f,
-            0.0f, 0.0204f, 0.82f,
-            0.36f, 0.095f, 0.035f, 0.94f
+            // Keep the vanilla biome tint as the dominant signal.  Water still refracts and
+            // receives the L8 specular/point-light treatment, but must not replace most of its
+            // diffuse contribution with an opaque-looking optical layer.
+            0.0f, 0.0204f, 0.30f,
+            0.15f, 0.040f, 0.015f, 0.94f
     );
 
     private SurfaceMaterialPolicy() {

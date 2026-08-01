@@ -56,11 +56,11 @@ public final class SurfaceMaterialPolicyTests {
         require(SurfaceMaterialPolicy.forBlock(Blocks.GLASS.defaultBlockState())
                         == SurfaceMaterialPolicy.GLASS,
                 "glass block did not resolve the transmissive CPU policy");
-        require(close(SurfaceMaterialPolicy.WATER.transmission(), 0.82f)
+        require(close(SurfaceMaterialPolicy.WATER.transmission(), 0.30f)
                         && close(SurfaceMaterialPolicy.GLASS.transmission(), 0.92f)
                         && SurfaceMaterialPolicy.WATER.transmission()
                         < SurfaceMaterialPolicy.GLASS.transmission(),
-                "water lost its vanilla-weighted diffuse/transmission balance");
+                "water lost its vanilla-first diffuse/transmission balance");
         require(SurfaceMaterialPolicy.forTerrain(
                         Blocks.OAK_LEAVES.defaultBlockState(), false)
                         == SurfaceMaterialPolicy.POROUS
@@ -232,8 +232,10 @@ public final class SurfaceMaterialPolicyTests {
                         && close(SurfaceMaterialPolicy.wetDielectricF0(0.04f, 1.0f), 0.025f),
                 "wet dielectric F0 no longer follows the conservative water-film target");
 
-        float shallow = SurfaceMaterialPolicy.beerLambert(0.36f, 0.5f);
-        float deep = SurfaceMaterialPolicy.beerLambert(0.36f, 5.0f);
+        float shallow = SurfaceMaterialPolicy.beerLambert(
+                SurfaceMaterialPolicy.WATER.absorptionRed(), 0.5f);
+        float deep = SurfaceMaterialPolicy.beerLambert(
+                SurfaceMaterialPolicy.WATER.absorptionRed(), 5.0f);
         require(shallow <= 1.0f && shallow > deep && deep >= 0.0f,
                 "Beer-Lambert absorption is not energy-conserving and depth-monotonic");
 
@@ -242,9 +244,9 @@ public final class SurfaceMaterialPolicyTests {
         float brightRefraction = waterRefractionScale(0.40f, 4.0f);
         float vanillaRed = 0.08f;
         float vanillaGreen = 0.24f;
-        require(close(darkRefraction, 0.919f)
+        require(close(darkRefraction, 0.972f)
                         && close(neutralRefraction, 1.0f)
-                        && close(brightRefraction, 1.081f)
+                        && close(brightRefraction, 1.028f)
                         && close(
                         vanillaRed * brightRefraction / (vanillaGreen * brightRefraction),
                         vanillaRed / vanillaGreen),
@@ -257,10 +259,10 @@ public final class SurfaceMaterialPolicyTests {
     ) {
         float relativeGain = Math.clamp(
                 refractedLuminance / Math.max(vanillaLuminance, 0.02f),
-                0.82f,
-                1.18f
+                0.90f,
+                1.10f
         );
-        return 1.0f + (relativeGain - 1.0f) * 0.45f;
+        return 1.0f + (relativeGain - 1.0f) * 0.28f;
     }
 
     private static void testRainExposureSnapshot() {
