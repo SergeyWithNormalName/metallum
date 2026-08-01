@@ -265,13 +265,17 @@ public final class SurfaceMaterialPolicyTests {
 
     private static void testRainExposureSnapshot() {
         int[] heights = new int[SodiumRainExposureSnapshot.AREA];
+        boolean[] rainfallColumns = new boolean[SodiumRainExposureSnapshot.AREA];
         heights[(3 << 4) | 2] = 71;
-        SodiumRainExposureSnapshot snapshot = new SodiumRainExposureSnapshot(32, -16, heights);
+        rainfallColumns[(3 << 4) | 2] = true;
+        SodiumRainExposureSnapshot snapshot = new SodiumRainExposureSnapshot(
+                32, -16, heights, rainfallColumns);
         require(snapshot.canRainReach(34, 71, -13)
                         && !snapshot.canRainReach(34, 70, -13)
+                        && !snapshot.canRainReach(33, 256, -13)
                         && !snapshot.canRainReach(31, 100, -13)
                         && !snapshot.canRainReach(34, 100, 0),
-                "MOTION_BLOCKING rain exposure snapshot accepts a sheltered or foreign column");
+                "rain exposure snapshot accepts a dry-biome, sheltered, or foreign column");
     }
 
     private static void testComprehensiveBlockClassifications() {

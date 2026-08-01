@@ -5,8 +5,10 @@ import com.metallum.client.sodium.SodiumRainExposureSnapshotAccess;
 import net.caffeinemc.mods.sodium.client.world.LevelSlice;
 import net.caffeinemc.mods.sodium.client.world.cloned.ChunkRenderContext;
 import net.caffeinemc.mods.sodium.client.world.cloned.ClonedChunkSectionCache;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.levelgen.Heightmap;
 import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
@@ -38,17 +40,29 @@ abstract class LevelSliceRainExposureMixin implements SodiumRainExposureSnapshot
         int minBlockX = sectionPos.minBlockX();
         int minBlockZ = sectionPos.minBlockZ();
         int[] heights = new int[SodiumRainExposureSnapshot.AREA];
+        boolean[] rainfallColumns = new boolean[SodiumRainExposureSnapshot.AREA];
+        BlockPos.MutableBlockPos precipitationPosition = new BlockPos.MutableBlockPos();
         for (int localZ = 0; localZ < SodiumRainExposureSnapshot.WIDTH; localZ++) {
             for (int localX = 0; localX < SodiumRainExposureSnapshot.WIDTH; localX++) {
-                heights[(localZ << 4) | localX] = level.getHeight(
+                int column = (localZ << 4) | localX;
+                int blockX = minBlockX + localX;
+                int blockZ = minBlockZ + localZ;
+                int precipitationHeight = level.getHeight(
                         Heightmap.Types.MOTION_BLOCKING,
-                        minBlockX + localX,
-                        minBlockZ + localZ
+                        blockX,
+                        blockZ
                 );
+                heights[column] = precipitationHeight;
+                // Use the exact location-sensitive vanilla result instead of the global rain
+                // level: deserts report NONE and cold columns report SNOW, neither of which
+                // should make terrain wet or add rain-driven specular highlights.
+                precipitationPosition.set(blockX, precipitationHeight, blockZ);
+                rainfallColumns[column] = level.precipitationAt(precipitationPosition)
+                        == Biome.Precipitation.RAIN;
             }
         }
         ((SodiumRainExposureSnapshotAccess) context).metallum$setRainExposureSnapshot(
-                new SodiumRainExposureSnapshot(minBlockX, minBlockZ, heights));
+                new SodiumRainExposureSnapshot(minBlockX, minBlockZ, heights, rainfallColumns));
     }
 
     @Inject(method = "copyData", at = @At("HEAD"))
