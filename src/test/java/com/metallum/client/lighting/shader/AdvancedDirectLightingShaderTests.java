@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "a97d4111d45d48d408055ab13847b8c38bda691ec780720ae32d325417a3adf4",
+            "sodium-solid-fsh", "d885cf4d5856e104d4dd8d5d0cb8ae5deb2a310aa3367a3e2258024f9c54a846",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "2116441b86582ccb7b3811d45d22e410d84ab86a2358aa4926b2e18b4d97795f",
+            "sodium-cutout-fsh", "c3cfcd63dc6fc225ca7be56183eb47dd595dda332c30f16252c1353f31ec7fb2",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "0f7cd5589e28a5d2c6c025f00602596a86fba7bd400d69a54548898147873a63",
+            "minecraft-entity-fsh", "020d7b8a3b68a7a406ae0dbeaae7e3dbba7a67f15e16f9aa07bba1ec332448bb",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "a762e9c6f6a25348d7f6fd6c8f646e1ef2bc0ac0b97f9c25a00f7946967b0e97"
+            "minecraft-end-portal-fsh", "a5145f63ba511059d092755067e6a65e0fe52c50abab14ab0dc363f26b8b0862"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -824,8 +824,8 @@ public final class AdvancedDirectLightingShaderTests {
         require(visibilityCallStart >= 0 && visibilityCallEnd > visibilityCallStart,
                 "L6 per-light visibility call is missing");
         String visibilityCall = sodiumFormula.substring(visibilityCallStart, visibilityCallEnd);
-        require(countOccurrences(sodiumFragment, receiverPositionTransform) == 1
-                        && countOccurrences(sodiumFragment, receiverNormalTransform) == 1
+        require(countOccurrences(sodiumFormula, receiverPositionTransform) == 1
+                        && countOccurrences(sodiumFormula, receiverNormalTransform) == 1
                         && before(sodiumFormula,
                         "vec3 receiverCameraRelative =",
                         "for (uint candidate = 0u; candidate < countLimit; ++candidate)")
@@ -1031,11 +1031,27 @@ public final class AdvancedDirectLightingShaderTests {
                 "L8 changed the legacy environment helper instead of adding a gated optic term");
         require(direct.contains("metallumEvaluateClusteredMaterialSpecularV1")
                         && direct.contains("float dominantScore = 0.0;")
+                        && direct.contains("uint dominantLightIndex = 0xffffffffu;")
                         && countOccurrences(direct, "metallumEvaluateGgxV1(") == 1
                         && before(direct,
                         "for (uint candidate = 0u; candidate < countLimit; ++candidate)",
                         "return material.specularScale * metallumEvaluateGgxV1("),
                 "local GGX is not bounded to one dominant-light evaluation per fragment");
+        String materialSpecular = materialSpecularHelper(sodiumFragment);
+        require(materialSpecular.contains("dominantLightIndex = lightIndex;")
+                        && materialSpecular.contains("dominantShadowRef =")
+                        && materialSpecular.contains(
+                        "metallumVoxelShadowRefBuffer.refs[dominantLightIndex]")
+                        && materialSpecular.contains(
+                        "if (dominantShadowState != 1u && dominantShadowState != 2u)")
+                        && materialSpecular.contains(
+                        "float visibility = metallumVoxelVisibilityV1(")
+                        && materialSpecular.contains("dominantRadiance * visibility")
+                        && materialSpecular.contains("return vec3(0.0);")
+                        && before(materialSpecular,
+                        "float visibility = metallumVoxelVisibilityV1(",
+                        "return material.specularScale * metallumEvaluateGgxV1("),
+                "local GGX highlight can bypass verified voxel visibility");
         require(countOccurrences(sodiumFragment, "metallumEvaluateGgxV1(") == 3,
                 "L8 added an unbounded GGX call site");
         require(countOccurrences(sodiumFragment, "metallumResolveSurfaceMaterialV1(") == 2

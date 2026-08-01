@@ -2033,6 +2033,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
 
                 float dominantScore = 0.0;
+                uint dominantLightIndex = 0xffffffffu;
                 vec3 dominantDirection = vec3(0.0);
                 vec3 dominantRadiance = vec3(0.0);
                 uint countLimit = min(
@@ -2066,18 +2067,92 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float score = dot(radiance * nDotL, vec3(0.2126, 0.7152, 0.0722));
                     if (score > dominantScore) {
                         dominantScore = score;
+                        dominantLightIndex = lightIndex;
                         dominantDirection = lightDirection;
                         dominantRadiance = radiance;
                     }
                 }
-                if (dominantScore == 0.0) {
+                if (dominantScore == 0.0 || dominantLightIndex == 0xffffffffu) {
+                    return vec3(0.0);
+                }
+
+                // This is an additive, view-dependent highlight. Unlike diffuse L3 light it
+                // has no useful all-visible fallback: a missing L6 answer would let a bright
+                // emitter behind solid terrain appear as a mirror-like glint. Require the same
+                // completed/retained L6 page that proves direct-light visibility; environment
+                // reflection remains independent of this local-light term.
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 3u
+                        || metallumVoxelShadow.worldAndFlags.z != 1u
+                        || metallumVoxelShadow.caps.y == 0u
+                        || metallumVoxelShadow.caps.y > 3u
+                        || metallumVoxelShadow.caps.z == 0u
+                        || metallumVoxelShadow.caps.z > 96u
+                        || metallumVoxelShadow.caps.w != activeLightCount
+                        || metallumVoxelShadow.caps.w > 4096u
+                        || any(notEqual(
+                        metallumVoxelShadow.contract.xy,
+                        metallumLighting.frameIdAndGeneration.zw))
+                        || any(notEqual(
+                        metallumVoxelShadow.proxyAndFrame.zw,
+                        metallumLighting.frameIdAndGeneration.xy))
+                        || metallumVoxelShadow.proxyAndFrame.y > 32u
+                        || metallumVoxelShadow.proxyAndFrame.x
+                        > metallumVoxelShadow.proxyAndFrame.y);
+                if (!localShadowContractValid
+                        || !metallumFiniteVec3V1(viewPosition)
+                        || !metallumFiniteVec3V1(normal)
+                        || !metallumFiniteVec3V1(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz)
+                        || any(lessThan(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(0.0)))
+                        || any(greaterThanEqual(
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz, vec3(1.0)))) {
+                    return vec3(0.0);
+                }
+                vec3 receiverCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * viewPosition;
+                vec3 receiverWorldRelative =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + receiverCameraRelative;
+                vec3 receiverWorldNormal =
+                        mat3(metallumVoxelShadow.worldFromView) * normal;
+                if (!metallumFiniteVec3V1(receiverCameraRelative)
+                        || !metallumFiniteVec3V1(receiverWorldRelative)
+                        || !metallumFiniteVec3V1(receiverWorldNormal)) {
+                    return vec3(0.0);
+                }
+            #ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
+                // The current L5 representation cannot distinguish a partial receiver from
+                // its own quantized occluder. Keep local specular fail-closed there until that
+                // geometry ambiguity is resolved; never turn it into a through-wall highlight.
+                if (metallumVoxelPartialReceiverSurfaceV1(
+                        receiverWorldRelative, receiverWorldNormal)) {
+                    return vec3(0.0);
+                }
+            #endif
+                MetallumGpuLightV1 dominantLight =
+                        metallumLightBuffer.lights[dominantLightIndex];
+                uvec4 dominantShadowRef =
+                        metallumVoxelShadowRefBuffer.refs[dominantLightIndex];
+                uint dominantShadowState = dominantShadowRef.x;
+                if (dominantShadowState != 1u && dominantShadowState != 2u) {
+                    return vec3(0.0);
+                }
+                float visibility = metallumVoxelVisibilityV1(
+                        receiverCameraRelative,
+                        receiverWorldRelative,
+                        receiverWorldNormal,
+                        dominantLight.positionRadius.xyz,
+                        dominantLight.metadata.xy,
+                        dominantShadowRef);
+                if (!(visibility > 0.0)) {
                     return vec3(0.0);
                 }
                 return material.specularScale * metallumEvaluateGgxV1(
                         normal,
                         viewDirection,
                         dominantDirection,
-                        dominantRadiance,
+                        dominantRadiance * visibility,
                         metallumMaterialF0V1(material, albedo),
                         material.roughness);
             }
