@@ -414,8 +414,6 @@ public final class RendererGenerationPlanner {
                     multiply(renderPixels, 4L * 3L), false));
             resources.add(resource("frame_interpolation_ui_ring", domain,
                     multiply(displayPixels, 4L * 3L), false));
-            resources.add(resource("frame_interpolation_composite_ring", domain,
-                    multiply(displayPixels, 8L * 2L * 3L), false));
             passes.add(pass("frame_interpolation_prepare", domain));
             if (spatial) {
                 // Spatial has no FrameInterpolatableScaler. Its depth/motion inputs

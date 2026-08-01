@@ -729,8 +729,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         // exact texture through the same composite path; it is never fed to
         // MetalFX or included in world-color history.
         let sdrUi: MTLTexture
-        let generatedPresentation: MTLTexture
-        let realPresentation: MTLTexture
         /// This is the only cross-queue ownership fence for this physical
         /// ring slot.  A later producer waits here before it overwrites any
         /// texture in the slot; the real presentation signals it after its
@@ -1082,10 +1080,10 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
     }
 
     /**
-     * Retains the UI and both output targets until the last GPU composite has
-     * completed.  This is deliberately distinct from a ticket: tickets own
-     * renderer command buffers, while this work item owns presentation-only
-     * consumers that may outlive renderer completion.
+     * Retains the UI and validation-only output targets until the last GPU
+     * composite has completed.  This is deliberately distinct from a ticket:
+     * tickets own renderer command buffers, while this work item owns
+     * presentation-only consumers that may outlive renderer completion.
      */
     private final class UiCompositeWork {
         let slot: Int
@@ -1095,13 +1093,18 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         let generatedTarget: MTLTexture
         let realTarget: MTLTexture
 
-        init(slot: Int, resources: Slot) {
+        init(
+            slot: Int,
+            resources: Slot,
+            generatedTarget: MTLTexture,
+            realTarget: MTLTexture
+        ) {
             self.slot = slot
             self.uiTexture = resources.sdrUi
             self.generatedWorld = resources.generatedColor
             self.realWorld = resources.realColor
-            self.generatedTarget = resources.generatedPresentation
-            self.realTarget = resources.realPresentation
+            self.generatedTarget = generatedTarget
+            self.realTarget = realTarget
         }
     }
 
@@ -1352,15 +1355,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         )
         uiDescriptor.storageMode = .private
         uiDescriptor.usage = [.shaderRead, .renderTarget]
-        let presentationDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: key.pixelFormat,
-            width: key.width,
-            height: key.height,
-            mipmapped: false
-        )
-        presentationDescriptor.storageMode = .private
-        presentationDescriptor.usage = [.shaderRead, .renderTarget]
-
         var depthDescriptor: MTLTextureDescriptor?
         var motionDescriptor: MTLTextureDescriptor?
         if #available(macOS 26.0, *), let interpolator = interpolator as? MTLFXFrameInterpolator {
@@ -1392,8 +1386,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             guard let realColor = device.makeTexture(descriptor: descriptor),
                   let generatedColor = device.makeTexture(descriptor: generatedDescriptor),
                   let sdrUi = device.makeTexture(descriptor: uiDescriptor),
-                  let generatedPresentation = device.makeTexture(descriptor: presentationDescriptor),
-                  let realPresentation = device.makeTexture(descriptor: presentationDescriptor),
                   // Exactly one reusable GPU fence belongs to each fixed ring
                   // slot.  It is allocated with the textures, never per frame.
                   let reuseFence = device.makeSharedEvent() else {
@@ -1416,8 +1408,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             realColor.label = "Metallum FI real color \(index)"
             generatedColor.label = "Metallum FI generated color \(index)"
             sdrUi.label = "Metallum FI SDR UI \(index)"
-            generatedPresentation.label = "Metallum FI generated UI composite \(index)"
-            realPresentation.label = "Metallum FI real UI composite \(index)"
             reuseFence.label = "Metallum FI slot reuse fence \(index)"
             allocated.append(Slot(
                 realColor: realColor,
@@ -1425,8 +1415,6 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
                 depth: depth,
                 motion: motion,
                 sdrUi: sdrUi,
-                generatedPresentation: generatedPresentation,
-                realPresentation: realPresentation,
                 reuseFence: reuseFence,
                 state: .free,
                 ownerTicket: nil,
@@ -1437,11 +1425,44 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
         }
         slots = allocated
         fiReaderLeases = Array(repeating: 0, count: allocated.count)
-        // Each slot owns world history (2), one SDR UI texture, and separate
-        // generated/real composite targets.  The targets make the UI lifetime
-        // explicit and avoid sharing a drawable across the two presentations.
-        textureAllocationCount = allocated.count * 5
+        // Each production slot owns only world history (2) and one SDR UI
+        // texture.  The validation harness creates its two offscreen composite
+        // targets lazily, so production does not retain unused display-sized
+        // HDR textures merely to exercise the validation path.
+        textureAllocationCount = allocated.count * 3
         return true
+    }
+
+    /**
+     * Stage-8 validates both composite outputs without adding their
+     * display-sized targets to every production ring slot.  This path is
+     * native-test-only, and UiCompositeWork retains the two targets through
+     * command-buffer completion so they cannot be released early.
+     */
+    private func makeValidationUiCompositeWork(
+        slot: Int,
+        resources: Slot
+    ) -> UiCompositeWork? {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: key.pixelFormat,
+            width: key.width,
+            height: key.height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .renderTarget]
+        guard let generatedTarget = device.makeTexture(descriptor: descriptor),
+              let realTarget = device.makeTexture(descriptor: descriptor) else {
+            return nil
+        }
+        generatedTarget.label = "Metallum FI validation generated UI composite"
+        realTarget.label = "Metallum FI validation real UI composite"
+        return UiCompositeWork(
+            slot: slot,
+            resources: resources,
+            generatedTarget: generatedTarget,
+            realTarget: realTarget
+        )
     }
 
     /**
@@ -4334,9 +4355,15 @@ private final class MetallumFrameInterpolationCoordinator: @unchecked Sendable {
             state.unlock()
             return .bypassBackpressure
         }
+        guard let work = makeValidationUiCompositeWork(
+            slot: slot,
+            resources: slots[slot]
+        ) else {
+            state.unlock()
+            return .transientFailure
+        }
         slots[slot].state = .realFrameReserved
         pendingRealFrames += 1
-        let work = UiCompositeWork(slot: slot, resources: slots[slot])
         pendingUiCompositeWork = work
         state.unlock()
 
@@ -5118,9 +5145,9 @@ public func metallum_frame_interpolation_coordinator_stress_stage4(_ device: MTL
         }
 
         let warmAllocationCount = coordinator.nativeTextureAllocationCount()
-        // Stage 8 adds one retained SDR UI texture and two separate composite
-        // targets per slot, alongside the real/generated world-color pair.
-        guard warmAllocationCount == 15 else { return -2 }
+        // The production ring retains only the real/generated world colors
+        // and SDR UI. Stage 8 allocates its two composite outputs lazily.
+        guard warmAllocationCount == 9 else { return -2 }
         for _ in 0..<10_000 {
             guard let slot = coordinator.reserveRealFrameSlot(),
                   coordinator.completeRealFrameSlot(slot) == .ready,
@@ -5434,7 +5461,7 @@ public func metallum_frame_interpolation_hdr_ui_stress_stage8(_ device: MTLDevic
             }
         }
 
-        guard coordinator.nativeTextureAllocationCount() == 15,
+        guard coordinator.nativeTextureAllocationCount() == 9,
               coordinator.encodeSharedUiCompositeValidation(
                 outputMode: outputMode,
                 currentHeadroom: initialHeadroom
@@ -5442,7 +5469,8 @@ public func metallum_frame_interpolation_hdr_ui_stress_stage8(_ device: MTLDevic
               coordinator.nativeStage8Counter(1) == 1,
               coordinator.drain(timeoutNanoseconds: 1_000_000_000) == .ready,
               coordinator.nativeStage8Counter(0) == 2,
-              coordinator.nativeStage8Counter(1) == 0 else {
+              coordinator.nativeStage8Counter(1) == 0,
+              coordinator.nativeTextureAllocationCount() == 9 else {
             return -2
         }
 
