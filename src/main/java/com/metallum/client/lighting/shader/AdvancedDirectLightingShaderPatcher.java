@@ -251,15 +251,20 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return mix(mix(a, b, fade.x), mix(c, d, fade.x), fade.y);
             }
 
-            vec2 metallumComputeWorldPosXZV1(vec3 viewPosition) {
+            vec2 metallumWaterWorldPositionV1(vec3 viewPosition) {
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
                 vec3 cameraRelativePosition = worldFromView * viewPosition;
-                ivec2 wrappedCameraBlock =
-                        metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
                 vec2 cameraBlockRelativePosition =
                         metallumVoxelShadow.cameraFractionAndMinTrans.xz
                         + cameraRelativePosition.xz;
-                return vec2(wrappedCameraBlock) + cameraBlockRelativePosition;
+                // The noise function itself tiles. Do not tile this world-space anchor: a
+                // 256-block camera-coordinate wrap changes the wave phases discontinuously.
+                return vec2(metallumVoxelShadow.cameraBlockAndFlags.xz)
+                        + cameraBlockRelativePosition;
+            }
+
+            vec2 metallumComputeWorldPosXZV1(vec3 viewPosition) {
+                return metallumWaterWorldPositionV1(viewPosition);
             }
 
             float metallumMoistureNoiseV1(vec2 worldPos) {
@@ -426,20 +431,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return normal;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
-                vec3 cameraRelativePosition = worldFromView * viewPosition;
                 vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
                 if (dot(worldNormal, worldNormal) == 0.0 || abs(worldNormal.y) < 0.55) {
                     return normal;
                 }
                 float time = metallumEnvironment.materialContract.x == 1u
                         ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
-                ivec2 wrappedCameraBlock =
-                        metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
-                vec2 cameraBlockRelativePosition =
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xz
-                        + cameraRelativePosition.xz;
-                vec2 waterWorldPosition = vec2(wrappedCameraBlock)
-                        + cameraBlockRelativePosition;
+                vec2 waterWorldPosition = metallumWaterWorldPositionV1(viewPosition);
 
                 float macroNoise1 = metallumWaterValueNoiseV1(
                         waterWorldPosition * 0.0625 + vec2(time * 0.08, -time * 0.06), 255);
@@ -562,6 +560,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 albedo,
                     vec3 viewDirection,
                     vec3 normal,
+                    vec3 viewPosition,
                     MetallumSurfaceMaterialV1 material) {
                 if (material.transmission == 0.0) {
                     return albedo * material.wetAlbedoScale;
@@ -576,10 +575,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float distance = material.opticalDepth / nDotV;
                 vec3 transmittance = exp(-material.absorption * distance);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
-                    ivec2 wrappedCameraBlock =
-                            metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255);
-                    vec2 waterWorldPos = vec2(wrappedCameraBlock)
-                            + metallumVoxelShadow.cameraFractionAndMinTrans.xz;
+                    vec2 waterWorldPos = metallumWaterWorldPositionV1(viewPosition);
                     float time = metallumEnvironment.materialContract.x == 1u
                             ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
                     float caustic = metallumWaterValueNoiseV1(
@@ -2155,7 +2151,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;\n"
                     + "            metallumPreparedAlbedo = metallumTransmissionV1(\n"
                     + "                    metallumPreparedAlbedo, metallumViewDirection,\n"
-                    + "                    metallumDirectNormal, metallumSurfaceMaterial);\n"
+                    + "                    metallumDirectNormal, metallumLightingPosition,\n"
+                    + "                    metallumSurfaceMaterial);\n"
                     + "            color.rgb *= metallumSurfaceMaterial.wetAlbedoScale;\n"
                     + "            if (metallumSurfaceMaterial.transmission > 0.0) {\n"
                     + "                if (metallumSurfaceMaterial.kind\n"

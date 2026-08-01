@@ -68,6 +68,7 @@ public final class MetalRuntimeTests {
         testPartialDynamicWritePreservation();
         testFenceTimeoutRounding();
         testEdrRefreshThrottle();
+        testWaterMaterialClockIsMonotonic();
         testGpuTimingDetailGate();
         testLocalShadowResidentAtlasContracts();
         testJavaWorkloadTelemetryGateAndReset();
@@ -964,6 +965,17 @@ public final class MetalRuntimeTests {
                 "EDR capability query did not run at the refresh boundary");
         require(MetalSurface.shouldRefreshEdrCapabilities(10_000L, 9_000L),
                 "EDR capability query did not recover from a backwards clock sample");
+    }
+
+    private static void testWaterMaterialClockIsMonotonic() {
+        double beforeLegacyWrap = 4095.95;
+        double afterLegacyWrap = SunShadowGpuResources.advanceMaterialTimeSeconds(
+                beforeLegacyWrap, 0.10);
+        require(afterLegacyWrap > 4096.0 && afterLegacyWrap > beforeLegacyWrap,
+                "water material clock wrapped at the legacy 4096-second boundary");
+        require(SunShadowGpuResources.advanceMaterialTimeSeconds(afterLegacyWrap, 10.0)
+                        == afterLegacyWrap + 0.25,
+                "water material clock no longer bounds a single stalled-frame delta");
     }
 
     private static void testGpuTimingStageAbi() {

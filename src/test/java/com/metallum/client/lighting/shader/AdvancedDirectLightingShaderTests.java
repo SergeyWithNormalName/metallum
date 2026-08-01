@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "f2bd6023fc505d754b675c55cf369fd233c346578bf97e4cc4085d5a78788fe7",
+            "sodium-solid-fsh", "f61ecc060e027462f0a20e14863a7f9cec81f0d49aa550089fd5acbebc08424d",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "eaf83f02673c2dfce33b66bbc0ee15bc37d2356407591e03f28ded341be93d8f",
+            "sodium-cutout-fsh", "6211e92e8ad5dfea2b1fe9ec7f30f913f61113c828a72ad74f665c497b7315ba",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "dd4581fd9dd5ad9db5684b5812d221eee6389801599177e4811db84397edb953",
+            "minecraft-entity-fsh", "994fa4d9995175b63592fb018da0824b4406cc072da3c16bef909e233a83937e",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "4dd50c1638bb6457cd61a074f62f65a42b62439e5f3a1f2e205789b5e0e7a8d7"
+            "minecraft-end-portal-fsh", "4abf7a1927f825cca2ba41f275b1cdc5fd8217f4b53886cae71a274c660b32bc"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -961,11 +961,16 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "metallumPreparedAlbedo = metallumVanillaAlbedo;")
                         && sodiumFragment.contains(
+                        "vec2 metallumWaterWorldPositionV1(vec3 viewPosition)")
+                        && sodiumFragment.contains(
+                        "return vec2(metallumVoxelShadow.cameraBlockAndFlags.xz)")
+                        && !sodiumFragment.contains(
                         "metallumVoxelShadow.cameraBlockAndFlags.xz & ivec2(255)")
                         && sodiumFragment.contains("float metallumWaterValueNoiseV1(")
                         && sodiumFragment.contains(
                         "ivec2 wrapped = cell & ivec2(periodMask);")
-                        && sodiumFragment.contains("vec2 waterWorldPosition = vec2(wrappedCameraBlock)")
+                        && sodiumFragment.contains(
+                        "vec2 waterWorldPosition = metallumWaterWorldPositionV1(viewPosition);")
                         && sodiumFragment.contains("vec2 domainWarp = vec2(")
                         && sodiumFragment.contains("float microNoise1 = metallumWaterValueNoiseV1(")
                         && sodiumFragment.contains("float wave1 = sin(")

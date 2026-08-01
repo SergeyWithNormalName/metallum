@@ -47,6 +47,18 @@ final class SunShadowGpuResources implements AutoCloseable {
     private long renderedSubmitIndex = Long.MIN_VALUE;
     private boolean closed;
 
+    /**
+     * Advances the material clock without a modulo reset. The water shader combines this time
+     * with several non-commensurate wave and noise frequencies, so wrapping the value makes the
+     * surface visibly jump rather than return to an identical phase.
+     */
+    static double advanceMaterialTimeSeconds(
+            final double materialTimeSeconds,
+            final double frameDeltaSeconds
+    ) {
+        return materialTimeSeconds + Math.clamp(frameDeltaSeconds, 0.0, 0.25);
+    }
+
     private SunShadowGpuResources(
             final long generation,
             final SunShadowLayout.Budget budget,
@@ -231,8 +243,8 @@ final class SunShadowGpuResources implements AutoCloseable {
                 selected.cascadeReceiverNormalBias(1),
                 selected.cascadeReceiverNormalBias(2),
                 this.budget.receiverNormalBiasTexels());
-        this.materialTimeSeconds = (this.materialTimeSeconds
-                + Math.clamp(frameState.deltaSeconds(), 0.0, 0.25)) % 4096.0;
+        this.materialTimeSeconds = advanceMaterialTimeSeconds(
+                this.materialTimeSeconds, frameState.deltaSeconds());
         this.materialRainWetness = SurfaceMaterialPolicy.smoothRainWetness(
                 this.materialRainWetness,
                 environment.rain(),
