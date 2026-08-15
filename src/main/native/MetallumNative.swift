@@ -8335,8 +8335,13 @@ private struct MetallumTemporalDiagnosticUniforms {
     // which remains unjittered for MetalFX motion vectors.
     var previousProjection: simd_float4x4
     var inversePreviousJitteredProjection: simd_float4x4
-    var currentCameraPosition: SIMD4<Float>
-    var previousCameraPosition: SIMD4<Float>
+    // Keep the camera origin out of the GPU packet.  World-relative geometry is
+    // already expressed around the current camera, so the diagnostic shader
+    // only needs this delta to express that point in the previous frame.  It
+    // must be formed before narrowing to Float: at Minecraft's legal far-world
+    // positions Float(current) - Float(previous) drops ordinary sub-block
+    // camera motion entirely.
+    var cameraDelta: SIMD4<Float>
     var renderExtent: SIMD2<Float>
     var jitter: SIMD2<Float>
     var previousJitter: SIMD2<Float>
@@ -8452,6 +8457,19 @@ public func metallum_encode_temporal_diagnostics_v2(
         NativeState.lastReactiveTexture = reactiveTexture
         NativeState.lastClassificationTexture = classificationTexture
 
+        let cameraDeltaX = frame.currentCameraPosition[0] - frame.previousCameraPosition[0]
+        let cameraDeltaY = frame.currentCameraPosition[1] - frame.previousCameraPosition[1]
+        let cameraDeltaZ = frame.currentCameraPosition[2] - frame.previousCameraPosition[2]
+        let largestFloat = Double(Float.greatestFiniteMagnitude)
+        guard cameraDeltaX.isFinite, cameraDeltaY.isFinite, cameraDeltaZ.isFinite,
+              abs(cameraDeltaX) <= largestFloat,
+              abs(cameraDeltaY) <= largestFloat,
+              abs(cameraDeltaZ) <= largestFloat else {
+            // Do not feed non-finite reprojection data to MetalFX.  This only
+            // applies to invalid camera input outside the game's world bounds;
+            // normal teleports are already covered by the FrameState reset.
+            return -2
+        }
         let currentView = frame.currentView
         let currentProjection = frame.currentProjection
         var uniforms = MetallumTemporalDiagnosticUniforms(
@@ -8462,17 +8480,8 @@ public func metallum_encode_temporal_diagnostics_v2(
             previousView: frame.previousView,
             previousProjection: frame.previousUnjitteredProjection,
             inversePreviousJitteredProjection: frame.previousProjection.inverse,
-            currentCameraPosition: SIMD4(
-                Float(frame.currentCameraPosition[0]),
-                Float(frame.currentCameraPosition[1]),
-                Float(frame.currentCameraPosition[2]),
-                0
-            ),
-            previousCameraPosition: SIMD4(
-                Float(frame.previousCameraPosition[0]),
-                Float(frame.previousCameraPosition[1]),
-                Float(frame.previousCameraPosition[2]),
-                0
+            cameraDelta: SIMD4(
+                Float(cameraDeltaX), Float(cameraDeltaY), Float(cameraDeltaZ), 0
             ),
             renderExtent: SIMD2(Float(frame.renderWidth), Float(frame.renderHeight)),
             jitter: SIMD2(frame.jitterX, frame.jitterY),

@@ -466,6 +466,24 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             )
             try require(moved.motion.x.isFinite && moved.motion.x > 0 && moved.reactive == 0,
                         "Camera translation direction is invalid")
+            // Forming the delta after each absolute position is narrowed to
+            // Float loses sub-block camera motion from 2^24 onwards.  The
+            // production path must narrow exactly one already-computed Double
+            // delta, so all legal far-world origins produce the same motion.
+            let expectedSubBlockMotion = moved.motion.x * 0.1
+            for origin in [1_000_000.0, 16_777_216.0, 29_999_984.0] {
+                let farMoved = try runCase(
+                    device: device, queue: queue, setFrameState: setFrameState, encode: encode,
+                    width: 64, height: 64,
+                    currentCameraX: origin + 0.1, previousCameraX: origin
+                )
+                try require(
+                    farMoved.motion.x.isFinite
+                        && abs(farMoved.motion.x - expectedSubBlockMotion) <= 0.05
+                        && farMoved.reactive == 0,
+                    "Far-world camera delta lost precision at origin \(origin): \(farMoved.motion.x)"
+                )
+            }
             let disocclusionPrimer = try runCase(
                 device: device, queue: queue, setFrameState: setFrameState, encode: encode,
                 width: 64, height: 64, resetMask: 1 << 4, depthValue: 0.5
@@ -520,7 +538,7 @@ private enum TemporalDiagnosticRuntimeValidationMain {
             try require(abs(reset.motion.x) <= 0.01 && abs(reset.motion.y) <= 0.01
                             && reset.reactive == 255,
                         "Teleport/dimension reset output mismatch")
-            print("Temporal runtime validation passed (transition, static, L8 reactive merge, Dynamic warm standby, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, camera, depth disocclusion, far view-space depth, resize/FOV, reset)")
+            print("Temporal runtime validation passed (transition, static, L8 reactive merge, Dynamic warm standby, fixed-input Dynamic scaler + DRS resize, HDR precompose + menu blur, far-world camera delta, depth disocclusion, far view-space depth, resize/FOV, reset)")
         } catch {
             fputs("Temporal diagnostic runtime validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

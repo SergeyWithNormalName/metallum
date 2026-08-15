@@ -13,8 +13,7 @@ struct MetallumTemporalUniforms {
     float4x4 previousView;
     float4x4 previousProjection;
     float4x4 inversePreviousJitteredProjection;
-    float4 currentCameraPosition;
-    float4 previousCameraPosition;
+    float4 cameraDelta;
     float2 renderExtent;
     float2 jitter;
     float2 previousJitter;
@@ -118,9 +117,7 @@ fragment MetallumTemporalOutputs metallum_temporal_diagnostic_fs(
 
     // Static terrain reprojection (camera motion vector generation)
     float3 worldRelativeCurrent = (uniforms.inverseCurrentView * float4(currentLocal, 1.0f)).xyz;
-    float3 previousRelative = worldRelativeCurrent
-        + uniforms.currentCameraPosition.xyz
-        - uniforms.previousCameraPosition.xyz;
+    float3 previousRelative = worldRelativeCurrent + uniforms.cameraDelta.xyz;
 
     // Project to previous clip space
     float4 previousClip = uniforms.previousProjection * uniforms.previousView * float4(previousRelative, 1.0f);
@@ -285,9 +282,7 @@ kernel void metallum_reprojection_validate(
 
             // Static terrain reprojection
             float3 worldRelativeCurrent = (uniforms.inverseCurrentView * float4(currentLocal, 1.0f)).xyz;
-            float3 previousRelative = worldRelativeCurrent
-                + uniforms.currentCameraPosition.xyz
-                - uniforms.previousCameraPosition.xyz;
+            float3 previousRelative = worldRelativeCurrent + uniforms.cameraDelta.xyz;
 
             // Project to previous clip space
             float4 previousClip = uniforms.previousProjection * uniforms.previousView * float4(previousRelative, 1.0f);

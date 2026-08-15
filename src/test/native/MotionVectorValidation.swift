@@ -34,8 +34,7 @@ private struct MetallumTemporalDiagnosticUniforms {
     var previousView: simd_float4x4
     var previousProjection: simd_float4x4
     var inversePreviousJitteredProjection: simd_float4x4
-    var currentCameraPosition: SIMD4<Float>
-    var previousCameraPosition: SIMD4<Float>
+    var cameraDelta: SIMD4<Float>
     var renderExtent: SIMD2<Float>
     var jitter: SIMD2<Float>
     var previousJitter: SIMD2<Float>
@@ -300,8 +299,7 @@ private func validateCameraBobJitterReprojection(
         previousView: identity,
         previousProjection: previousProjection,
         inversePreviousJitteredProjection: simd_inverse(previousJitteredProjection),
-        currentCameraPosition: .zero,
-        previousCameraPosition: .zero,
+        cameraDelta: .zero,
         renderExtent: extent,
         jitter: jitter,
         previousJitter: previousJitter,
@@ -434,8 +432,7 @@ private enum MotionVectorValidationMain {
                 previousView: ident,
                 previousProjection: ident,
                 inversePreviousJitteredProjection: ident,
-                currentCameraPosition: SIMD4<Float>(0, 0, 0, 0),
-                previousCameraPosition: SIMD4<Float>(-0.1, 0, 0, 0),
+                cameraDelta: SIMD4<Float>(0.1, 0, 0, 0),
                 renderExtent: SIMD2<Float>(1280, 720),
                 jitter: .zero,
                 previousJitter: .zero,
