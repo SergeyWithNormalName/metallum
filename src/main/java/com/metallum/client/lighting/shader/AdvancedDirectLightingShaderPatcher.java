@@ -527,7 +527,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * (distribution * geometry * nDotL / max(4.0 * nDotV * nDotL, 0.0001));
             }
 
-            vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness) {
+            vec3 metallumEnvironmentLookupV1(
+                    vec3 direction,
+                    vec3 normal,
+                    float roughness,
+                    float celestialShape) {
                 vec3 scattered = metallumSafeNormalV1(mix(direction, normal, roughness * 0.55));
                 if (dot(scattered, scattered) == 0.0) {
                     scattered = direction;
@@ -547,13 +551,45 @@ public final class AdvancedDirectLightingShaderPatcher {
                     float norm = (p + 2.0) / 386.0;
                     float celestial = pow(max(dot(scattered, toLight), 0.0), p) * norm;
                     environment += max(
-                            metallumEnvironment.directionalRadiance.rgb, vec3(0.0)) * celestial;
+                            metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                            * (celestial * celestialShape);
                 }
                 return environment;
             }
 
+            vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness) {
+                return metallumEnvironmentLookupV1(direction, normal, roughness, 1.0);
+            }
+
             vec3 metallumEnvironmentLookupV1(vec3 direction) {
                 return metallumEnvironmentLookupV1(direction, vec3(0.0), 0.05);
+            }
+
+            float metallumWaterSquareSunMaskV1(
+                    vec3 reflectedDirection,
+                    vec3 sunDirection) {
+                vec3 sun = metallumSafeNormalV1(sunDirection);
+                if (dot(sun, sun) == 0.0) {
+                    return 1.0;
+                }
+                vec3 squareRight = cross(metallumEnvironment.worldUpAndMedium.xyz, sun);
+                float squareRightLengthSquared = dot(squareRight, squareRight);
+                if (squareRightLengthSquared < 0.0001) {
+                    squareRight = cross(vec3(0.0, 0.0, 1.0), sun);
+                    squareRightLengthSquared = dot(squareRight, squareRight);
+                }
+                if (squareRightLengthSquared < 0.0001) {
+                    return 1.0;
+                }
+                squareRight *= inversesqrt(squareRightLengthSquared);
+                vec3 squareUp = cross(sun, squareRight);
+                vec2 sunPlane = vec2(
+                        dot(reflectedDirection, squareRight),
+                        dot(reflectedDirection, squareUp));
+                // A soft 3.4° square keeps the Minecraft sun recognizable without turning
+                // the water into a hard-edged, temporally unstable white tile.
+                float squareDistance = max(abs(sunPlane.x), abs(sunPlane.y));
+                return 1.0 - smoothstep(0.030, 0.046, squareDistance);
             }
 
             vec3 metallumTransmissionV1(
@@ -725,8 +761,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float nDotV = max(dot(normal, viewDirection), 0.0);
                 vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
                 vec3 reflectedDirection = reflect(-viewDirection, normal);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                bool waterSunlit = material.kind == METALLUM_SURFACE_WATER_V1
+                        && (metallumEnvironment.contract.w & 2u) == 0u;
+                float waterSunShape = waterSunlit
+                        ? metallumWaterSquareSunMaskV1(reflectedDirection, toLight)
+                        : 1.0;
                 vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
-                        reflectedDirection, normal, material.roughness);
+                        reflectedDirection, normal, material.roughness, waterSunShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
                     // The terrain light coordinate already records vanilla skylight after
@@ -743,7 +785,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * environmentVisibility * (1.0 - material.roughness * 0.48)
                         * environmentStyleWeight;
 
-                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
                 if (directionalWeight > 0.0) {
                     float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
@@ -752,7 +793,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             viewDirection,
                             toLight,
                             max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                                    * (skyOcclusion * sunVisibility),
+                                    * (skyOcclusion * sunVisibility * waterSunShape),
                             f0,
                             material.roughness);
                 }
