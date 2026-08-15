@@ -728,6 +728,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
                         reflectedDirection, normal, material.roughness);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    // The terrain light coordinate already records vanilla skylight after
+                    // block occlusion. Do not leave an analytic-sky floor in a cave or under
+                    // a solid roof; local voxel-occluded highlights remain a separate term.
+                    float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
+                    bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
+                    float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
+                    environmentVisibility = waterOpenSky * waterCelestialReflection;
+                }
                 float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
                         ? 0.92 : 1.0;
                 vec3 result = reflectedEnvironment * environmentFresnel

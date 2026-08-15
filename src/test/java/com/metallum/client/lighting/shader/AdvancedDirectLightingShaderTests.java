@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "c3ae4133676c774703dee41e7881829bcbf7b337173238fe8a7de95e55f887c8",
+            "sodium-solid-fsh", "1d7c3a28cbb3e04dc128100d442fd1df46c33b26c0d31aafe6ae4cf69b2ddaba",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "a0bad53261ee9efd9b5147ab59f0e7cbb24d0b5539f608af3c79027632eff9ea",
+            "sodium-cutout-fsh", "f371b4d4ed697d05052f4c3a3cab3018b37f8638b6d6454d7c4c157c3d05391a",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "fc9de41a5bdcbdabaf4777986b7fe8874e414d6ae19584e290940312ab8998e9",
+            "minecraft-entity-fsh", "eb4a3802b20c8d9f8334f4a44356dd6c760f5c93c4526af562dcbf2834a759f7",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "246f2cc45532937dd226c4456ce8692fb2d576df74220c64584ceac9bfa8ba2b"
+            "minecraft-end-portal-fsh", "946dbc5c8e47c800d03bcbc0a6edb54bdde90bc0f9a6a59b39c89f308dfb53ed"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -95,6 +95,7 @@ public final class AdvancedDirectLightingShaderTests {
         testDepthSliceBoundaries();
         testPowerOfTwoAddressingMatchesFloorArithmetic();
         testWaterWavePhaseIsWorldStable();
+        testWaterSkyReflectionVisibility();
         testScaleInvariantSurfaceNormal();
         testL6ShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
@@ -254,6 +255,30 @@ public final class AdvancedDirectLightingShaderTests {
                         && Math.abs(waterNoiseCoordinate(-0.001, worldZ - 256.0)
                         - expectedNoiseZ) < 1.0e-9,
                 "L8 water noise lost its exact 256-block large-world period");
+    }
+
+    private static void testWaterSkyReflectionVisibility() {
+        float closedCave = waterSkyReflectionVisibility(0.0f, false);
+        float roofedInterior = waterSkyReflectionVisibility(0.20f, false);
+        float shadedOpening = waterSkyReflectionVisibility(0.50f, false);
+        float openDay = waterSkyReflectionVisibility(1.0f, false);
+        float openMoon = waterSkyReflectionVisibility(1.0f, true);
+        require(Math.abs(closedCave) < 0.000001f
+                        && Math.abs(roofedInterior) < 0.000001f
+                        && shadedOpening > 0.0f && shadedOpening < openDay
+                        && Math.abs(openDay - 1.0f) < 0.000001f
+                        && Math.abs(openMoon - 0.18f) < 0.000001f,
+                "water sky reflection no longer closes indoors, fades through skylight, or dims at night");
+    }
+
+    private static float waterSkyReflectionVisibility(
+            final float skyVisibility,
+            final boolean moonlit
+    ) {
+        float normalizedSky = Math.clamp(skyVisibility, 0.0f, 1.0f);
+        float edge = Math.clamp((normalizedSky - 0.20f) / 0.65f, 0.0f, 1.0f);
+        float openSky = edge * edge * (3.0f - 2.0f * edge);
+        return openSky * (moonlit ? 0.18f : 1.0f);
     }
 
     private static double waterWavePhase(
@@ -977,6 +1002,20 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float wave1 = sin(")
                         && sodiumFragment.contains("float wave2 = cos("),
                 "L8 water refraction, depth absorption, or procedural waves are missing");
+        require(environment.contains("float environmentVisibility = mix(0.46, 1.0, skyOcclusion);")
+                        && environment.contains("if (material.kind == METALLUM_SURFACE_WATER_V1) {")
+                        && environment.contains(
+                        "float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);")
+                        && environment.contains(
+                        "bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;")
+                        && environment.contains(
+                        "float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;")
+                        && environment.contains(
+                        "environmentVisibility = waterOpenSky * waterCelestialReflection;")
+                        && before(environment,
+                        "if (material.kind == METALLUM_SURFACE_WATER_V1) {",
+                        "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1"),
+                "water sky reflection is not gated by existing skylight and moon state");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
                         && !sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1")
                         && sodiumFragment.contains(
