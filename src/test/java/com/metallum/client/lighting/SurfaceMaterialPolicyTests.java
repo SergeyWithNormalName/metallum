@@ -270,6 +270,7 @@ public final class SurfaceMaterialPolicyTests {
         boolean[] rainfallColumns = new boolean[SodiumRainExposureSnapshot.AREA];
         heights[(3 << 4) | 2] = 71;
         rainfallColumns[(3 << 4) | 2] = true;
+        heights[(4 << 4) | 4] = 63;
         SodiumRainExposureSnapshot snapshot = new SodiumRainExposureSnapshot(
                 32, -16, heights, rainfallColumns);
         require(snapshot.canRainReach(34, 71, -13)
@@ -278,6 +279,12 @@ public final class SurfaceMaterialPolicyTests {
                         && !snapshot.canRainReach(31, 100, -13)
                         && !snapshot.canRainReach(34, 100, 0),
                 "rain exposure snapshot accepts a dry-biome, sheltered, or foreign column");
+        require(snapshot.canSeeSky(34, 71, -13)
+                        && !snapshot.canSeeSky(34, 70, -13)
+                        && snapshot.canSeeSky(36, 63, -12)
+                        && !snapshot.canRainReach(36, 63, -12)
+                        && !snapshot.canSeeSky(31, 100, -13),
+                "sky exposure must respect the roof height but ignore local rain biome eligibility");
     }
 
     private static void testComprehensiveBlockClassifications() {

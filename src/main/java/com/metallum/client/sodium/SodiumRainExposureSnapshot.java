@@ -38,13 +38,28 @@ public final class SodiumRainExposureSnapshot {
     }
 
     public boolean canRainReach(final int blockX, final int surfaceY, final int blockZ) {
+        int column = this.column(blockX, blockZ);
+        return column >= 0
+                && this.rainfallColumns[column]
+                && surfaceY >= this.precipitationHeights[column];
+    }
+
+    /**
+     * Returns whether the surface lies at or above vanilla's motion-blocking height for its
+     * column. Unlike {@link #canRainReach(int, int, int)}, this deliberately ignores biome
+     * precipitation: an open water surface in a desert or snowy biome still sees the sky.
+     */
+    public boolean canSeeSky(final int blockX, final int surfaceY, final int blockZ) {
+        int column = this.column(blockX, blockZ);
+        return column >= 0 && surfaceY >= this.precipitationHeights[column];
+    }
+
+    private int column(final int blockX, final int blockZ) {
         int localX = blockX - this.minBlockX;
         int localZ = blockZ - this.minBlockZ;
         if ((localX | localZ) < 0 || localX >= WIDTH || localZ >= WIDTH) {
-            return false;
+            return -1;
         }
-        int column = (localZ << 4) | localX;
-        return this.rainfallColumns[column]
-                && surfaceY >= this.precipitationHeights[column];
+        return (localZ << 4) | localX;
     }
 }
