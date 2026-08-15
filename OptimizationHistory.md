@@ -14,8 +14,8 @@
   markers. Detailed-прогоны служат только для атрибуции.
 - Изменение качества, дальности, количества каскадов или набора функций не считается
   бесплатной оптимизацией.
-- Идеи, принадлежащие будущим этапам `LIGHTING_ARCHITECTURE_PLAN.md`, не внедряются
-  раньше времени.
+- Будущие архитектурные идеи не внедряются раньше времени и без отдельной
+  измеримой причины.
 - Отрицательный кандидат полностью удаляется из исходников. В истории остаётся
   только метод, результат и мой вывод.
 
@@ -298,9 +298,9 @@ property tests и conservative widening. Матрицы, depth bounds и culling
 **Статус:** потенциально самый сильный shadow upgrade, но сознательно не внедрялся.
 
 Кэшировать статический terrain и обновлять только dirty pages действительно может
-убрать основную стоимость трёх полных caster passes. Но это буквально содержание L6
-в `LIGHTING_ARCHITECTURE_PLAN.md`: static/dynamic split, invalidation, локальные
-voxel shadows и сохранение стабильной texel phase.
+убрать основную стоимость трёх полных caster passes. Но для этого нужен полноценный
+L6 static/dynamic split, invalidation, локальные voxel shadows и сохранение
+стабильной texel phase.
 
 Попытка сделать «маленький cache» сейчас создала бы скрытую вторую архитектуру без
 world/chunk/light invalidation и помешала бы будущему L6. До этого этапа правильный
@@ -1988,3 +1988,39 @@ fractional position; и hash period, и noise scale замкнуты на 256 б
 для water fragments, без texture samples, passes, buffers, allocations или работы над сушей.
 Actual-source GLSL/SPIR-V тест дополнительно проверяет 256-block periodicity и block-boundary
 continuity; live signoff остаётся нужен для субъективной плотности рисунка и fps на полной воде.
+
+## 2026-08-12 — Nether L4 Sun-Shadow Runtime Guard (Эксперимент отклонен)
+
+**Статус:** Отклонено (`REJECTED_NO_MEASURABLE_SCREENING_GAIN`), изменённый код откатён из продакшена.
+
+### Описание и аудит гипотезы
+
+Была предложена гипотеза, что динамический uniform-guard в MSL вызывающей функции позволит пропустить выполнение `metallumSunVisibilityV1` в Nether/End измерениях:
+```glsl
+bool sunShadowActive = (metallumEnvironment.contract.w & 1u) != 0u
+        && metallumEnvironment.directionAndFlags.w > 0.0;
+if (sunShadowActive && directionalWeight > 0.0 && (hasDirectionalLight || hasSkyLight)) {
+    sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+}
+```
+
+Аудит показал:
+1. В исходном базовом коде уже присутствовала проверка `if (directionalWeight > 0.0)`.
+2. Для фрагментов ландшафта в Cave `skyVisibility` равен `0.0`, поэтому `directionalWeight` равен `0.0`, и исходный код уже пропускал вызов `metallumSunVisibilityV1` для ландшафта.
+3. Прямое парное Tier B сравнение (Guard OFF vs Guard ON) на `hdrtest-cave-v1` показало:
+   - Guard OFF: `163.32 FPS` (GPU p95 `5.97 ms`)
+   - Guard ON: `164.67 FPS` (GPU p95 `5.65 ms`)
+   - Разница: `+1.35 FPS (+0.83%)` — находится в пределах повседневного шума стенда для 160+ FPS.
+
+### Аудит раннего claim Tier C
+
+Предыдущий 2x2 Tier C claim классифицирован как `INVALID_BASELINE_CANDIDATE_SEPARATION`: оба кандидатных и один из "baseline" прогонов выполнялись на коммите с уже введённым guard, а один baseline прогон являлся reference capture и игнорировался анализатором. Плейсхолдер отменён, код откатён.
+
+### Сохранённый диагностический результат (Ablation Finding)
+
+- **FULL_ADVANCED компилированный шейдер**: ~160–168 FPS в Cave при тихой обстановке, ~31 FPS при тяжелых взаимодействиях L3/L4/L6.
+- **Компил-тайм абеляция `#define METALLUM_ABLATE_L4_SUN_SHADOWS 1`**: ~165–168 FPS (SUPPORTED: удаление кода L4 receiver на этапе MSL препроцессора радикально меняет генерацию кода/распределение регистров).
+- **Runtime guard**: не воспроизводит компил-тайм прирост над базовым `directionalWeight > 0.0` (SUPPORTED).
+- **Причина**: UNKNOWN (требует прямых счетчиков компилятора/GPU для точного подтверждения).
+
+Шейдер откатён к чистому baseline. Следующий гипотетический шаг — специализация MSL PSO под измерение.

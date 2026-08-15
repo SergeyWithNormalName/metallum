@@ -61,11 +61,13 @@ Java and Swift exchange complex packets using direct contiguous byte memory segm
 ---
 
 ## 7. Links to Detailed Documentation
+- [Documentation map](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/README.md): Canonical documents and placement rules.
 - [Architecture & Frame Graph](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/architecture.md): Lifecycle of a frame and JNI-bridge.
 - [Metal Renderer Backend](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/metal-renderer.md): Command buffers, encoders, and caching.
 - [Lighting System](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/lighting.md): Clustered lighting and emitters extraction.
 - [Shadow Systems](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/shadows.md): Cascaded shadows and ray-traced voxel occupancy shadows.
 - [Memory Management](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/memory.md): Heap vs off-heap memory safety.
 - [Performance & Profiling](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/performance.md): Bottlenecks and optimization guidelines.
+- [Benchmarking & Performance Methodology](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/docs/BENCHMARKING.md): For Metallum performance work, read docs/BENCHMARKING.md and use the `metallum-benchmarking` skill.
 - [Technical Debt Registry](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/TECH_DEBT.md): Tracked issues, priority list, and locks.
 - [Future Technologies Readiness](file:///Users/sergejgenerozov/Documents/Эксперимент с модом/metallum/FUTURE_RENDERING.md): Temporal upscaling, dynamic resolution, and TAA.

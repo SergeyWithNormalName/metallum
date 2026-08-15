@@ -1,6 +1,6 @@
 # Temporal Upscaling and Dynamic Resolution
 
-Status: audited against the production code on 2026-07-23.
+Status: audited against the production code on 2026-08-16.
 
 This document describes the current implementation, not a design target. It separates guarantees proven by code and automated validation from pacing that still needs a real client benchmark.
 
@@ -12,9 +12,14 @@ Fixed Temporal presets use render-sized inputs:
 
 | Preset | Input extent | Jitter phases |
 | --- | --- | --- |
-| Quality | 75% linear | 18 |
+| Quality | 75% linear | derived from actual render/display extent |
 | Performance | 50% linear | 32 |
-| Ultra Performance | about 33% linear | 72 |
+| Ultra Performance | 40% linear | derived from actual render/display extent |
+
+`JitterSequence.phaseCount(...)` derives phases as
+`ceil(8 × max(displayWidth/renderWidth, displayHeight/renderHeight)^2)`.
+At exact nominal extents this is 15 / 32 / 50 phases respectively; rounded
+targets can differ. The preset name is not a phase-count contract.
 
 The public dynamic Temporal mode is deliberately more conservative. It is a two-state controller, not continuous DRS:
 
@@ -84,6 +89,18 @@ The checked-in tests prove important local contracts:
 - `temporalDiagnosticRuntimeValidation` validates Dynamic-Temporal warm standby creation, typed motion/reactive input, a `64x64 -> 48x48` input-content transition inside unchanged `96x96` physical inputs, reset behavior, depth disocclusion, HDR precompose/UI backdrop and menu blur.
 
 Those tests do **not** measure a real Minecraft `Native -> Temporal -> Native` transition at the built-in display resolution. They cannot prove a p95/p99 frame-time bound, absence of one-frame target-resize hitches, or absence of policy oscillation in the Overworld and Nether.
+
+The large-world camera-delta precision defect was fixed on 2026-08-15: Swift
+subtracts the two camera positions as `Double` before narrowing the relative
+delta for MSL. Do not reintroduce subtraction of independently narrowed
+absolute `Float` coordinates.
+
+The remaining input-quality boundary is entity motion. The recorder, packet ABI
+and native shader exist, but production does not yet provide validated live
+`MTLBuffer` handles, so replay emits no packets by design. Material-authored
+reactive coverage is also incomplete outside the supported terrain path. These
+are correctness/visual-quality gaps, not evidence that the static camera path
+is broken.
 
 ## 7. Required live evidence before claiming smooth switching
 

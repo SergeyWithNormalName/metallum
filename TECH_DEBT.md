@@ -70,6 +70,7 @@ This document records the identified technical debt, safety hazards, and concurr
 - **Why it is a problem**: The JVM garbage collector does not understand Metal GPU execution queues and could deallocate a Java resource wrapper before the GPU completes its work.
 - **Possible Impact**: Intermittent GPU crashes and driver hangs (`AGXMetalG13X` SIGSEGV crashes) under high memory pressure.
 - **Fixing Complexity**: Medium. Ensure all Java resource wrappers explicitly register their handles in the deferred destruction queue (`MetalDestructionQueue`) rather than relying on standard finalize hooks or simple GC deallocations.
+- **Startup-hygiene disposition**: No FFM-handle optimization is authorized here. Treat eager downcall-handle creation as a future measurable candidate only: first record separate cold-start timings for native-resource extraction, FFM lookup/downcall creation, and device-to-`metallum_init_pipelines` completion; consider a design change only if repeated runs identify FFM setup as a material contributor without worsening failure handling.
 
 ---
 
@@ -79,20 +80,21 @@ This document records the identified technical debt, safety hazards, and concurr
 - **Description**: T1B currently has transform history, packet layout, shader math, and native matrix tests, but no production hook supplies the actual Metal entity vertex/index buffers. The recorder therefore emits no in-game replay packets by design.
 - **Risk**: Treating the implementation as ready would either render no dynamic entity motion or tempt a caller to pass invalid raw handles to the native bridge.
 - **Required completion**: Capture only deferred-lifetime real `MTLBuffer` handles from the Metal draw path, validate packet bounds/device ownership and render pipeline state, then prove the path in a live moving/teleporting-entity scene before enabling it.
+- **Startup-hygiene disposition**: No Entity Motion packaging or startup optimization is authorized here. It remains a future candidate only after live draw packets exist; measure an identical moving-entity route with replay Off/On, including presented-frame pacing, GPU p95/p99, dropped frames, and visual motion-vector correctness before deciding whether its startup or runtime footprint warrants work.
 
 ---
 
-## 7. Nether Lava Stress Artifact Does Not Capture Frame Timing
-- **Location**: `benchmark/nether_lava_stress_results.json`, `scripts/run_metal_benchmark.sh`
-- **Priority**: **P1**
-- **Description**: The committed eight-scenario artifact records `fps: 0.0` and `gpu_p95: 0.0` for every entry; the baseline also has zero measured frames. Its light-density and cluster-overflow fields are useful diagnostics, but it cannot support a frame-time or FPS conclusion.
-- **Risk**: Optimizing against unmeasured or manually inferred numbers would accept regressions or attribute cost to the wrong renderer stage.
-- **Required completion**: Rerun the route with the built-in timestamp profiler, reject zero-value measurement fields, and publish whole-frame median/p95/tail data together with the captured JSONL evidence.
+## 7. Benchmark Acceptance Receipt Is a Local Integrity Gate
+- **Location**: `scripts/run_metal_benchmark.sh`, `tools/metal_benchmark_report.py`, [docs/BENCHMARKING.md](docs/BENCHMARKING.md)
+- **Priority**: **P2**
+- **Description**: A `.accepted.json` receipt binds a complete run's raw JSONL, derived summary and logs, but it is a local consistency check rather than an external trust root. Historical zero-frame Nether artifacts are not benchmark evidence and must not be revived as a baseline.
+- **Risk**: Treating a receipt as a performance verdict, or treating old diagnostic counters as frame-time data, would permit invalid comparisons.
+- **Required completion**: Keep decisions bound to complete timestamp reports and the documented Tier C multi-run comparison. If receipt creation or validation is changed, add a regression proving its event ordering and bindings before relying on it.
 
 ---
 
 ## 8. Frame Interpolation Requires Live Visual and Latency Acceptance Evidence
-- **Location**: `FrameInterpolation.md` sections 14.3–14.4; `docs/promotion-frame-scheduler.md`; `MetallumFrameInterpolationCoordinator.swift`
+- **Location**: `FUTURE_RENDERING.md`; `docs/promotion-frame-scheduler.md`; `MetallumFrameInterpolationCoordinator.swift`
 - **Priority**: **P2**
 - **Description**: Fixed-Temporal and Spatial production paths now share an Extended ProMotion scheduler with runtime VRR timing, bounded generated→real ordering, absolute Mach deadlines, actual `MTLDrawable.presentedTime` telemetry and fail-open real presentation. Automated Java/Swift/Metal validation proves policy and resource contracts, but cannot provide a deterministic game-owned drawable stream, moving entities, a real HUD or player input latency.
 - **Risk**: A formally valid adaptive schedule can still show temporal artifacts, uneven on-panel cadence or latency spikes in a real world, especially around UI, teleport, F3+A, fullscreen/display/headroom transitions and OS power/thermal refresh changes.

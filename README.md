@@ -4,6 +4,13 @@ Metallum is an experimental Metal rendering backend for Minecraft on macOS. It r
 
 The project is still experimental. Performance and compatibility can vary by macOS version, resource pack, and installed mods.
 
+## Documentation
+
+The compact documentation map is in [docs/README.md](docs/README.md). In particular,
+[the benchmarking guide](docs/BENCHMARKING.md) is the only operating contract for
+performance work, while [OptimizationHistory.md](OptimizationHistory.md) is the
+dated record of accepted and rejected experiments.
+
 ## HDR
 
 The default `auto` mode enables the scene-wide HDR path when macOS reports an EDR-capable display and falls back to SDR otherwise. The HDR path uses:
