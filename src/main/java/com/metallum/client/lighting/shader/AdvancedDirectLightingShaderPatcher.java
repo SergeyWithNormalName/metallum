@@ -395,11 +395,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec2 worldPos = metallumComputeWorldPosXZV1(viewPosition);
                     float moistureNoise = metallumMoistureNoiseV1(worldPos);
                     material.wetness = clamp(material.wetness * (0.60 + 0.80 * moistureNoise), 0.0, 1.0);
-                    float puddleThreshold = mix(0.68, 0.38, material.wetness);
-                    float puddleMask = kind != METALLUM_SURFACE_POROUS_V1
-                            ? smoothstep(puddleThreshold - 0.10, puddleThreshold + 0.10, moistureNoise) * smoothstep(0.05, 0.35, material.wetness)
-                            : 0.0;
-                    texturedWetRoughness = mix(texturedWetRoughness, 0.055, puddleMask);
                 }
                 material.roughness = clamp(mix(
                         material.roughness, texturedWetRoughness, material.wetness),

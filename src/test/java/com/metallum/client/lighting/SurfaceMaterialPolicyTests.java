@@ -21,7 +21,7 @@ public final class SurfaceMaterialPolicyTests {
         testRainExposureSnapshot();
         testWetnessAndAbsorption();
         testComprehensiveBlockClassifications();
-        testMicroPuddlesAndMoistureNoise();
+        testWetSurfaceRoughnessBounds();
         System.out.println("PASS L8 GGX, water/glass optics, wetness, and compact material policy tests");
     }
 
@@ -354,7 +354,7 @@ public final class SurfaceMaterialPolicyTests {
                 "exposed copper door did not resolve STONE");
     }
 
-    private static void testMicroPuddlesAndMoistureNoise() {
+    private static void testWetSurfaceRoughnessBounds() {
         // Validate material descriptors wet vs dry properties
         require(SurfaceMaterialPolicy.STONE.wetRoughnessTarget() == 0.28f, "stone wet roughness target mismatch");
         require(SurfaceMaterialPolicy.POROUS.wetRoughnessTarget() == 0.72f, "porous wet roughness target mismatch");

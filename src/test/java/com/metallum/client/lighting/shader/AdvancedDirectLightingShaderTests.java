@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "b03d479ffb6b8f84b56e467b288ffc996571f757a4e4b0928abdea09b25e9e6b",
+            "sodium-solid-fsh", "7d7c49bcd4d4f5b0cbc452f61d02a93d362f1880a539fa19e360dc32697c3359",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "f8c4024afe51c34a2a570ee18a4ae9411d08a9d3b0811ff197f54910b6b42afe",
+            "sodium-cutout-fsh", "c463ff66b07974c52ea09ea80fbbac0c701af370b58b6ad3ee24be77eccbd062",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "9d724794333607283eebaa68a114328db6ceb0e8389b47411d9ee56ef696c180",
+            "minecraft-entity-fsh", "cae914839bfb8607a4c13ef85f3710db2ac04757d77b6eba8697ab16df294a0b",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "e5965962c0af2d25938c300d55d48ecb534b5568f6d11f854aaaba26026e2f3e"
+            "minecraft-end-portal-fsh", "3f1223a244e43ad85de728ece887bfafd679a9629d9c758134068e4f80691629"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -1077,9 +1077,12 @@ public final class AdvancedDirectLightingShaderTests {
 
         require(sodiumFragment.contains("vec2 metallumComputeWorldPosXZV1(vec3 viewPosition)")
                         && sodiumFragment.contains("float metallumMoistureNoiseV1(vec2 worldPos)")
-                        && sodiumFragment.contains("float puddleMask = kind != METALLUM_SURFACE_POROUS_V1")
-                        && sodiumFragment.contains("texturedWetRoughness = mix(texturedWetRoughness, 0.055, puddleMask)"),
-                "R2 micro-puddles or world-space moisture noise is missing");
+                        && sodiumFragment.contains(
+                        "material.wetness = clamp(material.wetness * (0.60 + 0.80 * moistureNoise), 0.0, 1.0);")
+                        && !sodiumFragment.contains("float puddleMask =")
+                        && !sodiumFragment.contains(
+                        "texturedWetRoughness = mix(texturedWetRoughness, 0.055, puddleMask)"),
+                "rain moisture no longer stays continuous or reintroduced a discontinuous puddle mask");
         require(sodiumFragment.contains("vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness)")
                         && sodiumFragment.contains("mix(direction, normal, roughness * 0.55)")
                         && sodiumFragment.contains("float p = clamp(2.0 / (safeRoughness * safeRoughness) - 2.0, 2.0, 384.0)")
