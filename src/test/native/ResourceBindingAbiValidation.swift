@@ -18,6 +18,30 @@ private typealias NativeApplyFunction = @convention(c) (
     UInt64
 ) -> Int32
 
+private typealias NativeCreateBuffer = @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int,
+    UInt
+) -> UnsafeMutableRawPointer?
+
+private typealias NativeReleaseObject = @convention(c) (
+    UnsafeMutableRawPointer?
+) -> Void
+
+private typealias NativeBufferHandleIsLive = @convention(c) (
+    UnsafeMutableRawPointer?
+) -> Int32
+
+private typealias NativeDrawIndexedCpuCommands = @convention(c) (
+    UnsafeMutableRawPointer?,
+    UInt,
+    UInt,
+    UnsafeMutableRawPointer?,
+    UnsafeRawPointer?,
+    Int,
+    UInt64
+) -> Void
+
 private let headerBytes = 32
 private let recordBytes = 48
 
@@ -115,12 +139,70 @@ private enum ResourceBindingAbiValidationMain {
                 throw ValidationFailure.message("Native resource binding ABI symbol is missing")
             }
             let nativeApply = unsafeBitCast(symbol, to: NativeApplyFunction.self)
+            guard let createBufferSymbol = dlsym(library, "metallum_create_buffer"),
+                  let releaseObjectSymbol = dlsym(library, "metallum_release_object"),
+                  let bufferHandleIsLiveSymbol = dlsym(
+                      library,
+                      "metallum_buffer_handle_is_live"
+                  ),
+                  let drawIndexedCpuCommandsSymbol = dlsym(
+                      library,
+                      "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands"
+                  ) else {
+                throw ValidationFailure.message("Native buffer lifecycle ABI symbols are missing")
+            }
+            let nativeCreateBuffer = unsafeBitCast(createBufferSymbol, to: NativeCreateBuffer.self)
+            let nativeReleaseObject = unsafeBitCast(releaseObjectSymbol, to: NativeReleaseObject.self)
+            let nativeBufferHandleIsLive = unsafeBitCast(
+                bufferHandleIsLiveSymbol,
+                to: NativeBufferHandleIsLive.self
+            )
+            let nativeDrawIndexedCpuCommands = unsafeBitCast(
+                drawIndexedCpuCommandsSymbol,
+                to: NativeDrawIndexedCpuCommands.self
+            )
 
             guard let device = MTLCreateSystemDefaultDevice(),
                   let queue = device.makeCommandQueue(),
-                  let commandBuffer = queue.makeCommandBuffer(),
-                  let buffer = device.makeBuffer(length: 64, options: .storageModeShared) else {
+                  let commandBuffer = queue.makeCommandBuffer() else {
                 throw ValidationFailure.message("Could not create Metal validation resources")
+            }
+            let devicePointer = Unmanaged.passUnretained(device as AnyObject).toOpaque()
+            guard let lifecycleProbe = nativeCreateBuffer(
+                devicePointer,
+                64,
+                MTLResourceOptions.storageModeShared.rawValue
+            ) else {
+                throw ValidationFailure.message("Native ABI could not create a lifecycle probe")
+            }
+            let lifecycleProbeObject = Unmanaged<AnyObject>.fromOpaque(
+                lifecycleProbe
+            ).takeUnretainedValue()
+            try require(
+                lifecycleProbeObject is MTLBuffer,
+                "General native lifecycle probe was not an MTLBuffer"
+            )
+            try require(
+                nativeBufferHandleIsLive(lifecycleProbe) == 1,
+                "General native buffer handle was not registered"
+            )
+            nativeReleaseObject(lifecycleProbe)
+            try require(
+                nativeBufferHandleIsLive(lifecycleProbe) == 0,
+                "Generally released buffer handle remained eligible for GPU encoding"
+            )
+
+            guard let bufferHandle = nativeCreateBuffer(
+                devicePointer,
+                64,
+                MTLResourceOptions.storageModeShared.rawValue
+            ) else {
+                throw ValidationFailure.message("Native ABI could not create a validation buffer")
+            }
+            defer { nativeReleaseObject(bufferHandle) }
+            let bufferObject = Unmanaged<AnyObject>.fromOpaque(bufferHandle).takeUnretainedValue()
+            guard let buffer = bufferObject as? MTLBuffer else {
+                throw ValidationFailure.message("Native buffer ABI returned a non-MTLBuffer object")
             }
             let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba8Unorm,
@@ -142,6 +224,21 @@ private enum ResourceBindingAbiValidationMain {
             pass.colorAttachments[0].storeAction = .store
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
                 throw ValidationFailure.message("Could not create Metal validation encoder")
+            }
+
+            let staleDrawCommand: [UInt32] = [3, 1, 0, 0, 0]
+            withExtendedLifetime(lifecycleProbeObject) {
+                staleDrawCommand.withUnsafeBytes { raw in
+                    nativeDrawIndexedCpuCommands(
+                        Unmanaged.passUnretained(encoder as AnyObject).toOpaque(),
+                        MTLPrimitiveType.triangle.rawValue,
+                        MTLIndexType.uint16.rawValue,
+                        lifecycleProbe,
+                        raw.baseAddress,
+                        1,
+                        UInt64(raw.count)
+                    )
+                }
             }
 
             let valid = validPacket(buffer: buffer, texture: texture, sampler: sampler)
@@ -215,8 +312,8 @@ private enum ResourceBindingAbiValidationMain {
                         "Duplicate binding index was not rejected")
             var invalidObjectType = valid
             writeUInt64(objectAddress(texture), at: headerBytes + 16, into: &invalidObjectType)
-            try require(apply(nativeApply, encoder: encoder, bytes: invalidObjectType) == -14,
-                        "Wrong native object type was not rejected")
+            try require(apply(nativeApply, encoder: encoder, bytes: invalidObjectType) == -11,
+                        "Unregistered uniform-buffer handle was not rejected")
             var outOfBounds = valid
             writeUInt64(60, at: headerBytes + 32, into: &outOfBounds)
             writeUInt64(16, at: headerBytes + 40, into: &outOfBounds)
@@ -234,7 +331,7 @@ private enum ResourceBindingAbiValidationMain {
             commandBuffer.waitUntilCompleted()
             try require(commandBuffer.status == .completed,
                         "Command buffer failed after applying valid resource bindings")
-            print("Native resource binding ABI validation passed (19 negative cases)")
+            print("Native resource binding ABI validation passed (19 negative cases + stale indexed draw)")
         } catch {
             fputs("Native resource binding ABI validation FAILED: \(error)\n", stderr)
             exit(EXIT_FAILURE)

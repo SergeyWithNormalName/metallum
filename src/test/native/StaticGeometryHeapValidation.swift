@@ -25,6 +25,10 @@ private typealias NativeReleaseDeviceCaches = @convention(c) (
     UnsafeMutableRawPointer?
 ) -> Void
 
+private typealias NativeBufferHandleIsLive = @convention(c) (
+    UnsafeMutableRawPointer?
+) -> Int32
+
 private let heapPageBytes = 16 * 1024 * 1024
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -68,6 +72,10 @@ private final class NativeBufferLease {
         release(handle)
     }
 
+    func handleForValidation() -> UnsafeMutableRawPointer? {
+        handle
+    }
+
     deinit {
         close()
     }
@@ -77,6 +85,7 @@ private struct NativeApi {
     let createStaticGeometryBuffer: NativeCreateStaticGeometryBuffer
     let releaseStaticGeometryBuffer: NativeReleaseObject
     let releaseDeviceCaches: NativeReleaseDeviceCaches
+    let bufferHandleIsLive: NativeBufferHandleIsLive
 
     func makeBuffer(device: MTLDevice, length: Int) throws -> NativeBufferLease {
         let devicePointer = Unmanaged.passUnretained(device as AnyObject).toOpaque()
@@ -90,6 +99,19 @@ private struct NativeApi {
             release: releaseStaticGeometryBuffer
         )
     }
+}
+
+private func validateBufferHandleLifecycle(api: NativeApi, device: MTLDevice) throws {
+    let lease = try api.makeBuffer(device: device, length: 4 * 1024)
+    guard let handle = lease.handleForValidation() else {
+        throw ValidationFailure.message("Lifecycle probe lost its native buffer handle")
+    }
+    try require(api.bufferHandleIsLive(handle) == 1, "New native buffer handle was not registered")
+    lease.close()
+    try require(
+        api.bufferHandleIsLive(handle) == 0,
+        "Released native buffer handle remained eligible for indexed draws"
+    )
 }
 
 private func validateHeapBacked(
@@ -213,6 +235,8 @@ private func validateRoundTrip(
 }
 
 private func runValidation(api: NativeApi, device: MTLDevice) throws {
+    try validateBufferHandleLifecycle(api: api, device: device)
+
     let anchorLength = 4 * 1024
     let reusableLength = 2 * 1024 * 1024
     let secondPageLength = 8 * 1024 * 1024
@@ -362,6 +386,12 @@ private enum StaticGeometryHeapValidationMain {
             ) else {
                 throw ValidationFailure.message("Device cache release ABI symbol is missing")
             }
+            guard let bufferHandleIsLiveSymbol = dlsym(
+                library,
+                "metallum_buffer_handle_is_live"
+            ) else {
+                throw ValidationFailure.message("Buffer handle liveness ABI symbol is missing")
+            }
 
             let api = NativeApi(
                 createStaticGeometryBuffer: unsafeBitCast(
@@ -375,6 +405,10 @@ private enum StaticGeometryHeapValidationMain {
                 releaseDeviceCaches: unsafeBitCast(
                     releaseCachesSymbol,
                     to: NativeReleaseDeviceCaches.self
+                ),
+                bufferHandleIsLive: unsafeBitCast(
+                    bufferHandleIsLiveSymbol,
+                    to: NativeBufferHandleIsLive.self
                 )
             )
             guard let device = MTLCreateSystemDefaultDevice() else {

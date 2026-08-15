@@ -514,6 +514,7 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetCullMode = downcall(lookup, "metallum_MTLRenderCommandEncoder_setCullMode", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG));
             MTLRenderCommandEncoderSetTriangleFillMode = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTriangleFillMode", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, INT));
             MTLRenderCommandEncoderSetBuffer = downcall(lookup, "metallum_MTLRenderCommandEncoder_setBuffer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, INT));
+            MTLRenderCommandEncoderSetRegisteredBuffer = downcall(lookup, "metallum_MTLRenderCommandEncoder_setRegisteredBuffer", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, INT));
             MTLRenderCommandEncoderSetBufferOffset = downcall(lookup, "metallum_MTLRenderCommandEncoder_setBufferOffset", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, INT));
             MTLRenderCommandEncoderSetTexture = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTexture", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
             MTLRenderCommandEncoderSetTextureAndSampler = downcall(lookup, "metallum_MTLRenderCommandEncoder_setTextureAndSampler", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, INT));
@@ -889,6 +890,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderSetCullMode;
     private static final MethodHandle MTLRenderCommandEncoderSetTriangleFillMode;
     private static final MethodHandle MTLRenderCommandEncoderSetBuffer;
+    private static final MethodHandle MTLRenderCommandEncoderSetRegisteredBuffer;
     private static final MethodHandle MTLRenderCommandEncoderSetBufferOffset;
     private static final MethodHandle MTLRenderCommandEncoderSetTexture;
     private static final MethodHandle MTLRenderCommandEncoderSetTextureAndSampler;
@@ -2269,6 +2271,14 @@ public final class MetalNativeBridge {
             MTLRenderCommandEncoderSetBuffer.invokeExact(segment(encoder), segment(buffer), offset, index, stageMask);
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_setBuffer", throwable);
+        }
+    }
+
+    public static void MTLRenderCommandEncoder_setRegisteredBuffer(final MemorySegment encoder, final MemorySegment buffer, final long offset, final long index, final int stageMask) {
+        try {
+            MTLRenderCommandEncoderSetRegisteredBuffer.invokeExact(segment(encoder), segment(buffer), offset, index, stageMask);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_MTLRenderCommandEncoder_setRegisteredBuffer", throwable);
         }
     }
 

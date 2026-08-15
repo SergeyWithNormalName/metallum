@@ -20,6 +20,16 @@ private typealias NativeEncodeBatch = @convention(c) (
     UInt64
 ) -> Int32
 
+private typealias NativeCreateBuffer = @convention(c) (
+    UnsafeMutableRawPointer?,
+    Int,
+    UInt
+) -> UnsafeMutableRawPointer?
+
+private typealias NativeReleaseObject = @convention(c) (
+    UnsafeMutableRawPointer?
+) -> Void
+
 private let recordBytes = 32
 private let legacyVertexBytes = 20
 private let legacyLightUshortIndex = 8
@@ -29,6 +39,48 @@ private struct PatchRecord {
     let sidecar: MTLBuffer?
     let vertexOffset: UInt64
     let vertexCount: UInt64
+}
+
+private final class NativeBufferLease {
+    let buffer: MTLBuffer
+    private var handle: UnsafeMutableRawPointer?
+    private let release: NativeReleaseObject
+
+    init(handle: UnsafeMutableRawPointer, release: @escaping NativeReleaseObject) throws {
+        let object = Unmanaged<AnyObject>.fromOpaque(handle).takeUnretainedValue()
+        guard let buffer = object as? MTLBuffer else {
+            release(handle)
+            throw ValidationFailure.message("Native buffer ABI returned a non-MTLBuffer object")
+        }
+        self.buffer = buffer
+        self.handle = handle
+        self.release = release
+    }
+
+    deinit {
+        if let handle {
+            release(handle)
+            self.handle = nil
+        }
+    }
+}
+
+private struct NativeApi {
+    let encodeBatch: NativeEncodeBatch
+    let createBuffer: NativeCreateBuffer
+    let releaseObject: NativeReleaseObject
+
+    func makeBuffer(
+        device: MTLDevice,
+        length: Int,
+        options: MTLResourceOptions
+    ) throws -> NativeBufferLease {
+        let devicePointer = Unmanaged.passUnretained(device as AnyObject).toOpaque()
+        guard let handle = createBuffer(devicePointer, length, options.rawValue) else {
+            throw ValidationFailure.message("Native ABI could not create a validation buffer")
+        }
+        return try NativeBufferLease(handle: handle, release: releaseObject)
+    }
 }
 
 private func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -98,24 +150,30 @@ private func requireFilled(_ buffer: MTLBuffer, with value: UInt16, _ message: S
 }
 
 private func validateFailureAtomicity(
-    _ nativeEncode: NativeEncodeBatch,
+    _ api: NativeApi,
     device: MTLDevice,
     queue: MTLCommandQueue
 ) throws {
     let vertices = 8
-    guard let geometry = device.makeBuffer(
-              length: vertices * legacyVertexBytes,
-              options: .storageModeShared
-          ),
-          let secondGeometry = device.makeBuffer(
-              length: vertices * legacyVertexBytes,
-              options: .storageModeShared
-          ),
-          let sidecar = device.makeBuffer(
-              length: vertices * MemoryLayout<UInt16>.stride,
-              options: .storageModeShared
-          ),
-          let commandBuffer = queue.makeCommandBuffer(),
+    let geometryLease = try api.makeBuffer(
+        device: device,
+        length: vertices * legacyVertexBytes,
+        options: .storageModeShared
+    )
+    let secondGeometryLease = try api.makeBuffer(
+        device: device,
+        length: vertices * legacyVertexBytes,
+        options: .storageModeShared
+    )
+    let sidecarLease = try api.makeBuffer(
+        device: device,
+        length: vertices * MemoryLayout<UInt16>.stride,
+        options: .storageModeShared
+    )
+    let geometry = geometryLease.buffer
+    let secondGeometry = secondGeometryLease.buffer
+    let sidecar = sidecarLease.buffer
+    guard let commandBuffer = queue.makeCommandBuffer(),
           let fence = device.makeFence() else {
         throw ValidationFailure.message("Could not create native preflight validation resources")
     }
@@ -125,11 +183,11 @@ private func validateFailureAtomicity(
     fill(sidecar, with: 0x1234)
 
     let valid = [PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 1, vertexCount: 2)]
-    try require(encode(nativeEncode, commandBuffer: nil, fence: fence, records: valid) == -1,
+    try require(encode(api.encodeBatch, commandBuffer: nil, fence: fence, records: valid) == -1,
                 "Null command buffer was not rejected")
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: nil, records: valid) == -1,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: nil, records: valid) == -1,
                 "Null fence was not rejected")
-    let nullPacket = nativeEncode(
+    let nullPacket = api.encodeBatch(
         objectPointer(commandBuffer as AnyObject),
         objectPointer(fence as AnyObject),
         nil,
@@ -138,14 +196,14 @@ private func validateFailureAtomicity(
     )
     try require(nullPacket == -1, "Null batch packet was not rejected")
     try require(encode(
-        nativeEncode,
+        api.encodeBatch,
         commandBuffer: commandBuffer,
         fence: fence,
         records: valid,
         capacity: UInt64(recordBytes - 1)
     ) == -2, "Truncated batch packet was not rejected")
     try require(encode(
-        nativeEncode,
+        api.encodeBatch,
         commandBuffer: commandBuffer,
         fence: fence,
         records: valid,
@@ -153,7 +211,7 @@ private func validateFailureAtomicity(
     ) == -2, "Oversized batch count was not rejected")
 
     let nullHandle = [PatchRecord(geometry: nil, sidecar: sidecar, vertexOffset: 0, vertexCount: 1)]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: nullHandle) == -3,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: nullHandle) == -3,
                 "Null native buffer handle was not rejected")
 
     let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -168,7 +226,7 @@ private func validateFailureAtomicity(
     var wrongTypeBytes = packet(valid)
     writeUInt64(objectAddress(texture), at: 0, into: &wrongTypeBytes)
     let wrongType = wrongTypeBytes.withUnsafeBytes { raw in
-        nativeEncode(
+        api.encodeBatch(
             objectPointer(commandBuffer as AnyObject),
             objectPointer(fence as AnyObject),
             raw.baseAddress,
@@ -176,10 +234,10 @@ private func validateFailureAtomicity(
             1
         )
     }
-    try require(wrongType == -4, "Non-buffer native object was not rejected")
+    try require(wrongType == -3, "Unregistered native buffer handle was not rejected")
 
     let emptyRange = [PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 0, vertexCount: 0)]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: emptyRange) == -6,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: emptyRange) == -6,
                 "Empty vertex range was not rejected")
     let geometryOutOfBounds = [PatchRecord(
         geometry: geometry,
@@ -188,7 +246,7 @@ private func validateFailureAtomicity(
         vertexCount: 2
     )]
     try require(encode(
-        nativeEncode,
+        api.encodeBatch,
         commandBuffer: commandBuffer,
         fence: fence,
         records: geometryOutOfBounds
@@ -199,20 +257,20 @@ private func validateFailureAtomicity(
         vertexOffset: UInt64.max,
         vertexCount: 1
     )]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: overflowingRange) == -6,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: overflowingRange) == -6,
                 "Overflowing vertex range was not rejected")
 
     let geometryOverlap = [
         PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 0, vertexCount: 3),
         PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 2, vertexCount: 2)
     ]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: geometryOverlap) == -7,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: geometryOverlap) == -7,
                 "Overlapping geometry ranges were not rejected")
     let sidecarOverlap = [
         PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 0, vertexCount: 3),
         PatchRecord(geometry: secondGeometry, sidecar: sidecar, vertexOffset: 2, vertexCount: 2)
     ]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: sidecarOverlap) == -7,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: sidecarOverlap) == -7,
                 "Overlapping sidecar ranges were not rejected")
 
     commandBuffer.commit()
@@ -226,17 +284,27 @@ private func validateFailureAtomicity(
 }
 
 private func validateGpuBatch(
-    _ nativeEncode: NativeEncodeBatch,
+    _ api: NativeApi,
     device: MTLDevice,
     queue: MTLCommandQueue
 ) throws {
     let vertices = 8
     let geometryBytes = vertices * legacyVertexBytes
     let sidecarBytes = vertices * MemoryLayout<UInt16>.stride
+    let geometryLease = try api.makeBuffer(
+        device: device,
+        length: geometryBytes,
+        options: .storageModePrivate
+    )
+    let sidecarLease = try api.makeBuffer(
+        device: device,
+        length: sidecarBytes,
+        options: .storageModePrivate
+    )
+    let geometry = geometryLease.buffer
+    let sidecar = sidecarLease.buffer
     guard let geometryUpload = device.makeBuffer(length: geometryBytes, options: .storageModeShared),
           let sidecarUpload = device.makeBuffer(length: sidecarBytes, options: .storageModeShared),
-          let geometry = device.makeBuffer(length: geometryBytes, options: .storageModePrivate),
-          let sidecar = device.makeBuffer(length: sidecarBytes, options: .storageModePrivate),
           let geometryReadback = device.makeBuffer(length: geometryBytes, options: .storageModeShared),
           let sidecarReadback = device.makeBuffer(length: sidecarBytes, options: .storageModeShared),
           let commandBuffer = queue.makeCommandBuffer(),
@@ -269,7 +337,7 @@ private func validateGpuBatch(
         PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 1, vertexCount: 2),
         PatchRecord(geometry: geometry, sidecar: sidecar, vertexOffset: 5, vertexCount: 2)
     ]
-    try require(encode(nativeEncode, commandBuffer: commandBuffer, fence: fence, records: records) == 1,
+    try require(encode(api.encodeBatch, commandBuffer: commandBuffer, fence: fence, records: records) == 1,
                 "Valid native Sodium light patch batch was rejected")
 
     guard let readback = commandBuffer.makeBlitCommandEncoder() else {
@@ -324,14 +392,22 @@ private enum SodiumLightLegacyPatchValidationMain {
             ) else {
                 throw ValidationFailure.message("Native Sodium light patch batch symbol is missing")
             }
+            guard let createBufferSymbol = dlsym(library, "metallum_create_buffer"),
+                  let releaseObjectSymbol = dlsym(library, "metallum_release_object") else {
+                throw ValidationFailure.message("Native buffer lifecycle ABI symbols are missing")
+            }
             guard let device = MTLCreateSystemDefaultDevice(),
                   let queue = device.makeCommandQueue() else {
                 throw ValidationFailure.message("No Metal validation device or command queue is available")
             }
 
-            let nativeEncode = unsafeBitCast(symbol, to: NativeEncodeBatch.self)
-            try validateFailureAtomicity(nativeEncode, device: device, queue: queue)
-            try validateGpuBatch(nativeEncode, device: device, queue: queue)
+            let api = NativeApi(
+                encodeBatch: unsafeBitCast(symbol, to: NativeEncodeBatch.self),
+                createBuffer: unsafeBitCast(createBufferSymbol, to: NativeCreateBuffer.self),
+                releaseObject: unsafeBitCast(releaseObjectSymbol, to: NativeReleaseObject.self)
+            )
+            try validateFailureAtomicity(api, device: device, queue: queue)
+            try validateGpuBatch(api, device: device, queue: queue)
             print("Native Sodium legacy-light patch validation passed on \(device.name)")
         } catch {
             fputs("Native Sodium legacy-light patch validation FAILED: \(error)\n", stderr)

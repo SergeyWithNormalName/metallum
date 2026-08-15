@@ -4277,6 +4277,98 @@ private func objectAddress(_ object: AnyObject) -> UInt {
     UInt(bitPattern: Unmanaged.passUnretained(object).toOpaque())
 }
 
+/// Owns a strong, address-keyed reference for every MTLBuffer exported through the C ABI.
+///
+/// Java intentionally carries Objective-C objects as raw addresses. Accepting one of those
+/// addresses as a typed MTLBuffer argument makes Swift retain/dereference it before the function
+/// body can reject a stale handle. Resolve raw buffer handles through this registry instead so an
+/// already-released address fails closed without entering Metal or AGX.
+private final class MetallumBufferHandleRegistry: @unchecked Sendable {
+    static let shared = MetallumBufferHandleRegistry()
+
+    private let lock = NSLock()
+    private var buffers: [UInt: MTLBuffer] = [:]
+    private var rejectedUseCount: UInt64 = 0
+    private var loggedFirstRejectedUse = false
+
+    private init() {
+    }
+
+    func register(_ buffer: MTLBuffer) {
+        let address = objectAddress(buffer)
+        lock.lock()
+        precondition(buffers[address] == nil, "MTLBuffer handle was registered twice")
+        buffers[address] = buffer
+        lock.unlock()
+    }
+
+    func resolve(_ pointer: UnsafeMutableRawPointer?) -> MTLBuffer? {
+        guard let pointer else { return nil }
+        lock.lock()
+        let buffer = buffers[UInt(bitPattern: pointer)]
+        lock.unlock()
+        return buffer
+    }
+
+    func resolveForEncoding(_ pointer: UnsafeMutableRawPointer?) -> MTLBuffer? {
+        guard let pointer else {
+            recordRejectedUse()
+            return nil
+        }
+
+        lock.lock()
+        let buffer = buffers[UInt(bitPattern: pointer)]
+        lock.unlock()
+        if buffer == nil {
+            recordRejectedUse()
+        }
+        return buffer
+    }
+
+    @discardableResult
+    func unregister(_ pointer: UnsafeMutableRawPointer?) -> Bool {
+        guard let pointer else { return false }
+        lock.lock()
+        let removed = buffers.removeValue(forKey: UInt(bitPattern: pointer))
+        lock.unlock()
+        return withExtendedLifetime(removed) { removed != nil }
+    }
+
+    func isLive(_ pointer: UnsafeMutableRawPointer?) -> Bool {
+        resolve(pointer) != nil
+    }
+
+    private func recordRejectedUse() {
+        var shouldLog = false
+        lock.lock()
+        rejectedUseCount &+= 1
+        if !loggedFirstRejectedUse {
+            loggedFirstRejectedUse = true
+            shouldLog = true
+        }
+        lock.unlock()
+        if shouldLog {
+            NSLog(
+                "[metallum] Rejected GPU encoding because an MTLBuffer handle was no longer live"
+            )
+        }
+    }
+}
+
+@inline(__always)
+private func indexBufferRangeIsValid(
+    _ buffer: MTLBuffer,
+    offset: Int,
+    count: Int,
+    stride: Int
+) -> Bool {
+    guard offset >= 0, count >= 0, stride > 0 else { return false }
+    let (byteCount, countOverflow) = count.multipliedReportingOverflow(by: stride)
+    guard !countOverflow else { return false }
+    let (end, endOverflow) = offset.addingReportingOverflow(byteCount)
+    return !endOverflow && end <= buffer.length
+}
+
 private func textureSliceCount(_ texture: MTLTexture) -> Int {
     switch texture.textureType {
     case .type2DArray:
@@ -8731,8 +8823,18 @@ public func metallum_commit_entity_velocity_replay(
         encoder.setCullMode(mtlCullMode)
         encoder.setDepthBias(packet.depthBias, slopeScale: packet.slopeScale, clamp: packet.clamp)
 
-        guard let vertexBuffer = bindingPacketObject(packet.vertexBufferHandle) as? MTLBuffer,
-              let indexBuffer = bindingPacketObject(packet.indexBufferHandle) as? MTLBuffer else {
+        guard let vertexBufferPointer = UnsafeMutableRawPointer(
+                  bitPattern: UInt(packet.vertexBufferHandle)
+              ),
+              let indexBufferPointer = UnsafeMutableRawPointer(
+                  bitPattern: UInt(packet.indexBufferHandle)
+              ),
+              let vertexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(
+                  vertexBufferPointer
+              ),
+              let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(
+                  indexBufferPointer
+              ) else {
             encoder.endEncoding()
             return -6
         }
@@ -11293,13 +11395,11 @@ public func metallum_MTLCommandBuffer_encodeSodiumLightLegacyPatchBatch_v1(
         let vertexCount = sodiumLightPatchUInt64(packet, record + 24)
 
         guard geometryAddress != 0, sidecarAddress != 0,
-              let geometryObject = bindingPacketObject(geometryAddress),
-              let sidecarObject = bindingPacketObject(sidecarAddress) else {
+              let geometryPointer = UnsafeMutableRawPointer(bitPattern: UInt(geometryAddress)),
+              let sidecarPointer = UnsafeMutableRawPointer(bitPattern: UInt(sidecarAddress)),
+              let geometry = MetallumBufferHandleRegistry.shared.resolveForEncoding(geometryPointer),
+              let sidecar = MetallumBufferHandleRegistry.shared.resolveForEncoding(sidecarPointer) else {
             return MetallumSodiumLightPatchAbiV1.errorHandle
-        }
-        guard let geometry = geometryObject as? MTLBuffer,
-              let sidecar = sidecarObject as? MTLBuffer else {
-            return MetallumSodiumLightPatchAbiV1.errorObjectType
         }
         guard objectAddress(geometry.device) == deviceAddress,
               objectAddress(sidecar.device) == deviceAddress else {
@@ -11516,6 +11616,7 @@ public func metallum_create_buffer(
             return nil
         }
         trackBufferAllocation(buffer)
+        MetallumBufferHandleRegistry.shared.register(buffer)
         return retainedPointer(buffer)
     }
 }
@@ -11533,6 +11634,7 @@ public func metallum_create_static_geometry_buffer(
             return nil
         }
         trackBufferAllocation(buffer)
+        MetallumBufferHandleRegistry.shared.register(buffer)
         return retainedPointer(buffer)
     }
 }
@@ -11829,6 +11931,32 @@ public func metallum_MTLRenderCommandEncoder_setBuffer(_ encoder: MTLRenderComma
     }
 }
 
+@_cdecl("metallum_MTLRenderCommandEncoder_setRegisteredBuffer")
+public func metallum_MTLRenderCommandEncoder_setRegisteredBuffer(
+    _ encoder: MTLRenderCommandEncoder,
+    _ bufferHandle: UnsafeMutableRawPointer?,
+    _ offset: UInt64,
+    _ index: UInt64,
+    _ stageMask: Int32
+) {
+    guard let buffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(bufferHandle),
+          offset <= UInt64(buffer.length) else {
+        if (stageMask & 1) != 0 {
+            encoder.setVertexBuffer(nil, offset: 0, index: Int(index))
+        }
+        if (stageMask & 2) != 0 {
+            encoder.setFragmentBuffer(nil, offset: 0, index: Int(index))
+        }
+        return
+    }
+    if (stageMask & 1) != 0 {
+        encoder.setVertexBuffer(buffer, offset: Int(offset), index: Int(index))
+    }
+    if (stageMask & 2) != 0 {
+        encoder.setFragmentBuffer(buffer, offset: Int(offset), index: Int(index))
+    }
+}
+
 @_cdecl("metallum_MTLRenderCommandEncoder_setBufferOffset")
 public func metallum_MTLRenderCommandEncoder_setBufferOffset(_ encoder: MTLRenderCommandEncoder, _ offset: UInt64, _ index: UInt64, _ stageMask: Int32) {
     if (stageMask & 1) != 0 {
@@ -11995,8 +12123,7 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
             return MetallumResourceBindingAbi.errorDuplicateIndex
         }
         occupiedBindingMask |= bindingBit
-        guard primaryAddress != 0,
-              let primaryObject = bindingPacketObject(primaryAddress) else {
+        guard primaryAddress != 0 else {
             return MetallumResourceBindingAbi.errorHandle
         }
 
@@ -12014,8 +12141,9 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
             guard offset <= UInt64(Int.max) else {
                 return MetallumResourceBindingAbi.errorRange
             }
-            guard let buffer = primaryObject as? MTLBuffer else {
-                return MetallumResourceBindingAbi.errorObjectType
+            guard let pointer = UnsafeMutableRawPointer(bitPattern: UInt(primaryAddress)),
+                  let buffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(pointer) else {
+                return MetallumResourceBindingAbi.errorHandle
             }
             let nativeLength = UInt64(buffer.length)
             guard offset <= nativeLength, length <= nativeLength - offset else {
@@ -12032,6 +12160,7 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
                 return MetallumResourceBindingAbi.errorRange
             }
             guard secondaryAddress != 0,
+                  let primaryObject = bindingPacketObject(primaryAddress),
                   let secondaryObject = bindingPacketObject(secondaryAddress) else {
                 return MetallumResourceBindingAbi.errorHandle
             }
@@ -12048,7 +12177,8 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
             guard secondaryAddress == 0, offset == 0, length == 0 else {
                 return MetallumResourceBindingAbi.errorRange
             }
-            guard primaryObject is MTLTexture else {
+            guard let primaryObject = bindingPacketObject(primaryAddress),
+                  primaryObject is MTLTexture else {
                 return MetallumResourceBindingAbi.errorObjectType
             }
         default:
@@ -12065,11 +12195,13 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
         let primaryAddress = bindingPacketUInt64(packet, record + 16)
         let secondaryAddress = bindingPacketUInt64(packet, record + 24)
         let offset = Int(bindingPacketUInt64(packet, record + 32))
-        let primaryObject = bindingPacketObject(primaryAddress)!
 
         switch type {
         case MetallumResourceBindingAbi.typeUniformBuffer:
-            let buffer = primaryObject as! MTLBuffer
+            guard let pointer = UnsafeMutableRawPointer(bitPattern: UInt(primaryAddress)),
+                  let buffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(pointer) else {
+                return MetallumResourceBindingAbi.errorHandle
+            }
             if stage & MetallumResourceBindingAbi.stageVertex != 0 {
                 encoder.setVertexBuffer(buffer, offset: offset, index: bindingIndex)
             }
@@ -12077,6 +12209,7 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
                 encoder.setFragmentBuffer(buffer, offset: offset, index: bindingIndex)
             }
         case MetallumResourceBindingAbi.typeTextureSampler:
+            let primaryObject = bindingPacketObject(primaryAddress)!
             let texture = primaryObject as! MTLTexture
             let sampler = bindingPacketObject(secondaryAddress)! as! MTLSamplerState
             if stage & MetallumResourceBindingAbi.stageVertex != 0 {
@@ -12088,6 +12221,7 @@ public func metallum_MTLRenderCommandEncoder_applyResourceBindings_v1(
                 encoder.setFragmentSamplerState(sampler, index: bindingIndex)
             }
         case MetallumResourceBindingAbi.typeTexelTexture:
+            let primaryObject = bindingPacketObject(primaryAddress)!
             let texture = primaryObject as! MTLTexture
             if stage & MetallumResourceBindingAbi.stageVertex != 0 {
                 encoder.setVertexTexture(texture, index: bindingIndex)
@@ -12138,14 +12272,20 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitives(
     _ primitiveType: MTLPrimitiveType,
     _ indexCount: Int,
     _ indexType: MTLIndexType,
-    _ indexBuffer: MTLBuffer,
+    _ indexBufferHandle: UnsafeMutableRawPointer?,
     _ indexBufferOffset: Int,
     _ instanceCount: Int,
     _ baseVertex: Int,
     _ baseInstance: Int
 ) {
     let indexStride = indexType == .uint16 ? 2 : 4
-    guard indexBufferOffset + indexCount * indexStride <= indexBuffer.length else {
+    guard let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indexBufferHandle),
+          indexBufferRangeIsValid(
+              indexBuffer,
+              offset: indexBufferOffset,
+              count: indexCount,
+              stride: indexStride
+          ) else {
         return
     }
     encoder.drawIndexedPrimitives(
@@ -12165,7 +12305,7 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     _ encoder: MTLRenderCommandEncoder,
     _ primitiveType: MTLPrimitiveType,
     _ indexType: MTLIndexType,
-    _ indexBuffer: MTLBuffer,
+    _ indexBufferHandle: UnsafeMutableRawPointer?,
     _ firstIndexOffsets: UnsafePointer<Int>,
     _ indexCounts: UnsafePointer<Int32>,
     _ vertexOffsets: UnsafePointer<Int32>,
@@ -12173,12 +12313,20 @@ public func metallum_MTLRenderCommandEncoder_multiDrawIndexed(
     _ instanceCount: Int,
     _ baseInstance: Int
 ) {
+    guard let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indexBufferHandle) else {
+        return
+    }
     let indexStride = indexType == .uint16 ? 2 : 4
     for i in 0..<drawCount {
         let indexCount = Int(indexCounts[i])
         if indexCount > 0 {
             let offset = firstIndexOffsets[i]
-            guard offset + indexCount * indexStride <= indexBuffer.length else {
+            guard indexBufferRangeIsValid(
+                indexBuffer,
+                offset: offset,
+                count: indexCount,
+                stride: indexStride
+            ) else {
                 continue
             }
             encoder.drawIndexedPrimitives(
@@ -12200,12 +12348,16 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect(
     _ encoder: MTLRenderCommandEncoder,
     _ primitiveType: MTLPrimitiveType,
     _ indexType: MTLIndexType,
-    _ indexBuffer: MTLBuffer,
-    _ indirectBuffer: MTLBuffer,
+    _ indexBufferHandle: UnsafeMutableRawPointer?,
+    _ indirectBufferHandle: UnsafeMutableRawPointer?,
     _ indirectBufferOffset: UInt64,
     _ drawCount: Int,
     _ stride: UInt64
 ) {
+    guard let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indexBufferHandle),
+          let indirectBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indirectBufferHandle) else {
+        return
+    }
     var offset = Int(indirectBufferOffset)
     for _ in 0..<drawCount {
         guard offset + 20 <= indirectBuffer.length else {
@@ -12228,12 +12380,15 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
     _ encoder: MTLRenderCommandEncoder,
     _ primitiveType: MTLPrimitiveType,
     _ indexType: MTLIndexType,
-    _ indexBuffer: MTLBuffer,
+    _ indexBufferHandle: UnsafeMutableRawPointer?,
     _ commands: UnsafeRawPointer,
     _ drawCount: Int,
     _ stride: UInt64
 ) {
     guard drawCount > 0, stride >= 20 else { return }
+    guard let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indexBufferHandle) else {
+        return
+    }
     let indexStride: Int
     switch indexType {
     case .uint16:
@@ -12252,8 +12407,18 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
         let baseVertex = command.load(fromByteOffset: 12, as: Int32.self)
         let baseInstance = command.load(fromByteOffset: 16, as: UInt32.self)
         if indexCount > 0, instanceCount > 0 {
-            let offset = Int(UInt64(firstIndex) * UInt64(indexStride))
-            if offset + Int(indexCount) * indexStride <= indexBuffer.length {
+            let offsetBytes = UInt64(firstIndex) * UInt64(indexStride)
+            if offsetBytes <= UInt64(Int.max) {
+                let offset = Int(offsetBytes)
+                guard indexBufferRangeIsValid(
+                    indexBuffer,
+                    offset: offset,
+                    count: Int(indexCount),
+                    stride: indexStride
+                ) else {
+                    command = command.advanced(by: Int(stride))
+                    continue
+                }
                 encoder.drawIndexedPrimitives(
                     type: primitiveType,
                     indexCount: Int(indexCount),
@@ -12274,11 +12439,14 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
 public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
     _ encoder: MTLRenderCommandEncoder,
     _ primitiveType: MTLPrimitiveType,
-    _ indirectBuffer: MTLBuffer,
+    _ indirectBufferHandle: UnsafeMutableRawPointer?,
     _ indirectBufferOffset: UInt64,
     _ drawCount: Int,
     _ stride: UInt64
 ) {
+    guard let indirectBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indirectBufferHandle) else {
+        return
+    }
     var offset = Int(indirectBufferOffset)
     for _ in 0..<drawCount {
         guard offset + 16 <= indirectBuffer.length else {
@@ -12296,8 +12464,8 @@ public func metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect(
 @_cdecl("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan")
 public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
     _ encoder: MTLRenderCommandEncoder,
-    _ indexBuffer: MTLBuffer,
-    _ fanIndexBuffer: MTLBuffer,
+    _ indexBufferHandle: UnsafeMutableRawPointer?,
+    _ fanIndexBufferHandle: UnsafeMutableRawPointer?,
     _ fanIndexBufferOffset: Int,
     _ indexType: Int,
     _ indexOffsetBytes: Int,
@@ -12306,6 +12474,10 @@ public func metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesTriangleFan(
     _ instanceCount: Int,
     _ baseInstance: Int
 ) {
+    guard let indexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(indexBufferHandle),
+          let fanIndexBuffer = MetallumBufferHandleRegistry.shared.resolveForEncoding(fanIndexBufferHandle) else {
+        return
+    }
     guard let generatedIndexCount = writeIndexedTriangleFanIndices(
         sourceIndexBuffer: indexBuffer,
         destinationIndexBuffer: fanIndexBuffer,
@@ -14166,6 +14338,7 @@ public func MTLBlitCommandEncoder_waitForFence(
 public func metallum_release_object(_ obj: UnsafeMutableRawPointer?) {
     autoreleasepool {
         guard let obj else { return }
+        MetallumBufferHandleRegistry.shared.unregister(obj)
         let object = Unmanaged<AnyObject>.fromOpaque(obj).takeUnretainedValue()
         if let commandBuffer = object as? MTLCommandBuffer {
             MetallumGpuTimingCoordinator.shared.abandon(commandBuffer)
@@ -14181,6 +14354,7 @@ public func metallum_release_static_geometry_buffer(_ obj: UnsafeMutableRawPoint
         let release = MetallumStaticGeometryHeapRegistry.shared.beginRelease(
             bufferAddress: UInt(bitPattern: obj)
         )
+        MetallumBufferHandleRegistry.shared.unregister(obj)
         Unmanaged<AnyObject>.fromOpaque(obj).release()
         if let release {
             MetallumStaticGeometryHeapRegistry.shared.finishRelease(release)
@@ -14188,6 +14362,11 @@ public func metallum_release_static_geometry_buffer(_ obj: UnsafeMutableRawPoint
             NSLog("[metallum] Static geometry buffer release was not registered")
         }
     }
+}
+
+@_cdecl("metallum_buffer_handle_is_live")
+public func metallum_buffer_handle_is_live(_ obj: UnsafeMutableRawPointer?) -> Int32 {
+    MetallumBufferHandleRegistry.shared.isLive(obj) ? 1 : 0
 }
 
 @_cdecl("metallum_get_buffer_contents")

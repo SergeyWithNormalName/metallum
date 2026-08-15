@@ -539,7 +539,12 @@ final class MetalRenderPass implements RenderPassBackend {
 
             MetalGpuBuffer nativeVertexBuffer = (MetalGpuBuffer) vertexBuffer.buffer();
             int metalSlot = firstSlot + slot;
-            enc.setBuffer(nativeVertexBuffer.nativeHandle(), vertexBuffer.offset(), metalSlot, MetalCompiledRenderPipeline.STAGE_VERTEX);
+            enc.setRegisteredBuffer(
+                    nativeVertexBuffer.nativeHandle(),
+                    vertexBuffer.offset(),
+                    metalSlot,
+                    MetalCompiledRenderPipeline.STAGE_VERTEX
+            );
         }
         if (compiledPipeline.usesSodiumLightSidecar()) {
             pushSodiumLightSidecar(enc);
@@ -594,7 +599,7 @@ final class MetalRenderPass implements RenderPassBackend {
         }
 
         int dataSlot = this.compiledPipeline.sodiumLightSidecarBufferSlot();
-        enc.setBuffer(
+        enc.setRegisteredBuffer(
                 dataBuffer.nativeHandle(),
                 dataOffset,
                 dataSlot,
@@ -603,7 +608,7 @@ final class MetalRenderPass implements RenderPassBackend {
         int controlSlot = dataSlot + 1;
         if (this.boundSidecarControlSlot != controlSlot
                 || this.boundSidecarControlEnabled != enabled) {
-            enc.setBuffer(
+            enc.setRegisteredBuffer(
                     bindings.control().nativeHandle(),
                     enabled ? Integer.BYTES : 0L,
                     controlSlot,
@@ -933,7 +938,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         GpuBufferSlice uniformSlice = requireBufferSlice(binding, "Uniform");
         MetalGpuBuffer uniformBuffer = (MetalGpuBuffer) uniformSlice.buffer();
-        enc.setBuffer(
+        enc.setRegisteredBuffer(
                 uniformBuffer.nativeHandle(),
                 uniformSlice.offset(),
                 binding.bindingIndex(),
