@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "7d7c49bcd4d4f5b0cbc452f61d02a93d362f1880a539fa19e360dc32697c3359",
+            "sodium-solid-fsh", "e8a546f7b9173ac0b09428a16d002916264049eeb4326bb34c4bc3721c47f9f3",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "c463ff66b07974c52ea09ea80fbbac0c701af370b58b6ad3ee24be77eccbd062",
+            "sodium-cutout-fsh", "da7963c45274428b867f8cb952d65906171656b48c2d437075f94f203d26bba5",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "cae914839bfb8607a4c13ef85f3710db2ac04757d77b6eba8697ab16df294a0b",
+            "minecraft-entity-fsh", "5d6f5b9b52044d6d8d4a5b18cd16e39cc91ab3035d79d9200464cb41b88fea38",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "3f1223a244e43ad85de728ece887bfafd679a9629d9c758134068e4f80691629"
+            "minecraft-end-portal-fsh", "bd0581e4af76f365be9ba15b8618237246267a4b36dd81c2a6478ba8cff9b6bb"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -710,8 +710,10 @@ public final class AdvancedDirectLightingShaderTests {
                         "float metallumVoxelSoftVisibilityV1(")
                         && sodiumFragment.contains(
                         "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(")
-                        && sodiumFragment.contains(
+                        && (sodiumFragment.contains(
                         "return metallumVoxelSoftCachedVisibilityV1(")
+                        || sodiumFragment.contains(
+                        "vec3 softVisibility = metallumVoxelSoftCachedVisibilityV1("))
                         && sodiumFragment.contains("vec4 bilinearWeight = vec4(")
                         && sodiumFragment.contains("vec4 triangleWeight;")
                         && sodiumFragment.contains(
@@ -741,7 +743,7 @@ public final class AdvancedDirectLightingShaderTests {
                         "direct += unshadowedContribution * visibility;")
                         && before(sodiumFragment,
                         "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(",
-                        "return metallumVoxelSoftCachedVisibilityV1(")
+                        "metallumVoxelSoftCachedVisibilityV1(")
                         && !sodiumFragment.contains("bool filterAlongX"),
                 "L6 all-source shadow filter lost bounded full-resolution blur");
         require(sodiumFragment.contains(

@@ -1711,11 +1711,27 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return clamp(visibility, vec3(0.0), vec3(1.0));
             }
 
+            float metallumVoxelDistanceFadeV1(vec3 lightCameraRelative, float lightRadius) {
+                ivec4 outerOriginAndSpan = metallumVoxelShadow.caps.y >= 3u
+                        ? metallumVoxelShadow.levelOriginAndSpan2
+                        : metallumVoxelShadow.levelOriginAndSpan1;
+                vec3 levelMinCameraRelative = vec3(outerOriginAndSpan.xyz - metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        - metallumVoxelShadow.cameraFractionAndMinTrans.xyz;
+                vec3 levelMaxCameraRelative = levelMinCameraRelative + vec3(float(outerOriginAndSpan.w));
+                vec3 distToMin = lightCameraRelative - levelMinCameraRelative;
+                vec3 distToMax = levelMaxCameraRelative - lightCameraRelative;
+                float minDistToBoundary = min(min(distToMin.x, distToMax.x), min(min(distToMin.y, distToMax.y), min(distToMin.z, distToMax.z)));
+                float fadeMargin = max(16.0, float(outerOriginAndSpan.w) * 0.08);
+                float rawFade = 1.0 - clamp((minDistToBoundary - max(lightRadius, 0.0)) / fadeMargin, 0.0, 1.0);
+                return rawFade * rawFade * (3.0 - 2.0 * rawFade);
+            }
+
             vec3 metallumVoxelVisibilityV1(
                     vec3 receiverCameraRelative,
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
+                    float lightRadius,
                     uvec2 lightStableId,
                     uvec4 shadowRef) {
                 uint atlasByteOffset = shadowRef.y;
@@ -1772,12 +1788,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                 // A resident L6 page is a discretized cubemap. Filtering must happen on
                 // every valid page, not only on a later-selected brightest source: otherwise
                 // overlapping local lights retain visibly pixelated shadow silhouettes.
-                return metallumVoxelSoftCachedVisibilityV1(
+                vec3 softVisibility = metallumVoxelSoftCachedVisibilityV1(
                         atlasByteOffset >> 3u,
                         cacheFaceEdge,
                         lightToReceiver,
                         receiverDistance,
                         receiverWorldNormal, nearestVisibility);
+                float distanceFade = metallumVoxelDistanceFadeV1(lightCameraRelative, lightRadius);
+                return mix(softVisibility, vec3(1.0), distanceFade);
             }
 
             uint metallumClusterIndexV1(vec3 viewPosition) {
@@ -1947,6 +1965,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                                     receiverWorldRelative,
                                     receiverWorldNormal,
                                     light.positionRadius.xyz,
+                                    radius,
                                     light.metadata.xy,
                                     shadowRef);
                         } else {
@@ -2103,6 +2122,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverWorldRelative,
                         receiverWorldNormal,
                         dominantLight.positionRadius.xyz,
+                        max(dominantLight.positionRadius.w, 0.0),
                         dominantLight.metadata.xy,
                         dominantShadowRef);
                 if (!any(greaterThan(visibility, vec3(0.0)))) {
@@ -2846,6 +2866,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "metallumVoxelResolvedTapVisibilityV1",
                 "metallumVoxelCachedVisibilityV1",
                 "metallumVoxelSoftCachedVisibilityV1",
+                "metallumVoxelDistanceFadeV1",
                 "metallumVoxelVisibilityV1",
                 "metallumProxyVisibilityV1",
                 "metallumComputeWorldPosXZV1",

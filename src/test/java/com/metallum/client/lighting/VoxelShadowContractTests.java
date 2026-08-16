@@ -12,8 +12,13 @@ import com.metallum.client.voxel.VoxelMaterialDescriptor;
 import com.metallum.client.voxel.VoxelShadowCacheBuilder;
 import com.metallum.client.voxel.VoxelShadowCacheMirror;
 import com.metallum.client.voxel.VoxelShadowTraversal;
+import com.metallum.client.voxel.VoxelShapeEncoder;
+import com.metallum.client.voxel.VoxelShapeRegistry;
+import com.metallum.client.voxel.VoxelSubdivision;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.metallum.client.voxel.VoxelWorldToken;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
@@ -48,6 +53,16 @@ public final class VoxelShadowContractTests {
         testExactTraversalAtAllSubdivisions();
         testCachedCubeTraversal();
         testFinePartialOpaqueOccluders();
+        testHybridShapeRefinementFidelity();
+        testThinShapeClassification();
+        testDynamicShapeSyncContract();
+        testLiveUpdateSequence();
+        testMultiPatchBatchMirror();
+        testDistanceLevelSelection();
+        testCoarseLevelFallback();
+        testPerceptualDistanceFadeMonotonicity();
+        testLODHysteresisStability();
+        testStaticDynamicDistanceParity();
         testVariableAtlasCubePages();
         testRelevantGeometrySurvivesClipmapScroll();
         testStableCubeLevelSelection();
@@ -1502,6 +1517,568 @@ public final class VoxelShadowContractTests {
     }
 
     private record CubeSample(int face, int x, int y, Vector direction) {
+    }
+
+    private static void testThinShapeClassification() {
+        // 1. Blocks aligned to multiples of 0.25 (1/4m) must use fast-path shapeProxyId == 0
+        VoxelShape fullCube = Shapes.block();
+        VoxelShape bottomSlab = Shapes.box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
+        VoxelShape topSlab = Shapes.box(0.0, 0.5, 0.0, 1.0, 1.0, 1.0);
+        VoxelShape straightStair = Shapes.or(
+                Shapes.box(0.0, 0.0, 0.0, 1.0, 0.5, 1.0),
+                Shapes.box(0.0, 0.5, 0.0, 0.5, 1.0, 1.0)
+        );
+        VoxelShape quarterStep = Shapes.box(0.0, 0.0, 0.0, 0.25, 0.25, 0.25);
+
+        VoxelMaterialDescriptor opaqueDesc = VoxelMaterialDescriptor.defaults(VoxelMaterialClass.OPAQUE);
+        require(VoxelShapeEncoder.encode(fullCube, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId() == 0,
+                "full cube unexpectedly received shape proxy");
+        require(VoxelShapeEncoder.encode(bottomSlab, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId() == 0,
+                "bottom slab unexpectedly received shape proxy");
+        require(VoxelShapeEncoder.encode(topSlab, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId() == 0,
+                "top slab unexpectedly received shape proxy");
+        require(VoxelShapeEncoder.encode(straightStair, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId() == 0,
+                "straight stair unexpectedly received shape proxy");
+        require(VoxelShapeEncoder.encode(quarterStep, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId() == 0,
+                "quarter step unexpectedly received shape proxy");
+
+        // 2. Complex / thin / compound blocks not aligned to 0.25 must receive shapeProxyId > 0
+        VoxelShape glassPaneZ = Shapes.box(0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625);
+        VoxelShape glassPaneX = Shapes.box(0.4375, 0.0, 0.0, 0.5625, 1.0, 1.0);
+        VoxelShape ironBarsCross = Shapes.or(
+                Shapes.box(0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625),
+                Shapes.box(0.4375, 0.0, 0.0, 0.5625, 1.0, 1.0)
+        );
+        VoxelShape fencePost = Shapes.box(0.375, 0.0, 0.375, 0.625, 1.0, 0.625);
+        VoxelShape fenceWithArm = Shapes.or(
+                Shapes.box(0.375, 0.0, 0.375, 0.625, 1.0, 0.625),
+                Shapes.box(0.0, 0.375, 0.4375, 0.375, 0.5625, 0.5625)
+        );
+        VoxelShape trapdoorClosed = Shapes.box(0.0, 0.0, 0.0, 1.0, 0.1875, 1.0);
+        VoxelShape trapdoorOpen = Shapes.box(0.0, 0.0, 0.8125, 1.0, 1.0, 1.0);
+
+        int paneZId = VoxelShapeEncoder.encode(glassPaneZ, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int paneXId = VoxelShapeEncoder.encode(glassPaneX, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int ironBarsId = VoxelShapeEncoder.encode(ironBarsCross, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int fenceId = VoxelShapeEncoder.encode(fencePost, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int fenceArmId = VoxelShapeEncoder.encode(fenceWithArm, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int trapClosedId = VoxelShapeEncoder.encode(trapdoorClosed, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        int trapOpenId = VoxelShapeEncoder.encode(trapdoorOpen, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+
+        require(paneZId > 0, "glass pane Z did not receive shape proxy");
+        require(paneXId > 0, "glass pane X did not receive shape proxy");
+        require(ironBarsId > 0, "iron bars cross did not receive shape proxy");
+        require(fenceId > 0, "fence post did not receive shape proxy");
+        require(fenceArmId > 0, "fence with arm did not receive shape proxy");
+        require(trapClosedId > 0, "closed trapdoor did not receive shape proxy");
+        require(trapOpenId > 0, "open trapdoor did not receive shape proxy");
+
+        // 3. Deduplication: encoding the exact same shape twice yields identical shapeProxyId
+        int paneZIdSecond = VoxelShapeEncoder.encode(glassPaneZ, VoxelSubdivision.FOUR, opaqueDesc).shapeProxyId();
+        require(paneZId == paneZIdSecond, "shape proxy registry failed to deduplicate identical shape");
+    }
+
+    private static void testHybridShapeRefinementFidelity() {
+        // 1. A thin pane at block (2, 0, 0) with thickness 0.125 centered at Z=0.5: [0.4375, 0.5625]
+        VoxelShape paneShape = Shapes.box(0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625);
+        VoxelShapeEncoder.EncodedShape encodedPane = VoxelShapeEncoder.encode(
+                paneShape, VoxelSubdivision.FOUR,
+                VoxelMaterialDescriptor.defaults(VoxelMaterialClass.CUTOUT)
+        );
+        require(encodedPane.shapeProxyId() > 0, "thin pane was not assigned a refined ShapeProxy");
+        require(encodedPane.occupiedCellCount() == 32, "conservative 4x occupancy did not identify 32 potential subcells");
+
+        // 2. Build a brick patch with this pane at block (2, 0, 0)
+        int[] occupancy = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        int blockX = 2;
+        long remaining = encodedPane.occupancyMask();
+        while (remaining != 0L) {
+            int bit = Long.numberOfTrailingZeros(remaining);
+            int fineX = bit & 3;
+            int fineY = bit >>> 2 & 3;
+            int fineZ = bit >>> 4;
+            int logicalX = blockX * 4 + fineX;
+            int logicalY = fineY;
+            int logicalZ = fineZ;
+            int wordOffset = logicalZ * VoxelBrickPatch.LOGICAL_EDGE + logicalY;
+            occupancy[wordOffset] |= 1 << logicalX;
+            remaining &= remaining - 1L;
+        }
+        int blockEdge = VoxelBrickPatch.LOGICAL_EDGE / 4;
+        byte[] optical = new byte[blockEdge * blockEdge * blockEdge];
+        optical[blockX] = (byte) VoxelMaterialDescriptor.defaults(VoxelMaterialClass.CUTOUT).packedUnsignedByte();
+        byte[] chromatic = VoxelChromaticFilter.neutralPackedValues(optical.length);
+        short[] shapeIds = new short[optical.length];
+        shapeIds[blockX] = (short) encodedPane.shapeProxyId();
+
+        VoxelBrickPatch patch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 999,
+                VOXEL_WORLD.generation(), 11L, occupancy, optical, chromatic, shapeIds
+        );
+
+        VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
+        mirror.reset();
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2))
+        );
+        mirror.acknowledge(cacheCoverageBatch(999L, patch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snapshot = mirror.snapshot(clipmap);
+        require(snapshot != null, "refined pane snapshot did not publish");
+
+        // 3. Test ray traversing through the EMPTY portion of the 4x subcell (Z = 0.30):
+        // Receiver at (0.5, 0.5, 0.30), aiming toward (4.5, 0.5, 0.30)
+        // Ray passes through block (2, 0, 0) at local Z = 0.30.
+        // In conservative 4x voxelization, subcell 1 [0.25, 0.50] is occupied!
+        // With hybrid refinement, the ray MUST NOT be blocked.
+        AdvancedLight light30 = new AdvancedLight(
+                991L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.5, 0.30, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        VoxelShadowCacheBuilder.PageResult page30 = VoxelShadowCacheBuilder.buildPage(
+                snapshot, light30, 64, 96
+        );
+        ByteBuffer buf30 = ByteBuffer.wrap(page30.payload()).order(ByteOrder.nativeOrder());
+        int centralRayOffset = pageEntryOffset(0, 31, 31, 0, 64);
+        require(Float.isInfinite(buf30.getFloat(centralRayOffset))
+                        && isVisibleRgb(packedRgb(buf30, centralRayOffset)),
+                "ray at Z=0.30 through empty space of pane was falsely blocked by dilated 4x occupancy!");
+
+        // 4. Test ray directly aiming at the physical pane (Z = 0.50):
+        // Receiver at (0.5, 0.5, 0.50), aiming toward (4.5, 0.5, 0.50).
+        // Ray hits the pane at exact entry distance X = 2.0 (distance from 0.5 = 1.5).
+        AdvancedLight light50 = new AdvancedLight(
+                992L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.5, 0.50, 4.0f,
+                1.0f, 0.8f, 0.5f, 2.0f, 10
+        );
+        VoxelShadowCacheBuilder.PageResult page50 = VoxelShadowCacheBuilder.buildPage(
+                snapshot, light50, 64, 96
+        );
+        ByteBuffer buf50 = ByteBuffer.wrap(page50.payload()).order(ByteOrder.nativeOrder());
+        float hitDist = buf50.getFloat(centralRayOffset);
+        require(Float.isFinite(hitDist) && isOpaqueRgb(packedRgb(buf50, centralRayOffset)),
+                "ray at Z=0.50 directly hitting pane failed to be blocked");
+        require(Math.abs(hitDist - 1.5f) < 0.05f,
+                "pane hit distance was not exact: expected ~1.5, got " + hitDist);
+
+        mirror.reset();
+    }
+
+    private static void testLiveUpdateSequence() {
+        VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
+        mirror.reset();
+
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2))
+        );
+        VoxelWorldToken world = clipmap.world();
+        long clipGen = clipmap.clipmapGeneration();
+
+        // 1. Initial state: empty brick at (0, 0, 0)
+        int[] emptyOcc = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        byte[] emptyOpt = new byte[8 * 8 * 8];
+        byte[] emptyChr = VoxelChromaticFilter.neutralPackedValues(emptyOpt.length);
+        short[] emptyShp = new short[emptyOpt.length];
+        VoxelBrickPatch initPatch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 10,
+                world.generation(), clipGen, emptyOcc, emptyOpt, emptyChr, emptyShp
+        );
+        mirror.acknowledge(cacheCoverageBatch(10L, initPatch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snap1 = mirror.snapshot(clipmap);
+        require(snap1 != null && snap1.revision() > 0L, "mirror initial revision was not positive");
+
+        // Light at (0.5, 0.5, 0.5) shining toward (4.5, 0.5, 0.5)
+        AdvancedLight testLight = new AdvancedLight(
+                501L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.5, 0.5, 5.0f,
+                1.0f, 1.0f, 1.0f, 1.0f, 15
+        );
+        VoxelShadowCacheBuilder.PageResult initPage = VoxelShadowCacheBuilder.buildPage(
+                snap1, testLight, 64, 96
+        );
+        ByteBuffer initBuf = ByteBuffer.wrap(initPage.payload()).order(ByteOrder.nativeOrder());
+        int centralRayOffset = pageEntryOffset(0, 31, 31, 0, 64);
+        require(Float.isInfinite(initBuf.getFloat(centralRayOffset)),
+                "Initial empty world had false shadow");
+
+        // 2. Place full opaque cube at block (2, 0, 0)
+        int[] cubeOcc = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        for (int cz = 0; cz < 4; cz++) {
+            for (int cy = 0; cy < 4; cy++) {
+                cubeOcc[cz * VoxelBrickPatch.LOGICAL_EDGE + cy] |= 0b1111 << 8;
+            }
+        }
+        byte[] cubeOpt = new byte[8 * 8 * 8];
+        cubeOpt[2] = 0x20; // opaque
+        byte[] cubeChr = VoxelChromaticFilter.neutralPackedValues(cubeOpt.length);
+        short[] cubeShp = new short[cubeOpt.length];
+        VoxelBrickPatch cubePatch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 11,
+                world.generation(), clipGen, cubeOcc, cubeOpt, cubeChr, cubeShp
+        );
+        mirror.acknowledge(cacheCoverageBatch(11L, cubePatch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snap2 = mirror.snapshot(clipmap);
+        require(snap2 != null && snap2.revision() > snap1.revision(),
+                "Mirror revision did not advance after placing full cube");
+
+        VoxelShadowCacheBuilder.PageResult cubePage = VoxelShadowCacheBuilder.buildPage(
+                snap2, testLight, 64, 96
+        );
+        ByteBuffer cubeBuf = ByteBuffer.wrap(cubePage.payload()).order(ByteOrder.nativeOrder());
+        float cubeHitDist = cubeBuf.getFloat(centralRayOffset);
+        require(Float.isFinite(cubeHitDist) && Math.abs(cubeHitDist - 1.5f) < 0.05f,
+                "Placed full cube did not produce immediate shadow: got hitDist " + cubeHitDist);
+
+        // 3. Update to bottom half slab at block (2, 0, 0)
+        int[] slabOcc = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        for (int cz = 0; cz < 4; cz++) {
+            for (int cy = 0; cy < 2; cy++) { // bottom half (cy in 0..1)
+                slabOcc[cz * VoxelBrickPatch.LOGICAL_EDGE + cy] |= 0b1111 << 8;
+            }
+        }
+        byte[] slabOpt = new byte[8 * 8 * 8];
+        slabOpt[2] = 0x20;
+        byte[] slabChr = VoxelChromaticFilter.neutralPackedValues(slabOpt.length);
+        short[] slabShp = new short[slabOpt.length]; // shapeProxyId = 0 (4x quarter aligned)
+        VoxelBrickPatch slabPatch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 12,
+                world.generation(), clipGen, slabOcc, slabOpt, slabChr, slabShp
+        );
+        mirror.acknowledge(cacheCoverageBatch(12L, slabPatch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snap3 = mirror.snapshot(clipmap);
+        require(snap3 != null && snap3.revision() > snap2.revision(),
+                "Mirror revision did not advance after updating to slab");
+
+        // Ray at Y=0.25 (bottom half) must hit the slab
+        AdvancedLight slabHitLight = new AdvancedLight(
+                502L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.25, 0.5, 5.0f,
+                1.0f, 1.0f, 1.0f, 1.0f, 15
+        );
+        VoxelShadowCacheBuilder.PageResult slabHitPage = VoxelShadowCacheBuilder.buildPage(
+                snap3, slabHitLight, 64, 96
+        );
+        ByteBuffer slabHitBuf = ByteBuffer.wrap(slabHitPage.payload()).order(ByteOrder.nativeOrder());
+        require(Float.isFinite(slabHitBuf.getFloat(centralRayOffset)),
+                "Ray aiming at bottom half of slab failed to hit occluder");
+
+        // Ray at Y=0.75 (top half) must pass freely
+        AdvancedLight slabMissLight = new AdvancedLight(
+                503L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.75, 0.5, 5.0f,
+                1.0f, 1.0f, 1.0f, 1.0f, 15
+        );
+        VoxelShadowCacheBuilder.PageResult slabMissPage = VoxelShadowCacheBuilder.buildPage(
+                snap3, slabMissLight, 64, 96
+        );
+        ByteBuffer slabMissBuf = ByteBuffer.wrap(slabMissPage.payload()).order(ByteOrder.nativeOrder());
+        require(Float.isInfinite(slabMissBuf.getFloat(centralRayOffset)),
+                "Ray aiming at empty top half of slab was falsely occluded");
+
+        // 4. Update to thin glass pane at block (2, 0, 0)
+        short paneProxyId = (short) VoxelShapeRegistry.register(List.of(
+                new VoxelShapeRegistry.Box(0.4375f, 0.0f, 0.0f, 0.5625f, 1.0f, 1.0f)
+        ));
+        int[] paneOcc = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        for (int cz = 0; cz < 4; cz++) {
+            for (int cy = 0; cy < 4; cy++) {
+                paneOcc[cz * VoxelBrickPatch.LOGICAL_EDGE + cy] |= 0b0011 << 8;
+            }
+        }
+        byte[] paneOpt = new byte[8 * 8 * 8];
+        paneOpt[2] = 0x20;
+        byte[] paneChr = VoxelChromaticFilter.neutralPackedValues(paneOpt.length);
+        short[] paneShp = new short[paneOpt.length];
+        paneShp[2] = paneProxyId;
+        VoxelBrickPatch panePatch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 13,
+                world.generation(), clipGen, paneOcc, paneOpt, paneChr, paneShp
+        );
+        mirror.acknowledge(cacheCoverageBatch(13L, panePatch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snap4 = mirror.snapshot(clipmap);
+        require(snap4 != null && snap4.revision() > snap3.revision(),
+                "Mirror revision did not advance after updating to glass pane");
+
+        // Ray hitting thin pane (X in 2.4375..2.5625)
+        AdvancedLight paneHitLight = new AdvancedLight(
+                504L, 1L, LightSourceKind.BLOCK,
+                0.5, 0.5, 0.5, 5.0f,
+                1.0f, 1.0f, 1.0f, 1.0f, 15
+        );
+        VoxelShadowCacheBuilder.PageResult paneHitPage = VoxelShadowCacheBuilder.buildPage(
+                snap4, paneHitLight, 64, 96
+        );
+        ByteBuffer paneHitBuf = ByteBuffer.wrap(paneHitPage.payload()).order(ByteOrder.nativeOrder());
+        float paneHitDist = paneHitBuf.getFloat(centralRayOffset);
+        require(Float.isFinite(paneHitDist) && Math.abs(paneHitDist - 1.9375f) < 0.05f,
+                "Thin pane failed to be hit at exact boundary: got " + paneHitDist);
+
+        // 5. Remove occluder completely (break block)
+        VoxelBrickPatch breakPatch = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 14,
+                world.generation(), clipGen, emptyOcc, emptyOpt, emptyChr, emptyShp
+        );
+        mirror.acknowledge(cacheCoverageBatch(14L, breakPatch, 0, 2), clipmap);
+        VoxelShadowCacheMirror.Snapshot snap5 = mirror.snapshot(clipmap);
+        require(snap5 != null && snap5.revision() > snap4.revision(),
+                "Mirror revision did not advance after breaking block");
+
+        VoxelShadowCacheBuilder.PageResult breakPage = VoxelShadowCacheBuilder.buildPage(
+                snap5, testLight, 64, 96
+        );
+        ByteBuffer breakBuf = ByteBuffer.wrap(breakPage.payload()).order(ByteOrder.nativeOrder());
+        require(Float.isInfinite(breakBuf.getFloat(centralRayOffset)),
+                "Broken block shadow remained after removal update");
+
+        mirror.reset();
+    }
+
+    private static void testMultiPatchBatchMirror() {
+        VoxelShadowCacheMirror mirror = VoxelShadowCacheMirror.global();
+        mirror.reset();
+
+        VoxelClipmapSnapshot clipmap = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 11L,
+                List.of(new VoxelClipmapSnapshot.Level(0, 4, 64, -1, -1, -1, 2))
+        );
+        VoxelWorldToken world = clipmap.world();
+        long clipGen = clipmap.clipmapGeneration();
+
+        int[] occ1 = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        byte[] opt1 = new byte[8 * 8 * 8];
+        byte[] chr1 = VoxelChromaticFilter.neutralPackedValues(opt1.length);
+        short[] shp1 = new short[opt1.length];
+        VoxelBrickPatch patch1 = new VoxelBrickPatch(
+                0, 0, 0, 0, 0, 0, 0, 50,
+                world.generation(), clipGen, occ1, opt1, chr1, shp1
+        );
+
+        int[] occ2 = new int[VoxelBrickPatch.OCCUPANCY_WORDS];
+        occ2[0] = 0x0000_0001;
+        byte[] opt2 = new byte[8 * 8 * 8];
+        opt2[0] = 0x20;
+        byte[] chr2 = VoxelChromaticFilter.neutralPackedValues(opt2.length);
+        short[] shp2 = new short[opt2.length];
+        VoxelBrickPatch patch2 = new VoxelBrickPatch(
+                0, 1, 0, 0, -1, 0, 0, 51,
+                world.generation(), clipGen, occ2, opt2, chr2, shp2
+        );
+
+        VoxelUploadBatch multiBatch = new VoxelUploadBatch(
+                50L, world, clipGen, 50L,
+                List.of(patch1, patch2), 0, 0L, 0, 0, 0L, 0L
+        );
+        mirror.acknowledge(multiBatch, clipmap);
+
+        VoxelShadowCacheMirror.Snapshot snap = mirror.snapshot(clipmap);
+        require(snap != null, "Snapshot from multi-patch batch mirror was null");
+        require(snap.bricks().containsKey(new VoxelShadowCacheMirror.Key(0, 0, 0, 0)),
+                "Patch 1 missing from mirror snapshot");
+        require(snap.bricks().containsKey(new VoxelShadowCacheMirror.Key(0, 1, 0, 0)),
+                "Patch 2 missing from mirror snapshot");
+        require(snap.bricks().get(new VoxelShadowCacheMirror.Key(0, 1, 0, 0)).contentStamp() == 51,
+                "Patch 2 contentStamp mismatch in mirror snapshot");
+
+        mirror.reset();
+    }
+
+    private static void testDynamicShapeSyncContract() {
+        VoxelShape glassPane = Shapes.box(0.0, 0.0, 0.4375, 1.0, 1.0, 0.5625);
+        VoxelMaterialDescriptor cutout = VoxelMaterialDescriptor.defaults(VoxelMaterialClass.CUTOUT);
+        VoxelShapeEncoder.EncodedShape encoded = VoxelShapeEncoder.encode(glassPane, VoxelSubdivision.FOUR, cutout);
+        int proxyId = encoded.shapeProxyId();
+        require(proxyId > 0, "testDynamicShapeSyncContract: proxyId must be > 0");
+
+        byte[] payload = VoxelShapeRegistry.serializeGpuPayload();
+        require(payload.length >= 16, "GPU shape payload was too short");
+        ByteBuffer buf = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
+        int proxyCount = buf.getInt(0);
+        int totalBoxCount = buf.getInt(4);
+        int proxyTableBytes = buf.getInt(8);
+        int boxTableBytes = buf.getInt(12);
+
+        require(proxyCount >= 2, "proxyCount must be at least 2 (null proxy + registered proxy)");
+        require(totalBoxCount >= 1, "totalBoxCount must be at least 1");
+        require(proxyTableBytes == proxyCount * 8, "proxyTableBytes mismatch");
+        require(boxTableBytes == totalBoxCount * 32, "boxTableBytes mismatch");
+
+        // Verify proxy entry for proxyId
+        int entryOffset = 16 + proxyId * 8;
+        int boxOffset = buf.getInt(entryOffset);
+        int boxCount = buf.getInt(entryOffset + 4);
+        require(boxCount == 1, "Glass pane proxy boxCount must be 1");
+
+        // Verify box bounds
+        int boxBase = 16 + proxyTableBytes + boxOffset * 32;
+        float minX = buf.getFloat(boxBase);
+        float minY = buf.getFloat(boxBase + 4);
+        float minZ = buf.getFloat(boxBase + 8);
+        float maxX = buf.getFloat(boxBase + 12);
+        float maxY = buf.getFloat(boxBase + 16);
+        float maxZ = buf.getFloat(boxBase + 20);
+
+        require(minX == 0.0f && minY == 0.0f && maxX == 1.0f && maxY == 1.0f,
+                "Glass pane X/Y bounds mismatch");
+        require(Math.abs(minZ - 0.4375f) < 1.0e-5f && Math.abs(maxZ - 0.5625f) < 1.0e-5f,
+                "Glass pane Z bounds mismatch: [" + minZ + ", " + maxZ + "]");
+    }
+
+    private static void testDistanceLevelSelection() {
+        VoxelClipmapSnapshot performance = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 1L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 2, 128, -2, -2, -2, 4),
+                        new VoxelClipmapSnapshot.Level(1, 1, 128, -2, -2, -2, 4)
+                )
+        );
+        VoxelClipmapSnapshot balanced = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 1L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 4, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(1, 2, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(2, 1, 256, -4, -4, -4, 8)
+                )
+        );
+        VoxelClipmapSnapshot ultra = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 1L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 4, 384, -6, -6, -6, 12),
+                        new VoxelClipmapSnapshot.Level(1, 2, 384, -6, -6, -6, 12),
+                        new VoxelClipmapSnapshot.Level(2, 1, 384, -6, -6, -6, 12)
+                )
+        );
+
+        // Near small light (radius 8 at 10m): fits Level 0 in Balanced/Ultra (subdivision 4)
+        AdvancedLight nearSmall = new AdvancedLight(100L, 1L, LightSourceKind.BLOCK, 10.0, 0.0, 0.0, 8.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        require(VoxelShadowCacheBuilder.selectCacheLevel(balanced, nearSmall, 96) == 0,
+                "Near small light did not select Level 0 in Balanced");
+        require(VoxelShadowCacheBuilder.selectCacheLevel(ultra, nearSmall, 96) == 0,
+                "Near small light did not select Level 0 in Ultra");
+
+        // Mid light (radius 16 at 30m): Level 0 crossings (114) exceed 96, so selects Level 1 (subdivision 2)
+        AdvancedLight midLight = new AdvancedLight(101L, 1L, LightSourceKind.BLOCK, 30.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        require(VoxelShadowCacheBuilder.selectCacheLevel(balanced, midLight, 96) == 1,
+                "Mid radius-16 light did not select Level 1 in Balanced");
+        require(VoxelShadowCacheBuilder.selectCacheLevel(ultra, midLight, 96) == 1,
+                "Mid radius-16 light did not select Level 1 in Ultra");
+
+        // Far light (radius 16 at 70m): fits Level 2 in Balanced (span 256, 70+16=86 > 64) and Level 1 in Ultra (span 192, 70+16=86 < 96)
+        AdvancedLight farLight = new AdvancedLight(102L, 1L, LightSourceKind.BLOCK, 70.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        require(VoxelShadowCacheBuilder.selectCacheLevel(balanced, farLight, 96) == 2,
+                "Far light at 70m did not select Level 2 in Balanced");
+        require(VoxelShadowCacheBuilder.selectCacheLevel(ultra, farLight, 96) == 1,
+                "Far light at 70m did not select Level 1 in Ultra");
+
+        // Out-of-bounds light (radius 16 at 120m in Balanced where half-span is 128, 120+16=136 > 128)
+        AdvancedLight outBalanced = new AdvancedLight(103L, 1L, LightSourceKind.BLOCK, 120.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        require(VoxelShadowCacheBuilder.selectCacheLevel(balanced, outBalanced, 96) == -1,
+                "Out-of-bounds light was not safely rejected in Balanced");
+        // But Ultra (half-span 192) contains 120+16=136 at Level 2
+        require(VoxelShadowCacheBuilder.selectCacheLevel(ultra, outBalanced, 96) == 2,
+                "Light at 120m did not select Level 2 in Ultra");
+
+        // Out-of-bounds light for Ultra (radius 16 at 180m, 180+16=196 > 192)
+        AdvancedLight outUltra = new AdvancedLight(104L, 1L, LightSourceKind.BLOCK, 180.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        require(VoxelShadowCacheBuilder.selectCacheLevel(ultra, outUltra, 96) == -1,
+                "Out-of-bounds light was not safely rejected in Ultra");
+    }
+
+    private static void testCoarseLevelFallback() {
+        VoxelClipmapSnapshot balanced = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 1L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 4, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(1, 2, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(2, 1, 256, -4, -4, -4, 8)
+                )
+        );
+        // Light with large radius 20 at position (0,0,0):
+        // Level 0 (sub 4): crossings = ceil(20 * 4 * sqrt(3)) + 3 = 142 > 96 (FAILS step budget)
+        // Level 1 (sub 2): crossings = ceil(20 * 2 * sqrt(3)) + 3 = 73 <= 96 (PASSES step budget, fits span 128)
+        AdvancedLight largeRadius = new AdvancedLight(200L, 1L, LightSourceKind.BLOCK, 0.0, 0.0, 0.0, 20.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        int selected = VoxelShadowCacheBuilder.selectCacheLevel(balanced, largeRadius, 96);
+        require(selected == 1, "Large radius light did not fallback from Level 0 to Level 1: " + selected);
+
+        // Light with radius 40 at position (0,0,0):
+        // Level 1 (sub 2): crossings = ceil(40 * 2 * sqrt(3)) + 3 = 142 > 96 (FAILS step budget)
+        // Level 2 (sub 1): crossings = ceil(40 * 1 * sqrt(3)) + 3 = 73 <= 96 (PASSES step budget, fits span 256)
+        AdvancedLight veryLargeRadius = new AdvancedLight(201L, 1L, LightSourceKind.BLOCK, 0.0, 0.0, 0.0, 40.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0);
+        int selectedVeryLarge = VoxelShadowCacheBuilder.selectCacheLevel(balanced, veryLargeRadius, 96);
+        require(selectedVeryLarge == 2, "Very large radius light did not fallback to Level 2: " + selectedVeryLarge);
+    }
+
+    private static void testPerceptualDistanceFadeMonotonicity() {
+        // Test smoothstep fade curve: minDistToBoundary from radius + margin to radius
+        float radius = 16.0f;
+        float fadeMargin = 24.0f; // typical Balanced margin
+
+        float previousFade = -1.0f;
+        for (float dist = radius + fadeMargin + 10.0f; dist >= radius - 10.0f; dist -= 1.0f) {
+            float rawFade = 1.0f - Math.clamp((dist - radius) / fadeMargin, 0.0f, 1.0f);
+            float distanceFade = rawFade * rawFade * (3.0f - 2.0f * rawFade);
+
+            require(distanceFade >= 0.0f && distanceFade <= 1.0f, "Fade out of [0, 1] range: " + distanceFade);
+            if (previousFade >= 0.0f) {
+                require(distanceFade >= previousFade, "Fade is not monotonically increasing as distance to boundary shrinks");
+            }
+            if (dist >= radius + fadeMargin) {
+                require(distanceFade == 0.0f, "Fade must be 0.0 well within clipmap");
+            }
+            if (dist <= radius) {
+                require(distanceFade == 1.0f, "Fade must be exactly 1.0 at clipmap boundary");
+            }
+            previousFade = distanceFade;
+        }
+    }
+
+    private static void testLODHysteresisStability() {
+        // Test projected ratio hysteresis curve:
+        // radius = 16: raw threshold for 64 is ratio >= 0.35 => distance <= 45.71m
+        // UPGRADE_GUARD is 1.10 (ratio >= 0.385 => distance <= 41.55m)
+        // DOWNGRADE_GUARD is 0.90 (ratio < 0.315 => distance > 50.79m)
+        double radius = 16.0;
+
+        // Near distance 40m -> ratio = 0.40 >= 0.35 (64 edge)
+        double nearRatio = radius / 40.0;
+        require(nearRatio >= 0.35, "Near ratio must qualify for 64 edge");
+
+        // Distance 48m -> ratio = 0.333 (between 0.315 and 0.35, retained by downgrade guard)
+        double retainedRatio = radius / 48.0;
+        require(retainedRatio >= 0.35 * 0.90 && retainedRatio < 0.35,
+                "Retained ratio must fall within the downgrade guard band");
+
+        // Distance 55m -> ratio = 0.29 < 0.315 (drops to 32 edge)
+        double droppedRatio = radius / 55.0;
+        require(droppedRatio < 0.35 * 0.90 && droppedRatio >= 0.175,
+                "Dropped ratio must fall within 32 edge band");
+    }
+
+    private static void testStaticDynamicDistanceParity() {
+        VoxelClipmapSnapshot balanced = new VoxelClipmapSnapshot(
+                VOXEL_WORLD, 1L,
+                List.of(
+                        new VoxelClipmapSnapshot.Level(0, 4, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(1, 2, 256, -4, -4, -4, 8),
+                        new VoxelClipmapSnapshot.Level(2, 1, 256, -4, -4, -4, 8)
+                )
+        );
+        AdvancedLight staticLight = new AdvancedLight(
+                300L, 1L, LightSourceKind.BLOCK, 60.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0,
+                false, ShadowEmitterFootprint.empty(), LocalShadowSourceClass.STATIC_CACHE
+        );
+        AdvancedLight dynamicLight = new AdvancedLight(
+                301L, 1L, LightSourceKind.BLOCK, 60.0, 0.0, 0.0, 16.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0,
+                false, ShadowEmitterFootprint.empty(), LocalShadowSourceClass.ENTITY_DYNAMIC
+        );
+
+        int staticLevel = VoxelShadowCacheBuilder.selectCacheLevel(balanced, staticLight, 96);
+        int dynamicLevel = VoxelShadowCacheBuilder.selectCacheLevel(balanced, dynamicLight, 96);
+
+        require(staticLevel >= 0 && staticLevel == dynamicLevel,
+                "Static and dynamic level selection diverged at distance: static=" + staticLevel + ", dynamic=" + dynamicLevel);
     }
 
     private static void require(final boolean condition, final String message) {
