@@ -1287,7 +1287,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         if (!requests.isEmpty()) {
             try {
                 upload = this.dynamicBackend.prepare(
-                        this.generation, voxelResources, frame.frameId(), requests
+                        this.generation, voxelResources, mirror, frame.frameId(), requests
                 );
             } catch (RuntimeException failure) {
                 disableDynamicBackend("packet preparation", failure);

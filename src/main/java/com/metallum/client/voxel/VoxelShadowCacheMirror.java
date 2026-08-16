@@ -172,6 +172,7 @@ public final class VoxelShadowCacheMirror {
         private final int[] occupancy;
         private final byte[] optical;
         private final byte[] chromatic;
+        private final short[] shapeProxyIds;
 
         private Brick(
                 final int logicalX,
@@ -180,14 +181,17 @@ public final class VoxelShadowCacheMirror {
                 final int contentStamp,
                 final int[] ownedOccupancy,
                 final byte[] ownedOptical,
-                final byte[] ownedChromatic
+                final byte[] ownedChromatic,
+                final short[] ownedShapeProxyIds
         ) {
             if (contentStamp == 0 || ownedOccupancy == null
                     || ownedOccupancy.length != VoxelBrickPatch.OCCUPANCY_WORDS
                     || ownedOptical == null || ownedOptical.length == 0
                     || ownedChromatic == null
                     || ownedChromatic.length != VoxelChromaticFilter.packedBytesFor(
-                    ownedOptical.length)) {
+                    ownedOptical.length)
+                    || ownedShapeProxyIds == null
+                    || ownedShapeProxyIds.length != ownedOptical.length) {
                 throw new IllegalArgumentException("Invalid L6 cache-mirror brick");
             }
             this.logicalX = logicalX;
@@ -197,6 +201,7 @@ public final class VoxelShadowCacheMirror {
             this.occupancy = ownedOccupancy;
             this.optical = ownedOptical;
             this.chromatic = ownedChromatic;
+            this.shapeProxyIds = ownedShapeProxyIds;
         }
 
         private static Brick fromPatch(final VoxelBrickPatch patch) {
@@ -207,7 +212,8 @@ public final class VoxelShadowCacheMirror {
                     patch.contentStamp(),
                     patch.occupancyWords(),
                     patch.opticalPayload(),
-                    patch.chromaticPayload()
+                    patch.chromaticPayload(),
+                    patch.shapeProxyIds()
             );
         }
 
@@ -237,6 +243,17 @@ public final class VoxelShadowCacheMirror {
 
         public byte[] chromatic() {
             return this.chromatic;
+        }
+
+        public short[] shapeProxyIds() {
+            return this.shapeProxyIds;
+        }
+
+        public short shapeProxyId(final int blockIndex) {
+            if (blockIndex < 0 || blockIndex >= this.shapeProxyIds.length) {
+                return 0;
+            }
+            return this.shapeProxyIds[blockIndex];
         }
     }
 

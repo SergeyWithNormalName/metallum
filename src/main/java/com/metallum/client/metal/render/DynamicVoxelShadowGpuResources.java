@@ -144,14 +144,104 @@ final class DynamicVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
+    private int lastShapeCount = -1;
+    private long lastMirrorRevision = -1L;
+    private MemorySegment shapeTableSegment;
+    private final MemorySegment[] levelShapeSegments = new MemorySegment[3];
+
+    void syncShapes(
+            final VoxelOccupancyGpuResources voxels,
+            final com.metallum.client.voxel.VoxelShadowCacheMirror.Snapshot mirrorSnapshot
+    ) {
+        ensureOpen();
+        boolean needsUpload = false;
+        int currentShapeCount = com.metallum.client.voxel.VoxelShapeRegistry.count();
+        if (this.lastShapeCount != currentShapeCount || this.shapeTableSegment == null) {
+            byte[] payload = com.metallum.client.voxel.VoxelShapeRegistry.serializeGpuPayload();
+            if (this.shapeTableSegment == null || this.shapeTableSegment.byteSize() < payload.length) {
+                this.shapeTableSegment = this.arena.allocate(Math.max(1024L, payload.length), Long.BYTES);
+            }
+            MemorySegment.copy(MemorySegment.ofArray(payload), 0L, this.shapeTableSegment, 0L, payload.length);
+            this.lastShapeCount = currentShapeCount;
+            needsUpload = true;
+        }
+
+        long currentRevision = mirrorSnapshot == null ? 0L : mirrorSnapshot.revision();
+        if (this.lastMirrorRevision != currentRevision || this.levelShapeSegments[0] == null) {
+            var levels = voxels.levels();
+            for (int levelIndex = 0; levelIndex < Math.min(3, levels.size()); levelIndex++) {
+                var level = levels.get(levelIndex);
+                int baseDimension = level.logicalEdge() / level.subdivision();
+                int totalBlocks = baseDimension * baseDimension * baseDimension;
+                long byteSize = (long) totalBlocks * Short.BYTES;
+                if (this.levelShapeSegments[levelIndex] == null
+                        || this.levelShapeSegments[levelIndex].byteSize() < byteSize) {
+                    this.levelShapeSegments[levelIndex] = this.arena.allocate(byteSize, Short.BYTES);
+                }
+                MemorySegment levelSeg = this.levelShapeSegments[levelIndex];
+                levelSeg.fill((byte) 0);
+                if (mirrorSnapshot != null) {
+                    int baseEdge = 32 / level.subdivision();
+                    for (var entry : mirrorSnapshot.bricks().entrySet()) {
+                        var key = entry.getKey();
+                        if (key.level() != levelIndex) {
+                            continue;
+                        }
+                        var brick = entry.getValue();
+                        short[] proxyIds = brick.shapeProxyIds();
+                        int brickBaseX = key.destinationX() * baseEdge;
+                        int brickBaseY = key.destinationY() * baseEdge;
+                        int brickBaseZ = key.destinationZ() * baseEdge;
+                        for (int localIndex = 0; localIndex < proxyIds.length; localIndex++) {
+                            short proxyId = proxyIds[localIndex];
+                            if (proxyId == 0) {
+                                continue;
+                            }
+                            int localX = localIndex % baseEdge;
+                            int localY = (localIndex / baseEdge) % baseEdge;
+                            int localZ = localIndex / (baseEdge * baseEdge);
+                            int dest = ((brickBaseZ + localZ) * baseDimension
+                                    + (brickBaseY + localY)) * baseDimension + (brickBaseX + localX);
+                            levelSeg.set(ValueLayout.JAVA_SHORT.withOrder(ByteOrder.LITTLE_ENDIAN),
+                                    (long) dest * Short.BYTES, proxyId);
+                        }
+                    }
+                }
+            }
+            this.lastMirrorRevision = currentRevision;
+            needsUpload = true;
+        }
+
+        if (needsUpload) {
+            MetalNativeBridge.metallum_dynamic_shadow_upload_shapes_v1(
+                    this.context,
+                    this.shapeTableSegment,
+                    this.levelShapeSegments[0],
+                    this.levelShapeSegments[1],
+                    this.levelShapeSegments[2]
+            );
+        }
+    }
+
     FrameUpload prepare(
             final long lightingGeneration,
             final VoxelOccupancyGpuResources voxels,
             final long frameId,
             final List<Request> requests
     ) {
+        return prepare(lightingGeneration, voxels, null, frameId, requests);
+    }
+
+    FrameUpload prepare(
+            final long lightingGeneration,
+            final VoxelOccupancyGpuResources voxels,
+            final com.metallum.client.voxel.VoxelShadowCacheMirror.Snapshot mirrorSnapshot,
+            final long frameId,
+            final List<Request> requests
+    ) {
         ensureOpen();
         Objects.requireNonNull(voxels, "voxels");
+        syncShapes(voxels, mirrorSnapshot);
         List<Request> copied = List.copyOf(Objects.requireNonNull(requests, "requests"));
         if (lightingGeneration <= 0L || frameId <= 0L || copied.isEmpty() || copied.size() > MAX_LIGHTS
                 || voxels.lightingGeneration() != lightingGeneration) {

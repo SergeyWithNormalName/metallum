@@ -19,13 +19,14 @@ public final class VoxelShadowTraversal {
         }
     }
 
-    /** One CPU mirror of an exact L5 level: X-fastest occupancy, optical and chromatic planes. */
+    /** One CPU mirror of an exact L5 level: X-fastest occupancy, optical, chromatic and shape planes. */
     public record LevelData(
             VoxelClipmapSnapshot snapshot,
             int levelIndex,
             int[] occupancyWords,
             byte[] opticalBytes,
             byte[] chromaticBytes,
+            short[] shapeProxyIds,
             BrickMetadata[] metadata
     ) {
         public LevelData {
@@ -36,7 +37,27 @@ public final class VoxelShadowTraversal {
             occupancyWords = occupancyWords == null ? null : occupancyWords.clone();
             opticalBytes = opticalBytes == null ? null : opticalBytes.clone();
             chromaticBytes = chromaticBytes == null ? null : chromaticBytes.clone();
+            shapeProxyIds = shapeProxyIds == null ? null : shapeProxyIds.clone();
             metadata = metadata == null ? null : metadata.clone();
+        }
+
+        public LevelData(
+                final VoxelClipmapSnapshot snapshot,
+                final int levelIndex,
+                final int[] occupancyWords,
+                final byte[] opticalBytes,
+                final byte[] chromaticBytes,
+                final BrickMetadata[] metadata
+        ) {
+            this(
+                    snapshot,
+                    levelIndex,
+                    occupancyWords,
+                    opticalBytes,
+                    chromaticBytes,
+                    new short[opticalBytes == null ? 0 : opticalBytes.length],
+                    metadata
+            );
         }
 
         /** Legacy test/reference constructor: absent colour data is explicitly neutral. */
@@ -55,6 +76,7 @@ public final class VoxelShadowTraversal {
                     VoxelChromaticFilter.neutralPackedValues(
                             opticalBytes == null ? 0 : opticalBytes.length
                     ),
+                    new short[opticalBytes == null ? 0 : opticalBytes.length],
                     metadata
             );
         }
@@ -208,18 +230,39 @@ public final class VoxelShadowTraversal {
             long blockZ = Math.floorDiv(cellZ, scale);
             if (sample.occupied && (blockX != lastOpticalBlockX
                     || blockY != lastOpticalBlockY || blockZ != lastOpticalBlockZ)) {
-                red *= sample.transmittance * sample.red;
-                green *= sample.transmittance * sample.green;
-                blue *= sample.transmittance * sample.blue;
-                if (!Float.isFinite(red) || !Float.isFinite(green) || !Float.isFinite(blue)) {
-                    return RgbVisibility.VISIBLE;
-                }
-                if (red <= 0.0f && green <= 0.0f && blue <= 0.0f) {
-                    return RgbVisibility.BLOCKED;
-                }
                 lastOpticalBlockX = blockX;
                 lastOpticalBlockY = blockY;
                 lastOpticalBlockZ = blockZ;
+                boolean hit = true;
+                if (sample.shapeProxyId > 0) {
+                    VoxelShapeRegistry.ShapeProxy proxy = VoxelShapeRegistry.get(sample.shapeProxyId);
+                    if (proxy != null) {
+                        double localStartX = receiver.x() - blockX;
+                        double localStartY = receiver.y() - blockY;
+                        double localStartZ = receiver.z() - blockZ;
+                        double localDeltaX = light.x() - receiver.x();
+                        double localDeltaY = light.y() - receiver.y();
+                        double localDeltaZ = light.z() - receiver.z();
+                        double uHit = proxy.intersectSegment(
+                                localStartX, localStartY, localStartZ,
+                                localDeltaX, localDeltaY, localDeltaZ
+                        );
+                        if (uHit < 0.0) {
+                            hit = false;
+                        }
+                    }
+                }
+                if (hit) {
+                    red *= sample.transmittance * sample.red;
+                    green *= sample.transmittance * sample.green;
+                    blue *= sample.transmittance * sample.blue;
+                    if (!Float.isFinite(red) || !Float.isFinite(green) || !Float.isFinite(blue)) {
+                        return RgbVisibility.VISIBLE;
+                    }
+                    if (red <= 0.0f && green <= 0.0f && blue <= 0.0f) {
+                        return RgbVisibility.BLOCKED;
+                    }
+                }
             }
             if (cellX == endCellX && cellY == endCellY && cellZ == endCellZ) {
                 return new RgbVisibility(red, green, blue);
@@ -287,8 +330,11 @@ public final class VoxelShadowTraversal {
             return null;
         }
         int chromaticId = VoxelChromaticFilter.packedId(data.chromaticBytes(), opticalIndex);
+        int shapeProxyId = data.shapeProxyIds() != null && opticalIndex < data.shapeProxyIds().length
+                ? data.shapeProxyIds()[opticalIndex] : 0;
         return new Sample(
                 true,
+                shapeProxyId,
                 transmittance,
                 VoxelChromaticFilter.red(chromaticId),
                 VoxelChromaticFilter.green(chromaticId),
@@ -348,7 +394,7 @@ public final class VoxelShadowTraversal {
                             positiveDifference(endY, startY)
                     ),
                     positiveDifference(endZ, startZ)
-            );
+                    );
         } catch (ArithmeticException failure) {
             return Long.MAX_VALUE;
         }
@@ -378,7 +424,7 @@ public final class VoxelShadowTraversal {
         return (long) Math.floor(value);
     }
 
-    private record Sample(boolean occupied, float transmittance, float red, float green, float blue) {
-        private static final Sample EMPTY = new Sample(false, 1.0f, 1.0f, 1.0f, 1.0f);
+    private record Sample(boolean occupied, int shapeProxyId, float transmittance, float red, float green, float blue) {
+        private static final Sample EMPTY = new Sample(false, 0, 1.0f, 1.0f, 1.0f, 1.0f);
     }
 }

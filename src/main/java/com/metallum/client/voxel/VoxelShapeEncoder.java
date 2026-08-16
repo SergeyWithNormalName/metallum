@@ -32,6 +32,7 @@ public final class VoxelShapeEncoder {
 
         int cells = subdivision.cellCount();
         double[] coverage = new double[cells];
+        int shapeProxyId = VoxelShapeRegistry.FAST_PATH_ID;
         if (!shape.isEmpty()) {
             List<Box> boxes = new ArrayList<>();
             shape.forAllBoxes((minX, minY, minZ, maxX, maxY, maxZ) -> {
@@ -42,6 +43,16 @@ public final class VoxelShapeEncoder {
             });
             for (Box box : boxes) {
                 rasterize(box, subdivision, coverage);
+            }
+            if (!boxes.isEmpty() && !allAlignedToQuarter(boxes)) {
+                List<VoxelShapeRegistry.Box> registryBoxes = new ArrayList<>(boxes.size());
+                for (Box b : boxes) {
+                    registryBoxes.add(new VoxelShapeRegistry.Box(
+                            (float) b.minX, (float) b.minY, (float) b.minZ,
+                            (float) b.maxX, (float) b.maxY, (float) b.maxZ
+                    ));
+                }
+                shapeProxyId = VoxelShapeRegistry.register(registryBoxes);
             }
         }
 
@@ -64,6 +75,7 @@ public final class VoxelShapeEncoder {
                 subdivision,
                 material,
                 occupancyMask,
+                shapeProxyId,
                 coverageBytes,
                 opticalBytes,
                 quantizeUp(aggregateCoverage),
@@ -106,6 +118,21 @@ public final class VoxelShapeEncoder {
             }
         }
         return false;
+    }
+
+    private static boolean allAlignedToQuarter(final List<Box> boxes) {
+        for (Box b : boxes) {
+            if (!isQuarterMultiple(b.minX) || !isQuarterMultiple(b.minY) || !isQuarterMultiple(b.minZ)
+                    || !isQuarterMultiple(b.maxX) || !isQuarterMultiple(b.maxY) || !isQuarterMultiple(b.maxZ)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isQuarterMultiple(final double value) {
+        double scaled = value * 4.0;
+        return Math.abs(scaled - Math.round(scaled)) < 1.0e-5;
     }
 
     private static void rasterize(
@@ -173,6 +200,7 @@ public final class VoxelShapeEncoder {
         private final VoxelSubdivision subdivision;
         private final VoxelMaterialDescriptor material;
         private final long occupancyMask;
+        private final int shapeProxyId;
         private final byte[] coverageBytes;
         private final byte[] opticalBytes;
         private final int coverageByte;
@@ -182,6 +210,7 @@ public final class VoxelShapeEncoder {
                 final VoxelSubdivision subdivision,
                 final VoxelMaterialDescriptor material,
                 final long occupancyMask,
+                final int shapeProxyId,
                 final byte[] coverageBytes,
                 final byte[] opticalBytes,
                 final int coverageByte,
@@ -190,6 +219,7 @@ public final class VoxelShapeEncoder {
             this.subdivision = subdivision;
             this.material = material;
             this.occupancyMask = occupancyMask;
+            this.shapeProxyId = shapeProxyId;
             this.coverageBytes = coverageBytes.clone();
             this.opticalBytes = opticalBytes.clone();
             this.coverageByte = coverageByte;
@@ -206,6 +236,10 @@ public final class VoxelShapeEncoder {
 
         public long occupancyMask() {
             return this.occupancyMask;
+        }
+
+        public int shapeProxyId() {
+            return this.shapeProxyId;
         }
 
         public boolean occupied(final int x, final int y, final int z) {

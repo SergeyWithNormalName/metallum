@@ -3422,7 +3422,8 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "monitor": environment["METALLUM_BENCHMARK_MONITOR"] ?? "unknown",
             "refresh_hz": Int(environment["METALLUM_BENCHMARK_REFRESH_HZ"] ?? "") ?? -1,
             "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
-            "thermal_state": Self.thermalStateName()
+            "thermal_state": Self.thermalStateName(),
+            "ablation_mode": environment["METALLUM_DIAGNOSTIC_ABLATION"] ?? "FULL_ADVANCED"
         ]
         if let presentation = window.presentation {
             for (key, value) in presentation.report {
@@ -4742,6 +4743,10 @@ private final class MetallumDynamicShadowContext: @unchecked Sendable {
     let pipelines: MetallumDynamicShadowPipelines
     let atlasSuffixOffset: UInt64
     let atlasSuffixBytes: UInt64
+    let dummyShapeTable: MTLBuffer
+    let dummyShapeBuffer: MTLBuffer
+    private var shapeTableBuffer: MTLBuffer?
+    private var shapeProxyBuffers: [MTLBuffer] = []
     private let lock = NSLock()
     private var retired = false
 
@@ -4755,6 +4760,12 @@ private final class MetallumDynamicShadowContext: @unchecked Sendable {
         self.pipelines = pipelines
         self.atlasSuffixOffset = atlasSuffixOffset
         self.atlasSuffixBytes = atlasSuffixBytes
+        self.dummyShapeTable = device.makeBuffer(length: 1024, options: .storageModeShared)!
+        self.dummyShapeBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared)!
+        self.dummyShapeTable.contents().initializeMemory(as: UInt8.self, repeating: 0, count: 1024)
+        self.dummyShapeBuffer.contents().initializeMemory(as: UInt8.self, repeating: 0, count: 65_536)
+        self.dummyShapeTable.label = "Metallum dynamic shadow dummy shape table"
+        self.dummyShapeBuffer.label = "Metallum dynamic shadow dummy shape buffer"
     }
 
     func canEncode() -> Bool {
@@ -4767,6 +4778,74 @@ private final class MetallumDynamicShadowContext: @unchecked Sendable {
         lock.lock()
         retired = true
         lock.unlock()
+    }
+
+    func shapeTable() -> MTLBuffer {
+        lock.lock()
+        defer { lock.unlock() }
+        return shapeTableBuffer ?? dummyShapeTable
+    }
+
+    func shapeProxyBuffer(for level: Int) -> MTLBuffer {
+        lock.lock()
+        defer { lock.unlock() }
+        guard level >= 0, level < shapeProxyBuffers.count else { return dummyShapeBuffer }
+        return shapeProxyBuffers[level]
+    }
+
+    func updateShapes(
+        tablePointer: UnsafeRawPointer?,
+        tableBytes: UInt64,
+        level0Pointer: UnsafeRawPointer?,
+        level0Bytes: UInt64,
+        level1Pointer: UnsafeRawPointer?,
+        level1Bytes: UInt64,
+        level2Pointer: UnsafeRawPointer?,
+        level2Bytes: UInt64
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !retired else { return false }
+
+        if let tablePointer, tableBytes > 0 {
+            let count = Int(tableBytes)
+            if let existing = shapeTableBuffer, existing.length >= count {
+                existing.contents().copyMemory(from: tablePointer, byteCount: count)
+            } else {
+                guard let newBuffer = device.makeBuffer(
+                    bytes: tablePointer,
+                    length: count,
+                    options: .storageModeShared
+                ) else { return false }
+                newBuffer.label = "Metallum dynamic shadow shape table"
+                shapeTableBuffer = newBuffer
+            }
+        }
+
+        let levelPointers = [level0Pointer, level1Pointer, level2Pointer]
+        let levelBytesArray = [level0Bytes, level1Bytes, level2Bytes]
+        while shapeProxyBuffers.count < 3 {
+            guard let emptyBuffer = device.makeBuffer(length: 65_536, options: .storageModeShared) else { return false }
+            emptyBuffer.contents().initializeMemory(as: UInt8.self, repeating: 0, count: 65_536)
+            shapeProxyBuffers.append(emptyBuffer)
+        }
+        for level in 0..<3 {
+            if let ptr = levelPointers[level], levelBytesArray[level] > 0 {
+                let count = Int(levelBytesArray[level])
+                if shapeProxyBuffers[level].length >= count {
+                    shapeProxyBuffers[level].contents().copyMemory(from: ptr, byteCount: count)
+                } else {
+                    guard let newBuffer = device.makeBuffer(
+                        bytes: ptr,
+                        length: count,
+                        options: .storageModeShared
+                    ) else { return false }
+                    newBuffer.label = "Metallum dynamic shadow shapeProxyIds L\(level)"
+                    shapeProxyBuffers[level] = newBuffer
+                }
+            }
+        }
+        return true
     }
 }
 
@@ -10007,6 +10086,10 @@ public func metallum_dynamic_shadow_encode_v1(
         levelBytes.withUnsafeBytes { bytes in
             encoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 14)
         }
+        encoder.setBuffer(dynamic.shapeProxyBuffer(for: 0), offset: 0, index: 15)
+        encoder.setBuffer(dynamic.shapeProxyBuffer(for: 1), offset: 0, index: 16)
+        encoder.setBuffer(dynamic.shapeProxyBuffer(for: 2), offset: 0, index: 17)
+        encoder.setBuffer(dynamic.shapeTable(), offset: 0, index: 18)
         encoder.dispatchThreads(
             MTLSize(width: maxRayCount, height: requests.count, depth: 1),
             threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1)
@@ -10017,6 +10100,32 @@ public func metallum_dynamic_shadow_encode_v1(
         trackedEndEncoding(encoder)
         return MetallumDynamicShadowAbiV1.encoded
     }
+}
+
+@_cdecl("metallum_dynamic_shadow_upload_shapes_v1")
+public func metallum_dynamic_shadow_upload_shapes_v1(
+    _ pointer: UnsafeMutableRawPointer?,
+    _ tablePointer: UnsafeRawPointer?,
+    _ tableBytes: UInt64,
+    _ level0Pointer: UnsafeRawPointer?,
+    _ level0Bytes: UInt64,
+    _ level1Pointer: UnsafeRawPointer?,
+    _ level1Bytes: UInt64,
+    _ level2Pointer: UnsafeRawPointer?,
+    _ level2Bytes: UInt64
+) -> Int32 {
+    guard let pointer else { return -1 }
+    let context = Unmanaged<MetallumDynamicShadowContext>.fromOpaque(pointer).takeUnretainedValue()
+    return context.updateShapes(
+        tablePointer: tablePointer,
+        tableBytes: tableBytes,
+        level0Pointer: level0Pointer,
+        level0Bytes: level0Bytes,
+        level1Pointer: level1Pointer,
+        level1Bytes: level1Bytes,
+        level2Pointer: level2Pointer,
+        level2Bytes: level2Bytes
+    ) ? 1 : 0
 }
 
 private func voxelContextBuffer(

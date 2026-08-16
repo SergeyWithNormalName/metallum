@@ -38,6 +38,7 @@ public final class SodiumVoxelSectionExtractor {
         long[] occupancyMasks = new long[VoxelSectionSnapshot.BLOCK_COUNT];
         byte[] optical = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
         byte[] chromaticIds = new byte[VoxelSectionSnapshot.BLOCK_COUNT];
+        short[] shapeProxyIds = new short[VoxelSectionSnapshot.BLOCK_COUNT];
         BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
 
         for (int localIndex = 0; localIndex < VoxelSectionSnapshot.BLOCK_COUNT; localIndex++) {
@@ -70,6 +71,7 @@ public final class SodiumVoxelSectionExtractor {
                 chromaticIds[localIndex] = (byte) VoxelChromaticFilter.idFor(
                         state, material.materialClass()
                 );
+                shapeProxyIds[localIndex] = (short) encoded.shapeProxyId();
             } catch (RuntimeException ignored) {
                 // A modded shape is allowed to fail locally. Keep the L5 producer safe and
                 // conservative without propagating a failure into Sodium's accepted geometry.
@@ -78,11 +80,12 @@ public final class SodiumVoxelSectionExtractor {
                         VoxelMaterialClass.UNKNOWN_CONSERVATIVE
                 ).packedUnsignedByte();
                 chromaticIds[localIndex] = (byte) VoxelChromaticFilter.NEUTRAL_ID;
+                shapeProxyIds[localIndex] = (short) VoxelShapeRegistry.FAST_PATH_ID;
             }
         }
         return new VoxelSectionCandidate(
             task,
-            new VoxelSectionSnapshot(occupancyMasks, optical, chromaticIds),
+            new VoxelSectionSnapshot(occupancyMasks, optical, chromaticIds, shapeProxyIds),
             VoxelSectionSnapshot.BLOCK_COUNT
         );
     }

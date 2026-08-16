@@ -1159,6 +1159,22 @@ tasks.register("builtinShaderFallbackValidation", Exec) {
 		"2"
 }
 
+tasks.register("forcedSourceStartupValidation", JavaExec) {
+	group = "verification"
+	description = "Validates forced-source native startup through the Java resource-extraction bridge"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+
+	inputs.dir(layout.buildDirectory.dir("resources/main/natives/macos"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.ForcedSourceStartupValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
 tasks.named("test", Test) {
 	// HDR tests use a dependency-free Java entry point instead of a JUnit engine.
 	failOnNoDiscoveredTests = false
@@ -1205,6 +1221,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("hdrValueValidation"))
 	dependsOn(tasks.named("builtinShaderLibraryValidation"))
 	dependsOn(tasks.named("builtinShaderFallbackValidation"))
+	dependsOn(tasks.named("forcedSourceStartupValidation"))
 	dependsOn(tasks.named("spatialScalingValidation"))
 	dependsOn(tasks.named("temporalScalingValidation"))
 	dependsOn(tasks.named("gpuTimingValidation"))

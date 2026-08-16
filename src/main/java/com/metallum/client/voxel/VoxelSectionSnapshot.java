@@ -10,21 +10,32 @@ public final class VoxelSectionSnapshot {
     private static final VoxelSectionSnapshot EMPTY = new VoxelSectionSnapshot(
             new long[BLOCK_COUNT],
             new byte[BLOCK_COUNT],
-            new byte[BLOCK_COUNT]
+            new byte[BLOCK_COUNT],
+            new short[BLOCK_COUNT]
     );
 
     private final long[] occupancyMasks;
     private final byte[] optical;
     private final byte[] chromaticIds;
+    private final short[] shapeProxyIds;
 
     public VoxelSectionSnapshot(final long[] occupancyMasks, final byte[] optical) {
-        this(occupancyMasks, optical, new byte[BLOCK_COUNT]);
+        this(occupancyMasks, optical, new byte[BLOCK_COUNT], new short[BLOCK_COUNT]);
     }
 
     public VoxelSectionSnapshot(
             final long[] occupancyMasks,
             final byte[] optical,
             final byte[] chromaticIds
+    ) {
+        this(occupancyMasks, optical, chromaticIds, new short[BLOCK_COUNT]);
+    }
+
+    public VoxelSectionSnapshot(
+            final long[] occupancyMasks,
+            final byte[] optical,
+            final byte[] chromaticIds,
+            final short[] shapeProxyIds
     ) {
         if (occupancyMasks == null || occupancyMasks.length != BLOCK_COUNT) {
             throw new IllegalArgumentException("Voxel section requires exactly 4096 occupancy masks");
@@ -35,6 +46,9 @@ public final class VoxelSectionSnapshot {
         if (chromaticIds == null || chromaticIds.length != BLOCK_COUNT) {
             throw new IllegalArgumentException("Voxel section requires exactly 4096 chromatic values");
         }
+        if (shapeProxyIds == null || shapeProxyIds.length != BLOCK_COUNT) {
+            throw new IllegalArgumentException("Voxel section requires exactly 4096 shape proxy IDs");
+        }
         for (byte chromaticId : chromaticIds) {
             int id = Byte.toUnsignedInt(chromaticId);
             if (id > VoxelChromaticFilter.MAX_ID) {
@@ -44,6 +58,7 @@ public final class VoxelSectionSnapshot {
         this.occupancyMasks = Arrays.copyOf(occupancyMasks, occupancyMasks.length);
         this.optical = Arrays.copyOf(optical, optical.length);
         this.chromaticIds = Arrays.copyOf(chromaticIds, chromaticIds.length);
+        this.shapeProxyIds = Arrays.copyOf(shapeProxyIds, shapeProxyIds.length);
     }
 
     /** Shared immutable zero snapshot used by Sodium's no-mesh empty-section result. */
@@ -78,6 +93,15 @@ public final class VoxelSectionSnapshot {
         return Arrays.copyOf(this.chromaticIds, this.chromaticIds.length);
     }
 
+    public short shapeProxyId(final int localIndex) {
+        requireLocalIndex(localIndex);
+        return this.shapeProxyIds[localIndex];
+    }
+
+    public short[] shapeProxyIds() {
+        return Arrays.copyOf(this.shapeProxyIds, this.shapeProxyIds.length);
+    }
+
     long occupancyMaskUnchecked(final int localIndex) {
         return this.occupancyMasks[localIndex];
     }
@@ -88,6 +112,10 @@ public final class VoxelSectionSnapshot {
 
     byte chromaticIdUnchecked(final int localIndex) {
         return this.chromaticIds[localIndex];
+    }
+
+    short shapeProxyIdUnchecked(final int localIndex) {
+        return this.shapeProxyIds[localIndex];
     }
 
     private static void requireLocalIndex(final int localIndex) {

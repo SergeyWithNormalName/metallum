@@ -22,11 +22,17 @@ private typealias DynamicCreate = @convention(c) (
 private typealias DynamicRelease = @convention(c) (UnsafeMutableRawPointer?) -> Void
 private typealias DynamicEncode = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeRawPointer?, UInt64) -> Int32
+private typealias DynamicUploadShapes = @convention(c) (
+    UnsafeMutableRawPointer?,
+    UnsafeRawPointer?, UInt64,
+    UnsafeRawPointer?, UInt64,
+    UnsafeRawPointer?, UInt64,
+    UnsafeRawPointer?, UInt64
+) -> Int32
 
 private let atlasSuffixOffset = 4_096
 private let atlasSuffixBytes = 393_216
 private let atlasTotalBytes = atlasSuffixOffset + atlasSuffixBytes
-
 private func require(_ value: @autoclosure () throws -> Bool, _ message: String) throws {
     guard try value() else { throw Failure.message(message) }
 }
@@ -69,7 +75,56 @@ private func l5Layout() -> [UInt8] {
     return value
 }
 
-private enum FixtureKind { case layered, slab, fence }
+private struct ShapeBox {
+    var minX: Float
+    var minY: Float
+    var minZ: Float
+    var maxX: Float
+    var maxY: Float
+    var maxZ: Float
+}
+
+private struct ShapeProxyDef {
+    var boxes: [ShapeBox]
+}
+
+private func serializeShapeTable(_ proxies: [ShapeProxyDef]) -> [UInt8] {
+    let proxyCount = UInt32(proxies.count + 1)
+    var totalBoxes: UInt32 = 0
+    for p in proxies { totalBoxes += UInt32(p.boxes.count) }
+    let proxyTableBytes = proxyCount * 8
+    let boxTableBytes = totalBoxes * 32
+    let totalBytes = 16 + proxyTableBytes + boxTableBytes
+    var data = [UInt8](repeating: 0, count: Int(totalBytes))
+    put32(proxyCount, 0, &data)
+    put32(totalBoxes, 4, &data)
+    put32(proxyTableBytes, 8, &data)
+    put32(boxTableBytes, 12, &data)
+    var boxCursor: UInt32 = 0
+    let proxyOffset = 16
+    let boxOffset = Int(16 + proxyTableBytes)
+    for (i, proxy) in proxies.enumerated() {
+        let proxyId = i + 1
+        let currentProxyOffset = proxyOffset + proxyId * 8
+        put32(boxCursor, currentProxyOffset, &data)
+        put32(UInt32(proxy.boxes.count), currentProxyOffset + 4, &data)
+        for b in proxy.boxes {
+            let currentBoxOffset = boxOffset + Int(boxCursor) * 32
+            putFloat(b.minX, currentBoxOffset, &data)
+            putFloat(b.minY, currentBoxOffset + 4, &data)
+            putFloat(b.minZ, currentBoxOffset + 8, &data)
+            putFloat(b.maxX, currentBoxOffset + 12, &data)
+            putFloat(b.maxY, currentBoxOffset + 16, &data)
+            putFloat(b.maxZ, currentBoxOffset + 20, &data)
+            putFloat(0.0, currentBoxOffset + 24, &data)
+            putFloat(0.0, currentBoxOffset + 28, &data)
+            boxCursor += 1
+        }
+    }
+    return data
+}
+
+private enum FixtureKind { case layered, slab, fence, pane, trapdoor, stairs }
 
 private func fixtureOccupied(_ kind: FixtureKind, _ x: Int, _ y: Int, _ z: Int) -> Bool {
     switch kind {
@@ -78,13 +133,16 @@ private func fixtureOccupied(_ kind: FixtureKind, _ x: Int, _ y: Int, _ z: Int) 
     // resolution; neither can be reduced to the block-wide optical material alone.
     case .slab: return (4..<8).contains(x) && (2..<4).contains(y)
     case .fence: return (4..<6).contains(x) && (0..<4).contains(y) && (1..<3).contains(z)
+    case .pane: return (4..<8).contains(x) && (0..<4).contains(y) && (0..<4).contains(z)
+    case .trapdoor: return (4..<8).contains(x) && (0..<4).contains(y) && (0..<4).contains(z)
+    case .stairs: return (4..<8).contains(x) && (0..<4).contains(y) && (0..<4).contains(z)
     }
 }
 
 private func fixtureMaterial(_ kind: FixtureKind, _ blockX: Int) -> UInt8 {
     switch kind {
     case .layered: return [119, 145, 182, 32][blockX - 1] // glass, foliage, water, opaque
-    case .slab, .fence: return 32 // opaque geometry
+    case .slab, .fence, .pane, .trapdoor, .stairs: return 32 // opaque geometry
     }
 }
 
@@ -93,7 +151,7 @@ private func fixtureChromaticId(_ kind: FixtureKind, _ blockX: Int) -> UInt8 {
     case .layered:
         // red stained glass, green foliage, light-blue water, then opaque neutral.
         return [14, 13, 3, 0][blockX - 1]
-    case .slab, .fence:
+    case .slab, .fence, .pane, .trapdoor, .stairs:
         return 0
     }
 }
@@ -218,7 +276,51 @@ private func cubeDirection(_ face: Int, _ x: Int, _ y: Int, _ edge: Int) -> SIMD
     return raw / sqrt(raw.x * raw.x + raw.y * raw.y + raw.z * raw.z)
 }
 
-private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .layered) -> [(Float, UInt32)] {
+private func intersectBox(_ start: SIMD3<Double>, _ delta: SIMD3<Double>, _ box: ShapeBox) -> Double {
+    var uMin = 0.0, uMax = 1.0
+    if abs(delta.x) > 1e-7 {
+        let inv = 1.0 / delta.x
+        let u1 = (Double(box.minX) - start.x) * inv
+        let u2 = (Double(box.maxX) - start.x) * inv
+        uMin = max(uMin, min(u1, u2))
+        uMax = min(uMax, max(u1, u2))
+        if uMin > uMax { return -1.0 }
+    } else if start.x < Double(box.minX) - 1e-5 || start.x > Double(box.maxX) + 1e-5 {
+        return -1.0
+    }
+    if abs(delta.y) > 1e-7 {
+        let inv = 1.0 / delta.y
+        let u1 = (Double(box.minY) - start.y) * inv
+        let u2 = (Double(box.maxY) - start.y) * inv
+        uMin = max(uMin, min(u1, u2))
+        uMax = min(uMax, max(u1, u2))
+        if uMin > uMax { return -1.0 }
+    } else if start.y < Double(box.minY) - 1e-5 || start.y > Double(box.maxY) + 1e-5 {
+        return -1.0
+    }
+    if abs(delta.z) > 1e-7 {
+        let inv = 1.0 / delta.z
+        let u1 = (Double(box.minZ) - start.z) * inv
+        let u2 = (Double(box.maxZ) - start.z) * inv
+        uMin = max(uMin, min(u1, u2))
+        uMax = min(uMax, max(u1, u2))
+        if uMin > uMax { return -1.0 }
+    } else if start.z < Double(box.minZ) - 1e-5 || start.z > Double(box.maxZ) + 1e-5 {
+        return -1.0
+    }
+    return uMin
+}
+
+private func intersectProxy(_ start: SIMD3<Double>, _ delta: SIMD3<Double>, _ proxy: ShapeProxyDef) -> Double {
+    var best = Double.infinity
+    for box in proxy.boxes {
+        let u = intersectBox(start, delta, box)
+        if u >= 0.0 && u < best { best = u }
+    }
+    return best.isInfinite ? -1.0 : best
+}
+
+private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .layered, _ proxy: ShapeProxyDef? = nil) -> [(Float, UInt32)] {
     let radius = 8.0, subdivision = 4.0, startDistance = min(0.08 / subdivision, radius * 0.02)
     let source = SIMD3<Double>(repeating: 2.0)
     let start = source + direction * (startDistance * subdivision)
@@ -243,17 +345,32 @@ private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .l
         guard (0..<32).contains(cell.x), (0..<32).contains(cell.y), (0..<32).contains(cell.z) else { break }
         let block = SIMD3<Int>(Int(floor(Double(cell.x) / subdivision)), Int(floor(Double(cell.y) / subdivision)), Int(floor(Double(cell.z) / subdivision)))
         if fixtureOccupied(kind, cell.x, cell.y, cell.z) && block != lastBlock {
-            let transmittance = Float(fixtureMaterial(kind, max(1, block.x)) & 31) / 31.0
-            visibility = multiply(
-                visibility,
-                transmittance,
-                chromaticFilter(fixtureChromaticId(kind, max(1, block.x)))
-            )
-            let hit = (Float(max(0, startDistance + entry * (radius - startDistance))), packRgb(visibility))
-            output[min(hitCount, 3)] = hit
-            hitCount += 1
-            lastBlock = block
-            if visibility == SIMD3<Float>(repeating: 0) { break }
+            var hit = true
+            var effectiveEntry = entry
+            if let p = proxy {
+                let worldSource = source / subdivision
+                let localStart = (worldSource + direction * startDistance) - SIMD3<Double>(Double(block.x), Double(block.y), Double(block.z))
+                let localDelta = direction * (radius - startDistance)
+                let uHit = intersectProxy(localStart, localDelta, p)
+                if uHit < 0.0 {
+                    hit = false
+                } else {
+                    effectiveEntry = uHit
+                }
+            }
+            if hit {
+                let transmittance = Float(fixtureMaterial(kind, max(1, block.x)) & 31) / 31.0
+                visibility = multiply(
+                    visibility,
+                    transmittance,
+                    chromaticFilter(fixtureChromaticId(kind, max(1, block.x)))
+                )
+                let hitRecord = (Float(max(0, startDistance + effectiveEntry * (radius - startDistance))), packRgb(visibility))
+                output[min(hitCount, 3)] = hitRecord
+                hitCount += 1
+                lastBlock = block
+                if visibility == SIMD3<Float>(repeating: 0) { break }
+            }
         }
         let next = min(x.0, min(y.0, z.0)); if !next.isFinite || next > 1 { break }
         let tie = next + 1e-10
@@ -263,9 +380,9 @@ private func referenceTrace(_ direction: SIMD3<Double>, _ kind: FixtureKind = .l
     return output
 }
 
-private func compareReference(_ page: [UInt8], _ atlasOffset: Int, _ edge: Int, _ kind: FixtureKind = .layered) throws {
+private func compareReference(_ page: [UInt8], _ atlasOffset: Int, _ edge: Int, _ kind: FixtureKind = .layered, _ proxy: ShapeProxyDef? = nil) throws {
     for face in 0..<6 { for y in 0..<edge { for x in 0..<edge {
-        let expected = referenceTrace(cubeDirection(face, x, y, edge), kind)
+        let expected = referenceTrace(cubeDirection(face, x, y, edge), kind, proxy)
         let base = atlasOffset + ((face * edge * edge + y * edge + x) * 4 * 8)
         for layer in 0..<4 {
             let distance = readFloat(page, base + layer * 8), packedRgb = read32(page, base + layer * 8 + 4)
@@ -348,6 +465,7 @@ private func renderSinglePage(
         let create = try symbol(library, "metallum_dynamic_shadow_create_context_v1", DynamicCreate.self)
         let release = try symbol(library, "metallum_dynamic_shadow_release_context_v1", DynamicRelease.self)
         let encode = try symbol(library, "metallum_dynamic_shadow_encode_v1", DynamicEncode.self)
+        let uploadShapes = try symbol(library, "metallum_dynamic_shadow_upload_shapes_v1", DynamicUploadShapes.self)
         try require(version() == 1, "dynamic ABI version changed")
         var layoutBytes = [UInt8](repeating: 0, count: 32)
         try require(layoutBytes.withUnsafeMutableBytes { layout($0.baseAddress, 32) } == 1
@@ -423,6 +541,88 @@ private func renderSinglePage(
         try uploadFixture(l5PlanesPacket(.fence), voxel, queue, voxelUpload)
         let fencePage = try renderSinglePage(dynamicPacket(), voxel, dynamic, device, queue, encode)
         try requireFixtureHit(fencePage, "fence"); try compareReference(fencePage, 0, 16, .fence)
+
+        // ShapeProxy fine-phase refinement fixtures:
+        // 1. Thin pane (0.125m thick): tests false-positive broad phase rejection vs true hits.
+        let paneProxy = ShapeProxyDef(boxes: [
+            ShapeBox(minX: 0.4375, minY: 0.0, minZ: 0.0, maxX: 0.5625, maxY: 1.0, maxZ: 1.0)
+        ])
+        let paneTable = serializeShapeTable([paneProxy])
+        var level0ShapeProxies = [UInt16](repeating: 0, count: 16 * 16 * 16)
+        level0ShapeProxies[1] = 1 // block (1, 0, 0)
+        try require(paneTable.withUnsafeBytes { tableBytes in
+            level0ShapeProxies.withUnsafeBytes { level0Bytes in
+                uploadShapes(
+                    dynamic,
+                    tableBytes.baseAddress, UInt64(tableBytes.count),
+                    level0Bytes.baseAddress, UInt64(level0Bytes.count),
+                    nil, 0,
+                    nil, 0
+                )
+            }
+        } == 1, "uploading pane shape proxy failed")
+        try uploadFixture(l5PlanesPacket(.pane), voxel, queue, voxelUpload)
+        let panePage = try renderSinglePage(dynamicPacket(), voxel, dynamic, device, queue, encode)
+        try requireFixtureHit(panePage, "pane")
+        try compareReference(panePage, 0, 16, .pane, paneProxy)
+
+        // 2. Open trapdoor / Wall element:
+        let trapdoorProxy = ShapeProxyDef(boxes: [
+            ShapeBox(minX: 0.0, minY: 0.0, minZ: 0.8125, maxX: 1.0, maxY: 1.0, maxZ: 1.0)
+        ])
+        let trapdoorTable = serializeShapeTable([trapdoorProxy])
+        try require(trapdoorTable.withUnsafeBytes { tableBytes in
+            level0ShapeProxies.withUnsafeBytes { level0Bytes in
+                uploadShapes(
+                    dynamic,
+                    tableBytes.baseAddress, UInt64(tableBytes.count),
+                    level0Bytes.baseAddress, UInt64(level0Bytes.count),
+                    nil, 0,
+                    nil, 0
+                )
+            }
+        } == 1, "uploading trapdoor shape proxy failed")
+        try uploadFixture(l5PlanesPacket(.trapdoor), voxel, queue, voxelUpload)
+        let trapdoorPage = try renderSinglePage(dynamicPacket(), voxel, dynamic, device, queue, encode)
+        try requireFixtureHit(trapdoorPage, "trapdoor")
+        try compareReference(trapdoorPage, 0, 16, .trapdoor, trapdoorProxy)
+
+        // 3. Asymmetric / stairs shape:
+        let stairsProxy = ShapeProxyDef(boxes: [
+            ShapeBox(minX: 0.0, minY: 0.0, minZ: 0.0, maxX: 1.0, maxY: 0.5, maxZ: 1.0),
+            ShapeBox(minX: 0.0, minY: 0.5, minZ: 0.5, maxX: 1.0, maxY: 1.0, maxZ: 1.0)
+        ])
+        let stairsTable = serializeShapeTable([stairsProxy])
+        try require(stairsTable.withUnsafeBytes { tableBytes in
+            level0ShapeProxies.withUnsafeBytes { level0Bytes in
+                uploadShapes(
+                    dynamic,
+                    tableBytes.baseAddress, UInt64(tableBytes.count),
+                    level0Bytes.baseAddress, UInt64(level0Bytes.count),
+                    nil, 0,
+                    nil, 0
+                )
+            }
+        } == 1, "uploading stairs shape proxy failed")
+        try uploadFixture(l5PlanesPacket(.stairs), voxel, queue, voxelUpload)
+        let stairsPage = try renderSinglePage(dynamicPacket(), voxel, dynamic, device, queue, encode)
+        try requireFixtureHit(stairsPage, "stairs")
+        try compareReference(stairsPage, 0, 16, .stairs, stairsProxy)
+
+        // Reset shapes for following tests:
+        let emptyLevel0 = [UInt16](repeating: 0, count: 16 * 16 * 16)
+        let emptyTable = serializeShapeTable([])
+        _ = emptyTable.withUnsafeBytes { tableBytes in
+            emptyLevel0.withUnsafeBytes { level0Bytes in
+                uploadShapes(
+                    dynamic,
+                    tableBytes.baseAddress, UInt64(tableBytes.count),
+                    level0Bytes.baseAddress, UInt64(level0Bytes.count),
+                    nil, 0,
+                    nil, 0
+                )
+            }
+        }
 
         // These are covered, resident ±30M-world-coordinate cases, not merely no-fault
         // dispatches: metadata tags and every cube face/layer are checked against the same

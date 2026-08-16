@@ -132,6 +132,7 @@ final class VoxelBrickPacker implements AutoCloseable {
         int chromaticLength = VoxelChromaticFilter.packedBytesFor(opticalLength);
         byte[] payload = new byte[VoxelBrickPatch.OCCUPANCY_BYTES + opticalLength + chromaticLength];
         byte[] chromatic = new byte[chromaticLength];
+        short[] shapes = new short[opticalLength];
         ByteBuffer littleEndian = ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN);
         long originX = Math.multiplyExact(key.brickX(), baseEdge);
         long originY = Math.multiplyExact(key.brickY(), baseEdge);
@@ -150,8 +151,8 @@ final class VoxelBrickPacker implements AutoCloseable {
                             | ((int) blockWorldZ & 15) << 4 | ((int) blockWorldX & 15);
                     long sourceMask = contributor.absent()
                             ? 0L : contributor.snapshot().occupancyMaskUnchecked(localIndex);
-                    int opticalOffset = VoxelBrickPatch.OCCUPANCY_BYTES
-                            + (blockZ * baseEdge + blockY) * baseEdge + blockX;
+                    int blockIndex = (blockZ * baseEdge + blockY) * baseEdge + blockX;
+                    int opticalOffset = VoxelBrickPatch.OCCUPANCY_BYTES + blockIndex;
                     byte packedOptical = contributor.absent()
                             ? 0 : contributor.snapshot().opticalUnchecked(localIndex);
                     payload[opticalOffset] = exactCellOptical(
@@ -162,9 +163,11 @@ final class VoxelBrickPacker implements AutoCloseable {
                             : Byte.toUnsignedInt(contributor.snapshot().chromaticIdUnchecked(localIndex));
                     VoxelChromaticFilter.putPackedId(
                             chromatic,
-                            opticalOffset - VoxelBrickPatch.OCCUPANCY_BYTES,
+                            blockIndex,
                             chromaticId
                     );
+                    shapes[blockIndex] = contributor.absent()
+                            ? 0 : contributor.snapshot().shapeProxyIdUnchecked(localIndex);
                     if (sourceMask != 0L) {
                         writeOccupancy(
                                 littleEndian, sourceMask, subdivision, blockX, blockY, blockZ
@@ -190,7 +193,8 @@ final class VoxelBrickPacker implements AutoCloseable {
                 ticket.clipmapGeneration(),
                 payload,
                 opticalLength,
-                chromaticLength
+                chromaticLength,
+                shapes
         );
     }
 

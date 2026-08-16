@@ -25,6 +25,7 @@ public final class VoxelBrickPatch {
     private final byte[] packedPayload;
     private final int opticalLength;
     private final int chromaticLength;
+    private final short[] shapeProxyIds;
 
     public VoxelBrickPatch(
             final int level,
@@ -44,7 +45,8 @@ public final class VoxelBrickPatch {
                 level, destinationBrickX, destinationBrickY, destinationBrickZ,
                 logicalBrickX, logicalBrickY, logicalBrickZ, contentStamp,
                 worldGeneration, clipmapGeneration, occupancyWords, optical,
-                VoxelChromaticFilter.neutralPackedValues(optical == null ? 0 : optical.length)
+                VoxelChromaticFilter.neutralPackedValues(optical == null ? 0 : optical.length),
+                new short[optical == null ? 0 : optical.length]
         );
     }
 
@@ -62,6 +64,31 @@ public final class VoxelBrickPatch {
             final int[] occupancyWords,
             final byte[] optical,
             final byte[] chromatic
+    ) {
+        this(
+                level, destinationBrickX, destinationBrickY, destinationBrickZ,
+                logicalBrickX, logicalBrickY, logicalBrickZ, contentStamp,
+                worldGeneration, clipmapGeneration, occupancyWords, optical,
+                chromatic,
+                new short[optical == null ? 0 : optical.length]
+        );
+    }
+
+    public VoxelBrickPatch(
+            final int level,
+            final int destinationBrickX,
+            final int destinationBrickY,
+            final int destinationBrickZ,
+            final int logicalBrickX,
+            final int logicalBrickY,
+            final int logicalBrickZ,
+            final int contentStamp,
+            final long worldGeneration,
+            final long clipmapGeneration,
+            final int[] occupancyWords,
+            final byte[] optical,
+            final byte[] chromatic,
+            final short[] shapeProxyIds
     ) {
         if (level < 0 || destinationBrickX < 0 || destinationBrickY < 0 || destinationBrickZ < 0) {
             throw new IllegalArgumentException("Voxel patch level and toroidal destination must be non-negative");
@@ -82,6 +109,9 @@ public final class VoxelBrickPatch {
                 || chromatic.length != VoxelChromaticFilter.packedBytesFor(optical.length)) {
             throw new IllegalArgumentException("Voxel brick chromatic payload does not match optics");
         }
+        if (shapeProxyIds == null || shapeProxyIds.length != optical.length) {
+            throw new IllegalArgumentException("Voxel brick shape proxy payload does not match optics");
+        }
         this.level = level;
         this.destinationBrickX = destinationBrickX;
         this.destinationBrickY = destinationBrickY;
@@ -95,6 +125,7 @@ public final class VoxelBrickPatch {
         this.packedPayload = pack(occupancyWords, optical, chromatic);
         this.opticalLength = optical.length;
         this.chromaticLength = chromatic.length;
+        this.shapeProxyIds = shapeProxyIds.clone();
     }
 
     private VoxelBrickPatch(
@@ -110,13 +141,15 @@ public final class VoxelBrickPatch {
             final long clipmapGeneration,
             final byte[] ownedPackedPayload,
             final int opticalLength,
-            final int chromaticLength
+            final int chromaticLength,
+            final short[] ownedShapeProxyIds
     ) {
         if (level < 0 || destinationBrickX < 0 || destinationBrickY < 0 || destinationBrickZ < 0
                 || worldGeneration <= 0L || clipmapGeneration <= 0L || contentStamp == 0
                 || ownedPackedPayload == null || opticalLength <= 0 || chromaticLength <= 0
                 || chromaticLength != VoxelChromaticFilter.packedBytesFor(opticalLength)
-                || ownedPackedPayload.length != OCCUPANCY_BYTES + opticalLength + chromaticLength) {
+                || ownedPackedPayload.length != OCCUPANCY_BYTES + opticalLength + chromaticLength
+                || ownedShapeProxyIds == null || ownedShapeProxyIds.length != opticalLength) {
             throw new IllegalArgumentException("Invalid worker-owned voxel patch");
         }
         this.level = level;
@@ -132,6 +165,7 @@ public final class VoxelBrickPatch {
         this.packedPayload = ownedPackedPayload;
         this.opticalLength = opticalLength;
         this.chromaticLength = chromaticLength;
+        this.shapeProxyIds = ownedShapeProxyIds;
     }
 
     static VoxelBrickPatch fromOwnedPackedPayload(
@@ -147,12 +181,13 @@ public final class VoxelBrickPatch {
             final long clipmapGeneration,
             final byte[] ownedPackedPayload,
             final int opticalLength,
-            final int chromaticLength
+            final int chromaticLength,
+            final short[] ownedShapeProxyIds
     ) {
         return new VoxelBrickPatch(
                 level, destinationBrickX, destinationBrickY, destinationBrickZ,
                 logicalBrickX, logicalBrickY, logicalBrickZ, contentStamp,
-                worldGeneration, clipmapGeneration, ownedPackedPayload, opticalLength, chromaticLength
+                worldGeneration, clipmapGeneration, ownedPackedPayload, opticalLength, chromaticLength, ownedShapeProxyIds
         );
     }
 
@@ -224,7 +259,7 @@ public final class VoxelBrickPatch {
         return Arrays.copyOfRange(
                 this.packedPayload,
                 OCCUPANCY_BYTES + this.opticalLength,
-                this.packedPayload.length
+                OCCUPANCY_BYTES + this.opticalLength + this.chromaticLength
         );
     }
 
@@ -232,7 +267,26 @@ public final class VoxelBrickPatch {
         return this.chromaticLength;
     }
 
+    public int shapeLength() {
+        return this.shapeProxyIds.length * Short.BYTES;
+    }
+
+    public short[] shapeProxyIds() {
+        return this.shapeProxyIds.clone();
+    }
+
+    public short shapeProxyId(final int blockIndex) {
+        if (blockIndex < 0 || blockIndex >= this.shapeProxyIds.length) {
+            return 0;
+        }
+        return this.shapeProxyIds[blockIndex];
+    }
+
     public int packedPayloadLength() {
+        return this.packedPayload.length;
+    }
+
+    public int gpuPayloadLength() {
         return this.packedPayload.length;
     }
 
@@ -246,6 +300,11 @@ public final class VoxelBrickPatch {
                 this.packedPayload, 0, destination, ValueLayout.JAVA_BYTE,
                 offset, this.packedPayload.length
         );
+    }
+
+    /** Copies the L5 GPU upload payload (occupancy + optical + chromatic) into the GPU staging packet. */
+    public void copyGpuPayloadTo(final MemorySegment destination, final long offset) {
+        copyPackedPayloadTo(destination, offset);
     }
 
     private static byte[] pack(

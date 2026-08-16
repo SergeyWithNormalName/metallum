@@ -24,6 +24,7 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumHdrEffects.metal",
             "/natives/macos/shaders/MetallumClear.metal",
             "/natives/macos/shaders/MetallumSodiumLightPatch.metal",
+            "/natives/macos/shaders/MetallumTemporalDiagnostics.metal",
             "/natives/macos/shaders/MetallumClusterBuild.metal",
             "/natives/macos/shaders/MetallumVoxelOccupancy.metal",
             "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal"
@@ -278,6 +279,22 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG
+                    )
+            );
+            dynamicShadowUploadShapesV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_dynamic_shadow_upload_shapes_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            ValueLayout.ADDRESS,
+                            LONG,
                             ValueLayout.ADDRESS,
                             LONG
                     )
@@ -848,6 +865,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle dynamicShadowCreateContextV1;
     private static final MethodHandle dynamicShadowReleaseContextV1;
     private static final MethodHandle dynamicShadowEncodeV1;
+    private static final MethodHandle dynamicShadowUploadShapesV1;
     private static final MethodHandle encodeTemporalDiagnosticsV2;
     private static final MethodHandle commitEntityVelocityReplay;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
@@ -1467,6 +1485,26 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_dynamic_shadow_encode_v1", throwable);
+        }
+    }
+
+    public static int metallum_dynamic_shadow_upload_shapes_v1(
+            final MemorySegment dynamicContext,
+            final MemorySegment table,
+            final MemorySegment level0,
+            final MemorySegment level1,
+            final MemorySegment level2
+    ) {
+        try {
+            return (int) dynamicShadowUploadShapesV1.invokeExact(
+                    segment(dynamicContext),
+                    segment(table), table == null ? 0L : table.byteSize(),
+                    segment(level0), level0 == null ? 0L : level0.byteSize(),
+                    segment(level1), level1 == null ? 0L : level1.byteSize(),
+                    segment(level2), level2 == null ? 0L : level2.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_dynamic_shadow_upload_shapes_v1", throwable);
         }
     }
 

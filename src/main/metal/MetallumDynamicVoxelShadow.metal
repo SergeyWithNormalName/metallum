@@ -108,11 +108,121 @@ inline uint metallum_pack_rgb_unorm8(float3 value) {
     return 0xff000000u | red | (green << 8u) | (blue << 16u);
 }
 
+struct MetallumShapeBoxV1 {
+    float minX;
+    float minY;
+    float minZ;
+    float maxX;
+    float maxY;
+    float maxZ;
+    float pad0;
+    float pad1;
+};
+
+struct MetallumShapeProxyEntryV1 {
+    uint boxOffset;
+    uint boxCount;
+};
+
+struct MetallumShapeProxyHeaderV1 {
+    uint proxyCount;
+    uint totalBoxCount;
+    uint proxyTableBytes;
+    uint boxTableBytes;
+};
+
+inline float metallum_intersect_box(
+    float3 localStart,
+    float3 localDelta,
+    MetallumShapeBoxV1 box
+) {
+    float uMin = 0.0f;
+    float uMax = 1.0f;
+
+    // X axis
+    if (abs(localDelta.x) > 1.0e-7f) {
+        const float inv = 1.0f / localDelta.x;
+        const float u1 = (box.minX - localStart.x) * inv;
+        const float u2 = (box.maxX - localStart.x) * inv;
+        const float enter = min(u1, u2);
+        const float exit = max(u1, u2);
+        uMin = max(uMin, enter);
+        uMax = min(uMax, exit);
+        if (uMin > uMax) return -1.0f;
+    } else if (localStart.x < box.minX - 1.0e-5f || localStart.x > box.maxX + 1.0e-5f) {
+        return -1.0f;
+    }
+
+    // Y axis
+    if (abs(localDelta.y) > 1.0e-7f) {
+        const float inv = 1.0f / localDelta.y;
+        const float u1 = (box.minY - localStart.y) * inv;
+        const float u2 = (box.maxY - localStart.y) * inv;
+        const float enter = min(u1, u2);
+        const float exit = max(u1, u2);
+        uMin = max(uMin, enter);
+        uMax = min(uMax, exit);
+        if (uMin > uMax) return -1.0f;
+    } else if (localStart.y < box.minY - 1.0e-5f || localStart.y > box.maxY + 1.0e-5f) {
+        return -1.0f;
+    }
+
+    // Z axis
+    if (abs(localDelta.z) > 1.0e-7f) {
+        const float inv = 1.0f / localDelta.z;
+        const float u1 = (box.minZ - localStart.z) * inv;
+        const float u2 = (box.maxZ - localStart.z) * inv;
+        const float enter = min(u1, u2);
+        const float exit = max(u1, u2);
+        uMin = max(uMin, enter);
+        uMax = min(uMax, exit);
+        if (uMin > uMax) return -1.0f;
+    } else if (localStart.z < box.minZ - 1.0e-5f || localStart.z > box.maxZ + 1.0e-5f) {
+        return -1.0f;
+    }
+
+    return uMin;
+}
+
+inline float metallum_intersect_proxy(
+    float3 localStart,
+    float3 localDelta,
+    uint proxyId,
+    device const uchar *shapeProxyTable
+) {
+    if (proxyId == 0u || shapeProxyTable == nullptr) {
+        return -1.0f;
+    }
+    device const MetallumShapeProxyHeaderV1 *header =
+        reinterpret_cast<device const MetallumShapeProxyHeaderV1 *>(shapeProxyTable);
+    if (proxyId >= header->proxyCount) {
+        return -1.0f;
+    }
+    device const MetallumShapeProxyEntryV1 *entries =
+        reinterpret_cast<device const MetallumShapeProxyEntryV1 *>(shapeProxyTable + 16u);
+    const MetallumShapeProxyEntryV1 entry = entries[proxyId];
+    if (entry.boxCount == 0u) {
+        return -1.0f;
+    }
+    device const MetallumShapeBoxV1 *boxes =
+        reinterpret_cast<device const MetallumShapeBoxV1 *>(shapeProxyTable + 16u + header->proxyTableBytes);
+
+    float bestU = INFINITY;
+    for (uint i = 0u; i < entry.boxCount; ++i) {
+        const float u = metallum_intersect_box(localStart, localDelta, boxes[entry.boxOffset + i]);
+        if (u >= 0.0f && u < bestU) {
+            bestU = u;
+        }
+    }
+    return isinf(bestU) ? -1.0f : bestU;
+}
+
 inline bool metallum_sample_voxel(
     device const uint *occupancy,
     device const uchar *optical,
     device const uchar *chromatic,
     device const uint4 *metadata,
+    device const ushort *shapeProxyIds,
     uint logicalEdge,
     uint subdivision,
     uint brickDimension,
@@ -121,11 +231,13 @@ inline bool metallum_sample_voxel(
     int cellZ,
     thread bool &occupied,
     thread float &transmittance,
-    thread float3 &filter
+    thread float3 &filter,
+    thread uint &shapeProxyId
 ) {
     occupied = false;
     transmittance = 1.0f;
     filter = float3(1.0f);
+    shapeProxyId = 0u;
     const int scale = int(subdivision);
     const int blockX = metallum_floor_div(cellX, scale);
     const int blockY = metallum_floor_div(cellY, scale);
@@ -178,6 +290,9 @@ inline bool metallum_sample_voxel(
     const uint packedChromatic = uint(chromatic[opticalIndex >> 1u]);
     const uint paletteId = (packedChromatic >> ((opticalIndex & 1u) * 4u)) & 15u;
     filter = metallum_chromatic_filter(paletteId);
+    if (shapeProxyIds != nullptr) {
+        shapeProxyId = uint(shapeProxyIds[opticalIndex]);
+    }
     return isfinite(transmittance) && all(isfinite(filter));
 }
 
@@ -197,6 +312,10 @@ kernel void metallum_dynamic_voxel_shadow_v1(
     device uchar *atlas [[buffer(12)]],
     device const MetallumDynamicShadowRequestV1 *requests [[buffer(13)]],
     device const MetallumDynamicShadowLevelV1 *levels [[buffer(14)]],
+    device const ushort *shapeProxyIds0 [[buffer(15)]],
+    device const ushort *shapeProxyIds1 [[buffer(16)]],
+    device const ushort *shapeProxyIds2 [[buffer(17)]],
+    device const uchar *shapeProxyTable [[buffer(18)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     const uint requestIndex = gid.y;
@@ -228,6 +347,8 @@ kernel void metallum_dynamic_voxel_shadow_v1(
         : (request.levelIndex == 1u ? chromatic1 : chromatic2);
     const device uint4 *metadata = request.levelIndex == 0u ? metadata0
         : (request.levelIndex == 1u ? metadata1 : metadata2);
+    const device ushort *shapeProxyIds = request.levelIndex == 0u ? shapeProxyIds0
+        : (request.levelIndex == 1u ? shapeProxyIds1 : shapeProxyIds2);
     // All DDA arithmetic stays near the source cell. The absolute cell is reconstructed
     // with integers for metadata lookup, preserving sub-voxel source precision at ±30M.
     if (level.subdivision == 0u || level.logicalEdge == 0u
@@ -296,10 +417,11 @@ kernel void metallum_dynamic_voxel_shadow_v1(
         bool occupied = false;
         float transmittance = 1.0f;
         float3 chromaticFilter = float3(1.0f);
+        uint shapeProxyId = 0u;
         if (!metallum_sample_voxel(
-                occupancy, optical, chromatic, metadata, level.logicalEdge, level.subdivision,
+                occupancy, optical, chromatic, metadata, shapeProxyIds, level.logicalEdge, level.subdivision,
                 level.brickDimension, worldCell.x, worldCell.y, worldCell.z,
-                occupied, transmittance, chromaticFilter
+                occupied, transmittance, chromaticFilter, shapeProxyId
             )) {
             return;
         }
@@ -310,18 +432,38 @@ kernel void metallum_dynamic_voxel_shadow_v1(
             request.sourceBlockX, request.sourceBlockY, request.sourceBlockZ
         ));
         if (!emitterBlock && occupied && any(block != lastBlock)) {
-            cumulativeVisibility *= transmittance * chromaticFilter;
-            if (!all(isfinite(cumulativeVisibility))) { return; }
-            const float hitDistance = max(0.0f,
-                startDistance + entryT * (request.radius - startDistance));
-            const uint outputLayer = min(hitCount, METALLUM_DYNAMIC_SHADOW_LAYERS_V1 - 1u);
-            MetallumDynamicShadowHitV1 hit;
-            hit.distance = hitDistance;
-            hit.packedRgb = metallum_pack_rgb_unorm8(cumulativeVisibility);
-            entries[outputBase + outputLayer] = hit;
-            hitCount = min(hitCount + 1u, METALLUM_DYNAMIC_SHADOW_LAYERS_V1);
-            lastBlock = block;
-            if (all(cumulativeVisibility <= float3(0.0f))) { return; }
+            bool hit = true;
+            float effectiveHitT = entryT;
+            if (shapeProxyId > 0u && shapeProxyTable != nullptr) {
+                const float3 worldSource = float3(
+                    float(request.sourceBlockX) + request.sourceFractionX,
+                    float(request.sourceBlockY) + request.sourceFractionY,
+                    float(request.sourceBlockZ) + request.sourceFractionZ
+                );
+                const float3 startWorld = worldSource + direction * startDistance;
+                const float3 localStart = startWorld - float3(block);
+                const float3 localDelta = direction * (request.radius - startDistance);
+                const float uHit = metallum_intersect_proxy(localStart, localDelta, shapeProxyId, shapeProxyTable);
+                if (uHit < 0.0f) {
+                    hit = false;
+                } else {
+                    effectiveHitT = uHit;
+                }
+            }
+            if (hit) {
+                cumulativeVisibility *= transmittance * chromaticFilter;
+                if (!all(isfinite(cumulativeVisibility))) { return; }
+                const float hitDistance = max(0.0f,
+                    startDistance + effectiveHitT * (request.radius - startDistance));
+                const uint outputLayer = min(hitCount, METALLUM_DYNAMIC_SHADOW_LAYERS_V1 - 1u);
+                MetallumDynamicShadowHitV1 hitRecord;
+                hitRecord.distance = hitDistance;
+                hitRecord.packedRgb = metallum_pack_rgb_unorm8(cumulativeVisibility);
+                entries[outputBase + outputLayer] = hitRecord;
+                hitCount = min(hitCount + 1u, METALLUM_DYNAMIC_SHADOW_LAYERS_V1);
+                lastBlock = block;
+                if (all(cumulativeVisibility <= float3(0.0f))) { return; }
+            }
         }
 
         const float next = min(tMax.x, min(tMax.y, tMax.z));

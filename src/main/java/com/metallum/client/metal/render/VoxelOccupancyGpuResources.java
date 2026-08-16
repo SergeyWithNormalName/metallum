@@ -506,7 +506,7 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
                 this.budget.levels().get(patch.level()).chromaticBytesPerBrick());
         if (patch.opticalLength() != expectedOptical
                 || patch.chromaticLength() != expectedChromatic
-                || patch.packedPayloadLength()
+                || patch.gpuPayloadLength()
                 != VoxelBrickPatch.OCCUPANCY_BYTES + expectedOptical + expectedChromatic
                 || patch.destinationBrickX() != Math.floorMod(
                 patch.logicalBrickX(), level.brickDimension())
