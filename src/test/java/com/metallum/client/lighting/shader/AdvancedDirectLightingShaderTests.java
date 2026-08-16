@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "e8a546f7b9173ac0b09428a16d002916264049eeb4326bb34c4bc3721c47f9f3",
+            "sodium-solid-fsh", "9d02e0a785df1a329160a961d6095122f89099bb067701a6d1c50dd44a3e13f9",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "da7963c45274428b867f8cb952d65906171656b48c2d437075f94f203d26bba5",
+            "sodium-cutout-fsh", "d4b36f8dd4ebb73a31de8597073b9c9609d6882eeb496b6f6084d447a52b0de5",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "5d6f5b9b52044d6d8d4a5b18cd16e39cc91ab3035d79d9200464cb41b88fea38",
+            "minecraft-entity-fsh", "6521ec258e63462b5097e80a5d0c850d387a95fb5c1bc0130116e982274c0460",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "bd0581e4af76f365be9ba15b8618237246267a4b36dd81c2a6478ba8cff9b6bb"
+            "minecraft-end-portal-fsh", "699be4f5c429cadcc4621c170f1810da1753e6d26309de50c1a14f651be7588c"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -904,9 +904,9 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "- metallumVoxelShadow.cameraFractionAndMinTrans.xyz")
                         && sodiumFragment.contains(
-                        "all(greaterThanEqual(startWorldRelative, minimum))")
+                        "all(greaterThan(startWorldRelative, minimum + vec3(0.01, 0.02, 0.01)))")
                         && sodiumFragment.contains(
-                        "all(lessThanEqual(startWorldRelative, maximum))")
+                        "all(lessThan(startWorldRelative, maximum - vec3(0.01, 0.01, 0.01)))")
                         && sodiumFragment.contains(
                         "floatBitsToUint(proxy.minWorldRelative.w)")
                         && sodiumFragment.contains(

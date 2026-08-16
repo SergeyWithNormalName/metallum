@@ -9,6 +9,7 @@ import com.metallum.client.lighting.BoundedDynamicLightCollector;
 import com.metallum.client.lighting.BoundedEntityShadowProxyCollector;
 import com.metallum.client.lighting.CameraHeldLightTracker;
 import com.metallum.client.lighting.DirectLightFrustum;
+import com.metallum.client.lighting.EntityShadowFilter;
 import com.metallum.client.lighting.EntityShadowProxy;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.LightWorldToken;
@@ -213,9 +214,14 @@ abstract class LevelExtractorAdvancedLightMixin {
             }
         }
         BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
-        if (proxyCollector != null) {
+        if (proxyCollector != null && EntityShadowFilter.isShadowCaster(entity)) {
             try {
-                proxyCollector.offer(EntityShadowProxy.fromEntity(entity, proxyCollector.world()));
+                float partialTick = deltaTracker != null && currentLevel != null
+                        ? deltaTracker.getGameTimeDeltaPartialTick(!currentLevel.tickRateManager().isEntityFrozen(entity))
+                        : 0.0f;
+                proxyCollector.offerAll(EntityShadowProxy.proxiesForEntity(
+                        entity, partialTick, proxyCollector.world(), true
+                ));
             } catch (Throwable ignored) {
                 // Proxy extraction is isolated from the dynamic-light admission contract.
                 EntityShadowProxyRegistry.global().failOpen(proxyCollector.world());

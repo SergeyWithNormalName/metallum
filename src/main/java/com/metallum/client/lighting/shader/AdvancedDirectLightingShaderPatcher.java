@@ -910,10 +910,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 endWorldRelative,
                     vec3 minimum,
                     vec3 maximum) {
-                if (all(greaterThanEqual(startWorldRelative, minimum))
-                        && all(lessThanEqual(startWorldRelative, maximum))) {
-                    return false;
-                }
                 vec3 delta = endWorldRelative - startWorldRelative;
                 float entry = 0.0;
                 float exit = 1.0;
@@ -939,7 +935,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         return false;
                     }
                 }
-                return exit >= 0.0 && entry < 1.0;
+                if (all(greaterThan(startWorldRelative, minimum + vec3(0.01, 0.02, 0.01)))
+                        && all(lessThan(startWorldRelative, maximum - vec3(0.01, 0.01, 0.01)))) {
+                    return false;
+                }
+                return exit >= 0.001 && entry < 0.999;
             }
 
             // Returns false only for a valid, bounded proxy test with no hit. Invalid proxy
@@ -1147,9 +1147,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                                 - metallumVoxelShadow.cameraFractionAndMinTrans.xyz,
                         lightStableId,
                         proxyFailOpen)) {
-                    return 0.0;
-                }
-                if (proxyFailOpen) {
                     return 0.0;
                 }
 
@@ -1772,9 +1769,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                         lightCameraRelative,
                         lightStableId,
                         proxyFailOpen)) {
-                    return vec3(0.0);
-                }
-                if (proxyFailOpen) {
                     return vec3(0.0);
                 }
                 vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;

@@ -69,6 +69,15 @@ public final class BoundedEntityShadowProxyCollector {
         }
     }
 
+    public void offerAll(final List<EntityShadowProxy> proxies) {
+        if (proxies == null || proxies.isEmpty()) {
+            return;
+        }
+        for (int index = 0; index < proxies.size(); index++) {
+            offer(proxies.get(index));
+        }
+    }
+
     public int offered() {
         return offered;
     }

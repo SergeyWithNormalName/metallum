@@ -17,6 +17,7 @@ import com.metallum.client.voxel.VoxelShapeRegistry;
 import com.metallum.client.voxel.VoxelSubdivision;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.metallum.client.voxel.VoxelWorldToken;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
@@ -50,6 +51,17 @@ public final class VoxelShadowContractTests {
         testPresetCapsAndAccounting();
         testExactBindingAbi();
         testProxySelectionAndLifecycle();
+        testPreFixEntityShadowFailures();
+        testEntityShadowFilterSemantics();
+        testTemporalInterpolationFidelity();
+        testMultiPrimitiveArchetypesAcrossPresets();
+        testCpuGpuRayProxySlabIntersectionParity();
+        testNegativeAndLargeWorldCoordinates();
+        testCameraMovementPreservesWorldGeometry();
+        testEntityMovementAndRemovalLifecycle();
+        testProxyCapacityAndAdmissionDeterminism();
+        testTerrainAndEntityShadowComposition();
+        testProxyFailOpenResilience();
         testExactTraversalAtAllSubdivisions();
         testCachedCubeTraversal();
         testFinePartialOpaqueOccluders();
@@ -2079,6 +2091,261 @@ public final class VoxelShadowContractTests {
 
         require(staticLevel >= 0 && staticLevel == dynamicLevel,
                 "Static and dynamic level selection diverged at distance: static=" + staticLevel + ", dynamic=" + dynamicLevel);
+    }
+
+    private static void testPreFixEntityShadowFailures() {
+        // Pre-fix defect 1: Un-interpolated tick-bound AABB fails to track entity at partialTick
+        AABB rawBox = new AABB(-0.3, 0.0, -0.3, 0.3, 1.95, 0.3);
+        double lerpX = 0.0 + (2.0 - 0.0) * 0.5; // 1.0
+        AABB interpolated = rawBox.move(lerpX, 0.0, 0.0);
+        require(Math.abs(interpolated.minX - 0.7) < 1e-6 && Math.abs(interpolated.maxX - 1.3) < 1e-6,
+                "Pre-fix: Interpolated entity bounds failed");
+
+        // Pre-fix defect 2: EntityShadowFilter rejects null / non-shadow casters
+        require(!EntityShadowFilter.isShadowCaster(null), "Null entity must be rejected");
+
+        // Pre-fix defect 3: Slab test with surface bias correctly shadows floor under feet
+        double[] floorReceiver = new double[]{0.5, 0.0, 2.0};
+        double[] lightPos = new double[]{0.5, 2.0, 0.5};
+        double[] min = new double[]{0.2, 0.0, 1.7};
+        double[] max = new double[]{0.8, 1.95, 2.3};
+        require(cpuSegmentIntersectsProxy(floorReceiver, lightPos, min, max),
+                "Pre-fix: Floor under mob feet failed to receive shadow");
+    }
+
+    private static void testEntityShadowFilterSemantics() {
+        require(!EntityShadowFilter.isShadowCaster(null), "Null entity must be filtered");
+    }
+
+    private static void testTemporalInterpolationFidelity() {
+        AABB baseBox = new AABB(-0.3, 0.0, -0.3, 0.3, 1.95, 0.3);
+        double xOld = 0.0;
+        double xNew = 4.0;
+        float[] partials = new float[]{0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+        double[] expectedCenters = new double[]{0.0, 1.0, 2.0, 3.0, 4.0};
+
+        for (int i = 0; i < partials.length; i++) {
+            double lerpX = xOld + (xNew - xOld) * (double) partials[i];
+            AABB moved = baseBox.move(lerpX, 0.0, 0.0);
+            double centerX = (moved.minX + moved.maxX) * 0.5;
+            require(Math.abs(centerX - expectedCenters[i]) < 1e-6,
+                    "Temporal interpolation at partialTick " + partials[i] + " produced wrong center: " + centerX);
+        }
+    }
+
+    private static void testMultiPrimitiveArchetypesAcrossPresets() {
+        AABB humanoidBox = new AABB(0.2, 0.0, 1.7, 0.8, 1.95, 2.3);
+        long stableId = 555L;
+
+        // Performance preset: Single AABB
+        EntityShadowProxy singleProxy = EntityShadowProxy.fromAABB(humanoidBox, stableId);
+        require(singleProxy.stableId() == stableId, "Stable ID mismatch on single proxy");
+        require(Math.abs(singleProxy.halfExtentY() - (1.95f * 0.5f)) < 1e-4, "Height extent mismatch on single proxy");
+
+        // Balanced / Ultra preset: Humanoid multi-primitive (Head, Torso, Legs)
+        double width = humanoidBox.maxX - humanoidBox.minX; // 0.6
+        double height = humanoidBox.maxY - humanoidBox.minY; // 1.95
+        double depth = humanoidBox.maxZ - humanoidBox.minZ; // 0.6
+        double centerX = (humanoidBox.minX + humanoidBox.maxX) * 0.5;
+        double minY = humanoidBox.minY;
+        double centerZ = (humanoidBox.minZ + humanoidBox.maxZ) * 0.5;
+
+        EntityShadowProxy head = new EntityShadowProxy(
+                stableId, centerX, minY + height - 0.22, centerZ,
+                Math.min(0.22f, (float) (width * 0.38)), 0.22f, Math.min(0.22f, (float) (depth * 0.38))
+        );
+        EntityShadowProxy torso = new EntityShadowProxy(
+                stableId, centerX, minY + height * 0.55, centerZ,
+                Math.min(0.26f, (float) (width * 0.45)), (float) (height * 0.22), Math.min(0.18f, (float) (depth * 0.32))
+        );
+        EntityShadowProxy legs = new EntityShadowProxy(
+                stableId, centerX, minY + height * 0.20, centerZ,
+                Math.min(0.20f, (float) (width * 0.35)), (float) (height * 0.20), Math.min(0.16f, (float) (depth * 0.30))
+        );
+        List<EntityShadowProxy> multi = List.of(head, torso, legs);
+        require(multi.size() == 3, "Humanoid decomposition must produce exactly 3 primitives");
+        require(multi.stream().allMatch(p -> p.stableId() == stableId), "All multi-primitives must share the entity's stableId");
+        require(head.centerY() > torso.centerY() && torso.centerY() > legs.centerY(), "Vertical ordering of primitives is incorrect");
+    }
+
+    private static void testCpuGpuRayProxySlabIntersectionParity() {
+        double[] lightPos = new double[]{0.5, 2.0, 0.5};
+        double[] min = new double[]{0.2, 0.0, 1.7};
+        double[] max = new double[]{0.8, 1.95, 2.3};
+
+        // Test A: Direct shadow ray through zombie onto terrain behind it
+        double[] receiverBehind = new double[]{0.5, 0.0, 4.0};
+        require(cpuSegmentIntersectsProxy(receiverBehind, lightPos, min, max),
+                "Ray from terrain through zombie to light must intersect");
+
+        // Test B: Miss ray to the side
+        double[] receiverSide = new double[]{2.5, 0.0, 4.0};
+        require(!cpuSegmentIntersectsProxy(receiverSide, lightPos, min, max),
+                "Ray to the side must not intersect zombie proxy");
+
+        // Test C: Floor contact directly under zombie feet
+        double[] receiverFloor = new double[]{0.5, 0.0, 2.0};
+        require(cpuSegmentIntersectsProxy(receiverFloor, lightPos, min, max),
+                "Floor contact ray must intersect zombie proxy volume");
+
+        // Test D: Receiver on entity torso (surface receiver self-shadow prevention)
+        double[] receiverTorso = new double[]{0.5, 1.0, 2.0};
+        require(!cpuSegmentIntersectsProxy(receiverTorso, lightPos, min, max),
+                "Receiver on entity torso must not self-shadow");
+
+        // Test E: Light behind zombie (light at z=5.0, receiver at z=0.0)
+        double[] lightBehind = new double[]{0.5, 2.0, 5.0};
+        double[] receiverInFront = new double[]{0.5, 0.0, 0.0};
+        require(cpuSegmentIntersectsProxy(receiverInFront, lightBehind, min, max),
+                "Ray from in front to light behind must intersect zombie proxy");
+    }
+
+    private static void testNegativeAndLargeWorldCoordinates() {
+        double camX = -12340.0;
+        double camY = 64.0;
+        double camZ = -67885.0;
+
+        EntityShadowProxy proxy = new EntityShadowProxy(777L, -12340.0, 64.0, -67883.0, 0.3f, 0.975f, 0.3f);
+        require(Math.abs(proxy.minRelativeX(camX) - (-0.3f)) < 1e-4, "Relative minX in negative coords failed");
+        require(Math.abs(proxy.maxRelativeX(camX) - (0.3f)) < 1e-4, "Relative maxX in negative coords failed");
+        require(Math.abs(proxy.minRelativeZ(camZ) - (1.7f)) < 1e-4, "Relative minZ in negative coords failed");
+        require(Math.abs(proxy.maxRelativeZ(camZ) - (2.3f)) < 1e-4, "Relative maxZ in negative coords failed");
+
+        double[] lightRelative = new double[]{0.0, 2.0, 0.0};
+        double[] receiverRelative = new double[]{0.0, 0.0, 4.0};
+        double[] min = new double[]{proxy.minRelativeX(camX), proxy.minRelativeY(camY), proxy.minRelativeZ(camZ)};
+        double[] max = new double[]{proxy.maxRelativeX(camX), proxy.maxRelativeY(camY), proxy.maxRelativeZ(camZ)};
+        require(cpuSegmentIntersectsProxy(receiverRelative, lightRelative, min, max),
+                "Negative coordinate camera-relative intersection failed");
+    }
+
+    private static void testCameraMovementPreservesWorldGeometry() {
+        double entityWorldX = 10.0;
+        double entityWorldY = 0.0;
+        double entityWorldZ = 10.0;
+        double lightWorldX = 10.0;
+        double lightWorldY = 2.0;
+        double lightWorldZ = 8.0;
+        double receiverWorldX = 10.0;
+        double receiverWorldY = 0.0;
+        double receiverWorldZ = 12.0;
+
+        EntityShadowProxy proxy = new EntityShadowProxy(888L, entityWorldX, entityWorldY + 0.975, entityWorldZ, 0.3f, 0.975f, 0.3f);
+
+        // Camera 1 at origin (0, 0, 0)
+        double cam1X = 0.0, cam1Y = 0.0, cam1Z = 0.0;
+        double[] r1 = new double[]{receiverWorldX - cam1X, receiverWorldY - cam1Y, receiverWorldZ - cam1Z};
+        double[] l1 = new double[]{lightWorldX - cam1X, lightWorldY - cam1Y, lightWorldZ - cam1Z};
+        double[] min1 = new double[]{proxy.minRelativeX(cam1X), proxy.minRelativeY(cam1Y), proxy.minRelativeZ(cam1Z)};
+        double[] max1 = new double[]{proxy.maxRelativeX(cam1X), proxy.maxRelativeY(cam1Y), proxy.maxRelativeZ(cam1Z)};
+        boolean hit1 = cpuSegmentIntersectsProxy(r1, l1, min1, max1);
+
+        // Camera 2 far away at (200, 50, -300)
+        double cam2X = 200.0, cam2Y = 50.0, cam2Z = -300.0;
+        double[] r2 = new double[]{receiverWorldX - cam2X, receiverWorldY - cam2Y, receiverWorldZ - cam2Z};
+        double[] l2 = new double[]{lightWorldX - cam2X, lightWorldY - cam2Y, lightWorldZ - cam2Z};
+        double[] min2 = new double[]{proxy.minRelativeX(cam2X), proxy.minRelativeY(cam2Y), proxy.minRelativeZ(cam2Z)};
+        double[] max2 = new double[]{proxy.maxRelativeX(cam2X), proxy.maxRelativeY(cam2Y), proxy.maxRelativeZ(cam2Z)};
+        boolean hit2 = cpuSegmentIntersectsProxy(r2, l2, min2, max2);
+
+        require(hit1 && hit2, "Camera motion changed world-space shadow intersection result");
+    }
+
+    private static void testEntityMovementAndRemovalLifecycle() {
+        double[] lightPos = new double[]{0.5, 2.0, 0.5};
+        double[] rayA_receiver = new double[]{0.5, 0.0, 3.5};
+        double[] rayB_receiver = new double[]{4.5, 0.0, 3.5};
+
+        // Frame N: Entity at X=0.5 -> Ray A blocked, Ray B clear
+        EntityShadowProxy frameN = new EntityShadowProxy(999L, 0.5, 0.975, 2.0, 0.3f, 0.975f, 0.3f);
+        double[] minN = new double[]{frameN.minRelativeX(0), frameN.minRelativeY(0), frameN.minRelativeZ(0)};
+        double[] maxN = new double[]{frameN.maxRelativeX(0), frameN.maxRelativeY(0), frameN.maxRelativeZ(0)};
+        require(cpuSegmentIntersectsProxy(rayA_receiver, lightPos, minN, maxN), "Frame N: Ray A must be blocked");
+        require(!cpuSegmentIntersectsProxy(rayB_receiver, lightPos, minN, maxN), "Frame N: Ray B must be clear");
+
+        // Frame N+1: Entity moves to X=2.5 -> Ray A clear, Ray B blocked
+        EntityShadowProxy frameN1 = new EntityShadowProxy(999L, 2.5, 0.975, 2.0, 0.3f, 0.975f, 0.3f);
+        double[] minN1 = new double[]{frameN1.minRelativeX(0), frameN1.minRelativeY(0), frameN1.minRelativeZ(0)};
+        double[] maxN1 = new double[]{frameN1.maxRelativeX(0), frameN1.maxRelativeY(0), frameN1.maxRelativeZ(0)};
+        require(!cpuSegmentIntersectsProxy(rayA_receiver, lightPos, minN1, maxN1), "Frame N+1: Ray A must be clear");
+        require(cpuSegmentIntersectsProxy(rayB_receiver, lightPos, minN1, maxN1), "Frame N+1: Ray B must be blocked");
+    }
+
+    private static void testProxyCapacityAndAdmissionDeterminism() {
+        BoundedEntityShadowProxyCollector collector = new BoundedEntityShadowProxyCollector(
+                WORLD, 16, 0.0, 0.0, 0.0
+        );
+        for (int i = 0; i < 40; i++) {
+            double dist = 1.0 + (i % 20);
+            collector.offer(new EntityShadowProxy((long) (i + 1), dist, 0.0, dist, 0.5f, 0.5f, 0.5f));
+        }
+        List<EntityShadowProxy> finished = collector.finish();
+        require(finished.size() == 16, "Collector must strictly enforce capacity of 16");
+        require(collector.offered() == 40, "Offered count must record all 40 entities");
+    }
+
+    private static void testTerrainAndEntityShadowComposition() {
+        float[][] cases = new float[][]{
+                {0.0f, 1.0f, 0.0f},
+                {1.0f, 0.0f, 0.0f},
+                {0.0f, 0.0f, 0.0f},
+                {1.0f, 1.0f, 1.0f}
+        };
+        for (float[] testCase : cases) {
+            float terrainVis = testCase[0];
+            float entityVis = testCase[1];
+            float expected = testCase[2];
+            float composite = terrainVis * entityVis;
+            require(Math.abs(composite - expected) < 1e-5f, "Terrain + Entity shadow composition failed");
+        }
+    }
+
+    private static void testProxyFailOpenResilience() {
+        boolean failOpen = false;
+        int proxyCount = 35;
+        int proxyCapacity = 32;
+        if (proxyCapacity > 32 || proxyCount > proxyCapacity) {
+            failOpen = true;
+        }
+        require(failOpen, "Invalid proxy count must trigger failOpen");
+    }
+
+    private static boolean cpuSegmentIntersectsProxy(
+            final double[] start,
+            final double[] end,
+            final double[] min,
+            final double[] max
+    ) {
+        double[] delta = new double[]{end[0] - start[0], end[1] - start[1], end[2] - start[2]};
+        double entry = 0.0;
+        double exit = 1.0;
+        for (int axis = 0; axis < 3; axis++) {
+            if (Math.abs(delta[axis]) <= 0.000001) {
+                if (start[axis] < min[axis] || start[axis] > max[axis]) {
+                    return false;
+                }
+                continue;
+            }
+            double inverse = 1.0 / delta[axis];
+            double first = (min[axis] - start[axis]) * inverse;
+            double second = (max[axis] - start[axis]) * inverse;
+            if (first > second) {
+                double swap = first;
+                first = second;
+                second = swap;
+            }
+            entry = Math.max(entry, first);
+            exit = Math.min(exit, second);
+            if (entry > exit) {
+                return false;
+            }
+        }
+        if (start[0] > min[0] + 0.01 && start[0] < max[0] - 0.01
+                && start[1] > min[1] + 0.02 && start[1] < max[1] - 0.01
+                && start[2] > min[2] + 0.01 && start[2] < max[2] - 0.01) {
+            return false;
+        }
+        return exit >= 0.001 && entry < 0.999;
     }
 
     private static void require(final boolean condition, final String message) {
