@@ -8,7 +8,7 @@ of one-off investigations.
 | --- | --- |
 | Architecture, thread confinement, ABI | [architecture.md](architecture.md) |
 | Native Metal resources and presentation | [metal-renderer.md](metal-renderer.md) |
-| Lighting and local shadows | [lighting.md](lighting.md), [shadows.md](shadows.md), [CLOUD_SHADOWS.md](CLOUD_SHADOWS.md) |
+| Lighting and local shadows | [lighting.md](lighting.md), [shadows.md](shadows.md), [CLOUD_SHADOWS.md](CLOUD_SHADOWS.md), [WATER_CAUSTICS.md](WATER_CAUSTICS.md) |
 | Resource lifetime | [memory.md](memory.md) |
 | Benchmarks and evidence rules | [BENCHMARKING.md](BENCHMARKING.md) |
 | Temporal scaling and DRS | [TEMPORAL_UPSCALING_DRS.md](TEMPORAL_UPSCALING_DRS.md) |

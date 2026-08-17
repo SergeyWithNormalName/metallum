@@ -423,23 +423,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return clamp(mix(dielectric, albedo, material.metalness), vec3(0.0), vec3(0.98));
             }
 
-            vec3 metallumWaterNormalV1(
-                    vec3 viewPosition,
-                    vec3 normal,
-                    MetallumSurfaceMaterialV1 material) {
-                if (material.kind != METALLUM_SURFACE_WATER_V1
-                        || metallumVoxelShadow.caps.x != 4u) {
-                    return normal;
-                }
-                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
-                vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
-                if (dot(worldNormal, worldNormal) == 0.0 || abs(worldNormal.y) < 0.55) {
-                    return normal;
-                }
-                float time = metallumEnvironment.materialContract.x == 1u
-                        ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
-                vec2 waterWorldPosition = metallumWaterWorldPositionV1(viewPosition);
+            struct MetallumWaterWaveStateV1 {
+                vec2 totalSlope;
+                float crest;
+                float causticFocusing;
+            };
 
+            MetallumWaterWaveStateV1 metallumEvaluateWaterWavesV1(
+                    vec2 waterWorldPosition,
+                    float time) {
                 float macroNoise1 = metallumWaterValueNoiseV1(
                         waterWorldPosition * 0.0625 + vec2(time * 0.08, -time * 0.06), 255);
                 float macroNoise2 = metallumWaterValueNoiseV1(
@@ -472,10 +464,45 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec2 totalSlope = (vec2(slopeX, slopeZ) * 0.60 + microSlope) * localAmplitude;
                 float crest = clamp((wave1 * 0.35 + wave2 * 0.30 + wave3 * 0.30 + medCentered * 0.40 - 0.28) * 3.2, 0.0, 1.0);
 
+                float ridge1 = 1.0 - abs(wave1 + wave2 * 0.65);
+                float ridge2 = 1.0 - abs(wave2 + wave3 * 0.65);
+                float ridge3 = 1.0 - abs(wave3 + wave1 * 0.65);
+                float focus1 = max(ridge1, 0.0);
+                float focus2 = max(ridge2, 0.0);
+                float focus3 = max(ridge3, 0.0);
+                float rawFocus = (focus1 * focus1 * 0.45 + focus2 * focus2 * 0.35 + focus3 * focus3 * 0.20);
+                rawFocus = rawFocus * (2.2 + localAmplitude * 10.0) + crest * 0.45;
+
+                MetallumWaterWaveStateV1 state;
+                state.totalSlope = totalSlope;
+                state.crest = crest;
+                state.causticFocusing = rawFocus;
+                return state;
+            }
+
+            vec3 metallumWaterNormalV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    MetallumSurfaceMaterialV1 material) {
+                if (material.kind != METALLUM_SURFACE_WATER_V1
+                        || metallumVoxelShadow.caps.x != 4u) {
+                    return normal;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
+                if (dot(worldNormal, worldNormal) == 0.0 || abs(worldNormal.y) < 0.55) {
+                    return normal;
+                }
+                float time = metallumEnvironment.materialContract.x == 1u
+                        ? metallumEnvironment.materialWeatherAndTime.z : 0.0;
+                vec2 waterWorldPosition = metallumWaterWorldPositionV1(viewPosition);
+                MetallumWaterWaveStateV1 waveState = metallumEvaluateWaterWavesV1(
+                        waterWorldPosition, time);
+
                 worldNormal = metallumSafeNormalV1(
-                        worldNormal + vec3(totalSlope.x, 0.0, totalSlope.y));
+                        worldNormal + vec3(waveState.totalSlope.x, 0.0, waveState.totalSlope.y));
                 worldNormal = metallumSafeNormalV1(
-                        mix(worldNormal, vec3(0.0, 1.0, 0.0), crest * 0.07));
+                        mix(worldNormal, vec3(0.0, 1.0, 0.0), waveState.crest * 0.07));
                 vec3 perturbed = metallumSafeNormalV1(transpose(worldFromView) * worldNormal);
                 return dot(perturbed, perturbed) == 0.0 ? normal : perturbed;
             }
@@ -769,11 +796,89 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return mix(1.0, sampledTransmittance, projectionWeight);
             }
 
+            float metallumUnderwaterCausticGainV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                if (metallumEnvironment.materialContract.x != 1u) {
+                    return 1.0;
+                }
+                bool cameraUnderwater = metallumEnvironment.materialContract.z == 1u;
+                uint alphaByte = uint(round(clamp(receiverAlpha, 0.0, 1.0) * 255.0));
+                bool receiverSubmerged = (alphaByte <= 254u && alphaByte >= 192u)
+                        || ((packedMaterial & 256u) != 0u);
+                if (!receiverSubmerged && !cameraUnderwater) {
+                    return 1.0;
+                }
+                if (dot(metallumEnvironment.directionalRadiance.rgb, vec3(1.0)) <= 0.0001) {
+                    return 1.0;
+                }
+                if (metallumVoxelShadow.caps.x != 4u) {
+                    return 1.0;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 toLightWorld = metallumSafeNormalV1(
+                        worldFromView * metallumEnvironment.directionAndFlags.xyz);
+                if (toLightWorld.y <= 0.001) {
+                    return 1.0;
+                }
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                vec3 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + cameraRelativePosition;
+                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + cameraBlockRelativePosition;
+
+                float depth = 0.0;
+                if (alphaByte <= 254u && alphaByte >= 192u) {
+                    depth = float(255u - alphaByte);
+                } else {
+                    uint packedDepth = (packedMaterial >> 9u) & 63u;
+                    if (packedDepth > 0u) {
+                        depth = float(packedDepth);
+                    } else if (cameraUnderwater || receiverSubmerged) {
+                        float waterSurfaceY = metallumEnvironment.materialWeatherAndTime.w;
+                        depth = waterSurfaceY - worldPosition.y;
+                    }
+                }
+                if (depth <= 0.0 || isnan(depth) || isinf(depth)) {
+                    return 1.0;
+                }
+                const float eta = 0.75;
+                const float eta2 = 0.5625;
+                float cosTheta1 = clamp(toLightWorld.y, 0.0, 1.0);
+                float k = 1.0 - eta2 * (1.0 - cosTheta1 * cosTheta1);
+                float refractedY = sqrt(max(k, 0.4375));
+                vec2 refractedXZ = toLightWorld.xz * eta;
+                vec3 refractedToLight = vec3(refractedXZ.x, refractedY, refractedXZ.y);
+
+                vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
+                float nDotRefracted = dot(worldNormal, refractedToLight);
+                if (nDotRefracted <= 0.001) {
+                    return 1.0;
+                }
+                float orientationFactor = clamp(nDotRefracted * 1.25, 0.0, 1.0);
+                float depthWeight = exp(-0.08 * depth);
+
+                float projectionDistance = depth / refractedY;
+                vec2 surfacePointXZ = worldPosition.xz + refractedXZ * projectionDistance;
+                float time = metallumEnvironment.materialWeatherAndTime.z;
+                MetallumWaterWaveStateV1 waveState = metallumEvaluateWaterWavesV1(
+                        surfacePointXZ, time);
+
+                float centeredFocus = waveState.causticFocusing - 0.85;
+                float causticStrength = depthWeight * orientationFactor * 1.25;
+                return clamp(1.0 + centeredFocus * causticStrength, 0.45, 2.40);
+            }
+
             vec3 metallumEvaluateEnvironmentV1(
                     vec3 viewPosition,
                     vec3 normal,
                     vec3 albedo,
-                    float skyVisibility) {
+                    float skyVisibility,
+                    uint packedMaterial,
+                    float receiverAlpha) {
                 if (metallumEnvironment.contract.x != 1u) {
                     return vec3(0.0);
                 }
@@ -801,12 +906,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                 diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
                         * (skyOcclusion * hemisphere * skyShadow);
                 if (directionalWeight > 0.0) {
+                    float causticGain = metallumUnderwaterCausticGainV1(
+                            viewPosition, normal, packedMaterial, receiverAlpha);
                     diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                            * (directionalWeight * sunVisibility * cloudTransmittance);
+                            * (directionalWeight * sunVisibility * cloudTransmittance * causticGain);
                 }
                 return albedo * diffuse * 0.31830988618;
             }
-
+            """).append("""
             vec3 metallumEvaluateMaterialEnvironmentV1(
                     vec3 viewPosition,
                     vec3 normal,
@@ -1394,7 +1501,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 return 0.0;
             }
-
+            """).append("""
             vec3 metallumVoxelCubeFaceUvV1(vec3 direction) {
                 vec3 magnitude = abs(direction);
                 float major = max(magnitude.x, max(magnitude.y, magnitude.z));
@@ -2376,7 +2483,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    }\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
-                    + "            metallumPreparedAlbedo, metallumSkyVisibility);\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "            metallumMaterial, metallumTintColor.a);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n"
@@ -2436,7 +2544,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    vec3 metallumPreparedAlbedo = max(metallumDirectAlbedo, vec3(0.0));\n"
                     + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
-                    + "            metallumPreparedAlbedo, metallumSkyVisibility);\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "            0u, 1.0);\n"
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n"
@@ -2472,7 +2581,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            color, metallumEndPortalReceiverAlbedo);\n"
                     + "    color += metallumEvaluateEnvironmentV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
-                    + "            metallumPreparedAlbedo, 1.0);\n"
+                    + "            metallumPreparedAlbedo, 1.0,\n"
+                    + "            0u, 1.0);\n"
                     + "    color += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n"

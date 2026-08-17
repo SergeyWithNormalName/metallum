@@ -265,6 +265,22 @@ tasks.register("cloudShadowLightingUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.cloud.CloudShadowLightingIntegrationTests")
 }
 
+tasks.register("waterCausticsUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs pure unit tests for WATER-CAUSTICS-1 Synchronized Underwater Caustics"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.water.WaterCausticsTests")
+}
+
+tasks.register("waterCausticsLightingUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs direct celestial lighting composition tests for WATER-CAUSTICS-1 Water Caustics"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.water.WaterCausticsLightingIntegrationTests")
+}
+
 tasks.register("torchEpochTelemetryUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free bounded torch epoch telemetry tests"
@@ -1219,6 +1235,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
 	dependsOn(tasks.named("cloudShadowUnitTest"))
 	dependsOn(tasks.named("cloudShadowLightingUnitTest"))
+	dependsOn(tasks.named("waterCausticsUnitTest"))
+	dependsOn(tasks.named("waterCausticsLightingUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("l6DynamicShadowTelemetryUnitTest"))
 	dependsOn(tasks.named("benchmarkWindowContractUnitTest"))

@@ -21,6 +21,15 @@ public final class SodiumHdrSemantic {
     /** Internal-only bits carried by the temporary Sodium vertices before final packing. */
     private static final int SURFACE_CLASS_SHIFT = 5;
     private static final int SURFACE_CLASS_MASK = 0x0f << SURFACE_CLASS_SHIFT;
+    /** Internal-only submerged bits carried on temporary vertices before final packing. */
+    public static final int SUBMERGED_SHIFT = 9;
+    public static final int SUBMERGED_BIT = 1 << SUBMERGED_SHIFT;
+    public static final int SUBMERGED_DEPTH_SHIFT = 10;
+    public static final int SUBMERGED_DEPTH_MASK = 0x3f;
+    public static final int PACKED_MATERIAL_SUBMERGED_BIT = 1 << 8;
+    public static final int PACKED_MATERIAL_DEPTH_SHIFT = 9;
+    public static final int PACKED_MATERIAL_DEPTH_MASK = 0x3f;
+
     /** Version-locked unused base values in Sodium 0.9.1's current block shaders. */
     private static final int MATERIAL_BASE_METAL = 2;
     private static final int MATERIAL_BASE_SMOOTH_DIELECTRIC = 4;
@@ -132,19 +141,30 @@ public final class SodiumHdrSemantic {
             final int lightEmission,
             final boolean exact
     ) {
-        tagQuad(vertices, lightEmission, exact, SURFACE_CLASS_NONE);
+        tagQuad(vertices, lightEmission, exact, SURFACE_CLASS_NONE, false, 0);
     }
 
-    /**
-     * Carries the remesh-time L8 surface class in temporary vertex-only bits. Final packing uses
-     * the conditional exact-emission bit plus currently unused Sodium base combinations, so
-     * all existing 0..15 emission strengths survive without another terrain stream.
-     */
     public static void tagQuad(
             final ChunkVertexEncoder.Vertex[] vertices,
             final int lightEmission,
             final boolean exact,
             final int surfaceClass
+    ) {
+        tagQuad(vertices, lightEmission, exact, surfaceClass, false, 0);
+    }
+
+    /**
+     * Carries the remesh-time L8 surface class and submerged water-column information in
+     * temporary vertex-only bits. Final packing uses the conditional exact-emission bit plus
+     * currently unused Sodium base combinations and upper material bits.
+     */
+    public static void tagQuad(
+            final ChunkVertexEncoder.Vertex[] vertices,
+            final int lightEmission,
+            final boolean exact,
+            final int surfaceClass,
+            final boolean submerged,
+            final int submergedDepth
     ) {
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(lightEmission, exact);
         int boundedSurfaceClass = Math.clamp(
@@ -153,8 +173,22 @@ public final class SodiumHdrSemantic {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT
                     | (boundedSurfaceClass << SURFACE_CLASS_SHIFT);
         }
-        for (ChunkVertexEncoder.Vertex vertex : vertices) {
-            ((HdrEmissionVertex) vertex).metallum$setHdrSemantic(semantic);
+        if (submerged) {
+            int boundedDepth = Math.clamp(submergedDepth, 1, 63);
+            semantic |= SUBMERGED_BIT | (boundedDepth << SUBMERGED_DEPTH_SHIFT);
+            int alpha = 255 - boundedDepth;
+            for (ChunkVertexEncoder.Vertex vertex : vertices) {
+                if (vertex instanceof HdrEmissionVertex hdrVertex) {
+                    hdrVertex.metallum$setHdrSemantic(semantic);
+                }
+                vertex.color = (vertex.color & 0x00FFFFFF) | (alpha << 24);
+            }
+        } else {
+            for (ChunkVertexEncoder.Vertex vertex : vertices) {
+                if (vertex instanceof HdrEmissionVertex hdrVertex) {
+                    hdrVertex.metallum$setHdrSemantic(semantic);
+                }
+            }
         }
         if ((semantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK) != 0
                 && ACTIVE_LOGGED.compareAndSet(false, true)) {
@@ -182,8 +216,12 @@ public final class SodiumHdrSemantic {
         int emission = 0;
         boolean exact = false;
         int surfaceClass = SURFACE_CLASS_NONE;
+        boolean submerged = false;
+        int submergedDepth = 0;
         for (ChunkVertexEncoder.Vertex vertex : vertices) {
-            int vertexSemantic = ((HdrEmissionVertex) vertex).metallum$getHdrSemantic();
+            int vertexSemantic = (vertex instanceof HdrEmissionVertex hdrVertex)
+                    ? hdrVertex.metallum$getHdrSemantic()
+                    : 0;
             int vertexEmission = vertexSemantic & SodiumHdrShaderPatcher.HDR_VERTEX_EMISSION_MASK;
             emission = Math.max(emission, vertexEmission);
             exact |= vertexEmission != 0
@@ -199,6 +237,11 @@ public final class SodiumHdrSemantic {
                     break;
                 }
             }
+            if ((vertexSemantic & SUBMERGED_BIT) != 0) {
+                submerged = true;
+                int vDepth = (vertexSemantic >> SUBMERGED_DEPTH_SHIFT) & SUBMERGED_DEPTH_MASK;
+                submergedDepth = Math.max(submergedDepth, vDepth);
+            }
         }
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
         int packedBase = materialBits;
@@ -206,7 +249,12 @@ public final class SodiumHdrSemantic {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT;
             packedBase = materialBaseForSurfaceClass(materialBits, surfaceClass);
         }
-        return SodiumHdrShaderPatcher.packMaterialBits(packedBase, semantic);
+        int packed = SodiumHdrShaderPatcher.packMaterialBits(packedBase, semantic);
+        if (submerged) {
+            int depth = Math.clamp(submergedDepth, 1, 63);
+            packed |= PACKED_MATERIAL_SUBMERGED_BIT | (depth << PACKED_MATERIAL_DEPTH_SHIFT);
+        }
+        return packed;
     }
 
     /** Final version-locked Sodium base used by one non-emissive L8 surface class. */

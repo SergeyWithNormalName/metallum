@@ -24,6 +24,8 @@ import net.minecraft.client.renderer.block.dispatch.BlockStateModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.core.Direction;
+import net.minecraft.tags.FluidTags;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
@@ -48,10 +50,22 @@ abstract class BlockRendererHdrMixin {
     private int metallum$blockLightEmission;
 
     @Unique
+    private LevelSlice metallum$slice;
+
+    @Unique
+    private BlockPos metallum$blockPos;
+
+    @Unique
     private SodiumRainExposureSnapshot metallum$rainExposureSnapshot;
 
     @Unique
     private boolean metallum$blockRainExposed;
+
+    @Unique
+    private boolean metallum$blockSubmerged;
+
+    @Unique
+    private int metallum$blockSubmergedDepth;
 
     /** Reused by one Sodium block-mesher instance; never allocated in the quad hot path. */
     @Unique
@@ -76,6 +90,7 @@ abstract class BlockRendererHdrMixin {
             final TranslucentGeometryCollector collector,
             final CallbackInfo ci
     ) {
+        this.metallum$slice = slice;
         this.metallum$rainExposureSnapshot =
                 ((SodiumRainExposureSnapshotAccess) (Object) slice)
                         .metallum$getRainExposureSnapshot();
@@ -83,8 +98,12 @@ abstract class BlockRendererHdrMixin {
 
     @Inject(method = "release", at = @At("TAIL"), remap = false)
     private void metallum$releaseRainExposureSnapshot(final CallbackInfo ci) {
+        this.metallum$slice = null;
+        this.metallum$blockPos = null;
         this.metallum$rainExposureSnapshot = null;
         this.metallum$blockRainExposed = false;
+        this.metallum$blockSubmerged = false;
+        this.metallum$blockSubmergedDepth = 0;
     }
 
     @Inject(method = "renderModel", at = @At("HEAD"), remap = false)
@@ -97,9 +116,37 @@ abstract class BlockRendererHdrMixin {
     ) {
         this.metallum$blockState = state;
         this.metallum$blockLightEmission = state.getLightEmission();
+        this.metallum$blockPos = pos;
         SodiumRainExposureSnapshot rainExposure = this.metallum$rainExposureSnapshot;
         this.metallum$blockRainExposed = rainExposure != null
                 && rainExposure.canRainReach(pos.getX(), pos.getY() + 1, pos.getZ());
+
+        LevelSlice slice = this.metallum$slice;
+        if (slice != null && pos != null) {
+            boolean blockWater = state.getFluidState().is(FluidTags.WATER);
+            boolean waterAbove = slice.getFluidState(pos.above()).is(FluidTags.WATER);
+            if (blockWater || waterAbove) {
+                int waterY = pos.getY() + (waterAbove ? 1 : 0);
+                int posX = pos.getX();
+                int posZ = pos.getZ();
+                for (int step = 1; step <= 63; step++) {
+                    if (slice.getFluidState(new BlockPos(posX, waterY + 1, posZ)).is(FluidTags.WATER)) {
+                        waterY++;
+                    } else {
+                        break;
+                    }
+                }
+                int surfaceY = waterY + 1;
+                this.metallum$blockSubmergedDepth = Math.clamp(surfaceY - pos.getY(), 1, 63);
+                this.metallum$blockSubmerged = true;
+            } else {
+                this.metallum$blockSubmerged = false;
+                this.metallum$blockSubmergedDepth = 0;
+            }
+        } else {
+            this.metallum$blockSubmerged = false;
+            this.metallum$blockSubmergedDepth = 0;
+        }
     }
 
     @WrapOperation(
@@ -231,7 +278,30 @@ abstract class BlockRendererHdrMixin {
                     : SodiumHdrSemantic.SURFACE_CLASS_NONE;
             default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
         };
-        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass);
+        boolean submerged = this.metallum$blockSubmerged;
+        int submergedDepth = this.metallum$blockSubmergedDepth;
+        if (!submerged && this.metallum$slice != null && this.metallum$blockPos != null) {
+            Direction facing = quad.getLightFace();
+            if (facing != null) {
+                BlockPos waterPos = this.metallum$blockPos.relative(facing);
+                if (this.metallum$slice.getFluidState(waterPos).is(FluidTags.WATER)) {
+                    int waterY = waterPos.getY();
+                    int posX = waterPos.getX();
+                    int posZ = waterPos.getZ();
+                    for (int step = 1; step <= 63; step++) {
+                        if (this.metallum$slice.getFluidState(new BlockPos(posX, waterY + 1, posZ)).is(FluidTags.WATER)) {
+                            waterY++;
+                        } else {
+                            break;
+                        }
+                    }
+                    int surfaceY = waterY + 1;
+                    submerged = true;
+                    submergedDepth = Math.clamp(surfaceY - this.metallum$blockPos.getY(), 1, 63);
+                }
+            }
+        }
+        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass, submerged, submergedDepth);
     }
 
     @Unique

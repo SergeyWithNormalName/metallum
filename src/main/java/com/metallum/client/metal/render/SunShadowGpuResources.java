@@ -252,7 +252,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         );
         putVec4(packet, EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET,
                 this.materialRainWetness, environment.thunder(),
-                (float) this.materialTimeSeconds, 0.0f);
+                (float) this.materialTimeSeconds, (float) environment.waterSurfaceY());
         putInt4(packet, EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
@@ -342,7 +342,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         );
         putVec4(packet, EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET,
                 this.materialRainWetness, environment.thunder(),
-                (float) this.materialTimeSeconds, 0.0f);
+                (float) this.materialTimeSeconds, (float) environment.waterSurfaceY());
         putInt4(packet, EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),

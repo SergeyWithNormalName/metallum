@@ -33,7 +33,8 @@ public record EnvironmentDescriptor(
         float thunder,
         float moonPhaseBrightness,
         boolean moon,
-        boolean sunShadowEligible
+        boolean sunShadowEligible,
+        float waterSurfaceY
 ) {
     public static final int VERSION = 1;
 
@@ -58,6 +59,53 @@ public record EnvironmentDescriptor(
             0.04f
     );
 
+    public EnvironmentDescriptor(
+            final int version,
+            final Profile profile,
+            final Medium medium,
+            final float toLightX,
+            final float toLightY,
+            final float toLightZ,
+            final float directionalRed,
+            final float directionalGreen,
+            final float directionalBlue,
+            final float skyRed,
+            final float skyGreen,
+            final float skyBlue,
+            final float ambientRed,
+            final float ambientGreen,
+            final float ambientBlue,
+            final float rain,
+            final float thunder,
+            final float moonPhaseBrightness,
+            final boolean moon,
+            final boolean sunShadowEligible
+    ) {
+        this(
+                version,
+                profile,
+                medium,
+                toLightX,
+                toLightY,
+                toLightZ,
+                directionalRed,
+                directionalGreen,
+                directionalBlue,
+                skyRed,
+                skyGreen,
+                skyBlue,
+                ambientRed,
+                ambientGreen,
+                ambientBlue,
+                rain,
+                thunder,
+                moonPhaseBrightness,
+                moon,
+                sunShadowEligible,
+                64.0f
+        );
+    }
+
     public EnvironmentDescriptor {
         if (version != VERSION) {
             throw new IllegalArgumentException("Unsupported environment descriptor version " + version);
@@ -79,6 +127,7 @@ public record EnvironmentDescriptor(
         rain = clampUnit(rain, "rain");
         thunder = clampUnit(thunder, "thunder");
         moonPhaseBrightness = clampUnit(moonPhaseBrightness, "moon phase brightness");
+        requireFinite(waterSurfaceY, "water surface Y");
 
         float directionLengthSquared = toLightX * toLightX
                 + toLightY * toLightY
@@ -100,6 +149,32 @@ public record EnvironmentDescriptor(
         if (sunShadowEligible && directionalRed + directionalGreen + directionalBlue <= 0.0f) {
             throw new IllegalArgumentException("A shadow-casting environment needs directional radiance");
         }
+    }
+
+    public EnvironmentDescriptor withWaterSurfaceY(final float surfaceY) {
+        return new EnvironmentDescriptor(
+                this.version,
+                this.profile,
+                this.medium,
+                this.toLightX,
+                this.toLightY,
+                this.toLightZ,
+                this.directionalRed,
+                this.directionalGreen,
+                this.directionalBlue,
+                this.skyRed,
+                this.skyGreen,
+                this.skyBlue,
+                this.ambientRed,
+                this.ambientGreen,
+                this.ambientBlue,
+                this.rain,
+                this.thunder,
+                this.moonPhaseBrightness,
+                this.moon,
+                this.sunShadowEligible,
+                surfaceY
+        );
     }
 
     public static EnvironmentDescriptor celestial(
@@ -129,7 +204,8 @@ public record EnvironmentDescriptor(
                 rain,
                 thunder,
                 moonPhaseBrightness,
-                VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting()
+                VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting(),
+                64.0f
         );
     }
 
@@ -148,8 +224,43 @@ public record EnvironmentDescriptor(
             final float moonPhaseBrightness,
             final CelestialLightingProfile celestial
     ) {
-        Objects.requireNonNull(medium, "medium");
-        Objects.requireNonNull(celestial, "celestial");
+        return celestial(
+                medium,
+                sunAngle,
+                skyRed,
+                skyGreen,
+                skyBlue,
+                skyFactor,
+                ambientRed,
+                ambientGreen,
+                ambientBlue,
+                rain,
+                thunder,
+                moonPhaseBrightness,
+                celestial,
+                64.0f
+        );
+    }
+
+    public static EnvironmentDescriptor celestial(
+            final Medium medium,
+            final float sunAngle,
+            final float skyRed,
+            final float skyGreen,
+            final float skyBlue,
+            final float skyFactor,
+            final float ambientRed,
+            final float ambientGreen,
+            final float ambientBlue,
+            final float rain,
+            final float thunder,
+            final float moonPhaseBrightness,
+            final CelestialLightingProfile celestial,
+            final float waterSurfaceY
+    ) {
+        CelestialLightingProfile effectiveCelestial = celestial == null
+                ? VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting()
+                : celestial;
         requireFinite(sunAngle, "sun angle");
         requireNonNegative(skyRed, "sky red");
         requireNonNegative(skyGreen, "sky green");
@@ -180,13 +291,13 @@ public record EnvironmentDescriptor(
             case AIR -> 1.0f;
         };
         float directionalScale = moon
-                ? celestial.moonIntensityScale() * celestial.evaluateMoonPhaseScale(safeMoonPhase) * horizon
-                : celestial.sunIntensityScale() * horizon;
+                ? effectiveCelestial.moonIntensityScale() * effectiveCelestial.evaluateMoonPhaseScale(safeMoonPhase) * horizon
+                : effectiveCelestial.sunIntensityScale() * horizon;
         directionalScale *= weatherTransmission * mediumTransmission;
 
         LinearColor lightColor = moon
-                ? celestial.moonColor()
-                : celestial.evaluateSunColor(altitude);
+                ? effectiveCelestial.moonColor()
+                : effectiveCelestial.evaluateSunColor(altitude);
 
         float directionalRed = directionalScale * lightColor.red();
         float directionalGreen = directionalScale * lightColor.green();
@@ -221,7 +332,8 @@ public record EnvironmentDescriptor(
                 safeThunder,
                 safeMoonPhase,
                 moon,
-                altitude > 0.035f && directionalScale > 0.001f
+                altitude > 0.035f && directionalScale > 0.001f,
+                waterSurfaceY
         );
     }
 
@@ -255,7 +367,8 @@ public record EnvironmentDescriptor(
                 0.0f,
                 0.0f,
                 false,
-                false
+                false,
+                64.0f
         );
     }
 

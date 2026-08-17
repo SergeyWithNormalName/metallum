@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
+import com.metallum.client.lighting.water.WaterCausticsPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metal.render.MetalDevice;
@@ -318,6 +319,15 @@ abstract class GameRendererMetalFxMixin {
                         case WANING_CRESCENT, WAXING_CRESCENT -> 0.25f;
                         case NEW_MOON -> 0.08f;
                     };
+            float waterSurfaceY = 64.0f;
+            if (camera.pos != null && this.minecraft.level != null) {
+                waterSurfaceY = WaterCausticsPolicy.resolveWaterSurfaceY(
+                        this.minecraft.level,
+                        camera.pos.x,
+                        camera.pos.y,
+                        camera.pos.z
+                );
+            }
             return EnvironmentDescriptor.celestial(
                     medium,
                     sky.sunAngle,
@@ -331,7 +341,8 @@ abstract class GameRendererMetalFxMixin {
                     rain,
                     thunder,
                     phaseBrightness,
-                    VisualStyleRuntime.activeProfile().celestialLighting()
+                    VisualStyleRuntime.activeProfile().celestialLighting(),
+                    waterSurfaceY
             );
         }
         if (skybox == DimensionType.Skybox.END) {
