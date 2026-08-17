@@ -7,6 +7,7 @@ import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
+import com.metallum.client.lighting.shader.CloudShadowBindingAbi;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -483,9 +484,13 @@ final class MetalCrossShaderCompiler {
                         .isExternalShadowSampler(sampler.name()))
                 .toList();
         int removed = module.samplers().size() - filtered.size();
-        if (removed != EnvironmentShadowBindingAbi.shadowTextureSlots().length) {
+        // The GLSL ablation removes receiver work, not the original external sampler
+        // declarations.  They must still be stripped from the intermediary module so
+        // the generated Metal diagnostic variant has no L4/cloud texture/sampler bindings.
+        int expectedRemoved = EnvironmentShadowBindingAbi.shadowTextureSlots().length + 1;
+        if (removed != expectedRemoved) {
             throw new IllegalStateException(
-                    "Advanced fragment must expose exactly three external L4 shadow samplers"
+                    "Advanced fragment must expose exactly four external L4/cloud shadow samplers (removed " + removed + ", expected " + expectedRemoved + ")"
             );
         }
         return new IntermediaryShaderModule(
@@ -561,10 +566,11 @@ final class MetalCrossShaderCompiler {
                 );
             }
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.SAMPLED_IMAGE
-                    && EnvironmentShadowBindingAbi.ownsShadowTextureSlot(
-                    binding.bindingIndex())) {
+                    && (EnvironmentShadowBindingAbi.ownsShadowTextureSlot(
+                    binding.bindingIndex())
+                    || binding.bindingIndex() == CloudShadowBindingAbi.TEXTURE_SLOT)) {
                 throw new IllegalStateException(
-                        "L4 shadow texture slot " + binding.bindingIndex()
+                        "L4/cloud shadow texture slot " + binding.bindingIndex()
                                 + " collides with pipeline resource " + binding.name()
                                 + " for " + pipeline.getLocation()
                 );
@@ -634,6 +640,13 @@ final class MetalCrossShaderCompiler {
                             + pipeline.getLocation()
             );
         }
+        boolean ablateL4 = com.metallum.client.benchmark.DiagnosticAblationMode.getSystemCurrent().ablateL4() == 1;
+        if (ablateL4) {
+            // The diagnostic define makes the L4 receiver branch a compile-time
+            // no-op.  SPIRV-Cross is allowed to retain unused declarations in
+            // either stage, so their exact shape is not a correctness invariant.
+            return;
+        }
         for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
             String textureMarker = "[[texture(" + slot + ")]]";
             String samplerMarker = "[[sampler(" + slot + ")]]";
@@ -647,6 +660,18 @@ final class MetalCrossShaderCompiler {
                                 + pipeline.getLocation()
                 );
             }
+        }
+        String cloudTextureMarker = "[[texture(" + CloudShadowBindingAbi.TEXTURE_SLOT + ")]]";
+        String cloudSamplerMarker = "[[sampler(" + CloudShadowBindingAbi.TEXTURE_SLOT + ")]]";
+        if (countOccurrences(variant.fragmentMsl(), cloudTextureMarker) != 1
+                || countOccurrences(variant.fragmentMsl(), cloudSamplerMarker) != 1
+                || variant.vertexMsl().contains(cloudTextureMarker)
+                || variant.vertexMsl().contains(cloudSamplerMarker)) {
+            throw new IllegalStateException(
+                    "Cloud shadow texture/sampler slot " + CloudShadowBindingAbi.TEXTURE_SLOT
+                            + " is missing, repeated, or visible to the vertex stage for "
+                            + pipeline.getLocation()
+            );
         }
     }
 

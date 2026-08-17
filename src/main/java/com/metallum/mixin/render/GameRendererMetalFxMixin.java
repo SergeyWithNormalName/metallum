@@ -5,6 +5,7 @@ import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metal.render.MetalDevice;
+import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.renderer.temporal.FrameCapture;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.Matrix4;
@@ -239,6 +240,9 @@ abstract class GameRendererMetalFxMixin {
                         this.minecraft.level.dimension().identifier().toString()
                 );
             }
+            EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
+            com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =
+                    metallum$cloudShadowFrameState(environment, deltaTracker, device);
             device.publishFrameState(new FrameCapture(
                     transforms,
                     new FrameState.CameraPosition(position.x, position.y, position.z),
@@ -247,11 +251,37 @@ abstract class GameRendererMetalFxMixin {
                     camera.depthFar,
                     Integer.toUnsignedLong(System.identityHashCode(this.minecraft.level)),
                     this.metallum$dimensionIdentity,
-                    metallum$environmentDescriptor(camera, deltaTracker)
+                    environment,
+                    cloudShadow
             ));
             return projectionBuffer.getBuffer(jitteredProjection);
         }
         return projectionBuffer.getBuffer(finalProjection);
+    }
+
+    private com.metallum.client.lighting.cloud.CloudShadowFrameState metallum$cloudShadowFrameState(
+            final EnvironmentDescriptor environment,
+            final DeltaTracker deltaTracker,
+            final MetalDevice device
+    ) {
+        if (this.minecraft == null || this.minecraft.options == null || this.gameRenderState == null) {
+            return com.metallum.client.lighting.cloud.CloudShadowFrameState.disabled();
+        }
+        net.minecraft.client.CloudStatus cloudStatus = this.minecraft.options.cloudStatus().get();
+        float cloudHeight = this.gameRenderState.levelRenderState.cloudHeight;
+        int cloudColor = this.gameRenderState.levelRenderState.cloudColor;
+        long gameTime = this.gameRenderState.levelRenderState.gameTime;
+        float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
+        com.metallum.client.lighting.cloud.CloudShadowSource source = device.cloudShadowSource();
+        return com.metallum.client.lighting.cloud.CloudShadowFrameState.extract(
+                cloudStatus,
+                cloudHeight,
+                cloudColor,
+                gameTime,
+                partialTick,
+                environment,
+                source
+        );
     }
 
     private EnvironmentDescriptor metallum$environmentDescriptor(
@@ -300,7 +330,8 @@ abstract class GameRendererMetalFxMixin {
                     ambientLight.z(),
                     rain,
                     thunder,
-                    phaseBrightness
+                    phaseBrightness,
+                    VisualStyleRuntime.activeProfile().celestialLighting()
             );
         }
         if (skybox == DimensionType.Skybox.END) {

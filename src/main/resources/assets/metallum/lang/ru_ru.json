@@ -1,6 +1,11 @@
 {
   "metallum.options.page": "Metallum",
   "metallum.options.group.lighting": "Освещение",
+  "metallum.options.visual_style.name": "Стиль графики",
+  "metallum.options.visual_style.tooltip": "Изменяет художественный характер изображения, не меняя выбранный режим качества и производительности.",
+  "metallum.options.visual_style.vanilla": "Ваниль",
+  "metallum.options.visual_style.natural": "Натуральный",
+  "metallum.options.visual_style.realism": "Реализм",
   "metallum.options.improved_lighting.name": "Продвинутое освещение",
   "metallum.options.improved_lighting.tooltip": "Включает кластерный цветной прямой свет L3 для блоков и сущностей. L2-рендерер материалов остаётся автоматическим; при ошибке допуска используется безопасный Vanilla-свет. Требуется перезапуск.",
   "metallum.options.lighting_preset.name": "Пресет освещения",

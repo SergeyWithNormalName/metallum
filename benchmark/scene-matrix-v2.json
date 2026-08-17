@@ -1,0 +1,73 @@
+{
+  "matrix_version": 2,
+  "description": "Metallum Benchmark Environment v2 Scene Matrix (P0 + P1)",
+  "scenes": [
+    {
+      "id": "hdrtest-static-v1",
+      "canonical_route": "benchmark/routes/hdrtest-static-v1.json",
+      "workload_type": "OVERWORLD_DAYLIGHT_STATIC",
+      "tier": "HISTORICAL_P0",
+      "primary_stress": "L4_SUN_SHADOW_RECEIVER_SURFACE_PBR",
+      "target_fps_range_m1_pro_native_hdr": "140 - 150 FPS"
+    },
+    {
+      "id": "hdrtest-torch-v1",
+      "canonical_route": "benchmark/routes/hdrtest-torch-v1.json",
+      "workload_type": "LOCAL_LIGHT_INSERTION_EPOCH",
+      "tier": "HISTORICAL_P0",
+      "primary_stress": "L3_CLUSTER_BUILD_AND_SHADING",
+      "target_fps_range_m1_pro_native_hdr": "140 - 150 FPS"
+    },
+    {
+      "id": "hdrtest-torch-toggle-v1",
+      "canonical_route": "benchmark/routes/hdrtest-torch-toggle-v1.json",
+      "workload_type": "LOCAL_LIGHT_TOGGLE_EPOCH",
+      "tier": "HISTORICAL_P0",
+      "primary_stress": "L3_CLUSTER_DIRTY_UPDATE_REMOVAL",
+      "target_fps_range_m1_pro_native_hdr": "140 - 150 FPS"
+    },
+    {
+      "id": "hdrtest-l6-dynamic-v1",
+      "canonical_route": "benchmark/routes/hdrtest-l6-dynamic-v1.json",
+      "workload_type": "DYNAMIC_VOXEL_SHADOW_ORBIT",
+      "tier": "HISTORICAL_P0",
+      "primary_stress": "L6_VOXEL_RAYTRACED_SHADOWS_AND_ENTITY_PROBES",
+      "target_fps_range_m1_pro_native_hdr": "75 - 85 FPS"
+    },
+    {
+      "id": "nether-lava-stress-v1",
+      "canonical_route": "benchmark/routes/nether-lava-stress-v1.json",
+      "workload_type": "NETHER_EMISSIVE_LIGHT_STRESS",
+      "tier": "HISTORICAL_P0",
+      "primary_stress": "L3_CLUSTER_OVERFLOW_AND_HEAVY_EMISSIVES",
+      "target_fps_range_m1_pro_native_hdr": "30 - 35 FPS"
+    },
+    {
+      "id": "hdrtest-cave-v1",
+      "alias": "cave-local-lights-v1",
+      "canonical_route": "benchmark/routes/hdrtest-cave-v1.json",
+      "workload_type": "CAVE_LOCAL_LIGHTS_V1",
+      "tier": "P1_DETERMINISTIC_SCENE",
+      "primary_stress": "L3_EMISSIVE_LOCAL_LIGHTS_AND_L6_VOXEL_SHADOWS",
+      "target_fps_range_m1_pro_native_hdr": "30 - 32 FPS"
+    },
+    {
+      "id": "hdrtest-foliage-v1",
+      "alias": "foliage-water-v1",
+      "canonical_route": "benchmark/routes/hdrtest-foliage-v1.json",
+      "workload_type": "FOLIAGE_WATER_V1",
+      "tier": "P1_DETERMINISTIC_SCENE",
+      "primary_stress": "ALPHA_TESTED_VEGETATION_AND_WATER_TRANSLUCENCY",
+      "target_fps_range_m1_pro_native_hdr": "84 - 88 FPS"
+    },
+    {
+      "id": "hdrtest-rain-v1",
+      "alias": "rain-v1",
+      "canonical_route": "benchmark/routes/hdrtest-rain-v1.json",
+      "workload_type": "RAIN_V1",
+      "tier": "P1_DETERMINISTIC_SCENE",
+      "primary_stress": "RAIN_WEATHER_TRANSLUCENCY_AND_PARTICLES",
+      "target_fps_range_m1_pro_native_hdr": "36 - 37 FPS"
+    }
+  ]
+}

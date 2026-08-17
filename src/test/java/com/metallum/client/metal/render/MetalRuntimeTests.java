@@ -20,6 +20,7 @@ import com.metallum.client.renderer.LocalVoxelShadowAtlasLayout;
 import com.metallum.client.renderer.LocalVoxelShadowLayout;
 import com.metallum.client.renderer.MetalCapabilities;
 import com.metallum.client.renderer.MetalExecutorKind;
+import com.metallum.client.renderer.RendererFeatureMask;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.metal.render.mtl.MTLHazardTrackingMode;
@@ -36,6 +37,14 @@ import com.mojang.blaze3d.textures.GpuSampler;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout;
 import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.VulkanBindGroupEntryType;
+import com.metallum.client.lighting.EntityShadowProxy;
+import com.metallum.client.lighting.EntityShadowProxySnapshot;
+import com.metallum.client.lighting.LightWorldToken;
+import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.CloudShadowBindingAbi;
+import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
+import com.metallum.client.voxel.VoxelClipmapSnapshot;
+import com.metallum.client.voxel.VoxelWorldToken;
 import net.minecraft.client.renderer.RenderPipelines;
 
 import java.lang.foreign.Arena;
@@ -95,6 +104,7 @@ public final class MetalRuntimeTests {
         testL2GenerationResourceRouting();
         testL2AtomicMaterialFallback();
         testAutomaticMaterialContractAndCompatibilityOverride();
+        testLocalShadowIndependentEntityProxyContract();
     }
 
     private static void testVoxelShadowTraversalMslLoopContract() {
@@ -452,6 +462,156 @@ public final class MetalRuntimeTests {
         ));
     }
 
+    private static void testLocalShadowIndependentEntityProxyContract() {
+        ByteBuffer params = ByteBuffer.allocateDirect(LocalVoxelShadowLayout.PARAMS_BYTES)
+                .order(ByteOrder.nativeOrder());
+        int proxySlotBytes = 32 * LocalVoxelShadowLayout.PROXY_STRIDE_BYTES;
+        ByteBuffer proxies = ByteBuffer.allocateDirect(proxySlotBytes)
+                .order(ByteOrder.nativeOrder());
+        ByteBuffer descriptors = ByteBuffer.allocateDirect(16 * 64)
+                .order(ByteOrder.nativeOrder());
+
+        LightWorldToken tokenA = new LightWorldToken(1L, "minecraft:overworld");
+        LightWorldToken tokenB = new LightWorldToken(2L, "minecraft:the_nether");
+
+        EntityShadowProxy proxy1 = new EntityShadowProxy(101L, 0.0, 1.0, 0.0, 0.5f, 1.0f, 0.5f);
+        EntityShadowProxy proxy2 = new EntityShadowProxy(102L, 2.0, 1.0, 0.0, 0.5f, 1.0f, 0.5f);
+        EntityShadowProxySnapshot proxySnapshot2 = new EntityShadowProxySnapshot(
+                EntityShadowProxySnapshot.CURRENT_VERSION,
+                tokenA,
+                1L,
+                List.of(proxy1, proxy2),
+                2
+        );
+        EntityShadowProxySnapshot emptySnapshot = new EntityShadowProxySnapshot(
+                EntityShadowProxySnapshot.CURRENT_VERSION,
+                tokenA,
+                1L,
+                List.of(),
+                0
+        );
+        EntityShadowProxySnapshot mismatchSnapshot = new EntityShadowProxySnapshot(
+                EntityShadowProxySnapshot.CURRENT_VERSION,
+                tokenB,
+                1L,
+                List.of(proxy1),
+                1
+        );
+
+        FrameState frame = new FrameState(
+                com.metallum.client.renderer.temporal.FrameContract.temporalProductionV1(),
+                0L, 1L, 0L, 1L, 1L, 1L,
+                RenderContractMode.METALLUM,
+                LightingModel.ADVANCED,
+                DisplayOutputMode.SDR,
+                LightingPreset.BALANCED,
+                RendererFeatureMask.NONE,
+                MetalExecutorKind.METAL3,
+                RendererGenerationConfig.CURRENT_FRAME_RESOURCE_CONTRACT_VERSION,
+                FrameState.ResourceBytes.NONE,
+                FrameState.AdvancedLightingWork.NONE,
+                FrameState.Transforms.identity(),
+                FrameState.Transforms.identity(),
+                new FrameState.Extent(256, 144),
+                new FrameState.Extent(256, 144),
+                1.0, 1.0,
+                FrameState.JitterOffset.ZERO,
+                java.util.Set.of(),
+                41L, 0,
+                0.016, 0.1, 1000.0,
+                new FrameState.CameraPosition(0.0, 64.0, 0.0),
+                new FrameState.CameraPosition(0.0, 64.0, 0.0),
+                0L, 0L,
+                1.0, 1.0
+        );
+        LocalVoxelShadowGpuResources.CameraParts camera =
+                LocalVoxelShadowGpuResources.cameraParts(frame.currentCameraPosition());
+
+        VoxelWorldToken voxelWorldA = new VoxelWorldToken(1L, "minecraft:overworld");
+        VoxelClipmapSnapshot.Level level0 = new VoxelClipmapSnapshot.Level(0, 1, 32, 0L, 0L, 0L, 1);
+        VoxelClipmapSnapshot voxelSnapshot = new VoxelClipmapSnapshot(
+                voxelWorldA,
+                1L,
+                List.of(level0)
+        );
+
+        // CASE A: voxelActive = true, proxySnapshot = 2 -> GPU params proxyCount = 2
+        params.clear(); proxies.clear(); descriptors.clear();
+        int countA = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, proxySnapshot2,
+                true, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countA == 2, "CASE A packed count must be 2");
+        require(params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 2,
+                "CASE A params proxyCount must be 2");
+        require(params.getInt(VoxelShadowBindingAbi.ACTIVE_OFFSET) == 1,
+                "CASE A params active must be 1");
+
+        // CASE B: voxelActive = false, proxySnapshot = 2 -> GPU params proxyCount MUST STILL = 2
+        params.clear(); proxies.clear(); descriptors.clear();
+        int countB = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, proxySnapshot2,
+                false, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countB == 2, "CASE B packed count must be 2");
+        require(params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 2,
+                "CASE B params proxyCount must be 2 even when voxelActive is false");
+        require(params.getInt(VoxelShadowBindingAbi.ACTIVE_OFFSET) == 1,
+                "CASE B params active must be 1 to enable entity shadow evaluation");
+
+        // CASE C: voxelActive = false, proxySnapshot empty -> proxyCount = 0
+        params.clear(); proxies.clear(); descriptors.clear();
+        int countC = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, emptySnapshot,
+                false, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countC == 0, "CASE C packed count must be 0");
+        require(params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 0,
+                "CASE C params proxyCount must be 0");
+
+        // CASE D: voxelActive transition true -> false -> true -> entity proxy count stable
+        int countD1 = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, proxySnapshot2,
+                true, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countD1 == 2 && params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 2,
+                "CASE D1 failed");
+        int countD2 = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, proxySnapshot2,
+                false, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countD2 == 2 && params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 2,
+                "CASE D2 failed");
+        int countD3 = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, proxySnapshot2,
+                true, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countD3 == 2 && params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 2,
+                "CASE D3 failed");
+
+        // CASE E: world token mismatch -> proxyCount = 0
+        params.clear(); proxies.clear(); descriptors.clear();
+        int countE = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, tokenA, mismatchSnapshot,
+                false, voxelSnapshot, 4, 512, 32, 32, false
+        );
+        require(countE == 0, "CASE E packed count must be 0 on world token mismatch");
+        require(params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 0,
+                "CASE E params proxyCount must be 0 on world token mismatch");
+
+        // CASE F: world unload (world = null) -> proxyCount = 0
+        params.clear(); proxies.clear(); descriptors.clear();
+        int countF = LocalVoxelShadowGpuResources.packFrameParameters(
+                params, proxies, descriptors, frame, camera, null, proxySnapshot2,
+                false, null, 4, 512, 32, 32, false
+        );
+        require(countF == 0, "CASE F packed count must be 0 on world unload");
+        require(params.getInt(VoxelShadowBindingAbi.PROXY_COUNT_OFFSET) == 0,
+                "CASE F params proxyCount must be 0 on world unload");
+        require(params.getInt(VoxelShadowBindingAbi.ACTIVE_OFFSET) == 0,
+                "CASE F params active must be 0 on world unload");
+    }
+
     private static void testCanonicalShaderResourceLayout() {
         VulkanBindGroupLayout.Entry projection = new VulkanBindGroupLayout.Entry(
                 VulkanBindGroupEntryType.UNIFORM_BUFFER, "Projection", null);
@@ -471,6 +631,17 @@ public final class MetalRuntimeTests {
                 "shader variants retained reflection-order-dependent resource indices");
         require(legacy.equals(List.of(transforms, projection, sampler)),
                 "canonical shader resource ordering changed");
+        require(AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow0")
+                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow1")
+                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow2")
+                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumCloudShadow"),
+                "external shadow/cloud samplers not recognized");
+        require(AdvancedDirectLightingShaderPatcher.externalShadowSamplerSlot("metallumCloudShadow")
+                        == CloudShadowBindingAbi.TEXTURE_SLOT,
+                "cloud shadow sampler slot mismatch");
+        require(!AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("Sampler0")
+                        && !AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("DiffuseSampler"),
+                "vanilla samplers must not be classified as external shadow samplers");
     }
 
     private static void testAdvancedLightingPerSubmitLatch() {

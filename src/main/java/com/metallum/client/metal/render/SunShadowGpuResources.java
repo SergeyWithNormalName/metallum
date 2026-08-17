@@ -258,6 +258,114 @@ final class SunShadowGpuResources implements AutoCloseable {
                 environment.profile().ordinal(),
                 environment.medium().ordinal(),
                 0);
+        return encode(environment, frameState, com.metallum.client.lighting.cloud.CloudShadowFrameState.disabled());
+    }
+
+    SunShadowFrame encode(
+            final EnvironmentDescriptor environment,
+            final FrameState frameState,
+            final com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow
+    ) {
+        ensureOpen();
+        Objects.requireNonNull(environment, "environment");
+        Objects.requireNonNull(frameState, "frameState");
+        Objects.requireNonNull(cloudShadow, "cloudShadow");
+        if (frameState.lightingGenerationId() != this.generation) {
+            throw new IllegalArgumentException("Environment does not match the shadow generation");
+        }
+        SunShadowFrame planned = SunShadowFrame.plan(
+                environment,
+                this.budget,
+                frameState,
+                this.stabilizer
+        );
+        this.cacheDecision = this.cache.prepare(planned);
+        SunShadowFrame selected = this.cacheDecision.workingFrame();
+        int slot = frameState.inFlightSlot();
+        long offset = (long) slot * SunShadowLayout.PARAMS_BYTES;
+        ByteBuffer packet = this.paramsRing.sliceStorage(offset, SunShadowLayout.PARAMS_BYTES)
+                .order(ByteOrder.nativeOrder());
+        packet.clear();
+        while (packet.remaining() > 0) {
+            packet.put((byte) 0);
+        }
+        packet.clear();
+        for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
+            putMatrix(packet, cascade * 64, selected.shadowFromView(cascade));
+        }
+        Vector3f toLight = selected.toLightView();
+        putVec4(packet, EnvironmentShadowBindingAbi.DIRECTION_AND_FLAGS_OFFSET,
+                toLight.x, toLight.y, toLight.z, selected.needsShadowPass() ? 1.0f : 0.0f);
+        putVec4(packet, EnvironmentShadowBindingAbi.DIRECTIONAL_RADIANCE_OFFSET,
+                environment.directionalRed(), environment.directionalGreen(),
+                environment.directionalBlue(), environment.moon() ? 1.0f : 0.0f);
+        putVec4(packet, EnvironmentShadowBindingAbi.SKY_IRRADIANCE_OFFSET,
+                environment.skyRed(), environment.skyGreen(), environment.skyBlue(), 0.0f);
+        putVec4(packet, EnvironmentShadowBindingAbi.AMBIENT_RADIANCE_OFFSET,
+                environment.ambientRed(), environment.ambientGreen(), environment.ambientBlue(), 0.0f);
+        putVec4(packet, EnvironmentShadowBindingAbi.CASCADE_SPLITS_OFFSET,
+                selected.cascadeSplit(0), selected.cascadeSplit(1), selected.cascadeSplit(2),
+                selected.cascadeSplit(selected.cascadeCount() - 1));
+        putVec4(packet, EnvironmentShadowBindingAbi.TEXEL_AND_BIAS_OFFSET,
+                1.0f / this.budget.resolution(),
+                this.budget.receiverDepthBias(),
+                this.budget.receiverNormalBias(),
+                this.budget.pcfRadiusTexels());
+        putVec4(packet, EnvironmentShadowBindingAbi.CASCADE_BLEND_OFFSET,
+                this.budget.blendFraction(),
+                this.budget.blendFraction(),
+                this.budget.blendFraction(),
+                0.0f);
+        int flags = (planned.needsShadowPass() ? 1 : 0)
+                | (environment.moon() ? 2 : 0)
+                | (environment.profile().ordinal() << 4)
+                | (environment.medium().ordinal() << 8);
+        putInt4(packet, EnvironmentShadowBindingAbi.CONTRACT_OFFSET,
+                EnvironmentShadowBindingAbi.VERSION,
+                selected.cascadeCount(),
+                (int) selected.lightingGeneration(),
+                flags);
+        Vector3f worldUp = selected.worldUpView();
+        putVec4(packet, EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET,
+                worldUp.x, worldUp.y, worldUp.z, environment.medium().ordinal());
+        putVec4(packet, EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET,
+                selected.cascadeReceiverNormalBias(0),
+                selected.cascadeReceiverNormalBias(1),
+                selected.cascadeReceiverNormalBias(2),
+                this.budget.receiverNormalBiasTexels());
+        this.materialTimeSeconds = advanceMaterialTimeSeconds(
+                this.materialTimeSeconds, frameState.deltaSeconds());
+        this.materialRainWetness = SurfaceMaterialPolicy.smoothRainWetness(
+                this.materialRainWetness,
+                environment.rain(),
+                (float) Math.clamp(frameState.deltaSeconds(), 0.0, 0.25)
+        );
+        putVec4(packet, EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET,
+                this.materialRainWetness, environment.thunder(),
+                (float) this.materialTimeSeconds, 0.0f);
+        putInt4(packet, EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET,
+                EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
+                environment.profile().ordinal(),
+                environment.medium().ordinal(),
+                0);
+        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET,
+                cloudShadow.cloudOffsetX(), cloudShadow.cloudOffsetZ(),
+                cloudShadow.gridWidth(), cloudShadow.gridHeight());
+        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET,
+                cloudShadow.cloudHeight(), cloudShadow.cloudThickness(),
+                cloudShadow.cloudOpacity(), (float) cloudShadow.mode().id());
+        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET,
+                cloudShadow.shadowStrength(),
+                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_LOW_ELEVATION,
+                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_STABLE_ELEVATION,
+                0.0f);
+        int cloudFlags = (cloudShadow.enabled() ? 1 : 0)
+                | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0);
+        putInt4(packet, EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET,
+                EnvironmentShadowBindingAbi.CLOUD_CONTRACT_VERSION,
+                cloudShadow.mode().id(),
+                (int) cloudShadow.patternGeneration(),
+                cloudFlags);
         this.frame = selected;
         this.renderedSubmitIndex = selected.needsShadowPass()
                 ? Long.MIN_VALUE

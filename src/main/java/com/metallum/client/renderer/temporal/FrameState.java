@@ -63,7 +63,8 @@ public record FrameState(
         LIGHTING_MODEL_CHANGE,
         OUTPUT_MODE_CHANGE,
         INTERNAL_RENDER_SCALE_CHANGE,
-        RESOURCE_PACK_SHADER_RELOAD
+        RESOURCE_PACK_SHADER_RELOAD,
+        VISUAL_STYLE_CHANGE
     }
 
     public record Extent(int width, int height) {

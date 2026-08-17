@@ -44,3 +44,5 @@ libs/
 
 # internal agent session data
 .agents/
+.codex-worktrees/
+tools/metallum_gpu_capability_probe

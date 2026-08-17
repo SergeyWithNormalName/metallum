@@ -154,6 +154,16 @@ private enum FrameStateAbiValidationMain {
             try require(validate(nativeValidate, unknownFeatureBit) == -4,
                         "Unknown feature bit was accepted")
 
+            var unknownResetBit = valid
+            writeUInt64(1 << 14, at: 88, into: &unknownResetBit)
+            try require(validate(nativeValidate, unknownResetBit) == -4,
+                        "Unknown reset bit was accepted")
+
+            var validStyleResetBit = valid
+            writeUInt64(1 << 13, at: 88, into: &validStyleResetBit)
+            try require(validate(nativeValidate, validStyleResetBit) == 1,
+                        "VISUAL_STYLE_CHANGE reset bit (bit 13) was rejected")
+
             var invalidVersion = valid
             writeUInt32(1, at: 0, into: &invalidVersion)
             try require(validate(nativeValidate, invalidVersion) == -2, "Version mismatch was accepted")

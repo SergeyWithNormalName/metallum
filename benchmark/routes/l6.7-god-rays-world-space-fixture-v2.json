@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "id": "l6.7-god-rays-world-space-fixture-v2",
+  "description": "Visual acceptance fixture for an aperture-bound local volumetric shaft through a three-block-thick 1x2 tunnel, with a four-source lava dense proxy plus two nearby raw lava distractors. The captured image, not READY telemetry, decides success.",
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "aperture": {
+    "position": [96, 75, -96],
+    "size_blocks": [1, 2],
+    "source_offset": [0, 0, 5]
+  },
+  "scene": {
+    "divider_thickness_blocks": 3,
+    "lava_distractors": [
+      [92, 74, -101], [93, 74, -101], [92, 75, -101], [93, 75, -101],
+      [100, 74, -101], [100, 75, -101]
+    ]
+  },
+  "camera_target": "aperture_camera_face_center",
+  "max_source_distance": 16.0,
+  "captures": [
+    {
+      "name": "open-front",
+      "route": "l6.7-god-rays-world-space-front-v2.json",
+      "mode": "OPEN",
+      "camera": "FRONT",
+      "visual_expectation": "The torch shaft crosses the finite three-block 1x2 tunnel in depth; the four-source lava dense proxy and two raw lava lights must not become camera-fixed orange halos."
+    },
+    {
+      "name": "open-profile",
+      "route": "l6.7-god-rays-world-space-profile-v2.json",
+      "mode": "OPEN",
+      "camera": "PROFILE",
+      "visual_expectation": "The three-block-thick 1x2 tunnel produces a finite world-space cone/shaft with visible lateral parallax despite the near-camera lava dense proxy and raw lights."
+    },
+    {
+      "name": "sealed-profile",
+      "route": "l6.7-god-rays-world-space-profile-sealed-v2.json",
+      "mode": "SEALED",
+      "camera": "PROFILE",
+      "visual_expectation": "No torch shaft crosses the viewer chamber when the full three-block tunnel is sealed; dense and raw lava remain direct local light only."
+    },
+    {
+      "name": "open-air-profile",
+      "route": "l6.7-god-rays-world-space-profile-open-air-v2.json",
+      "mode": "OPEN_AIR",
+      "camera": "PROFILE",
+      "visual_expectation": "No aperture-qualified torch shaft appears without the enclosing divider, even though dense and raw lava distractors remain present."
+    }
+  ]
+}

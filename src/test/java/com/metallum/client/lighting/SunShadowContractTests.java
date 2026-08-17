@@ -722,7 +722,7 @@ public final class SunShadowContractTests {
 
     private static void testBindingAbi() {
         require(EnvironmentShadowBindingAbi.VERSION == SunShadowLayout.ABI_VERSION
-                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
+                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 448
                         && EnvironmentShadowBindingAbi.PARAMS_SLOT == 26,
                 "environment parameter ABI changed");
         require(java.util.Arrays.equals(
@@ -734,7 +734,11 @@ public final class SunShadowContractTests {
                         && EnvironmentShadowBindingAbi.MATRIX_2_OFFSET == 128
                         && EnvironmentShadowBindingAbi.CONTRACT_OFFSET == 304
                         && EnvironmentShadowBindingAbi.WORLD_UP_AND_MEDIUM_OFFSET == 320
-                        && EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET == 336,
+                        && EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET == 336
+                        && EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET == 384
+                        && EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET == 400
+                        && EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET == 416
+                        && EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET == 432,
                 "environment packet offsets changed");
     }
 

@@ -13,6 +13,8 @@ import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.metalfx.TemporalScalingMode;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
+import com.metallum.client.renderer.style.VisualStyle;
+import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.voxel.VoxelPreviewMode;
 import com.metallum.client.voxel.VoxelPreviewSettings;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
@@ -38,6 +40,26 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 .setName(Component.translatable("metallum.options.page"))
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.lighting"))
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "visual_style"),
+                                VisualStyle.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.visual_style.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.visual_style.tooltip"
+                            ))
+                            .setElementNameProvider(style -> Component.translatable(
+                                    "metallum.options.visual_style." + style.persistentName()
+                            ))
+                            .setDefaultValue(VisualStyle.VANILLA)
+                            .setBinding(
+                                    MetallumSodiumConfig::setVisualStyle,
+                                    VisualStyleRuntime::activeStyle
+                            )
+                    )
                     .addOption(builder.createBooleanOption(
                                 Identifier.fromNamespaceAndPath("metallum", "improved_lighting")
                             )
@@ -303,6 +325,11 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     private static HdrConfig getConfig() {
         MetalDevice device = MetalDevice.getInstance();
         return device != null ? device.hdrConfig() : HdrConfig.load();
+    }
+
+    private static void setVisualStyle(final VisualStyle style) {
+        VisualStyleRuntime.setStyle(style);
+        RendererConfig.load().withVisualStyle(style).save();
     }
 
     private static void setImprovedLighting(final boolean enabled) {

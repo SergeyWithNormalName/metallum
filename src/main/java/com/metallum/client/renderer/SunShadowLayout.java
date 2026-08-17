@@ -6,7 +6,7 @@ import java.util.Objects;
 public final class SunShadowLayout {
     public static final int ABI_VERSION = 1;
     public static final int MAX_CASCADES = 3;
-    public static final int PARAMS_BYTES = 384;
+    public static final int PARAMS_BYTES = 448;
     public static final int PARAMS_RING_SLOTS = 3;
     public static final int SHADOW_COLOR_BYTES_PER_PIXEL = 1;
     public static final int SHADOW_DEPTH_BYTES_PER_PIXEL = 4;

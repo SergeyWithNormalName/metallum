@@ -57,6 +57,7 @@ public final class AdvancedDirectLightingShaderPatcher {
     public static final String SHADOW_SAMPLER_0 = "metallumSunShadow0";
     public static final String SHADOW_SAMPLER_1 = "metallumSunShadow1";
     public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
+    public static final String CLOUD_SAMPLER = "metallumCloudShadow";
 
     private static final String MARKER = "METALLUM_ADVANCED_DIRECT_LIGHTING_V1";
     private static final Pattern VERSION_PATTERN = Pattern.compile("(?m)^\\s*#version\\s+\\d+[^\\r\\n]*");
@@ -114,11 +115,16 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec4 cascadeNormalBias;
                 vec4 materialWeatherAndTime;
                 uvec4 materialContract;
+                vec4 cloudOffsetAndGridSize;
+                vec4 cloudParams;
+                vec4 cloudShadowFadeAndStrength;
+                uvec4 cloudContract;
             } metallumEnvironment;
 
             layout(binding = 13) uniform sampler2DShadow metallumSunShadow0;
             layout(binding = 14) uniform sampler2DShadow metallumSunShadow1;
             layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
+            layout(binding = 12) uniform sampler2D metallumCloudShadow;
 
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
@@ -560,31 +566,37 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return metallumEnvironmentLookupV1(direction, vec3(0.0), 0.05);
             }
 
-            float metallumWaterSquareSunMaskV1(
+            float metallumWaterSquareCelestialMaskV1(
                     vec3 reflectedDirection,
-                    vec3 sunDirection) {
-                vec3 sun = metallumSafeNormalV1(sunDirection);
-                if (dot(sun, sun) == 0.0) {
+                    vec3 celestialDirection) {
+                vec3 celestial = metallumSafeNormalV1(celestialDirection);
+                if (dot(celestial, celestial) == 0.0) {
                     return 1.0;
                 }
-                vec3 squareRight = cross(metallumEnvironment.worldUpAndMedium.xyz, sun);
+                vec3 squareRight = cross(metallumEnvironment.worldUpAndMedium.xyz, celestial);
                 float squareRightLengthSquared = dot(squareRight, squareRight);
                 if (squareRightLengthSquared < 0.0001) {
-                    squareRight = cross(vec3(0.0, 0.0, 1.0), sun);
+                    squareRight = cross(vec3(0.0, 0.0, 1.0), celestial);
                     squareRightLengthSquared = dot(squareRight, squareRight);
                 }
                 if (squareRightLengthSquared < 0.0001) {
                     return 1.0;
                 }
                 squareRight *= inversesqrt(squareRightLengthSquared);
-                vec3 squareUp = cross(sun, squareRight);
-                vec2 sunPlane = vec2(
+                vec3 squareUp = cross(celestial, squareRight);
+                vec2 celestialPlane = vec2(
                         dot(reflectedDirection, squareRight),
                         dot(reflectedDirection, squareUp));
-                // A soft 3.4° square keeps the Minecraft sun recognizable without turning
-                // the water into a hard-edged, temporally unstable white tile.
-                float squareDistance = max(abs(sunPlane.x), abs(sunPlane.y));
+                // A soft 3.4° square keeps the Minecraft celestial bodies (sun and moon) recognizable
+                // without turning the water into a hard-edged, temporally unstable white tile.
+                float squareDistance = max(abs(celestialPlane.x), abs(celestialPlane.y));
                 return 1.0 - smoothstep(0.030, 0.046, squareDistance);
+            }
+
+            float metallumWaterSquareSunMaskV1(
+                    vec3 reflectedDirection,
+                    vec3 sunDirection) {
+                return metallumWaterSquareCelestialMaskV1(reflectedDirection, sunDirection);
             }
 
             vec3 metallumTransmissionV1(
@@ -707,6 +719,56 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return visibility;
             }
 
+            float metallumCloudTransmittanceV1(vec3 viewPosition) {
+                if (metallumEnvironment.cloudContract.x != 1u) {
+                    return 1.0;
+                }
+                uint mode = metallumEnvironment.cloudContract.y;
+                if (mode == 0u || metallumEnvironment.cloudParams.z <= 0.005) {
+                    return 1.0;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 toLightWorld = metallumSafeNormalV1(
+                        worldFromView * metallumEnvironment.directionAndFlags.xyz);
+                float lightY = toLightWorld.y;
+                if (lightY <= 0.001) {
+                    return 1.0;
+                }
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                vec3 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + cameraRelativePosition;
+                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + cameraBlockRelativePosition;
+
+                float cloudHeight = metallumEnvironment.cloudParams.x;
+                float cloudThickness = metallumEnvironment.cloudParams.y;
+                float cloudTop = cloudHeight + cloudThickness;
+                if (worldPosition.y >= cloudTop) {
+                    return 1.0;
+                }
+                float targetHeight = (mode == 2u)
+                        ? (cloudHeight + cloudThickness * 0.5)
+                        : cloudHeight;
+                if (worldPosition.y >= cloudHeight) {
+                    targetHeight = cloudTop;
+                }
+                float t = (targetHeight - worldPosition.y) / lightY;
+                if (t < 0.0) {
+                    return 1.0;
+                }
+                vec2 cloudWorldPos = worldPosition.xz + toLightWorld.xz * t;
+                vec2 shiftedPos = cloudWorldPos + metallumEnvironment.cloudOffsetAndGridSize.xy;
+                vec2 gridSize = metallumEnvironment.cloudOffsetAndGridSize.zw;
+                vec2 uv = shiftedPos / max(gridSize, vec2(1.0));
+
+                float sampledTransmittance = texture(metallumCloudShadow, uv).r;
+                float lowElevation = metallumEnvironment.cloudShadowFadeAndStrength.y;
+                float stableElevation = metallumEnvironment.cloudShadowFadeAndStrength.z;
+                float projectionWeight = smoothstep(lowElevation, stableElevation, lightY);
+                return mix(1.0, sampledTransmittance, projectionWeight);
+            }
+
             vec3 metallumEvaluateEnvironmentV1(
                     vec3 viewPosition,
                     vec3 normal,
@@ -729,6 +791,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (directionalWeight > 0.0) {
                     sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
                 }
+                float cloudTransmittance = 1.0;
+                if (directionalWeight > 0.0 && sunVisibility > 0.0) {
+                    cloudTransmittance = metallumCloudTransmittanceV1(viewPosition);
+                }
                 const float shadowedSkyVisibility = 0.42;
                 float skyShadow = mix(shadowedSkyVisibility, 1.0, sunVisibility);
                 vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
@@ -736,7 +802,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * (skyOcclusion * hemisphere * skyShadow);
                 if (directionalWeight > 0.0) {
                     diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                            * (directionalWeight * sunVisibility);
+                            * (directionalWeight * sunVisibility * cloudTransmittance);
                 }
                 return albedo * diffuse * 0.31830988618;
             }
@@ -757,13 +823,12 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
                 vec3 reflectedDirection = reflect(-viewDirection, normal);
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
-                bool waterSunlit = material.kind == METALLUM_SURFACE_WATER_V1
-                        && (metallumEnvironment.contract.w & 2u) == 0u;
-                float waterSunShape = waterSunlit
-                        ? metallumWaterSquareSunMaskV1(reflectedDirection, toLight)
+                bool waterCelestialLit = material.kind == METALLUM_SURFACE_WATER_V1;
+                float waterCelestialShape = waterCelestialLit
+                        ? metallumWaterSquareCelestialMaskV1(reflectedDirection, toLight)
                         : 1.0;
                 vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
-                        reflectedDirection, normal, material.roughness, waterSunShape);
+                        reflectedDirection, normal, material.roughness, waterCelestialShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
                     // The terrain light coordinate already records vanilla skylight after
@@ -783,12 +848,15 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
                 if (directionalWeight > 0.0) {
                     float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    float cloudTransmittance = (sunVisibility > 0.0)
+                            ? metallumCloudTransmittanceV1(viewPosition)
+                            : 1.0;
                     result += metallumEvaluateGgxV1(
                             normal,
                             viewDirection,
                             toLight,
                             max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
-                                    * (skyOcclusion * sunVisibility * waterSunShape),
+                                    * (skyOcclusion * sunVisibility * cloudTransmittance * waterCelestialShape),
                             f0,
                             material.roughness);
                 }
@@ -1141,6 +1209,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
 
                 bool proxyFailOpen = false;
+#ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
                 if (!metallumProxyVisibilityV1(
                         receiverCameraRelative,
                         endWorldRelative
@@ -1149,6 +1218,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         proxyFailOpen)) {
                     return 0.0;
                 }
+#else
+                if (metallumVoxelProxyBuffer.proxies[0].minWorldRelative.w == -9999.0) {
+                    return 0.0;
+                }
+#endif
 
                 vec3 startBlockOffsetFloat = floor(startWorldRelative);
                 vec3 endBlockOffsetFloat = floor(endWorldRelative);
@@ -1722,7 +1796,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float rawFade = 1.0 - clamp((minDistToBoundary - max(lightRadius, 0.0)) / fadeMargin, 0.0, 1.0);
                 return rawFade * rawFade * (3.0 - 2.0 * rawFade);
             }
-
+            """).append("""
             vec3 metallumVoxelVisibilityV1(
                     vec3 receiverCameraRelative,
                     vec3 receiverWorldRelative,
@@ -1761,14 +1835,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                         + lightCameraRelative;
                 if (!metallumFiniteVec3V1(lightCameraRelative)
                         || !metallumFiniteVec3V1(lightWorldRelative)) {
-                    return vec3(0.0);
-                }
-                bool proxyFailOpen = false;
-                if (!metallumProxyVisibilityV1(
-                        receiverCameraRelative,
-                        lightCameraRelative,
-                        lightStableId,
-                        proxyFailOpen)) {
                     return vec3(0.0);
                 }
                 vec3 lightToReceiver = receiverWorldRelative - lightWorldRelative;
@@ -1824,6 +1890,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         metallumLighting.gridAndLightCount.w,
                         metallumLighting.capacitiesAndFlags.y);
                 if (activeLightCount == 0u) {
+                    if (metallumVoxelShadow.worldAndFlags.w == 1u) {
+                        return metallumVoxelShadow.proxyAndFrame.x > 0u
+                                ? vec3(0.0, 0.5, 0.5)
+                                : vec3(0.5, 0.0, 0.0);
+                    }
                     return vec3(0.0);
                 }
                 // L6 is an optional local-shadow refinement over an otherwise valid L3 batch.
@@ -1851,6 +1922,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint cluster = metallumClusterIndexV1(viewPosition);
                 uint clusterCapacity = metallumLighting.capacitiesAndFlags.x;
                 if (cluster >= clusterCapacity) {
+                    if (metallumVoxelShadow.worldAndFlags.w == 1u) {
+                        return metallumVoxelShadow.proxyAndFrame.x > 0u
+                                ? vec3(0.0, 0.5, 0.5)
+                                : vec3(0.5, 0.0, 0.0);
+                    }
                     return vec3(0.0);
                 }
 
@@ -1859,6 +1935,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uint indexCapacity = metallumLighting.capacitiesAndFlags.z;
                 if (header.offset > indexCapacity
                         || header.count > indexCapacity - header.offset) {
+                    if (metallumVoxelShadow.worldAndFlags.w == 1u) {
+                        return metallumVoxelShadow.proxyAndFrame.x > 0u
+                                ? vec3(0.0, 0.5, 0.5)
+                                : vec3(0.5, 0.0, 0.0);
+                    }
                     return vec3(0.0);
                 }
 
@@ -1911,6 +1992,7 @@ public final class AdvancedDirectLightingShaderPatcher {
 
                 vec3 direct = vec3(0.0);
                 uint evaluated = 0u;
+                bool hitEntityProxy = false;
                 for (uint candidate = 0u; candidate < countLimit; ++candidate) {
                     uint lightIndex = metallumClusterIndexBuffer.indices[
                             header.offset + candidate];
@@ -1946,30 +2028,52 @@ public final class AdvancedDirectLightingShaderPatcher {
                     uvec4 shadowRef = uvec4(0u);
                     if (localShadowContractValid && !partialReceiverSurface && nDotL > 0.0
                             && any(greaterThan(radiance, vec3(0.0)))) {
-                        shadowRef = metallumVoxelShadowRefBuffer.refs[lightIndex];
-                        uint shadowState = shadowRef.x;
-                        // State zero is an explicit, valid approximation while a resident page
-                        // is unavailable. It never enters the atlas or legacy DDA path.
-                        // Only completed or retained cache pages enter the heavier atlas path.
-                        if (shadowState == 0u) {
-                            visibility = vec3(1.0);
-                        } else if (shadowState == 1u || shadowState == 2u) {
-                            visibility = metallumVoxelVisibilityV1(
-                                    receiverCameraRelative,
-                                    receiverWorldRelative,
-                                    receiverWorldNormal,
-                                    light.positionRadius.xyz,
-                                    radius,
-                                    light.metadata.xy,
-                                    shadowRef);
+                        vec3 lightCameraRelative =
+                                mat3(metallumVoxelShadow.worldFromView) * light.positionRadius.xyz;
+                        bool proxyFailOpen = false;
+#ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
+                        bool entityVisible = metallumProxyVisibilityV1(
+                                receiverCameraRelative,
+                                lightCameraRelative,
+                                light.metadata.xy,
+                                proxyFailOpen);
+#else
+                        bool entityVisible =
+                                metallumVoxelProxyBuffer.proxies[0].minWorldRelative.w != -9999.0;
+#endif
+                        if (!entityVisible) {
+                            hitEntityProxy = true;
+                            visibility = vec3(0.0);
                         } else {
-                            // A descriptor failure must not extinguish its L3 light. The
-                            // producer will repair the page/descriptor on a later submit.
-                            visibility = vec3(1.0);
+                            shadowRef = metallumVoxelShadowRefBuffer.refs[lightIndex];
+                            uint shadowState = shadowRef.x;
+                            if (shadowState == 0u) {
+                                visibility = vec3(1.0);
+                            } else if (shadowState == 1u || shadowState == 2u) {
+                                visibility = metallumVoxelVisibilityV1(
+                                        receiverCameraRelative,
+                                        receiverWorldRelative,
+                                        receiverWorldNormal,
+                                        light.positionRadius.xyz,
+                                        radius,
+                                        light.metadata.xy,
+                                        shadowRef);
+                            } else {
+                                visibility = vec3(1.0);
+                            }
                         }
                     }
                     direct += unshadowedContribution * visibility;
                     evaluated += 1u;
+                }
+                if (metallumVoxelShadow.worldAndFlags.w == 1u) {
+                    if (hitEntityProxy) {
+                        direct += vec3(1.0, 0.0, 1.0);
+                    } else if (metallumVoxelShadow.proxyAndFrame.x > 0u) {
+                        direct += vec3(0.0, 0.5, 0.5);
+                    } else {
+                        direct += vec3(0.5, 0.0, 0.0);
+                    }
                 }
                 return direct;
             }
@@ -2105,6 +2209,22 @@ public final class AdvancedDirectLightingShaderPatcher {
             #endif
                 MetallumGpuLightV1 dominantLight =
                         metallumLightBuffer.lights[dominantLightIndex];
+                vec3 lightCameraRelative =
+                        mat3(metallumVoxelShadow.worldFromView) * dominantLight.positionRadius.xyz;
+                bool proxyFailOpen = false;
+#ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
+                bool entityVisible = metallumProxyVisibilityV1(
+                        receiverCameraRelative,
+                        lightCameraRelative,
+                        dominantLight.metadata.xy,
+                        proxyFailOpen);
+#else
+                bool entityVisible =
+                        metallumVoxelProxyBuffer.proxies[0].minWorldRelative.w != -9999.0;
+#endif
+                if (!entityVisible) {
+                    return vec3(0.0);
+                }
                 uvec4 dominantShadowRef =
                         metallumVoxelShadowRefBuffer.refs[dominantLightIndex];
                 uint dominantShadowState = dominantShadowRef.x;
@@ -2438,7 +2558,8 @@ public final class AdvancedDirectLightingShaderPatcher {
     public static boolean isExternalShadowSampler(final String name) {
         return SHADOW_SAMPLER_0.equals(name)
                 || SHADOW_SAMPLER_1.equals(name)
-                || SHADOW_SAMPLER_2.equals(name);
+                || SHADOW_SAMPLER_2.equals(name)
+                || CLOUD_SAMPLER.equals(name);
     }
 
     public static int externalShadowSamplerSlot(final String name) {
@@ -2451,7 +2572,10 @@ public final class AdvancedDirectLightingShaderPatcher {
         if (SHADOW_SAMPLER_2.equals(name)) {
             return EnvironmentShadowBindingAbi.SHADOW_TEXTURE_2_SLOT;
         }
-        throw new IllegalArgumentException("Not an L4 shadow sampler: " + name);
+        if (CLOUD_SAMPLER.equals(name)) {
+            return CloudShadowBindingAbi.TEXTURE_SLOT;
+        }
+        throw new IllegalArgumentException("Not an L4 shadow or cloud sampler: " + name);
     }
 
     /**
@@ -2825,7 +2949,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             if (AdvancedLightingBindingAbi.ownsFragmentSlot(slot)
                     || slot == EnvironmentShadowBindingAbi.PARAMS_SLOT
                     || VoxelShadowBindingAbi.ownsFragmentSlot(slot)
-                    || EnvironmentShadowBindingAbi.ownsShadowTextureSlot(slot)) {
+                    || EnvironmentShadowBindingAbi.ownsShadowTextureSlot(slot)
+                    || slot == CloudShadowBindingAbi.TEXTURE_SLOT) {
                 return slot;
             }
         }
@@ -2837,6 +2962,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "MetallumGpuLightV1",
                 "MetallumLightingParamsV1",
                 "MetallumEnvironmentShadowV1",
+                "metallumCloudShadow",
+                "metallumCloudTransmittanceV1",
                 "MetallumVoxelVisibilityCacheV1",
                 "MetallumVoxelShadowRefsV1",
                 "MetallumVoxelProxyV1",

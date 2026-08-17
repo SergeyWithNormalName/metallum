@@ -1,6 +1,7 @@
 package com.metallum.client.renderer.temporal;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.lighting.cloud.CloudShadowFrameState;
 
 import java.util.Objects;
 
@@ -13,12 +14,14 @@ public record FrameCapture(
         double farPlane,
         long worldIdentity,
         long dimensionIdentity,
-        EnvironmentDescriptor environment
+        EnvironmentDescriptor environment,
+        CloudShadowFrameState cloudShadow
 ) {
     public FrameCapture {
         Objects.requireNonNull(transforms, "transforms");
         Objects.requireNonNull(cameraPosition, "cameraPosition");
         Objects.requireNonNull(environment, "environment");
+        Objects.requireNonNull(cloudShadow, "cloudShadow");
         if (deltaSeconds < 0.0 || !Double.isFinite(deltaSeconds)) {
             throw new IllegalArgumentException("Frame delta must be non-negative and finite");
         }
@@ -38,6 +41,29 @@ public record FrameCapture(
             final double nearPlane,
             final double farPlane,
             final long worldIdentity,
+            final long dimensionIdentity,
+            final EnvironmentDescriptor environment
+    ) {
+        this(
+                transforms,
+                cameraPosition,
+                deltaSeconds,
+                nearPlane,
+                farPlane,
+                worldIdentity,
+                dimensionIdentity,
+                environment,
+                CloudShadowFrameState.disabled()
+        );
+    }
+
+    public FrameCapture(
+            final FrameState.Transforms transforms,
+            final FrameState.CameraPosition cameraPosition,
+            final double deltaSeconds,
+            final double nearPlane,
+            final double farPlane,
+            final long worldIdentity,
             final long dimensionIdentity
     ) {
         this(
@@ -48,7 +74,8 @@ public record FrameCapture(
                 farPlane,
                 worldIdentity,
                 dimensionIdentity,
-                EnvironmentDescriptor.NONE
+                EnvironmentDescriptor.NONE,
+                CloudShadowFrameState.disabled()
         );
     }
 }

@@ -249,6 +249,22 @@ tasks.register("metalRuntimeUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.metal.render.MetalRuntimeTests")
 }
 
+tasks.register("cloudShadowUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs pure unit tests for CLOUD-1 Vanilla-synchronized Cloud Shadows"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.cloud.CloudShadowTests")
+}
+
+tasks.register("cloudShadowLightingUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs direct celestial lighting composition tests for CLOUD-1 Cloud Shadows"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.cloud.CloudShadowLightingIntegrationTests")
+}
+
 tasks.register("torchEpochTelemetryUnitTest", JavaExec) {
 	group = "verification"
 	description = "Runs dependency-free bounded torch epoch telemetry tests"
@@ -317,6 +333,14 @@ tasks.register("frameGraphValidation", JavaExec) {
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.metal.render.framegraph.FrameGraphTests")
+}
+
+tasks.register("visualStyleUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free visual style data model, profile, migration and runtime tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.style.VisualStyleTests")
 }
 
 tasks.register("rendererArchitectureUnitTest", JavaExec) {
@@ -1193,6 +1217,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("localShadowAtlasUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyBridgeValidation"))
 	dependsOn(tasks.named("metalRuntimeUnitTest"))
+	dependsOn(tasks.named("cloudShadowUnitTest"))
+	dependsOn(tasks.named("cloudShadowLightingUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("l6DynamicShadowTelemetryUnitTest"))
 	dependsOn(tasks.named("benchmarkWindowContractUnitTest"))
@@ -1201,6 +1227,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumRelightPlanUnitTest"))
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
+	dependsOn(tasks.named("visualStyleUnitTest"))
 	dependsOn(tasks.named("rendererArchitectureUnitTest"))
 	dependsOn(tasks.named("sodiumConfigUnitTest"))
 	dependsOn(tasks.named("temporalContractValidation"))

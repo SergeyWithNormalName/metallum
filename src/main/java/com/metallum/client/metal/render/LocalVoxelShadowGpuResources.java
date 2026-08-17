@@ -6,6 +6,7 @@ import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.EntityShadowProxy;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.LocalShadowSourceClass;
 import com.metallum.client.lighting.ShadowEmitterFootprint;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
@@ -381,18 +382,61 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         zero(descriptors);
 
         CameraParts camera = cameraParts(frame.currentCameraPosition());
-        packCommonParams(params, frame, camera, lights.size());
         this.boundVoxelResources = voxelResources;
-        boolean active = voxelResources != null && snapshot != null
+
+        LightWorldToken world = lightSnapshot == null ? null : lightSnapshot.world();
+        boolean entityProxyActive = world != null
+                && proxySnapshot != null
+                && world.equals(proxySnapshot.world());
+
+        boolean voxelActive = voxelResources != null && snapshot != null
                 && voxelResources.matches(
                 this.generation, voxelResources.budget(), snapshot
         );
-        int proxyCount = 0;
+
+        int atlasHitCapacity = Math.toIntExact(
+                this.budget.totalVisibilityAtlasBytes()
+                        / LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
+        );
+
+        int proxyCount = packFrameParameters(
+                params,
+                proxies,
+                descriptors,
+                frame,
+                camera,
+                world,
+                proxySnapshot,
+                voxelActive,
+                snapshot,
+                lights.size(),
+                atlasHitCapacity,
+                this.budget.maxEntityProxies(),
+                this.budget.maxSteps(),
+                Boolean.getBoolean("metallum.shadow.debug.visualize")
+        );
+
+        if (Boolean.getBoolean("metallum.shadow.debug") && (frame.frameId() % 60 == 0 || frame.frameId() < 20)) {
+            String mismatch = !voxelActive
+                    ? (voxelResources == null ? "voxelResources == null" : (snapshot == null ? "snapshot == null" : voxelResources.mismatchReason(this.generation, voxelResources.budget(), snapshot)))
+                    : "none";
+            Metallum.LOGGER.info(
+                    "[L6_ENCODE_TELEMETRY] frameId={}, slot={}, voxelRes={}, voxelSnap={}, voxelActive={}, mismatchReason='{}', proxySnap={}, proxySnapCount={}, entityProxyActive={}, proxyCount={}",
+                    frame.frameId(), slot,
+                    voxelResources != null, snapshot != null, voxelActive,
+                    mismatch,
+                    proxySnapshot != null,
+                    proxySnapshot != null ? proxySnapshot.proxies().size() : 0,
+                    entityProxyActive,
+                    proxyCount
+            );
+        }
+
         VoxelShadowCacheMirror.Snapshot mirror = null;
         List<FrameLight> frameLights = new ArrayList<>(lights.size());
         DynamicFramePlan dynamicPlan = DynamicFramePlan.empty();
         try {
-            if (active) {
+            if (voxelActive) {
                 boolean staticOnly = DynamicShadowAdmission.isStaticOnly(lights);
                 mirror = VoxelShadowCacheMirror.global().snapshot(snapshot);
                 if (mirror == null) {
@@ -400,10 +444,6 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 }
                 VoxelClipmapSnapshot acceptedSnapshot = mirror == null
                         ? snapshot : mirror.clipmap();
-                packLevels(params, acceptedSnapshot);
-                proxyCount = packProxies(
-                        proxies, proxySnapshot, frame.currentCameraPosition()
-                );
                 frameLights = describeFrameLights(
                         lights, acceptedSnapshot, mirror, frame.currentCameraPosition()
                 );
@@ -428,26 +468,9 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                         descriptors, frameLights, mirror, submitIndex,
                         dynamicPlan, false
                 );
-                putInt4(params, VoxelShadowBindingAbi.CAPS_OFFSET,
-                        VoxelShadowBindingAbi.VERSION,
-                        snapshot.levels().size(),
-                        this.budget.maxSteps(),
-                        lights.size());
-                putInt4(params, VoxelShadowBindingAbi.PROXY_AND_FRAME_OFFSET,
-                        proxyCount, this.budget.maxEntityProxies(),
-                        (int) frame.frameId(), (int) (frame.frameId() >>> 32));
-                putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET,
-                        frame.lightingGenerationId());
-                putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET + 8,
-                        snapshot.clipmapGeneration());
-                putLongParts(params, VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET,
-                        snapshot.world().generation());
-                params.putInt(VoxelShadowBindingAbi.ACTIVE_OFFSET, 1);
-            } else {
-                packFailClosedDescriptors(descriptors, lights.size());
             }
         } catch (RuntimeException failure) {
-            active = false;
+            voxelActive = false;
             proxyCount = 0;
             frameLights = List.of();
             mirror = null;
@@ -455,7 +478,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             zero(params);
             zero(proxies);
             zero(descriptors);
-            packCommonParams(params, frame, camera, lights.size());
+            packCommonParams(
+                    params, frame, camera, lights.size(),
+                    atlasHitCapacity, this.budget.maxSteps(), this.budget.maxEntityProxies()
+            );
             packFailClosedDescriptors(descriptors, lights.size());
             Metallum.LOGGER.warn("L6 resident-atlas frame failed closed", failure);
         }
@@ -465,10 +491,10 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
             throw new IllegalStateException("L6 descriptor coverage lost an L3 upload light");
         }
         this.frameContext = new FrameContext(
-                submitIndex, slot, List.copyOf(frameLights), mirror, active, dynamicPlan
+                submitIndex, slot, List.copyOf(frameLights), mirror, voxelActive, dynamicPlan
         );
         this.prepared = preparedFrame(
-                active, proxyCount, submitIndex, coverage, frameLights, 0, 0L,
+                voxelActive, proxyCount, submitIndex, coverage, frameLights, 0, 0L,
                 dynamicPlan, false, false
         );
         return this.prepared;
@@ -2555,18 +2581,17 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
-    private void packCommonParams(
+    static void packCommonParams(
             final ByteBuffer params,
             final FrameState frame,
             final CameraParts camera,
-            final int lightCount
+            final int lightCount,
+            final int atlasHitCapacity,
+            final int maxSteps,
+            final int maxEntityProxies
     ) {
         putMatrix(params, VoxelShadowBindingAbi.WORLD_FROM_VIEW_MATRIX_OFFSET,
                 frame.currentTransforms().unjitteredCamera());
-        int atlasHitCapacity = Math.toIntExact(
-                this.budget.totalVisibilityAtlasBytes()
-                        / LocalVoxelShadowAtlasLayout.HIT_STRIDE_BYTES
-        );
         putInt4(params, VoxelShadowBindingAbi.CAMERA_BLOCK_AND_FLAGS_OFFSET,
                 camera.blockX(), camera.blockY(), camera.blockZ(), atlasHitCapacity);
         putFloat4(params,
@@ -2574,10 +2599,13 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 camera.fractionX(), camera.fractionY(), camera.fractionZ(),
                 MINIMUM_TRANSMITTANCE);
         putInt4(params, VoxelShadowBindingAbi.CAPS_OFFSET,
-                VoxelShadowBindingAbi.VERSION, 0, this.budget.maxSteps(), lightCount);
+                VoxelShadowBindingAbi.VERSION, 0, maxSteps, lightCount);
         putInt4(params, VoxelShadowBindingAbi.PROXY_AND_FRAME_OFFSET,
-                0, this.budget.maxEntityProxies(),
+                0, maxEntityProxies,
                 (int) frame.frameId(), (int) (frame.frameId() >>> 32));
+        putInt4(params, VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET,
+                0, 0, 0,
+                Boolean.getBoolean("metallum.shadow.debug.visualize") ? 1 : 0);
     }
 
     private static void packLevels(
@@ -2608,16 +2636,91 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
-    private int packProxies(
+    static int packFrameParameters(
+            final ByteBuffer params,
+            final ByteBuffer proxies,
+            final ByteBuffer descriptors,
+            final FrameState frame,
+            final CameraParts camera,
+            final LightWorldToken world,
+            final EntityShadowProxySnapshot proxySnapshot,
+            final boolean voxelActive,
+            final VoxelClipmapSnapshot snapshot,
+            final int lightCount,
+            final int atlasHitCapacity,
+            final int maxEntityProxies,
+            final int maxSteps,
+            final boolean debugVisualize
+    ) {
+        packCommonParams(params, frame, camera, lightCount, atlasHitCapacity, maxSteps, maxEntityProxies);
+        boolean entityProxyActive = world != null
+                && proxySnapshot != null
+                && world.equals(proxySnapshot.world());
+        int proxyCount = 0;
+        if (entityProxyActive) {
+            proxyCount = packProxies(
+                    proxies, proxySnapshot, frame.currentCameraPosition(), maxEntityProxies
+            );
+        }
+        if (voxelActive && snapshot != null) {
+            VoxelShadowCacheMirror.Snapshot mirror = VoxelShadowCacheMirror.global().snapshot(snapshot);
+            if (mirror == null) {
+                mirror = VoxelShadowCacheMirror.global().latestAcceptedSnapshot(snapshot);
+            }
+            VoxelClipmapSnapshot acceptedSnapshot = mirror == null
+                    ? snapshot : mirror.clipmap();
+            packLevels(params, acceptedSnapshot);
+            putInt4(params, VoxelShadowBindingAbi.CAPS_OFFSET,
+                    VoxelShadowBindingAbi.VERSION,
+                    snapshot.levels().size(),
+                    maxSteps,
+                    lightCount);
+            putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET,
+                    frame.lightingGenerationId());
+            putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET + 8,
+                    snapshot.clipmapGeneration());
+            putLongParts(params, VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET,
+                    snapshot.world().generation());
+            params.putInt(VoxelShadowBindingAbi.ACTIVE_OFFSET, 1);
+        } else {
+            if (descriptors != null) {
+                packFailClosedDescriptors(descriptors, lightCount);
+            }
+            if (world != null) {
+                putInt4(params, VoxelShadowBindingAbi.CAPS_OFFSET,
+                        VoxelShadowBindingAbi.VERSION,
+                        snapshot != null && !snapshot.levels().isEmpty() ? snapshot.levels().size() : 1,
+                        maxSteps,
+                        lightCount);
+                putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET,
+                        frame.lightingGenerationId());
+                putLongParts(params, VoxelShadowBindingAbi.CONTRACT_OFFSET + 8,
+                        snapshot != null ? snapshot.clipmapGeneration() : 0L);
+                putLongParts(params, VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET,
+                        world.generation());
+                params.putInt(VoxelShadowBindingAbi.ACTIVE_OFFSET, 1);
+            }
+        }
+        putInt4(params, VoxelShadowBindingAbi.PROXY_AND_FRAME_OFFSET,
+                proxyCount, maxEntityProxies,
+                (int) frame.frameId(), (int) (frame.frameId() >>> 32));
+        if (debugVisualize) {
+            params.putInt(VoxelShadowBindingAbi.WORLD_RESERVED_OFFSET, 1);
+        }
+        return proxyCount;
+    }
+
+    static int packProxies(
             final ByteBuffer proxies,
             final EntityShadowProxySnapshot snapshot,
-            final FrameState.CameraPosition camera
+            final FrameState.CameraPosition camera,
+            final int maxEntityProxies
     ) {
         if (snapshot == null) {
             return 0;
         }
         int count = Math.min(
-                snapshot.proxies().size(), this.budget.maxEntityProxies()
+                snapshot.proxies().size(), maxEntityProxies
         );
         for (int index = 0; index < count; index++) {
             EntityShadowProxy proxy = snapshot.proxies().get(index);
@@ -2632,6 +2735,20 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                     proxy.maxRelativeY(camera.y()),
                     proxy.maxRelativeZ(camera.z()),
                     Float.intBitsToFloat((int) (proxy.stableId() >>> 32)));
+        }
+        if (Boolean.getBoolean("metallum.shadow.debug") && count > 0) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("L6 packProxies: count=").append(count).append("/").append(snapshot.proxies().size())
+                    .append(", cam=(").append(camera.x()).append(",").append(camera.y()).append(",").append(camera.z()).append(")\n");
+            for (int i = 0; i < Math.min(3, count); i++) {
+                EntityShadowProxy p = snapshot.proxies().get(i);
+                sb.append("  [proxy #").append(i).append("] stableId=").append(p.stableId())
+                        .append(", center=(").append(p.centerX()).append(",").append(p.centerY()).append(",").append(p.centerZ()).append(")")
+                        .append(", halfExt=(").append(p.halfExtentX()).append(",").append(p.halfExtentY()).append(",").append(p.halfExtentZ()).append(")")
+                        .append(", minRel=(").append(p.minRelativeX(camera.x())).append(",").append(p.minRelativeY(camera.y())).append(",").append(p.minRelativeZ(camera.z())).append(")")
+                        .append(", maxRel=(").append(p.maxRelativeX(camera.x())).append(",").append(p.maxRelativeY(camera.y())).append(",").append(p.maxRelativeZ(camera.z())).append(")\n");
+            }
+            Metallum.LOGGER.info("{}", sb.toString().trim());
         }
         return count;
     }
@@ -2686,7 +2803,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
-    private static CameraParts cameraParts(final FrameState.CameraPosition camera) {
+    static CameraParts cameraParts(final FrameState.CameraPosition camera) {
         double blockX = Math.floor(camera.x());
         double blockY = Math.floor(camera.y());
         double blockZ = Math.floor(camera.z());
@@ -3234,7 +3351,7 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
         }
     }
 
-    private record CameraParts(
+    record CameraParts(
             int blockX,
             int blockY,
             int blockZ,

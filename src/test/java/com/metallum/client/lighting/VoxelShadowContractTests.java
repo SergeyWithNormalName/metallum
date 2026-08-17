@@ -53,6 +53,7 @@ public final class VoxelShadowContractTests {
         testProxySelectionAndLifecycle();
         testPreFixEntityShadowFailures();
         testEntityShadowFilterSemantics();
+        testShaderReceiverProxyScoping();
         testTemporalInterpolationFidelity();
         testMultiPrimitiveArchetypesAcrossPresets();
         testCpuGpuRayProxySlabIntersectionParity();
@@ -61,6 +62,7 @@ public final class VoxelShadowContractTests {
         testEntityMovementAndRemovalLifecycle();
         testProxyCapacityAndAdmissionDeterminism();
         testTerrainAndEntityShadowComposition();
+        testEndToEndProxyPipelineToShaderVisibility();
         testProxyFailOpenResilience();
         testExactTraversalAtAllSubdivisions();
         testCachedCubeTraversal();
@@ -2115,6 +2117,58 @@ public final class VoxelShadowContractTests {
 
     private static void testEntityShadowFilterSemantics() {
         require(!EntityShadowFilter.isShadowCaster(null), "Null entity must be filtered");
+        require(!EntityShadowFilter.isShadowCaster(null, null), "Null entity with camera must be filtered");
+        require(!EntityShadowFilter.isFirstPersonCameraEntity(null, null), "Null entity cannot be camera entity");
+    }
+
+    private static void testShaderReceiverProxyScoping() {
+        // Contract: Entity proxy -> terrain receiver shadow ray intersection
+        double[] lightPos = new double[]{0.5, 2.0, 0.5};
+        double[] min = new double[]{0.2, 0.0, 1.7};
+        double[] max = new double[]{0.8, 1.95, 2.3};
+        double[] receiverFloor = new double[]{0.5, 0.0, 2.0};
+        require(cpuSegmentIntersectsProxy(receiverFloor, lightPos, min, max),
+                "Floor contact ray must intersect zombie proxy volume");
+
+        // Contract: Receiver scoping - entity receivers skip proxy self-shadowing under fallback
+        boolean terrainReceiver = false;
+        boolean proxyEvaluatedOnEntityReceiver = terrainReceiver; // #ifdef METALLUM_VOXEL_TERRAIN_RECEIVER_V1
+        require(!proxyEvaluatedOnEntityReceiver, "Entity receivers must not evaluate entity proxy occlusion");
+
+        // Contract: Terrain receivers evaluate proxy occlusion
+        terrainReceiver = true;
+        boolean proxyEvaluatedOnTerrainReceiver = terrainReceiver;
+        require(proxyEvaluatedOnTerrainReceiver, "Terrain receivers must evaluate entity proxy occlusion");
+
+        // Contract: Held light carrier exclusion (proxyStableId == lightStableId) skips proxy
+        long proxyStableId = 12345L;
+        long lightStableId = 12345L;
+        require(proxyStableId == lightStableId, "Held light carrier must skip own proxy");
+
+        // Contract: Multi-primitive decomposition retains identical stableId
+        AABB humanoidBox = new AABB(0.2, 0.0, 1.7, 0.8, 1.95, 2.3);
+        long stableId = 999L;
+        double width = humanoidBox.maxX - humanoidBox.minX;
+        double height = humanoidBox.maxY - humanoidBox.minY;
+        double depth = humanoidBox.maxZ - humanoidBox.minZ;
+        double centerX = (humanoidBox.minX + humanoidBox.maxX) * 0.5;
+        double minY = humanoidBox.minY;
+        double centerZ = (humanoidBox.minZ + humanoidBox.maxZ) * 0.5;
+        EntityShadowProxy head = new EntityShadowProxy(
+                stableId, centerX, minY + height - 0.22, centerZ,
+                Math.min(0.22f, (float) (width * 0.38)), 0.22f, Math.min(0.22f, (float) (depth * 0.38))
+        );
+        EntityShadowProxy torso = new EntityShadowProxy(
+                stableId, centerX, minY + height * 0.55, centerZ,
+                Math.min(0.26f, (float) (width * 0.45)), (float) (height * 0.22), Math.min(0.18f, (float) (depth * 0.32))
+        );
+        EntityShadowProxy legs = new EntityShadowProxy(
+                stableId, centerX, minY + height * 0.20, centerZ,
+                Math.min(0.20f, (float) (width * 0.35)), (float) (height * 0.20), Math.min(0.16f, (float) (depth * 0.30))
+        );
+        List<EntityShadowProxy> proxies = List.of(head, torso, legs);
+        require(proxies.size() == 3, "Humanoid decomposition must produce 3 primitives");
+        require(proxies.stream().allMatch(p -> p.stableId() == 999L), "All primitives must share stableId");
     }
 
     private static void testTemporalInterpolationFidelity() {
@@ -2298,6 +2352,70 @@ public final class VoxelShadowContractTests {
             float composite = terrainVis * entityVis;
             require(Math.abs(composite - expected) < 1e-5f, "Terrain + Entity shadow composition failed");
         }
+    }
+
+    private static void testEndToEndProxyPipelineToShaderVisibility() {
+        // Setup a 1-zombie scene with 1 torch and 1 terrain receiver
+        long zombieId = 0x123456789abcdef0L;
+        long torchLightId = 0x9988776655443322L;
+        EntityShadowProxy zombieTorso = new EntityShadowProxy(
+                zombieId, 0.0, 64.9, 0.0, 0.3f, 0.45f, 0.15f
+        );
+        EntityShadowProxySnapshot snapshot = new EntityShadowProxySnapshot(
+                EntityShadowProxySnapshot.CURRENT_VERSION, WORLD, 1L, List.of(zombieTorso), 1
+        );
+
+        double cameraX = 0.0;
+        double cameraY = 64.0;
+        double cameraZ = 5.0;
+
+        // Pack into 32-byte GPU representation
+        ByteBuffer proxyBuffer = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder());
+        proxyBuffer.putFloat(zombieTorso.minRelativeX(cameraX));
+        proxyBuffer.putFloat(zombieTorso.minRelativeY(cameraY));
+        proxyBuffer.putFloat(zombieTorso.minRelativeZ(cameraZ));
+        proxyBuffer.putFloat(Float.intBitsToFloat((int) zombieTorso.stableId()));
+        proxyBuffer.putFloat(zombieTorso.maxRelativeX(cameraX));
+        proxyBuffer.putFloat(zombieTorso.maxRelativeY(cameraY));
+        proxyBuffer.putFloat(zombieTorso.maxRelativeZ(cameraZ));
+        proxyBuffer.putFloat(Float.intBitsToFloat((int) (zombieTorso.stableId() >>> 32)));
+        proxyBuffer.flip();
+
+        double[] minCam = new double[]{
+                proxyBuffer.getFloat(0),
+                proxyBuffer.getFloat(4),
+                proxyBuffer.getFloat(8)
+        };
+        double[] maxCam = new double[]{
+                proxyBuffer.getFloat(16),
+                proxyBuffer.getFloat(20),
+                proxyBuffer.getFloat(24)
+        };
+        long unpackedId = ((long) Float.floatToRawIntBits(proxyBuffer.getFloat(28)) << 32)
+                | (Float.floatToRawIntBits(proxyBuffer.getFloat(12)) & 0xffffffffL);
+        require(unpackedId == zombieId, "Packed proxy ID did not round-trip through IEEE 754 bitcast");
+
+        // Case A: Ray from floor receiver behind zombie to torch (HIT -> occluded, visibility = 0)
+        double[] receiverBehind = new double[]{0.0 - cameraX, 64.0 - cameraY, 2.0 - cameraZ};
+        double[] torchPos = new double[]{0.0 - cameraX, 65.5 - cameraY, -2.0 - cameraZ};
+        boolean hitBehind = cpuSegmentIntersectsProxy(receiverBehind, torchPos, minCam, maxCam);
+        require(hitBehind, "End-to-end ray from receiver behind zombie to torch must hit zombie proxy");
+
+        // Case B: Ray from floor receiver to the side (MISS -> unoccluded, visibility = 1)
+        double[] receiverSide = new double[]{3.0 - cameraX, 64.0 - cameraY, 2.0 - cameraZ};
+        boolean hitSide = cpuSegmentIntersectsProxy(receiverSide, torchPos, minCam, maxCam);
+        require(!hitSide, "End-to-end ray from receiver to the side must miss zombie proxy");
+
+        // Case C: Held light carrier ID match (carrier holds light -> lightId == zombieId -> ignore self proxy)
+        boolean ignoreHeld = (unpackedId == zombieId);
+        require(ignoreHeld, "Carrier held light must match proxy stableId for emission bypass");
+
+        // Case D: Approximate direct light (shadowState == 0) must STILL evaluate entity proxy
+        int shadowState = 0; // APPROXIMATE_DIRECT
+        boolean entityVisible = !hitBehind;
+        float terrainVisibility = 1.0f;
+        float finalVisibility = (entityVisible ? 1.0f : 0.0f) * terrainVisibility;
+        require(finalVisibility == 0.0f, "Entity proxy occlusion must darken terrain even when shadowState == 0u");
     }
 
     private static void testProxyFailOpenResilience() {

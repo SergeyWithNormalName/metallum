@@ -14,11 +14,8 @@
   "license": "MIT",
   "accessWidener": "metallum.accesswidener",
   "icon": "assets/metallum/icon.png",
-  "environment": "*",
+  "environment": "client",
   "entrypoints": {
-    "main": [
-      "com.metallum.Metallum"
-    ],
     "sodium:config_api_user": [
       "com.metallum.client.gui.MetallumSodiumConfig"
     ]

@@ -37,12 +37,18 @@ public final class MetallumSodiumConfigTests {
         OptionPage page = (OptionPage) options.pages().getFirst();
         require(!page.groups().isEmpty(), "Metallum Sodium page has no option groups");
         OptionGroup lighting = page.groups().getFirst();
-        require(lighting.options().size() == 2,
-                "Metallum Lighting group must expose the Advanced request and the Preset selector");
+        require(lighting.options().size() == 3,
+                "Metallum Lighting group must expose Visual Style, Advanced Lighting, and Preset selectors");
 
-        Option option = lighting.options().getFirst();
         Field idField = Option.class.getDeclaredField("id");
         idField.setAccessible(true);
+        Option visualStyle = findOption(page, idField, "visual_style");
+        require(visualStyle instanceof EnumOption,
+                "Metallum visual_style Sodium option is missing or has the wrong type");
+        require(visualStyle.getFlags() == null || !visualStyle.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum visual_style option must NOT require a game restart");
+
+        Option option = findOption(page, idField, "improved_lighting");
         Identifier id = (Identifier) idField.get(option);
         require(option instanceof BooleanOption
                         && id.equals(Identifier.fromNamespaceAndPath(

@@ -133,7 +133,7 @@ def source_digest(root: Path) -> str:
     raw_paths = sorted(set(filter(None, result.stdout.split(b"\0"))))
     hasher = hashlib.sha256(SOURCE_DIGEST_VERSION)
     for raw_path in raw_paths:
-        if raw_path == b"net" or raw_path.startswith(b"net/"):
+        if raw_path == b"net" or raw_path.startswith(b"net/") or raw_path.startswith(b".codex-worktrees/"):
             continue
         relative = Path(os.fsdecode(raw_path))
         if relative.is_absolute() or ".." in relative.parts:
@@ -1191,12 +1191,16 @@ def route_values(path: Path) -> list[str]:
     if clock.get("paused") is not True:
         raise FixtureError("static benchmark route requires a paused clock")
     weather = _object(route.get("weather"), "weather")
-    _exact_keys(weather, "weather", {"mode", "frozen", "clear_duration_ticks"})
-    if weather.get("mode") != "clear" or weather.get("frozen") is not True:
-        raise FixtureError("static benchmark route requires clear frozen weather")
+    weather_mode = _string(weather.get("mode"), "weather.mode")
+    if weather_mode not in ("clear", "rain"):
+        raise FixtureError("route weather.mode must be 'clear' or 'rain'")
+    if weather.get("frozen") is not True:
+        raise FixtureError("static benchmark route requires frozen weather")
+    duration_key = "rain_duration_ticks" if "rain_duration_ticks" in weather else "clear_duration_ticks"
+    _exact_keys(weather, "weather", {"mode", "frozen", duration_key})
     clear_weather_ticks = _integer(
-        weather.get("clear_duration_ticks"),
-        "weather.clear_duration_ticks",
+        weather.get(duration_key),
+        f"weather.{duration_key}",
         1,
     )
     simulation = _object(route.get("simulation"), "simulation")

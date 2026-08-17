@@ -8313,7 +8313,7 @@ private enum MetallumFrameStateAbiV3 {
         | temporalBit
         | interpolationBit
         | temporalWarmStandbyBit
-    static let knownResetBits: UInt64 = 0x1fff
+    static let knownResetBits: UInt64 = 0x3fff
 }
 
 struct MetallumRendererFrameStateSnapshot {

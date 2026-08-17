@@ -230,6 +230,30 @@ public final class FrameSynthesisTests {
                             FrameSynthesisContract.RejectionReason.HISTORY_DISCONTINUITY),
                     discontinuity + " did not invalidate synthesis history");
         }
+
+        FrameState styleResetState = new FrameState(
+                valid.current().state().contract(),
+                2L, 1L, 1L, 1L, 1L, 1L,
+                RenderContractMode.LEGACY, LightingModel.VANILLA, DisplayOutputMode.HDR,
+                LightingPreset.BALANCED, com.metallum.client.renderer.RendererFeatureMask.NONE,
+                MetalExecutorKind.METAL3, 1, FrameState.ResourceBytes.NONE, FrameState.AdvancedLightingWork.NONE,
+                FrameState.Transforms.identity(), FrameState.Transforms.identity(),
+                RENDER_EXTENT, DISPLAY_EXTENT, 1.0, 1.0, FrameState.JitterOffset.ZERO,
+                Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)
+        );
+        FrameSynthesisContract.RenderedFrame styleResetFrame = new FrameSynthesisContract.RenderedFrame(
+                styleResetState, 1L, valid.current().worldColor(),
+                valid.current().depth(), valid.current().motion(),
+                valid.current().reactiveMask(), valid.current().sdrUi(),
+                false, Set.of()
+        );
+        FrameSynthesisContract.Request styleResetRequest = copy(
+                valid, styleResetFrame, valid.previous(),
+                valid.generatedPresentation(), valid.drawableOwnership(), valid.inFlightOwnership()
+        );
+        require(FrameSynthesisContract.evaluate(styleResetRequest).rejectionReasons().contains(
+                        FrameSynthesisContract.RejectionReason.HISTORY_DISCONTINUITY),
+                "VISUAL_STYLE_CHANGE history reset reason did not invalidate synthesis history");
     }
 
     private static void testGenerationTransitionsFailClosed() {

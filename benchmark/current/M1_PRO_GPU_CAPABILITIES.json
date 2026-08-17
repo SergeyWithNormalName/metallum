@@ -1,0 +1,41 @@
+{
+  "counter_sampling_boundaries" : {
+    "blit_boundary" : "UNAVAILABLE",
+    "dispatch_boundary" : "UNAVAILABLE",
+    "draw_boundary" : "UNAVAILABLE",
+    "stage_boundary" : "RUNTIME_CONFIRMED"
+  },
+  "counter_sets" : [
+    {
+      "counter_names" : [
+        "GPUTimestamp"
+      ],
+      "name" : "timestamp"
+    }
+  ],
+  "device_name" : "Apple M1 Pro",
+  "feature_classifications" : {
+    "dynamic_caching" : "UNAVAILABLE",
+    "hardware_ray_tracing" : "UNAVAILABLE",
+    "mesh_shaders_family9" : "UNAVAILABLE",
+    "metal3_architecture" : "RUNTIME_CONFIRMED",
+    "metal4_api_availability" : "DOCUMENTATION_CONFIRMED",
+    "statistic_counters" : "UNAVAILABLE",
+    "timestamp_stage_sampling" : "RUNTIME_CONFIRMED",
+    "xcode_shader_cost_graph" : "UNAVAILABLE"
+  },
+  "is_headless" : false,
+  "is_low_power" : false,
+  "max_buffer_length_bytes" : 9534832640,
+  "recommended_max_working_set_bytes" : 12713115648,
+  "registry_id" : 4294969879,
+  "schema_version" : 1,
+  "supported_gpu_families" : {
+    "apple7" : "RUNTIME_CONFIRMED",
+    "apple8" : "UNAVAILABLE",
+    "apple9" : "UNAVAILABLE",
+    "metal3" : "RUNTIME_CONFIRMED",
+    "metal4" : "DOCUMENTATION_CONFIRMED"
+  },
+  "timestamp_iso8601" : "2026-08-12T06:11:29Z"
+}

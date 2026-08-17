@@ -75,6 +75,18 @@ public final class TemporalContractTests {
         require(world.historyResetReasons().equals(Set.of(FrameState.HistoryResetReason.WORLD_LOAD_UNLOAD)),
                 "world transition reset mismatch");
         require(world.historyGeneration() == 5L, "history generation did not advance once per reset frame");
+
+        TemporalResetEvents.signal(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE);
+        FrameState styleChanged = tracker.publish(
+                state(12L, 2L, 3L, 1600, 900, Matrix4.identity()),
+                TemporalResetEvents.consume()
+        );
+        require(styleChanged.historyResetReasons().equals(Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)),
+                "visual style change reset mismatch");
+        require(TemporalResetEvents.consume().isEmpty(), "visual style change event was not atomically consumed");
+        require(tracker.publish(state(13L, 2L, 3L, 1600, 900, Matrix4.identity()), Set.of())
+                        .historyResetReasons().isEmpty(),
+                "visual style reset leaked into the next frame");
     }
 
     private static void testDeterministicDisabledJitter() {

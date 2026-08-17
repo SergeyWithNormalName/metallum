@@ -1,0 +1,93 @@
+{
+  "route": "hdrtest-cave-v1",
+  "settings": "native-hdr-fancy-v1",
+  "preset": "balanced",
+  "gpu": "Apple M1 Pro",
+  "modes": {
+    "FULL_ADVANCED": {
+      "ablation_mode": "FULL_ADVANCED",
+      "advanced_shader_variant": "CELESTIAL_FULL",
+      "resolved_lighting_model": "ADVANCED",
+      "clustered_lighting_active": true,
+      "voxel_clipmaps_active": true,
+      "fps_elapsed": 31.41,
+      "gpu_p95_ms": 36.51,
+      "glsl_patcher_defines": {
+        "METALLUM_ABLATE_L3_LOCAL_LIGHTS": 0,
+        "METALLUM_ABLATE_L4_SUN_SHADOWS": 0,
+        "METALLUM_ABLATE_L6_VOXEL_SHADOWS": 0,
+        "METALLUM_ABLATE_SURFACE_PBR": 0
+      },
+      "hot_shaders": {
+        "sodium_solid_terrain_fragment": {
+          "glsl_source_hash": "c3ae4133676c774703dee41e7881829bcbf7b337173238fe8a7de95e55f887c8",
+          "post_patcher_glsl_hash": "95a1288c1b3f07a213e84c478a2e1e07b81f1816f1947e4b971a81bc7e163b92",
+          "flavor": "METALLUM_ADVANCED",
+          "l4_samplers_present": true
+        }
+      }
+    },
+    "DIAGNOSTIC_NO_L4_RECEIVER_BUGGED": {
+      "ablation_mode": "NO_L4_RECEIVER",
+      "advanced_shader_variant": "CELESTIAL_FULL",
+      "resolved_lighting_model": "VANILLA",
+      "clustered_lighting_active": false,
+      "voxel_clipmaps_active": false,
+      "fps_elapsed": 157.80,
+      "gpu_p95_ms": 4.50,
+      "failure_cause": "MetalCrossShaderCompiler.validateAdvancedLightingBindings preflight exception on minecraft:pipeline/armor_translucent (expected 0 shadow slots for METALLUM_ADVANCED, found 13)",
+      "glsl_patcher_defines": {
+        "METALLUM_ABLATE_L3_LOCAL_LIGHTS": 0,
+        "METALLUM_ABLATE_L4_SUN_SHADOWS": 1,
+        "METALLUM_ABLATE_L6_VOXEL_SHADOWS": 0,
+        "METALLUM_ABLATE_SURFACE_PBR": 0
+      }
+    },
+    "DIAGNOSTIC_NO_L4_RECEIVER_FIXED": {
+      "ablation_mode": "NO_L4_RECEIVER",
+      "advanced_shader_variant": "CELESTIAL_FULL",
+      "resolved_lighting_model": "ADVANCED",
+      "clustered_lighting_active": true,
+      "voxel_clipmaps_active": true,
+      "fps_elapsed": 31.52,
+      "gpu_p95_ms": 35.94,
+      "glsl_patcher_defines": {
+        "METALLUM_ABLATE_L3_LOCAL_LIGHTS": 0,
+        "METALLUM_ABLATE_L4_SUN_SHADOWS": 1,
+        "METALLUM_ABLATE_L6_VOXEL_SHADOWS": 0,
+        "METALLUM_ABLATE_SURFACE_PBR": 0
+      },
+      "hot_shaders": {
+        "sodium_solid_terrain_fragment": {
+          "glsl_source_hash": "c3ae4133676c774703dee41e7881829bcbf7b337173238fe8a7de95e55f887c8",
+          "post_patcher_glsl_hash": "e5c6a1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+          "flavor": "METALLUM_ADVANCED",
+          "l4_samplers_present": false
+        }
+      }
+    },
+    "PRODUCTION_NON_CELESTIAL_NO_L4": {
+      "ablation_mode": "FULL_ADVANCED",
+      "advanced_shader_variant": "NON_CELESTIAL_NO_L4",
+      "resolved_lighting_model": "ADVANCED",
+      "clustered_lighting_active": true,
+      "voxel_clipmaps_active": true,
+      "fps_elapsed": 31.93,
+      "gpu_p95_ms": 35.06,
+      "glsl_patcher_defines": {
+        "METALLUM_ABLATE_L3_LOCAL_LIGHTS": 0,
+        "METALLUM_ABLATE_L4_SUN_SHADOWS": 1,
+        "METALLUM_ABLATE_L6_VOXEL_SHADOWS": 0,
+        "METALLUM_ABLATE_SURFACE_PBR": 0
+      },
+      "hot_shaders": {
+        "sodium_solid_terrain_fragment": {
+          "glsl_source_hash": "c3ae4133676c774703dee41e7881829bcbf7b337173238fe8a7de95e55f887c8",
+          "post_patcher_glsl_hash": "e5c6a1b2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0",
+          "flavor": "METALLUM_ADVANCED_NON_CELESTIAL",
+          "l4_samplers_present": false
+        }
+      }
+    }
+  }
+}

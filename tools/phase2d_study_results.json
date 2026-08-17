@@ -1,0 +1,62 @@
+{
+  "phase2d-full": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T151717Z-gda7236c7d0ad-dirty-phase2d-full-off.raw.jsonl",
+    "filename": "20260807T151717Z-gda7236c7d0ad-dirty-phase2d-full-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_FULL",
+    "fps": 16.62018117405378,
+    "gpu_p50": 61.960500199347734,
+    "gpu_p95": 63.116125063970685,
+    "gpu_p99": 63.44766682013869,
+    "cpu_p95": 16.2975,
+    "light_count": 2048,
+    "requested_indices": 354498,
+    "accepted_indices": 354498,
+    "occ_p95": 96,
+    "occ_max": 256
+  },
+  "phase2d-no-lava": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T152322Z-gda7236c7d0ad-dirty-phase2d-no-lava-off.raw.jsonl",
+    "filename": "20260807T152322Z-gda7236c7d0ad-dirty-phase2d-no-lava-off.raw.jsonl",
+    "ablation_mode": "L3_NO_LAVA",
+    "fps": 16.90871849450223,
+    "gpu_p50": 60.867041582241654,
+    "gpu_p95": 62.2811249922961,
+    "gpu_p99": 63.19041666574776,
+    "cpu_p95": 15.470042,
+    "light_count": 2048,
+    "requested_indices": 354495,
+    "accepted_indices": 354495,
+    "occ_p95": 96,
+    "occ_max": 256
+  },
+  "phase2d-no-non-lava": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T152909Z-gda7236c7d0ad-dirty-phase2d-no-non-lava-off.raw.jsonl",
+    "filename": "20260807T152909Z-gda7236c7d0ad-dirty-phase2d-no-non-lava-off.raw.jsonl",
+    "ablation_mode": "L3_NO_NON_LAVA_STATIC",
+    "fps": 23.81928215371396,
+    "gpu_p50": 43.83912496268749,
+    "gpu_p95": 44.12704170681536,
+    "gpu_p99": 44.20399991795421,
+    "cpu_p95": 13.345042,
+    "light_count": 2048,
+    "requested_indices": 354411,
+    "accepted_indices": 354411,
+    "occ_p95": 96,
+    "occ_max": 256
+  },
+  "phase2d-no-l3": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T153332Z-gda7236c7d0ad-dirty-phase2d-no-l3-off.raw.jsonl",
+    "filename": "20260807T153332Z-gda7236c7d0ad-dirty-phase2d-no-l3-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_L3_SHADE_DISABLED",
+    "fps": 31.421673897340394,
+    "gpu_p50": 33.66829175502062,
+    "gpu_p95": 33.72862492688,
+    "gpu_p99": 33.79145823419094,
+    "cpu_p95": 12.429375,
+    "light_count": 2048,
+    "requested_indices": 354813,
+    "accepted_indices": 354813,
+    "occ_p95": 96,
+    "occ_max": 256
+  }
+}

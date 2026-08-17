@@ -1,6 +1,11 @@
 {
   "metallum.options.page": "Metallum",
   "metallum.options.group.lighting": "Lighting",
+  "metallum.options.visual_style.name": "Visual Style",
+  "metallum.options.visual_style.tooltip": "Changes the artistic rendering character without changing the selected performance/quality preset.",
+  "metallum.options.visual_style.vanilla": "Vanilla",
+  "metallum.options.visual_style.natural": "Natural",
+  "metallum.options.visual_style.realism": "Realism",
   "metallum.options.improved_lighting.name": "Advanced Lighting",
   "metallum.options.improved_lighting.tooltip": "Enables L3 clustered colored direct lighting for terrain and entities. The L2 material renderer remains automatic; failed admission safely falls back to Vanilla lighting. Changes require a restart.",
   "metallum.options.lighting_preset.name": "Lighting Preset",

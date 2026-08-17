@@ -52,6 +52,7 @@ import com.metallum.client.renderer.MetalExecutorKind;
 import com.metallum.client.renderer.RenderContractMode;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.RendererFeatureMask;
+import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.renderer.RendererGenerationConfig;
 import com.metallum.client.renderer.RendererGenerationManifest;
 import com.metallum.client.renderer.RendererGenerationPlanner;
@@ -201,7 +202,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean temporalScalingActive;
     private final boolean temporalDiagnosticsConfigured;
     private boolean temporalDiagnosticsActive;
-    private final MetalCommandEncoder commandEncoder;
+    final MetalCommandEncoder commandEncoder;
     private int trackedTextureAllocationDepth;
     private final DeviceInfo deviceInfo;
     public final MTLCommandQueue commandQueue;
@@ -293,6 +294,10 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private SunShadowGpuResources sunShadowResources;
     @Nullable
+    private CloudShadowGpuResources cloudShadowResources;
+    private com.metallum.client.lighting.cloud.CloudShadowSource cloudShadowSource =
+            com.metallum.client.lighting.cloud.CloudShadowSource.empty();
+    @Nullable
     private VoxelOccupancyGpuResources voxelOccupancyResources;
     @Nullable
     private LocalVoxelShadowGpuResources localVoxelShadowResources;
@@ -342,6 +347,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         AdvancedLightingRuntime.reset();
         VoxelClipmapController.global().clear();
         this.rendererConfig = RendererConfig.load();
+        VisualStyleRuntime.initialize(this.rendererConfig.visualStyle());
         VoxelClipmapController.global().configurePreset(
                 voxelPreset(this.rendererConfig.lightingPreset())
         );
@@ -440,6 +446,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
+        this.cloudShadowResources = new CloudShadowGpuResources(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
         HdrSceneState.configure(this.hdrConfig, initialEdrCapabilities);
@@ -685,6 +692,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (this.sunShadowResources != null) {
             this.sunShadowResources.close();
             this.sunShadowResources = null;
+        }
+        if (this.cloudShadowResources != null) {
+            this.cloudShadowResources.close();
+            this.cloudShadowResources = null;
         }
         if (this.voxelOccupancyResources != null) {
             this.voxelOccupancyResources.close();
@@ -1885,7 +1896,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                     if (shadowResources == null || localShadowResources == null) {
                         throw new IllegalStateException("L4/L6 shadow resources disappeared");
                     }
-                    shadowResources.encode(capture.environment(), published);
+                    if (this.cloudShadowResources != null) {
+                        this.cloudShadowResources.update(capture.cloudShadow(), this.cloudShadowSource);
+                    }
+                    shadowResources.encode(capture.environment(), published, capture.cloudShadow());
                     voxelResources = this.voxelOccupancyResources;
                     VoxelClipmapSnapshot localVoxelSnapshot = voxelController.snapshot();
                     EntityShadowProxySnapshot proxySnapshot = lightSnapshot.world() == null
@@ -2507,12 +2521,30 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         int inFlightSlot = (int) (this.commandEncoder.currentSubmitIndex()
                 % FrameStatePacketRing.SLOT_COUNT);
+        if (this.cloudShadowResources != null) {
+            this.cloudShadowResources.bind(encoder);
+        }
         shadows.bind(encoder, inFlightSlot);
         localShadows.bind(
                 encoder,
                 inFlightSlot,
                 this.commandEncoder.currentSubmitIndex()
         );
+    }
+
+    public com.metallum.client.lighting.cloud.CloudShadowSource cloudShadowSource() {
+        return this.cloudShadowSource;
+    }
+
+    public void updateCloudShadowSource(final com.metallum.client.lighting.cloud.CloudShadowSource source) {
+        this.cloudShadowSource = source != null
+                ? source
+                : com.metallum.client.lighting.cloud.CloudShadowSource.empty();
+    }
+
+    @Nullable
+    CloudShadowGpuResources cloudShadowResources() {
+        return this.cloudShadowResources;
     }
 
     void setMaterialWorldPassActive(final boolean active) {

@@ -56,10 +56,25 @@ abstract class LevelExtractorAdvancedLightMixin {
     private BoundedEntityShadowProxyCollector metallum$entityShadowProxies;
 
     @Unique
-    private final CameraHeldLightTracker metallum$cameraHeldLightTracker = new CameraHeldLightTracker();
+    @Nullable
+    private Camera metallum$currentCamera;
+
+    @Unique
+    @Nullable
+    private CameraHeldLightTracker metallum$cameraHeldLightTracker;
 
     @Unique
     private long metallum$cameraHeldStableId;
+
+    @Unique
+    private CameraHeldLightTracker metallum$cameraHeldTracker() {
+        CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
+        if (tracker == null) {
+            tracker = new CameraHeldLightTracker();
+            this.metallum$cameraHeldLightTracker = tracker;
+        }
+        return tracker;
+    }
 
     @Inject(
             method = "setLevel(Lnet/minecraft/client/multiplayer/ClientLevel;)V",
@@ -77,8 +92,12 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
+        this.metallum$currentCamera = null;
         this.metallum$cameraHeldStableId = 0L;
-        this.metallum$cameraHeldLightTracker.reset();
+        CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
+        if (tracker != null) {
+            tracker.reset();
+        }
     }
 
     @Inject(
@@ -96,6 +115,15 @@ abstract class LevelExtractorAdvancedLightMixin {
             EntityShadowProxyRegistry.global().openWorld(next, token);
             VoxelClipmapController.global().openWorld(next, metallum$dimensionId(next));
         }
+        com.metallum.client.metal.render.MetalDevice device = com.metallum.client.metal.render.MetalDevice.getInstance();
+        if (device != null && (!device.cloudShadowSource().isAvailable() || device.cloudShadowSource().generation() == 0L)) {
+            ResourceManager resourceManager = net.minecraft.client.Minecraft.getInstance().getResourceManager();
+            if (resourceManager != null) {
+                com.metallum.client.lighting.cloud.CloudShadowSource source =
+                        com.metallum.client.lighting.cloud.CloudShadowSource.loadFromResourceManager(resourceManager, 1L);
+                device.updateCloudShadowSource(source);
+            }
+        }
     }
 
     @Inject(
@@ -106,6 +134,13 @@ abstract class LevelExtractorAdvancedLightMixin {
             final ResourceManager resourceManager,
             final CallbackInfo ci
     ) {
+        com.metallum.client.metal.render.MetalDevice device = com.metallum.client.metal.render.MetalDevice.getInstance();
+        if (device != null) {
+            long nextGen = device.cloudShadowSource().generation() + 1L;
+            com.metallum.client.lighting.cloud.CloudShadowSource source =
+                    com.metallum.client.lighting.cloud.CloudShadowSource.loadFromResourceManager(resourceManager, nextGen);
+            device.updateCloudShadowSource(source);
+        }
         if (this.level == null) {
             return;
         }
@@ -122,6 +157,14 @@ abstract class LevelExtractorAdvancedLightMixin {
         }
     }
 
+    @Unique
+    private static final java.util.concurrent.atomic.AtomicLong metallum$debugHeadCount =
+            new java.util.concurrent.atomic.AtomicLong();
+    @Unique
+    private int metallum$debugInterceptionsThisFrame;
+    @Unique
+    private int metallum$debugZombiesThisFrame;
+
     @Inject(
             method = "extractVisibleEntities(Lnet/minecraft/client/Camera;Lnet/minecraft/client/renderer/culling/Frustum;Lnet/minecraft/client/DeltaTracker;Lnet/minecraft/client/renderer/state/level/LevelRenderState;)V",
             at = @At("HEAD")
@@ -137,12 +180,27 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
         this.metallum$cameraHeldStableId = 0L;
-        if (this.level == null || !AdvancedLightingRuntime.shouldCollect()) {
+        this.metallum$debugInterceptionsThisFrame = 0;
+        this.metallum$debugZombiesThisFrame = 0;
+        long headCount = metallum$debugHeadCount.incrementAndGet();
+        boolean debug = Boolean.getBoolean("metallum.shadow.debug");
+        boolean hasLevel = this.level != null;
+        boolean shouldCollect = AdvancedLightingRuntime.shouldCollect();
+        boolean isActive = AdvancedLightingRuntime.isActive();
+
+        if (!hasLevel || !shouldCollect) {
+            if (debug && headCount % 60 == 1) {
+                com.metallum.Metallum.LOGGER.info(
+                        "[ENTITY_SHADOW_HEAD] headCount={}, levelPresent={}, shouldCollect={}, isActive={}, collectorCreated=false",
+                        headCount, hasLevel, shouldCollect, isActive
+                );
+            }
             return;
         }
         AdvancedLightRegistry registry = AdvancedLightRegistry.global();
         registry.observeHook(AdvancedLightRegistry.Hook.DYNAMIC_ENTITY);
         LightWorldToken token = registry.openWorld(this.level, metallum$dimensionId(this.level));
+        EntityShadowProxyRegistry.global().openWorld(this.level, token);
         this.metallum$dynamicLights = new BoundedDynamicLightCollector(
                 token,
                 AdvancedLightRegistry.MAX_DYNAMIC_LIGHTS,
@@ -166,7 +224,14 @@ abstract class LevelExtractorAdvancedLightMixin {
                 camera.position().y,
                 camera.position().z
         );
+        this.metallum$currentCamera = camera;
         this.metallum$offerCameraHeldLight(camera, deltaTracker, token);
+        if (debug && headCount % 60 == 1) {
+            com.metallum.Metallum.LOGGER.info(
+                    "[ENTITY_SHADOW_HEAD] headCount={}, levelPresent=true, shouldCollect=true, isActive={}, worldToken={}, collectorCreated=true",
+                    headCount, isActive, token
+            );
+        }
     }
 
     @WrapOperation(
@@ -187,6 +252,25 @@ abstract class LevelExtractorAdvancedLightMixin {
             final double cameraZ,
             final Operation<Boolean> original
     ) {
+        this.metallum$debugInterceptionsThisFrame++;
+        String typeName = entity.getType().toString();
+        boolean isZombie = typeName.toLowerCase().contains("zombie");
+        if (isZombie) {
+            this.metallum$debugZombiesThisFrame++;
+        }
+        boolean filterResult = EntityShadowFilter.isShadowCaster(entity, this.metallum$currentCamera);
+        boolean debug = Boolean.getBoolean("metallum.shadow.debug");
+        if (debug && metallum$debugHeadCount.get() % 60 == 1 && (isZombie || this.metallum$debugInterceptionsThisFrame <= 3)) {
+            com.metallum.Metallum.LOGGER.info(
+                    "[ENTITY_SHADOW_ITERATION] countThisFrame={}, entityType={}, isZombie={}, shadowFilter={}, collectorPresent={}",
+                    this.metallum$debugInterceptionsThisFrame,
+                    entity.getType().toString(),
+                    isZombie,
+                    filterResult,
+                    this.metallum$entityShadowProxies != null
+            );
+        }
+
         BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
         DeltaTracker deltaTracker = this.metallum$dynamicLightDeltaTracker;
         ClientLevel currentLevel = this.level;
@@ -214,7 +298,7 @@ abstract class LevelExtractorAdvancedLightMixin {
             }
         }
         BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
-        if (proxyCollector != null && EntityShadowFilter.isShadowCaster(entity)) {
+        if (proxyCollector != null && filterResult) {
             try {
                 float partialTick = deltaTracker != null && currentLevel != null
                         ? deltaTracker.getGameTimeDeltaPartialTick(!currentLevel.tickRateManager().isEntityFrozen(entity))
@@ -247,6 +331,7 @@ abstract class LevelExtractorAdvancedLightMixin {
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
         this.metallum$entityShadowProxies = null;
+        this.metallum$currentCamera = null;
         this.metallum$cameraHeldStableId = 0L;
         if (collector != null) {
             try {
@@ -264,16 +349,40 @@ abstract class LevelExtractorAdvancedLightMixin {
                 );
             }
         }
+        boolean debug = Boolean.getBoolean("metallum.shadow.debug");
+        boolean attempted = false;
+        int offered = 0;
+        int retained = 0;
         if (proxyCollector != null) {
             try {
+                java.util.List<com.metallum.client.lighting.EntityShadowProxy> finished = proxyCollector.finish();
+                offered = proxyCollector.offered();
+                retained = finished.size();
+                attempted = true;
                 EntityShadowProxyRegistry.global().publish(
-                        proxyCollector.world(), proxyCollector.finish(), proxyCollector.offered()
+                        proxyCollector.world(), finished, offered
                 );
-            } catch (IllegalStateException ignored) {
-                // World/reload races deliberately drop the old optional proxy frame.
-            } catch (Throwable ignored) {
+            } catch (IllegalStateException stale) {
+                if (debug) {
+                    com.metallum.Metallum.LOGGER.warn("[ENTITY_SHADOW_RETURN] Stale proxy publication dropped: {}", stale.getMessage());
+                }
+            } catch (Throwable failure) {
+                if (debug) {
+                    com.metallum.Metallum.LOGGER.warn("[ENTITY_SHADOW_RETURN] Proxy publication failure", failure);
+                }
                 EntityShadowProxyRegistry.global().failOpen(proxyCollector.world());
             }
+        }
+        if (debug && metallum$debugHeadCount.get() % 60 == 1) {
+            com.metallum.Metallum.LOGGER.info(
+                    "[ENTITY_SHADOW_RETURN] collectorExisted={}, entitiesIntercepted={}, zombiesIntercepted={}, offeredPrimitives={}, retainedPrimitives={}, publicationAttempted={}",
+                    proxyCollector != null,
+                    this.metallum$debugInterceptionsThisFrame,
+                    this.metallum$debugZombiesThisFrame,
+                    offered,
+                    retained,
+                    attempted
+            );
         }
     }
 
@@ -306,7 +415,7 @@ abstract class LevelExtractorAdvancedLightMixin {
                     .getCameraType().isFirstPerson()
                     ? metallum$firstPersonHeldPose(camera)
                     : metallum$thirdPersonHeldPose(player, partialTick);
-            CameraHeldLightTracker.CameraHeldLightAnchor anchor = this.metallum$cameraHeldLightTracker
+            CameraHeldLightTracker.CameraHeldLightAnchor anchor = this.metallum$cameraHeldTracker()
                     .update(
                             stableId,
                             pose,
@@ -323,7 +432,10 @@ abstract class LevelExtractorAdvancedLightMixin {
             // the ordinary entity pass for this frame instead of publishing a differently
             // anchored replacement after the isolated camera-held path failed.
             this.metallum$cameraHeldStableId = attemptedStableId;
-            this.metallum$cameraHeldLightTracker.reset();
+            CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
+            if (tracker != null) {
+                tracker.reset();
+            }
             com.metallum.Metallum.LOGGER.warn(
                     "Skipping this frame's camera-held light after an isolated extraction failure",
                     failure

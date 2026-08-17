@@ -77,13 +77,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "9d02e0a785df1a329160a961d6095122f89099bb067701a6d1c50dd44a3e13f9",
+            "sodium-solid-fsh", "83d16bddfe0631c5b503344343dfec4634613ddd56c70bc6c78c38ba5a7b9fc8",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "d4b36f8dd4ebb73a31de8597073b9c9609d6882eeb496b6f6084d447a52b0de5",
+            "sodium-cutout-fsh", "7434aa8dae5f15e52c7e57fbec800bacef8bf56bb6ce38de8765773eb622d5fe",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "6521ec258e63462b5097e80a5d0c850d387a95fb5c1bc0130116e982274c0460",
+            "minecraft-entity-fsh", "c83cfa4943ae94b06a34e935a869c906179a7be5e2ce09417a640bda9469dccd",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "699be4f5c429cadcc4621c170f1810da1753e6d26309de50c1a14f651be7588c"
+            "minecraft-end-portal-fsh", "73b982726832632125a3c887927cd653b15c98f976a2aa9b1b9b3ca5d8ce7495"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -96,7 +96,7 @@ public final class AdvancedDirectLightingShaderTests {
         testPowerOfTwoAddressingMatchesFloorArithmetic();
         testWaterWavePhaseIsWorldStable();
         testWaterSkyReflectionVisibility();
-        testWaterSquareSunMask();
+        testWaterSquareCelestialMask();
         testScaleInvariantSurfaceNormal();
         testL6ShadowFilterContinuityAndBlur();
         testLightingModelIsAnIndependentVariantAxis();
@@ -139,10 +139,15 @@ public final class AdvancedDirectLightingShaderTests {
                 "shader cluster constants diverged from generation layout");
         require(EnvironmentShadowBindingAbi.VERSION == 1
                         && EnvironmentShadowBindingAbi.PARAMS_SLOT == 26
-                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 384
+                        && EnvironmentShadowBindingAbi.PARAMS_BYTES == 448
                         && EnvironmentShadowBindingAbi.MATERIAL_WEATHER_AND_TIME_OFFSET == 352
                         && EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_OFFSET == 368
                         && EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION == 1
+                        && EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET == 384
+                        && EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET == 400
+                        && EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET == 416
+                        && EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET == 432
+                        && CloudShadowBindingAbi.TEXTURE_SLOT == 12
                         && java.util.Arrays.equals(
                         EnvironmentShadowBindingAbi.shadowTextureSlots(),
                         new int[]{13, 14, 15})
@@ -282,21 +287,21 @@ public final class AdvancedDirectLightingShaderTests {
         return openSky * (moonlit ? 0.18f : 1.0f);
     }
 
-    private static void testWaterSquareSunMask() {
-        float center = waterSquareSunMask(0.0f, 0.0f);
-        float insideCorner = waterSquareSunMask(0.028f, 0.028f);
-        float diagonalShoulder = waterSquareSunMask(0.034f, 0.034f);
-        float axialOutside = waterSquareSunMask(0.048f, 0.0f);
+    private static void testWaterSquareCelestialMask() {
+        float center = waterSquareCelestialMask(0.0f, 0.0f);
+        float insideCorner = waterSquareCelestialMask(0.028f, 0.028f);
+        float diagonalShoulder = waterSquareCelestialMask(0.034f, 0.034f);
+        float axialOutside = waterSquareCelestialMask(0.048f, 0.0f);
         require(Math.abs(center - 1.0f) < 0.000001f
                         && Math.abs(insideCorner - 1.0f) < 0.000001f
                         && diagonalShoulder > 0.0f
                         && axialOutside < 0.000001f
                         && diagonalShoulder > axialOutside,
-                "water sun mask is not a bounded soft square");
+                "water celestial mask is not a bounded soft square");
     }
 
-    private static float waterSquareSunMask(final float sunPlaneX, final float sunPlaneY) {
-        float squareDistance = Math.max(Math.abs(sunPlaneX), Math.abs(sunPlaneY));
+    private static float waterSquareCelestialMask(final float celestialPlaneX, final float celestialPlaneY) {
+        float squareDistance = Math.max(Math.abs(celestialPlaneX), Math.abs(celestialPlaneY));
         float edge = Math.clamp((squareDistance - 0.030f) / 0.016f, 0.0f, 1.0f);
         return 1.0f - edge * edge * (3.0f - 2.0f * edge);
     }
@@ -964,6 +969,9 @@ public final class AdvancedDirectLightingShaderTests {
                         "visibility = mix(visibility, 1.0, blend);")
                         && sodiumFragment.contains("for (int y = -1; y <= 1; ++y)")
                         && sodiumFragment.contains("for (int x = -1; x <= 1; ++x)")
+                        && sodiumFragment.contains("uniform sampler2D metallumCloudShadow")
+                        && sodiumFragment.contains("metallumCloudTransmittanceV1")
+                        && sodiumEnvironment.contains("cloudTransmittance")
                         && sodiumFragment.contains("smoothstep(split - blendWidth, split, viewDepth)"),
                 "terrain/entities do not share bounded PCF environment lighting with cascade blending");
     }
@@ -1038,18 +1046,17 @@ public final class AdvancedDirectLightingShaderTests {
                         "if (material.kind == METALLUM_SURFACE_WATER_V1) {",
                         "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1"),
                 "water sky reflection is not gated by existing skylight and moon state");
-        require(sodiumFragment.contains("float metallumWaterSquareSunMaskV1(")
+        require(sodiumFragment.contains("float metallumWaterSquareCelestialMaskV1(")
                         && sodiumFragment.contains("vec3 squareRight = cross(")
                         && sodiumFragment.contains(
-                        "float squareDistance = max(abs(sunPlane.x), abs(sunPlane.y));")
+                        "float squareDistance = max(abs(celestialPlane.x), abs(celestialPlane.y));")
                         && sodiumFragment.contains(
                         "return 1.0 - smoothstep(0.030, 0.046, squareDistance);")
-                        && environment.contains("bool waterSunlit = material.kind == METALLUM_SURFACE_WATER_V1")
-                        && environment.contains("(metallumEnvironment.contract.w & 2u) == 0u;")
-                        && environment.contains("? metallumWaterSquareSunMaskV1(reflectedDirection, toLight)")
-                        && environment.contains("reflectedDirection, normal, material.roughness, waterSunShape)")
-                        && environment.contains("skyOcclusion * sunVisibility * waterSunShape"),
-                "water sunlight does not use the bounded square celestial mask");
+                        && environment.contains("bool waterCelestialLit = material.kind == METALLUM_SURFACE_WATER_V1;")
+                        && environment.contains("? metallumWaterSquareCelestialMaskV1(reflectedDirection, toLight)")
+                        && environment.contains("reflectedDirection, normal, material.roughness, waterCelestialShape)")
+                        && environment.contains("skyOcclusion * sunVisibility * cloudTransmittance * waterCelestialShape"),
+                "water celestial lighting does not use the bounded square celestial mask");
         require(sodiumFragment.contains("material.wetness = terrainSurface")
                         && !sodiumFragment.contains("METALLUM_RAIN_WETNESS_EPSILON_V1")
                         && sodiumFragment.contains(
@@ -1091,7 +1098,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("mix(sharpSky, 0.49, roughness * 0.80)")
                         && sodiumFragment.contains("reflectedEnvironment = metallumEnvironmentLookupV1(")
                         && sodiumFragment.contains(
-                        "reflectedDirection, normal, material.roughness, waterSunShape)"),
+                        "reflectedDirection, normal, material.roughness, waterCelestialShape)"),
                 "R3 roughness-based environment reflection blurring overload is missing");
 
         require(sodiumFragment.contains("bool metallumTaggedL8Surface")

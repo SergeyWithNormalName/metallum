@@ -1,5 +1,10 @@
 package com.metallum.client.lighting;
 
+import com.metallum.client.renderer.style.CelestialLightingProfile;
+import com.metallum.client.renderer.style.LinearColor;
+import com.metallum.client.renderer.style.VisualStyle;
+import com.metallum.client.renderer.style.VisualStyleProfiles;
+
 import java.util.Objects;
 
 /**
@@ -111,7 +116,40 @@ public record EnvironmentDescriptor(
             final float thunder,
             final float moonPhaseBrightness
     ) {
+        return celestial(
+                medium,
+                sunAngle,
+                skyRed,
+                skyGreen,
+                skyBlue,
+                skyFactor,
+                ambientRed,
+                ambientGreen,
+                ambientBlue,
+                rain,
+                thunder,
+                moonPhaseBrightness,
+                VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting()
+        );
+    }
+
+    public static EnvironmentDescriptor celestial(
+            final Medium medium,
+            final float sunAngle,
+            final float skyRed,
+            final float skyGreen,
+            final float skyBlue,
+            final float skyFactor,
+            final float ambientRed,
+            final float ambientGreen,
+            final float ambientBlue,
+            final float rain,
+            final float thunder,
+            final float moonPhaseBrightness,
+            final CelestialLightingProfile celestial
+    ) {
         Objects.requireNonNull(medium, "medium");
+        Objects.requireNonNull(celestial, "celestial");
         requireFinite(sunAngle, "sun angle");
         requireNonNegative(skyRed, "sky red");
         requireNonNegative(skyGreen, "sky green");
@@ -142,13 +180,17 @@ public record EnvironmentDescriptor(
             case AIR -> 1.0f;
         };
         float directionalScale = moon
-                ? 0.13f * (0.18f + 0.82f * safeMoonPhase) * horizon
-                : 1.65f * horizon;
+                ? celestial.moonIntensityScale() * celestial.evaluateMoonPhaseScale(safeMoonPhase) * horizon
+                : celestial.sunIntensityScale() * horizon;
         directionalScale *= weatherTransmission * mediumTransmission;
 
-        float directionalRed = directionalScale * (moon ? 0.50f : 1.00f);
-        float directionalGreen = directionalScale * (moon ? 0.62f : 0.93f);
-        float directionalBlue = directionalScale * (moon ? 0.90f : 0.78f);
+        LinearColor lightColor = moon
+                ? celestial.moonColor()
+                : celestial.evaluateSunColor(altitude);
+
+        float directionalRed = directionalScale * lightColor.red();
+        float directionalGreen = directionalScale * lightColor.green();
+        float directionalBlue = directionalScale * lightColor.blue();
         float diffuseWeather = 1.0f - safeThunder * 0.45f;
         // Minecraft 26.2 authors skyFactor for its encoded lightmap. Use it for the data-driven
         // day/night curve, but keep L4's scene-linear reference scale: copying skyFactor through

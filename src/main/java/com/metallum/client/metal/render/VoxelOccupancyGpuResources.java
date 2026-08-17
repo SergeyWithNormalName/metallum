@@ -304,6 +304,42 @@ final class VoxelOccupancyGpuResources implements AutoCloseable {
         return true;
     }
 
+    String mismatchReason(
+            final long expectedLightingGeneration,
+            final VoxelClipmapLayout.Budget expectedBudget,
+            final VoxelClipmapSnapshot snapshot
+    ) {
+        if (snapshot == null) {
+            return "snapshot == null";
+        }
+        if (expectedLightingGeneration != this.lightingGeneration) {
+            return "lightingGen expected=" + expectedLightingGeneration + ", actual=" + this.lightingGeneration;
+        }
+        if (!this.budget.equals(expectedBudget)) {
+            return "budget mismatch: expected=" + expectedBudget + ", actual=" + this.budget;
+        }
+        if (snapshot.clipmapGeneration() != this.clipmapGeneration) {
+            return "clipmapGen mismatch: snapshot=" + snapshot.clipmapGeneration() + ", gpu=" + this.clipmapGeneration;
+        }
+        if (snapshot.world().generation() != this.worldGeneration) {
+            return "worldGen mismatch: snapshot=" + snapshot.world().generation() + ", gpu=" + this.worldGeneration;
+        }
+        if (snapshot.levels().size() != this.levels.size()) {
+            return "level count mismatch: snapshot=" + snapshot.levels().size() + ", gpu=" + this.levels.size();
+        }
+        for (int index = 0; index < this.levels.size(); index++) {
+            VoxelClipmapSnapshot.Level left = this.levels.get(index);
+            VoxelClipmapSnapshot.Level right = snapshot.levels().get(index);
+            if (left.level() != right.level()
+                    || left.subdivision() != right.subdivision()
+                    || left.logicalEdge() != right.logicalEdge()
+                    || left.brickDimension() != right.brickDimension()) {
+                return "level[" + index + "] layout mismatch";
+            }
+        }
+        return "none";
+    }
+
     boolean matchesGenerationAndBudget(
             final long expectedLightingGeneration,
             final VoxelClipmapLayout.Budget expectedBudget

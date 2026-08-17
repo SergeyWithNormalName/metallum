@@ -283,6 +283,7 @@ public final class MetalFxBenchmarkController {
             float pitch,
             long clockTicks,
             int clearWeatherTicks,
+            String weatherMode,
             boolean simulationFrozen,
             int stableFrames,
             int timeoutFrames,
@@ -319,6 +320,10 @@ public final class MetalFxBenchmarkController {
 
             long clockTicks = nonNegativeLong("METALLUM_BENCHMARK_CLOCK_TICKS");
             int clearWeatherTicks = positiveIntStrict("METALLUM_BENCHMARK_CLEAR_WEATHER_TICKS");
+            String weatherMode = System.getenv("METALLUM_BENCHMARK_WEATHER_MODE");
+            if (weatherMode == null || weatherMode.isEmpty()) {
+                weatherMode = "clear";
+            }
             boolean simulationFrozen = "1".equals(requiredEnv("METALLUM_BENCHMARK_SIMULATION_FROZEN"));
             if (!simulationFrozen) {
                 throw new IllegalArgumentException("benchmark route requires frozen simulation ticks");
@@ -354,6 +359,7 @@ public final class MetalFxBenchmarkController {
                     pitch,
                     clockTicks,
                     clearWeatherTicks,
+                    weatherMode,
                     simulationFrozen,
                     stableFrames,
                     timeoutFrames,
@@ -1887,7 +1893,19 @@ public final class MetalFxBenchmarkController {
                 server.clockManager().setTotalTicks(clock, this.route.clockTicks());
                 server.clockManager().setPaused(clock, true);
             }
-            server.setWeatherParameters(this.route.clearWeatherTicks(), 0, false, false);
+            if ("rain".equals(this.route.weatherMode())) {
+                server.setWeatherParameters(0, this.route.clearWeatherTicks(), true, false);
+                level.setRainLevel(1.0f);
+                if (mc.level != null) {
+                    mc.execute(() -> mc.level.setRainLevel(1.0f));
+                }
+            } else {
+                server.setWeatherParameters(this.route.clearWeatherTicks(), 0, false, false);
+                level.setRainLevel(0.0f);
+                if (mc.level != null) {
+                    mc.execute(() -> mc.level.setRainLevel(0.0f));
+                }
+            }
             if (!player.level().dimension().equals(this.route.dimension())) {
                 server.tickRateManager().setFrozen(false);
             }
@@ -1963,12 +1981,19 @@ public final class MetalFxBenchmarkController {
                 return "server clock differs from the paused route clock";
             }
         }
-        if (level.getWeatherData().isRaining()
-                || level.getWeatherData().isThundering()
-                || level.getWeatherData().getClearWeatherTime() != this.route.clearWeatherTicks()
-                || level.getRainLevel(1.0f) != 0.0f
-                || level.getThunderLevel(1.0f) != 0.0f) {
-            return "server weather is not frozen and clear";
+        if ("rain".equals(this.route.weatherMode())) {
+            if (!level.getWeatherData().isRaining()
+                    || level.getWeatherData().isThundering()) {
+                return "server weather is not frozen rain";
+            }
+        } else {
+            if (level.getWeatherData().isRaining()
+                    || level.getWeatherData().isThundering()
+                    || level.getWeatherData().getClearWeatherTime() != this.route.clearWeatherTicks()
+                    || level.getRainLevel(1.0f) != 0.0f
+                    || level.getThunderLevel(1.0f) != 0.0f) {
+                return "server weather is not frozen and clear";
+            }
         }
         String workloadMismatch = serverWorkloadStateMismatch(level);
         if (workloadMismatch != null) {
@@ -2015,9 +2040,15 @@ public final class MetalFxBenchmarkController {
         if (!minecraft.level.tickRateManager().isFrozen()) {
             return "client simulation ticks are not frozen";
         }
-        if (minecraft.level.getRainLevel(1.0f) != 0.0f
-                || minecraft.level.getThunderLevel(1.0f) != 0.0f) {
-            return "client weather is not clear";
+        if ("rain".equals(this.route.weatherMode())) {
+            if (!minecraft.level.isRaining()) {
+                return "client weather is not rain";
+            }
+        } else {
+            if (minecraft.level.getRainLevel(1.0f) != 0.0f
+                    || minecraft.level.getThunderLevel(1.0f) != 0.0f) {
+                return "client weather is not clear";
+            }
         }
         String workloadMismatch = clientWorkloadStateMismatch(minecraft);
         if (workloadMismatch != null) {

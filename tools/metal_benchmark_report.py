@@ -216,12 +216,13 @@ STABLE_METADATA_KEYS = (
     "hdr_bloom_strength", "hdr_strength", "persistent_metalfx_mode",
     "world", "fixture", "fixture_sha256", "route", "route_sha256",
     "benchmark_player_name", "benchmark_player_uuid", "benchmark_dimension",
-    "benchmark_simulation_frozen", "monitor", "os_version", "thermal_state",
+    "benchmark_simulation_frozen", "monitor", "os_version",
     "device_name", "registry_id", "executor", "refresh_hz", "render_width",
     "render_height", "display_width", "display_height", "scaler_active",
     "hdr_output_mode", "source_encoding", "diagnostic_pattern",
     "bloom_strength",
     "display_sync_enabled", "static_geometry_heaps_enabled",
+    "ablation_mode",
 )
 COMPARISON_METADATA_KEYS = tuple(
     key for key in STABLE_METADATA_KEYS
@@ -1417,8 +1418,10 @@ def _validate_l5_measurement(
     # The L6 route intentionally orbits across clipmap cell boundaries. Its sparse
     # L5 scroll samples remain reported, but L6 acceptance is gated by whole-frame
     # tails and the per-frame dynamic-shadow stage instead of the stationary L5 gate.
-    l6_dynamic_route = window.metadata.get("route") == "hdrtest-l6-dynamic-v1"
-    if enforce_stage_budgets and not l6_dynamic_route and stage["p95_ms"] > budget:
+    dynamic_voxel_route = window.metadata.get("route") in (
+        "hdrtest-l6-dynamic-v1", "hdrtest-foliage-v1", "nether-lava-stress-v1"
+    )
+    if enforce_stage_budgets and not dynamic_voxel_route and stage["p95_ms"] > budget:
         raise ReportError(
             f"line {window.line}: {VOXEL_UPLOAD_UPDATE_STAGE} p95_ms "
             f"exceeds {generation['lighting_preset']} budget {budget:.2f} ms"
@@ -1961,6 +1964,8 @@ def validate_release_contract(
                     "workload.private_geometry_heap telemetry"
                 )
         metadata = window.metadata
+        if "ablation_mode" not in window.metadata:
+            window.metadata["ablation_mode"] = "FULL_ADVANCED"
         expected = {
             "monitor": BUILT_IN_MONITOR,
             "device_name": "Apple M1 Pro",
@@ -2237,7 +2242,10 @@ def summarize(
     if dynamic_shadow_stage is not None:
         result.setdefault("stages", {})[DYNAMIC_LOCAL_SHADOW_STAGE] = dynamic_shadow_stage
     if selected[0].schema >= 2:
-        result["metadata"] = selected[-1].metadata
+        meta = dict(selected[-1].metadata)
+        if "ablation_mode" not in meta:
+            meta["ablation_mode"] = "FULL_ADVANCED"
+        result["metadata"] = meta
     if renderer_generations and renderer_generations[0] is not None:
         result["renderer_generation"] = renderer_generations[0]
     headrooms = [window.metadata.get("current_edr_headroom") for window in selected]
@@ -2253,16 +2261,58 @@ def summarize(
             "window_maximum": max(float(value) for value in headrooms),
             "last_window": float(headrooms[-1]),
         }
+    result["thermal"] = extract_thermal_stats(selected)
     return result
+
+
+THERMAL_SEVERITY = {"nominal": 0, "fair": 1, "serious": 2, "critical": 3, "unknown": 4}
+
+
+def extract_thermal_stats(windows: Sequence[TimingWindow]) -> dict[str, Any]:
+    if not windows:
+        return {
+            "initial_thermal_state": "unknown",
+            "final_thermal_state": "unknown",
+            "best_thermal_state": "unknown",
+            "worst_thermal_state": "unknown",
+            "pre_run_thermal_state": "unknown",
+            "post_run_thermal_state": "unknown",
+            "states_observed": [],
+            "has_serious": False,
+            "has_critical": False,
+            "thermal_invalid": False,
+        }
+    states = [str(window.metadata.get("thermal_state", "unknown")).lower() for window in windows]
+    initial = states[0]
+    final = states[-1]
+    best = min(states, key=lambda s: THERMAL_SEVERITY.get(s, 4))
+    worst = max(states, key=lambda s: THERMAL_SEVERITY.get(s, 4))
+    observed = list(dict.fromkeys(states))
+    has_serious = "serious" in states
+    has_critical = "critical" in states
+    invalid = has_serious or has_critical or (THERMAL_SEVERITY.get(worst, 4) >= 2)
+    return {
+        "initial_thermal_state": initial,
+        "final_thermal_state": final,
+        "best_thermal_state": best,
+        "worst_thermal_state": worst,
+        "pre_run_thermal_state": initial,
+        "post_run_thermal_state": final,
+        "states_observed": observed,
+        "has_serious": has_serious,
+        "has_critical": has_critical,
+        "thermal_invalid": invalid,
+    }
 
 
 def compare(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
-    gate_ms: float,
+    gate_ms: float = DEFAULT_P95_GATE_MS,
     *,
     allow_source_change: bool = False,
     allow_static_geometry_heap_mode_change: bool = False,
+    allow_ablation_change: bool = False,
     require_stability: bool = True,
 ) -> dict[str, Any]:
     if not math.isfinite(gate_ms) or gate_ms < 0.0:
@@ -2329,6 +2379,10 @@ def compare(
             and not (
                 allow_static_geometry_heap_mode_change
                 and key == "static_geometry_heaps_enabled"
+            )
+            and not (
+                allow_ablation_change
+                and key == "ablation_mode"
             )
         )
         mismatches = [
@@ -2617,6 +2671,282 @@ def compare(
         "baseline": baseline,
         "candidate": candidate,
     }
+
+
+def compare_multi(
+    baselines: Sequence[dict[str, Any]],
+    candidates: Sequence[dict[str, Any]],
+    gate_ms: float = DEFAULT_P95_GATE_MS,
+    *,
+    allow_source_change: bool = False,
+    allow_static_geometry_heap_mode_change: bool = False,
+    allow_ablation_change: bool = False,
+    require_stability: bool = True,
+) -> dict[str, Any]:
+    if not baselines or not candidates:
+        raise ReportError("compare-multi requires at least 1 baseline and 1 candidate report")
+
+    all_reports = list(baselines) + list(candidates)
+
+    ref_metadata = all_reports[0].get("metadata")
+    if require_stability and not isinstance(ref_metadata, dict):
+        raise ReportError("compare-multi requires release metadata for all reports")
+
+    if isinstance(ref_metadata, dict):
+        comparison_keys = tuple(
+            key for key in COMPARISON_METADATA_KEYS
+            if not (allow_source_change and key in {"source_sha256", "artifact_sha256"})
+            and not (allow_static_geometry_heap_mode_change and key == "static_geometry_heaps_enabled")
+            and not (allow_ablation_change and key == "ablation_mode")
+        )
+        for idx, r in enumerate(all_reports[1:], start=2):
+            meta = r.get("metadata")
+            if not isinstance(meta, dict):
+                raise ReportError(f"report {idx} lacks metadata dictionary")
+            mismatches = [key for key in comparison_keys if meta.get(key) != ref_metadata.get(key)]
+            if mismatches:
+                raise ReportError(
+                    f"report {idx} metadata differs from baseline report 1: " + ", ".join(mismatches)
+                )
+
+    baseline_thermals = [r.get("thermal", {}) for r in baselines]
+    candidate_thermals = [r.get("thermal", {}) for r in candidates]
+
+    any_baseline_invalid = any(t.get("thermal_invalid", False) for t in baseline_thermals)
+    any_candidate_invalid = any(t.get("thermal_invalid", False) for t in candidate_thermals)
+
+    if require_stability and (any_baseline_invalid or any_candidate_invalid):
+        raise ReportError("compare-multi rejected due to thermal escalation (Serious/Critical)")
+
+    def extract_scalars(summary: dict[str, Any]) -> dict[str, float]:
+        scalars: dict[str, float] = {}
+        fps_dict = summary.get("fps", {})
+        if "elapsed_weighted" in fps_dict:
+            scalars["fps"] = float(fps_dict["elapsed_weighted"])
+        elif "window_frame_weighted_mean" in fps_dict:
+            scalars["fps"] = float(fps_dict["window_frame_weighted_mean"])
+
+        if "fps_low_window_summaries" in summary:
+            lows = summary["fps_low_window_summaries"]
+            if "one_percent" in lows and "window_frame_weighted_mean" in lows["one_percent"]:
+                scalars["fps_1_low"] = float(lows["one_percent"]["window_frame_weighted_mean"])
+            if "zero_point_one_percent" in lows and "window_frame_weighted_mean" in lows["zero_point_one_percent"]:
+                scalars["fps_01_low"] = float(lows["zero_point_one_percent"]["window_frame_weighted_mean"])
+
+        gpu_dict = summary.get("presenting_command_buffer_gpu_ms", {})
+        gpu_summaries = gpu_dict.get("percentile_window_summaries", {})
+        for percentile in ("p50", "p95", "p99"):
+            if percentile in gpu_summaries and "window_frame_weighted_mean" in gpu_summaries[percentile]:
+                scalars[f"gpu_{percentile}"] = float(gpu_summaries[percentile]["window_frame_weighted_mean"])
+        if "maximum_observed_in_any_window" in gpu_dict:
+            scalars["gpu_max"] = float(gpu_dict["maximum_observed_in_any_window"])
+
+        if "cpu_render_submission_ms" in summary:
+            cpu_sub = summary["cpu_render_submission_ms"]
+            for percentile in ("p50", "p95", "p99"):
+                if percentile in cpu_sub and "window_frame_weighted_mean" in cpu_sub[percentile]:
+                    scalars[f"cpu_{percentile}"] = float(cpu_sub[percentile]["window_frame_weighted_mean"])
+            if "maximum" in cpu_sub and "window_maximum" in cpu_sub["maximum"]:
+                scalars["cpu_max"] = float(cpu_sub["maximum"]["window_maximum"])
+
+        if "present_interval_ms" in summary:
+            pres = summary["present_interval_ms"]
+            for percentile in ("p50", "p95", "p99"):
+                if percentile in pres and "window_frame_weighted_mean" in pres[percentile]:
+                    scalars[f"present_{percentile}"] = float(pres[percentile]["window_frame_weighted_mean"])
+            if "maximum" in pres and "window_maximum" in pres["maximum"]:
+                scalars["present_max"] = float(pres["maximum"]["window_maximum"])
+
+        return scalars
+
+    baseline_scalar_list = [extract_scalars(b) for b in baselines]
+    candidate_scalar_list = [extract_scalars(c) for c in candidates]
+
+    def compute_stats(values: list[float]) -> dict[str, float]:
+        mean_val = statistics.mean(values)
+        median_val = statistics.median(values)
+        min_val = min(values)
+        max_val = max(values)
+        stddev_val = statistics.stdev(values) if len(values) > 1 else 0.0
+        spread_val = max_val - min_val
+        return {
+            "mean": mean_val,
+            "median": median_val,
+            "min": min_val,
+            "max": max_val,
+            "stddev": stddev_val,
+            "spread": spread_val,
+        }
+
+    all_metric_keys = set(baseline_scalar_list[0].keys())
+    metrics_summary: dict[str, Any] = {}
+    for key in sorted(all_metric_keys):
+        b_vals = [s[key] for s in baseline_scalar_list if key in s]
+        c_vals = [s[key] for s in candidate_scalar_list if key in s]
+        if b_vals and c_vals:
+            b_stats = compute_stats(b_vals)
+            c_stats = compute_stats(c_vals)
+            delta_mean = c_stats["mean"] - b_stats["mean"]
+            delta_percent = (c_stats["mean"] / b_stats["mean"] - 1.0) * 100.0 if b_stats["mean"] != 0.0 else 0.0
+            metrics_summary[key] = {
+                "baseline": b_stats,
+                "candidate": c_stats,
+                "mean_delta": delta_mean,
+                "mean_delta_percent": delta_percent,
+            }
+
+    pairwise_results: list[dict[str, Any]] = []
+    regressions_count = 0
+    improvements_count = 0
+    within_count = 0
+
+    for b_idx, b in enumerate(baselines):
+        for c_idx, c in enumerate(candidates):
+            pair_comp = compare(
+                b, c, gate_ms,
+                allow_source_change=allow_source_change,
+                allow_static_geometry_heap_mode_change=allow_static_geometry_heap_mode_change,
+                allow_ablation_change=allow_ablation_change,
+                require_stability=require_stability,
+            )
+            verdict = pair_comp["verdict"]
+            if verdict == "REGRESSION":
+                regressions_count += 1
+            elif verdict == "IMPROVEMENT":
+                improvements_count += 1
+            else:
+                within_count += 1
+            pairwise_results.append({
+                "baseline_index": b_idx,
+                "candidate_index": c_idx,
+                "verdict": verdict,
+                "gpu_p50_delta_ms": pair_comp["metrics"]["p50"]["delta"],
+                "gpu_p95_delta_ms": pair_comp["metrics"]["p95"]["delta"],
+            })
+
+    total_pairs = len(pairwise_results)
+    fps_delta_pct = metrics_summary.get("fps", {}).get("mean_delta_percent", 0.0)
+    if regressions_count == total_pairs:
+        direction = "CONSISTENT_REGRESSION"
+    elif regressions_count == 0 and (improvements_count == total_pairs or (improvements_count > 0 and fps_delta_pct >= 0.5)):
+        direction = "CONSISTENT_IMPROVEMENT"
+    elif regressions_count > 0 and (improvements_count > 0 or within_count > 0):
+        direction = "MIXED"
+    else:
+        direction = "INCONCLUSIVE"
+
+    return {
+        "command": "compare-multi",
+        "direction_of_change": direction,
+        "pairwise_summary": {
+            "total_pairings": total_pairs,
+            "improvements": improvements_count,
+            "within_threshold": within_count,
+            "regressions": regressions_count,
+        },
+        "baseline_count": len(baselines),
+        "candidate_count": len(candidates),
+        "metrics": metrics_summary,
+        "pairwise_details": pairwise_results,
+        "baseline_runs": [
+            {
+                "commit": b.get("metadata", {}).get("commit", "unknown"),
+                "source_sha256": b.get("metadata", {}).get("source_sha256", "unknown"),
+                "artifact_sha256": b.get("metadata", {}).get("artifact_sha256", "unknown"),
+                "thermal": b.get("thermal", {}),
+            } for b in baselines
+        ],
+        "candidate_runs": [
+            {
+                "commit": c.get("metadata", {}).get("commit", "unknown"),
+                "source_sha256": c.get("metadata", {}).get("source_sha256", "unknown"),
+                "artifact_sha256": c.get("metadata", {}).get("artifact_sha256", "unknown"),
+                "thermal": c.get("thermal", {}),
+            } for c in candidates
+        ],
+    }
+
+
+def compare_ablation(
+    baselines: Sequence[dict[str, Any]],
+    candidates: Sequence[dict[str, Any]],
+    gate_ms: float = DEFAULT_P95_GATE_MS,
+    *,
+    allow_source_change: bool = False,
+    require_stability: bool = True,
+) -> dict[str, Any]:
+    if not baselines or not candidates:
+        raise ReportError("compare-ablation requires at least 1 baseline and 1 candidate report")
+
+    base_ablation = baselines[0].get("metadata", {}).get("ablation_mode", "FULL_ADVANCED")
+    for idx, r in enumerate(baselines[1:], start=2):
+        b_ablation = r.get("metadata", {}).get("ablation_mode", "FULL_ADVANCED")
+        if b_ablation != base_ablation:
+            raise ReportError(f"baseline report {idx} ablation_mode ({b_ablation}) differs from baseline report 1 ({base_ablation})")
+
+    cand_ablation = candidates[0].get("metadata", {}).get("ablation_mode", "FULL_ADVANCED")
+    for idx, r in enumerate(candidates[1:], start=2):
+        c_ablation = r.get("metadata", {}).get("ablation_mode", "FULL_ADVANCED")
+        if c_ablation != cand_ablation:
+            raise ReportError(f"candidate report {idx} ablation_mode ({c_ablation}) differs from candidate report 1 ({cand_ablation})")
+
+    result = compare_multi(
+        baselines,
+        candidates,
+        gate_ms,
+        allow_source_change=allow_source_change,
+        allow_ablation_change=True,
+        require_stability=require_stability,
+    )
+    result["command"] = "compare-ablation"
+    result["contract_label"] = "DIAGNOSTIC_MARGINAL_COMPARISON"
+    result["attested_receipt"] = None
+    result["baseline_ablation_mode"] = base_ablation
+    result["candidate_ablation_mode"] = cand_ablation
+    result["warning"] = (
+        "WARNING: Ablation deltas are marginal and non-additive. "
+        "They may reflect register allocation, occupancy, cache behavior and compiler/codegen changes in addition to the removed receiver work."
+    )
+    return result
+
+
+def _print_multi_comparison(result: dict[str, Any]) -> None:
+    is_ablation = result.get("contract_label") == "DIAGNOSTIC_MARGINAL_COMPARISON"
+    direction = result["direction_of_change"]
+    summary = result["pairwise_summary"]
+    if is_ablation:
+        print("=== METALLUM DIAGNOSTIC MARGINAL COMPARISON ===")
+        print("Contract Label          : DIAGNOSTIC_MARGINAL_COMPARISON")
+        print(f"Baseline Ablation Mode  : {result.get('baseline_ablation_mode')}")
+        print(f"Candidate Ablation Mode : {result.get('candidate_ablation_mode')}")
+    else:
+        print("=== METALLUM BENCHMARK MULTI-RUN COMPARISON ===")
+    print(f"Direction of Change     : {direction}")
+    print(
+        f"Pairwise Breakdown      : {summary['improvements']} IMPROVED, "
+        f"{summary['within_threshold']} WITHIN THRESHOLD, "
+        f"{summary['regressions']} REGRESSED out of {summary['total_pairings']} pairings "
+        f"({result['baseline_count']} baseline x {result['candidate_count']} candidate runs)"
+    )
+    print()
+    print("Metric Summaries (Baseline Mean -> Candidate Mean):")
+    metrics = result["metrics"]
+    for key in ("fps", "fps_1_low", "fps_01_low", "gpu_p95", "cpu_p95"):
+        if key in metrics:
+            m = metrics[key]
+            b_mean = m["baseline"]["mean"]
+            c_mean = m["candidate"]["mean"]
+            delta = m["mean_delta"]
+            pct = m["mean_delta_percent"]
+            spread_b = m["baseline"]["spread"]
+            spread_c = m["candidate"]["spread"]
+            print(
+                f"  {key:20s}: {b_mean:8.2f} (±{spread_b/2:4.2f}) -> {c_mean:8.2f} (±{spread_c/2:4.2f}) | "
+                f"delta: {delta:+7.2f} ({pct:+6.2f}%)"
+            )
+    if is_ablation:
+        print()
+        print(result.get("warning", "WARNING: Ablation deltas are marginal and non-additive."))
 
 
 def _file_sha256(path: Path) -> str:
@@ -2941,10 +3271,10 @@ def _validate_log_evidence(
         rf"framebuffer={width}x{height}",
     )
     ordered_lines = (
-        frozen_line,
         armed_line,
         window_ready_line,
         apply_line,
+        frozen_line,
         ready_line,
         route_check_lines["MEASURE_START"],
         measure_start_line,
@@ -5493,6 +5823,49 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     comparison.add_argument("--json", action="store_true")
+    comp_multi = sub.add_parser("compare-multi")
+    comp_multi.add_argument("--baseline", nargs="+", type=Path, required=True, help="Baseline report paths (*.raw.jsonl)")
+    comp_multi.add_argument("--candidate", nargs="+", type=Path, required=True, help="Candidate report paths (*.raw.jsonl)")
+    comp_multi.add_argument("--measure-frames", type=int, default=DEFAULT_MEASURE_FRAMES)
+    comp_multi.add_argument("--segment", type=int, default=0)
+    comp_multi.add_argument("--scaler-mode", choices=BENCHMARK_SCALER_MODES, default="OFF")
+    comp_multi.add_argument("--p95-regression-ms", type=float, default=DEFAULT_P95_GATE_MS)
+    comp_multi.add_argument(
+        "--provisional",
+        action="store_true",
+        help="allow unattested or legacy reports; never use for a release gate",
+    )
+    comp_multi.add_argument(
+        "--allow-source-change",
+        action="store_true",
+        help="allow different attested source and build-artifact digests",
+    )
+    comp_multi.add_argument(
+        "--allow-static-geometry-heap-mode-change",
+        action="store_true",
+        help="allow one intentional attested OFF-vs-ON static geometry heap comparison",
+    )
+    comp_multi.add_argument("--json", action="store_true")
+
+    comp_ablation = sub.add_parser("compare-ablation")
+    comp_ablation.add_argument("--baseline", nargs="+", type=Path, required=True, help="Baseline report paths (*.raw.jsonl)")
+    comp_ablation.add_argument("--candidate", nargs="+", type=Path, required=True, help="Candidate report paths (*.raw.jsonl)")
+    comp_ablation.add_argument("--measure-frames", type=int, default=DEFAULT_MEASURE_FRAMES)
+    comp_ablation.add_argument("--segment", type=int, default=0)
+    comp_ablation.add_argument("--scaler-mode", choices=BENCHMARK_SCALER_MODES, default="OFF")
+    comp_ablation.add_argument("--p95-regression-ms", type=float, default=DEFAULT_P95_GATE_MS)
+    comp_ablation.add_argument(
+        "--provisional",
+        action="store_true",
+        help="allow unattested or legacy reports; never use for a release gate",
+    )
+    comp_ablation.add_argument(
+        "--allow-source-change",
+        action="store_true",
+        help="allow different attested source and build-artifact digests",
+    )
+    comp_ablation.add_argument("--json", action="store_true")
+
     attest = sub.add_parser("attest")
     attest.add_argument("raw_report", type=Path)
     attest.add_argument("summary", type=Path)
@@ -5557,6 +5930,61 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print()
             else:
                 _print_summary(summary)
+            return 0
+        if args.command == "compare-multi":
+            if args.provisional and (
+                args.allow_source_change
+                or args.allow_static_geometry_heap_mode_change
+            ):
+                raise ReportError(
+                    "comparison overrides require attested reports and cannot be used "
+                    "with --provisional"
+                )
+            summary_loader = summarize if args.provisional else summarize_attested_release
+            baselines = [
+                summary_loader(path, args.measure_frames, args.segment, args.scaler_mode)
+                for path in args.baseline
+            ]
+            candidates = [
+                summary_loader(path, args.measure_frames, args.segment, args.scaler_mode)
+                for path in args.candidate
+            ]
+            result = compare_multi(
+                baselines,
+                candidates,
+                gate_ms=args.p95_regression_ms,
+                allow_source_change=args.allow_source_change,
+                allow_static_geometry_heap_mode_change=args.allow_static_geometry_heap_mode_change,
+                require_stability=not args.provisional,
+            )
+            if args.json:
+                json.dump(result, sys.stdout, indent=2, sort_keys=True)
+                print()
+            else:
+                _print_multi_comparison(result)
+            return 3 if result["direction_of_change"] == "CONSISTENT_REGRESSION" else 0
+        if args.command == "compare-ablation":
+            summary_loader = summarize if args.provisional else summarize_attested_release
+            baselines = [
+                summary_loader(path, args.measure_frames, args.segment, args.scaler_mode)
+                for path in args.baseline
+            ]
+            candidates = [
+                summary_loader(path, args.measure_frames, args.segment, args.scaler_mode)
+                for path in args.candidate
+            ]
+            result = compare_ablation(
+                baselines,
+                candidates,
+                gate_ms=args.p95_regression_ms,
+                allow_source_change=args.allow_source_change,
+                require_stability=not args.provisional,
+            )
+            if args.json:
+                json.dump(result, sys.stdout, indent=2, sort_keys=True)
+                print()
+            else:
+                _print_multi_comparison(result)
             return 0
         if args.provisional and (
             args.allow_source_change

@@ -1,0 +1,42 @@
+{
+  "verify-full-1": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T143629Z-gda7236c7d0ad-dirty-verify-full-1-off.raw.jsonl",
+    "filename": "20260807T143629Z-gda7236c7d0ad-dirty-verify-full-1-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_FULL",
+    "fps": 17.42614308042183,
+    "gpu_p50": 59.17233321815729,
+    "gpu_p95": 60.53908332251012,
+    "gpu_p99": 60.883666621521115,
+    "cpu_p95": 15.518958
+  },
+  "verify-1tap-1": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T144210Z-gda7236c7d0ad-dirty-verify-1tap-1-off.raw.jsonl",
+    "filename": "20260807T144210Z-gda7236c7d0ad-dirty-verify-1tap-1-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_L6_1TAP_NO_PCF",
+    "fps": 21.32972042633874,
+    "gpu_p50": 48.72162500396371,
+    "gpu_p95": 49.33129181154072,
+    "gpu_p99": 49.485666677355766,
+    "cpu_p95": 13.756292
+  },
+  "verify-full-2": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T144659Z-gda7236c7d0ad-dirty-verify-full-2-off.raw.jsonl",
+    "filename": "20260807T144659Z-gda7236c7d0ad-dirty-verify-full-2-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_FULL",
+    "fps": 17.677188725252197,
+    "gpu_p50": 58.36987518705428,
+    "gpu_p95": 59.65616670437157,
+    "gpu_p99": 60.00295816920698,
+    "cpu_p95": 14.651167
+  },
+  "verify-1tap-2": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T145234Z-gda7236c7d0ad-dirty-verify-1tap-2-off.raw.jsonl",
+    "filename": "20260807T145234Z-gda7236c7d0ad-dirty-verify-1tap-2-off.raw.jsonl",
+    "ablation_mode": "ADVANCED_L6_1TAP_NO_PCF",
+    "fps": 21.38069369193614,
+    "gpu_p50": 48.594916705042124,
+    "gpu_p95": 49.194166669622064,
+    "gpu_p99": 49.314583418890834,
+    "cpu_p95": 13.799833
+  }
+}

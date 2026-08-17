@@ -1,0 +1,72 @@
+{
+  "phase2b-open-profile-hist-on": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T075614Z-gda7236c7d0ad-dirty-phase2b-open-profile-hist-on-off.raw.jsonl",
+    "filename": "20260807T075614Z-gda7236c7d0ad-dirty-phase2b-open-profile-hist-on-off.raw.jsonl",
+    "artifact_sha256": "b2f11998c573a4373d4f05e34c715c139ebcf6d900d197de2921cfca02eeae7b",
+    "commit": "da7236c7d0ad",
+    "fps": 13.76683442941672,
+    "gpu_p50": 74.15262493304908,
+    "gpu_p95": 74.42483329214156,
+    "cpu_p95": 3.002542,
+    "light_count": 760,
+    "requested_indices": 31002,
+    "occ_p95": 16,
+    "occ_max": 42
+  },
+  "phase2b-open-profile-hist-off": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T080314Z-gda7236c7d0ad-dirty-phase2b-open-profile-hist-off-off.raw.jsonl",
+    "filename": "20260807T080314Z-gda7236c7d0ad-dirty-phase2b-open-profile-hist-off-off.raw.jsonl",
+    "artifact_sha256": "b2f11998c573a4373d4f05e34c715c139ebcf6d900d197de2921cfca02eeae7b",
+    "commit": "da7236c7d0ad",
+    "fps": 13.83550048427511,
+    "gpu_p50": 73.80554149858654,
+    "gpu_p95": 73.97125009447336,
+    "cpu_p95": 2.52775,
+    "light_count": 760,
+    "requested_indices": 31002,
+    "occ_p95": 16,
+    "occ_max": 42
+  },
+  "phase2b-open-front-hist-on": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T081009Z-gda7236c7d0ad-dirty-phase2b-open-front-hist-on-off.raw.jsonl",
+    "filename": "20260807T081009Z-gda7236c7d0ad-dirty-phase2b-open-front-hist-on-off.raw.jsonl",
+    "artifact_sha256": "b2f11998c573a4373d4f05e34c715c139ebcf6d900d197de2921cfca02eeae7b",
+    "commit": "da7236c7d0ad",
+    "fps": 13.915825137440276,
+    "gpu_p50": 73.38520837947726,
+    "gpu_p95": 73.62016662955284,
+    "cpu_p95": 2.590709,
+    "light_count": 712,
+    "requested_indices": 27506,
+    "occ_p95": 8,
+    "occ_max": 44
+  },
+  "phase2b-sealed-profile-hist-on": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T081700Z-gda7236c7d0ad-dirty-phase2b-sealed-profile-hist-on-off.raw.jsonl",
+    "filename": "20260807T081700Z-gda7236c7d0ad-dirty-phase2b-sealed-profile-hist-on-off.raw.jsonl",
+    "artifact_sha256": "b2f11998c573a4373d4f05e34c715c139ebcf6d900d197de2921cfca02eeae7b",
+    "commit": "da7236c7d0ad",
+    "fps": 14.48109654451749,
+    "gpu_p50": 72.00345839373767,
+    "gpu_p95": 72.28862517513335,
+    "cpu_p95": 4.241709,
+    "light_count": 760,
+    "requested_indices": 31002,
+    "occ_p95": 16,
+    "occ_max": 42
+  },
+  "phase2b-open-air-profile-hist-on": {
+    "filepath": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/run/logs/metallum-benchmarks/20260807T082338Z-gda7236c7d0ad-dirty-phase2b-open-air-profile-hist-on-off.raw.jsonl",
+    "filename": "20260807T082338Z-gda7236c7d0ad-dirty-phase2b-open-air-profile-hist-on-off.raw.jsonl",
+    "artifact_sha256": "b2f11998c573a4373d4f05e34c715c139ebcf6d900d197de2921cfca02eeae7b",
+    "commit": "da7236c7d0ad",
+    "fps": 14.484683689314487,
+    "gpu_p50": 70.54725009948015,
+    "gpu_p95": 70.83075004629791,
+    "cpu_p95": 4.547666,
+    "light_count": 760,
+    "requested_indices": 31002,
+    "occ_p95": 16,
+    "occ_max": 42
+  }
+}
