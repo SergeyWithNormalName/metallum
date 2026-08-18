@@ -149,6 +149,28 @@ final class MetalCrossShaderCompiler {
                     );
                     variants.put(HdrShaderFlavor.METALLUM_ADVANCED, advanced);
                     if (isSodiumTerrainReceiverPipeline(pipeline)) {
+                        try {
+                            MetalCompiledRenderPipeline.ShaderVariantSource ambient = compileVariant(
+                                    device,
+                                    pipeline,
+                                    shaderSource,
+                                    HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                            );
+                            validateVariantParity(
+                                    pipeline,
+                                    HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY,
+                                    legacy,
+                                    ambient
+                            );
+                            variants.put(HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY, ambient);
+                        } catch (ShaderCompileException | RuntimeException exception) {
+                            com.metallum.Metallum.LOGGER.warn(
+                                    "Failed to compile METALLUM_ADVANCED_AMBIENT_ONLY variant for {}: {}",
+                                    pipeline.getLocation(),
+                                    failureMessage(exception)
+                            );
+                        }
+
                         MetalCompiledRenderPipeline.ShaderVariantSource reactive = compileVariant(
                                 device,
                                 pipeline,
@@ -162,6 +184,28 @@ final class MetalCrossShaderCompiler {
                                 reactive
                         );
                         variants.put(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE, reactive);
+
+                        try {
+                            MetalCompiledRenderPipeline.ShaderVariantSource reactiveAmbient = compileVariant(
+                                    device,
+                                    pipeline,
+                                    shaderSource,
+                                    HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY
+                            );
+                            validateVariantParity(
+                                    pipeline,
+                                    HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY,
+                                    legacy,
+                                    reactiveAmbient
+                            );
+                            variants.put(HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY, reactiveAmbient);
+                        } catch (ShaderCompileException | RuntimeException exception) {
+                            com.metallum.Metallum.LOGGER.warn(
+                                    "Failed to compile METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY variant for {}: {}",
+                                    pipeline.getLocation(),
+                                    failureMessage(exception)
+                            );
+                        }
                     }
                 } catch (ShaderCompileException | RuntimeException exception) {
                     AdvancedLightingPreflightGate.rejectAdvancedVariant(
@@ -372,19 +416,19 @@ final class MetalCrossShaderCompiler {
                 tolerateUnprovidedInputs(vertexOutputs, fragmentLayoutSpirv.inputs()),
                 layoutEntries
         );
+        boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
         MslShader fragmentMsl = spirvToMsl(
                 fragmentSpirv.spirv(),
                 layoutEntries.size(),
                 Map.of(),
-                flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
-                        ? L8_REACTIVE_OUTPUT_LOCATIONS
-                        : Map.of()
+                reactive ? L8_REACTIVE_OUTPUT_LOCATIONS : Map.of()
         );
 
         String fragmentSource = isAdvancedFlavor(flavor)
                 ? preserveVoxelShadowTraversalLoop(fragmentMsl.source())
                 : fragmentMsl.source();
-        if (flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
+        if (reactive) {
             validateL8ReactiveMslOutputs(fragmentSource);
         }
         String vertexEntryPoint = extractEntryPoint(vertexMsl.source(), VERTEX_ENTRY_PATTERN, "main0");
@@ -484,6 +528,16 @@ final class MetalCrossShaderCompiler {
                         .isExternalShadowSampler(sampler.name()))
                 .toList();
         int removed = module.samplers().size() - filtered.size();
+        boolean isAmbientOnly = flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+        if (isAmbientOnly) {
+            if (removed != 0) {
+                throw new IllegalStateException(
+                        "Ambient-only Advanced fragment must not expose external shadow samplers (removed " + removed + ", expected 0)"
+                );
+            }
+            return module;
+        }
         // The GLSL ablation removes receiver work, not the original external sampler
         // declarations.  They must still be stripped from the intermediary module so
         // the generated Metal diagnostic variant has no L4/cloud texture/sampler bindings.
@@ -518,8 +572,11 @@ final class MetalCrossShaderCompiler {
         }
         if (flavor == HdrShaderFlavor.METALLUM
                 || flavor == HdrShaderFlavor.METALLUM_ADVANCED
-                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
-            boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE;
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY) {
+            boolean reactive = flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                    || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
             if (variant.semanticOutput() != reactive) {
                 throw new IllegalStateException(
                         flavor + " variant has the wrong reactive attachment contract for pipeline "
@@ -527,7 +584,7 @@ final class MetalCrossShaderCompiler {
                 );
             }
             if (isAdvancedFlavor(flavor)) {
-                validateAdvancedLightingBindings(pipeline, variant);
+                validateAdvancedLightingBindings(pipeline, flavor, variant);
             }
         } else if (flavor != HdrShaderFlavor.LEGACY_HDR_SEMANTIC
                 && flavor != HdrShaderFlavor.SCENE_RASTER_LINEAR
@@ -552,6 +609,7 @@ final class MetalCrossShaderCompiler {
 
     private static void validateAdvancedLightingBindings(
             final RenderPipeline pipeline,
+            final HdrShaderFlavor flavor,
             final MetalCompiledRenderPipeline.ShaderVariantSource variant
     ) {
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
@@ -640,6 +698,35 @@ final class MetalCrossShaderCompiler {
                             + pipeline.getLocation()
             );
         }
+        boolean isAmbientOnly = flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+        if (isAmbientOnly) {
+            for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
+                String textureMarker = "[[texture(" + slot + ")]]";
+                String samplerMarker = "[[sampler(" + slot + ")]]";
+                if (variant.fragmentMsl().contains(textureMarker)
+                        || variant.fragmentMsl().contains(samplerMarker)
+                        || variant.vertexMsl().contains(textureMarker)
+                        || variant.vertexMsl().contains(samplerMarker)) {
+                    throw new IllegalStateException(
+                            "Ambient-only fragment retained L4 shadow texture/sampler slot " + slot
+                                    + " for " + pipeline.getLocation()
+                    );
+                }
+            }
+            String cloudTextureMarker = "[[texture(" + CloudShadowBindingAbi.TEXTURE_SLOT + ")]]";
+            String cloudSamplerMarker = "[[sampler(" + CloudShadowBindingAbi.TEXTURE_SLOT + ")]]";
+            if (variant.fragmentMsl().contains(cloudTextureMarker)
+                    || variant.fragmentMsl().contains(cloudSamplerMarker)
+                    || variant.vertexMsl().contains(cloudTextureMarker)
+                    || variant.vertexMsl().contains(cloudSamplerMarker)) {
+                throw new IllegalStateException(
+                        "Ambient-only fragment retained Cloud shadow texture/sampler slot "
+                                + CloudShadowBindingAbi.TEXTURE_SLOT + " for " + pipeline.getLocation()
+                );
+            }
+            return;
+        }
         boolean ablateL4 = com.metallum.client.benchmark.DiagnosticAblationMode.getSystemCurrent().ablateL4() == 1;
         if (ablateL4) {
             // The diagnostic define makes the L4 receiver branch a compile-time
@@ -714,7 +801,9 @@ final class MetalCrossShaderCompiler {
 
     private static boolean isAdvancedFlavor(final HdrShaderFlavor flavor) {
         return flavor == HdrShaderFlavor.METALLUM_ADVANCED
-                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE;
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
     }
 
     private static boolean isSunShadowCasterPipeline(final RenderPipeline pipeline) {

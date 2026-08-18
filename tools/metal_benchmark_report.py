@@ -4143,7 +4143,6 @@ def self_test() -> None:
         )
 
     minecraft_evidence = "\n".join((
-        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ARMED "
         "scope=Built-in Retina Display target=3024x1964 warmup=1800 "
         "measure=3000 sequence=[OFF] route=hdrtest-static-v1",
@@ -4154,6 +4153,7 @@ def self_test() -> None:
         "route=hdrtest-static-v1 fixture=hdrtest-static-v1 "
         "player=MetallumBench/b07a402a-d8ea-354f-9398-aaf208a798b9 "
         "dimension=minecraft:overworld",
+        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_READY "
         "route=hdrtest-static-v1 stable_frames=120 "
         "pose=[86.1,74.0,-95.5;155.4,13.2] max_fps=260 "

@@ -27,7 +27,9 @@ import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
+import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.lighting.LightFrameSnapshot;
+import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.L8ReactiveShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
@@ -313,6 +315,8 @@ public final class MetalDevice implements GpuDeviceBackend {
     private long lastVoxelDebugChecksumSubmitIndex = Long.MIN_VALUE;
     private boolean voxelDebugChecksumRuntimeDisabled;
     private boolean voxelDebugChecksumFailureLogged;
+    private volatile EnvironmentDescriptor.Profile activeEnvironmentProfile =
+            EnvironmentDescriptor.Profile.CELESTIAL;
     private NativeFullscreen nativeFullscreen;
 
     MetalDevice(
@@ -1648,9 +1652,23 @@ public final class MetalDevice implements GpuDeviceBackend {
         return this.entityTransformTracker;
     }
 
+    public boolean isAmbientOnlyTerrainSpecializationActive() {
+        String override = System.getProperty("metallum.benchmark.ambientTerrainSpecialization");
+        if (override == null || override.isBlank()) {
+            override = System.getenv("METALLUM_BENCHMARK_AMBIENT_TERRAIN_SPECIALIZATION");
+        }
+        if ("full".equalsIgnoreCase(override)) {
+            return false;
+        }
+        return this.activeEnvironmentProfile == EnvironmentDescriptor.Profile.AMBIENT_ONLY;
+    }
+
     /** Publishes one final world-camera snapshot into its reusable in-flight ABI slot. */
     public synchronized FrameState publishFrameState(final FrameCapture capture) {
         Objects.requireNonNull(capture, "capture");
+        this.activeEnvironmentProfile = capture.environment() != null
+                ? capture.environment().profile()
+                : EnvironmentDescriptor.Profile.CELESTIAL;
         RendererGenerationConfig generation = this.activeRendererGeneration;
         RendererGenerationKey generationKey = this.publishedRendererGeneration;
         FrameState.Extent renderExtent = this.activeRenderExtent;
@@ -3265,7 +3283,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (key.flavor() == HdrShaderFlavor.METALLUM
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
-                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE) {
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY) {
             MetallumMaterialShaderPatcher.Result material = MetallumMaterialShaderPatcher.patch(
                     key.id().getNamespace(),
                     key.id().getPath(),
@@ -3283,6 +3303,11 @@ public final class MetalDevice implements GpuDeviceBackend {
             if (key.flavor() == HdrShaderFlavor.METALLUM) {
                 return material.source();
             }
+            TerrainEnvironmentSpecialization specialization =
+                    (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                            || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY)
+                            ? TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                            : TerrainEnvironmentSpecialization.FULL;
             AdvancedDirectLightingShaderPatcher.Result advanced =
                     AdvancedDirectLightingShaderPatcher.patch(
                             key.id().getNamespace(),
@@ -3291,7 +3316,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     ? MetallumMaterialShaderPatcher.Stage.VERTEX
                                     : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
                             LightingModel.ADVANCED,
-                            material.source()
+                            material.source(),
+                            specialization
                     );
             if (!advanced.success()) {
                 throw new IllegalStateException(
@@ -3299,7 +3325,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 + advanced.failureReason()
                 );
             }
-            if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED) {
+            if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
+                    || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY) {
                 return advanced.source();
             }
             L8ReactiveShaderPatcher.Result reactive = L8ReactiveShaderPatcher.patch(

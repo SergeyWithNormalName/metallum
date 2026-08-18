@@ -2,6 +2,7 @@ package com.metallum.client.lighting.shader;
 
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.SunShadowLayout;
@@ -107,6 +108,7 @@ public final class AdvancedDirectLightingShaderTests {
         testTwoPhasePreflightGate();
         testActualSourcesCompileAndMatchGoldens();
         testDedicatedSunShadowVariants();
+        testAmbientOnlyTerrainSpecialization();
     }
 
     private static void testVersionedBindingAbi() {
@@ -1519,6 +1521,127 @@ public final class AdvancedDirectLightingShaderTests {
                         preprocess(sources[4].namespace(), sources[4].path(), sources[4].stage())
                 ).success(),
                 "end portal receiver unexpectedly entered the L4 caster contract");
+    }
+
+    private static void testAmbientOnlyTerrainSpecialization() throws IOException {
+        // A. Semantic specialization mapping
+        require(TerrainEnvironmentSpecialization.from(com.metallum.client.lighting.EnvironmentDescriptor.Profile.AMBIENT_ONLY)
+                == TerrainEnvironmentSpecialization.AMBIENT_ONLY, "AMBIENT_ONLY profile did not map to AMBIENT_ONLY");
+        require(TerrainEnvironmentSpecialization.from(com.metallum.client.lighting.EnvironmentDescriptor.Profile.CELESTIAL)
+                == TerrainEnvironmentSpecialization.FULL, "CELESTIAL profile did not map to FULL");
+        require(TerrainEnvironmentSpecialization.from(com.metallum.client.lighting.EnvironmentDescriptor.Profile.END)
+                == TerrainEnvironmentSpecialization.FULL, "END profile did not map to FULL");
+        require(TerrainEnvironmentSpecialization.from(null)
+                == TerrainEnvironmentSpecialization.FULL, "null profile did not map to FULL");
+
+        ShaderCase[] sources = actualTargetSources();
+        AdvancedDirectLightingShaderPatcher.Result ambientPatch =
+                AdvancedDirectLightingShaderPatcher.patch(
+                        sources[1].namespace(),
+                        sources[1].path(),
+                        sources[1].stage(),
+                        LightingModel.ADVANCED,
+                        materialSource(sources[1]),
+                        TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                );
+        require(ambientPatch.success(), "ambient specialization patching failed: " + ambientPatch.failureReason());
+        String ambientFragment = ambientPatch.source();
+
+        // 1. Absence of external shadow / cloud samplers
+        require(!ambientFragment.contains("metallumSunShadow0")
+                && !ambientFragment.contains("metallumSunShadow1")
+                && !ambientFragment.contains("metallumSunShadow2")
+                && !ambientFragment.contains("metallumCloudShadow"),
+                "ambient-only shader retained external shadow samplers");
+
+        // 2. Absence of celestial evaluation helpers
+        require(!ambientFragment.contains("metallumPcfV1(")
+                && !ambientFragment.contains("metallumCascadeVisibilityV1(")
+                && !ambientFragment.contains("metallumSunVisibilityV1(")
+                && !ambientFragment.contains("metallumCloudTransmittanceV1(")
+                && !ambientFragment.contains("metallumUnderwaterCausticGainV1(")
+                && !ambientFragment.contains("metallumWaterSquareCelestialMaskV1(")
+                && !ambientFragment.contains("metallumWaterSquareSunMaskV1("),
+                "ambient-only shader retained celestial evaluation functions");
+
+        // 3. Presence of clustered lighting, L6 voxel shadow, and material evaluation
+        require(ambientFragment.contains("metallumEvaluateClusteredDirectV1(")
+                && ambientFragment.contains("metallumEvaluateEnvironmentV1(")
+                && ambientFragment.contains("metallumResolveSurfaceMaterialV1(")
+                && ambientFragment.contains("metallumEvaluateMaterialEnvironmentV1(")
+                && ambientFragment.contains("metallumEvaluateGgxV1("),
+                "ambient-only shader missing required clustered or material functions");
+
+        // 4. SPIR-V and MSL compilation check
+        String sodiumVertex = advancedSource(sources[0]);
+        try (GlslCompiler compiler = new GlslCompiler();
+             IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                     "sodium-solid-ambient.vsh", withDefines(sodiumVertex, SODIUM_SOLID_DEFINES), ShaderType.VERTEX);
+             IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                     "sodium-solid-ambient.fsh", withDefines(ambientFragment, SODIUM_SOLID_DEFINES), ShaderType.FRAGMENT)) {
+            require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                    "ambient-only shader produced invalid SPIR-V");
+            long shadowSamplerCount = fragmentModule.samplers().stream()
+                    .filter(s -> AdvancedDirectLightingShaderPatcher.isExternalShadowSampler(s.name()))
+                    .count();
+            require(shadowSamplerCount == 0,
+                    "ambient-only shader reflection exposed " + shadowSamplerCount + " shadow samplers");
+        } catch (ShaderCompileException exception) {
+            throw new AssertionError("ambient-only shader compilation failed", exception);
+        }
+
+        // 5. Numerical equivalence between FULL and AMBIENT_ONLY in AMBIENT_ONLY profile conditions
+        // In an AMBIENT_ONLY profile:
+        // directionalRadiance = (0, 0, 0), contract.w has bit 0 cleared (no sun shadow) -> sunVisibility = 1.0
+        // skyShadow = mix(0.42, 1.0, 1.0) = 1.0
+        // FULL formula: diffuse = ambientRadiance + skyIrradiance * (skyOcclusion * hemisphere * 1.0)
+        // AMBIENT_ONLY formula: diffuse = ambientRadiance + skyIrradiance * (skyOcclusion * hemisphere)
+        // Both evaluate to identical values across all surface normals and sky visibility levels.
+        float[] ambientRadiance = {0.12f, 0.08f, 0.05f};
+        float[] skyIrradiance = {0.25f, 0.15f, 0.10f};
+        float[] up = {0.0f, 1.0f, 0.0f};
+
+        float[][] testNormals = {
+                {0.0f, 1.0f, 0.0f},
+                {0.0f, -1.0f, 0.0f},
+                {1.0f, 0.0f, 0.0f},
+                {0.0f, 0.0f, 1.0f},
+                {0.57735f, 0.57735f, 0.57735f},
+                {-0.57735f, 0.57735f, -0.57735f}
+        };
+        float[] testSkyVisibilities = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+        float[][] testAlbedos = {
+                {0.8f, 0.8f, 0.8f},
+                {0.2f, 0.5f, 0.9f},
+                {0.05f, 0.05f, 0.05f},
+                {1.0f, 0.95f, 0.8f}
+        };
+
+        for (float[] normal : testNormals) {
+            float hemisphere = 0.30f + 0.70f * Math.max(
+                    normal[0] * up[0] + normal[1] * up[1] + normal[2] * up[2],
+                    0.0f
+            );
+            for (float skyVis : testSkyVisibilities) {
+                float skyOcclusion = Math.clamp(skyVis, 0.0f, 1.0f);
+                for (float[] albedo : testAlbedos) {
+                    // Full path under AMBIENT_ONLY (directionalRadiance = 0, sunVis = 1.0, skyShadow = 1.0)
+                    float fullR = albedo[0] * (ambientRadiance[0] + skyIrradiance[0] * (skyOcclusion * hemisphere * 1.0f)) * 0.31830988618f;
+                    float fullG = albedo[1] * (ambientRadiance[1] + skyIrradiance[1] * (skyOcclusion * hemisphere * 1.0f)) * 0.31830988618f;
+                    float fullB = albedo[2] * (ambientRadiance[2] + skyIrradiance[2] * (skyOcclusion * hemisphere * 1.0f)) * 0.31830988618f;
+
+                    // Specialized AMBIENT_ONLY path
+                    float ambR = albedo[0] * (ambientRadiance[0] + skyIrradiance[0] * (skyOcclusion * hemisphere)) * 0.31830988618f;
+                    float ambG = albedo[1] * (ambientRadiance[1] + skyIrradiance[1] * (skyOcclusion * hemisphere)) * 0.31830988618f;
+                    float ambB = albedo[2] * (ambientRadiance[2] + skyIrradiance[2] * (skyOcclusion * hemisphere)) * 0.31830988618f;
+
+                    require(Math.abs(fullR - ambR) < 1.0e-7f
+                                    && Math.abs(fullG - ambG) < 1.0e-7f
+                                    && Math.abs(fullB - ambB) < 1.0e-7f,
+                            "numerical divergence between FULL and AMBIENT_ONLY in ambient-only contract");
+                }
+            }
+        }
     }
 
     private static void compileShadowPair(

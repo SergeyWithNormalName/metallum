@@ -1328,7 +1328,9 @@ VALIDATION_ARG=""
 if [ "$TIMING_DETAIL" -eq 0 ] \
     && [ "$METAL_VALIDATION" -eq 0 ] \
     && [ "$CAPTURE_REFERENCE" -eq 0 ] \
-    && [ "$FI_VALIDATION" -eq 0 ]; then
+    && [ "$FI_VALIDATION" -eq 0 ] \
+    && [ "$WARMUP_FRAMES" -eq 1800 ] \
+    && [ "$MEASURE_FRAMES" -eq 3000 ]; then
     RELEASE_ARG=--release-contract
 fi
 if [ "$METAL_VALIDATION" -eq 1 ]; then

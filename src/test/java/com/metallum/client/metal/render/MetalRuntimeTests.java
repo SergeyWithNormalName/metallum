@@ -710,6 +710,22 @@ public final class MetalRuntimeTests {
                         true, true, false, true
                 ) == HdrShaderFlavor.METALLUM_ADVANCED,
                 "reactive flavor escaped its Temporal/variant availability gate");
+        require(MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, true, true, false, false, false
+                ) == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY,
+                "ambient specialization did not select METALLUM_ADVANCED_AMBIENT_ONLY");
+        require(MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, true, true, true, true, true
+                ) == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY,
+                "ambient specialization did not select METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY");
+        require(MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, true, false, false, false, false
+                ) == HdrShaderFlavor.METALLUM_ADVANCED,
+                "missing ambient variant did not fail open to METALLUM_ADVANCED");
+        require(MetalCompiledRenderPipeline.selectMaterialWorldFlavor(
+                        true, true, false, true, false, false, false
+                ) == HdrShaderFlavor.METALLUM_ADVANCED,
+                "inactive ambient profile selected ambient-only flavor");
         require(!MetalDevice.isAdvancedLightingWorldPassActive(
                         advancedGeneration,
                         true,

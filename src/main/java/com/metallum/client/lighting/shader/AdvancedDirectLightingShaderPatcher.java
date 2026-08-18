@@ -1,6 +1,7 @@
 package com.metallum.client.lighting.shader;
 
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
+import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.SunShadowLayout;
@@ -83,6 +84,7 @@ public final class AdvancedDirectLightingShaderPatcher {
     );
 
     private static final String FRAGMENT_ABI_AND_HELPERS = buildFragmentAbiAndHelpers();
+    private static final String FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY = buildAmbientOnlyFragmentAbiAndHelpers();
 
     private static String buildFragmentAbiAndHelpers() {
         return new StringBuilder(96_000).append("""
@@ -2360,6 +2362,517 @@ public final class AdvancedDirectLightingShaderPatcher {
             """).toString();
     }
 
+    private static String buildAmbientOnlyFragmentAbiAndHelpers() {
+        String source = FRAGMENT_ABI_AND_HELPERS;
+
+        // 1. Remove external shadow and cloud sampler declarations
+        String samplers = """
+            layout(binding = 13) uniform sampler2DShadow metallumSunShadow0;
+            layout(binding = 14) uniform sampler2DShadow metallumSunShadow1;
+            layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
+            layout(binding = 12) uniform sampler2D metallumCloudShadow;
+            """;
+        source = replaceExactlyOnce(source, samplers, "");
+        if (source == null) {
+            throw new IllegalStateException("Failed to strip external shadow samplers from AMBIENT_ONLY helper");
+        }
+
+        // 2. Specialize environment lookup and remove water square celestial masks
+        String fullEnvLookupAndMasks = """
+            vec3 metallumEnvironmentLookupV1(
+                    vec3 direction,
+                    vec3 normal,
+                    float roughness,
+                    float celestialShape) {
+                vec3 scattered = metallumSafeNormalV1(mix(direction, normal, roughness * 0.55));
+                if (dot(scattered, scattered) == 0.0) {
+                    scattered = direction;
+                }
+                vec3 up = normalize(metallumEnvironment.worldUpAndMedium.xyz);
+                float hemisphere = clamp(dot(scattered, up) * 0.5 + 0.5, 0.0, 1.0);
+                vec3 ambient = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                vec3 sky = max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0));
+                float sharpSky = mix(0.12, 0.86, hemisphere);
+                float skyFactor = mix(sharpSky, 0.49, roughness * 0.80);
+                vec3 environment = ambient * 0.31830988618
+                        + sky * skyFactor;
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                if (dot(toLight, toLight) > 0.0) {
+                    float safeRoughness = max(roughness, 0.045);
+                    float p = clamp(2.0 / (safeRoughness * safeRoughness) - 2.0, 2.0, 384.0);
+                    float norm = (p + 2.0) / 386.0;
+                    float celestial = pow(max(dot(scattered, toLight), 0.0), p) * norm;
+                    environment += max(
+                            metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                            * (celestial * celestialShape);
+                }
+                return environment;
+            }
+
+            vec3 metallumEnvironmentLookupV1(vec3 direction, vec3 normal, float roughness) {
+                return metallumEnvironmentLookupV1(direction, normal, roughness, 1.0);
+            }
+
+            vec3 metallumEnvironmentLookupV1(vec3 direction) {
+                return metallumEnvironmentLookupV1(direction, vec3(0.0), 0.05);
+            }
+
+            float metallumWaterSquareCelestialMaskV1(
+                    vec3 reflectedDirection,
+                    vec3 celestialDirection) {
+                vec3 celestial = metallumSafeNormalV1(celestialDirection);
+                if (dot(celestial, celestial) == 0.0) {
+                    return 1.0;
+                }
+                vec3 squareRight = cross(metallumEnvironment.worldUpAndMedium.xyz, celestial);
+                float squareRightLengthSquared = dot(squareRight, squareRight);
+                if (squareRightLengthSquared < 0.0001) {
+                    squareRight = cross(vec3(0.0, 0.0, 1.0), celestial);
+                    squareRightLengthSquared = dot(squareRight, squareRight);
+                }
+                if (squareRightLengthSquared < 0.0001) {
+                    return 1.0;
+                }
+                squareRight *= inversesqrt(squareRightLengthSquared);
+                vec3 squareUp = cross(celestial, squareRight);
+                vec2 celestialPlane = vec2(
+                        dot(reflectedDirection, squareRight),
+                        dot(reflectedDirection, squareUp));
+                // A soft 3.4° square keeps the Minecraft celestial bodies (sun and moon) recognizable
+                // without turning the water into a hard-edged, temporally unstable white tile.
+                float squareDistance = max(abs(celestialPlane.x), abs(celestialPlane.y));
+                return 1.0 - smoothstep(0.030, 0.046, squareDistance);
+            }
+
+            float metallumWaterSquareSunMaskV1(
+                    vec3 reflectedDirection,
+                    vec3 sunDirection) {
+                return metallumWaterSquareCelestialMaskV1(reflectedDirection, sunDirection);
+            }
+            """;
+        String ambientEnvLookup = """
+            vec3 metallumEnvironmentLookupV1(
+                    vec3 direction,
+                    vec3 normal,
+                    float roughness) {
+                vec3 scattered = metallumSafeNormalV1(mix(direction, normal, roughness * 0.55));
+                if (dot(scattered, scattered) == 0.0) {
+                    scattered = direction;
+                }
+                vec3 up = normalize(metallumEnvironment.worldUpAndMedium.xyz);
+                float hemisphere = clamp(dot(scattered, up) * 0.5 + 0.5, 0.0, 1.0);
+                vec3 ambient = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                vec3 sky = max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0));
+                float sharpSky = mix(0.12, 0.86, hemisphere);
+                float skyFactor = mix(sharpSky, 0.49, roughness * 0.80);
+                return ambient * 0.31830988618 + sky * skyFactor;
+            }
+
+            vec3 metallumEnvironmentLookupV1(vec3 direction) {
+                return metallumEnvironmentLookupV1(direction, vec3(0.0), 0.05);
+            }
+            """;
+        source = replaceExactlyOnce(source, fullEnvLookupAndMasks, ambientEnvLookup);
+        if (source == null) {
+            throw new IllegalStateException("Failed to specialize environment lookup for AMBIENT_ONLY helper");
+        }
+
+        // 3. Remove celestial helper functions: PCF, cascade visibility, sun visibility, cloud transmittance, underwater caustics
+        String celestialHelpers = """
+            float metallumPcfV1(sampler2DShadow shadowMap, vec3 coordinate) {
+                if (any(lessThan(coordinate.xy, vec2(0.0)))
+                        || any(greaterThan(coordinate.xy, vec2(1.0)))
+                        || coordinate.z < 0.0 || coordinate.z > 1.0) {
+                    return 1.0;
+                }
+                float lit = 0.0;
+                float texel = max(metallumEnvironment.texelAndBias.x, 0.000001)
+                        * max(metallumEnvironment.texelAndBias.w, 0.5);
+                float receiverDepth = coordinate.z
+                        + max(metallumEnvironment.texelAndBias.y, 0.0);
+                for (int y = -1; y <= 1; ++y) {
+                    for (int x = -1; x <= 1; ++x) {
+                        vec2 uv = clamp(
+                                coordinate.xy + vec2(float(x), float(y)) * texel,
+                                vec2(0.0), vec2(1.0));
+                        lit += texture(shadowMap, vec3(uv, receiverDepth));
+                    }
+                }
+                return lit * (1.0 / 9.0);
+            }
+
+            float metallumCascadeVisibilityV1(int cascade, vec3 viewPosition, vec3 normal) {
+                float normalBias = cascade == 0
+                        ? metallumEnvironment.cascadeNormalBias.x
+                        : cascade == 1
+                                ? metallumEnvironment.cascadeNormalBias.y
+                                : metallumEnvironment.cascadeNormalBias.z;
+                vec3 offsetPosition = viewPosition
+                        + normal * max(
+                                normalBias,
+                                max(metallumEnvironment.texelAndBias.z, 0.0));
+                vec4 clip;
+                if (cascade == 0) {
+                    clip = metallumEnvironment.shadowFromView0 * vec4(offsetPosition, 1.0);
+                } else if (cascade == 1) {
+                    clip = metallumEnvironment.shadowFromView1 * vec4(offsetPosition, 1.0);
+                } else {
+                    clip = metallumEnvironment.shadowFromView2 * vec4(offsetPosition, 1.0);
+                }
+                if (!(abs(clip.w) > 0.000001) || isnan(clip.w) || isinf(clip.w)) {
+                    return 1.0;
+                }
+                vec3 coordinate = clip.xyz / clip.w;
+                coordinate.xy = coordinate.xy * 0.5 + 0.5;
+                if (cascade == 0) {
+                    return metallumPcfV1(metallumSunShadow0, coordinate);
+                }
+                if (cascade == 1) {
+                    return metallumPcfV1(metallumSunShadow1, coordinate);
+                }
+                return metallumPcfV1(metallumSunShadow2, coordinate);
+            }
+
+            float metallumSunVisibilityV1(vec3 viewPosition, vec3 normal) {
+                if (metallumEnvironment.contract.x != 1u
+                        || (metallumEnvironment.contract.w & 1u) == 0u) {
+                    return 1.0;
+                }
+                int cascadeCount = int(clamp(metallumEnvironment.contract.y, 2u, 3u));
+                float viewDepth = max(-viewPosition.z, 0.0);
+                int cascade = viewDepth <= metallumEnvironment.cascadeSplits.x ? 0
+                        : viewDepth <= metallumEnvironment.cascadeSplits.y ? 1 : 2;
+                if (cascade >= cascadeCount
+                        || viewDepth > metallumEnvironment.cascadeSplits[cascadeCount - 1]) {
+                    return 1.0;
+                }
+                float visibility = metallumCascadeVisibilityV1(cascade, viewPosition, normal);
+                float split = metallumEnvironment.cascadeSplits[cascade];
+                float previous = cascade == 0 ? 0.0
+                        : metallumEnvironment.cascadeSplits[cascade - 1];
+                float blendWidth = max(
+                        (split - previous) * metallumEnvironment.cascadeBlend[cascade],
+                        0.0001);
+                float blend = smoothstep(split - blendWidth, split, viewDepth);
+                if (blend > 0.0) {
+                    if (cascade + 1 < cascadeCount) {
+                        visibility = mix(
+                                visibility,
+                                metallumCascadeVisibilityV1(cascade + 1, viewPosition, normal),
+                                blend);
+                    } else {
+                        visibility = mix(visibility, 1.0, blend);
+                    }
+                }
+                return visibility;
+            }
+
+            float metallumCloudTransmittanceV1(vec3 viewPosition) {
+                if (metallumEnvironment.cloudContract.x != 1u) {
+                    return 1.0;
+                }
+                uint mode = metallumEnvironment.cloudContract.y;
+                if (mode == 0u || metallumEnvironment.cloudParams.z <= 0.005) {
+                    return 1.0;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 toLightWorld = metallumSafeNormalV1(
+                        worldFromView * metallumEnvironment.directionAndFlags.xyz);
+                float lightY = toLightWorld.y;
+                if (lightY <= 0.001) {
+                    return 1.0;
+                }
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                vec3 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + cameraRelativePosition;
+                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + cameraBlockRelativePosition;
+
+                float cloudHeight = metallumEnvironment.cloudParams.x;
+                float cloudThickness = metallumEnvironment.cloudParams.y;
+                float cloudTop = cloudHeight + cloudThickness;
+                if (worldPosition.y >= cloudTop) {
+                    return 1.0;
+                }
+                float targetHeight = (mode == 2u)
+                        ? (cloudHeight + cloudThickness * 0.5)
+                        : cloudHeight;
+                if (worldPosition.y >= cloudHeight) {
+                    targetHeight = cloudTop;
+                }
+                float t = (targetHeight - worldPosition.y) / lightY;
+                if (t < 0.0) {
+                    return 1.0;
+                }
+                vec2 cloudWorldPos = worldPosition.xz + toLightWorld.xz * t;
+                vec2 shiftedPos = cloudWorldPos + metallumEnvironment.cloudOffsetAndGridSize.xy;
+                vec2 gridSize = metallumEnvironment.cloudOffsetAndGridSize.zw;
+                vec2 uv = shiftedPos / max(gridSize, vec2(1.0));
+
+                float sampledTransmittance = texture(metallumCloudShadow, uv).r;
+                float lowElevation = metallumEnvironment.cloudShadowFadeAndStrength.y;
+                float stableElevation = metallumEnvironment.cloudShadowFadeAndStrength.z;
+                float projectionWeight = smoothstep(lowElevation, stableElevation, lightY);
+                return mix(1.0, sampledTransmittance, projectionWeight);
+            }
+
+            float metallumUnderwaterCausticGainV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                if (metallumEnvironment.materialContract.x != 1u) {
+                    return 1.0;
+                }
+                bool cameraUnderwater = metallumEnvironment.materialContract.z == 1u;
+                uint alphaByte = uint(round(clamp(receiverAlpha, 0.0, 1.0) * 255.0));
+                bool receiverSubmerged = (alphaByte <= 254u && alphaByte >= 192u)
+                        || ((packedMaterial & 256u) != 0u);
+                if (!receiverSubmerged && !cameraUnderwater) {
+                    return 1.0;
+                }
+                if (dot(metallumEnvironment.directionalRadiance.rgb, vec3(1.0)) <= 0.0001) {
+                    return 1.0;
+                }
+                if (metallumVoxelShadow.caps.x != 4u) {
+                    return 1.0;
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 toLightWorld = metallumSafeNormalV1(
+                        worldFromView * metallumEnvironment.directionAndFlags.xyz);
+                if (toLightWorld.y <= 0.001) {
+                    return 1.0;
+                }
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                vec3 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + cameraRelativePosition;
+                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + cameraBlockRelativePosition;
+
+                float depth = 0.0;
+                if (alphaByte <= 254u && alphaByte >= 192u) {
+                    depth = float(255u - alphaByte);
+                } else {
+                    uint packedDepth = (packedMaterial >> 9u) & 63u;
+                    if (packedDepth > 0u) {
+                        depth = float(packedDepth);
+                    } else if (cameraUnderwater || receiverSubmerged) {
+                        float waterSurfaceY = metallumEnvironment.materialWeatherAndTime.w;
+                        depth = waterSurfaceY - worldPosition.y;
+                    }
+                }
+                if (depth <= 0.0 || isnan(depth) || isinf(depth)) {
+                    return 1.0;
+                }
+                const float eta = 0.75;
+                const float eta2 = 0.5625;
+                float cosTheta1 = clamp(toLightWorld.y, 0.0, 1.0);
+                float k = 1.0 - eta2 * (1.0 - cosTheta1 * cosTheta1);
+                float refractedY = sqrt(max(k, 0.4375));
+                vec2 refractedXZ = toLightWorld.xz * eta;
+                vec3 refractedToLight = vec3(refractedXZ.x, refractedY, refractedXZ.y);
+
+                vec3 worldNormal = metallumSafeNormalV1(worldFromView * normal);
+                float nDotRefracted = dot(worldNormal, refractedToLight);
+                if (nDotRefracted <= 0.001) {
+                    return 1.0;
+                }
+                float orientationFactor = clamp(nDotRefracted * 1.25, 0.0, 1.0);
+                float depthWeight = exp(-0.08 * depth);
+
+                float projectionDistance = depth / refractedY;
+                vec2 surfacePointXZ = worldPosition.xz + refractedXZ * projectionDistance;
+                float time = metallumEnvironment.materialWeatherAndTime.z;
+                MetallumWaterWaveStateV1 waveState = metallumEvaluateWaterWavesV1(
+                        surfacePointXZ, time);
+
+                float centeredFocus = waveState.causticFocusing - 0.85;
+                float causticStrength = depthWeight * orientationFactor * 1.25;
+                return clamp(1.0 + centeredFocus * causticStrength, 0.45, 2.40);
+            }
+            """;
+        source = replaceExactlyOnce(source, celestialHelpers, "");
+        if (source == null) {
+            throw new IllegalStateException("Failed to strip celestial helpers from AMBIENT_ONLY helper");
+        }
+
+        // 4. Specialize metallumEvaluateEnvironmentV1
+        String fullEnvEval = """
+            vec3 metallumEvaluateEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                if (metallumEnvironment.contract.x != 1u) {
+                    return vec3(0.0);
+                }
+                if (dot(normal, normal) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                float hemisphere = 0.30 + 0.70 * max(
+                        dot(normal, normalize(metallumEnvironment.worldUpAndMedium.xyz)),
+                        0.0);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                float nDotL = max(dot(normal, toLight), 0.0);
+                float directionalWeight = skyOcclusion * nDotL;
+                float sunVisibility = 1.0;
+                if (directionalWeight > 0.0) {
+                    sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                }
+                float cloudTransmittance = 1.0;
+                if (directionalWeight > 0.0 && sunVisibility > 0.0) {
+                    cloudTransmittance = metallumCloudTransmittanceV1(viewPosition);
+                }
+                const float shadowedSkyVisibility = 0.42;
+                float skyShadow = mix(shadowedSkyVisibility, 1.0, sunVisibility);
+                vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
+                        * (skyOcclusion * hemisphere * skyShadow);
+                if (directionalWeight > 0.0) {
+                    float causticGain = metallumUnderwaterCausticGainV1(
+                            viewPosition, normal, packedMaterial, receiverAlpha);
+                    diffuse += max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                            * (directionalWeight * sunVisibility * cloudTransmittance * causticGain);
+                }
+                return albedo * diffuse * 0.31830988618;
+            }
+            """;
+        String ambientEnvEval = """
+            vec3 metallumEvaluateEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                if (metallumEnvironment.contract.x != 1u) {
+                    return vec3(0.0);
+                }
+                if (dot(normal, normal) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                float hemisphere = 0.30 + 0.70 * max(
+                        dot(normal, normalize(metallumEnvironment.worldUpAndMedium.xyz)),
+                        0.0);
+                vec3 diffuse = max(metallumEnvironment.ambientRadiance.rgb, vec3(0.0));
+                diffuse += max(metallumEnvironment.skyIrradiance.rgb, vec3(0.0))
+                        * (skyOcclusion * hemisphere);
+                return albedo * diffuse * 0.31830988618;
+            }
+            """;
+        source = replaceExactlyOnce(source, fullEnvEval, ambientEnvEval);
+        if (source == null) {
+            throw new IllegalStateException("Failed to specialize metallumEvaluateEnvironmentV1 for AMBIENT_ONLY helper");
+        }
+
+        // 5. Specialize metallumEvaluateMaterialEnvironmentV1
+        String fullMaterialEnvEval = """
+            vec3 metallumEvaluateMaterialEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    MetallumSurfaceMaterialV1 material) {
+                vec3 viewDirection = metallumSafeNormalV1(-viewPosition);
+                if (dot(viewDirection, viewDirection) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                vec3 f0 = metallumMaterialF0V1(material, albedo);
+                float nDotV = max(dot(normal, viewDirection), 0.0);
+                vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
+                vec3 reflectedDirection = reflect(-viewDirection, normal);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                bool waterCelestialLit = material.kind == METALLUM_SURFACE_WATER_V1;
+                float waterCelestialShape = waterCelestialLit
+                        ? metallumWaterSquareCelestialMaskV1(reflectedDirection, toLight)
+                        : 1.0;
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
+                        reflectedDirection, normal, material.roughness, waterCelestialShape);
+                float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    // The terrain light coordinate already records vanilla skylight after
+                    // block occlusion. Do not leave an analytic-sky floor in a cave or under
+                    // a solid roof; local voxel-occluded highlights remain a separate term.
+                    float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
+                    bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
+                    float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
+                    environmentVisibility = waterOpenSky * waterCelestialReflection;
+                }
+                float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? 0.92 : 1.0;
+                vec3 result = reflectedEnvironment * environmentFresnel
+                        * environmentVisibility * (1.0 - material.roughness * 0.48)
+                        * environmentStyleWeight;
+
+                float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
+                if (directionalWeight > 0.0) {
+                    float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    float cloudTransmittance = (sunVisibility > 0.0)
+                            ? metallumCloudTransmittanceV1(viewPosition)
+                            : 1.0;
+                    result += metallumEvaluateGgxV1(
+                            normal,
+                            viewDirection,
+                            toLight,
+                            max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                                    * (skyOcclusion * sunVisibility * cloudTransmittance * waterCelestialShape),
+                            f0,
+                            material.roughness);
+                }
+                return result * material.specularScale;
+            }
+""";
+        String ambientMaterialEnvEval = """
+            vec3 metallumEvaluateMaterialEnvironmentV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    MetallumSurfaceMaterialV1 material) {
+                vec3 viewDirection = metallumSafeNormalV1(-viewPosition);
+                if (dot(viewDirection, viewDirection) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                vec3 f0 = metallumMaterialF0V1(material, albedo);
+                float nDotV = max(dot(normal, viewDirection), 0.0);
+                vec3 environmentFresnel = metallumSchlickFresnelV1(f0, nDotV);
+                vec3 reflectedDirection = reflect(-viewDirection, normal);
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
+                        reflectedDirection, normal, material.roughness);
+                float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    // The terrain light coordinate already records vanilla skylight after
+                    // block occlusion. Do not leave an analytic-sky floor in a cave or under
+                    // a solid roof; local voxel-occluded highlights remain a separate term.
+                    float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
+                    bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
+                    float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
+                    environmentVisibility = waterOpenSky * waterCelestialReflection;
+                }
+                float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? 0.92 : 1.0;
+                vec3 result = reflectedEnvironment * environmentFresnel
+                        * environmentVisibility * (1.0 - material.roughness * 0.48)
+                        * environmentStyleWeight;
+                return result * material.specularScale;
+            }
+""";
+        source = replaceExactlyOnce(source, fullMaterialEnvEval, ambientMaterialEnvEval);
+        if (source == null) {
+            throw new IllegalStateException("Failed to specialize metallumEvaluateMaterialEnvironmentV1 for AMBIENT_ONLY helper");
+        }
+
+        return source;
+    }
+
     private static final String SODIUM_VERTEX_DECLARATION =
             "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
                     + "out float metallumSkyVisibility;\n// " + MARKER;
@@ -2590,13 +3103,30 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     private AdvancedDirectLightingShaderPatcher() {
     }
-
     public static Result patch(
             final String namespace,
             final String path,
             final MetallumMaterialShaderPatcher.Stage stage,
             final LightingModel lightingModel,
             final String materialSource
+    ) {
+        return patch(
+                namespace,
+                path,
+                stage,
+                lightingModel,
+                materialSource,
+                TerrainEnvironmentSpecialization.FULL
+        );
+    }
+
+    public static Result patch(
+            final String namespace,
+            final String path,
+            final MetallumMaterialShaderPatcher.Stage stage,
+            final LightingModel lightingModel,
+            final String materialSource,
+            final TerrainEnvironmentSpecialization specialization
     ) {
         if (materialSource == null) {
             return Result.failure(null, "shader source is missing");
@@ -2649,7 +3179,7 @@ public final class AdvancedDirectLightingShaderPatcher {
         }
 
         if (isSodiumTerrain(namespace, path)) {
-            return patchSodium(stage, materialSource);
+            return patchSodium(stage, materialSource, specialization);
         }
         if (isEntity(namespace, path)) {
             return patchEntity(stage, materialSource);
@@ -2726,7 +3256,8 @@ public final class AdvancedDirectLightingShaderPatcher {
 
     private static Result patchSodium(
             final MetallumMaterialShaderPatcher.Stage stage,
-            final String source
+            final String source,
+            final TerrainEnvironmentSpecialization specialization
     ) {
         if (stage == MetallumMaterialShaderPatcher.Stage.VERTEX) {
             String patched = replaceExactlyOnce(
@@ -2762,7 +3293,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec2 v_TexCoord;",
                 SODIUM_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, true);
+        patched = installFragmentAbi(patched, true, specialization);
         patched = replaceExactlyOnce(patched, SODIUM_FOG_ANCHOR, SODIUM_DIRECT_BLOCK);
         if (patched == null
                 || !patched.contains("dFdx(metallumLightingPosition)")
@@ -2812,7 +3343,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec2 texCoord0;",
                 ENTITY_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, false);
+        patched = installFragmentAbi(patched, false, TerrainEnvironmentSpecialization.FULL);
         patched = replaceExactlyOnce(patched, ENTITY_COLOR_ANCHOR, ENTITY_DIRECT_ALBEDO);
         patched = replaceExactlyOnce(
                 patched,
@@ -2861,7 +3392,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec4 texProj0;",
                 END_PORTAL_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, false);
+        patched = installFragmentAbi(patched, false, TerrainEnvironmentSpecialization.FULL);
         patched = replaceExactlyOnce(patched, END_PORTAL_FOG_ANCHOR, END_PORTAL_DIRECT_BLOCK);
         if (patched == null
                 || !patched.contains("metallumPortalDerivativeNormal")
@@ -2871,10 +3402,17 @@ public final class AdvancedDirectLightingShaderPatcher {
         return Result.success(patched);
     }
 
-    private static String installFragmentAbi(final String source, final boolean terrainReceiver) {
+    private static String installFragmentAbi(
+            final String source,
+            final boolean terrainReceiver,
+            final TerrainEnvironmentSpecialization specialization
+    ) {
         if (source == null) {
             return null;
         }
+        String helpers = (terrainReceiver && specialization == TerrainEnvironmentSpecialization.AMBIENT_ONLY)
+                ? FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY
+                : FRAGMENT_ABI_AND_HELPERS;
         return replaceExactlyOnce(
                 source,
                 "out vec4 fragColor;",
@@ -2882,7 +3420,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         + (terrainReceiver
                         ? "\n#define METALLUM_VOXEL_TERRAIN_RECEIVER_V1\n"
                         : "")
-                        + FRAGMENT_ABI_AND_HELPERS
+                        + helpers
         );
     }
 
@@ -2916,7 +3454,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             if (!source.contains("#version 430 core")) {
                 return Result.failure(source, "Advanced fragment marker retained a non-storage GLSL version");
             }
-            if (!source.contains(FRAGMENT_ABI_AND_HELPERS)) {
+            boolean isAmbientOnly = source.contains(FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY);
+            if (!source.contains(FRAGMENT_ABI_AND_HELPERS) && !isAmbientOnly) {
                 return Result.failure(source, "Advanced fragment helper ABI is not canonical");
             }
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
@@ -2960,12 +3499,14 @@ public final class AdvancedDirectLightingShaderPatcher {
                     );
                 }
             }
-            for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
-                if (countOccurrences(
-                        source,
-                        "layout(binding = " + slot + ") uniform sampler2DShadow"
-                ) != 1) {
-                    return Result.failure(source, "Advanced fragment marker has an incomplete shadow ABI");
+            if (!isAmbientOnly) {
+                for (int slot : EnvironmentShadowBindingAbi.shadowTextureSlots()) {
+                    if (countOccurrences(
+                            source,
+                            "layout(binding = " + slot + ") uniform sampler2DShadow"
+                    ) != 1) {
+                        return Result.failure(source, "Advanced fragment marker has an incomplete shadow ABI");
+                    }
                 }
             }
             if (countOccurrences(source, "metallumEvaluateClusteredDirectV1(") != 2) {
