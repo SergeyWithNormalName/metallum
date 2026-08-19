@@ -205,7 +205,8 @@ public record EnvironmentDescriptor(
                 thunder,
                 moonPhaseBrightness,
                 VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting(),
-                64.0f
+                64.0f,
+                LightningEnvironmentPolicy.FlashContribution.NONE
         );
     }
 
@@ -238,7 +239,8 @@ public record EnvironmentDescriptor(
                 thunder,
                 moonPhaseBrightness,
                 celestial,
-                64.0f
+                64.0f,
+                LightningEnvironmentPolicy.FlashContribution.NONE
         );
     }
 
@@ -258,9 +260,48 @@ public record EnvironmentDescriptor(
             final CelestialLightingProfile celestial,
             final float waterSurfaceY
     ) {
+        return celestial(
+                medium,
+                sunAngle,
+                skyRed,
+                skyGreen,
+                skyBlue,
+                skyFactor,
+                ambientRed,
+                ambientGreen,
+                ambientBlue,
+                rain,
+                thunder,
+                moonPhaseBrightness,
+                celestial,
+                waterSurfaceY,
+                LightningEnvironmentPolicy.FlashContribution.NONE
+        );
+    }
+
+    public static EnvironmentDescriptor celestial(
+            final Medium medium,
+            final float sunAngle,
+            final float skyRed,
+            final float skyGreen,
+            final float skyBlue,
+            final float skyFactor,
+            final float ambientRed,
+            final float ambientGreen,
+            final float ambientBlue,
+            final float rain,
+            final float thunder,
+            final float moonPhaseBrightness,
+            final CelestialLightingProfile celestial,
+            final float waterSurfaceY,
+            final LightningEnvironmentPolicy.FlashContribution flash
+    ) {
         CelestialLightingProfile effectiveCelestial = celestial == null
                 ? VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting()
                 : celestial;
+        LightningEnvironmentPolicy.FlashContribution safeFlash = flash == null
+                ? LightningEnvironmentPolicy.FlashContribution.NONE
+                : flash;
         requireFinite(sunAngle, "sun angle");
         requireNonNegative(skyRed, "sky red");
         requireNonNegative(skyGreen, "sky green");
@@ -322,12 +363,12 @@ public record EnvironmentDescriptor(
                 directionalRed,
                 directionalGreen,
                 directionalBlue,
-                skyRed * skyScale,
-                skyGreen * skyScale,
-                skyBlue * skyScale,
-                ambientRed * diffuseToIrradiance,
-                ambientGreen * diffuseToIrradiance,
-                ambientBlue * diffuseToIrradiance,
+                skyRed * skyScale + safeFlash.skyRed(),
+                skyGreen * skyScale + safeFlash.skyGreen(),
+                skyBlue * skyScale + safeFlash.skyBlue(),
+                ambientRed * diffuseToIrradiance + safeFlash.ambientRed(),
+                ambientGreen * diffuseToIrradiance + safeFlash.ambientGreen(),
+                ambientBlue * diffuseToIrradiance + safeFlash.ambientBlue(),
                 safeRain,
                 safeThunder,
                 safeMoonPhase,

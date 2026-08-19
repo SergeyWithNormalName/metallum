@@ -204,6 +204,14 @@ tasks.register("shadowValueValidation", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.SunShadowContractTests")
 }
 
+tasks.register("lightningEnvironmentUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates atmospheric lightning environment lighting pulses and descriptors"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.LightningEnvironmentPolicyTests")
+}
+
 tasks.register("voxelOccupancyUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates L5 sub-block masks, optical classes, toroidal scroll and bounded dirty queues"
@@ -1237,6 +1245,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("cloudShadowLightingUnitTest"))
 	dependsOn(tasks.named("waterCausticsUnitTest"))
 	dependsOn(tasks.named("waterCausticsLightingUnitTest"))
+	dependsOn(tasks.named("lightningEnvironmentUnitTest"))
 	dependsOn(tasks.named("torchEpochTelemetryUnitTest"))
 	dependsOn(tasks.named("l6DynamicShadowTelemetryUnitTest"))
 	dependsOn(tasks.named("benchmarkWindowContractUnitTest"))

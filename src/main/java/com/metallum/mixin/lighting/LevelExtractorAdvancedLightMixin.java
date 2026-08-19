@@ -88,6 +88,7 @@ abstract class LevelExtractorAdvancedLightMixin {
             AdvancedLightRegistry.global().closeWorld(this.level);
             EntityShadowProxyRegistry.global().closeWorld(this.level);
             VoxelClipmapController.global().closeWorld(this.level);
+            com.metallum.client.lighting.LightningEnvironmentPolicy.reset();
         }
         this.metallum$dynamicLights = null;
         this.metallum$dynamicLightDeltaTracker = null;
@@ -97,6 +98,9 @@ abstract class LevelExtractorAdvancedLightMixin {
         CameraHeldLightTracker tracker = this.metallum$cameraHeldLightTracker;
         if (tracker != null) {
             tracker.reset();
+        }
+        if (next == null) {
+            com.metallum.client.lighting.LightningEnvironmentPolicy.reset();
         }
     }
 
@@ -258,6 +262,12 @@ abstract class LevelExtractorAdvancedLightMixin {
         if (isZombie) {
             this.metallum$debugZombiesThisFrame++;
         }
+        ClientLevel currentLevel = this.level;
+        if (entity instanceof net.minecraft.world.entity.LightningBolt bolt && entity.isAlive()) {
+            com.metallum.client.lighting.LightningEnvironmentPolicy.observeBolt(
+                    bolt, currentLevel != null ? currentLevel.getGameTime() : -1L
+            );
+        }
         boolean filterResult = EntityShadowFilter.isShadowCaster(entity, this.metallum$currentCamera);
         boolean debug = Boolean.getBoolean("metallum.shadow.debug");
         if (debug && metallum$debugHeadCount.get() % 60 == 1 && (isZombie || this.metallum$debugInterceptionsThisFrame <= 3)) {
@@ -273,7 +283,6 @@ abstract class LevelExtractorAdvancedLightMixin {
 
         BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
         DeltaTracker deltaTracker = this.metallum$dynamicLightDeltaTracker;
-        ClientLevel currentLevel = this.level;
         if (collector != null && deltaTracker != null && currentLevel != null) {
             try {
                 float partialTick = deltaTracker.getGameTimeDeltaPartialTick(
@@ -326,6 +335,9 @@ abstract class LevelExtractorAdvancedLightMixin {
             final LevelRenderState output,
             final CallbackInfo ci
     ) {
+        com.metallum.client.lighting.LightningEnvironmentPolicy.finishFrame(
+                this.level != null ? this.level.getGameTime() : -1L
+        );
         BoundedDynamicLightCollector collector = this.metallum$dynamicLights;
         BoundedEntityShadowProxyCollector proxyCollector = this.metallum$entityShadowProxies;
         this.metallum$dynamicLights = null;
