@@ -76,14 +76,57 @@ public final class MetalFxSpatialScaling {
             return SpatialScalingMode.OFF;
         }
         MetalDevice device = MetalDevice.getInstance();
-        if (runtimeDisabled || device == null || !device.supportsSpatialScaling()) {
+        return selectEffectiveMode(
+                requestedMode,
+                benchmarkOverride,
+                device != null ? device.hdrOutputMode() : HdrOutputMode.SDR,
+                runtimeDisabled,
+                device != null && device.supportsSpatialScaling(),
+                MetallumDrsController.currentScale()
+        );
+    }
+
+    public static SpatialScalingMode selectEffectiveMode(
+            final SpatialScalingMode persistedMode,
+            final SpatialScalingMode overrideMode,
+            final HdrOutputMode outputMode,
+            final boolean disabledAtRuntime,
+            final boolean supportedByDevice,
+            final float currentScale
+    ) {
+        if (disabledAtRuntime || !supportedByDevice) {
             return SpatialScalingMode.OFF;
         }
+        SpatialScalingMode selectedMode = selectRequestedMode(persistedMode, overrideMode);
+        SpatialScalingMode resolvedMode = resolveRequestedMode(selectedMode, outputMode);
+        if (!resolvedMode.enabled()) {
+            return SpatialScalingMode.OFF;
+        }
+        return isDynamicNativeFallbackActive(selectedMode, overrideMode, currentScale)
+                ? SpatialScalingMode.OFF
+                : resolvedMode;
+    }
+
+    public static boolean isDynamicNativeFallbackActive() {
+        ensureConfigLoaded();
         SpatialScalingMode selectedMode = selectRequestedMode(requestedMode, benchmarkOverride);
-        SpatialScalingMode resolvedMode = resolveRequestedMode(selectedMode, device.hdrOutputMode());
-        return resolvedMode.enabled()
-                ? resolvedMode
-                : SpatialScalingMode.OFF;
+        return isDynamicNativeFallbackActive(selectedMode, benchmarkOverride, MetallumDrsController.currentScale());
+    }
+
+    public static boolean isDynamicNativeFallbackActive(final SpatialScalingMode selectedMode) {
+        return isDynamicNativeFallbackActive(selectedMode, benchmarkOverride, MetallumDrsController.currentScale());
+    }
+
+    public static boolean isDynamicNativeFallbackActive(
+            final SpatialScalingMode selectedMode,
+            final SpatialScalingMode overrideMode,
+            final float currentScale
+    ) {
+        return selectedMode != null
+                && selectedMode.isDynamic()
+                && overrideMode == null
+                && !selectedMode.isFixedPreset()
+                && currentScale >= 1.00f - 1.0e-5f;
     }
 
     public static boolean isActive() {

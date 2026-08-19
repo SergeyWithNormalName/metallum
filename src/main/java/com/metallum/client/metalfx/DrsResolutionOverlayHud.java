@@ -122,6 +122,15 @@ public final class DrsResolutionOverlayHud {
                             dims.renderWidth(), dims.renderHeight(), dims.actualWidthScale() * 100.0f,
                             dims.displayWidth(), dims.displayHeight(), MetalFxUpscaling.activeType().name()
                     );
+        } else if (MetallumDrsController.isEnabled()) {
+            renderLabel = String.format(
+                    Locale.ROOT,
+                    "Render FPS: %d | DRS: %dx%d (100%% Native) [GPU %.1f ms]",
+                    fps,
+                    displayWidth,
+                    displayHeight,
+                    MetallumDrsController.emaGpuTimeMs()
+            );
         } else {
             renderLabel = String.format(
                     Locale.ROOT,

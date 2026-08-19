@@ -170,7 +170,9 @@ public final class MetalFxUpscaling {
     }
 
     public static boolean consumePendingResize() {
-        return MetalFxSpatialScaling.consumePendingResize() || MetalFxTemporalScaling.consumePendingResize();
+        boolean spatialPending = MetalFxSpatialScaling.consumePendingResize();
+        boolean temporalPending = MetalFxTemporalScaling.consumePendingResize();
+        return spatialPending || temporalPending;
     }
 
     public static void disableRuntimeAfterFailure(final Throwable cause) {

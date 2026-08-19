@@ -1,5 +1,6 @@
 package com.metallum.client.metalfx;
 
+import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrUiRenderTarget;
 
 /**
@@ -28,6 +29,7 @@ public final class DrsScalingTests {
         testInvalidGpuFrameTimeIgnored();
         testNativeSecondsBoundary();
         testBreathingOscillationStressHarness();
+        testDynamicSpatialTransitionsAndRecovery();
         System.out.println("DRS scaling controller unit tests passed cleanly.");
     }
 
@@ -431,6 +433,78 @@ public final class DrsScalingTests {
         // Scale changes should be very minimal (only initial adaptation, no oscillation back and forth).
         require(scaleChangeCount <= 10, "Breathing prevention harness verified: scale changes count (" + scaleChangeCount + ") is low, preventing oscillation");
 
+        MetallumDrsController.reset();
+        MetallumDrsController.setEnabled(false);
+    }
+
+    private static void testDynamicSpatialTransitionsAndRecovery() {
+        MetallumDrsController.reset();
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
+        MetallumDrsController.setEnabled(true);
+        require(MetalFxSpatialScaling.isRequested(), "dynamic spatial is requested");
+        require(MetallumDrsController.isEnabled(), "DRS controller is enabled");
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f, "initial scale is 1.00");
+        require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "dynamic native fallback active at 1.00 Native");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.SDR, false, true, 1.00f
+                ) == SpatialScalingMode.OFF,
+                "effective mode is OFF at 1.00 Native"
+        );
+
+        // Clear any pending resize
+        MetalFxUpscaling.consumePendingResize();
+
+        // Feed an over-budget GPU sample (16.5ms > 15.5ms)
+        MetallumDrsController.updateGpuFrameTime(16.5f);
+        require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f, "DRS downscales to 0.95");
+        require(MetalFxUpscaling.consumePendingResize(), "pending resize requested on downscale");
+        require(!MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "dynamic fallback inactive below 1.00");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.SDR, false, true, 0.95f
+                ) == SpatialScalingMode.SPATIAL,
+                "effective mode is SPATIAL at 0.95"
+        );
+
+        // Hold scale during settle frames
+        for (int i = 0; i < MetallumDrsController.SCALE_DOWN_SETTLE_FRAMES; i++) {
+            MetallumDrsController.updateGpuFrameTime(14.0f);
+        }
+
+        // Feed under-budget frames (12.0ms < 13.5ms) to trigger recovery holdoff
+        MetallumDrsController.setEmaGpuTimeDirectForTest(12.0f);
+        for (int i = 0; i < MetallumDrsController.SCALE_UP_HOLDOFF_FRAMES - 1; i++) {
+            MetallumDrsController.updateGpuFrameTime(12.0f);
+            require(Math.abs(MetallumDrsController.currentScale() - 0.95f) < 1.0e-5f, "scale held at 0.95 during holdoff");
+            require(!MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "spatial remains active during holdoff");
+        }
+
+        // Completing the 12th frame steps scale up to 1.00
+        MetallumDrsController.updateGpuFrameTime(12.0f);
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f, "scale recovers to 1.00");
+        require(MetalFxUpscaling.consumePendingResize(), "pending resize requested on recovery to 1.00");
+        require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "spatial fallback active upon reaching 1.00");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.SDR, false, true, 1.00f
+                ) == SpatialScalingMode.OFF,
+                "effective mode returns to OFF at 1.00"
+        );
+        require(MetalFxSpatialScaling.isRequested(), "dynamic spatial remains requested");
+        require(MetallumDrsController.isEnabled(), "DRS remains alive and monitoring at 1.00 Native");
+
+        // Stable window around 1.00 does not oscillate or re-request resize
+        MetallumDrsController.setEmaGpuTimeDirectForTest(14.5f);
+        for (int i = 0; i < 30; i++) {
+            MetallumDrsController.updateGpuFrameTime(14.5f);
+            require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f, "scale remains stable at 1.00");
+            require(!MetalFxUpscaling.consumePendingResize(), "no spurious resize in stable region (frame " + i + ")");
+            require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "dynamic fallback remains active in stable region");
+        }
+
+        // Clean up
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
         MetallumDrsController.reset();
         MetallumDrsController.setEnabled(false);
     }

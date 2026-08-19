@@ -75,6 +75,10 @@ abstract class GameRendererMetalFxMixin {
             ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
         }
         if (!MetalFxUpscaling.isActive()) {
+            if (this.mainRenderTarget.width != displayWidth
+                    || this.mainRenderTarget.height != displayHeight) {
+                ((GameRenderer) (Object) this).resize(displayWidth, displayHeight);
+            }
             if (device != null) {
                 device.publishRendererGenerationState(displayWidth, displayHeight);
             }
@@ -320,12 +324,21 @@ abstract class GameRendererMetalFxMixin {
                         case NEW_MOON -> 0.08f;
                     };
             float waterSurfaceY = 64.0f;
+            com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution flash =
+                    com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution.NONE;
             if (camera.pos != null && this.minecraft.level != null) {
                 waterSurfaceY = WaterCausticsPolicy.resolveWaterSurfaceY(
                         this.minecraft.level,
                         camera.pos.x,
                         camera.pos.y,
                         camera.pos.z
+                );
+                flash = com.metallum.client.lighting.LightningEnvironmentPolicy.evaluate(
+                        camera.pos.x,
+                        camera.pos.y,
+                        camera.pos.z,
+                        partialTick,
+                        medium
                 );
             }
             return EnvironmentDescriptor.celestial(
@@ -342,7 +355,8 @@ abstract class GameRendererMetalFxMixin {
                     thunder,
                     phaseBrightness,
                     VisualStyleRuntime.activeProfile().celestialLighting(),
-                    waterSurfaceY
+                    waterSurfaceY,
+                    flash
             );
         }
         if (skybox == DimensionType.Skybox.END) {

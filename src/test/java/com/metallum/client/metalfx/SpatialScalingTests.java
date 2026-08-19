@@ -15,6 +15,7 @@ public final class SpatialScalingTests {
         testRequestedModeSelection();
         testPresetDimensions();
         testOddAndTinyDimensions();
+        testDynamicSpatialNativeBypass();
     }
 
     private static void testModeParsing() {
@@ -196,6 +197,81 @@ public final class SpatialScalingTests {
                 }
             }
         }
+    }
+
+    private static void testDynamicSpatialNativeBypass() {
+        MetallumDrsController.reset();
+        MetallumDrsController.setEnabled(true);
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
+        require(MetalFxSpatialScaling.requestedMode() == SpatialScalingMode.SPATIAL, "requested dynamic mode is SPATIAL");
+        require(MetalFxSpatialScaling.isRequested(), "isRequested is true for dynamic SPATIAL");
+        require(MetallumDrsController.isEnabled(), "DRS controller remains enabled for dynamic SPATIAL");
+        require(Math.abs(MetallumDrsController.currentScale() - 1.00f) < 1.0e-5f, "initial scale is 1.00");
+
+        // At scale 1.00, Native bypass is active
+        require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "dynamic native fallback active at scale 1.00");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.SDR, false, true, 1.00f
+                ) == SpatialScalingMode.OFF,
+                "effective mode is OFF at scale 1.00 on supported device"
+        );
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.ENHANCED, false, true, 1.00f
+                ) == SpatialScalingMode.OFF,
+                "effective mode is OFF at scale 1.00 in Enhanced HDR on supported device"
+        );
+
+        MetalFxSpatialScaling.Dimensions dim100 = MetalFxSpatialScaling.dimensions(SpatialScalingMode.SPATIAL, 3024, 1964);
+        require(dim100.renderWidth() == 3024 && dim100.renderHeight() == 1964, "dimensions at 1.00 match display dimensions");
+
+        // When scale drops below 1.00 (e.g. 0.95), Spatial scaling activates
+        MetallumDrsController.setScaleDirectForTest(0.95f);
+        require(!MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "dynamic native fallback inactive at scale 0.95");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, null, HdrOutputMode.SDR, false, true, 0.95f
+                ) == SpatialScalingMode.SPATIAL,
+                "effective mode is SPATIAL at scale 0.95 on supported device"
+        );
+
+        MetalFxSpatialScaling.Dimensions dim95 = MetalFxSpatialScaling.dimensions(SpatialScalingMode.SPATIAL, 3024, 1964);
+        require(dim95.renderWidth() == 2873 && dim95.renderHeight() == 1866, "dimensions at 0.95 scaled down");
+
+        // Fixed presets are never bypassed at 1.00 or any scale
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.QUALITY);
+        require(!MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "fallback inactive for fixed QUALITY preset");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.QUALITY, null, HdrOutputMode.SDR, false, true, 1.00f
+                ) == SpatialScalingMode.QUALITY,
+                "effective mode is QUALITY at 1.00"
+        );
+        MetalFxSpatialScaling.Dimensions dimQuality = MetalFxSpatialScaling.dimensions(SpatialScalingMode.QUALITY, 3024, 1964);
+        require(dimQuality.renderWidth() == 2268 && dimQuality.renderHeight() == 1473, "QUALITY dimensions are 75%");
+
+        // Benchmark overrides lock concrete presets deterministically
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.SPATIAL);
+        MetallumDrsController.setScaleDirectForTest(1.00f);
+        require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "fallback active before override");
+        MetalFxSpatialScaling.setBenchmarkOverride(SpatialScalingMode.PERFORMANCE);
+        require(!MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "fallback inactive during benchmark override");
+        require(
+                MetalFxSpatialScaling.selectEffectiveMode(
+                        SpatialScalingMode.SPATIAL, SpatialScalingMode.PERFORMANCE, HdrOutputMode.SDR, false, true, 1.00f
+                ) == SpatialScalingMode.PERFORMANCE,
+                "effective mode is PERFORMANCE under override"
+        );
+        MetalFxSpatialScaling.Dimensions dimPerf = MetalFxSpatialScaling.dimensions(SpatialScalingMode.PERFORMANCE, 3024, 1964);
+        require(dimPerf.renderWidth() == 1512 && dimPerf.renderHeight() == 982, "PERFORMANCE dimensions under override are 50%");
+        MetalFxSpatialScaling.clearBenchmarkOverride();
+        require(MetalFxSpatialScaling.isDynamicNativeFallbackActive(), "fallback active after clear override at 1.00");
+
+        // Clean up
+        MetalFxSpatialScaling.setRequestedMode(SpatialScalingMode.OFF);
+        MetallumDrsController.reset();
+        MetallumDrsController.setEnabled(false);
     }
 
     private static void expectIllegalArgument(final Runnable action, final String message) {
