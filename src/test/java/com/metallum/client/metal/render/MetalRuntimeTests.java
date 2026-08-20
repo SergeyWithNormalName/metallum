@@ -1017,7 +1017,7 @@ public final class MetalRuntimeTests {
         expandedRing.putInt(commandOffset + 12, -7);
         expandedRing.putInt(commandOffset + 16, 0);
 
-        MemorySegment commands = MetalGpuBuffer.cpuVisibleSlice(expandedRing, commandOffset, commandBytes);
+        MemorySegment commands = MemorySegment.ofBuffer(expandedRing).asSlice(commandOffset, commandBytes);
         ValueLayout.OfInt nativeInt = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.nativeOrder());
         require(commandOffset < resizeBoundary && commandOffset + commandBytes > resizeBoundary,
                 "regression fixture no longer crosses Sodium's 512000-byte resize boundary");
@@ -1027,11 +1027,14 @@ public final class MetalRuntimeTests {
                         && commands.get(nativeInt, 8) == 144
                         && commands.get(nativeInt, 12) == -7
                         && commands.get(nativeInt, 16) == 0,
-                "CPU-visible indirect replay did not preserve the resized Sodium command slice");
-        expectIndexOutOfBounds(() -> MetalGpuBuffer.cpuVisibleSlice(
-                expandedRing,
-                expandedRing.capacity() - 8L,
-                20L
+                "CPU-visible indirect snapshot did not preserve the resized Sodium command slice");
+        require(MetalRenderPass.requiredIndexedIndirectCommandBytes(drawCount, expandedRing.capacity())
+                        == commandBytes,
+                "Sodium indexed-indirect snapshot size changed");
+        expectIllegalArgument(() -> MetalRenderPass.requiredIndexedIndirectCommandBytes(-1, commandBytes));
+        expectIllegalArgument(() -> MetalRenderPass.requiredIndexedIndirectCommandBytes(
+                drawCount,
+                commandBytes - 1L
         ));
     }
 

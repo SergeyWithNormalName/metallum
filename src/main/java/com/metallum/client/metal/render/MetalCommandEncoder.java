@@ -28,6 +28,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,14 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     private final MetalDevice device;
     private long currentSubmitIndex = MAX_SUBMITS_IN_FLIGHT;
     private final InFlight[] inFlight = new InFlight[MAX_SUBMITS_IN_FLIGHT];
+    // Sodium owns and can replace its shared indirect-command ring while a frame is being
+    // assembled. Keep a Metallum-owned private arena per in-flight submit so AGX sees an
+    // immutable command range that cannot be changed by a later ring write or resize.
+    private final SodiumIndexedIndirectSnapshotArena[] sodiumIndexedIndirectSnapshots = {
+            new SodiumIndexedIndirectSnapshotArena(),
+            new SodiumIndexedIndirectSnapshotArena(),
+            new SodiumIndexedIndirectSnapshotArena()
+    };
     private final MemorySegment[] submitSemaphores = new MemorySegment[MAX_SUBMITS_IN_FLIGHT];
     private final MetalDestructionQueue destroyQueue = new MetalDestructionQueue(MAX_SUBMITS_IN_FLIGHT);
     private final MetalTransientMemory transientMemory;
@@ -1071,6 +1080,27 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         destroyQueue.add(destroyAction);
     }
 
+    GpuBufferSlice snapshotSodiumIndexedIndirectCommands(
+            final MetalGpuBuffer source,
+            final long sourceOffset,
+            final long byteLength
+    ) {
+        long sourceEnd = Math.addExact(sourceOffset, byteLength);
+        if (!source.hasCpuVisibleStorage()
+                || sourceOffset < 0L
+                || byteLength <= 0L
+                || sourceEnd > source.size()) {
+            throw new IllegalArgumentException("Invalid CPU-visible Sodium indexed-indirect command range");
+        }
+
+        SodiumIndexedIndirectSnapshotArena arena = sodiumIndexedIndirectSnapshots[
+                (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT)
+        ];
+        GpuBufferSlice snapshot = arena.allocate(device, currentSubmitIndex, byteLength);
+        writeToBuffer(snapshot, source.sliceStorage(sourceOffset, byteLength));
+        return snapshot;
+    }
+
     boolean awaitSubmitCompletion(final long submitIndex, final long timeoutMs) {
         if (submitIndex == currentSubmitIndex) {
             throw new IllegalStateException("Cannot wait on a fence for the current submit");
@@ -1104,6 +1134,9 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         if (commandBuffer != null) {
             commandBuffer.close();
             commandBuffer = null;
+        }
+        for (SodiumIndexedIndirectSnapshotArena arena : sodiumIndexedIndirectSnapshots) {
+            arena.close();
         }
         transientMemory.close();
         resourceBindingPacket.close();
@@ -1426,5 +1459,96 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
     }
 
     private record InFlight(long index, MTLCommandBuffer buffer, MemorySegment completedSemaphore) {
+    }
+
+    /**
+     * Command bytes are immutable from the point of view of an encoded indirect draw. A
+     * single frame can therefore not reuse offset zero: later writes would otherwise change
+     * every earlier GPU indirect draw before the command buffer executes. The arena allocates
+     * monotonically within one submit and resets only after the matching in-flight slot has
+     * been waited before reuse by {@link MetalCommandEncoder#submit()}.
+     */
+    private static final class SodiumIndexedIndirectSnapshotArena {
+        private static final long MINIMUM_BUFFER_BYTES = 512L * 1024L;
+        private final List<MetalGpuBuffer> buffers = new ArrayList<>();
+        private long submitIndex = Long.MIN_VALUE;
+        private int currentBufferIndex;
+        private long cursor;
+
+        GpuBufferSlice allocate(
+                final MetalDevice device,
+                final long requestedSubmitIndex,
+                final long byteLength
+        ) {
+            if (submitIndex != requestedSubmitIndex) {
+                resetForCompletedSubmit();
+                submitIndex = requestedSubmitIndex;
+            }
+
+            while (true) {
+                MetalGpuBuffer current = currentBuffer(device, byteLength);
+                long offset = align(cursor, Integer.BYTES);
+                if (offset <= current.size() && byteLength <= current.size() - offset) {
+                    cursor = offset + byteLength;
+                    return new GpuBufferSlice(current, offset, byteLength);
+                }
+                currentBufferIndex++;
+                cursor = 0L;
+            }
+        }
+
+        private MetalGpuBuffer currentBuffer(final MetalDevice device, final long minimumSize) {
+            if (currentBufferIndex < buffers.size()) {
+                return buffers.get(currentBufferIndex);
+            }
+            long previousSize = buffers.isEmpty()
+                    ? MINIMUM_BUFFER_BYTES
+                    : buffers.get(buffers.size() - 1).size();
+            long capacity = Math.max(MINIMUM_BUFFER_BYTES, minimumSize);
+            if (previousSize <= Long.MAX_VALUE / 2L) {
+                capacity = Math.max(capacity, previousSize * 2L);
+            }
+            MetalGpuBuffer created = new MetalGpuBuffer(
+                    device,
+                    GpuBuffer.USAGE_COPY_DST | GpuBuffer.USAGE_INDEX,
+                    capacity
+            );
+            buffers.add(created);
+            return created;
+        }
+
+        private void resetForCompletedSubmit() {
+            if (buffers.size() > 1) {
+                MetalGpuBuffer largest = buffers.getFirst();
+                for (MetalGpuBuffer buffer : buffers) {
+                    if (buffer.size() > largest.size()) {
+                        largest = buffer;
+                    }
+                }
+                for (MetalGpuBuffer buffer : buffers) {
+                    if (buffer != largest) {
+                        buffer.close();
+                    }
+                }
+                buffers.clear();
+                buffers.add(largest);
+            }
+            currentBufferIndex = 0;
+            cursor = 0L;
+        }
+
+        private static long align(final long value, final long alignment) {
+            return Math.addExact(value, alignment - 1L) & -alignment;
+        }
+
+        void close() {
+            for (MetalGpuBuffer buffer : buffers) {
+                buffer.close();
+            }
+            buffers.clear();
+            submitIndex = Long.MIN_VALUE;
+            currentBufferIndex = 0;
+            cursor = 0L;
+        }
     }
 }

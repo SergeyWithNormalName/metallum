@@ -575,11 +575,6 @@ public final class MetalNativeBridge {
                     "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG, LONG)
             );
-            MTLRenderCommandEncoderDrawIndexedPrimitivesCpuCommands = downcall(
-                    lookup,
-                    "metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands",
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, LONG, LONG, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG, LONG)
-            );
             MTLRenderCommandEncoderDrawPrimitivesIndirect = downcall(
                     lookup,
                     "metallum_MTLRenderCommandEncoder_drawPrimitivesIndirect",
@@ -920,7 +915,6 @@ public final class MetalNativeBridge {
     private static final MethodHandle MTLRenderCommandEncoderMultiDrawIndexed;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesTriangleFan;
     private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesIndirect;
-    private static final MethodHandle MTLRenderCommandEncoderDrawIndexedPrimitivesCpuCommands;
     private static final MethodHandle MTLRenderCommandEncoderDrawPrimitivesIndirect;
     private static final MethodHandle MTLCommandBufferClearColorDepthTexturesRegion;
     private static final MethodHandle MTLCommandBufferEncodePresentTextureToDrawable;
@@ -2464,30 +2458,6 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesIndirect", throwable);
-        }
-    }
-
-    public static void MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands(
-            final MemorySegment encoder,
-            final long primitiveType,
-            final long indexType,
-            final MemorySegment indexBuffer,
-            final MemorySegment commands,
-            final long drawCount,
-            final long stride
-    ) {
-        try {
-            MTLRenderCommandEncoderDrawIndexedPrimitivesCpuCommands.invokeExact(
-                    segment(encoder),
-                    primitiveType,
-                    indexType,
-                    segment(indexBuffer),
-                    segment(commands),
-                    drawCount,
-                    stride
-            );
-        } catch (Throwable throwable) {
-            throw bridgeFailure("metallum_MTLRenderCommandEncoder_drawIndexedPrimitivesCpuCommands", throwable);
         }
     }
 
