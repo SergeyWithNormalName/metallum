@@ -213,7 +213,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
     @Nullable
     private SodiumLightSidecarBindings sodiumLightSidecarBindings;
-    private ShaderSource activeShaderSource;
+    private final ShaderSource defaultShaderSource;
     @Nullable
     private MetalGpuTexture hdrSceneSnapshot;
     @Nullable
@@ -330,7 +330,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     ) {
         NativeHdrFrameGraph.initialize();
         INSTANCE = this;
-        this.activeShaderSource = defaultShaderSource;
+        this.defaultShaderSource = defaultShaderSource;
         this.debugOptions = debugOptions;
         this.metalDeviceHandle = metalDeviceHandle;
         this.metalLayer = metalLayer;
@@ -638,10 +638,7 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
-        ShaderSource effectiveSource = shaderSource == null ? this.activeShaderSource : shaderSource;
-        if (shaderSource != null) {
-            this.activeShaderSource = shaderSource;
-        }
+        ShaderSource effectiveSource = shaderSource == null ? this.defaultShaderSource : shaderSource;
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, effectiveSource));
     }
 
@@ -3233,7 +3230,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
-        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.activeShaderSource));
+        return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.defaultShaderSource));
     }
 
     IntermediaryShaderModule getOrCompileShader(

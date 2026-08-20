@@ -136,7 +136,7 @@ final class MetalRenderPass implements RenderPassBackend {
         if (textureView != null && sampler != null) {
             TextureViewAndSampler value = updateTextureBinding(this.samplers, name, textureView, sampler);
             if (commandEncoder.prepareTextureForRead((MetalGpuTexture) textureView.texture())) {
-                invalidateNativeEncoderState();
+                invalidateEncoderState();
             }
             MetalCompiledRenderPipeline.ResourceBinding binding = currentBinding(name);
             if (binding != null
@@ -694,7 +694,7 @@ final class MetalRenderPass implements RenderPassBackend {
 
         boolean sidecarPipeline = compiledPipeline.usesSodiumLightSidecar();
         if (sidecarPipeline && this.boundRenderEncoder != enc) {
-            this.invalidateNativeEncoderState();
+            this.invalidateEncoderState();
             this.boundRenderEncoder = enc;
         }
 
@@ -844,7 +844,7 @@ final class MetalRenderPass implements RenderPassBackend {
         return Long.bitCount(dirtyDescriptorMask) >= 2;
     }
 
-    private void invalidateNativeEncoderState() {
+    void invalidateEncoderState() {
         this.pipelineDirty = true;
         this.scissorDirty = true;
         this.vertexBuffersDirty = true;
