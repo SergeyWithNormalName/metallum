@@ -45,9 +45,10 @@ reflections                         bc04c588...  branch refs/heads/reflections
 незакоммиченный эксперимент. До selective extraction его worktree является
 единственной копией L7 source.
 
-Текущий `reflections` checkout также содержит чужой/предшествующий dirty WIP,
-включая planar reflections и god rays. Аудит ничего из этого не очищал и не
-перезаписывал.
+На момент аудита текущий `reflections` checkout содержал отдельный dirty WIP с
+planar reflections и god rays. Последующий cleanup удалил весь planar runtime и
+его shader/Sodium integration; god rays и прочий независимый WIP этим решением не
+затрагиваются.
 
 ## 3. Что уже есть в принятом voxel stack
 
@@ -237,27 +238,12 @@ Commits `c918ee8` и `5b23655` достижимы из текущего HEAD. О
 environment terms, но не отражают локальную/off-screen геометрию. Это полезный
 стабильный fallback, не voxel reflection.
 
-### 8.2. Незакоммиченный planar WIP
+### 8.2. Planar reflection cleanup
 
-В текущем checkout присутствуют untracked/modified:
-
-- `PlanarReflectionRenderer` — half-resolution mirrored water pass, reflected
-  frustum, oblique clipping, sky/opaque/cloud render;
-- `PlanarReflectionGpuResources` — RGBA16F/RGBA8 target, depth, sampler и fallback;
-- отдельные Sodium reflected lists/batch cache;
-- shader ABI и water sampling.
-
-Код содержит правильную защиту от same-pass feedback loop: во время записи
-reflection target shader получает fallback. Однако он выбирает одну water plane
-рядом с камерой и повторно рендерит мир. Поэтому он:
-
-- подходит только как water-specific option;
-- не решает wet terrain/metal/general reflections;
-- не является источником GI;
-- ещё требует live lake/cave/cloud/motion validation и отдельного M1 Pro A/B.
-
-Зелёные unit/build/startup tests не будут достаточным доказательством его
-качества или стоимости.
+После этого аудита весь незакоммиченный planar runtime был удалён из основного
+checkout: offscreen target, reflected Sodium lists/batch cache, mixins, shader ABI,
+water sampling, настройки и тест. Это не затрагивает принятый L8 analytic fallback
+выше и не является источником GI или voxel reflections.
 
 ## 9. Решение по переносу в текущем аудите
 
