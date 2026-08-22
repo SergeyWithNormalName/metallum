@@ -1435,6 +1435,19 @@ public final class AdvancedDirectLightingShaderTests {
         String entityFragment = advancedSource(sources[3]);
         String endPortalVertex = advancedSource(sources[4]);
         String endPortalFragment = advancedSource(sources[5]);
+        String expectedClusterDepthGuard = "metallumLighting.gridAndLightCount.z != "
+                + AdvancedLightingLayout.DEPTH_SLICES + "u";
+        boolean sodiumClusterDepthMatches = sodiumFragment.contains(expectedClusterDepthGuard);
+        boolean entityClusterDepthMatches = entityFragment.contains(expectedClusterDepthGuard);
+        boolean endPortalClusterDepthMatches = endPortalFragment.contains(expectedClusterDepthGuard);
+
+        require(sodiumClusterDepthMatches
+                        && entityClusterDepthMatches
+                        && endPortalClusterDepthMatches,
+                "Advanced shaders' L3 cluster-depth guard diverged from the upload ABI: "
+                        + "sodium=" + sodiumClusterDepthMatches
+                        + ", entity=" + entityClusterDepthMatches
+                        + ", endPortal=" + endPortalClusterDepthMatches);
 
         compilePair("sodium-solid", sodiumVertex, sodiumFragment, SODIUM_SOLID_DEFINES);
         compilePair("sodium-cutout", sodiumVertex, sodiumFragment, SODIUM_CUTOUT_DEFINES);

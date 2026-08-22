@@ -1995,7 +1995,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 albedo) {
                 if (metallumLighting.reserved0.w != 1u
                         || metallumLighting.capacitiesAndFlags.w != 64u
-                        || metallumLighting.gridAndLightCount.z != 6u) {
+                        || metallumLighting.gridAndLightCount.z !=""").append(" ").append(
+                AdvancedLightingLayout.DEPTH_SLICES).append("u) {").append("""
                     return vec3(0.0);
                 }
                 if (dot(normal, normal) == 0.0) {
@@ -2201,7 +2202,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     MetallumSurfaceMaterialV1 material) {
                 if (metallumLighting.reserved0.w != 1u
                         || metallumLighting.capacitiesAndFlags.w != 64u
-                        || metallumLighting.gridAndLightCount.z != 6u
+                        || metallumLighting.gridAndLightCount.z !=""").append(" ").append(
+                AdvancedLightingLayout.DEPTH_SLICES).append("u").append("""
                         || dot(normal, normal) == 0.0) {
                     return vec3(0.0);
                 }
