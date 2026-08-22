@@ -9,6 +9,7 @@ import com.metallum.client.renderer.SunShadowLayout;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -59,6 +60,12 @@ public final class AdvancedDirectLightingShaderPatcher {
     public static final String SHADOW_SAMPLER_1 = "metallumSunShadow1";
     public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
     public static final String CLOUD_SAMPLER = "metallumCloudShadow";
+    private static final Set<String> EXTERNAL_SHADOW_SAMPLERS = Set.of(
+            SHADOW_SAMPLER_0,
+            SHADOW_SAMPLER_1,
+            SHADOW_SAMPLER_2,
+            CLOUD_SAMPLER
+    );
 
     private static final String MARKER = "METALLUM_ADVANCED_DIRECT_LIGHTING_V1";
     private static final Pattern VERSION_PATTERN = Pattern.compile("(?m)^\\s*#version\\s+\\d+[^\\r\\n]*");
@@ -3196,10 +3203,12 @@ public final class AdvancedDirectLightingShaderPatcher {
     }
 
     public static boolean isExternalShadowSampler(final String name) {
-        return SHADOW_SAMPLER_0.equals(name)
-                || SHADOW_SAMPLER_1.equals(name)
-                || SHADOW_SAMPLER_2.equals(name)
-                || CLOUD_SAMPLER.equals(name);
+        return EXTERNAL_SHADOW_SAMPLERS.contains(name);
+    }
+
+    /** Number of external L4/cloud samplers that Advanced receiver variants must strip. */
+    public static int externalShadowSamplerCount() {
+        return EXTERNAL_SHADOW_SAMPLERS.size();
     }
 
     public static int externalShadowSamplerSlot(final String name) {

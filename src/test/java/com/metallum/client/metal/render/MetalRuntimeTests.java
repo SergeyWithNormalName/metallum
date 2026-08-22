@@ -634,7 +634,8 @@ public final class MetalRuntimeTests {
         require(AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow0")
                         && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow1")
                         && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow2")
-                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumCloudShadow"),
+                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumCloudShadow")
+                        && AdvancedDirectLightingShaderPatcher.externalShadowSamplerCount() == 4,
                 "external shadow/cloud samplers not recognized");
         require(AdvancedDirectLightingShaderPatcher.externalShadowSamplerSlot("metallumCloudShadow")
                         == CloudShadowBindingAbi.TEXTURE_SLOT,
