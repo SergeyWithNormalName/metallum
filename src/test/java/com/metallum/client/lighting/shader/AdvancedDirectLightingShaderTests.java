@@ -78,13 +78,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "b0f20f8ec6fbcc72b9735f21844676ebab4c6e7721495be2d6412def00fe2e37",
+            "sodium-solid-fsh", "118892cabf3ae355a97e62434baa3c9ab1747a8345e5a274720e29740a8b6609",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "1eef60eb42464db9e0b3e2744816110dd0fe5d17c70f80f0ef16b9b4c2072c94",
+            "sodium-cutout-fsh", "170069e9cc8acbb7350a6efa975db9cbd7552f83e9826b749567bdc7e53a74a4",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "9badc059d3b5382cf04383c80872a0ea2005210044b3ed37db61eb4ef1e3def9",
+            "minecraft-entity-fsh", "18609ea5773ffa3461017c5275dbf7dfd65f2ef6100012f31c912f2422ab5533",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "0896df5082e3496df48cb8f936e890a5333fad3f1afc8fa20fa5dc48f214310c"
+            "minecraft-end-portal-fsh", "785c092ce055610337200ec1c94e3be812b3fb90b313946c9fd44afe2230863c"
     );
 
     public static void main(final String[] args) throws IOException {

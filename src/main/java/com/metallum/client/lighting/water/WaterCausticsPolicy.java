@@ -290,6 +290,24 @@ public final class WaterCausticsPolicy {
     }
 
     /**
+     * Resolves solar-cascade visibility for a water-connected receiver.
+     *
+     * <p>The cascade contains only opaque air-space occluders. Reusing its hard
+     * silhouette for a water surface or submerged receiver makes a block-shaped
+     * dark pseudo-reflection or stamp on the bed. Cloud attenuation is evaluated
+     * separately and therefore remains active for both water paths.</p>
+     */
+    public static float waterReceiverSunVisibility(
+            final float opaqueCascadeVisibility,
+            final boolean receiverSubmerged,
+            final boolean receiverIsWaterSurface
+    ) {
+        return receiverSubmerged || receiverIsWaterSurface
+                ? 1.0f
+                : Math.clamp(opaqueCascadeVisibility, 0.0f, 1.0f);
+    }
+
+    /**
      * Resolves the authoritative local water surface height above the given camera position.
      * Bounded upward scan in the current level, deterministic, 0 allocations.
      */

@@ -755,6 +755,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return visibility;
             }
 
+            float metallumSubmergedReceiverSunVisibilityV1(
+                    float shadowVisibility,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                uint alphaByte = uint(round(clamp(receiverAlpha, 0.0, 1.0) * 255.0));
+                bool receiverSubmerged = (alphaByte <= 254u && alphaByte >= 192u)
+                        || ((packedMaterial & 256u) != 0u);
+                // The solar cascade only records opaque air-space occluders. Applying it
+                // unchanged below a transparent water column stamps their hard silhouette
+                // onto the bed, which is neither a reflection nor a valid water-light model.
+                return receiverSubmerged ? 1.0 : shadowVisibility;
+            }
+
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
                 if (metallumEnvironment.cloudContract.x != 1u) {
                     return 1.0;
@@ -904,6 +917,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float sunVisibility = 1.0;
                 if (directionalWeight > 0.0) {
                     sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    sunVisibility = metallumSubmergedReceiverSunVisibilityV1(
+                            sunVisibility, packedMaterial, receiverAlpha);
                 }
                 float cloudTransmittance = 1.0;
                 if (directionalWeight > 0.0 && sunVisibility > 0.0) {
@@ -963,7 +978,10 @@ public final class AdvancedDirectLightingShaderPatcher {
 
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
                 if (directionalWeight > 0.0) {
-                    float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    // The cascade contains opaque air-space occluders. Do not turn its
+                    // block silhouette into a dark pseudo-reflection on the water surface.
+                    float sunVisibility = material.kind == METALLUM_SURFACE_WATER_V1
+                            ? 1.0 : metallumSunVisibilityV1(viewPosition, normal);
                     float cloudTransmittance = (sunVisibility > 0.0)
                             ? metallumCloudTransmittanceV1(viewPosition)
                             : 1.0;
@@ -2576,6 +2594,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return visibility;
             }
 
+            float metallumSubmergedReceiverSunVisibilityV1(
+                    float shadowVisibility,
+                    uint packedMaterial,
+                    float receiverAlpha) {
+                uint alphaByte = uint(round(clamp(receiverAlpha, 0.0, 1.0) * 255.0));
+                bool receiverSubmerged = (alphaByte <= 254u && alphaByte >= 192u)
+                        || ((packedMaterial & 256u) != 0u);
+                // The solar cascade only records opaque air-space occluders. Applying it
+                // unchanged below a transparent water column stamps their hard silhouette
+                // onto the bed, which is neither a reflection nor a valid water-light model.
+                return receiverSubmerged ? 1.0 : shadowVisibility;
+            }
+
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
                 if (metallumEnvironment.cloudContract.x != 1u) {
                     return 1.0;
@@ -2732,6 +2763,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float sunVisibility = 1.0;
                 if (directionalWeight > 0.0) {
                     sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    sunVisibility = metallumSubmergedReceiverSunVisibilityV1(
+                            sunVisibility, packedMaterial, receiverAlpha);
                 }
                 float cloudTransmittance = 1.0;
                 if (directionalWeight > 0.0 && sunVisibility > 0.0) {
@@ -2822,7 +2855,10 @@ public final class AdvancedDirectLightingShaderPatcher {
 
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
                 if (directionalWeight > 0.0) {
-                    float sunVisibility = metallumSunVisibilityV1(viewPosition, normal);
+                    // The cascade contains opaque air-space occluders. Do not turn its
+                    // block silhouette into a dark pseudo-reflection on the water surface.
+                    float sunVisibility = material.kind == METALLUM_SURFACE_WATER_V1
+                            ? 1.0 : metallumSunVisibilityV1(viewPosition, normal);
                     float cloudTransmittance = (sunVisibility > 0.0)
                             ? metallumCloudTransmittanceV1(viewPosition)
                             : 1.0;

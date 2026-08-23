@@ -25,7 +25,7 @@ Key architectural properties:
 - **Submerged Receiver Encoding (CAUSTICS-2)**: Submerged terrain quads are tagged at chunk meshing time via `LevelSlice` fluid state and depth scanning into 32-bit vertex material parameters (`SUBMERGED_BIT` at bit 8, `SUBMERGED_DEPTH` at bits 9..14), allowing above-water visibility with 0 runtime raymarching and 0 per-frame CPU scans.
 - **Pure Arithmetic / Zero Texture Bandwidth**: Evaluated procedurally in ALU without additional texture samples, render targets, or framebuffer passes.
 - **Energy-Preserving & Contrast Bounded**: Modulates celestial directional diffuse with a mean-preserving multiplier strictly bounded in $[0.45, 2.40]$ (with enhanced contrast and sharpened focusing ridges).
-- **Integrated Optics**: Respects Snell's law refraction, exponential water depth extinction ($\exp(-\sigma \cdot \text{depth})$ with $\sigma = 0.08$), surface orientation, geometric terrain shadows, and cloud shadow transmittance.
+- **Integrated Optics**: Respects Snell's law refraction, exponential water depth extinction ($\exp(-\sigma \cdot \text{depth})$ with $\sigma = 0.08$), surface orientation, and cloud shadow transmittance. Opaque terrain cascades never stamp block silhouettes onto water-connected receivers.
 
 ---
 
@@ -189,9 +189,9 @@ Protected channels that are **never** modified by caustics:
 
 ## 10. Shadow & Cloud Interactions
 
-Caustic modulation respects all existing shadow attenuations:
-1. **Geometric Shadows (`metallumSunVisibilityV1`)**: If a submerged surface is in the shadow of a cliff or structure ($\text{sunVisibility} = 0$), celestial directional diffuse is 0, completely extinguishing the caustics.
-2. **Cloud Shadows (`metallumCloudTransmittanceV1`)**: Passing clouds darken both direct celestial light and caustics proportionally without phase artifacts.
+Caustic modulation treats the two shadow sources differently:
+1. **Opaque terrain cascade (`metallumSunVisibilityV1`)**: The cascade only contains opaque air-space occluders. It is retained for dry receivers, but bypassed for water surfaces and submerged receivers so its hard block silhouette cannot become a dark pseudo-reflection on the water or bed.
+2. **Cloud shadows (`metallumCloudTransmittanceV1`)**: Passing clouds remain active and darken direct celestial light and caustics proportionally without phase artifacts.
 
 ---
 
@@ -261,7 +261,6 @@ if (!receiverSubmerged && !cameraUnderwater) {
 | Test Class / Task | Type | Description | Result |
 | --- | --- | --- | --- |
 | `waterCausticsUnitTest` | Pure Unit | Synchronous wave evaluation, Snell refraction, depth monotonicity, camera motion invariance, energy conservation mean, above-water & submerged receiver matrix | **PASS** |
-| `waterCausticsLightingUnitTest` | Lighting Integration | Tests T1 through T11 (ambient/sky/local isolation, shadow gating, cloud compatibility, above-water active & dry neutral) | **PASS** |
+| `waterCausticsLightingUnitTest` | Lighting Integration | Tests T1 through T12 (ambient/sky/local isolation, water-aware shadow gating, cloud compatibility, above-water active & dry neutral) | **PASS** |
 | `advancedDirectLightingShaderUnitTest` | Shader Verification | Actual SPIR-V compilation and MSL translation with exact SHA256 golden checks for all 8 targets | **PASS** |
 | `./gradlew check` | Full Suite | 86/86 tasks including ABI native checks, Metal GPU execution, and temporal scaling | **PASS** |
-

@@ -25,6 +25,7 @@ public final class WaterCausticsLightingIntegrationTests {
         testT9_ZeroDirectionalRadianceProducesZeroCaustics();
         testT10_NonWaterMediumBypassesCaustics();
         testT11_AboveWaterSubmergedReceiverActiveAndDryReceiverNeutral();
+        testT12_SubmergedReceiverRejectsOpaqueCascadeSilhouette();
         System.out.println("All WaterCausticsLightingIntegrationTests passed successfully.");
     }
 
@@ -198,6 +199,18 @@ public final class WaterCausticsLightingIntegrationTests {
         );
         require(dryResult.totalColor() == neutralResult.totalColor(),
                 "T11 failed: dry receiver must have total lighting identical to neutral");
+    }
+
+    private static void testT12_SubmergedReceiverRejectsOpaqueCascadeSilhouette() {
+        float submergedVisibility = WaterCausticsPolicy.waterReceiverSunVisibility(0.0f, true, false);
+        float waterSurfaceVisibility = WaterCausticsPolicy.waterReceiverSunVisibility(0.0f, false, true);
+        float dryVisibility = WaterCausticsPolicy.waterReceiverSunVisibility(0.0f, false, false);
+        require(submergedVisibility == 1.0f,
+                "T12 failed: opaque cascade silhouette leaked onto a submerged receiver");
+        require(waterSurfaceVisibility == 1.0f,
+                "T12 failed: opaque cascade silhouette leaked onto the water surface");
+        require(dryVisibility == 0.0f,
+                "T12 failed: dry receiver must retain the opaque cascade shadow");
     }
 
     private static void require(final boolean condition, final String message) {
