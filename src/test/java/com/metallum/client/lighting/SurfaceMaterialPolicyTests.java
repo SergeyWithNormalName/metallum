@@ -3,6 +3,7 @@ package com.metallum.client.lighting;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
+import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.SharedConstants;
 import net.minecraft.world.level.block.Blocks;
@@ -17,6 +18,7 @@ public final class SurfaceMaterialPolicyTests {
         Bootstrap.bootStrap();
         testVanillaDefaults();
         testCompactSemanticCoexistence();
+        testWaterSurfaceDoesNotBecomeACausticReceiver();
         testFresnelAndGgx();
         testRainExposureSnapshot();
         testWetnessAndAbsorption();
@@ -72,6 +74,10 @@ public final class SurfaceMaterialPolicyTests {
                         Blocks.SLIME_BLOCK.defaultBlockState(), true)
                         == SurfaceMaterialPolicy.GLASS,
                 "genuine translucent terrain lost its conservative glass fallback");
+        require(SurfaceMaterialPolicy.forTerrain(
+                        Blocks.WATER.defaultBlockState(), true)
+                        == SurfaceMaterialPolicy.WATER,
+                "water terrain fell through to the generic translucent material path");
         require(SodiumHdrSemantic.SURFACE_CLASS_METAL
                         != SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
                         && SodiumHdrSemantic.SURFACE_CLASS_WATER
@@ -131,6 +137,28 @@ public final class SurfaceMaterialPolicyTests {
                 5, SodiumHdrShaderPatcher.encodeVertexSemantic(15, true));
         require(exactEmission == 253 && ((exactEmission >> 3) & 15) == 15,
                 "L8 compact material policy changed exact HDR emission");
+    }
+
+    private static void testWaterSurfaceDoesNotBecomeACausticReceiver() {
+        ChunkVertexEncoder.Vertex[] vertices = new ChunkVertexEncoder.Vertex[4];
+        for (int index = 0; index < vertices.length; index++) {
+            vertices[index] = new ChunkVertexEncoder.Vertex();
+            vertices[index].color = 0xFF80A0C0;
+        }
+
+        SodiumHdrSemantic.tagQuad(
+                vertices,
+                0,
+                false,
+                SodiumHdrSemantic.SURFACE_CLASS_WATER,
+                true,
+                5
+        );
+        for (ChunkVertexEncoder.Vertex vertex : vertices) {
+            int alpha = (vertex.color >>> 24) & 0xFF;
+            require(alpha == 255,
+                    "water surface was encoded as a submerged caustic receiver");
+        }
     }
 
     private static void testFresnelAndGgx() {

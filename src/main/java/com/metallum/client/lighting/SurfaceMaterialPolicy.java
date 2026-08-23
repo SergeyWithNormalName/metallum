@@ -5,6 +5,7 @@ import net.minecraft.world.level.block.BushBlock;
 import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.SaplingBlock;
 import net.minecraft.world.level.block.SoundType;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.WeatheringCopper;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -168,6 +169,9 @@ public final class SurfaceMaterialPolicy {
             final BlockState state,
             final boolean translucentRenderPass
     ) {
+        if (state != null && state.is(Blocks.WATER)) {
+            return WATER;
+        }
         Descriptor explicit = forBlock(state);
         return explicit == DIELECTRIC && translucentRenderPass ? GLASS : explicit;
     }

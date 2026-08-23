@@ -173,7 +173,11 @@ public final class SodiumHdrSemantic {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT
                     | (boundedSurfaceClass << SURFACE_CLASS_SHIFT);
         }
-        if (submerged) {
+        // A water interface transmits/refracts the caustic; it is never its receiver. Encoding
+        // a depth on it makes the receiver shader modulate the visible surface itself, producing
+        // dark block-shaped caustic silhouettes that look like broken reflections.
+        boolean causticReceiver = submerged && boundedSurfaceClass != SURFACE_CLASS_WATER;
+        if (causticReceiver) {
             int boundedDepth = Math.clamp(submergedDepth, 1, 63);
             semantic |= SUBMERGED_BIT | (boundedDepth << SUBMERGED_DEPTH_SHIFT);
             int alpha = 255 - boundedDepth;
