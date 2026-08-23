@@ -1,6 +1,7 @@
 package com.metallum.client.hdr;
 
 import com.metallum.Metallum;
+import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -127,6 +128,37 @@ public final class SodiumHdrSemantic {
 
     static int partialOverlayEmissionStrength(final int blockLightEmission) {
         return PARTIAL_OVERLAY_EMISSION_CURVE[Math.clamp(blockLightEmission, 0, 15)];
+    }
+
+    /**
+     * Converts the CPU material policy to the compact terrain semantic.
+     *
+     * <p>Water must retain its own class even on a submerged quad.  Otherwise the water
+     * interface is encoded as a caustic receiver and its alpha carries a fictitious water
+     * depth, producing a dark block-shaped overlay on the water surface.</p>
+     */
+    public static int terrainSurfaceClass(
+            final SurfaceMaterialPolicy.Kind kind,
+            final boolean upwardFace,
+            final boolean rainExposed
+    ) {
+        if (kind == null) {
+            return SURFACE_CLASS_NONE;
+        }
+        return switch (kind) {
+            // Preserve intrinsic optics on vertical faces. Upward sheltered faces are left on
+            // the legacy path because the compact byte has no independent precipitation bit.
+            case METAL -> !upwardFace || rainExposed
+                    ? SURFACE_CLASS_METAL : SURFACE_CLASS_NONE;
+            case SMOOTH_DIELECTRIC -> !upwardFace || rainExposed
+                    ? SURFACE_CLASS_SMOOTH_DIELECTRIC : SURFACE_CLASS_NONE;
+            case WATER -> SURFACE_CLASS_WATER;
+            case GLASS -> SURFACE_CLASS_GLASS;
+            case STONE -> rainExposed ? SURFACE_CLASS_STONE : SURFACE_CLASS_NONE;
+            case WOOD -> rainExposed ? SURFACE_CLASS_WOOD : SURFACE_CLASS_NONE;
+            case POROUS -> rainExposed ? SURFACE_CLASS_POROUS : SURFACE_CLASS_NONE;
+            case DIELECTRIC -> rainExposed ? SURFACE_CLASS_DIELECTRIC : SURFACE_CLASS_NONE;
+        };
     }
 
     private static boolean isAmethystGrowth(final BlockState state) {

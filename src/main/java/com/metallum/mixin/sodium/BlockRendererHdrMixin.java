@@ -254,30 +254,9 @@ abstract class BlockRendererHdrMixin {
         ).kind();
         boolean upwardFace = quad.faceNormal().y() > SurfaceMaterialPolicy.RAIN_FACING_START;
         boolean rainExposed = upwardFace && this.metallum$blockRainExposed;
-        int surfaceClass = switch (surfaceKind) {
-            // Preserve intrinsic optics on vertical faces. Upward sheltered faces are left on the
-            // legacy path because the compact byte has no independent precipitation bit.
-            case METAL -> !upwardFace || rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_METAL
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case SMOOTH_DIELECTRIC -> !upwardFace || rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case GLASS -> SodiumHdrSemantic.SURFACE_CLASS_GLASS;
-            case STONE -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_STONE
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case WOOD -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_WOOD
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case POROUS -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_POROUS
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            case DIELECTRIC -> rainExposed
-                    ? SodiumHdrSemantic.SURFACE_CLASS_DIELECTRIC
-                    : SodiumHdrSemantic.SURFACE_CLASS_NONE;
-            default -> SodiumHdrSemantic.SURFACE_CLASS_NONE;
-        };
+        int surfaceClass = SodiumHdrSemantic.terrainSurfaceClass(
+                surfaceKind, upwardFace, rainExposed
+        );
         boolean submerged = this.metallum$blockSubmerged;
         int submergedDepth = this.metallum$blockSubmergedDepth;
         if (!submerged && this.metallum$slice != null && this.metallum$blockPos != null) {

@@ -78,6 +78,10 @@ public final class SurfaceMaterialPolicyTests {
                         Blocks.WATER.defaultBlockState(), true)
                         == SurfaceMaterialPolicy.WATER,
                 "water terrain fell through to the generic translucent material path");
+        require(SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.WATER, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_WATER,
+                "water terrain was not forwarded to the compact water surface class");
         require(SodiumHdrSemantic.SURFACE_CLASS_METAL
                         != SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC
                         && SodiumHdrSemantic.SURFACE_CLASS_WATER
