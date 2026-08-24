@@ -3419,7 +3419,6 @@ def _validate_log_evidence(
         armed_line,
         window_ready_line,
         apply_line,
-        frozen_line,
         ready_line,
         route_check_lines["MEASURE_START"],
         measure_start_line,
@@ -3427,7 +3426,10 @@ def _validate_log_evidence(
         route_check_lines["MEASURE_END"],
         complete_line,
     )
-    if any(current >= following for current, following in zip(ordered_lines, ordered_lines[1:])):
+    if (
+        frozen_line >= ready_line
+        or any(current >= following for current, following in zip(ordered_lines, ordered_lines[1:]))
+    ):
         raise ReportError("benchmark evidence events are out of order")
     measurement["runtime"] = {
         "resolved_gui_scale": resolved_gui_scale,
@@ -4304,6 +4306,7 @@ def self_test() -> None:
         )
 
     minecraft_evidence = "\n".join((
+        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ARMED "
         "scope=Built-in Retina Display target=3024x1964 warmup=1800 "
         "measure=3000 sequence=[OFF] route=hdrtest-static-v1",
@@ -4314,7 +4317,6 @@ def self_test() -> None:
         "route=hdrtest-static-v1 fixture=hdrtest-static-v1 "
         "player=MetallumBench/b07a402a-d8ea-354f-9398-aaf208a798b9 "
         "dimension=minecraft:overworld",
-        "[main/INFO] METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN",
         "[render/INFO] METALLUM_BENCHMARK EVENT=ROUTE_READY "
         "route=hdrtest-static-v1 stable_frames=120 "
         "pose=[86.1,74.0,-95.5;155.4,13.2] max_fps=260 "
@@ -5516,6 +5518,21 @@ def self_test() -> None:
         )
         expect_log_error(
             "\n".join(reordered_lines) + "\n",
+            "events are out of order",
+        )
+        late_freeze_lines = minecraft_text.splitlines()
+        freeze_index = next(
+            index for index, value in enumerate(late_freeze_lines)
+            if "EVENT=SERVER_TICKS_FROZEN" in value
+        )
+        freeze_record = late_freeze_lines.pop(freeze_index)
+        ready_index = next(
+            index for index, value in enumerate(late_freeze_lines)
+            if "EVENT=ROUTE_READY" in value
+        )
+        late_freeze_lines.insert(ready_index + 1, freeze_record)
+        expect_log_error(
+            "\n".join(late_freeze_lines) + "\n",
             "events are out of order",
         )
         paths["minecraft_log"].write_text(minecraft_text, encoding="utf-8")
