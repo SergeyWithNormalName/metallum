@@ -68,6 +68,16 @@ to fit the slow baseline. The next permitted action is a separate baseline
 diagnosis/recovery with its own hypotheses and A/B evidence; no G1 field work is
 admitted by this result.
 
+A follow-up Tier B attribution on the same route found `world opaque` at
+`42.227 ms` average / `42.971 ms` p95. Sequential `NO_L3_RECEIVER`,
+`NO_L4_RECEIVER`, and `NO_L6_RECEIVER` compile-time ablations produced GPU p95
+deltas of `+1.424`, `+1.317`, and `+0.199 ms` versus `FULL_ADVANCED`; none
+supported a receiver-local recovery candidate. These diagnostic runs are not
+release receipts. The retained negative evidence is recorded in
+`OptimizationHistory.md`; a future recovery now requires pipeline/draw/material
+GPU-capture attribution inside `world opaque`, not a quality-reducing shader
+shortcut.
+
 ## Immutable functional fixtures
 
 `benchmark/gi/g0-fixtures-v1.json` binds ten deterministic, tracked Minecraft

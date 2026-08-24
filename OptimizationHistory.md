@@ -2109,6 +2109,45 @@ if (sunShadowActive && directionalWeight > 0.0 && (hasDirectionalLight || hasSky
 
 Кандидат `OPT-AMBIENT-PSO-1` уверенно проходит Performance Gate по независимому same-artifact раунду B3/A3/A4/B4 (GPU p95 `-2.01 ms` / `-4.08%`, FPS `+4.00%`, улучшение низких квантилей 1% и 0.1% на `+4.00%..+4.26%` при нулевых аллокациях по отслеживаемым категориям). Специализация утверждена и сохранена в основном коде.
 
+## 2026-08-24 — G0 Overworld baseline recovery audit (no-win)
+
+**Статус:** `REJECTED_NO_QUALITY_PRESERVING_CANDIDATE`; production-код не изменён.
+
+G0 зафиксировал воспроизводимый Tier C baseline около `20.07 FPS`, 1% low
+`16.90 FPS` и whole-GPU p95 `53.22 ms` на маршруте
+`gi-g0-overworld-v1`. Это ниже утверждённого абсолютного floor `30/20 FPS`.
+Floor, native resolution, Advanced Balanced lighting, CSM filtering и другие
+параметры качества не ослаблялись.
+
+Tier B detailed-прогон на том же маршруте и артефакте показал единственный
+доминирующий hot path: `world opaque` `42.227 ms` average / `42.971 ms` p95.
+Остальные измеренные стадии существенно меньше: actual-radiance HDR mapping
+`3.264 ms`, HDR extract + histogram `2.854 ms`, cluster build `0.814 ms`, sun
+shadow `0.170 ms`, translucent `0.579 ms`. Эти stage timings являются только
+атрибуцией и не заменяют Tier C acceptance.
+
+После этого выполнена последовательная compile-time receiver-абляция
+`600+600` кадров с единым commit/source/artifact и nominal thermal state:
+
+| Режим | FPS | 1% low | GPU p95 | Delta GPU p95 к FULL |
+| --- | ---: | ---: | ---: | ---: |
+| `FULL_ADVANCED` | 20.201 | 17.520 | 52.516 ms | — |
+| `NO_L3_RECEIVER` | 20.019 | 17.314 | 53.940 ms | +1.424 ms |
+| `NO_L4_RECEIVER` | 20.030 | 16.699 | 53.833 ms | +1.317 ms |
+| `NO_L6_RECEIVER` | 20.096 | 17.468 | 52.715 ms | +0.199 ms |
+
+Абляции маржинальны и неаддитивны, но ни одна не поддержала гипотезу о
+receiver-подсистеме с резервом порядка `20 ms`. GI_OFF telemetry во всех окнах
+осталась строго нулевой; отдельный vertex-reflection experiment был OFF.
+Статические geometry heaps, L4 runtime guard, lazy L6 shortcuts, упрощение PCF,
+снижение cascade quality/resolution и MetalFX уже исключены историей либо меняют
+утверждённый image/benchmark contract.
+
+Итог: локального quality-preserving кандидата, способного восстановить G0 floor,
+не найдено. Следующая обоснованная работа — отдельный GPU frame capture с
+разбиением `world opaque` по pipeline/draw/material category. До появления такого
+доказательства G0 остаётся `REJECTED_BASELINE_FLOOR`, а G1 не допускается.
+
 ---
 
 ### [2026-08-20] GOD-RAYS-2.5: Volumetric Shaft Isolation & Physical Atmospheric Single Scattering Model
