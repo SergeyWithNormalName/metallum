@@ -445,6 +445,13 @@ case "$route_field_count" in
         ;;
 esac
 
+case "$ROUTE_ID" in
+    gi-g0-*)
+        [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 0 ] \
+            || die "GI G0 routes forbid the separate vertex-reflection experiment"
+        ;;
+esac
+
 require_value "$PLAYER_NAME" "MetallumBench" "benchmark player name"
 require_value "$PLAYER_UUID" "b07a402a-d8ea-354f-9398-aaf208a798b9" "benchmark player UUID"
 require_value "$SIMULATION_FROZEN" "1" "benchmark simulation freeze"
@@ -612,8 +619,24 @@ case "$settings_field_count" in
             FI_MINIMUM_GENERATED_PERCENT FI_RENDERER_IMPROVED_LIGHTING \
             FI_RENDERER_LIGHTING_PRESET <<< "$settings_values"
         ;;
+    34)
+        [ "$FI_VALIDATION" -eq 0 ] \
+            || die "schema-v3 GI_OFF settings cannot be used for FI validation"
+        IFS=$'\t' read -r \
+            SETTINGS_ID SETTINGS_SPEC_SHA256 SETTINGS_SHA256 \
+            RENDER_DISTANCE SIMULATION_DISTANCE GRAPHICS_PRESET \
+            ENTITY_DISTANCE_SCALING PARTICLE_SETTING MIPMAP_LEVELS \
+            BIOME_BLEND_RADIUS MAX_FPS AO_ENABLED CLOUDS_MODE CLOUD_RANGE \
+            TEXTURE_FILTERING MAX_ANISOTROPY_BIT IMPROVED_TRANSPARENCY \
+            CONFIGURED_GUI_SCALE RESOURCE_PACKS_SHA256 SODIUM_SETTINGS_SHA256 \
+            ACTIVE_RESOURCE_PACK_IDS SODIUM_WORKER_THREADS HDR_MODE HDR_SOURCE_ENCODING \
+            HDR_BLOOM_STRENGTH HDR_STRENGTH PERSISTENT_METALFX_MODE \
+            FI_ENABLED FI_TEMPORAL_MODE FI_OVERLAY \
+            FI_MINIMUM_GENERATED_PERCENT BENCHMARK_RENDERER_IMPROVED_LIGHTING \
+            BENCHMARK_RENDERER_LIGHTING_PRESET BENCHMARK_RENDERER_GI_MODE <<< "$settings_values"
+        ;;
     *)
-        die "settings helper returned $settings_field_count fields instead of 27, 31, or 33"
+        die "settings helper returned $settings_field_count fields instead of 27, 31, 33, or 34"
         ;;
 esac
 SETTINGS_VALUES_BEFORE=$settings_values
@@ -678,8 +701,9 @@ RENDERER_LIGHTING=$(renderer_value improvedLighting)
 RENDERER_PRESET=$(renderer_value lightingPreset)
 RENDERER_INTERPOLATION=$(renderer_value frameInterpolation)
 RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
+RENDERER_GI_MODE=$(renderer_value globalIllumination)
 [ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
-require_value "$RENDERER_SCHEMA" "4" "renderer schemaVersion"
+require_value "$RENDERER_SCHEMA" "5" "renderer schemaVersion"
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
 if [ "$FI_VALIDATION" -eq 1 ]; then
@@ -696,10 +720,19 @@ else
     require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
 fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
+require_value "$RENDERER_GI_MODE" "off" "renderer globalIllumination"
+if [ "$settings_field_count" -eq 34 ]; then
+    require_value "$RENDERER_LIGHTING" "$BENCHMARK_RENDERER_IMPROVED_LIGHTING" \
+        "tracked renderer improvedLighting"
+    require_value "$RENDERER_PRESET" "$BENCHMARK_RENDERER_LIGHTING_PRESET" \
+        "tracked renderer lightingPreset"
+    require_value "$RENDERER_GI_MODE" "$BENCHMARK_RENDERER_GI_MODE" \
+        "tracked renderer globalIllumination"
+fi
 if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
     require_value "$RENDERER_LIGHTING" "true" "L6 dynamic route renderer improvedLighting"
 fi
-RENDERER_VALUES_BEFORE="$RENDERER_SCHEMA/$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG"
+RENDERER_VALUES_BEFORE="$RENDERER_SCHEMA/$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG/$RENDERER_GI_MODE"
 
 mkdir -p "$OUTPUT_DIR"
 git -C "$ROOT" check-ignore -q "$OUTPUT_DIR/.metallum-benchmark-probe" \
@@ -743,6 +776,7 @@ else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
+echo "GI_OFF_ADMISSION mode=$RENDERER_GI_MODE resources=0 passes=0 bindings=0 status=PASS"
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
@@ -878,7 +912,7 @@ cleanup() {
 
         renderer_debug_after=$(renderer_value voxelDebugChecksum)
         [ -n "$renderer_debug_after" ] || renderer_debug_after=false
-        renderer_after="$(renderer_value schemaVersion)/$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
+        renderer_after="$(renderer_value schemaVersion)/$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after/$(renderer_value globalIllumination)"
         if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
             echo "ERROR: renderer generation settings changed during the run" >&2
             cleanup_status=2
@@ -1045,6 +1079,7 @@ METALLUM_BENCHMARK_MEASURE_FRAMES="$MEASURE_FRAMES" \
 METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
 METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL="$EXPECTED_LIGHTING_MODEL" \
+METALLUM_BENCHMARK_GI_MODE="$RENDERER_GI_MODE" \
 METALLUM_VERTEX_REFLECTION_EXPERIMENT="$VERTEX_REFLECTION_EXPERIMENT" \
 METALLUM_BENCHMARK_WATER_REFLECTION_FACE_AWARE="$WATER_REFLECTION_FACE_AWARE" \
 METALLUM_BENCHMARK_WATER_REFLECTION_FIRST_SURFACE="$WATER_REFLECTION_FIRST_SURFACE" \

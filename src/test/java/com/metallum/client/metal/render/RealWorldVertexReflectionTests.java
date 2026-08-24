@@ -72,6 +72,7 @@ public final class RealWorldVertexReflectionTests {
         testCloudReflectionTransformOwnership();
         testReceiverFresnelCompositionMath();
         testMslGeneratedShaderContractProof();
+        testGiOffGeneratedMslContractProof();
 
         System.out.println("RealWorldVertexReflectionTests passed successfully!");
     }
@@ -602,6 +603,53 @@ public final class RealWorldVertexReflectionTests {
     private static String sha256(final String source) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(source.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * G0 proves the zero variant against emitted MSL. Source inspection alone
+     * is insufficient because dead declarations or resources can survive the
+     * GLSL/SPIR-V boundary.
+     */
+    private static void testGiOffGeneratedMslContractProof() throws Exception {
+        String sodiumVertex = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX
+        );
+        String sodiumFragment = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT
+        );
+        String materialVertex = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                sodiumVertex
+        ).source();
+        String materialFragment = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                sodiumFragment
+        ).source();
+        String offGlslVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        String offGlslFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        ShaderDefines offDefines = ShaderDefines.builder()
+                .define("USE_VERTEX_COMPRESSION")
+                .define("USE_FOG")
+                .build();
+        String offMslVertex = compileToMsl(offGlslVertex, ShaderType.VERTEX, offDefines);
+        String offMslFragment = compileToMsl(offGlslFragment, ShaderType.FRAGMENT, offDefines);
+
+        for (String token : new String[]{
+                "MetallumGi", "metallumGi", "giProbe", "giField", "giInject",
+                "giTransport", "globalIllumination", "metallumIrradianceField",
+                "metallumGiParams", "metallumGiConfidence"
+        }) {
+            require(!offGlslVertex.contains(token) && !offGlslFragment.contains(token),
+                    "GI_OFF GLSL contains reserved GI token " + token);
+            require(!offMslVertex.contains(token) && !offMslFragment.contains(token),
+                    "GI_OFF generated MSL contains reserved GI token " + token);
+        }
     }
 
     private static String compileToMsl(final String glslSource, final ShaderType stage, final ShaderDefines defines) throws ShaderCompileException {

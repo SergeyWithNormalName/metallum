@@ -199,6 +199,25 @@ VOXEL_CLIPMAP_INTEGER_KEYS = (
 VOXEL_CLIPMAP_KEYS = frozenset({
     "active", "output_independent", *VOXEL_CLIPMAP_INTEGER_KEYS,
 })
+GI_INTEGER_KEYS = (
+    "contract_version", "resource_count", "pass_count", "binding_count",
+    "shader_symbol_count", "allocated_bytes", "resident_bytes",
+    "valid_probes", "unknown_probes", "dirty_queued_total",
+    "dirty_completed_total", "dirty_discarded_total", "dirty_pending",
+    "injection_dispatches", "transport_dispatches", "source_epoch",
+    "probe_epoch", "field_epoch", "stale_cell_rejects",
+)
+GI_RESET_REASON_KEYS = frozenset({
+    "none", "world_change", "teleport", "scroll", "source_epoch",
+    "explicit", "device_reset",
+})
+GI_FALLBACK_REASON_KEYS = frozenset({
+    "none", "disabled", "unavailable", "invalid_input", "stale_data",
+    "budget", "native_failure",
+})
+GI_KEYS = frozenset({
+    "mode", "reset_reasons", "fallback_reasons", *GI_INTEGER_KEYS,
+})
 VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
     "performance": 0.15,
     "balanced": 0.40,
@@ -215,6 +234,7 @@ STABLE_METADATA_KEYS = (
     "sodium_settings_sha256", "configured_gui_scale",
     "active_resource_pack_ids", "sodium_chunk_builder_threads",
     "hdr_bloom_strength", "hdr_strength", "persistent_metalfx_mode",
+    "global_illumination_mode",
     "world", "fixture", "fixture_sha256", "route", "route_sha256",
     "benchmark_player_name", "benchmark_player_uuid", "benchmark_dimension",
     "benchmark_simulation_frozen", "monitor", "os_version",
@@ -269,6 +289,7 @@ class TimingWindow:
     renderer_generation: dict[str, Any] | None
     clustered_lighting: dict[str, Any] | None
     voxel_clipmaps: dict[str, Any] | None
+    global_illumination: dict[str, Any] | None
     light_cluster_stage: dict[str, Any] | None
     sun_shadow_stage: dict[str, Any] | None
     voxel_upload_update_stage: dict[str, Any] | None
@@ -396,6 +417,73 @@ def _parse_voxel_clipmaps(value: Any, line: int) -> dict[str, Any]:
         raise ReportError(
             f"line {line}: voxel_clipmaps.heap_used_bytes exceeds heap_bytes"
         )
+    return result
+
+
+def _parse_reason_counters(
+    value: Any, field: str, expected_keys: frozenset[str], line: int,
+) -> dict[str, int]:
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ReportError(f"line {line}: {field} has invalid keys")
+    return {
+        key: _integer(value.get(key), f"{field}.{key}", line)
+        for key in sorted(expected_keys)
+    }
+
+
+def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != GI_KEYS:
+        raise ReportError(f"line {line}: global_illumination has invalid keys")
+    mode = value.get("mode")
+    if mode not in ("off", "active"):
+        raise ReportError(
+            f"line {line}: global_illumination.mode must be 'off' or 'active'"
+        )
+    result: dict[str, Any] = {"mode": mode}
+    for key in GI_INTEGER_KEYS:
+        result[key] = _integer(value.get(key), f"global_illumination.{key}", line)
+    if result["contract_version"] != 1:
+        raise ReportError(
+            f"line {line}: global_illumination.contract_version must be 1"
+        )
+    result["reset_reasons"] = _parse_reason_counters(
+        value.get("reset_reasons"), "global_illumination.reset_reasons",
+        GI_RESET_REASON_KEYS, line,
+    )
+    result["fallback_reasons"] = _parse_reason_counters(
+        value.get("fallback_reasons"), "global_illumination.fallback_reasons",
+        GI_FALLBACK_REASON_KEYS, line,
+    )
+    if result["resident_bytes"] > result["allocated_bytes"]:
+        raise ReportError(
+            f"line {line}: global_illumination.resident_bytes exceeds allocated_bytes"
+        )
+    drained = result["dirty_completed_total"] + result["dirty_discarded_total"]
+    if drained > result["dirty_queued_total"]:
+        raise ReportError(
+            f"line {line}: global_illumination dirty counters exceed queued work"
+        )
+    if result["dirty_pending"] != result["dirty_queued_total"] - drained:
+        raise ReportError(
+            f"line {line}: global_illumination dirty_pending algebra is invalid"
+        )
+    if mode == "off":
+        nonzero = [
+            key for key in GI_INTEGER_KEYS
+            if key != "contract_version" and result[key] != 0
+        ]
+        nonzero += [
+            f"reset_reasons.{key}"
+            for key, count in result["reset_reasons"].items() if count != 0
+        ]
+        nonzero += [
+            f"fallback_reasons.{key}"
+            for key, count in result["fallback_reasons"].items() if count != 0
+        ]
+        if nonzero:
+            raise ReportError(
+                f"line {line}: GI_OFF contains nonzero telemetry: {', '.join(nonzero)}"
+            )
     return result
 
 
@@ -999,7 +1087,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
     if not isinstance(payload, dict):
         raise ReportError(f"line {line}: JSON value must be an object")
     schema = _integer(payload.get("schema_version"), "schema_version", line, 1)
-    if schema not in (1, 2, 3, 4, 5):
+    if schema not in (1, 2, 3, 4, 5, 6):
         raise ReportError(f"line {line}: unsupported schema_version {schema}")
     detail = payload.get("detail_enabled")
     if not isinstance(detail, bool):
@@ -1075,6 +1163,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
         voxel_clipmaps=(
             _parse_voxel_clipmaps(payload.get("voxel_clipmaps"), line)
             if schema >= 5 else None
+        ),
+        global_illumination=(
+            _parse_global_illumination(payload.get("global_illumination"), line)
+            if schema >= 6 else None
         ),
         light_cluster_stage=(
             _parse_light_cluster_stage(payload.get("stages"), line)
@@ -1555,6 +1647,45 @@ def _aggregate_voxel_clipmaps(
     }
 
 
+def _aggregate_global_illumination(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    present = [window.global_illumination is not None for window in windows]
+    if not any(present):
+        return None
+    if not all(present):
+        raise ReportError("selected windows mix global-illumination telemetry presence")
+    values = [
+        window.global_illumination for window in windows
+        if window.global_illumination is not None
+    ]
+    if len({value["mode"] for value in values}) != 1:
+        raise ReportError("selected windows mix global-illumination modes")
+    if len({value["contract_version"] for value in values}) != 1:
+        raise ReportError("selected windows mix global-illumination contract versions")
+    return {
+        "mode": values[0]["mode"],
+        "contract_version": values[0]["contract_version"],
+        "window_count": len(values),
+        "counters": {
+            key: {
+                "window_minimum": min(value[key] for value in values),
+                "window_maximum": max(value[key] for value in values),
+                "last_window": values[-1][key],
+            }
+            for key in GI_INTEGER_KEYS if key != "contract_version"
+        },
+        "reset_reasons": {
+            key: sum(value["reset_reasons"][key] for value in values)
+            for key in sorted(GI_RESET_REASON_KEYS)
+        },
+        "fallback_reasons": {
+            key: sum(value["fallback_reasons"][key] for value in values)
+            for key in sorted(GI_FALLBACK_REASON_KEYS)
+        },
+    }
+
+
 def _aggregate_timing_stage(
     windows: Sequence[TimingWindow], attribute: str, stage_name: str,
     *, allow_absent_or_zero: bool = False,
@@ -1912,9 +2043,9 @@ def validate_release_contract(
 
     expected_scaling = scaler != "OFF"
     for window in windows:
-        if window.schema not in (2, 3, 4, 5):
+        if window.schema not in (2, 3, 4, 5, 6):
             raise ReportError(
-                f"line {window.line}: release contract requires schema v2, v3, v4 or v5"
+                f"line {window.line}: release contract requires schema v2 through v6"
             )
         if window.detail:
             raise ReportError(f"line {window.line}: intrusive detail timing must be disabled")
@@ -2037,6 +2168,16 @@ def validate_release_contract(
             raise ReportError(
                 f"line {window.line}: persistent MetalFX mode must remain off"
             )
+        if window.schema >= 6:
+            if metadata.get("global_illumination_mode") != "off":
+                raise ReportError(
+                    f"line {window.line}: release metadata must attest GI_OFF"
+                )
+            if window.global_illumination is None \
+                    or window.global_illumination.get("mode") != "off":
+                raise ReportError(
+                    f"line {window.line}: release telemetry must attest GI_OFF"
+                )
         for key, expected_value in (
             ("hdr_strength", 1.0 if resolved_output == "hdr" else 0.0),
             ("bloom_strength", 0.18 if resolved_output == "hdr" else 0.0),
@@ -2228,6 +2369,9 @@ def summarize(
     voxel_clipmaps = _aggregate_voxel_clipmaps(selected)
     if voxel_clipmaps is not None:
         result["voxel_clipmaps"] = voxel_clipmaps
+    global_illumination = _aggregate_global_illumination(selected)
+    if global_illumination is not None:
+        result["global_illumination"] = global_illumination
     cluster_stage = _aggregate_light_cluster_stage(selected)
     if cluster_stage is not None:
         result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
@@ -3029,9 +3173,9 @@ def _derive_release_summary(
     workload_contract: str = WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     windows = load_report(raw_report)
-    if any(window.schema not in (2, 3, 4, 5) for window in windows):
+    if any(window.schema not in (2, 3, 4, 5, 6) for window in windows):
         raise ReportError(
-            "accepted raw report must contain schema-v2/v3/v4/v5 windows only"
+            "accepted raw report must contain schema-v2 through schema-v6 windows only"
         )
     measure_windows = [window for window in windows if window.phase == "measure"]
     if not measure_windows:
@@ -3418,7 +3562,7 @@ def create_attestation(
         workload_contract=WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     )
     payload = {
-        "schema_version": 5,
+        "schema_version": 6,
         "accepted": True,
         "raw_report": str(paths["raw_report"]),
         "raw_sha256": _file_sha256(paths["raw_report"]),
@@ -3463,6 +3607,7 @@ def _attestation_workload_contract(schema_version: int) -> str:
         3: WORKLOAD_CONTRACT_BASE,
         4: WORKLOAD_CONTRACT_EXPANDED,
         5: WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
+        6: WORKLOAD_CONTRACT_PRIVATE_GEOMETRY_HEAP,
     }[schema_version]
 
 
@@ -3471,7 +3616,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
     path = _attestation_path(raw)
     payload = _load_json_object(path, "benchmark attestation")
     schema_version = payload.get("schema_version")
-    if schema_version not in (2, 3, 4, 5) or payload.get("accepted") is not True:
+    if schema_version not in (2, 3, 4, 5, 6) or payload.get("accepted") is not True:
         raise ReportError(f"invalid benchmark attestation: {path}")
     expected = _artifact_paths(raw)
     artifact_keys = ("raw_report", "summary", "minecraft_log", "console_log")
@@ -3506,7 +3651,7 @@ def verify_attestation(raw_report: Path) -> dict[str, Any]:
         raise ReportError(f"attestation measurement contract is inconsistent: {path}")
     if payload.get("presented_frames") != summary["presented_frames"]:
         raise ReportError(f"attestation frame count is inconsistent: {path}")
-    if schema_version in (3, 4, 5):
+    if schema_version in (3, 4, 5, 6):
         if payload.get("workload") != summary["workload"]:
             raise ReportError(f"attestation workload is inconsistent: {path}")
     if payload.get("metadata") != summary["metadata"]:
@@ -4029,6 +4174,14 @@ def self_test() -> None:
             })
         return result
 
+    def global_illumination_off() -> dict[str, Any]:
+        return {
+            "mode": "off",
+            **{key: (1 if key == "contract_version" else 0) for key in GI_INTEGER_KEYS},
+            "reset_reasons": {key: 0 for key in GI_RESET_REASON_KEYS},
+            "fallback_reasons": {key: 0 for key in GI_FALLBACK_REASON_KEYS},
+        }
+
     def l3_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
         payload = line(4, index)
         payload["detail_enabled"] = detail
@@ -4102,6 +4255,13 @@ def self_test() -> None:
                 "p99_ms": 0.14,
                 "maximum_ms": 0.16,
             }
+        return payload
+
+    def g0_line(index: int, *, advanced: bool, detail: bool) -> dict[str, Any]:
+        payload = l5_line(index, advanced=advanced, detail=detail)
+        payload["schema_version"] = 6
+        payload["global_illumination"] = global_illumination_off()
+        payload["metadata"]["global_illumination_mode"] = "off"
         return payload
 
     def l6_dynamic_line(index: int, *, detail: bool) -> dict[str, Any]:
@@ -4790,6 +4950,88 @@ def self_test() -> None:
         assert schema5_release_summary["schema_versions"] == [5]
         assert schema5_release_summary["voxel_clipmaps"]["active"] is True
 
+        schema6_gi_off_release = root / "schema6-gi-off-release.raw.jsonl"
+        gi_off_payloads = [
+            g0_line(index, advanced=True, detail=False) for index in range(10)
+        ]
+        schema6_gi_off_release.write_text(
+            "\n".join(json.dumps(payload) for payload in gi_off_payloads) + "\n",
+            encoding="utf-8",
+        )
+        gi_off_summary, _ = _derive_release_summary(schema6_gi_off_release)
+        assert gi_off_summary["schema_versions"] == [6]
+        assert gi_off_summary["global_illumination"]["mode"] == "off"
+        assert gi_off_summary["global_illumination"]["window_count"] == 10
+        assert all(
+            value["window_maximum"] == 0
+            for value in gi_off_summary["global_illumination"]["counters"].values()
+        )
+
+        def invalid_gi_payload(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payload = g0_line(0, advanced=True, detail=False)
+            mutation(payload["global_illumination"])
+            path = root / f"{stem}.jsonl"
+            path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            expect_error(lambda: load_report(path), expected_error)
+
+        invalid_gi_payload(
+            "gi-off-extra-key", lambda gi: gi.update({"unexpected": 0}),
+            "global_illumination has invalid keys",
+        )
+        invalid_gi_payload(
+            "gi-off-active-bytes", lambda gi: gi.update({"allocated_bytes": 1}),
+            "GI_OFF contains nonzero telemetry",
+        )
+        invalid_gi_payload(
+            "gi-off-resident-over-allocation",
+            lambda gi: gi.update({"resident_bytes": 2, "allocated_bytes": 1}),
+            "resident_bytes exceeds allocated_bytes",
+        )
+        invalid_gi_payload(
+            "gi-off-dirty-algebra",
+            lambda gi: gi.update({"dirty_queued_total": 2, "dirty_pending": 1}),
+            "dirty_pending algebra is invalid",
+        )
+        invalid_gi_payload(
+            "gi-off-invalid-mode", lambda gi: gi.update({"mode": "debug"}),
+            "mode must be 'off' or 'active'",
+        )
+        invalid_gi_payload(
+            "gi-off-reset-reason",
+            lambda gi: gi["reset_reasons"].update({"teleport": 1}),
+            "GI_OFF contains nonzero telemetry",
+        )
+
+        missing_gi = root / "schema6-missing-gi.jsonl"
+        missing_payload = g0_line(0, advanced=True, detail=False)
+        missing_payload.pop("global_illumination")
+        missing_gi.write_text(json.dumps(missing_payload) + "\n", encoding="utf-8")
+        expect_error(lambda: load_report(missing_gi), "global_illumination has invalid keys")
+
+        mixed_gi = root / "schema6-mixed-gi-mode.jsonl"
+        mixed_payloads = [g0_line(index, advanced=True, detail=False) for index in range(10)]
+        mixed_payloads[-1]["global_illumination"]["mode"] = "active"
+        mixed_gi.write_text(
+            "\n".join(json.dumps(payload) for payload in mixed_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(mixed_gi, 3000, 0, "OFF"),
+            "mix global-illumination modes",
+        )
+
+        for invalid_frames in (299, 301, 3001):
+            invalid_alignment = root / f"schema6-invalid-alignment-{invalid_frames}.jsonl"
+            payload = g0_line(0, advanced=True, detail=False)
+            payload["presented_frames"] = invalid_frames
+            invalid_alignment.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            expect_error(
+                lambda path=invalid_alignment: _derive_release_summary(path),
+                "requires exactly 3000 measured frames",
+            )
+
         def make_bundle(
             stem: str,
             source_sha256: str,
@@ -5063,7 +5305,7 @@ def self_test() -> None:
         )["verdict"] == "WITHIN_THRESHOLD"
 
         verified = verify_attestation(new)
-        assert verified["schema_version"] == 5
+        assert verified["schema_version"] == 6
         assert verified["presented_frames"] == 3000
         assert verified["workload"] == new_summary["workload"]
         new_attested = summarize_attested_release(new, 3000, 0, "OFF")

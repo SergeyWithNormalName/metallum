@@ -14,7 +14,7 @@ public final class BenchmarkLightingAdmissionTests {
                 true, true, admission, healthy, ""
         );
         RendererConfig.LoadStatus current = new RendererConfig.LoadStatus(
-                "4", false, RendererConfig.LoadDisposition.CURRENT
+                "5", false, RendererConfig.LoadDisposition.CURRENT
         );
         require(BenchmarkLightingAdmission.evaluate(
                 BenchmarkLightingAdmission.RequiredModel.ADVANCED, current, advancedHealthy

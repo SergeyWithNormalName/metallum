@@ -41,10 +41,10 @@ All combinations (e.g. `REALISM + PERFORMANCE`, `VANILLA + ULTRA`) are valid. Se
 ---
 
 ## 4. Persistent Ownership: `RendererConfig`
-The selected `VisualStyle` is persisted in `metallum-renderer.properties` as part of `RendererConfig` (schema 4):
+The selected `VisualStyle` is persisted in `metallum-renderer.properties` as part of `RendererConfig` (schema 5):
 
 ```properties
-schemaVersion=4
+schemaVersion=5
 improvedLighting=false
 lightingPreset=balanced
 frameInterpolation=false
@@ -53,7 +53,7 @@ visualStyle=vanilla
 ```
 
 - **Default**: `vanilla`.
-- **Migration**: Old schemas (v1, v2, v3) migrate safely to schema 4 with `visualStyle = VANILLA` without resetting existing user settings.
+- **Migration**: Old schemas (v1-v4) migrate safely to schema 5 with `visualStyle = VANILLA` and `globalIllumination = OFF` without resetting existing user settings.
 - **Fail-Closed**: Unrecognized styles or malformed configurations fail closed to `VANILLA` without destructive file overwriting.
 
 ---

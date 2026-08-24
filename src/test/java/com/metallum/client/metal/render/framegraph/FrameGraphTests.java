@@ -77,6 +77,16 @@ public final class FrameGraphTests {
                         "dynamic_local_shadow_compute", "local_shadow_atlas_upload",
                         "direct_lighting")),
                 "Advanced lighting pass order changed");
+        List<String> g0TopologyNames = new ArrayList<>();
+        g0TopologyNames.addAll(graph.resources().stream()
+                .map(resource -> resource.id().name()).toList());
+        g0TopologyNames.addAll(passNames);
+        require(g0TopologyNames.stream().noneMatch(name ->
+                        name.startsWith("gi_")
+                                || name.contains("global_illumination")
+                                || name.contains("irradiance_field")
+                                || name.contains("gi_probe")),
+                "GI_OFF frame graph contains a GI resource or pass");
         for (FrameGraph.PassDesc pass : graph.passes()) {
             require(pass.contract().requiredCapabilities().equals(
                             Set.of(MetalCapabilities.Feature.ADVANCED_LIGHTING))

@@ -629,15 +629,16 @@ def _setting_output(value: object, field: str) -> str:
     return result
 
 
-def _schema_v2_renderer_properties(spec: dict[str, object]) -> dict[str, str]:
+def _renderer_properties(
+    spec: dict[str, object], schema_version: int,
+) -> dict[str, str]:
     expected = _object(
         spec.get("renderer_properties"), "settings.renderer_properties"
     )
-    _settings_exact_keys(
-        expected,
-        "renderer_properties",
-        {"improvedLighting", "lightingPreset"},
-    )
+    keys = {"improvedLighting", "lightingPreset"}
+    if schema_version == 3:
+        keys.add("globalIllumination")
+    _settings_exact_keys(expected, "renderer_properties", keys)
     improved_lighting = expected.get("improvedLighting")
     lighting_preset = expected.get("lightingPreset")
     if improved_lighting not in {"true", "false"}:
@@ -650,10 +651,19 @@ def _schema_v2_renderer_properties(spec: dict[str, object]) -> dict[str, str]:
             "benchmark settings renderer_properties.lightingPreset "
             "must be performance, balanced, or ultra"
         )
-    return {
+    result = {
         "improvedLighting": improved_lighting,
         "lightingPreset": lighting_preset,
     }
+    if schema_version == 3:
+        global_illumination = expected.get("globalIllumination")
+        if global_illumination != "off":
+            raise FixtureError(
+                "benchmark settings renderer_properties.globalIllumination "
+                "must be off during Stage G0"
+            )
+        result["globalIllumination"] = global_illumination
+    return result
 
 
 def settings_values(
@@ -671,7 +681,7 @@ def settings_values(
     spec_raw, payload = _load_strict_json(spec_path, "benchmark settings")
     spec = _object(payload, "benchmark settings root")
     schema_version = _integer(spec.get("schema_version"), "settings.schema_version", 1)
-    if schema_version not in (1, 2):
+    if schema_version not in (1, 2, 3):
         raise FixtureError("unsupported benchmark settings schema_version")
     expected_root_keys = {
         "schema_version", "id", "options", "hdr_properties",
@@ -680,6 +690,8 @@ def settings_values(
     }
     if schema_version == 2:
         expected_root_keys.update({"frame_interpolation", "renderer_properties"})
+    elif schema_version == 3:
+        expected_root_keys.add("renderer_properties")
     _settings_exact_keys(spec, "root", expected_root_keys)
     settings_id = _string(spec.get("id"), "settings.id", SAFE_ID_RE)
     expected_options = _object(spec.get("options"), "settings.options")
@@ -728,14 +740,16 @@ def settings_values(
         "settings.runtime.sodium_chunk_builder_threads",
         1,
     )
-    if schema_version == 1:
+    if schema_version in (1, 3):
         frame_interpolation_enabled = False
         temporal_mode = "unchanged"
         frame_interpolation_overlay = False
         minimum_generated_percent = 0
-        expected_renderer_properties: dict[str, str] = {}
+        expected_renderer_properties = (
+            {} if schema_version == 1 else _renderer_properties(spec, schema_version)
+        )
     else:
-        expected_renderer_properties = _schema_v2_renderer_properties(spec)
+        expected_renderer_properties = _renderer_properties(spec, schema_version)
         expected_frame_interpolation = _object(
             spec.get("frame_interpolation"), "settings.frame_interpolation"
         )
@@ -917,9 +931,10 @@ def settings_values(
         "runtime": expected_runtime,
         "resource_packs_sha256": resource_packs_sha256,
     }
-    if schema_version == 2:
-        canonical_settings["schema_version"] = 2
+    if schema_version in (2, 3):
+        canonical_settings["schema_version"] = schema_version
         canonical_settings["renderer_properties"] = actual_renderer_properties
+    if schema_version == 2:
         canonical_settings["frame_interpolation"] = {
             "enabled": frame_interpolation_enabled,
             "temporal_mode": temporal_mode,
@@ -958,7 +973,7 @@ def settings_values(
             "frame_interpolation.minimum_generated_percent",
         ),
     ]
-    if schema_version == 2:
+    if schema_version in (2, 3):
         result.extend([
             _setting_output(
                 actual_renderer_properties["improvedLighting"],
@@ -969,6 +984,11 @@ def settings_values(
                 "renderer.lightingPreset",
             ),
         ])
+    if schema_version == 3:
+        result.append(_setting_output(
+            actual_renderer_properties["globalIllumination"],
+            "renderer.globalIllumination",
+        ))
     return result
 
 
@@ -1038,41 +1058,48 @@ def apply_runtime_settings(
     renderer_path: Path,
     temporal_path: Path,
 ) -> None:
-    """Apply the schema-v2 FI profile without rewriting unrelated config entries."""
+    """Apply a tracked schema-v2 FI or schema-v3 GI_OFF runtime profile."""
     _raw, payload = _load_strict_json(spec_path, "benchmark settings")
     spec = _object(payload, "benchmark settings root")
-    if _integer(spec.get("schema_version"), "settings.schema_version", 1) != 2:
-        raise FixtureError("runtime settings application requires benchmark settings schema_version 2")
+    schema_version = _integer(spec.get("schema_version"), "settings.schema_version", 1)
+    if schema_version not in (2, 3):
+        raise FixtureError(
+            "runtime settings application requires benchmark settings schema_version 2 or 3"
+        )
+    expected_root_keys = {
+        "schema_version", "id", "options", "hdr_properties",
+        "metalfx_properties", "sodium_options", "sodium_mixin_properties",
+        "fabric_default_resource_packs", "runtime", "renderer_properties",
+    }
+    if schema_version == 2:
+        expected_root_keys.add("frame_interpolation")
     _settings_exact_keys(
-        spec,
-        "root",
-        {
-            "schema_version", "id", "options", "hdr_properties",
-            "metalfx_properties", "sodium_options", "sodium_mixin_properties",
-            "fabric_default_resource_packs", "runtime", "frame_interpolation",
-            "renderer_properties",
-        },
+        spec, "root", expected_root_keys,
     )
     expected_options = _object(spec.get("options"), "settings.options")
     expected_hdr = _object(spec.get("hdr_properties"), "settings.hdr_properties")
     expected_metalfx = _object(
         spec.get("metalfx_properties"), "settings.metalfx_properties"
     )
-    expected_frame_interpolation = _object(
-        spec.get("frame_interpolation"), "settings.frame_interpolation"
-    )
-    expected_renderer_properties = _schema_v2_renderer_properties(spec)
-    _settings_exact_keys(
-        expected_frame_interpolation,
-        "frame_interpolation",
-        {"enabled", "temporal_mode", "overlay", "minimum_generated_percent"},
-    )
-    enabled = expected_frame_interpolation.get("enabled")
-    temporal_mode = expected_frame_interpolation.get("temporal_mode")
-    if not isinstance(enabled, bool) or temporal_mode not in {
-        "quality", "performance", "ultra_performance",
-    }:
-        raise FixtureError("invalid schema-v2 frame interpolation runtime settings")
+    expected_renderer_properties = _renderer_properties(spec, schema_version)
+    if schema_version == 2:
+        expected_frame_interpolation = _object(
+            spec.get("frame_interpolation"), "settings.frame_interpolation"
+        )
+        _settings_exact_keys(
+            expected_frame_interpolation,
+            "frame_interpolation",
+            {"enabled", "temporal_mode", "overlay", "minimum_generated_percent"},
+        )
+        enabled = expected_frame_interpolation.get("enabled")
+        temporal_mode = expected_frame_interpolation.get("temporal_mode")
+        if not isinstance(enabled, bool) or temporal_mode not in {
+            "quality", "performance", "ultra_performance",
+        }:
+            raise FixtureError("invalid schema-v2 frame interpolation runtime settings")
+    else:
+        enabled = False
+        temporal_mode = None
     for description, values in (
         ("HDR properties", expected_hdr),
         ("MetalFX properties", expected_metalfx),
@@ -1093,7 +1120,8 @@ def apply_runtime_settings(
     )
     for key, value in expected_renderer_properties.items():
         _replace_property(renderer_path, "renderer properties", key, value)
-    _replace_property(temporal_path, "MetalFX Temporal properties", "mode", temporal_mode)
+    if temporal_mode is not None:
+        _replace_property(temporal_path, "MetalFX Temporal properties", "mode", temporal_mode)
 
 
 def _offline_player_uuid(name: str) -> str:
@@ -1828,6 +1856,47 @@ def self_test() -> None:
             sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
             renderer, temporal,
         ) == fi_output
+
+        g0_settings_payload = json.loads(fi_settings.read_text(encoding="utf-8"))
+        g0_settings_payload["schema_version"] = 3
+        g0_settings_payload["id"] = "test-g0-gi-off-v1"
+        g0_settings_payload.pop("frame_interpolation")
+        g0_settings_payload["renderer_properties"] = {
+            "improvedLighting": "false",
+            "lightingPreset": "balanced",
+            "globalIllumination": "off",
+        }
+        g0_settings = root / "g0-settings.json"
+        g0_settings.write_text(json.dumps(g0_settings_payload), encoding="utf-8")
+        renderer.write_text(
+            "schemaVersion=5\nimprovedLighting=false\nlightingPreset=balanced\n"
+            "frameInterpolation=false\nglobalIllumination=off\n",
+            encoding="utf-8",
+        )
+        g0_output = settings_values(
+            g0_settings, options, hdr, metalfx,
+            sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+            renderer, temporal,
+        )
+        assert len(g0_output) == 34 and g0_output[-3:] == [
+            "false", "balanced", "off",
+        ]
+        renderer.write_text(
+            renderer.read_text(encoding="utf-8").replace(
+                "globalIllumination=off", "globalIllumination=on"
+            ),
+            encoding="utf-8",
+        )
+        try:
+            settings_values(
+                g0_settings, options, hdr, metalfx,
+                sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+                renderer, temporal,
+            )
+        except FixtureError as error:
+            assert "renderer property globalIllumination differs" in str(error)
+        else:
+            raise AssertionError("GI_ON runtime setting was accepted by the G0 profile")
     print("metal benchmark fixture self-test passed")
 
 

@@ -20,9 +20,10 @@ public record RendererConfig(
         LightingPreset lightingPreset,
         boolean frameInterpolation,
         boolean voxelDebugChecksum,
-        VisualStyle visualStyle
+        VisualStyle visualStyle,
+        GlobalIlluminationMode globalIllumination
 ) {
-    public static final int SCHEMA_VERSION = 4;
+    public static final int SCHEMA_VERSION = 5;
     private static final String FILE_NAME = "metallum-renderer.properties";
 
     /** Disk-load provenance: defaults are safe for an interactive client but invalidate a benchmark. */
@@ -32,7 +33,7 @@ public record RendererConfig(
         MIGRATED_V1,
         MIGRATED_V2,
         MIGRATED_V3,
-        MIGRATED_V5,
+        MIGRATED_V4,
         FALLBACK_IO,
         FALLBACK_UNKNOWN_SCHEMA,
         FALLBACK_MALFORMED
@@ -61,10 +62,19 @@ public record RendererConfig(
         if (visualStyle == null) {
             throw new NullPointerException("visualStyle");
         }
+        if (globalIllumination == null) {
+            throw new NullPointerException("globalIllumination");
+        }
+        if (globalIllumination != GlobalIlluminationMode.OFF) {
+            throw new IllegalArgumentException("Stage G0 admits only GI_OFF");
+        }
     }
 
     public static RendererConfig defaults() {
-        return new RendererConfig(false, LightingPreset.BALANCED, false, false, VisualStyle.VANILLA);
+        return new RendererConfig(
+                false, LightingPreset.BALANCED, false, false,
+                VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        );
     }
 
     public static RendererConfig load() {
@@ -158,23 +168,23 @@ public record RendererConfig(
             }
             return loaded(migrated, "3", false, LoadDisposition.MIGRATED_V3);
         }
-        if ("5".equals(normalizedVersion)) {
-            RendererConfig migrated = parseV5(properties);
+        if ("4".equals(normalizedVersion)) {
+            RendererConfig migrated = parseV4(properties);
             if (migrated == null) {
                 Metallum.LOGGER.warn(
-                        "Malformed renderer config schema 5 at {}; using defaults without rewriting it",
+                        "Malformed renderer config schema 4 at {}; using defaults without rewriting it",
                         path
                 );
                 return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_MALFORMED);
             }
             if (migrated.save(path)) {
                 Metallum.LOGGER.info(
-                        "Migrated renderer config {} from schema 5 to {}",
+                        "Migrated renderer config {} from schema 4 to {}; global illumination is Off",
                         path,
                         SCHEMA_VERSION
                 );
             }
-            return loaded(migrated, "5", false, LoadDisposition.MIGRATED_V5);
+            return loaded(migrated, "4", false, LoadDisposition.MIGRATED_V4);
         }
         if (!Integer.toString(SCHEMA_VERSION).equals(normalizedVersion)) {
             Metallum.LOGGER.warn(
@@ -184,7 +194,7 @@ public record RendererConfig(
             );
             return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_UNKNOWN_SCHEMA);
         }
-        RendererConfig parsed = parseV4(properties);
+        RendererConfig parsed = parseV5(properties);
         if (parsed == null) {
             Metallum.LOGGER.warn(
                     "Malformed renderer config schema {} at {}; using defaults without rewriting it",
@@ -207,31 +217,36 @@ public record RendererConfig(
 
     public RendererConfig withImprovedLighting(final boolean enabled) {
         return new RendererConfig(
-                enabled, this.lightingPreset, this.frameInterpolation, this.voxelDebugChecksum, this.visualStyle
+                enabled, this.lightingPreset, this.frameInterpolation, this.voxelDebugChecksum,
+                this.visualStyle, this.globalIllumination
         );
     }
 
     public RendererConfig withLightingPreset(final LightingPreset preset) {
         return new RendererConfig(
-                this.improvedLighting, preset, this.frameInterpolation, this.voxelDebugChecksum, this.visualStyle
+                this.improvedLighting, preset, this.frameInterpolation, this.voxelDebugChecksum,
+                this.visualStyle, this.globalIllumination
         );
     }
 
     public RendererConfig withFrameInterpolation(final boolean enabled) {
         return new RendererConfig(
-                this.improvedLighting, this.lightingPreset, enabled, this.voxelDebugChecksum, this.visualStyle
+                this.improvedLighting, this.lightingPreset, enabled, this.voxelDebugChecksum,
+                this.visualStyle, this.globalIllumination
         );
     }
 
     public RendererConfig withVoxelDebugChecksum(final boolean enabled) {
         return new RendererConfig(
-                this.improvedLighting, this.lightingPreset, this.frameInterpolation, enabled, this.visualStyle
+                this.improvedLighting, this.lightingPreset, this.frameInterpolation, enabled,
+                this.visualStyle, this.globalIllumination
         );
     }
 
     public RendererConfig withVisualStyle(final VisualStyle style) {
         return new RendererConfig(
-                this.improvedLighting, this.lightingPreset, this.frameInterpolation, this.voxelDebugChecksum, style
+                this.improvedLighting, this.lightingPreset, this.frameInterpolation,
+                this.voxelDebugChecksum, style, this.globalIllumination
         );
     }
 
@@ -241,7 +256,7 @@ public record RendererConfig(
     }
 
     boolean save(final Path path) {
-        return writeProperties(path, toProperties(this), "Metallum renderer settings (schema 4)");
+        return writeProperties(path, toProperties(this), "Metallum renderer settings (schema 5)");
     }
 
     static RendererConfig from(final Properties properties) {
@@ -265,7 +280,10 @@ public record RendererConfig(
         if (oldLighting == null || interpolation == null || preset == null) {
             return null;
         }
-        return new RendererConfig(false, preset, interpolation, false, VisualStyle.VANILLA);
+        return new RendererConfig(
+                false, preset, interpolation, false,
+                VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        );
     }
 
     private static RendererConfig parseV2(final Properties properties) {
@@ -275,7 +293,10 @@ public record RendererConfig(
         if (advanced == null || interpolation == null || preset == null) {
             return null;
         }
-        return new RendererConfig(advanced, preset, interpolation, false, VisualStyle.VANILLA);
+        return new RendererConfig(
+                advanced, preset, interpolation, false,
+                VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        );
     }
 
     private static RendererConfig parseV3(final Properties properties) {
@@ -286,7 +307,10 @@ public record RendererConfig(
         if (advanced == null || interpolation == null || voxelChecksum == null || preset == null) {
             return null;
         }
-        return new RendererConfig(advanced, preset, interpolation, voxelChecksum, VisualStyle.VANILLA);
+        return new RendererConfig(
+                advanced, preset, interpolation, voxelChecksum,
+                VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        );
     }
 
     private static RendererConfig parseV4(final Properties properties) {
@@ -298,19 +322,24 @@ public record RendererConfig(
         if (advanced == null || interpolation == null || voxelChecksum == null || preset == null || style == null) {
             return null;
         }
-        return new RendererConfig(advanced, preset, interpolation, voxelChecksum, style);
+        return new RendererConfig(
+                advanced, preset, interpolation, voxelChecksum,
+                style, GlobalIlluminationMode.OFF
+        );
     }
 
     private static RendererConfig parseV5(final Properties properties) {
-        Boolean advanced = strictBoolean(properties, "improvedLighting", false);
-        Boolean interpolation = strictBoolean(properties, "frameInterpolation", false);
-        Boolean voxelChecksum = strictBoolean(properties, "voxelDebugChecksum", false);
-        LightingPreset preset = strictPreset(properties, "lightingPreset", LightingPreset.BALANCED);
-        VisualStyle style = strictStyle(properties, "visualStyle", VisualStyle.VANILLA);
-        if (advanced == null || interpolation == null || voxelChecksum == null || preset == null || style == null) {
+        RendererConfig base = parseV4(properties);
+        GlobalIlluminationMode gi = strictGlobalIlluminationMode(
+                properties, "globalIllumination", GlobalIlluminationMode.OFF
+        );
+        if (base == null || gi == null) {
             return null;
         }
-        return new RendererConfig(advanced, preset, interpolation, voxelChecksum, style);
+        return new RendererConfig(
+                base.improvedLighting, base.lightingPreset, base.frameInterpolation,
+                base.voxelDebugChecksum, base.visualStyle, gi
+        );
     }
 
     private static Boolean strictBoolean(
@@ -361,6 +390,22 @@ public record RendererConfig(
         }
     }
 
+    private static GlobalIlluminationMode strictGlobalIlluminationMode(
+            final Properties properties,
+            final String key,
+            final GlobalIlluminationMode defaultValue
+    ) {
+        String value = properties.getProperty(key);
+        if (value == null) {
+            return defaultValue;
+        }
+        try {
+            return GlobalIlluminationMode.valueOf(value.strip().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
     private static Properties toProperties(final RendererConfig config) {
         Properties properties = new Properties();
         properties.setProperty("schemaVersion", Integer.toString(SCHEMA_VERSION));
@@ -372,6 +417,7 @@ public record RendererConfig(
         properties.setProperty("frameInterpolation", Boolean.toString(config.frameInterpolation));
         properties.setProperty("voxelDebugChecksum", Boolean.toString(config.voxelDebugChecksum));
         properties.setProperty("visualStyle", config.visualStyle.persistentName());
+        properties.setProperty("globalIllumination", config.globalIllumination.persistentName());
         return properties;
     }
 

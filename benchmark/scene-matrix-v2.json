@@ -3,6 +3,30 @@
   "description": "Metallum Benchmark Environment v2 Scene Matrix (P0 + P1)",
   "scenes": [
     {
+      "id": "gi-g0-overworld-v1",
+      "canonical_route": "benchmark/routes/gi-g0-overworld-v1.json",
+      "workload_type": "GI_G0_OVERWORLD_BASELINE",
+      "tier": "G0_ACCEPTANCE",
+      "primary_stress": "ADVANCED_NATIVE_HDR_DAYLIGHT_BASELINE",
+      "target_fps_range_m1_pro_native_hdr": ">= 30 FPS average; >= 20 FPS 1% low"
+    },
+    {
+      "id": "gi-g0-sealed-cave-v1",
+      "canonical_route": "benchmark/routes/gi-g0-sealed-cave-v1.json",
+      "workload_type": "GI_G0_SEALED_CAVE_BASELINE",
+      "tier": "G0_ACCEPTANCE",
+      "primary_stress": "ADVANCED_NATIVE_HDR_ZERO_SKYLIGHT_INTERIOR",
+      "target_fps_range_m1_pro_native_hdr": ">= 20 FPS average; >= 10 FPS 1% low"
+    },
+    {
+      "id": "gi-g0-nether-v1",
+      "canonical_route": "benchmark/routes/gi-g0-nether-v1.json",
+      "workload_type": "GI_G0_NETHER_BASELINE",
+      "tier": "G0_ACCEPTANCE",
+      "primary_stress": "ADVANCED_NATIVE_HDR_LAVA_AND_LOCAL_LIGHTS",
+      "target_fps_range_m1_pro_native_hdr": ">= 20 FPS average; >= 10 FPS 1% low"
+    },
+    {
       "id": "hdrtest-static-v1",
       "canonical_route": "benchmark/routes/hdrtest-static-v1.json",
       "workload_type": "OVERWORLD_DAYLIGHT_STATIC",

@@ -1996,6 +1996,53 @@ private final class MetallumVoxelTelemetryStore: @unchecked Sendable {
     }
 }
 
+/// Stage G0 reserves the production telemetry shape without creating a GI
+/// context, Metal resource, pipeline, encoder, binding, or source collector.
+/// The report is deliberately immutable until a later GI stage adds an owner
+/// with the same explicit lifetime discipline as the L5 voxel store above.
+private enum MetallumGlobalIlluminationTelemetryV1 {
+    static let report: [String: Any] = [
+        "contract_version": 1,
+        "mode": "off",
+        "resource_count": 0,
+        "pass_count": 0,
+        "binding_count": 0,
+        "shader_symbol_count": 0,
+        "allocated_bytes": 0,
+        "resident_bytes": 0,
+        "valid_probes": 0,
+        "unknown_probes": 0,
+        "dirty_queued_total": 0,
+        "dirty_completed_total": 0,
+        "dirty_discarded_total": 0,
+        "dirty_pending": 0,
+        "injection_dispatches": 0,
+        "transport_dispatches": 0,
+        "source_epoch": 0,
+        "probe_epoch": 0,
+        "field_epoch": 0,
+        "stale_cell_rejects": 0,
+        "reset_reasons": [
+            "none": 0,
+            "world_change": 0,
+            "teleport": 0,
+            "scroll": 0,
+            "source_epoch": 0,
+            "explicit": 0,
+            "device_reset": 0
+        ],
+        "fallback_reasons": [
+            "none": 0,
+            "disabled": 0,
+            "unavailable": 0,
+            "invalid_input": 0,
+            "stale_data": 0,
+            "budget": 0,
+            "native_failure": 0
+        ]
+    ]
+}
+
 private final class MetallumVoxelContext: @unchecked Sendable {
     let device: MTLDevice
     let lightingGeneration: UInt64
@@ -3433,6 +3480,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "hdr_bloom_strength": Double(environment["METALLUM_BENCHMARK_HDR_BLOOM_STRENGTH"] ?? "") ?? -1.0,
             "hdr_strength": Double(environment["METALLUM_BENCHMARK_HDR_STRENGTH"] ?? "") ?? -1.0,
             "persistent_metalfx_mode": environment["METALLUM_BENCHMARK_PERSISTENT_METALFX_MODE"] ?? "unknown",
+            "global_illumination_mode": environment["METALLUM_BENCHMARK_GI_MODE"] ?? "off",
             "world": environment["METALLUM_BENCHMARK_WORLD"] ?? "unknown",
             "fixture": environment["METALLUM_BENCHMARK_FIXTURE_ID"] ?? "unknown",
             "fixture_sha256": environment["METALLUM_BENCHMARK_FIXTURE_SHA256"] ?? "unknown",
@@ -3519,7 +3567,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
         let clusteredLightingReport = MetallumLightingTelemetryStore.shared.snapshot().report
         let voxelClipmapsReport = MetallumVoxelTelemetryStore.shared.snapshot().report
         writer.write([
-            "schema_version": 5,
+            "schema_version": 6,
             "timestamp_unix_ms": Int64(Date().timeIntervalSince1970 * 1_000.0),
             "detail_enabled": NativeState.gpuTimingDetailEnabled,
             "presented_frames": window.sampleCount,
@@ -3540,6 +3588,7 @@ private final class MetallumGpuTimingStats: @unchecked Sendable {
             "renderer_generation": rendererGenerationReport,
             "clustered_lighting": clusteredLightingReport,
             "voxel_clipmaps": voxelClipmapsReport,
+            "global_illumination": MetallumGlobalIlluminationTelemetryV1.report,
             "stages": stages,
             "cpu_waits": waits,
             "workload": workloadReport,

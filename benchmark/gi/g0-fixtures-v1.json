@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "id": "gi-g0-fixtures-v1",
+  "coordinate_space": "minecraft_block_world",
+  "authoring_contract": {
+    "kind": "tracked_mcfunction_sources",
+    "deterministic": true,
+    "random_commands_forbidden": true,
+    "source_root": "benchmark/gi/fixtures/g0-v1"
+  },
+  "baseline_world": {
+    "fixture_id": "hdrtest-static-v1",
+    "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "scenarios": [
+    {
+      "id": "white-room-no-source",
+      "dimension": "minecraft:overworld",
+      "anchor": [256, 64, 0],
+      "source": "white_room_no_source.mcfunction",
+      "source_sha256": "ca7ba7c59c162abd6fe8d50d46c74acf664eeecb1a0a414f4023fe810ca9562c",
+      "invariant": "sealed white room contains no emissive block or aperture"
+    },
+    {
+      "id": "red-emitter",
+      "dimension": "minecraft:overworld",
+      "anchor": [288, 64, 0],
+      "source": "red_emitter.mcfunction",
+      "source_sha256": "484e7d4b8c0a8c351398fba8fc53bc54f04f3af394ac63eb6687aed8dbed0596",
+      "invariant": "red source and red diffuse landmark are explicit"
+    },
+    {
+      "id": "green-emitter",
+      "dimension": "minecraft:overworld",
+      "anchor": [320, 64, 0],
+      "source": "green_emitter.mcfunction",
+      "source_sha256": "5902878a2539414b42b7051cc79b9f856c1fcc73638f7e70f786509c6a5e7906",
+      "invariant": "green source and green diffuse landmark are explicit"
+    },
+    {
+      "id": "skylight-aperture",
+      "dimension": "minecraft:overworld",
+      "anchor": [352, 64, 0],
+      "source": "skylight_aperture.mcfunction",
+      "source_sha256": "37405dc40a790a299bc736a55d5b0c3a695e78074542c839ba48db0c31bc5435",
+      "invariant": "the only opening is one roof block"
+    },
+    {
+      "id": "lava-landmark",
+      "dimension": "minecraft:the_nether",
+      "anchor": [32, 30, 0],
+      "source": "lava_landmark.mcfunction",
+      "source_sha256": "374be3fb53c099204257880e77c7d503a051a3b00da0012c31bfc0477324955a",
+      "invariant": "lava is the only authored emissive volume"
+    },
+    {
+      "id": "thin-geometry",
+      "dimension": "minecraft:overworld",
+      "anchor": [416, 64, 0],
+      "source": "thin_geometry.mcfunction",
+      "source_sha256": "ade525578f8a9d1f443a96aff8a3e3720685cd1cc0083a6303be9fc99bb6d88d",
+      "invariant": "one-block iron bars intersect orthogonal glass panes"
+    },
+    {
+      "id": "chunk-boundary",
+      "dimension": "minecraft:overworld",
+      "anchor": [448, 64, 0],
+      "source": "chunk_boundary.mcfunction",
+      "source_sha256": "22333ad4f2ed92f8d28124e04d96634355f00c252df61334cf0ffdf4ec5be672",
+      "invariant": "the red-green interface lies exactly on x mod 16 equals zero"
+    },
+    {
+      "id": "cascade-boundary",
+      "dimension": "minecraft:overworld",
+      "anchor": [512, 64, 0],
+      "source": "cascade_boundary.mcfunction",
+      "source_sha256": "ed15e8c21149cbd769a0abd3a842b5c01df834e53032f561ee7ab3322a5de202",
+      "invariant": "the red-green interface lies on the declared 64-block test lattice"
+    },
+    {
+      "id": "scroll",
+      "dimension": "minecraft:overworld",
+      "anchor": [544, 64, 0],
+      "target": [608, 64, 0],
+      "source": "scroll_targets.mcfunction",
+      "source_sha256": "03e8b159978a71911192b53090d062ff716e24c3536525b77424c025cc2a95d9",
+      "invariant": "the target is one 64-block test interval from the origin"
+    },
+    {
+      "id": "teleport",
+      "dimension": "minecraft:overworld",
+      "anchor": [640, 64, 0],
+      "target": [1024, 64, 0],
+      "source": "teleport_targets.mcfunction",
+      "source_sha256": "2c4c593b97781227c36da05ac175144bed7e6fcf4e95f1253e0889689071d51e",
+      "invariant": "the target is outside the proposed 256-block outer coverage"
+    }
+  ],
+  "baseline_routes": [
+    {
+      "role": "overworld",
+      "path": "benchmark/routes/gi-g0-overworld-v1.json",
+      "route_sha256": "739eb444dcae83b7e7d769021804e88beb4465d211825644183603e0d6009205"
+    },
+    {
+      "role": "sealed_cave",
+      "path": "benchmark/routes/gi-g0-sealed-cave-v1.json",
+      "route_sha256": "d70f3fa26151cd334574be641ab007974e11b01a6b1c0b6f24791b0648569166"
+    },
+    {
+      "role": "nether",
+      "path": "benchmark/routes/gi-g0-nether-v1.json",
+      "route_sha256": "8777717930cafa4d54e35df00a12d516c0bcc6be7379131872f2145228556dbb"
+    }
+  ]
+}

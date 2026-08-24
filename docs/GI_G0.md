@@ -1,0 +1,133 @@
+# GI Stage G0: baseline, fixtures and zero contract
+
+Status: G0 contract implemented; Tier C acceptance receipts are pending. G1
+must not start until `benchmark/gi/g0-acceptance-v1.json` is committed and all
+entries remain independently verifiable.
+
+## Accepted M1 Pro profile
+
+- Device: Apple M1 Pro, non-headless, non-low-power; capability snapshot
+  `benchmark/current/M1_PRO_GPU_CAPABILITIES.json`.
+- Display: Built-in Retina Display, exclusive fullscreen,
+  `3024x1964@120 Hz`.
+- Renderer: Metallum render contract, Advanced lighting, Balanced preset.
+- Output: native scene HDR/EDR, sRGB source encoding, Fancy graphics,
+  render/simulation distance `16/12`, MetalFX Off, VSync Off, max FPS `260`.
+- Instrumentation: `METALLUM_L2_TIMING_DETAIL=0`, Metal validation Off, no
+  screenshots or HUD/capture instrumentation.
+- Tier C: 1800 presented warm-up frames plus 3000 measured frames, exactly ten
+  complete 300-frame windows, at least two independent runs per route.
+- Thermal validity: no Serious or Critical state during the measured interval.
+
+The single settings contract is `benchmark/settings/native-hdr-fancy-v1.json`.
+Its schema-v3 digest includes `improvedLighting=true`,
+`lightingPreset=balanced`, and `globalIllumination=off`; a runtime config that
+omits or changes any of those values fails preflight.
+
+## Baseline routes and floors
+
+| Role | Route | Absolute average floor | Absolute 1% low floor |
+| --- | --- | ---: | ---: |
+| Overworld | `gi-g0-overworld-v1` | 30 FPS | 20 FPS |
+| Sealed cave | `gi-g0-sealed-cave-v1` | 20 FPS | 10 FPS |
+| Nether | `gi-g0-nether-v1` | 20 FPS | 10 FPS |
+
+These floors are approved for native HDR Balanced on the exact profile above.
+They do not move downward when the renderer becomes slower. A future GI
+candidate must simultaneously satisfy:
+
+- whole-GPU p95 regression no greater than 8% versus the matching multi-run
+  baseline;
+- 1% low regression no greater than 10%;
+- the route-specific absolute average and 1% low floors above.
+
+Tier B stage timings can attribute `GI_INJECT`, `GI_TRANSPORT`, and
+`GI_RECEIVER` after those stages exist, but cannot replace these Tier C gates.
+
+## Immutable functional fixtures
+
+`benchmark/gi/g0-fixtures-v1.json` binds ten deterministic, tracked Minecraft
+function sources by SHA-256:
+
+- sealed white room without a source;
+- red emitter and green emitter rooms;
+- one-block skylight aperture;
+- Nether lava landmark;
+- intersecting thin geometry;
+- exact chunk and proposed cascade test boundaries;
+- scroll and out-of-coverage teleport targets.
+
+The source functions are the immutable authoring truth. They contain no random,
+loot, entity-spawn, camera-history, or screen-space input. The manifest also
+binds all three static baseline routes to the verified read-only
+`hdrtest-static-v1` APFS fixture. `tools/gi_g0_contract.py` checks source, route,
+fixture and settings digests plus the boundary geometry invariants.
+
+Materializing the functional sources into a future world snapshot must produce
+a new fixture ID and tree digest; editing the existing read-only fixture in
+place is forbidden. This avoids changing G0 baselines when G1/G2 add field
+debug views.
+
+## Telemetry schema v6
+
+Every native timing window contains an exact `global_illumination` v1 object.
+It reserves:
+
+- allocated/resident bytes and resource/pass/binding/shader-symbol counts;
+- valid/unknown probes;
+- dirty queued/completed/discarded/pending counters;
+- injection and transport dispatches;
+- source, probe and field epochs;
+- stale-cell rejects;
+- fixed reset-reason and fallback-reason maps.
+
+The parser rejects unknown/missing keys, negative counters, resident bytes above
+allocation, inconsistent dirty algebra, mixed modes/contracts, and any non-zero
+numeric leaf or reason while `mode=off`. Release schema-v6 windows must also
+carry `metadata.global_illumination_mode=off`.
+
+## Compile-time and runtime `GI_OFF`
+
+G0 is structural rather than a zero-valued enabled path:
+
+- renderer config schema 5 admits only `GlobalIlluminationMode.OFF`;
+- the Advanced frame graph contains no `gi_*`, global-illumination, irradiance
+  field or GI probe resource/pass;
+- no GI context, Metal texture/buffer, pipeline, encoder, binding, collector or
+  downcall exists;
+- the real Sodium terrain shader is compiled through GLSL, SPIR-V and
+  SPIRV-Cross, and emitted MSL is rejected if any reserved GI helper/resource
+  token survives;
+- benchmark preflight emits `GI_OFF_ADMISSION ... status=PASS`; G0 routes also
+  forbid the separate vertex-reflection experiment.
+
+The already quarantined frozen-reflection research asset is not GI and remains
+a separate default-off experiment. It may be packaged, but G0 routes cannot
+enable it, and ordinary generated terrain MSL contains neither its bindings nor
+any GI symbols.
+
+## Reproduction
+
+Preflight each route before any long run:
+
+```bash
+scripts/run_metal_benchmark.sh --preflight-only \
+  --route benchmark/routes/gi-g0-overworld-v1.json \
+  --settings benchmark/settings/native-hdr-fancy-v1.json \
+  --lighting-preset balanced
+```
+
+Remove `--preflight-only` and use unique labels for the two Tier C runs of each
+route. Do not set frame overrides: the default is the required `1800+3000`.
+All six `.accepted.json` receipts must pass `verify-attestation` against their
+raw, summary, Minecraft and console logs before their hashes enter the G0
+acceptance artifact.
+
+## Evidence boundary
+
+- Contract/build/generated-MSL/preflight results are `PROVEN` only for their
+  mechanical claims.
+- Valid Tier C receipts are `PROVEN` performance evidence for the exact routes,
+  source and settings digests they attest.
+- Fixture sources are deterministic test definitions; their future GI visual
+  appearance remains `UNKNOWN` until G1+ field/debug and live acceptance.

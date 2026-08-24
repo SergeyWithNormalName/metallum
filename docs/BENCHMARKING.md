@@ -48,6 +48,7 @@ Metallum enforces an end-to-end fingerprinting chain to make a local benchmark r
 - **Artifact SHA256**: Computed via `python3 tools/metal_benchmark_fixture.py artifact-digest . build/classes/java/main build/resources/main build/generated/metallum/natives/macos/libmetallum.dylib`. Ensures the exact compiled binaries are tracked.
 - **Fixture SHA256**: Read-only world directory under `run/benchmark-fixtures/<fixture-id>/world`. Validated via `tools/metal_benchmark_fixture.py verify-fixture` before cloning and after teardown. Any world modification causes a preflight/teardown abort.
 - **Settings SHA256**: Computed via `tools/metal_benchmark_fixture.py settings-values`. Maps tracked settings JSON (`benchmark/settings/*.json`) to runtime `options.txt`, `metallum-*.properties`, and Sodium configs.
+- **Renderer settings contract**: Settings schema v3 additionally binds `improvedLighting`, `lightingPreset`, and `globalIllumination`. G0 release runs require `globalIllumination=off` in both the tracked profile and runtime renderer properties.
 - **Run World Identity**: Temporary world allocated at `run/saves/MetallumBenchmark-<stamp>`. Protected by a UUID owner marker file (`.metallum-benchmark-owner`) and filesystem inode verification (`stat -f '%d:%i'`) to prevent unsafe directory cleanup.
 
 ---
@@ -64,6 +65,11 @@ Route files (`benchmark/routes/*.json`) define the player spawn pose, dimension,
 
 Route JSON is the source of truth for a route's schema and workload. Do not
 copy its field count into this guide: the launcher validates it directly.
+
+The GI G0 acceptance set uses three independent `STATIC` routes:
+`gi-g0-overworld-v1`, `gi-g0-sealed-cave-v1`, and `gi-g0-nether-v1`. Their
+exact profile, floors, fixture manifest, and receipt policy are defined in
+[GI_G0.md](GI_G0.md).
 
 ---
 
@@ -233,6 +239,12 @@ silently treat the saturated path as an unsaturated one.
 - **Voxel Clipmaps**:
   - `dirty_bricks_submitted/completed`: Dynamic clipmap voxel re-rasterization rate.
   - `heap_used_bytes` / `heap_bytes`: Voxel occupancy grid VRAM consumption.
+- **Global Illumination** (raw report schema v6):
+  - Every 300-frame window carries the strict `global_illumination` v1 object.
+  - In G0, `mode=off` and every allocation, pass, binding, shader-symbol,
+    dispatch, epoch, queue, reset, fallback, and stale counter MUST be zero.
+  - Unknown or missing keys, dirty-queue accounting errors, mixed modes, or a
+    non-zero GI_OFF leaf invalidate the report before attestation.
 
 ---
 

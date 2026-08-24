@@ -1309,12 +1309,44 @@ tasks.register("forcedSourceStartupValidation", JavaExec) {
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 }
 
+tasks.register("giG0FixtureContractTest", Exec) {
+    group = "verification"
+    description = "Validates immutable GI G0 fixture sources, routes, digests and GI_OFF settings"
+    inputs.file("tools/gi_g0_contract.py")
+    inputs.file("benchmark/gi/g0-fixtures-v1.json")
+    inputs.dir("benchmark/gi/fixtures/g0-v1")
+    inputs.files(fileTree("benchmark/routes") { include "gi-g0-*.json" })
+    inputs.files(
+        "benchmark/settings/native-hdr-fancy-v1.json",
+        "benchmark/settings/native-sdr-fancy-v1.json",
+        "benchmark/settings/nether-lava-stress-v1.json"
+    )
+    commandLine "python3", "tools/gi_g0_contract.py", "--root", "."
+}
+
+tasks.register("benchmarkFixtureContractTest", Exec) {
+    group = "verification"
+    description = "Runs immutable fixture/settings digest parser self-tests"
+    inputs.file("tools/metal_benchmark_fixture.py")
+    commandLine "python3", "tools/metal_benchmark_fixture.py", "self-test"
+}
+
+tasks.register("benchmarkReportContractTest", Exec) {
+    group = "verification"
+    description = "Runs timing parser, 300-frame alignment and GI telemetry self-tests"
+    inputs.file("tools/metal_benchmark_report.py")
+    commandLine "python3", "tools/metal_benchmark_report.py", "self-test"
+}
+
 tasks.named("test", Test) {
 	// HDR tests use a dependency-free Java entry point instead of a JUnit engine.
 	failOnNoDiscoveredTests = false
 }
 
 tasks.named("check") {
+    dependsOn(tasks.named("giG0FixtureContractTest"))
+    dependsOn(tasks.named("benchmarkFixtureContractTest"))
+    dependsOn(tasks.named("benchmarkReportContractTest"))
 	dependsOn(tasks.named("hdrUnitTest"))
 	dependsOn(tasks.named("emissiveTextureUnitTest"))
 	dependsOn(tasks.named("materialContractUnitTest"))

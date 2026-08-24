@@ -3,6 +3,7 @@ package com.metallum.client.renderer.style;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
+import com.metallum.client.renderer.GlobalIlluminationMode;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 
@@ -230,15 +231,24 @@ public final class VisualStyleTests {
 
     private static void testRendererConfigDefaults() {
         RendererConfig defaults = RendererConfig.defaults();
-        require(RendererConfig.SCHEMA_VERSION == 4, "SCHEMA_VERSION must be 4");
+        require(RendererConfig.SCHEMA_VERSION == 5, "SCHEMA_VERSION must be 5");
         require(!defaults.improvedLighting(), "improvedLighting default must be false");
         require(defaults.lightingPreset() == LightingPreset.BALANCED, "lightingPreset default must be BALANCED");
         require(!defaults.frameInterpolation(), "frameInterpolation default must be false");
         require(!defaults.voxelDebugChecksum(), "voxelDebugChecksum default must be false");
         require(defaults.visualStyle() == VisualStyle.VANILLA, "visualStyle default must be VANILLA");
+        require(defaults.globalIllumination() == GlobalIlluminationMode.OFF,
+                "globalIllumination default must be OFF");
 
-        expectNullPointer(() -> new RendererConfig(false, null, false, false, VisualStyle.VANILLA));
-        expectNullPointer(() -> new RendererConfig(false, LightingPreset.BALANCED, false, false, null));
+        expectNullPointer(() -> new RendererConfig(
+                false, null, false, false, VisualStyle.VANILLA, GlobalIlluminationMode.OFF
+        ));
+        expectNullPointer(() -> new RendererConfig(
+                false, LightingPreset.BALANCED, false, false, null, GlobalIlluminationMode.OFF
+        ));
+        expectNullPointer(() -> new RendererConfig(
+                false, LightingPreset.BALANCED, false, false, VisualStyle.VANILLA, null
+        ));
 
         RendererConfig withStyle = defaults.withVisualStyle(VisualStyle.NATURAL);
         require(withStyle.visualStyle() == VisualStyle.NATURAL, "withVisualStyle failed to update style");

@@ -371,7 +371,8 @@ public final class RendererArchitectureTests {
                         && defaults.lightingPreset() == LightingPreset.BALANCED
                         && !defaults.frameInterpolation()
                         && !defaults.voxelDebugChecksum()
-                        && defaults.visualStyle() == VisualStyle.VANILLA,
+                        && defaults.visualStyle() == VisualStyle.VANILLA
+                        && defaults.globalIllumination() == GlobalIlluminationMode.OFF,
                 "renderer config defaults are not fail-closed");
         RendererConfig lightingEnabled = defaults.withImprovedLighting(true);
         require(lightingEnabled.improvedLighting()
@@ -423,15 +424,16 @@ public final class RendererArchitectureTests {
                                 && migrated.visualStyle() == VisualStyle.VANILLA,
                         "v1 renderer config did not migrate Advanced to Off");
                 String firstMigration = Files.readString(configPath);
-                require(firstMigration.contains("schemaVersion=4")
+                require(firstMigration.contains("schemaVersion=5")
                                 && firstMigration.contains("improvedLighting=false")
                                 && firstMigration.contains("voxelDebugChecksum=false")
-                                && firstMigration.contains("visualStyle=vanilla"),
-                        "v1 renderer config was not persisted as schema 4");
+                                && firstMigration.contains("visualStyle=vanilla")
+                                && firstMigration.contains("globalIllumination=off"),
+                        "v1 renderer config was not persisted as schema 5");
                 RendererConfig repeated = RendererConfig.load(configPath);
                 require(repeated.equals(migrated)
                                 && Files.readString(configPath).equals(firstMigration),
-                        "schema-4 reload rewrote or changed the migrated config");
+                        "schema-5 reload rewrote or changed the migrated config");
                 require(Files.readString(hdrPath).equals(hdrSentinel),
                         "renderer migration read or changed the separate HDR file");
             }
@@ -447,7 +449,7 @@ public final class RendererArchitectureTests {
                             && schemaTwo.frameInterpolation()
                             && !schemaTwo.voxelDebugChecksum()
                             && schemaTwo.visualStyle() == VisualStyle.VANILLA
-                            && Files.readString(configPath).contains("schemaVersion=4")
+                            && Files.readString(configPath).contains("schemaVersion=5")
                             && Files.readString(configPath).contains("visualStyle=vanilla"),
                     "schema-2 renderer config did not migrate with L5 checksum Off");
 
@@ -462,7 +464,7 @@ public final class RendererArchitectureTests {
                             && schemaThree.frameInterpolation()
                             && schemaThree.voxelDebugChecksum()
                             && schemaThree.visualStyle() == VisualStyle.VANILLA
-                            && Files.readString(configPath).contains("schemaVersion=4")
+                            && Files.readString(configPath).contains("schemaVersion=5")
                             && Files.readString(configPath).contains("visualStyle=vanilla"),
                     "schema-3 renderer config did not migrate with visualStyle Vanilla");
 
@@ -483,16 +485,19 @@ public final class RendererArchitectureTests {
                             && !schemaFive.frameInterpolation()
                             && !schemaFive.voxelDebugChecksum()
                             && schemaFive.visualStyle() == VisualStyle.NATURAL
-                            && Files.readString(configPath).contains("schemaVersion=4")
+                            && schemaFive.globalIllumination() == GlobalIlluminationMode.OFF
+                            && Files.readString(configPath).contains("schemaVersion=5")
                             && Files.readString(configPath).contains("visualStyle=natural")
+                            && Files.readString(configPath).contains("localShadowFilterMode=full")
                             && Files.readString(configPath).contains("improvedLighting=true"),
-                    "schema-5 renderer config did not migrate properly to schema 4");
+                    "pre-G0 schema-5 renderer config did not preserve a GI_OFF default");
             RendererConfig schemaFiveReloaded = RendererConfig.load(configPath);
             require(schemaFiveReloaded.equals(schemaFive),
                     "schema-5 reloaded config diverged after migration");
 
             RendererConfig original = new RendererConfig(
-                    false, LightingPreset.ULTRA, true, true, VisualStyle.NATURAL
+                    false, LightingPreset.ULTRA, true, true,
+                    VisualStyle.NATURAL, GlobalIlluminationMode.OFF
             );
             original.save(configPath);
             original.withImprovedLighting(true).save(configPath);
@@ -511,7 +516,8 @@ public final class RendererArchitectureTests {
                     "schemaVersion=4\nimprovedLighting=true\nvoxelDebugChecksum=maybe\n",
                     "schemaVersion=4\nimprovedLighting=true\nvisualStyle=unknown_style\n",
                     "schemaVersion=5\nimprovedLighting=maybe\n",
-                    "schemaVersion=5\nimprovedLighting=true\nvisualStyle=unknown_style\n"
+                    "schemaVersion=5\nimprovedLighting=true\nvisualStyle=unknown_style\n",
+                    "schemaVersion=5\nimprovedLighting=true\nglobalIllumination=on\n"
             }) {
                 Files.writeString(configPath, invalid);
                 require(RendererConfig.load(configPath).equals(RendererConfig.defaults()),
@@ -544,25 +550,27 @@ public final class RendererArchitectureTests {
         }
         for (VisualStyle style : VisualStyle.values()) {
             Properties configured = new Properties();
-            configured.setProperty("schemaVersion", "4");
+            configured.setProperty("schemaVersion", "5");
             configured.setProperty("improvedLighting", "true");
             configured.setProperty("lightingPreset", "ultra");
             configured.setProperty("frameInterpolation", "true");
             configured.setProperty("voxelDebugChecksum", "true");
             configured.setProperty("visualStyle", style.persistentName());
+            configured.setProperty("globalIllumination", "off");
             RendererConfig parsed = RendererConfig.from(configured);
             require(parsed.improvedLighting()
                             && parsed.lightingPreset() == LightingPreset.ULTRA
                             && parsed.frameInterpolation()
                             && parsed.voxelDebugChecksum()
-                            && parsed.visualStyle() == style,
+                            && parsed.visualStyle() == style
+                            && parsed.globalIllumination() == GlobalIlluminationMode.OFF,
                     "renderer config axes were not parsed independently for " + style);
         }
         Properties invalidPreset = new Properties();
-        invalidPreset.setProperty("schemaVersion", "4");
+        invalidPreset.setProperty("schemaVersion", "5");
         invalidPreset.setProperty("lightingPreset", "unknown");
         require(RendererConfig.from(invalidPreset).equals(RendererConfig.defaults()),
-                "invalid schema-4 preset did not fail closed");
+                "invalid schema-5 preset did not fail closed");
         expectIllegalArgument(() -> RendererFeatureMask.of(
                 RendererFeatureMask.SPATIAL_UPSCALING,
                 RendererFeatureMask.TEMPORAL_UPSCALING
