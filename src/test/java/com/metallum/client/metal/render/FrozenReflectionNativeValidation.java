@@ -39,6 +39,10 @@ public final class FrozenReflectionNativeValidation {
                     71L,
                     MetalNativeBridge::metallum_radiance_context_destroy
             ), "frozen reflection native context creation failed")) {
+                RadianceGpuResources.GpuStats initialStats = resources.getStats();
+                require(initialStats != null && !initialStats.ready() && !initialStats.probeReady(),
+                        "new frozen reflection context must start in the safe disabled state");
+                validateDedicatedVertexBinding(device, queue, resources);
                 require(resources.queueFrozenBuild(71L, -64, 0, 128, rgba, validity, 0.35F, 0.30F, false),
                         "frozen private-texture upload and compute build was not queued");
                 long deadline = System.nanoTime() + 2_000_000_000L;

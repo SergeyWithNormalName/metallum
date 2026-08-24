@@ -14742,6 +14742,13 @@ private final class MetallumFrozenReflectionContext {
         self.probeMomentMips = probeMomentMips
         self.vertexSampler = sampler
         self.parameters = parameterBuffer
+        // The shader layout is enabled before Sodium has produced the first immutable field.
+        // Keep every declared vertex resource bound in that interval and make the shader's
+        // ready flag explicitly false, so the dynamic branch cannot sample the unpopulated
+        // private probe textures.  Leaving these slots unbound is a Metal validation error
+        // and can invalidate the complete Advanced terrain pass.
+        writeVertexParameters(originX: 0, originY: 0, originZ: 0,
+                ready: false, strength: 0.0, roughness: 0.0, contributionOnly: false)
     }
 
     func queueBuild(
@@ -14887,7 +14894,10 @@ private final class MetallumFrozenReflectionContext {
     func bindVertexResources(_ encoder: MTLRenderCommandEncoder) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard ready && probeReady && !buildInFlight else { return false }
+        // This is intentionally valid before the asynchronous frozen build completes.  The
+        // zeroed ready flag installed at construction (and again while building) disables the
+        // sample path, but the declared slots must still be bound for every draw using the ON
+        // vertex function.
         encoder.setVertexTexture(probeRadiance, index: 10)
         encoder.setVertexSamplerState(vertexSampler, index: 10)
         encoder.setVertexTexture(probeMoment, index: 11)

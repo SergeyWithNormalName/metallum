@@ -2585,32 +2585,51 @@ public final class MetalDevice implements GpuDeviceBackend {
             return;
         }
         RealWorldReflectionField field = RealWorldReflectionField.get();
+        // The reflection define changes the vertex function's Metal resource layout immediately,
+        // while a Sodium snapshot arrives later on a worker thread.  Materialize a native context
+        // first so its zero-ready resources cover that gap; otherwise the translucent Advanced
+        // draw executes with slots 10, 11 and 27 unbound.
+        if (this.frozenReflectionResources == null) {
+            this.frozenReflectionResources = RadianceGpuResources.create(
+                    this.metalDeviceHandle,
+                    this.commandQueue.nativeHandle(),
+                    0L,
+                    this::queueFrozenReflectionContextRelease
+            );
+            if (this.frozenReflectionResources == null) {
+                throw new IllegalStateException("Vertex reflection fallback resources are unavailable");
+            }
+        }
         FrozenReflectionFieldController.SourceSnapshot snapshot = field.claimReadySnapshotForGpuUpload();
         if (snapshot != null) {
-            this.closeFrozenReflectionResources();
-            RadianceGpuResources resources = RadianceGpuResources.create(
+            RadianceGpuResources replacement = RadianceGpuResources.create(
                     this.metalDeviceHandle,
                     this.commandQueue.nativeHandle(),
                     snapshot.worldGeneration(),
                     this::queueFrozenReflectionContextRelease
             );
-            if (resources == null || !resources.queueFrozenBuild(
+            if (replacement == null || !replacement.queueFrozenBuild(
                     snapshot.worldGeneration(),
                     snapshot.originX(), snapshot.originY(), snapshot.originZ(),
                     snapshot.packedRgba(), snapshot.validity(),
                     field.strength(), field.roughness(), field.isContributionOnly()
             )) {
-                if (resources != null) {
-                    resources.close();
+                if (replacement != null) {
+                    replacement.close();
                 }
                 field.noteGpuFailure(snapshot.worldGeneration(), snapshot.fieldGeneration());
-                return;
+            } else {
+                RadianceGpuResources previous = this.frozenReflectionResources;
+                this.frozenReflectionResources = replacement;
+                this.frozenReflectionFieldGeneration = snapshot.fieldGeneration();
+                if (previous != null) {
+                    previous.close();
+                }
             }
-            this.frozenReflectionResources = resources;
-            this.frozenReflectionFieldGeneration = snapshot.fieldGeneration();
         }
         RadianceGpuResources resources = this.frozenReflectionResources;
-        if (resources != null && resources.bindVertexResources(encoder.handle())) {
+        if (resources != null && resources.bindVertexResources(encoder.handle())
+                && this.frozenReflectionFieldGeneration != Long.MIN_VALUE) {
             field.noteGpuReady(resources.worldGeneration(), this.frozenReflectionFieldGeneration);
         }
     }
