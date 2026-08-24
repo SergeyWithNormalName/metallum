@@ -265,6 +265,9 @@ public final class RealWorldVertexReflectionTests {
         require(onMslVertex.contains("metallumCoarseReflection"), "Vertex must output metallumCoarseReflection");
         require(countOccurrences(onGlslVertex, "texture(metallumReflection") == 2,
                 "vertex carrier must issue exactly two 3D reads");
+        require(onGlslVertex.contains(
+                        "float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0) * metallumStrength"),
+                "reflection strength must limit the blend confidence, not merely darken its target");
 
         // 2. Fragment MSL has EXACT ZERO texture3d parameters and reads only vertex varying
         require(!onMslFragment.contains("texture3d"), "Fragment must have ZERO texture3d parameters");

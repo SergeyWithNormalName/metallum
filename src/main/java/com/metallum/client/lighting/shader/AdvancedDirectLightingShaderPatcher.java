@@ -2972,10 +2972,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "        vec4 metallumReflMom = texture(" + VertexReflectionExperiment.MOMENT_SAMPLER_NAME + ", metallumUvw);\n"
                     + "        vec3 metallumReflDir = reflect(normalize(position), vec3(0.0, 1.0, 0.0));\n"
                     + "        float metallumDirectionalWeight = clamp(1.0 + dot(metallumReflMom.xyz, metallumReflDir), 0.0, 2.0);\n"
-                    + "        float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0);\n"
+                    + "        float metallumStrength = clamp(metallumVertexReflection.reflectionStrengthAndSettings.x, 0.0, 1.0);\n"
+                    + "        float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0) * metallumStrength;\n"
                     + "        float metallumContributionOnly = metallumVertexReflection.reflectionStrengthAndSettings.z;\n"
-                    + "        metallumCoarseReflectionVal = vec4(metallumReflRad.rgb * metallumDirectionalWeight\n"
-                    + "                * metallumVertexReflection.reflectionStrengthAndSettings.x,\n"
+                    + "        metallumCoarseReflectionVal = vec4(metallumReflRad.rgb * metallumDirectionalWeight,\n"
                     + "                metallumContributionOnly > 0.5 ? -metallumConfidence : metallumConfidence);\n"
                     + "    }\n"
                     + "    metallumCoarseReflection = metallumCoarseReflectionVal;";

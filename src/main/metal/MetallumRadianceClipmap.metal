@@ -138,11 +138,18 @@ kernel void metallum_directional_probe_build_frozen(
                 float coverage = clamp(float(sourceCoverage.sample(
                     metallumDirectionalProbeSourceSampler, uvw, level(1.0f)).r), 0.0f, 1.0f);
                 float3 radiance = max(float3(sourceRadHalf.rgb), float3(0.0f));
+                // Coverage only means that the frozen source has accepted data at this point;
+                // air is therefore fully covered but contributes no outgoing radiance.  Weighting
+                // the probe by coverage alone diluted every surface sample with known-empty air
+                // and gave water a high confidence black result.  The source alpha is the
+                // prefiltered optical presence from the coverage-aware mip chain, so it is the
+                // conservative support term for this rough directional sample.
+                float opticalSupport = coverage * clamp(float(sourceRadHalf.a), 0.0f, 1.0f);
                 float energy = max(dot(radiance, float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
-                radianceSum += radiance * coverage;
-                directionalMomentSum += direction * (energy * coverage);
-                energySum += energy * coverage;
-                supportSum += coverage;
+                radianceSum += radiance * opticalSupport;
+                directionalMomentSum += direction * (energy * opticalSupport);
+                energySum += energy * opticalSupport;
+                supportSum += opticalSupport;
             }
         }
     }
