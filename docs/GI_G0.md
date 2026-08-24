@@ -1,8 +1,10 @@
 # GI Stage G0: baseline, fixtures and zero contract
 
-Status: G0 contract implemented; Tier C acceptance receipts are pending. G1
-must not start until `benchmark/gi/g0-acceptance-v1.json` is committed and all
-entries remain independently verifiable.
+Status: `REJECTED_BASELINE_FLOOR`. The G0 contracts and all six Tier C receipts
+are complete, but the current renderer fails the approved Overworld absolute
+floor. `benchmark/gi/g0-acceptance-v1.json` records the exact evidence and keeps
+`g1_allowed=false`; G1 must not start until a separate quality-preserving
+baseline recovery passes the same matrix.
 
 ## Accepted M1 Pro profile
 
@@ -43,6 +45,28 @@ candidate must simultaneously satisfy:
 
 Tier B stage timings can attribute `GI_INJECT`, `GI_TRANSPORT`, and
 `GI_RECEIVER` after those stages exist, but cannot replace these Tier C gates.
+
+## G0 decision on 2026-08-24
+
+All six final runs used commit `9c13e15b4669`, source digest
+`cd0d6a105368ad3cdb3cc9b7b3bc06bb5c312963c5d31f459bcfa046279d7b5b`,
+and artifact digest
+`35e67f8ffd23ebff764b2131f02e8c603fcd1566c6b5e7d169db9c8deb77f225`.
+Every run produced ten complete schema-v6 windows, nominal thermal state, a
+strict `.accepted.json` receipt, Advanced L3/L5/L6 admission, and all-zero
+GI_OFF telemetry.
+
+| Route | Run average FPS | Run 1% lows | Mean GPU p95 | Floor | Decision |
+| --- | --- | --- | ---: | --- | --- |
+| Overworld | 20.073 / 20.076 | 17.063 / 16.727 | 53.218 ms | 30 / 20 FPS | **FAIL** |
+| Sealed cave | 55.789 / 55.862 | 36.182 / 37.146 | 20.812 ms | 20 / 10 FPS | PASS |
+| Nether | 21.691 / 20.699 | 19.082 / 17.600 | 50.468 ms | 20 / 10 FPS | PASS |
+
+The Overworld failure is repeatable and is not a GI allocation, fallback,
+thermal, dirty-build, or lighting-admission artifact. The floor is not lowered
+to fit the slow baseline. The next permitted action is a separate baseline
+diagnosis/recovery with its own hypotheses and A/B evidence; no G1 field work is
+admitted by this result.
 
 ## Immutable functional fixtures
 

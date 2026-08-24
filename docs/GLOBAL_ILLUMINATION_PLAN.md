@@ -223,6 +223,12 @@ Stop-gate:
   абсолютного FPS floor, сначала исправляется baseline; GI не получает скидку за
   хороший относительный процент.
 
+Результат G0 от 2026-08-24: `REJECTED_BASELINE_FLOOR`. Шесть валидных Tier C
+receipt зафиксированы в `benchmark/gi/g0-acceptance-v1.json`; sealed cave и
+Nether прошли утверждённые floors, но два Overworld run дали около `20.07 FPS`
+и `16.90 FPS` mean 1% low против `30/20`. Поэтому `g1_allowed=false`, floor не
+ослаблен, и перед G1 требуется отдельное восстановление baseline.
+
 ### G1 — выборочное спасение L7 field infrastructure
 
 Цель: перенести полезную механику из

@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "id": "gi-g0-acceptance-v1",
+  "stage": "G0",
+  "decision": "REJECTED_BASELINE_FLOOR",
+  "g1_allowed": false,
+  "reason": "overworld_below_absolute_floor",
+  "evidence_interval_utc": ["2026-08-24T15:45:44Z", "2026-08-24T16:10:00Z"],
+  "baseline_source": {
+    "commit": "9c13e15b4669",
+    "source_sha256": "cd0d6a105368ad3cdb3cc9b7b3bc06bb5c312963c5d31f459bcfa046279d7b5b",
+    "artifact_sha256": "35e67f8ffd23ebff764b2131f02e8c603fcd1566c6b5e7d169db9c8deb77f225"
+  },
+  "profile": {
+    "device": "Apple M1 Pro",
+    "monitor": "Built-in Retina Display",
+    "width": 3024,
+    "height": 1964,
+    "refresh_hz": 120,
+    "exclusive_fullscreen": true,
+    "output": "native_hdr_scene",
+    "source_encoding": "linear",
+    "graphics": "fancy",
+    "render_distance": 16,
+    "simulation_distance": 12,
+    "max_fps": 260,
+    "vsync": false,
+    "metalfx": "OFF",
+    "lighting": "advanced",
+    "lighting_preset": "balanced",
+    "timing_detail": false,
+    "metal_validation": false,
+    "warmup_frames": 1800,
+    "measure_frames": 3000,
+    "windows": 10,
+    "thermal_requirement": "nominal_or_fair"
+  },
+  "settings": {
+    "path": "benchmark/settings/native-hdr-fancy-v1.json",
+    "id": "native-hdr-fancy-v1",
+    "spec_sha256": "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e",
+    "runtime_sha256": "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3",
+    "renderer_schema": 5,
+    "global_illumination": "off"
+  },
+  "fixture": {
+    "id": "hdrtest-static-v1",
+    "sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+  },
+  "gates": {
+    "relative_gpu_p95_regression_max_percent": 8.0,
+    "relative_one_percent_low_regression_max_percent": 10.0,
+    "absolute_policy": "every_run_must_meet_both_route_floors"
+  },
+  "routes": [
+    {
+      "role": "overworld",
+      "route": "gi-g0-overworld-v1",
+      "route_sha256": "739eb444dcae83b7e7d769021804e88beb4465d211825644183603e0d6009205",
+      "average_fps_floor": 30.0,
+      "one_percent_low_fps_floor": 20.0,
+      "mean_average_fps": 20.074354152266736,
+      "mean_one_percent_low_fps": 16.895366251747795,
+      "mean_gpu_p95_ms": 53.217506245709956,
+      "decision": "FAIL",
+      "runs": [
+        {
+          "id": "overworld-1",
+          "receipt": "run/logs/metallum-benchmarks/20260824T154544Z-g9c13e15b4669-clean-gi-g0-overworld-final-1-off.accepted.json",
+          "receipt_sha256": "ebd5bb1c6f51d465e9054c0d56eaf1f58609a8a0a3ad50f32176b8edceaad7ff",
+          "average_fps": 20.072866521432903,
+          "one_percent_low_fps": 17.063415143730875,
+          "gpu_p95_ms": 53.32226665923372,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        },
+        {
+          "id": "overworld-2",
+          "receipt": "run/logs/metallum-benchmarks/20260824T155041Z-g9c13e15b4669-clean-gi-g0-overworld-final-2-off.accepted.json",
+          "receipt_sha256": "81348fca5ccd5105c8eb8ca17d4a00c2a8488c8216f98ef73669da98d88b32c2",
+          "average_fps": 20.07584178310057,
+          "one_percent_low_fps": 16.72731735976471,
+          "gpu_p95_ms": 53.11274583218619,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        }
+      ]
+    },
+    {
+      "role": "sealed_cave",
+      "route": "gi-g0-sealed-cave-v1",
+      "route_sha256": "d70f3fa26151cd334574be641ab007974e11b01a6b1c0b6f24791b0648569166",
+      "average_fps_floor": 20.0,
+      "one_percent_low_fps_floor": 10.0,
+      "mean_average_fps": 55.825406179647985,
+      "mean_one_percent_low_fps": 36.66414671830351,
+      "mean_gpu_p95_ms": 20.81204374844674,
+      "decision": "PASS",
+      "runs": [
+        {
+          "id": "sealed-cave-1",
+          "receipt": "run/logs/metallum-benchmarks/20260824T155623Z-g9c13e15b4669-clean-gi-g0-sealed-cave-final-1-off.accepted.json",
+          "receipt_sha256": "d1c94f3cd5e5ffc7c0ec02410362b657984c2531b6d0254fe4dc6072dee0387e",
+          "average_fps": 55.78909029381236,
+          "one_percent_low_fps": 36.18249841004113,
+          "gpu_p95_ms": 20.83434583619237,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        },
+        {
+          "id": "sealed-cave-2",
+          "receipt": "run/logs/metallum-benchmarks/20260824T155838Z-g9c13e15b4669-clean-gi-g0-sealed-cave-final-2-off.accepted.json",
+          "receipt_sha256": "124b08ab494374824467acf1ec2a00ed471d4d960f94ee03f1218507b16f5df2",
+          "average_fps": 55.86172206548362,
+          "one_percent_low_fps": 37.14579502656589,
+          "gpu_p95_ms": 20.78974166070111,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        }
+      ]
+    },
+    {
+      "role": "nether",
+      "route": "gi-g0-nether-v1",
+      "route_sha256": "8777717930cafa4d54e35df00a12d516c0bcc6be7379131872f2145228556dbb",
+      "average_fps_floor": 20.0,
+      "one_percent_low_fps_floor": 10.0,
+      "mean_average_fps": 21.195048825975164,
+      "mean_one_percent_low_fps": 18.341309022821775,
+      "mean_gpu_p95_ms": 50.467577073141,
+      "decision": "PASS",
+      "runs": [
+        {
+          "id": "nether-1",
+          "receipt": "run/logs/metallum-benchmarks/20260824T160054Z-g9c13e15b4669-clean-gi-g0-nether-final-1-off.accepted.json",
+          "receipt_sha256": "b87db39567a310e8a59092039d5bd90cc83c9fd45c2cde6076c1ff4561203c26",
+          "average_fps": 21.691229226906618,
+          "one_percent_low_fps": 19.08214980704639,
+          "gpu_p95_ms": 49.42222915706225,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        },
+        {
+          "id": "nether-2",
+          "receipt": "run/logs/metallum-benchmarks/20260824T160544Z-g9c13e15b4669-clean-gi-g0-nether-final-2-off.accepted.json",
+          "receipt_sha256": "7e014eddef77c6d1856b740c31b567da5a07680328811e0ee4bc2ea246666778",
+          "average_fps": 20.698868425043706,
+          "one_percent_low_fps": 17.60046823859716,
+          "gpu_p95_ms": 51.512924989219755,
+          "thermal_state": "nominal",
+          "windows": 10,
+          "presented_frames": 3000,
+          "gi_off_verified": true
+        }
+      ]
+    }
+  ]
+}
