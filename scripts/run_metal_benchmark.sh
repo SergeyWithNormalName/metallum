@@ -36,6 +36,7 @@ CAPTURE_REFERENCE=0
 FI_VALIDATION=0
 SETTINGS_SPEC_EXPLICIT=0
 METALFX_MODE_EXPLICIT=0
+VERTEX_REFLECTION_EXPERIMENT=0
 
 RUN_WORLD_PATH=""
 RUN_WORLD_NAME=""
@@ -76,6 +77,10 @@ Options:
   --lighting-preset PRESET
                      performance, balanced, or ultra (default: balanced)
   --label LABEL      short artifact label (default: baseline)
+  --vertex-reflection-experiment
+                     opt in to the quarantined frozen vertex-reflection
+                     experiment for a diagnostic comparison; ordinary runs
+                     remain forced OFF
   --preflight-only   validate route/config/release settings contract/immutable fixture
                      without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
@@ -139,6 +144,10 @@ while [ "$#" -gt 0 ]; do
             need_value "$@"
             LABEL=$2
             shift 2
+            ;;
+        --vertex-reflection-experiment)
+            VERTEX_REFLECTION_EXPERIMENT=1
+            shift
             ;;
         --preflight-only)
             PREFLIGHT_ONLY=1
@@ -976,6 +985,10 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
     # masquerade as ordinary drawable timing samples.
     GPU_TIMING_ENV=0
 fi
+VERTEX_REFLECTION_JAVA_TOOL_OPTIONS=${JAVA_TOOL_OPTIONS:-}
+if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
+    VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.vertex.reflection.runtime=true"
+fi
 set +e
 METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
 METALLUM_BENCHMARK_FI_OVERLAY="$FI_OVERLAY_ENV" \
@@ -990,7 +1003,8 @@ METALLUM_BENCHMARK_MEASURE_FRAMES="$MEASURE_FRAMES" \
 METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
 METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL="$EXPECTED_LIGHTING_MODEL" \
-METALLUM_VERTEX_REFLECTION_EXPERIMENT=0 \
+METALLUM_VERTEX_REFLECTION_EXPERIMENT="$VERTEX_REFLECTION_EXPERIMENT" \
+JAVA_TOOL_OPTIONS="$VERTEX_REFLECTION_JAVA_TOOL_OPTIONS" \
 METALLUM_BENCHMARK_SCREENSHOTS="$CAPTURE_REFERENCE" \
 METALLUM_BENCHMARK_COMMIT="$commit" \
 METALLUM_BENCHMARK_DIRTY="$dirty_flag" \

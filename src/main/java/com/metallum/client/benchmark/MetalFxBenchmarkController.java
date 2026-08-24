@@ -7,6 +7,8 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -1841,6 +1843,11 @@ public final class MetalFxBenchmarkController {
                 this.route.routeId()
         );
         if (this.boundaryCheckEvent == RouteCheckEvent.MEASURE_START) {
+            String reflectionAdmissionFailure = verifyVertexReflectionAdmission();
+            if (reflectionAdmissionFailure != null) {
+                fail(minecraft, reflectionAdmissionFailure);
+                return;
+            }
             if (this.fiValidationRequired
                     && !this.fiGeneratedMeasurementStarted
                     && !beginFiGeneratedValidation(minecraft)) {
@@ -2560,6 +2567,30 @@ public final class MetalFxBenchmarkController {
                 this.sequence.get(this.segmentIndex),
                 this.segmentFrame
         );
+    }
+
+    /**
+     * A reflection comparison is meaningful only after the single frozen field is bound.
+     * Ordinary benchmark runs preserve the explicit OFF default and merely record it.
+     */
+    private @org.jspecify.annotations.Nullable String verifyVertexReflectionAdmission() {
+        boolean enabled = VertexReflectionExperiment.isRuntimeEnabled();
+        FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
+        boolean ready = snapshot.state() == FrozenReflectionFieldController.State.READY;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled={} state={} ready={} generation={}/{} origin=[{},{},{}] sections={}/{}/{} expected={}",
+                enabled,
+                snapshot.state(),
+                ready,
+                snapshot.worldGeneration(),
+                snapshot.fieldGeneration(),
+                snapshot.originX(), snapshot.originY(), snapshot.originZ(),
+                snapshot.publishedContent(), snapshot.knownEmpty(), snapshot.unavailable(), snapshot.expectedSections()
+        );
+        if (enabled && !ready) {
+            return "vertex reflection experiment was enabled but its frozen field was not READY";
+        }
+        return null;
     }
 
     private String completeL6DynamicShadowCoverage() {
