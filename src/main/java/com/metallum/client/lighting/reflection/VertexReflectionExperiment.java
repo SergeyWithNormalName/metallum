@@ -10,10 +10,8 @@ public final class VertexReflectionExperiment {
     public static final String ACTIVE_PROPERTY = "metallum.vertex.reflection.experiment";
     public static final String ACTIVE_ENV = "METALLUM_VERTEX_REFLECTION_EXPERIMENT";
     /**
-     * A second, JVM-only acknowledgement is required before this source-only
-     * experiment may allocate or bind Metal resources. The current prototype
-     * has no in-flight lifetime proof yet, so the ordinary experiment flag is
-     * intentionally compile/contract-only.
+     * Benchmark invocations acknowledge runtime allocation explicitly. Interactive users do so
+     * through the restart-gated Sodium option persisted by {@link VertexReflectionExperimentConfig}.
      */
     public static final String RUNTIME_PROPERTY = "metallum.vertex.reflection.runtime";
 
@@ -42,11 +40,11 @@ public final class VertexReflectionExperiment {
         if (env != null && !env.isBlank()) {
             return "1".equals(env.trim()) || "true".equalsIgnoreCase(env.trim());
         }
-        return false;
+        return VertexReflectionExperimentConfig.isEnabled();
     }
 
     public static boolean isRuntimeEnabled() {
-        return isActive() && Boolean.getBoolean(RUNTIME_PROPERTY);
+        return isActive() && (Boolean.getBoolean(RUNTIME_PROPERTY) || VertexReflectionExperimentConfig.isEnabled());
     }
 
     public static void setOverride(final Boolean active) {

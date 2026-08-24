@@ -72,5 +72,7 @@
   "metallum.options.diagnostic_pattern.name": "Полноэкранный калибровочный паттерн HDR",
   "metallum.options.diagnostic_pattern.tooltip": "Заменяет весь кадр калибровочным паттерном HDR. Нажмите Esc, чтобы выйти из паттерна.",
   "metallum.options.experimental_fp16.name": "Экспериментальный конвейер сцены FP16",
-  "metallum.options.experimental_fp16.tooltip": "Включает конвейер сцены в формате FP16 для продвинутых режимов. Изменения требуют перезапуска игры."
+  "metallum.options.experimental_fp16.tooltip": "Включает конвейер сцены в формате FP16 для продвинутых режимов. Изменения требуют перезапуска игры.",
+  "metallum.options.vertex_reflection_experiment.name": "Замороженные отражения воды (эксперимент)",
+  "metallum.options.vertex_reflection_experiment.tooltip": "Собирает одно фиксированное поле 128 блоков из рельефа Sodium и добавляет грубый вклад отражения только на воде. Требуется перезапуск. Это не готовая система отражений: нет динамических объектов, зеркального изображения, screen-space деталей и обновления поля при движении."
 }

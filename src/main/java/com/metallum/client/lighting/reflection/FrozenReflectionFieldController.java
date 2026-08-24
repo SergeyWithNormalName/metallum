@@ -26,6 +26,7 @@ public final class FrozenReflectionFieldController {
     public static final int SOURCE_CELL_BLOCKS = 2;
     public static final int SECTIONS_PER_EDGE = SPAN_BLOCKS / 16;
     public static final int EXPECTED_SECTION_COUNT = SECTIONS_PER_EDGE * SECTIONS_PER_EDGE * SECTIONS_PER_EDGE;
+    private static final int MAX_LATEST_TASK_FAILURES = 4;
 
     public enum State {
         OFF,
@@ -71,7 +72,8 @@ public final class FrozenReflectionFieldController {
             int publishedContent,
             int knownEmpty,
             int unavailable,
-            int expectedSections
+            int expectedSections,
+            @Nullable String invalidationReason
     ) {
     }
 
@@ -80,15 +82,19 @@ public final class FrozenReflectionFieldController {
     private @Nullable Object worldIdentity;
     private long nextWorldGeneration;
     private long fieldGeneration;
+    private long nextTaskGeneration;
     private State state = State.OFF;
     private int originX;
     private int originY;
     private int originZ;
     private final Set<Long> expectedSections = new HashSet<>();
     private final Map<Long, SectionState> sections = new HashMap<>();
+    private final Map<Long, Long> latestTaskGenerations = new HashMap<>();
+    private final Map<Long, Integer> latestTaskFailures = new HashMap<>();
     private short[] packedRgba = new short[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE * 4];
     private byte[] validity = new byte[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE];
     private @Nullable SourceSnapshot uploadSnapshot;
+    private @Nullable String invalidationReason;
 
     private FrozenReflectionFieldController() {
     }
@@ -126,9 +132,12 @@ public final class FrozenReflectionFieldController {
         this.originZ = sectionAlignedOrigin(cameraZ);
         this.expectedSections.clear();
         this.sections.clear();
+        this.latestTaskGenerations.clear();
+        this.latestTaskFailures.clear();
         Arrays.fill(this.packedRgba, (short) 0);
         Arrays.fill(this.validity, (byte) 0);
         this.uploadSnapshot = null;
+        this.invalidationReason = null;
         for (int z = 0; z < SECTIONS_PER_EDGE; z++) {
             for (int y = 0; y < SECTIONS_PER_EDGE; y++) {
                 for (int x = 0; x < SECTIONS_PER_EDGE; x++) {
@@ -146,7 +155,26 @@ public final class FrozenReflectionFieldController {
         if (this.worldIdentity != identity || this.state != State.COLLECTING || !this.expectedSections.contains(sectionKey)) {
             return null;
         }
-        return new FrozenReflectionSectionTask(this.nextWorldGeneration, this.fieldGeneration, sectionKey);
+        long taskGeneration = ++this.nextTaskGeneration;
+        this.latestTaskGenerations.put(sectionKey, taskGeneration);
+        return new FrozenReflectionSectionTask(this.nextWorldGeneration, this.fieldGeneration, sectionKey, taskGeneration);
+    }
+
+    /** Sodium applies air-only sections synchronously without a geometry upload. */
+    public synchronized boolean publishAuthoritativeEmpty(final Object identity, final long sectionKey) {
+        FrozenReflectionSectionTask task = beginSectionTask(identity, sectionKey);
+        return task != null && publishAccepted(new FrozenReflectionSectionCandidate(
+                task,
+                CompactSectionPayload.empty(sectionKey, task.worldGeneration())
+        ));
+    }
+
+    /** True only when no worker result is outstanding for a still-required non-empty section. */
+    public synchronized boolean needsSectionTask(final Object identity, final long sectionKey) {
+        return this.worldIdentity == identity
+                && this.state == State.COLLECTING
+                && this.sections.get(sectionKey) == SectionState.PENDING
+                && !this.latestTaskGenerations.containsKey(sectionKey);
     }
 
     /** Called only after Sodium has accepted the exact geometry output that carried the candidate. */
@@ -167,6 +195,8 @@ public final class FrozenReflectionFieldController {
         CompactSectionPayload payload = candidate.payload();
         depositSection(task.sectionKey(), payload);
         this.sections.put(task.sectionKey(), payload.isEmpty() ? SectionState.KNOWN_EMPTY : SectionState.PUBLISHED_CONTENT);
+        this.latestTaskGenerations.remove(task.sectionKey());
+        this.latestTaskFailures.remove(task.sectionKey());
         consume(payload);
         if (publishedSections() == EXPECTED_SECTION_COUNT) {
             this.uploadSnapshot = new SourceSnapshot(
@@ -183,14 +213,14 @@ public final class FrozenReflectionFieldController {
         return true;
     }
 
-    /** A stale candidate is not equivalent to transparent data. */
+    /** A superseded output is harmless; a latest output gets a bounded retry before fail-closed. */
     public synchronized void discardCandidate(final @Nullable FrozenReflectionSectionCandidate candidate) {
         if (candidate == null || !candidate.discard()) {
             return;
         }
         FrozenReflectionSectionTask task = candidate.task();
         consume(candidate.payload());
-        invalidateTaskIfCurrent(task);
+        retryOrInvalidateTask(task, "Sodium discarded the latest expected-section output");
     }
 
     public synchronized void removeSection(final Object identity, final long sectionKey) {
@@ -201,7 +231,21 @@ public final class FrozenReflectionFieldController {
             this.sections.put(sectionKey, SectionState.UNAVAILABLE);
             this.state = State.INVALID;
             this.uploadSnapshot = null;
+            this.invalidationReason = "Sodium removed an expected section before the frozen field was ready";
         }
+    }
+
+    /**
+     * The experimental preload owns its finite Sodium section set only until the immutable source
+     * snapshot has been queued.  Retaining those sections prevents culling from disposing an
+     * in-flight accepted-output task; it never retains terrain after the field is READY.
+     */
+    public synchronized boolean retainsSectionDuringCollection(final Object identity, final long sectionKey) {
+        return this.worldIdentity == identity
+                && this.expectedSections.contains(sectionKey)
+                && (this.state == State.COLLECTING
+                || this.state == State.READY_FOR_GPU_UPLOAD
+                || this.state == State.GPU_BUILD_QUEUED);
     }
 
     public synchronized @Nullable SourceSnapshot claimReadySnapshotForGpuUpload() {
@@ -224,13 +268,14 @@ public final class FrozenReflectionFieldController {
         if (this.nextWorldGeneration == worldGeneration && this.fieldGeneration == failedFieldGeneration) {
             this.state = State.INVALID;
             this.uploadSnapshot = null;
+            this.invalidationReason = "Metal rejected the immutable frozen-field upload";
         }
     }
 
     /** Extraction failed before a candidate existed; this expected section is unavailable. */
     public synchronized void noteCollectionFailure(final FrozenReflectionSectionTask task) {
         if (task != null) {
-            invalidateTaskIfCurrent(task);
+            retryOrInvalidateTask(task, "Sodium failed extraction for the latest expected-section output");
         }
     }
 
@@ -247,7 +292,8 @@ public final class FrozenReflectionFieldController {
             }
         }
         return new Snapshot(this.state, this.nextWorldGeneration, this.fieldGeneration,
-                this.originX, this.originY, this.originZ, content, empty, unavailable, this.expectedSections.size());
+                this.originX, this.originY, this.originZ, content, empty, unavailable, this.expectedSections.size(),
+                this.invalidationReason);
     }
 
     synchronized @Nullable SourceSnapshot sourceSnapshotForTests() {
@@ -258,16 +304,22 @@ public final class FrozenReflectionFieldController {
         return this.state == State.COLLECTING
                 && task.worldGeneration() == this.nextWorldGeneration
                 && task.fieldGeneration() == this.fieldGeneration
-                && this.expectedSections.contains(task.sectionKey());
+                && this.expectedSections.contains(task.sectionKey())
+                && this.latestTaskGenerations.getOrDefault(task.sectionKey(), Long.MIN_VALUE) == task.taskGeneration();
     }
 
-    private void invalidateTaskIfCurrent(final FrozenReflectionSectionTask task) {
-        if (task.worldGeneration() == this.nextWorldGeneration
-                && task.fieldGeneration() == this.fieldGeneration
-                && this.expectedSections.contains(task.sectionKey())) {
+    private void retryOrInvalidateTask(final FrozenReflectionSectionTask task, final String reason) {
+        if (isCurrentCollectingTask(task)) {
+            int failures = this.latestTaskFailures.getOrDefault(task.sectionKey(), 0) + 1;
+            if (failures < MAX_LATEST_TASK_FAILURES) {
+                this.latestTaskFailures.put(task.sectionKey(), failures);
+                this.latestTaskGenerations.remove(task.sectionKey());
+                return;
+            }
             this.sections.put(task.sectionKey(), SectionState.UNAVAILABLE);
             this.state = State.INVALID;
             this.uploadSnapshot = null;
+            this.invalidationReason = reason + " after " + failures + " attempts";
         }
     }
 
@@ -314,7 +366,10 @@ public final class FrozenReflectionFieldController {
     private void resetField(final State nextState) {
         this.expectedSections.clear();
         this.sections.clear();
+        this.latestTaskGenerations.clear();
+        this.latestTaskFailures.clear();
         this.uploadSnapshot = null;
+        this.invalidationReason = null;
         this.state = nextState;
     }
 

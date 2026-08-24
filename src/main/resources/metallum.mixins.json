@@ -58,6 +58,7 @@
     "sodium.ChunkBuilderMeshingTaskRelightAccessMixin",
     "sodium.ChunkBuilderMeshingTaskRelightOracleMixin",
     "sodium.ChunkBuilderMeshingTaskAdvancedLightMixin",
+    "sodium.ChunkBuilderFrozenReflectionAccess",
     "sodium.ChunkMeshBufferBuilderHdrMixin",
     "sodium.ChunkVertexEncoderVertexHdrMixin",
     "sodium.DefaultChunkRendererShadowMixin",

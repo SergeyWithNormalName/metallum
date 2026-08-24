@@ -5,9 +5,14 @@ package com.metallum.client.lighting.reflection;
  * reflection domain.  It deliberately has no revision reuse: a frozen build either receives
  * the exact generation it requested or becomes invalid.
  */
-public record FrozenReflectionSectionTask(long worldGeneration, long fieldGeneration, long sectionKey) {
+public record FrozenReflectionSectionTask(
+        long worldGeneration,
+        long fieldGeneration,
+        long sectionKey,
+        long taskGeneration
+) {
     public FrozenReflectionSectionTask {
-        if (worldGeneration <= 0L || fieldGeneration <= 0L) {
+        if (worldGeneration <= 0L || fieldGeneration <= 0L || taskGeneration <= 0L) {
             throw new IllegalArgumentException("Reflection generations must be positive");
         }
     }

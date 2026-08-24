@@ -4,6 +4,7 @@ import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
+import com.metallum.client.lighting.reflection.VertexReflectionExperimentConfig;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -200,6 +201,23 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 )
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.experimental"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "vertex_reflection_experiment"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.vertex_reflection_experiment.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.vertex_reflection_experiment.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    VertexReflectionExperimentConfig::setEnabled,
+                                    VertexReflectionExperimentConfig::isEnabled
+                            )
+                    )
                     .addOption(builder.createEnumOption(
                                 Identifier.fromNamespaceAndPath("metallum", "voxel_preview_mode"),
                                 VoxelPreviewMode.class

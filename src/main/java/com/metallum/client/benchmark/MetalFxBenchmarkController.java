@@ -2578,14 +2578,15 @@ public final class MetalFxBenchmarkController {
         FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
         boolean ready = snapshot.state() == FrozenReflectionFieldController.State.READY;
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled={} state={} ready={} generation={}/{} origin=[{},{},{}] sections={}/{}/{} expected={}",
+                "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled={} state={} ready={} generation={}/{} origin=[{},{},{}] sections={}/{}/{} expected={} invalidation={}",
                 enabled,
                 snapshot.state(),
                 ready,
                 snapshot.worldGeneration(),
                 snapshot.fieldGeneration(),
                 snapshot.originX(), snapshot.originY(), snapshot.originZ(),
-                snapshot.publishedContent(), snapshot.knownEmpty(), snapshot.unavailable(), snapshot.expectedSections()
+                snapshot.publishedContent(), snapshot.knownEmpty(), snapshot.unavailable(), snapshot.expectedSections(),
+                snapshot.invalidationReason()
         );
         if (enabled && !ready) {
             return "vertex reflection experiment was enabled but its frozen field was not READY";

@@ -82,12 +82,18 @@ public final class MetallumSodiumConfigTests {
                 "Metallum L5 checksum Sodium option is missing or has the wrong type");
         require(voxelChecksum.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum L5 checksum option must require a full game restart");
+        Option frozenReflection = findOption(page, idField, "vertex_reflection_experiment");
+        require(frozenReflection instanceof BooleanOption,
+                "Metallum frozen-reflection experiment option is missing or has the wrong type");
+        require(frozenReflection.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum frozen-reflection experiment must require a full game restart");
         require(findOption(page, idField, "voxel_preview_mode") instanceof EnumOption,
                 "Metallum L5 preview mode is missing or has the wrong type");
         require(findOption(page, idField, "voxel_preview_level") instanceof IntegerOption,
                 "Metallum L5 preview level is missing or has the wrong type");
         require(findOption(page, idField, "voxel_preview_slice") instanceof IntegerOption,
                 "Metallum L5 preview slice is missing or has the wrong type");
+
         System.out.println("Metallum Sodium config registration tests passed");
     }
 

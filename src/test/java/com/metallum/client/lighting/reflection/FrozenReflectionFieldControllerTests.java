@@ -11,6 +11,7 @@ public final class FrozenReflectionFieldControllerTests {
             VertexReflectionExperiment.setOverride(true);
             System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, "true");
             testKnownEmptyIsPublishedValidity();
+            testSupersededOutputDoesNotInvalidateTheLatestTask();
             testStaleOrUnavailableSectionInvalidatesTheField();
             System.out.println("FrozenReflectionFieldControllerTests passed successfully.");
         } finally {
@@ -31,6 +32,11 @@ public final class FrozenReflectionFieldControllerTests {
         FrozenReflectionFieldController.Snapshot initial = controller.snapshot();
         require(initial.state() == FrozenReflectionFieldController.State.COLLECTING, "field must collect once");
         require(initial.expectedSections() == 512, "fixed 128-block field must require exactly 8^3 sections");
+        long firstSection = SectionPos.asLong(
+                initial.originX() >> 4, initial.originY() >> 4, initial.originZ() >> 4
+        );
+        require(controller.retainsSectionDuringCollection(world, firstSection),
+                "in-flight frozen collection must retain its exact Sodium section");
         require(!controller.activateAtCamera(world, 8000.0, 8000.0, 8000.0), "field must never scroll after latching");
 
         for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
@@ -63,6 +69,8 @@ public final class FrozenReflectionFieldControllerTests {
         controller.noteGpuReady(claimed.worldGeneration(), claimed.fieldGeneration());
         require(controller.snapshot().state() == FrozenReflectionFieldController.State.READY,
                 "matching native completion must make the field ready");
+        require(!controller.retainsSectionDuringCollection(world, firstSection),
+                "ready frozen source must not retain Sodium sections");
         controller.closeWorld(world);
     }
 
@@ -75,11 +83,41 @@ public final class FrozenReflectionFieldControllerTests {
         long section = SectionPos.asLong(snapshot.originX() >> 4, snapshot.originY() >> 4, snapshot.originZ() >> 4);
         FrozenReflectionSectionTask task = controller.beginSectionTask(world, section);
         require(task != null, "first section must be expected");
-        controller.discardCandidate(new FrozenReflectionSectionCandidate(
-                task, CompactSectionPayload.empty(section, task.worldGeneration())
-        ));
+        for (int attempt = 0; attempt < 4; attempt++) {
+            controller.discardCandidate(new FrozenReflectionSectionCandidate(
+                    task, CompactSectionPayload.empty(section, task.worldGeneration())
+            ));
+            if (attempt < 3) {
+                require(controller.snapshot().state() == FrozenReflectionFieldController.State.COLLECTING,
+                        "a discarded latest task must receive bounded retries");
+                task = controller.beginSectionTask(world, section);
+                require(task != null, "retry must receive a fresh task generation");
+            }
+        }
         require(controller.snapshot().state() == FrozenReflectionFieldController.State.INVALID,
-                "discarded expected output is unavailable, not transparent world data");
+                "exhausted latest outputs are unavailable, not transparent world data");
+        controller.closeWorld(world);
+    }
+
+    private static void testSupersededOutputDoesNotInvalidateTheLatestTask() {
+        FrozenReflectionFieldController controller = FrozenReflectionFieldController.global();
+        Object world = new Object();
+        controller.openWorld(world);
+        require(controller.activateAtCamera(world, 0.0, 64.0, 0.0), "new world must activate a frozen field");
+        FrozenReflectionFieldController.Snapshot snapshot = controller.snapshot();
+        long section = SectionPos.asLong(snapshot.originX() >> 4, snapshot.originY() >> 4, snapshot.originZ() >> 4);
+        FrozenReflectionSectionTask older = controller.beginSectionTask(world, section);
+        FrozenReflectionSectionTask latest = controller.beginSectionTask(world, section);
+        require(older != null && latest != null && latest.taskGeneration() > older.taskGeneration(),
+                "a replacement Sodium rebuild must carry a newer task generation");
+        controller.discardCandidate(new FrozenReflectionSectionCandidate(
+                older, CompactSectionPayload.empty(section, older.worldGeneration())
+        ));
+        require(controller.snapshot().state() == FrozenReflectionFieldController.State.COLLECTING,
+                "discarding a superseded output must not reject its newer rebuild");
+        require(controller.publishAccepted(new FrozenReflectionSectionCandidate(
+                latest, CompactSectionPayload.empty(section, latest.worldGeneration())
+        )), "the latest accepted result must remain publishable");
         controller.closeWorld(world);
     }
 
