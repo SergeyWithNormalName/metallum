@@ -1382,7 +1382,7 @@ if [ "$EXPECTED_LIGHTING_MODEL" = "advanced" ]; then
 else
     admission_health=false
 fi
-admission="METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=$EXPECTED_LIGHTING_MODEL schema=4 defaults_used=false requested=$EXPECTED_LIGHTING_MODEL resolved=$EXPECTED_LIGHTING_MODEL l3=$admission_health l5=$admission_health l6=$admission_health status=PASS"
+admission="METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=$EXPECTED_LIGHTING_MODEL schema=$RENDERER_SCHEMA defaults_used=false requested=$EXPECTED_LIGHTING_MODEL resolved=$EXPECTED_LIGHTING_MODEL l3=$admission_health l5=$admission_health l6=$admission_health status=PASS"
 grep -Fq "$admission" "$MINECRAFT_LOG" \
     || die "benchmark lighting admission did not prove the requested $EXPECTED_LIGHTING_MODEL contract"
 if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
