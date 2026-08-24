@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.MetallumMaterialState;
+import com.metallum.client.metal.render.PlanarReflectionRenderer;
 import com.metallum.client.metal.render.SunShadowRenderer;
 import com.mojang.blaze3d.GpuFormat;
 import com.mojang.blaze3d.pipeline.ColorTargetState;
@@ -33,7 +34,7 @@ abstract class RenderPassMixin {
             cancellable = true
     )
     private void metallum$allowFp16SceneAttachment(final RenderPipeline pipeline, final CallbackInfo ci) {
-        if (SunShadowRenderer.isRendering()) {
+        if (SunShadowRenderer.isRendering() || PlanarReflectionRenderer.isRendering()) {
             this.backend.setPipeline(pipeline);
             ci.cancel();
             return;

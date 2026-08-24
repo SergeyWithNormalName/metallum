@@ -6,6 +6,7 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.lighting.reflection.VertexReflectionExperimentConfig;
 import com.metallum.client.metal.render.MetalDevice;
+import com.metallum.client.metal.render.PlanarReflectionConfig;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
 import com.metallum.client.metalfx.MetalFxUpscaling;
@@ -216,6 +217,22 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     VertexReflectionExperimentConfig::setEnabled,
                                     VertexReflectionExperimentConfig::isEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_planar_reflections"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.water_planar_reflections.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.water_planar_reflections.tooltip"
+                            ))
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    PlanarReflectionConfig::setEnabled,
+                                    PlanarReflectionConfig::isEnabled
                             )
                     )
                     .addOption(builder.createEnumOption(

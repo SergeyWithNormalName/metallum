@@ -635,11 +635,15 @@ public final class MetalRuntimeTests {
                         && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow1")
                         && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumSunShadow2")
                         && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumCloudShadow")
-                        && AdvancedDirectLightingShaderPatcher.externalShadowSamplerCount() == 4,
-                "external shadow/cloud samplers not recognized");
+                        && AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("metallumPlanarReflection")
+                        && AdvancedDirectLightingShaderPatcher.externalShadowSamplerCount() == 5,
+                "external shadow/cloud/planar samplers not recognized");
         require(AdvancedDirectLightingShaderPatcher.externalShadowSamplerSlot("metallumCloudShadow")
                         == CloudShadowBindingAbi.TEXTURE_SLOT,
                 "cloud shadow sampler slot mismatch");
+        require(AdvancedDirectLightingShaderPatcher.externalShadowSamplerSlot("metallumPlanarReflection")
+                        == com.metallum.client.lighting.shader.PlanarReflectionBindingAbi.TEXTURE_SLOT,
+                "planar reflection sampler slot mismatch");
         require(!AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("Sampler0")
                         && !AdvancedDirectLightingShaderPatcher.isExternalShadowSampler("DiffuseSampler"),
                 "vanilla samplers must not be classified as external shadow samplers");

@@ -62,11 +62,13 @@ public final class AdvancedDirectLightingShaderPatcher {
     public static final String SHADOW_SAMPLER_1 = "metallumSunShadow1";
     public static final String SHADOW_SAMPLER_2 = "metallumSunShadow2";
     public static final String CLOUD_SAMPLER = "metallumCloudShadow";
+    public static final String PLANAR_REFLECTION_SAMPLER = "metallumPlanarReflection";
     private static final Set<String> EXTERNAL_SHADOW_SAMPLERS = Set.of(
             SHADOW_SAMPLER_0,
             SHADOW_SAMPLER_1,
             SHADOW_SAMPLER_2,
-            CLOUD_SAMPLER
+            CLOUD_SAMPLER,
+            PLANAR_REFLECTION_SAMPLER
     );
 
     private static final String MARKER = "METALLUM_ADVANCED_DIRECT_LIGHTING_V1";
@@ -136,6 +138,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             layout(binding = 14) uniform sampler2DShadow metallumSunShadow1;
             layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
             layout(binding = 12) uniform sampler2D metallumCloudShadow;
+            layout(binding = 11) uniform sampler2D metallumPlanarReflection;
 
             layout(std430, binding = 27) readonly buffer MetallumLightingParamsV1 {
                 mat4 viewRotation;
@@ -964,6 +967,35 @@ public final class AdvancedDirectLightingShaderPatcher {
                         reflectedDirection, normal, material.roughness, waterCelestialShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    vec2 screenUv = gl_FragCoord.xy / max(
+                            vec2(metallumLighting.extentAndClusterCap.xy), vec2(1.0));
+                    // Normal is already the animated water normal.  Offset only by its deviation
+                    // from a flat water plane, so waves distort the capture without camera-pitch
+                    // drift.  The target alpha/edge fade preserves the analytic fallback.
+                    mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                    vec3 flatWaterNormal = metallumSafeNormalV1(
+                            transpose(worldFromView) * vec3(0.0, 1.0, 0.0));
+                    vec2 waveScreenOffset = (normal.xy - flatWaterNormal.xy) * 0.085;
+                    vec2 reflectionUv = screenUv + waveScreenOffset;
+                    float edgeDistance = min(
+                            min(reflectionUv.x, reflectionUv.y),
+                            min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
+                    vec4 planarSample = texture(metallumPlanarReflection,
+                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
+                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance);
+                    if (planarWeight > 0.0) {
+                        reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
+                        // The physically based dielectric F0 of water is only ~2%.  That is
+                        // imperceptible against Minecraft's opaque, tinted water at the intended
+                        // shoreline angles even though the planar target is valid.  Keep the
+                        // response view-dependent, but give the local capture a bounded artistic
+                        // Fresnel so a reflected shoreline remains legible without becoming a
+                        // mirror when looking straight down.
+                        float planarFresnel = clamp(
+                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
+                        environmentFresnel = mix(
+                                environmentFresnel, vec3(planarFresnel), planarWeight);
+                    }
                     // The terrain light coordinate already records vanilla skylight after
                     // block occlusion. Do not leave an analytic-sky floor in a cave or under
                     // a solid roof; local voxel-occluded highlights remain a separate term.
@@ -2400,6 +2432,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             layout(binding = 14) uniform sampler2DShadow metallumSunShadow1;
             layout(binding = 15) uniform sampler2DShadow metallumSunShadow2;
             layout(binding = 12) uniform sampler2D metallumCloudShadow;
+            layout(binding = 11) uniform sampler2D metallumPlanarReflection;
             """;
         source = replaceExactlyOnce(source, samplers, "");
         if (source == null) {
@@ -2841,6 +2874,35 @@ public final class AdvancedDirectLightingShaderPatcher {
                         reflectedDirection, normal, material.roughness, waterCelestialShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    vec2 screenUv = gl_FragCoord.xy / max(
+                            vec2(metallumLighting.extentAndClusterCap.xy), vec2(1.0));
+                    // Normal is already the animated water normal.  Offset only by its deviation
+                    // from a flat water plane, so waves distort the capture without camera-pitch
+                    // drift.  The target alpha/edge fade preserves the analytic fallback.
+                    mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                    vec3 flatWaterNormal = metallumSafeNormalV1(
+                            transpose(worldFromView) * vec3(0.0, 1.0, 0.0));
+                    vec2 waveScreenOffset = (normal.xy - flatWaterNormal.xy) * 0.085;
+                    vec2 reflectionUv = screenUv + waveScreenOffset;
+                    float edgeDistance = min(
+                            min(reflectionUv.x, reflectionUv.y),
+                            min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
+                    vec4 planarSample = texture(metallumPlanarReflection,
+                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
+                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance);
+                    if (planarWeight > 0.0) {
+                        reflectedEnvironment = mix(reflectedEnvironment, planarSample.rgb, planarWeight);
+                        // The physically based dielectric F0 of water is only ~2%.  That is
+                        // imperceptible against Minecraft's opaque, tinted water at the intended
+                        // shoreline angles even though the planar target is valid.  Keep the
+                        // response view-dependent, but give the local capture a bounded artistic
+                        // Fresnel so a reflected shoreline remains legible without becoming a
+                        // mirror when looking straight down.
+                        float planarFresnel = clamp(
+                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
+                        environmentFresnel = mix(
+                                environmentFresnel, vec3(planarFresnel), planarWeight);
+                    }
                     // The terrain light coordinate already records vanilla skylight after
                     // block occlusion. Do not leave an analytic-sky floor in a cave or under
                     // a solid roof; local voxel-occluded highlights remain a separate term.
@@ -3358,7 +3420,10 @@ public final class AdvancedDirectLightingShaderPatcher {
         if (CLOUD_SAMPLER.equals(name)) {
             return CloudShadowBindingAbi.TEXTURE_SLOT;
         }
-        throw new IllegalArgumentException("Not an L4 shadow or cloud sampler: " + name);
+        if (PLANAR_REFLECTION_SAMPLER.equals(name)) {
+            return PlanarReflectionBindingAbi.TEXTURE_SLOT;
+        }
+        throw new IllegalArgumentException("Not an L4 shadow, cloud, or planar reflection sampler: " + name);
     }
 
     /**
@@ -3759,7 +3824,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     || slot == EnvironmentShadowBindingAbi.PARAMS_SLOT
                     || VoxelShadowBindingAbi.ownsFragmentSlot(slot)
                     || EnvironmentShadowBindingAbi.ownsShadowTextureSlot(slot)
-                    || slot == CloudShadowBindingAbi.TEXTURE_SLOT) {
+                    || slot == CloudShadowBindingAbi.TEXTURE_SLOT
+                    || slot == PlanarReflectionBindingAbi.TEXTURE_SLOT) {
                 return slot;
             }
         }
@@ -3772,6 +3838,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "MetallumLightingParamsV1",
                 "MetallumEnvironmentShadowV1",
                 "metallumCloudShadow",
+                PLANAR_REFLECTION_SAMPLER,
                 "metallumCloudTransmittanceV1",
                 "MetallumVoxelVisibilityCacheV1",
                 "MetallumVoxelShadowRefsV1",

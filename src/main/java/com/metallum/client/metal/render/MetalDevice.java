@@ -460,6 +460,9 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         this.commandEncoder = new MetalCommandEncoder(this);
         this.cloudShadowResources = new CloudShadowGpuResources(this);
+        // Persistent fallback binding is created once on the render thread.  The water-only
+        // planar target itself is allocated lazily after the first eligible camera frame.
+        PlanarReflectionRenderer.init(this);
         this.deviceInfo = buildDeviceInfo(deviceName);
         HdrSemanticState.configure(configuredHdrMode, initialEdrCapabilities);
         HdrSceneState.configure(this.hdrConfig, initialEdrCapabilities);
@@ -697,6 +700,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.waitForSubmittedGpuWork();
         this.replaceFrameInterpolationCoordinator(null);
         this.closeFrozenReflectionResources();
+        PlanarReflectionRenderer.close();
         if (this.advancedLightingResources != null) {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
@@ -2573,6 +2577,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.commandEncoder.currentSubmitIndex()
         );
         this.bindFrozenReflectionIfReady(encoder);
+        PlanarReflectionRenderer.bind(encoder);
     }
 
     /**

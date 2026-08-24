@@ -1,6 +1,9 @@
 package com.metallum.mixin.sodium;
 
+import com.metallum.client.metal.render.PlanarReflectionRenderer;
 import com.metallum.client.metal.render.SunShadowRenderer;
+import com.metallum.client.sodium.SodiumPlanarReflectionBatchAccess;
+import com.metallum.client.sodium.SodiumPlanarReflectionBatchCache;
 import com.metallum.client.sodium.SodiumShadowBatchAccess;
 import com.metallum.client.sodium.SodiumShadowBatchCache;
 import net.caffeinemc.mods.sodium.client.gpu.device.batch.MultiDrawBatch;
@@ -15,9 +18,27 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** Prevents shadow caster lists from invalidating Sodium's main-camera draw batches. */
 @Mixin(value = RenderRegion.class, remap = false)
-abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
+abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess, SodiumPlanarReflectionBatchAccess {
     @Unique
     private SodiumShadowBatchCache metallum$shadowBatchCache;
+    @Unique
+    private SodiumPlanarReflectionBatchCache metallum$reflectionBatchCache;
+
+    @Override
+    public void metallum$preparePlanarReflectionBatch(
+            final long reflectionToken,
+            final long sections0,
+            final long sections1,
+            final long sections2,
+            final long sections3
+    ) {
+        if (this.metallum$reflectionBatchCache == null) {
+            this.metallum$reflectionBatchCache = new SodiumPlanarReflectionBatchCache();
+        }
+        this.metallum$reflectionBatchCache.prepare(
+                reflectionToken, sections0, sections1, sections2, sections3
+        );
+    }
 
     @Override
     public void metallum$prepareShadowBatch(
@@ -44,6 +65,14 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
             final TerrainRenderPass pass,
             final CallbackInfoReturnable<MultiDrawBatch> cir
     ) {
+        long reflectionToken = PlanarReflectionRenderer.activeTerrainToken();
+        if (reflectionToken != 0L) {
+            if (this.metallum$reflectionBatchCache == null) {
+                this.metallum$reflectionBatchCache = new SodiumPlanarReflectionBatchCache();
+            }
+            cir.setReturnValue(this.metallum$reflectionBatchCache.acquire(pass, reflectionToken));
+            return;
+        }
         long token = SunShadowRenderer.activeCascadeToken();
         if (token == 0L) {
             return;
@@ -59,12 +88,18 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
         if (this.metallum$shadowBatchCache != null) {
             this.metallum$shadowBatchCache.clearAll();
         }
+        if (this.metallum$reflectionBatchCache != null) {
+            this.metallum$reflectionBatchCache.clearAll();
+        }
     }
 
     @Inject(method = "removeSection", at = @At("TAIL"))
     private void metallum$invalidateRemovedShadowSection(final CallbackInfo ci) {
         if (this.metallum$shadowBatchCache != null) {
             this.metallum$shadowBatchCache.clearAll();
+        }
+        if (this.metallum$reflectionBatchCache != null) {
+            this.metallum$reflectionBatchCache.clearAll();
         }
     }
 
@@ -82,6 +117,9 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
         if (this.metallum$shadowBatchCache != null) {
             this.metallum$shadowBatchCache.clearAll();
         }
+        if (this.metallum$reflectionBatchCache != null) {
+            this.metallum$reflectionBatchCache.clearAll();
+        }
     }
 
     @Inject(method = "clearCachedBatchFor", at = @At("TAIL"))
@@ -92,6 +130,9 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
         if (this.metallum$shadowBatchCache != null) {
             this.metallum$shadowBatchCache.clear(pass);
         }
+        if (this.metallum$reflectionBatchCache != null) {
+            this.metallum$reflectionBatchCache.clear(pass);
+        }
     }
 
     @Inject(method = "delete", at = @At("HEAD"))
@@ -99,6 +140,10 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess {
         if (this.metallum$shadowBatchCache != null) {
             this.metallum$shadowBatchCache.delete();
             this.metallum$shadowBatchCache = null;
+        }
+        if (this.metallum$reflectionBatchCache != null) {
+            this.metallum$reflectionBatchCache.delete();
+            this.metallum$reflectionBatchCache = null;
         }
     }
 }
