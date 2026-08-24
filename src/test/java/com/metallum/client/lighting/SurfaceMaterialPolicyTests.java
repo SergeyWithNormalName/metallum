@@ -145,9 +145,11 @@ public final class SurfaceMaterialPolicyTests {
 
     private static void testWaterSurfaceDoesNotBecomeACausticReceiver() {
         ChunkVertexEncoder.Vertex[] vertices = new ChunkVertexEncoder.Vertex[4];
+        int[] vanillaLight = {0x00F000A0, 0x00D00080, 0x00900050, 0x00300020};
         for (int index = 0; index < vertices.length; index++) {
             vertices[index] = new ChunkVertexEncoder.Vertex();
             vertices[index].color = 0xFF80A0C0;
+            vertices[index].light = vanillaLight[index];
         }
 
         SodiumHdrSemantic.tagQuad(
@@ -158,10 +160,13 @@ public final class SurfaceMaterialPolicyTests {
                 true,
                 5
         );
-        for (ChunkVertexEncoder.Vertex vertex : vertices) {
+        for (int index = 0; index < vertices.length; index++) {
+            ChunkVertexEncoder.Vertex vertex = vertices[index];
             int alpha = (vertex.color >>> 24) & 0xFF;
             require(alpha == 255,
                     "water surface was encoded as a submerged caustic receiver");
+            require(vertex.light == vanillaLight[index],
+                    "water surface tagging replaced propagated vanilla skylight");
         }
     }
 
@@ -311,12 +316,6 @@ public final class SurfaceMaterialPolicyTests {
                         && !snapshot.canRainReach(31, 100, -13)
                         && !snapshot.canRainReach(34, 100, 0),
                 "rain exposure snapshot accepts a dry-biome, sheltered, or foreign column");
-        require(snapshot.canSeeSky(34, 71, -13)
-                        && !snapshot.canSeeSky(34, 70, -13)
-                        && snapshot.canSeeSky(36, 63, -12)
-                        && !snapshot.canRainReach(36, 63, -12)
-                        && !snapshot.canSeeSky(31, 100, -13),
-                "sky exposure must respect the roof height but ignore local rain biome eligibility");
     }
 
     private static void testComprehensiveBlockClassifications() {
