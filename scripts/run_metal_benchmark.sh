@@ -625,27 +625,33 @@ renderer_value() {
     local key=$1
     awk -F= -v key="$key" '$1 == key { print $2 }' "$RENDERER_CONFIG"
 }
+RENDERER_SCHEMA=$(renderer_value schemaVersion)
 RENDERER_LIGHTING=$(renderer_value improvedLighting)
 RENDERER_PRESET=$(renderer_value lightingPreset)
 RENDERER_INTERPOLATION=$(renderer_value frameInterpolation)
 RENDERER_VOXEL_DEBUG=$(renderer_value voxelDebugChecksum)
 [ -n "$RENDERER_VOXEL_DEBUG" ] || RENDERER_VOXEL_DEBUG=false
+require_value "$RENDERER_SCHEMA" "4" "renderer schemaVersion"
 case "$RENDERER_LIGHTING" in true|false) ;; *) die "renderer improvedLighting must be true or false" ;; esac
 require_value "$RENDERER_PRESET" "$LIGHTING_PRESET" "renderer lightingPreset"
 if [ "$FI_VALIDATION" -eq 1 ]; then
+    EXPECTED_LIGHTING_MODEL=vanilla
     require_value "$RENDERER_LIGHTING" "$FI_RENDERER_IMPROVED_LIGHTING" \
         "FI validation renderer improvedLighting"
     require_value "$RENDERER_PRESET" "$FI_RENDERER_LIGHTING_PRESET" \
         "FI validation renderer lightingPreset"
     require_value "$RENDERER_INTERPOLATION" "true" "renderer frameInterpolation"
 else
+    EXPECTED_LIGHTING_MODEL=advanced
+    require_value "$RENDERER_LIGHTING" "true" \
+        "benchmark renderer improvedLighting"
     require_value "$RENDERER_INTERPOLATION" "false" "renderer frameInterpolation"
 fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
 if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
     require_value "$RENDERER_LIGHTING" "true" "L6 dynamic route renderer improvedLighting"
 fi
-RENDERER_VALUES_BEFORE="$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG"
+RENDERER_VALUES_BEFORE="$RENDERER_SCHEMA/$RENDERER_LIGHTING/$RENDERER_PRESET/$RENDERER_INTERPOLATION/$RENDERER_VOXEL_DEBUG"
 
 mkdir -p "$OUTPUT_DIR"
 git -C "$ROOT" check-ignore -q "$OUTPUT_DIR/.metallum-benchmark-probe" \
@@ -688,7 +694,7 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
 else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
-echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$RENDERER_LIGHTING/$LIGHTING_PRESET, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
+echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
@@ -821,7 +827,7 @@ cleanup() {
 
         renderer_debug_after=$(renderer_value voxelDebugChecksum)
         [ -n "$renderer_debug_after" ] || renderer_debug_after=false
-        renderer_after="$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
+        renderer_after="$(renderer_value schemaVersion)/$(renderer_value improvedLighting)/$(renderer_value lightingPreset)/$(renderer_value frameInterpolation)/$renderer_debug_after"
         if [ "$renderer_after" != "${RENDERER_VALUES_BEFORE:-}" ]; then
             echo "ERROR: renderer generation settings changed during the run" >&2
             cleanup_status=2
@@ -983,6 +989,8 @@ METALLUM_BENCHMARK_WARMUP_FRAMES="$WARMUP_FRAMES" \
 METALLUM_BENCHMARK_MEASURE_FRAMES="$MEASURE_FRAMES" \
 METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
+METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL="$EXPECTED_LIGHTING_MODEL" \
+METALLUM_VERTEX_REFLECTION_EXPERIMENT=0 \
 METALLUM_BENCHMARK_SCREENSHOTS="$CAPTURE_REFERENCE" \
 METALLUM_BENCHMARK_COMMIT="$commit" \
 METALLUM_BENCHMARK_DIRTY="$dirty_flag" \
@@ -1269,6 +1277,14 @@ esac
 complete="METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=$MEASURE_FRAMES framebuffer=${WIDTH}x${HEIGHT}"
 complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ "$complete_count" -eq 1 ] || die "expected exactly one matching COMPLETE marker (found $complete_count)"
+if [ "$EXPECTED_LIGHTING_MODEL" = "advanced" ]; then
+    admission_health=true
+else
+    admission_health=false
+fi
+admission="METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=$EXPECTED_LIGHTING_MODEL schema=4 defaults_used=false requested=$EXPECTED_LIGHTING_MODEL resolved=$EXPECTED_LIGHTING_MODEL l3=$admission_health l5=$admission_health l6=$admission_health status=PASS"
+grep -Fq "$admission" "$MINECRAFT_LOG" \
+    || die "benchmark lighting admission did not prove the requested $EXPECTED_LIGHTING_MODEL contract"
 if [ "$FI_VALIDATION" -eq 1 ]; then
     fi_generated_prefix="METALLUM_BENCHMARK EVENT=FI_GENERATED_COMPLETE generated_delta="
     fi_generated_count=$(grep -Fc "$fi_generated_prefix" "$MINECRAFT_LOG" || true)

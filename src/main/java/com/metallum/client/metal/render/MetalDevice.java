@@ -30,6 +30,9 @@ import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.RealWorldReflectionField;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.L8ReactiveShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
@@ -69,6 +72,7 @@ import com.metallum.client.renderer.interpolation.FrameInterpolationPolicy;
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.renderer.temporal.TemporalResetEvents;
 import com.metallum.client.renderer.temporal.TemporalDiagnostics;
+import com.metallum.client.radiance.RadianceGpuResources;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelClipmapLayout;
@@ -211,6 +215,11 @@ public final class MetalDevice implements GpuDeviceBackend {
     private final Map<RenderPipeline, MetalCompiledRenderPipeline> compiledPipelines = new IdentityHashMap<>();
     private final Map<ShaderCompilationKey, IntermediaryShaderModule> shaderCache = new HashMap<>();
     private final Map<MslFunctionKey, MemorySegment> functionCache = new HashMap<>();
+    private boolean vertexReflectionPipelineStateInitialized;
+    private boolean vertexReflectionPipelineState;
+    @Nullable
+    private RadianceGpuResources frozenReflectionResources;
+    private long frozenReflectionFieldGeneration = Long.MIN_VALUE;
     @Nullable
     private SodiumLightSidecarBindings sodiumLightSidecarBindings;
     private final ShaderSource defaultShaderSource;
@@ -638,6 +647,7 @@ public final class MetalDevice implements GpuDeviceBackend {
 
     @Override
     public @NonNull CompiledRenderPipeline precompilePipeline(final @NonNull RenderPipeline pipeline, @Nullable final ShaderSource shaderSource) {
+        this.invalidatePipelinesForVertexReflectionToggle();
         ShaderSource effectiveSource = shaderSource == null ? this.defaultShaderSource : shaderSource;
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, effectiveSource));
     }
@@ -686,6 +696,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.closeSodiumLightSidecarBindings();
         this.waitForSubmittedGpuWork();
         this.replaceFrameInterpolationCoordinator(null);
+        this.closeFrozenReflectionResources();
         if (this.advancedLightingResources != null) {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
@@ -1879,6 +1890,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                         this.acknowledgeVoxelNativeRejection(voxelResources);
                         this.voxelTransientBusyLogged = false;
                     } else {
+                        AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                                "L5 voxel upload was not active for Advanced frame: status " + voxelStatus
+                        );
                         voxelController.retryUploadBatch(voxelBatch.batchId());
                         voxelBatch = null;
                         published = published.withAdvancedLightingWork(advancedWork);
@@ -2003,6 +2017,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                     this.advancedLightingFrameSubmitIndex = submitIndex;
                     this.advancedLightingFrameReady = shadowResources.isReady(submitIndex);
+                    AdvancedLightingRuntime.reportFrameHealth(
+                            this.rendererGenerationId,
+                            submitIndex,
+                            lightingResources != null,
+                            voxelResources != null,
+                            localPrepared.active()
+                    );
                     this.advancedLightingTransientFallbackLogged = false;
                     if (shouldScheduleVoxelDebugChecksum(
                             this.rendererConfig.voxelDebugChecksum(),
@@ -2050,6 +2071,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                     lightingStatus = Integer.MIN_VALUE;
                     this.advancedLightingFrameReady = false;
                     this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+                    AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                            "L4/L6 Advanced frame preparation failed"
+                    );
                     Metallum.LOGGER.warn(
                             "L4/L6 shadow frame preparation failed; using Vanilla lighting for this frame",
                             exception
@@ -2063,6 +2087,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
                 this.advancedLightingFrameReady = false;
                 this.advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
+                AdvancedLightingRuntime.reportBenchmarkFrameFallback(
+                        "Advanced frame upload fell back with status " + lightingStatus
+                );
                 FrameState fallback = published.withAdvancedLightingWork(
                         FrameState.AdvancedLightingWork.NONE
                 );
@@ -2545,6 +2572,55 @@ public final class MetalDevice implements GpuDeviceBackend {
                 inFlightSlot,
                 this.commandEncoder.currentSubmitIndex()
         );
+        this.bindFrozenReflectionIfReady(encoder);
+    }
+
+    /**
+     * Consumes at most one already-complete Sodium snapshot.  No world lookup, source capture,
+     * wait, or CPU readback happens here; native copies the snapshot into owned staging and later
+     * publishes readiness from its command-buffer completion handler.
+     */
+    private void bindFrozenReflectionIfReady(final MTLRenderCommandEncoder encoder) {
+        if (!VertexReflectionExperiment.isRuntimeEnabled()) {
+            return;
+        }
+        RealWorldReflectionField field = RealWorldReflectionField.get();
+        FrozenReflectionFieldController.SourceSnapshot snapshot = field.claimReadySnapshotForGpuUpload();
+        if (snapshot != null) {
+            this.closeFrozenReflectionResources();
+            RadianceGpuResources resources = RadianceGpuResources.create(
+                    this.metalDeviceHandle,
+                    this.commandQueue.nativeHandle(),
+                    snapshot.worldGeneration(),
+                    this::queueFrozenReflectionContextRelease
+            );
+            if (resources == null || !resources.queueFrozenBuild(
+                    snapshot.worldGeneration(),
+                    snapshot.originX(), snapshot.originY(), snapshot.originZ(),
+                    snapshot.packedRgba(), snapshot.validity(),
+                    field.strength(), field.roughness(), field.isContributionOnly()
+            )) {
+                if (resources != null) {
+                    resources.close();
+                }
+                field.noteGpuFailure(snapshot.worldGeneration(), snapshot.fieldGeneration());
+                return;
+            }
+            this.frozenReflectionResources = resources;
+            this.frozenReflectionFieldGeneration = snapshot.fieldGeneration();
+        }
+        RadianceGpuResources resources = this.frozenReflectionResources;
+        if (resources != null && resources.bindVertexResources(encoder.handle())) {
+            field.noteGpuReady(resources.worldGeneration(), this.frozenReflectionFieldGeneration);
+        }
+    }
+
+    private void closeFrozenReflectionResources() {
+        if (this.frozenReflectionResources != null) {
+            this.frozenReflectionResources.close();
+            this.frozenReflectionResources = null;
+        }
+        this.frozenReflectionFieldGeneration = Long.MIN_VALUE;
     }
 
     public com.metallum.client.lighting.cloud.CloudShadowSource cloudShadowSource() {
@@ -3203,6 +3279,13 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.commandEncoder.queueForDestroy(() -> MetalNativeBridge.metallum_release_object(handle));
     }
 
+    /** The native context retains all reflection textures until its own in-flight build completes. */
+    private void queueFrozenReflectionContextRelease(final MemorySegment context) {
+        this.commandEncoder.queueForDestroy(
+                () -> MetalNativeBridge.metallum_radiance_context_destroy(context)
+        );
+    }
+
     void queueResourceRelease(final MemorySegment handle, final Runnable afterRelease) {
         this.commandEncoder.queueForDestroy(() -> {
             try {
@@ -3230,7 +3313,29 @@ public final class MetalDevice implements GpuDeviceBackend {
     }
 
     MetalCompiledRenderPipeline getOrCompilePipeline(final RenderPipeline pipeline) {
+        this.invalidatePipelinesForVertexReflectionToggle();
         return this.compiledPipelines.computeIfAbsent(pipeline, p -> MetalCrossShaderCompiler.compile(this, p, this.defaultShaderSource));
+    }
+
+    /**
+     * The reflection carrier changes MSL resource declarations, while this cache is keyed only by
+     * RenderPipeline. A runtime toggle therefore invalidates the dependent shader/PSO cache before
+     * an OFF pipeline can be reused as ON (or vice versa).
+     */
+    private void invalidatePipelinesForVertexReflectionToggle() {
+        boolean enabled = VertexReflectionExperiment.isRuntimeEnabled();
+        if (!this.vertexReflectionPipelineStateInitialized) {
+            this.vertexReflectionPipelineStateInitialized = true;
+            this.vertexReflectionPipelineState = enabled;
+            return;
+        }
+        if (this.vertexReflectionPipelineState == enabled) {
+            return;
+        }
+        this.clearPipelineCache();
+        this.closeFrozenReflectionResources();
+        this.vertexReflectionPipelineState = enabled;
+        Metallum.LOGGER.info("Vertex reflection runtime state changed; invalidated dependent PSOs (enabled={})", enabled);
     }
 
     IntermediaryShaderModule getOrCompileShader(
@@ -3305,6 +3410,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                             || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY)
                             ? TerrainEnvironmentSpecialization.AMBIENT_ONLY
                             : TerrainEnvironmentSpecialization.FULL;
+            boolean vertexReflection = key.defines().flags().contains("METALLUM_VERTEX_REFLECTION")
+                    || key.defines().values().containsKey("METALLUM_VERTEX_REFLECTION");
             AdvancedDirectLightingShaderPatcher.Result advanced =
                     AdvancedDirectLightingShaderPatcher.patch(
                             key.id().getNamespace(),
@@ -3314,7 +3421,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
                             LightingModel.ADVANCED,
                             material.source(),
-                            specialization
+                            specialization,
+                            vertexReflection
                     );
             if (!advanced.success()) {
                 throw new IllegalStateException(

@@ -28,7 +28,8 @@ def macMetalSources = [
 	EntityMotion: layout.projectDirectory.file("src/main/metal/MetallumEntityMotion.metal"),
 	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
 	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal"),
-	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal")
+	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal"),
+	RadianceClipmap: layout.projectDirectory.file("src/main/metal/MetallumRadianceClipmap.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
 	[(name): layout.buildDirectory.file("generated/metallum/shaders/${name}.air")]
@@ -194,6 +195,44 @@ tasks.register("advancedDirectLightingShaderUnitTest", JavaExec) {
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.lighting.shader.AdvancedDirectLightingShaderTests")
+}
+
+tasks.register("frozenReflectionFieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates frozen accepted-Sodium reflection field ownership and validity semantics"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.reflection.FrozenReflectionFieldControllerTests")
+}
+
+tasks.register("realWorldVertexReflectionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates real-world reflection appearance extraction and vertex-only shader carrier"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.RealWorldVertexReflectionTests")
+}
+
+tasks.register("benchmarkLightingAdmissionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Rejects benchmark fallback/default configurations and incomplete Advanced frames"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.benchmark.BenchmarkLightingAdmissionTests")
+}
+
+tasks.register("frozenReflectionNativeValidation", JavaExec) {
+	group = "verification"
+	description = "Validates frozen reflection Java/FFM/private-3D Metal upload and compute lifecycle"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.metal.render.FrozenReflectionNativeValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 }
 
 tasks.register("shadowValueValidation", JavaExec) {
@@ -1235,6 +1274,10 @@ tasks.named("check") {
 	dependsOn(tasks.named("advancedLightRegistryUnitTest"))
 	dependsOn(tasks.named("surfaceMaterialUnitTest"))
 	dependsOn(tasks.named("advancedDirectLightingShaderUnitTest"))
+	dependsOn(tasks.named("frozenReflectionFieldUnitTest"))
+	dependsOn(tasks.named("realWorldVertexReflectionUnitTest"))
+	dependsOn(tasks.named("benchmarkLightingAdmissionUnitTest"))
+	dependsOn(tasks.named("frozenReflectionNativeValidation"))
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))
 	dependsOn(tasks.named("localVoxelShadowUnitTest"))

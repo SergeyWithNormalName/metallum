@@ -27,7 +27,8 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumTemporalDiagnostics.metal",
             "/natives/macos/shaders/MetallumClusterBuild.metal",
             "/natives/macos/shaders/MetallumVoxelOccupancy.metal",
-            "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal"
+            "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal",
+            "/natives/macos/shaders/MetallumRadianceClipmap.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
     private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG;
@@ -344,6 +345,44 @@ public final class MetalNativeBridge {
                     )
             );
             releaseDeviceCaches = downcall(lookup, "metallum_release_device_caches", FunctionDescriptor.ofVoid(ValueLayout.ADDRESS));
+
+            radianceContextCreate = downcall(
+                    lookup,
+                    "metallum_radiance_context_create",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            radianceContextUploadSourceFrozen = downcall(
+                    lookup,
+                    "metallum_radiance_context_upload_source_frozen",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            LONG,
+                            INT,
+                            INT,
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            FLOAT,
+                            FLOAT,
+                            INT
+                    )
+            );
+            radianceContextBindVertexResources = downcall(
+                    lookup,
+                    "metallum_radiance_context_bind_vertex_resources",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            radianceContextGetStats = downcall(
+                    lookup,
+                    "metallum_radiance_context_get_stats",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            radianceContextDestroy = downcall(
+                    lookup,
+                    "metallum_radiance_context_destroy",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
 
             MTLDeviceMaxMemoryAllocationSize = downcall(lookup, "metallum_MTLDevice_maxMemoryAllocationSize", FunctionDescriptor.of(LONG, ValueLayout.ADDRESS));
             MTLFXSpatialScalerSupportsDevice = downcall(
@@ -863,6 +902,11 @@ public final class MetalNativeBridge {
     private static final MethodHandle dynamicShadowUploadShapesV1;
     private static final MethodHandle encodeTemporalDiagnosticsV2;
     private static final MethodHandle commitEntityVelocityReplay;
+    private static final MethodHandle radianceContextCreate;
+    private static final MethodHandle radianceContextUploadSourceFrozen;
+    private static final MethodHandle radianceContextBindVertexResources;
+    private static final MethodHandle radianceContextGetStats;
+    private static final MethodHandle radianceContextDestroy;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
     private static final MethodHandle MTLDeviceMakeCommandQueue;
@@ -1499,6 +1543,77 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_dynamic_shadow_upload_shapes_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_radiance_context_create(
+            final MemorySegment device,
+            final MemorySegment queue,
+            final long worldGen
+    ) {
+        try {
+            return (MemorySegment) radianceContextCreate.invokeExact(segment(device), segment(queue), worldGen);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_create", throwable);
+        }
+    }
+
+    public static boolean metallum_radiance_context_upload_source_frozen(
+            final MemorySegment context,
+            final long worldGen,
+            final int originX,
+            final int originY,
+            final int originZ,
+            final MemorySegment rgbaPtr,
+            final MemorySegment validityPtr,
+            final float strength,
+            final float roughness,
+            final boolean contributionOnly
+    ) {
+        try {
+            int result = (int) radianceContextUploadSourceFrozen.invokeExact(
+                    segment(context), worldGen, originX, originY, originZ,
+                    segment(rgbaPtr), segment(validityPtr), strength, roughness,
+                    contributionOnly ? 1 : 0);
+            return result == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_upload_source_frozen", throwable);
+        }
+    }
+
+    /**
+     * Dedicated raw-handle binding path for the reflection context.  The context owns every
+     * Metal resource, so Java never receives retainable texture or buffer pointers.
+     */
+    public static boolean metallum_radiance_context_bind_vertex_resources(
+            final MemorySegment context,
+            final MemorySegment encoder
+    ) {
+        try {
+            int result = (int) radianceContextBindVertexResources.invokeExact(segment(context), segment(encoder));
+            return result == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_bind_vertex_resources", throwable);
+        }
+    }
+
+    public static boolean metallum_radiance_context_get_stats(
+            final MemorySegment context,
+            final MemorySegment outStats
+    ) {
+        try {
+            int result = (int) radianceContextGetStats.invokeExact(segment(context), segment(outStats));
+            return result == 1;
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_get_stats", throwable);
+        }
+    }
+
+    public static void metallum_radiance_context_destroy(final MemorySegment context) {
+        try {
+            radianceContextDestroy.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_destroy", throwable);
         }
     }
 

@@ -54,9 +54,12 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     // A missing voxel metallib/source must fail context creation, never Vanilla/L3/L4.
     case voxelOccupancy
     case dynamicVoxelShadow
+    // This is opt-in frozen-prototype work. A missing source/metallib must fail only the
+    // prototype context; it must never affect ordinary Advanced startup.
+    case radianceClipmap
 
     static var startupMandatory: [Self] {
-        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy && $0 != .dynamicVoxelShadow }
+        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy && $0 != .dynamicVoxelShadow && $0 != .radianceClipmap }
     }
 
     var sourceFileName: String {
@@ -69,6 +72,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .clusterBuild: "MetallumClusterBuild.metal"
         case .voxelOccupancy: "MetallumVoxelOccupancy.metal"
         case .dynamicVoxelShadow: "MetallumDynamicVoxelShadow.metal"
+        case .radianceClipmap: "MetallumRadianceClipmap.metal"
         }
     }
 
@@ -133,6 +137,12 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
             ]
         case .dynamicVoxelShadow:
             ["metallum_dynamic_voxel_shadow_v1"]
+        case .radianceClipmap:
+            [
+                "metallum_radiance_downsample_mip",
+                "metallum_directional_probe_build_frozen",
+                "metallum_directional_probe_downsample_mip"
+            ]
         }
     }
 }
@@ -14576,5 +14586,420 @@ public func metallum_MTLDevice_makeRenderPipelineState(
             NSLog("[metallum] Failed to create render pipeline state: %@", String(describing: error))
             return nil
         }
+    }
+}
+
+// MARK: - Frozen real-world reflection prototype
+
+// The Java layout is deliberately explicit: Int32 plus four bytes of padding before UInt64.
+// Keep these offsets synchronized with RadianceGpuResources.GpuStats.
+public struct MetallumFrozenReflectionStats {
+    public var ready: Int32
+    public var padding0: Int32 = 0
+    public var worldGeneration: UInt64
+    public var persistentBytes: UInt64
+    public var uploadCount: UInt64
+    public var sourceMipBuildCount: UInt64
+    public var originX: Int32
+    public var originY: Int32
+    public var originZ: Int32
+    public var probeReady: Int32
+    public var probeBytes: UInt64
+    public var probeBuildCount: UInt64
+    public var probeMipBuildCount: UInt64
+    public var preparationGpuNanoseconds: UInt64
+    public var probeOriginX: Int32
+    public var probeOriginY: Int32
+    public var probeOriginZ: Int32
+    public var buildInFlight: Int32
+}
+
+private struct MetallumFrozenReflectionBuildParameters {
+    var sourceOriginAndSpan: SIMD4<Int32>
+    var probeOriginAndSpan: SIMD4<Int32>
+}
+
+private final class MetallumFrozenReflectionContext {
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let sourceRadiance: MTLTexture
+    private let sourceValidity: MTLTexture
+    private let sourceRadianceMips: [MTLTexture]
+    private let sourceValidityMips: [MTLTexture]
+    private let probeRadiance: MTLTexture
+    private let probeMoment: MTLTexture
+    private let probeRadianceMips: [MTLTexture]
+    private let probeMomentMips: [MTLTexture]
+    private let vertexSampler: MTLSamplerState
+    private let parameters: MTLBuffer
+    private let sourceMipPipeline: MTLComputePipelineState
+    private let probeBuildPipeline: MTLComputePipelineState
+    private let probeMipPipeline: MTLComputePipelineState
+    private let lock = NSLock()
+
+    private var ready = false
+    private var probeReady = false
+    private var buildInFlight = false
+    private var worldGeneration: UInt64
+    private var origin: (Int32, Int32, Int32) = (0, 0, 0)
+    private var uploadCount: UInt64 = 0
+    private var sourceMipBuildCount: UInt64 = 0
+    private var probeBuildCount: UInt64 = 0
+    private var probeMipBuildCount: UInt64 = 0
+    private var preparationGpuNanoseconds: UInt64 = 0
+
+    init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
+        self.device = device
+        self.commandQueue = commandQueue
+        self.worldGeneration = worldGeneration
+
+        func textureDescriptor(_ format: MTLPixelFormat, edge: Int) -> MTLTextureDescriptor {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type3D
+            descriptor.pixelFormat = format
+            descriptor.width = edge
+            descriptor.height = edge
+            descriptor.depth = edge
+            descriptor.mipmapLevelCount = edge == 64 ? 6 : 6
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            descriptor.storageMode = .private
+            return descriptor
+        }
+
+        let sourceRadianceDescriptor = textureDescriptor(.rgba16Float, edge: 64)
+        let sourceValidityDescriptor = textureDescriptor(.r8Unorm, edge: 64)
+        let probeDescriptor = textureDescriptor(.rgba16Float, edge: 32)
+        guard let sourceRadiance = device.makeTexture(descriptor: sourceRadianceDescriptor),
+              let sourceValidity = device.makeTexture(descriptor: sourceValidityDescriptor),
+              let probeRadiance = device.makeTexture(descriptor: probeDescriptor),
+              let probeMoment = device.makeTexture(descriptor: probeDescriptor),
+              let parameterBuffer = device.makeBuffer(length: 64, options: .storageModeShared)
+        else {
+            return nil
+        }
+        sourceRadiance.label = "Metallum frozen reflection source radiance"
+        sourceValidity.label = "Metallum frozen reflection source validity"
+        probeRadiance.label = "Metallum frozen reflection directional radiance"
+        probeMoment.label = "Metallum frozen reflection directional moment"
+        parameterBuffer.label = "Metallum frozen reflection vertex parameters"
+
+        var radianceMips: [MTLTexture] = []
+        var validityMips: [MTLTexture] = []
+        var probeRadianceMips: [MTLTexture] = []
+        var probeMomentMips: [MTLTexture] = []
+        for mip in 0..<6 {
+            guard let radianceView = sourceRadiance.makeTextureView(
+                    pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
+                  let validityView = sourceValidity.makeTextureView(
+                    pixelFormat: .r8Unorm, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
+                  let probeRadianceView = probeRadiance.makeTextureView(
+                    pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
+                  let probeMomentView = probeMoment.makeTextureView(
+                    pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1)
+            else {
+                return nil
+            }
+            radianceMips.append(radianceView)
+            validityMips.append(validityView)
+            probeRadianceMips.append(probeRadianceView)
+            probeMomentMips.append(probeMomentView)
+        }
+
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        samplerDescriptor.mipFilter = .linear
+        samplerDescriptor.sAddressMode = .clampToEdge
+        samplerDescriptor.tAddressMode = .clampToEdge
+        samplerDescriptor.rAddressMode = .clampToEdge
+        guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else {
+            return nil
+        }
+
+        do {
+            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .radianceClipmap)
+            guard let sourceMip = library.makeFunction(name: "metallum_radiance_downsample_mip"),
+                  let probeBuild = library.makeFunction(name: "metallum_directional_probe_build_frozen"),
+                  let probeMip = library.makeFunction(name: "metallum_directional_probe_downsample_mip")
+            else {
+                return nil
+            }
+            self.sourceMipPipeline = try device.makeComputePipelineState(function: sourceMip)
+            self.probeBuildPipeline = try device.makeComputePipelineState(function: probeBuild)
+            self.probeMipPipeline = try device.makeComputePipelineState(function: probeMip)
+        } catch {
+            NSLog("[metallum] frozen reflection pipeline creation failed: %@", String(describing: error))
+            return nil
+        }
+
+        self.sourceRadiance = sourceRadiance
+        self.sourceValidity = sourceValidity
+        self.sourceRadianceMips = radianceMips
+        self.sourceValidityMips = validityMips
+        self.probeRadiance = probeRadiance
+        self.probeMoment = probeMoment
+        self.probeRadianceMips = probeRadianceMips
+        self.probeMomentMips = probeMomentMips
+        self.vertexSampler = sampler
+        self.parameters = parameterBuffer
+    }
+
+    func queueBuild(
+        worldGeneration: UInt64,
+        originX: Int32,
+        originY: Int32,
+        originZ: Int32,
+        rgba: UnsafeRawPointer,
+        validity: UnsafeRawPointer,
+        strength: Float,
+        roughness: Float,
+        contributionOnly: Bool
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !buildInFlight else {
+            NSLog("[metallum] frozen reflection build rejected: prior build is in flight")
+            return false
+        }
+        guard let radianceStaging = device.makeBuffer(
+                bytes: rgba, length: 64 * 64 * 64 * 4 * MemoryLayout<UInt16>.size, options: .storageModeShared),
+              let validityStaging = device.makeBuffer(
+                length: 256 * 64 * 64, options: .storageModeShared) else {
+            NSLog("[metallum] frozen reflection build rejected: staging allocation failed")
+            return false
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            NSLog("[metallum] frozen reflection build rejected: command buffer or blit encoder unavailable")
+            return false
+        }
+
+        // Buffer-to-texture copies require an aligned row pitch. Keep the Java snapshot compact,
+        // then expand only this transient native staging buffer; the private R8 field itself stays
+        // exactly 64^3 bytes (plus its allocated mip chain).
+        let validityDestination = validityStaging.contents()
+        for z in 0..<64 {
+            for y in 0..<64 {
+                let sourceOffset = (z * 64 + y) * 64
+                let destinationOffset = (z * 64 + y) * 256
+                memcpy(validityDestination.advanced(by: destinationOffset), validity.advanced(by: sourceOffset), 64)
+            }
+        }
+
+        self.ready = false
+        self.probeReady = false
+        self.buildInFlight = true
+        self.worldGeneration = worldGeneration
+        self.origin = (originX, originY, originZ)
+        writeVertexParameters(originX: originX, originY: originY, originZ: originZ,
+                ready: false, strength: strength, roughness: roughness, contributionOnly: contributionOnly)
+        commandBuffer.label = "Metallum Frozen Reflection Build"
+        blit.label = "Frozen reflection source upload"
+        blit.copy(from: radianceStaging, sourceOffset: 0, sourceBytesPerRow: 64 * 4 * 2,
+                sourceBytesPerImage: 64 * 64 * 4 * 2, sourceSize: MTLSize(width: 64, height: 64, depth: 64),
+                to: sourceRadiance, destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.copy(from: validityStaging, sourceOffset: 0, sourceBytesPerRow: 256,
+                sourceBytesPerImage: 256 * 64, sourceSize: MTLSize(width: 64, height: 64, depth: 64),
+                to: sourceValidity, destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+
+        for mip in 0..<5 {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                self.buildInFlight = false
+                NSLog("[metallum] frozen reflection build rejected: source mip encoder %d unavailable", mip)
+                return false
+            }
+            let edge = 64 >> (mip + 1)
+            encoder.setComputePipelineState(sourceMipPipeline)
+            encoder.setTexture(sourceRadianceMips[mip], index: 0)
+            encoder.setTexture(sourceValidityMips[mip], index: 1)
+            encoder.setTexture(sourceRadianceMips[mip + 1], index: 2)
+            encoder.setTexture(sourceValidityMips[mip + 1], index: 3)
+            encoder.dispatchThreads(MTLSize(width: edge, height: edge, depth: edge),
+                    threadsPerThreadgroup: MTLSize(width: min(8, edge), height: min(8, edge), depth: min(8, edge)))
+            encoder.endEncoding()
+        }
+
+        guard let probeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            self.buildInFlight = false
+            NSLog("[metallum] frozen reflection build rejected: directional probe encoder unavailable")
+            return false
+        }
+        var parameters = MetallumFrozenReflectionBuildParameters(
+                sourceOriginAndSpan: SIMD4<Int32>(originX, originY, originZ, 128),
+                probeOriginAndSpan: SIMD4<Int32>(originX, originY, originZ, 128))
+        probeEncoder.setComputePipelineState(probeBuildPipeline)
+        probeEncoder.setTexture(sourceRadiance, index: 0)
+        probeEncoder.setTexture(sourceValidity, index: 1)
+        probeEncoder.setTexture(probeRadianceMips[0], index: 2)
+        probeEncoder.setTexture(probeMomentMips[0], index: 3)
+        withUnsafeBytes(of: &parameters) { bytes in
+            probeEncoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 0)
+        }
+        probeEncoder.dispatchThreads(MTLSize(width: 32, height: 32, depth: 32),
+                threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 4))
+        probeEncoder.endEncoding()
+
+        for mip in 1..<6 {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                self.buildInFlight = false
+                NSLog("[metallum] frozen reflection build rejected: probe mip encoder %d unavailable", mip)
+                return false
+            }
+            let edge = 32 >> mip
+            encoder.setComputePipelineState(probeMipPipeline)
+            encoder.setTexture(probeRadianceMips[mip - 1], index: 0)
+            encoder.setTexture(probeMomentMips[mip - 1], index: 1)
+            encoder.setTexture(probeRadianceMips[mip], index: 2)
+            encoder.setTexture(probeMomentMips[mip], index: 3)
+            encoder.dispatchThreads(MTLSize(width: edge, height: edge, depth: edge),
+                    threadsPerThreadgroup: MTLSize(width: min(4, edge), height: min(4, edge), depth: min(4, edge)))
+            encoder.endEncoding()
+        }
+
+        commandBuffer.addCompletedHandler { [self, radianceStaging, validityStaging] completed in
+            _ = radianceStaging
+            _ = validityStaging
+            lock.lock()
+            defer { lock.unlock() }
+            buildInFlight = false
+            if completed.status == .completed {
+                ready = true
+                probeReady = true
+                uploadCount &+= 1
+                sourceMipBuildCount &+= 1
+                probeBuildCount &+= 1
+                probeMipBuildCount &+= 1
+                let elapsed = max(0.0, completed.gpuEndTime - completed.gpuStartTime)
+                preparationGpuNanoseconds = UInt64((elapsed * 1_000_000_000.0).rounded())
+                writeVertexParameters(originX: originX, originY: originY, originZ: originZ,
+                        ready: true, strength: strength, roughness: roughness, contributionOnly: contributionOnly)
+            } else {
+                NSLog("[metallum] frozen reflection build failed: %@", String(describing: completed.error))
+            }
+        }
+        commandBuffer.commit()
+        return true
+    }
+
+    func bindVertexResources(_ encoder: MTLRenderCommandEncoder) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ready && probeReady && !buildInFlight else { return false }
+        encoder.setVertexTexture(probeRadiance, index: 10)
+        encoder.setVertexSamplerState(vertexSampler, index: 10)
+        encoder.setVertexTexture(probeMoment, index: 11)
+        encoder.setVertexSamplerState(vertexSampler, index: 11)
+        encoder.setVertexBuffer(parameters, offset: 0, index: 27)
+        return true
+    }
+
+    func stats() -> MetallumFrozenReflectionStats {
+        lock.lock()
+        defer { lock.unlock() }
+        return MetallumFrozenReflectionStats(
+                ready: ready ? 1 : 0,
+                worldGeneration: worldGeneration,
+                persistentBytes: UInt64(sourceRadiance.allocatedSize + sourceValidity.allocatedSize),
+                uploadCount: uploadCount,
+                sourceMipBuildCount: sourceMipBuildCount,
+                originX: origin.0, originY: origin.1, originZ: origin.2,
+                probeReady: probeReady ? 1 : 0,
+                probeBytes: UInt64(probeRadiance.allocatedSize + probeMoment.allocatedSize),
+                probeBuildCount: probeBuildCount,
+                probeMipBuildCount: probeMipBuildCount,
+                preparationGpuNanoseconds: preparationGpuNanoseconds,
+                probeOriginX: origin.0, probeOriginY: origin.1, probeOriginZ: origin.2,
+                buildInFlight: buildInFlight ? 1 : 0)
+    }
+
+    private func writeVertexParameters(
+        originX: Int32, originY: Int32, originZ: Int32, ready: Bool,
+        strength: Float, roughness: Float, contributionOnly: Bool
+    ) {
+        let raw = parameters.contents()
+        raw.storeBytes(of: originX, toByteOffset: 0, as: Int32.self)
+        raw.storeBytes(of: originY, toByteOffset: 4, as: Int32.self)
+        raw.storeBytes(of: originZ, toByteOffset: 8, as: Int32.self)
+        raw.storeBytes(of: Int32(128), toByteOffset: 12, as: Int32.self)
+        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 16, as: Float.self)
+        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 20, as: Float.self)
+        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 24, as: Float.self)
+        raw.storeBytes(of: ready ? Float(1.0) : Float(0.0), toByteOffset: 28, as: Float.self)
+        raw.storeBytes(of: strength, toByteOffset: 32, as: Float.self)
+        raw.storeBytes(of: roughness, toByteOffset: 36, as: Float.self)
+        raw.storeBytes(of: contributionOnly ? Float(1.0) : Float(0.0), toByteOffset: 40, as: Float.self)
+        raw.storeBytes(of: Float(0.0), toByteOffset: 44, as: Float.self)
+        raw.storeBytes(of: UInt64(0), toByteOffset: 48, as: UInt64.self)
+        raw.storeBytes(of: UInt64(0), toByteOffset: 56, as: UInt64.self)
+    }
+}
+
+@_cdecl("metallum_radiance_context_create")
+public func metallum_radiance_context_create(
+    _ rawDevice: UnsafeMutableRawPointer?, _ rawQueue: UnsafeMutableRawPointer?, _ worldGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let rawDevice, let rawQueue,
+              let device = Unmanaged<AnyObject>.fromOpaque(rawDevice).takeUnretainedValue() as? MTLDevice,
+              let queue = Unmanaged<AnyObject>.fromOpaque(rawQueue).takeUnretainedValue() as? MTLCommandQueue,
+              let context = MetallumFrozenReflectionContext(device: device, commandQueue: queue, worldGeneration: worldGeneration)
+        else { return nil }
+        return Unmanaged.passRetained(context).toOpaque()
+    }
+}
+
+@_cdecl("metallum_radiance_context_upload_source_frozen")
+public func metallum_radiance_context_upload_source_frozen(
+    _ rawContext: UnsafeMutableRawPointer?, _ worldGeneration: UInt64,
+    _ originX: Int32, _ originY: Int32, _ originZ: Int32,
+    _ rgba: UnsafeRawPointer?, _ validity: UnsafeRawPointer?,
+    _ strength: Float, _ roughness: Float, _ contributionOnly: Int32
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rgba, let validity else {
+            NSLog("[metallum] frozen reflection upload rejected: context=%@ rgba=%@ validity=%@",
+                    rawContext == nil ? "nil" : "set", rgba == nil ? "nil" : "set", validity == nil ? "nil" : "set")
+            return 0
+        }
+        let context = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeUnretainedValue()
+        return context.queueBuild(worldGeneration: worldGeneration, originX: originX, originY: originY, originZ: originZ,
+                rgba: rgba, validity: validity, strength: strength, roughness: roughness,
+                contributionOnly: contributionOnly != 0) ? 1 : 0
+    }
+}
+
+@_cdecl("metallum_radiance_context_bind_vertex_resources")
+public func metallum_radiance_context_bind_vertex_resources(
+    _ rawContext: UnsafeMutableRawPointer?, _ rawEncoder: UnsafeMutableRawPointer?
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rawEncoder,
+              let encoder = Unmanaged<AnyObject>.fromOpaque(rawEncoder).takeUnretainedValue() as? MTLRenderCommandEncoder
+        else { return 0 }
+        let context = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeUnretainedValue()
+        return context.bindVertexResources(encoder) ? 1 : 0
+    }
+}
+
+@_cdecl("metallum_radiance_context_get_stats")
+public func metallum_radiance_context_get_stats(
+    _ rawContext: UnsafeMutableRawPointer?, _ destination: UnsafeMutableRawPointer?
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let destination else { return 0 }
+        var snapshot = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeUnretainedValue().stats()
+        destination.copyMemory(from: &snapshot, byteCount: MemoryLayout<MetallumFrozenReflectionStats>.size)
+        return 1
+    }
+}
+
+@_cdecl("metallum_radiance_context_destroy")
+public func metallum_radiance_context_destroy(_ rawContext: UnsafeMutableRawPointer?) {
+    autoreleasepool {
+        guard let rawContext else { return }
+        _ = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeRetainedValue()
     }
 }

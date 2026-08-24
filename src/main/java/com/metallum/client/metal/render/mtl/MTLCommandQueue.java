@@ -31,6 +31,10 @@ public final class MTLCommandQueue {
         return new MTLCommandBuffer(commandBuffer);
     }
 
+    public MemorySegment nativeHandle() {
+        return this.handle;
+    }
+
     public void close() {
         if (MetalNativeBridge.isNullHandle(handle)) {
             return;

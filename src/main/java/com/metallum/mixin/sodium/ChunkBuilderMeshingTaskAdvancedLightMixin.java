@@ -7,6 +7,11 @@ import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionCandidate;
 import com.metallum.client.lighting.LightSectionTask;
 import com.metallum.client.lighting.SodiumStaticLightExtractor;
+import com.metallum.client.lighting.reflection.FrozenReflectionCandidateSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionCandidate;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionTask;
+import com.metallum.client.lighting.reflection.FrozenReflectionTaskSlot;
 import com.metallum.client.sodium.SodiumRelightFastOutputSlot;
 import com.metallum.client.voxel.SodiumVoxelSectionExtractor;
 import com.metallum.client.voxel.VoxelCandidateSlot;
@@ -30,7 +35,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /** Runs one 16^3 emitter scan after the real Sodium full-mesh implementation returns. */
 @Mixin(value = ChunkBuilderMeshingTask.class, remap = false)
-abstract class ChunkBuilderMeshingTaskAdvancedLightMixin implements AdvancedLightTaskSlot, VoxelTaskSlot {
+abstract class ChunkBuilderMeshingTaskAdvancedLightMixin implements AdvancedLightTaskSlot, VoxelTaskSlot,
+        FrozenReflectionTaskSlot {
     @Shadow
     @Final
     private ChunkRenderContext renderContext;
@@ -42,6 +48,10 @@ abstract class ChunkBuilderMeshingTaskAdvancedLightMixin implements AdvancedLigh
     @Unique
     @Nullable
     private VoxelSectionTask metallum$voxelSectionTask;
+
+    @Unique
+    @Nullable
+    private FrozenReflectionSectionTask metallum$frozenReflectionTask;
 
     @Override
     public synchronized void metallum$setAdvancedLightTask(final LightSectionTask task) {
@@ -75,6 +85,22 @@ abstract class ChunkBuilderMeshingTaskAdvancedLightMixin implements AdvancedLigh
         return task;
     }
 
+    @Override
+    public synchronized void metallum$setFrozenReflectionTask(final FrozenReflectionSectionTask task) {
+        if (task == null || this.metallum$frozenReflectionTask != null) {
+            throw new IllegalStateException("Frozen reflection task stamp was assigned more than once");
+        }
+        this.metallum$frozenReflectionTask = task;
+    }
+
+    @Override
+    @Nullable
+    public synchronized FrozenReflectionSectionTask metallum$claimFrozenReflectionTask() {
+        FrozenReflectionSectionTask task = this.metallum$frozenReflectionTask;
+        this.metallum$frozenReflectionTask = null;
+        return task;
+    }
+
     @Inject(
             method = "execute(Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildContext;Lnet/caffeinemc/mods/sodium/client/util/task/CancellationToken;)Lnet/caffeinemc/mods/sodium/client/render/chunk/compile/ChunkBuildOutput;",
             at = @At("RETURN")
@@ -87,6 +113,22 @@ abstract class ChunkBuilderMeshingTaskAdvancedLightMixin implements AdvancedLigh
         ChunkBuildOutput output = cir.getReturnValue();
         if (output == null || !AdvancedLightingRuntime.shouldCollect()) {
             return;
+        }
+        FrozenReflectionSectionTask reflectionTask = this.metallum$claimFrozenReflectionTask();
+        if (reflectionTask != null) {
+            try {
+                FrozenReflectionSectionCandidate candidate = new FrozenReflectionSectionCandidate(
+                        reflectionTask,
+                        com.metallum.client.radiance.SodiumRadianceSectionExtractor.extract(
+                                reflectionTask.sectionKey(),
+                                reflectionTask.worldGeneration(),
+                                context.cache.getWorldSlice()
+                        )
+                );
+                ((FrozenReflectionCandidateSlot) output).metallum$setFrozenReflectionCandidate(candidate);
+            } catch (RuntimeException ignored) {
+                FrozenReflectionFieldController.global().noteCollectionFailure(reflectionTask);
+            }
         }
         LightSectionTask task = this.metallum$claimAdvancedLightTask();
         if (task == null) {

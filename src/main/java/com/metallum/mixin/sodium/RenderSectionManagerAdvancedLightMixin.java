@@ -5,6 +5,10 @@ import com.metallum.client.lighting.AdvancedLightResidentSlot;
 import com.metallum.client.lighting.AdvancedLightTaskSlot;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionTask;
+import com.metallum.client.lighting.reflection.FrozenReflectionEmptyTaskSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionTask;
+import com.metallum.client.lighting.reflection.FrozenReflectionTaskSlot;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelEmptyTaskSlot;
 import com.metallum.client.voxel.VoxelResidentSlot;
@@ -37,6 +41,9 @@ abstract class RenderSectionManagerAdvancedLightMixin {
     @Final
     private SectionStorage renderSections;
 
+    @Shadow
+    public abstract void scheduleRebuild(int sectionX, int sectionY, int sectionZ, boolean playerChanged);
+
     @Inject(
             method = "<init>(Lnet/minecraft/client/multiplayer/ClientLevel;ILnet/caffeinemc/mods/sodium/client/render/chunk/translucent_sorting/SortBehavior;)V",
             at = @At("RETURN")
@@ -52,6 +59,7 @@ abstract class RenderSectionManagerAdvancedLightMixin {
             registry.observeHook(AdvancedLightRegistry.Hook.WORLD_LIFECYCLE);
             registry.openWorld(level, metallum$dimensionId(level));
             VoxelClipmapController.global().openWorld(level, metallum$dimensionId(level));
+            FrozenReflectionFieldController.global().openWorld(level);
         }
     }
 
@@ -100,6 +108,16 @@ abstract class RenderSectionManagerAdvancedLightMixin {
             // exact revision/owner stamp until that output is created.
             ((VoxelEmptyTaskSlot) section).metallum$setEmptyVoxelSectionTask(voxelTask);
         }
+        FrozenReflectionSectionTask reflectionTask = FrozenReflectionFieldController.global().beginSectionTask(
+                this.level, section.getPosition().asLong()
+        );
+        if (reflectionTask != null) {
+            if (task != null) {
+                ((FrozenReflectionTaskSlot) task).metallum$setFrozenReflectionTask(reflectionTask);
+            } else {
+                ((FrozenReflectionEmptyTaskSlot) section).metallum$setEmptyFrozenReflectionTask(reflectionTask);
+            }
+        }
     }
 
     @Inject(method = "onSectionRemoved(III)V", at = @At("HEAD"))
@@ -126,12 +144,14 @@ abstract class RenderSectionManagerAdvancedLightMixin {
                 ? resident.metallum$getVoxelOwnerToken()
                 : 0L;
         VoxelClipmapController.global().removeSectionIfOwner(this.level, sectionKey, voxelOwner);
+        FrozenReflectionFieldController.global().removeSection(this.level, sectionKey);
     }
 
     @Inject(method = "destroy()V", at = @At("HEAD"))
     private void metallum$closeAdvancedLightWorld(final CallbackInfo ci) {
         AdvancedLightRegistry.global().closeWorld(this.level);
         VoxelClipmapController.global().closeWorld(this.level);
+        FrozenReflectionFieldController.global().closeWorld(this.level);
     }
 
     @Inject(method = "prepareFrame(Lorg/joml/Vector3dc;)V", at = @At("HEAD"))
@@ -143,6 +163,26 @@ abstract class RenderSectionManagerAdvancedLightMixin {
                     camera.y(),
                     camera.z()
             );
+            if (FrozenReflectionFieldController.global().activateAtCamera(
+                    this.level, camera.x(), camera.y(), camera.z()
+            )) {
+                // One bounded initial collection pass; the frozen field deliberately never follows
+                // later camera movement. If an expected section cannot publish, the controller
+                // remains invalid/pending rather than borrowing data from a different region.
+                FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
+                for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
+                    for (int y = 0; y < FrozenReflectionFieldController.SECTIONS_PER_EDGE; y++) {
+                        for (int x = 0; x < FrozenReflectionFieldController.SECTIONS_PER_EDGE; x++) {
+                            this.scheduleRebuild(
+                                    (snapshot.originX() >> 4) + x,
+                                    (snapshot.originY() >> 4) + y,
+                                    (snapshot.originZ() >> 4) + z,
+                                    true
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

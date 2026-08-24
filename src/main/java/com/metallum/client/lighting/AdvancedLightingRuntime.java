@@ -28,6 +28,40 @@ public final class AdvancedLightingRuntime {
         }
     }
 
+    /** Most recent fully prepared Advanced frame, used only to invalidate benchmarks. */
+    public record FrameHealth(
+            boolean observed,
+            boolean l3Active,
+            boolean l5Active,
+            boolean l6Active,
+            long generationId,
+            long submitIndex
+    ) {
+        public static FrameHealth none() {
+            return new FrameHealth(false, false, false, false, -1L, -1L);
+        }
+    }
+
+    /** Immutable telemetry snapshot; no renderer resource is exposed to the benchmark thread. */
+    public record BenchmarkStatus(
+            boolean requested,
+            boolean active,
+            Admission admission,
+            FrameHealth frame,
+            String benchmarkBlocker
+    ) {
+        public BenchmarkStatus {
+            Objects.requireNonNull(admission, "admission");
+            Objects.requireNonNull(frame, "frame");
+            benchmarkBlocker = benchmarkBlocker == null ? "" : benchmarkBlocker;
+        }
+
+        public String blocker() {
+            return !this.benchmarkBlocker.isEmpty()
+                    ? this.benchmarkBlocker : this.admission.blocker();
+        }
+    }
+
     private static volatile boolean requested;
     private static volatile GateState nativeState = GateState.PENDING;
     private static volatile GateState shaderState = GateState.PENDING;
@@ -36,6 +70,8 @@ public final class AdvancedLightingRuntime {
     private static String nativeBlocker = "native lighting backend is not initialized";
     private static String shaderBlocker = "Advanced shader coverage is not initialized";
     private static String registryBlocker = "";
+    private static FrameHealth frameHealth = FrameHealth.none();
+    private static String benchmarkBlocker = "";
     private static long epoch;
     private static long registryAdmissionGeneration;
 
@@ -51,6 +87,8 @@ public final class AdvancedLightingRuntime {
         nativeBlocker = "native lighting backend is not initialized";
         shaderBlocker = "Advanced shader coverage is not initialized";
         registryBlocker = "";
+        frameHealth = FrameHealth.none();
+        benchmarkBlocker = "";
         registryAdmissionGeneration = AdvancedLightRegistry.global().resetAdmissionHealth();
         AdvancedLightRegistry.global().clear();
         epoch = Math.addExact(epoch, 1L);
@@ -62,6 +100,8 @@ public final class AdvancedLightingRuntime {
         }
         requested = value;
         active = false;
+        frameHealth = FrameHealth.none();
+        benchmarkBlocker = "";
         if (!value) {
             AdvancedLightRegistry.global().clear();
         }
@@ -177,7 +217,44 @@ public final class AdvancedLightingRuntime {
             return false;
         }
         active = value;
+        if (value) {
+            frameHealth = FrameHealth.none();
+            benchmarkBlocker = "";
+        }
         return true;
+    }
+
+    /**
+     * Published after the frame's L3/L5/L6 work has been prepared. A normal
+     * client may continue after a transient fallback, but a benchmark cannot.
+     */
+    public static synchronized void reportFrameHealth(
+            final long generationId,
+            final long submitIndex,
+            final boolean l3Active,
+            final boolean l5Active,
+            final boolean l6Active
+    ) {
+        if (generationId < 0L || submitIndex < 0L) {
+            throw new IllegalArgumentException("Advanced frame identity must be non-negative");
+        }
+        frameHealth = new FrameHealth(true, l3Active, l5Active, l6Active, generationId, submitIndex);
+    }
+
+    /** Latches a run-invalid reason until the next successful Advanced generation. */
+    public static synchronized void reportBenchmarkFrameFallback(final String blocker) {
+        benchmarkBlocker = requireBlocker(blocker);
+        frameHealth = FrameHealth.none();
+    }
+
+    public static synchronized BenchmarkStatus benchmarkStatus() {
+        return new BenchmarkStatus(
+                requested,
+                active,
+                admission(),
+                frameHealth,
+                benchmarkBlocker
+        );
     }
 
     public static boolean shouldCollect() {

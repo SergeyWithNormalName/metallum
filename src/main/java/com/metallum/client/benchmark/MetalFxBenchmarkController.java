@@ -6,6 +6,8 @@ import com.metallum.client.metal.render.MetalGpuTiming;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
+import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.sodium.SodiumLightSidecar;
 import com.metallum.client.sodium.SodiumLightSidecarPacking;
@@ -395,6 +397,7 @@ public final class MetalFxBenchmarkController {
     private final boolean fiOverlayRequested;
     private final int fiMinimumGenerated;
     private final boolean useCurrentWindow;
+    private final BenchmarkLightingAdmission.RequiredModel expectedLightingModel;
     private final boolean captureScreenshots;
     private final List<BenchmarkScalingMode> sequence;
     private final RouteConfig route;
@@ -411,6 +414,7 @@ public final class MetalFxBenchmarkController {
     private long boundaryCheckToken;
     private int expectedFramebufferWidth;
     private int expectedFramebufferHeight;
+    private boolean advancedAdmissionLogged;
     private long targetMonitor;
     private VideoMode targetVideoMode;
     private Optional<VideoMode> originalFullscreenMode = Optional.empty();
@@ -484,6 +488,9 @@ public final class MetalFxBenchmarkController {
         boolean parsedFiValidationRequired = "1".equals(System.getenv("METALLUM_BENCHMARK_FI_REQUIRED"));
         boolean parsedFiOverlayRequested = false;
         int parsedFiMinimumGenerated = 0;
+        BenchmarkLightingAdmission.RequiredModel parsedExpectedLighting = parsedFiValidationRequired
+                ? BenchmarkLightingAdmission.RequiredModel.VANILLA
+                : BenchmarkLightingAdmission.RequiredModel.ADVANCED;
         try {
             parsedRoute = RouteConfig.fromEnvironment();
             parsedMaxFps = positiveIntStrict("METALLUM_BENCHMARK_MAX_FPS");
@@ -502,6 +509,9 @@ public final class MetalFxBenchmarkController {
             parsedAmbientOcclusion = requiredBoolean("METALLUM_BENCHMARK_AO");
             parsedResourcePackIds = requiredCsv("METALLUM_BENCHMARK_ACTIVE_RESOURCE_PACKS");
             parsedExpectedVsync = optionalBoolean("METALLUM_BENCHMARK_EXPECTED_VSYNC", false);
+            parsedExpectedLighting = BenchmarkLightingAdmission.RequiredModel.parse(
+                    requiredEnv("METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL")
+            );
             if (parsedFiValidationRequired) {
                 parsedFiOverlayRequested = optionalBoolean(
                         "METALLUM_BENCHMARK_FI_OVERLAY",
@@ -534,6 +544,7 @@ public final class MetalFxBenchmarkController {
         this.fiValidationRequired = parsedFiValidationRequired;
         this.fiOverlayRequested = parsedFiOverlayRequested;
         this.fiMinimumGenerated = parsedFiMinimumGenerated;
+        this.expectedLightingModel = parsedExpectedLighting;
         this.useCurrentWindow = "1".equals(System.getenv("METALLUM_BENCHMARK_CURRENT_WINDOW"));
         this.captureScreenshots = "1".equals(System.getenv("METALLUM_BENCHMARK_SCREENSHOTS"));
         this.expectedFramebufferWidth = this.targetWidth;
@@ -661,6 +672,11 @@ public final class MetalFxBenchmarkController {
 
     public void onPresentedFrame(final Minecraft minecraft) {
         if (this.stage != Stage.RUNNING) {
+            return;
+        }
+        String lightingAdmissionFailure = verifyLightingAdmission();
+        if (lightingAdmissionFailure != null) {
+            fail(minecraft, lightingAdmissionFailure);
             return;
         }
         String runtimeMismatch = runtimePacingMismatch(minecraft);
@@ -1699,6 +1715,11 @@ public final class MetalFxBenchmarkController {
         }
         if (this.routeStableFrames >= this.route.stableFrames()
                 && !this.routeServerTaskPending.get()) {
+            String lightingAdmissionFailure = verifyLightingAdmission();
+            if (lightingAdmissionFailure != null) {
+                fail(minecraft, lightingAdmissionFailure);
+                return;
+            }
             Metallum.LOGGER.info(
                     "METALLUM_BENCHMARK EVENT=ROUTE_READY route={} stable_frames={} pose=[{},{},{};{},{}] max_fps={} resolved_gui_scale={} resource_packs={}",
                     this.route.routeId(),
@@ -1725,6 +1746,53 @@ public final class MetalFxBenchmarkController {
                             + (reason == null ? "" : ": " + reason)
             );
         }
+    }
+
+    /**
+     * Makes the renderer's fail-closed behavior explicit to the benchmark.
+     * Interactive fallback is safe; using it as a cheaper timing workload is not.
+     */
+    private String verifyLightingAdmission() {
+        BenchmarkLightingAdmission.Decision decision = BenchmarkLightingAdmission.evaluate(
+                this.expectedLightingModel,
+                RendererConfig.lastLoadStatus(),
+                AdvancedLightingRuntime.benchmarkStatus()
+        );
+        boolean passed = decision.valid();
+        if (!passed || !this.advancedAdmissionLogged) {
+            if (passed) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected={} schema={} defaults_used={} requested={} resolved={} l3={} l5={} l6={} status=PASS generation={} shader_epoch={} reason=none",
+                        decision.required().name().toLowerCase(),
+                        decision.parsedSchema(),
+                        decision.defaultsUsed(),
+                        decision.requested(),
+                        decision.resolved(),
+                        decision.l3Active(),
+                        decision.l5Active(),
+                        decision.l6Active(),
+                        decision.generationId(),
+                        decision.shaderAdmissionEpoch()
+                );
+            } else {
+                Metallum.LOGGER.error(
+                        "METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected={} schema={} defaults_used={} requested={} resolved={} l3={} l5={} l6={} status=FAIL generation={} shader_epoch={} reason={}",
+                        decision.required().name().toLowerCase(),
+                        decision.parsedSchema(),
+                        decision.defaultsUsed(),
+                        decision.requested(),
+                        decision.resolved(),
+                        decision.l3Active(),
+                        decision.l5Active(),
+                        decision.l6Active(),
+                        decision.generationId(),
+                        decision.shaderAdmissionEpoch(),
+                        decision.reason()
+                );
+            }
+        }
+        this.advancedAdmissionLogged |= passed;
+        return passed ? null : "benchmark lighting admission failed: " + decision.reason();
     }
 
     private void beginBoundaryCheck(

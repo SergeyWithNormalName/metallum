@@ -2,6 +2,8 @@ package com.metallum.client.lighting.shader;
 
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
 import com.metallum.client.renderer.SunShadowLayout;
@@ -2921,9 +2923,62 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static final String SODIUM_VERTEX_DECLARATION =
             "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
                     + "out float metallumSkyVisibility;\n// " + MARKER;
+    private static final String SODIUM_VERTEX_DECLARATION_REFL =
+            "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
+                    + "out float metallumSkyVisibility;\n"
+                    + "layout(binding = " + VertexReflectionExperiment.RADIANCE_BINDING_SLOT + ") uniform sampler3D "
+                    + VertexReflectionExperiment.RADIANCE_SAMPLER_NAME + ";\n"
+                    + "layout(binding = " + VertexReflectionExperiment.MOMENT_BINDING_SLOT + ") uniform sampler3D "
+                    + VertexReflectionExperiment.MOMENT_SAMPLER_NAME + ";\n"
+                    + "layout(std430, binding = " + VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT + ") readonly buffer MetallumVoxelShadowParamsV1 {\n"
+                    + "    mat4 worldFromView;\n"
+                    + "    ivec4 cameraBlockAndFlags;\n"
+                    + "    vec4 cameraFractionAndMinTrans;\n"
+                    + "    uvec4 caps;\n"
+                    + "    uvec4 proxyAndFrame;\n"
+                    + "    ivec4 levelOriginAndSpan0;\n"
+                    + "    uvec4 levelLayout0;\n"
+                    + "    ivec4 levelOriginAndSpan1;\n"
+                    + "    uvec4 levelLayout1;\n"
+                    + "    ivec4 levelOriginAndSpan2;\n"
+                    + "    uvec4 levelLayout2;\n"
+                    + "    ivec4 levelOriginAndSpan3;\n"
+                    + "    uvec4 levelLayout3;\n"
+                    + "    uvec4 atlasContract;\n"
+                    + "    ivec4 atlasOriginAndSpan;\n"
+                    + "} metallumVoxelShadow;\n"
+                    + "layout(std430, binding = " + VertexReflectionExperiment.PARAMS_BINDING_SLOT + ") readonly buffer MetallumVertexReflectionParamsV1 {\n"
+                    + "    ivec4 fieldOriginAndSpan;\n"
+                    + "    vec4 fieldScaleAndFlags;\n"
+                    + "    vec4 reflectionStrengthAndSettings;\n"
+                    + "    vec4 reserved;\n"
+                    + "} metallumVertexReflection;\n"
+                    + "out vec4 metallumCoarseReflection;\n// " + MARKER;
     private static final String SODIUM_VERTEX_ASSIGNMENT =
             "    vec3 position = _vert_position + translation;\n"
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;";
+    private static final String SODIUM_VERTEX_ASSIGNMENT_REFL =
+            "    vec3 position = _vert_position + translation;\n"
+                    + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;\n"
+                    + "    vec3 metallumCameraBlockRel = metallumVoxelShadow.cameraFractionAndMinTrans.xyz + position;\n"
+                    + "    vec3 metallumWorldPos = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz) + metallumCameraBlockRel;\n"
+                    + "    vec3 metallumFieldOrigin = vec3(metallumVertexReflection.fieldOriginAndSpan.xyz);\n"
+                    + "    vec3 metallumUvw = (metallumWorldPos - metallumFieldOrigin) * metallumVertexReflection.fieldScaleAndFlags.xyz;\n"
+                    + "    vec4 metallumCoarseReflectionVal = vec4(0.0);\n"
+                    + "    if (metallumVertexReflection.fieldScaleAndFlags.w > 0.5\n"
+                    + "            && all(greaterThanEqual(metallumUvw, vec3(0.0)))\n"
+                    + "            && all(lessThan(metallumUvw, vec3(1.0)))) {\n"
+                    + "        vec4 metallumReflRad = texture(" + VertexReflectionExperiment.RADIANCE_SAMPLER_NAME + ", metallumUvw);\n"
+                    + "        vec4 metallumReflMom = texture(" + VertexReflectionExperiment.MOMENT_SAMPLER_NAME + ", metallumUvw);\n"
+                    + "        vec3 metallumReflDir = reflect(normalize(position), vec3(0.0, 1.0, 0.0));\n"
+                    + "        float metallumDirectionalWeight = clamp(1.0 + dot(metallumReflMom.xyz, metallumReflDir), 0.0, 2.0);\n"
+                    + "        float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0);\n"
+                    + "        float metallumContributionOnly = metallumVertexReflection.reflectionStrengthAndSettings.z;\n"
+                    + "        metallumCoarseReflectionVal = vec4(metallumReflRad.rgb * metallumDirectionalWeight\n"
+                    + "                * metallumVertexReflection.reflectionStrengthAndSettings.x,\n"
+                    + "                metallumContributionOnly > 0.5 ? -metallumConfidence : metallumConfidence);\n"
+                    + "    }\n"
+                    + "    metallumCoarseReflection = metallumCoarseReflectionVal;";
     private static final String SODIUM_MATERIAL_LIGHTMAP =
             "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
                     + "texture(u_LightTex, _vert_tex_light_coord));";
@@ -2935,10 +2990,17 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static final String SODIUM_FRAGMENT_INPUT =
             "in vec2 v_TexCoord;\nin vec3 metallumLightingPosition;\n"
                     + "in float metallumSkyVisibility;";
+    private static final String SODIUM_FRAGMENT_INPUT_REFL =
+            "in vec2 v_TexCoord;\nin vec3 metallumLightingPosition;\n"
+                    + "in float metallumSkyVisibility;\nin vec4 metallumCoarseReflection;";
     private static final String SODIUM_FOG_ANCHOR =
             "    fragColor = _linearFog(color, v_FragDistance, "
                     + "metallumMaterialDecodeColor(u_FogColor), u_EnvironmentFog, "
                     + "u_RenderFog, fadeFactor);";
+    private static final String SODIUM_CLUSTERED_DIRECT_ACCUMULATION =
+            "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n";
     private static final String SODIUM_DIRECT_BLOCK =
             "    vec3 metallumDerivativeNormal = cross(\n"
                     + "            dFdx(metallumLightingPosition),\n"
@@ -3047,6 +3109,23 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n"
                     + SODIUM_FOG_ANCHOR;
+    private static final String SODIUM_DIRECT_BLOCK_REFL =
+            SODIUM_DIRECT_BLOCK.replace(
+                    SODIUM_FOG_ANCHOR,
+                    "    bool metallumFrozenReflectionWater = metallumSurfaceEmission == 0u\n"
+                            + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
+                            + "            && metallumSurfaceBase == 3u;\n"
+                            + "    float metallumReflectionConfidence = abs(metallumCoarseReflection.a);\n"
+                            + "    if (metallumFrozenReflectionWater && metallumReflectionConfidence > 0.001) {\n"
+                            + "        float metallumReflectionWeight = clamp(metallumReflectionConfidence, 0.0, 1.0);\n"
+                            + "        if (metallumCoarseReflection.a < 0.0) {\n"
+                            + "            color.rgb += metallumCoarseReflection.rgb * metallumReflectionWeight;\n"
+                            + "        } else {\n"
+                            + "            color.rgb = mix(color.rgb, metallumCoarseReflection.rgb, metallumReflectionWeight);\n"
+                            + "        }\n"
+                            + "    }\n"
+                            + SODIUM_FOG_ANCHOR
+            );
 
     private static final String ENTITY_VERTEX_DECLARATION =
             "out vec2 texCoord0;\nout vec3 metallumLightingPosition;\n"
@@ -3173,6 +3252,18 @@ public final class AdvancedDirectLightingShaderPatcher {
             final String materialSource,
             final TerrainEnvironmentSpecialization specialization
     ) {
+        return patch(namespace, path, stage, lightingModel, materialSource, specialization, false);
+    }
+
+    public static Result patch(
+            final String namespace,
+            final String path,
+            final MetallumMaterialShaderPatcher.Stage stage,
+            final LightingModel lightingModel,
+            final String materialSource,
+            final TerrainEnvironmentSpecialization specialization,
+            final boolean vertexReflection
+    ) {
         if (materialSource == null) {
             return Result.failure(null, "shader source is missing");
         }
@@ -3224,7 +3315,12 @@ public final class AdvancedDirectLightingShaderPatcher {
         }
 
         if (isSodiumTerrain(namespace, path)) {
-            return patchSodium(stage, materialSource, specialization);
+            return patchSodium(
+                    stage,
+                    materialSource,
+                    specialization,
+                    vertexReflection
+            );
         }
         if (isEntity(namespace, path)) {
             return patchEntity(stage, materialSource);
@@ -3304,18 +3400,26 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static Result patchSodium(
             final MetallumMaterialShaderPatcher.Stage stage,
             final String source,
-            final TerrainEnvironmentSpecialization specialization
+            final TerrainEnvironmentSpecialization specialization,
+            final boolean vertexReflection
     ) {
         if (stage == MetallumMaterialShaderPatcher.Stage.VERTEX) {
+            String working = source;
+            if (vertexReflection) {
+                working = installStorageBufferVersion(working);
+                if (working == null) {
+                    return Result.failure(source, "Sodium vertex has no unique GLSL version directive");
+                }
+            }
             String patched = replaceExactlyOnce(
-                    source,
+                    working,
                     "out vec2 v_TexCoord;",
-                    SODIUM_VERTEX_DECLARATION
+                    vertexReflection ? SODIUM_VERTEX_DECLARATION_REFL : SODIUM_VERTEX_DECLARATION
             );
             patched = replaceExactlyOnce(
                     patched,
                     "    vec3 position = _vert_position + translation;",
-                    SODIUM_VERTEX_ASSIGNMENT
+                    vertexReflection ? SODIUM_VERTEX_ASSIGNMENT_REFL : SODIUM_VERTEX_ASSIGNMENT
             );
             patched = replaceExactlyOnce(
                     patched,
@@ -3338,14 +3442,21 @@ public final class AdvancedDirectLightingShaderPatcher {
         String patched = replaceExactlyOnce(
                 withStorageBuffers,
                 "in vec2 v_TexCoord;",
-                SODIUM_FRAGMENT_INPUT
+                vertexReflection ? SODIUM_FRAGMENT_INPUT_REFL : SODIUM_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, true, specialization);
-        patched = replaceExactlyOnce(patched, SODIUM_FOG_ANCHOR, SODIUM_DIRECT_BLOCK);
+        patched = installFragmentAbi(
+                patched,
+                true,
+                specialization
+        );
+        String directBlock = vertexReflection
+                ? SODIUM_DIRECT_BLOCK_REFL
+                : SODIUM_DIRECT_BLOCK;
+        patched = replaceExactlyOnce(patched, SODIUM_FOG_ANCHOR, directBlock);
         if (patched == null
                 || !patched.contains("dFdx(metallumLightingPosition)")
                 || !patched.contains("dFdy(metallumLightingPosition)")
-                || !patched.contains(SODIUM_DIRECT_BLOCK)) {
+                || !patched.contains(directBlock)) {
             return Result.failure(source, "Sodium Advanced fragment anchors changed");
         }
         return Result.success(patched);

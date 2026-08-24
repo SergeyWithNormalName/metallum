@@ -4,6 +4,11 @@ import com.metallum.client.lighting.AdvancedLightCandidateSlot;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.LightSectionCandidate;
+import com.metallum.client.lighting.reflection.FrozenReflectionCandidateSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionEmptyTaskSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionCandidate;
+import com.metallum.client.lighting.reflection.FrozenReflectionSectionTask;
 import com.metallum.client.voxel.VoxelCandidateSlot;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelEmptyTaskSlot;
@@ -26,7 +31,8 @@ import java.util.Map;
 
 /** Candidate ownership follows the exact lifetime of its Sodium build output. */
 @Mixin(value = ChunkBuildOutput.class, remap = false)
-abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandidateSlot, VoxelCandidateSlot {
+abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandidateSlot, VoxelCandidateSlot,
+        FrozenReflectionCandidateSlot {
     @Unique
     @Nullable
     private volatile LightSectionCandidate metallum$advancedLightCandidate;
@@ -34,6 +40,10 @@ abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandid
     @Unique
     @Nullable
     private volatile VoxelSectionCandidate metallum$voxelSectionCandidate;
+
+    @Unique
+    @Nullable
+    private volatile FrozenReflectionSectionCandidate metallum$frozenReflectionCandidate;
 
     @Inject(
             method = "<init>(Lnet/caffeinemc/mods/sodium/client/render/chunk/RenderSection;ILnet/caffeinemc/mods/sodium/client/render/chunk/translucent_sorting/data/TranslucentData;Lnet/caffeinemc/mods/sodium/client/render/chunk/data/BuiltSectionInfo;Ljava/util/Map;Z)V",
@@ -52,12 +62,21 @@ abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandid
             return;
         }
         VoxelSectionTask task = ((VoxelEmptyTaskSlot) section).metallum$claimEmptyVoxelSectionTask();
-        if (task == null || !AdvancedLightingRuntime.shouldCollect()) {
-            return;
+        if (task != null && AdvancedLightingRuntime.shouldCollect()) {
+            VoxelSectionCandidate candidate = VoxelSectionCandidate.empty(task);
+            VoxelClipmapController.global().noteSectionCandidateEncoded(candidate);
+            this.metallum$setVoxelSectionCandidate(candidate);
         }
-        VoxelSectionCandidate candidate = VoxelSectionCandidate.empty(task);
-        VoxelClipmapController.global().noteSectionCandidateEncoded(candidate);
-        this.metallum$setVoxelSectionCandidate(candidate);
+        FrozenReflectionSectionTask reflectionTask = ((FrozenReflectionEmptyTaskSlot) section)
+                .metallum$claimEmptyFrozenReflectionTask();
+        if (reflectionTask != null) {
+            this.metallum$setFrozenReflectionCandidate(new FrozenReflectionSectionCandidate(
+                    reflectionTask,
+                    com.metallum.client.radiance.SodiumRadianceSectionExtractor.empty(
+                            reflectionTask.sectionKey(), reflectionTask.worldGeneration()
+                    )
+            ));
+        }
     }
 
     @Override
@@ -120,6 +139,36 @@ abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandid
         }
     }
 
+    @Override
+    public synchronized void metallum$setFrozenReflectionCandidate(
+            @Nullable final FrozenReflectionSectionCandidate candidate
+    ) {
+        FrozenReflectionSectionCandidate previous = this.metallum$frozenReflectionCandidate;
+        if (previous == candidate) {
+            return;
+        }
+        this.metallum$frozenReflectionCandidate = candidate;
+        if (previous != null) {
+            FrozenReflectionFieldController.global().discardCandidate(previous);
+        }
+    }
+
+    @Override
+    @Nullable
+    public synchronized FrozenReflectionSectionCandidate metallum$takeFrozenReflectionCandidate() {
+        FrozenReflectionSectionCandidate candidate = this.metallum$frozenReflectionCandidate;
+        this.metallum$frozenReflectionCandidate = null;
+        return candidate;
+    }
+
+    @Override
+    public synchronized void metallum$discardFrozenReflectionCandidate() {
+        FrozenReflectionSectionCandidate candidate = this.metallum$takeFrozenReflectionCandidate();
+        if (candidate != null) {
+            FrozenReflectionFieldController.global().discardCandidate(candidate);
+        }
+    }
+
     @Inject(method = "destroy()V", at = @At("HEAD"))
     private void metallum$discardDestroyedAdvancedLightCandidate(final CallbackInfo ci) {
         if (this.metallum$advancedLightCandidate != null) {
@@ -127,6 +176,9 @@ abstract class ChunkBuildOutputAdvancedLightMixin implements AdvancedLightCandid
         }
         if (this.metallum$voxelSectionCandidate != null) {
             this.metallum$discardVoxelSectionCandidate();
+        }
+        if (this.metallum$frozenReflectionCandidate != null) {
+            this.metallum$discardFrozenReflectionCandidate();
         }
     }
 }

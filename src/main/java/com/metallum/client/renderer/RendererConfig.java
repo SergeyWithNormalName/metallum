@@ -25,6 +25,35 @@ public record RendererConfig(
     public static final int SCHEMA_VERSION = 4;
     private static final String FILE_NAME = "metallum-renderer.properties";
 
+    /** Disk-load provenance: defaults are safe for an interactive client but invalidate a benchmark. */
+    public enum LoadDisposition {
+        CURRENT,
+        CREATED_DEFAULTS,
+        MIGRATED_V1,
+        MIGRATED_V2,
+        MIGRATED_V3,
+        MIGRATED_V5,
+        FALLBACK_IO,
+        FALLBACK_UNKNOWN_SCHEMA,
+        FALLBACK_MALFORMED
+    }
+
+    public record LoadStatus(String parsedSchema, boolean defaultsUsed, LoadDisposition disposition) {
+        public LoadStatus {
+            parsedSchema = parsedSchema == null || parsedSchema.isBlank() ? "missing" : parsedSchema.strip();
+            if (disposition == null) {
+                throw new NullPointerException("disposition");
+            }
+        }
+    }
+
+    private record LoadResult(RendererConfig config, LoadStatus status) {
+    }
+
+    private static volatile LoadStatus lastLoadStatus = new LoadStatus(
+            "not-loaded", true, LoadDisposition.FALLBACK_IO
+    );
+
     public RendererConfig {
         if (lightingPreset == null) {
             throw new NullPointerException("lightingPreset");
@@ -44,10 +73,21 @@ public record RendererConfig(
     }
 
     static RendererConfig load(final Path path) {
+        LoadResult loaded = loadWithStatus(path);
+        lastLoadStatus = loaded.status();
+        return loaded.config();
+    }
+
+    /** Last file provenance consumed by startup/benchmark admission. */
+    public static LoadStatus lastLoadStatus() {
+        return lastLoadStatus;
+    }
+
+    static LoadResult loadWithStatus(final Path path) {
         if (!Files.isRegularFile(path)) {
             RendererConfig defaults = defaults();
             defaults.save(path);
-            return defaults;
+            return loaded(defaults, "missing", true, LoadDisposition.CREATED_DEFAULTS);
         }
 
         Properties properties = new Properties();
@@ -59,7 +99,7 @@ public record RendererConfig(
                     path,
                     exception
             );
-            return defaults();
+            return loaded(defaults(), "unreadable", true, LoadDisposition.FALLBACK_IO);
         }
 
         String rawVersion = properties.getProperty("schemaVersion");
@@ -70,7 +110,7 @@ public record RendererConfig(
                         "Malformed v1 renderer config at {}; using defaults without rewriting it",
                         path
                 );
-                return defaults();
+                return loaded(defaults(), "missing", true, LoadDisposition.FALLBACK_MALFORMED);
             }
             if (migrated.save(path)) {
                 Metallum.LOGGER.info(
@@ -79,7 +119,7 @@ public record RendererConfig(
                         SCHEMA_VERSION
                 );
             }
-            return migrated;
+            return loaded(migrated, "1", false, LoadDisposition.MIGRATED_V1);
         }
         String normalizedVersion = rawVersion.strip();
         if ("2".equals(normalizedVersion)) {
@@ -89,7 +129,7 @@ public record RendererConfig(
                         "Malformed renderer config schema 2 at {}; using defaults without rewriting it",
                         path
                 );
-                return defaults();
+                return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_MALFORMED);
             }
             if (migrated.save(path)) {
                 Metallum.LOGGER.info(
@@ -98,7 +138,7 @@ public record RendererConfig(
                         SCHEMA_VERSION
                 );
             }
-            return migrated;
+            return loaded(migrated, "2", false, LoadDisposition.MIGRATED_V2);
         }
         if ("3".equals(normalizedVersion)) {
             RendererConfig migrated = parseV3(properties);
@@ -107,7 +147,7 @@ public record RendererConfig(
                         "Malformed renderer config schema 3 at {}; using defaults without rewriting it",
                         path
                 );
-                return defaults();
+                return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_MALFORMED);
             }
             if (migrated.save(path)) {
                 Metallum.LOGGER.info(
@@ -116,7 +156,7 @@ public record RendererConfig(
                         SCHEMA_VERSION
                 );
             }
-            return migrated;
+            return loaded(migrated, "3", false, LoadDisposition.MIGRATED_V3);
         }
         if (!Integer.toString(SCHEMA_VERSION).equals(normalizedVersion)) {
             Metallum.LOGGER.warn(
@@ -124,7 +164,7 @@ public record RendererConfig(
                     rawVersion,
                     path
             );
-            return defaults();
+            return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_UNKNOWN_SCHEMA);
         }
         RendererConfig parsed = parseV4(properties);
         if (parsed == null) {
@@ -133,9 +173,18 @@ public record RendererConfig(
                     SCHEMA_VERSION,
                     path
             );
-            return defaults();
+            return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_MALFORMED);
         }
-        return parsed;
+        return loaded(parsed, normalizedVersion, false, LoadDisposition.CURRENT);
+    }
+
+    private static LoadResult loaded(
+            final RendererConfig config,
+            final String parsedSchema,
+            final boolean defaultsUsed,
+            final LoadDisposition disposition
+    ) {
+        return new LoadResult(config, new LoadStatus(parsedSchema, defaultsUsed, disposition));
     }
 
     public RendererConfig withImprovedLighting(final boolean enabled) {

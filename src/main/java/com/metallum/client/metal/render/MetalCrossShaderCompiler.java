@@ -4,6 +4,8 @@ import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.lighting.reflection.VertexReflectionBindingAbi;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
@@ -24,6 +26,8 @@ import com.mojang.blaze3d.vulkan.VulkanBindGroupLayout.VulkanBindGroupEntryType;
 import com.mojang.blaze3d.vulkan.glsl.*;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
+import net.minecraft.client.renderer.ShaderDefines;
+import net.minecraft.resources.Identifier;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -369,17 +373,24 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             @Nullable final List<MetalCompiledRenderPipeline.ResourceBinding> canonicalResources
     ) throws ShaderCompileException {
+        boolean vertexReflection = VertexReflectionExperiment.isRuntimeEnabled()
+                && isSodiumTranslucentTerrainPipeline(pipeline)
+                && isAdvancedFlavor(flavor);
+        ShaderDefines vertexDefines = vertexReflection
+                ? withVertexReflectionDefine(pipeline.getShaderDefines())
+                : pipeline.getShaderDefines();
+        ShaderDefines fragmentDefines = vertexDefines;
         IntermediaryShaderModule vertexSpirv = device.getOrCompileShader(
                 pipeline.getVertexShader(),
                 ShaderType.VERTEX,
-                pipeline.getShaderDefines(),
+                vertexDefines,
                 shaderSource,
                 flavor
         );
         IntermediaryShaderModule fragmentSpirv = device.getOrCompileShader(
                 pipeline.getFragmentShader(),
                 ShaderType.FRAGMENT,
-                pipeline.getShaderDefines(),
+                fragmentDefines,
                 shaderSource,
                 flavor
         );
@@ -388,6 +399,10 @@ final class MetalCrossShaderCompiler {
                     "Couldn't compile " + flavor + " shader for pipeline " + pipeline.getLocation()
             );
         }
+        IntermediaryShaderModule vertexLayoutSpirv = withoutExternalVertexReflectionSamplers(
+                vertexSpirv,
+                flavor
+        );
         IntermediaryShaderModule fragmentLayoutSpirv = withoutExternalShadowSamplers(
                 fragmentSpirv,
                 flavor
@@ -397,13 +412,13 @@ final class MetalCrossShaderCompiler {
         if (canonicalResources != null) {
             seedCanonicalLayout(layoutEntries, canonicalResources);
         }
-        addToBindGroup(layoutEntries, vertexSpirv, pipeline);
+        addToBindGroup(layoutEntries, vertexLayoutSpirv, pipeline);
         addToBindGroup(layoutEntries, fragmentLayoutSpirv, pipeline);
         canonicalizeLayoutEntries(layoutEntries);
         List<String> vertexOutputs = extractVariableNames(vertexSpirv.outputs());
 
-        vertexSpirv.rebind(
-                tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexSpirv.inputs()),
+        vertexLayoutSpirv.rebind(
+                tolerateUnprovidedInputs(MetalPipelineSupport.vertexAttributeNames(pipeline), vertexLayoutSpirv.inputs()),
                 layoutEntries
         );
         MslShader vertexMsl = spirvToMsl(
@@ -558,6 +573,65 @@ final class MetalCrossShaderCompiler {
         );
     }
 
+    /**
+     * Reflection textures are native-owned external vertex bindings, not ordinary pipeline
+     * descriptors. Keep their GLSL names in SPIR-V so MSL declares slots 10/11, but omit them
+     * from the canonical bind group (which otherwise tries to create Java-owned samplers).
+     */
+    private static IntermediaryShaderModule withoutExternalVertexReflectionSamplers(
+            final IntermediaryShaderModule module,
+            final HdrShaderFlavor flavor
+    ) {
+        if (!isAdvancedFlavor(flavor)) {
+            return module;
+        }
+        var filtered = module.samplers().stream()
+                .filter(sampler -> !VertexReflectionExperiment.isExperimentSampler(sampler.name()))
+                .toList();
+        if (filtered.size() == module.samplers().size()) {
+            return module;
+        }
+        return new IntermediaryShaderModule(
+                module.name(),
+                module.spirv(),
+                module.uniformBuffers(),
+                filtered,
+                module.outputs(),
+                module.inputs()
+        );
+    }
+
+    private static ShaderDefines withVertexReflectionDefine(final ShaderDefines defines) {
+        var builder = ShaderDefines.builder();
+        for (String flag : defines.flags()) {
+            builder.define(flag);
+        }
+        for (var entry : defines.values().entrySet()) {
+            builder.define(entry.getKey(), entry.getValue());
+        }
+        builder.define("METALLUM_VERTEX_REFLECTION", 1);
+        return builder.build();
+    }
+
+    static boolean isSodiumTranslucentTerrainPipeline(
+            final Identifier location,
+            final Identifier vertex,
+            final Identifier fragment
+    ) {
+        return "sodium".equals(location.getNamespace())
+                && "pipeline/translucent_terrain".equals(location.getPath())
+                && "sodium".equals(vertex.getNamespace())
+                && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(vertex.getPath())
+                && "sodium".equals(fragment.getNamespace())
+                && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(fragment.getPath());
+    }
+
+    static boolean isSodiumTranslucentTerrainPipeline(final RenderPipeline pipeline) {
+        return isSodiumTranslucentTerrainPipeline(
+                pipeline.getLocation(), pipeline.getVertexShader(), pipeline.getFragmentShader()
+        );
+    }
+
     private static void validateVariantParity(
             final RenderPipeline pipeline,
             final HdrShaderFlavor flavor,
@@ -637,8 +711,11 @@ final class MetalCrossShaderCompiler {
         }
         for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean reflectionOwnsVertexSlot = slot == VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT
+                    && VertexReflectionExperiment.isRuntimeEnabled()
+                    && isSodiumTranslucentTerrainPipeline(pipeline);
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexSlot)) {
                 throw new IllegalStateException(
                         "Advanced lighting fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
@@ -646,6 +723,12 @@ final class MetalCrossShaderCompiler {
                 );
             }
         }
+        VertexReflectionBindingAbi.validateMsl(
+                variant.vertexMsl(),
+                variant.fragmentMsl(),
+                VertexReflectionExperiment.isRuntimeEnabled()
+                        && isSodiumTranslucentTerrainPipeline(pipeline)
+        );
         String visibilityCacheMarker = "[[buffer("
                 + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
         if (countOccurrences(variant.fragmentMsl(), visibilityCacheMarker) != 1
@@ -659,8 +742,11 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean reflectionOwnsVertexVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
+                    && VertexReflectionExperiment.isRuntimeEnabled()
+                    && isSodiumTranslucentTerrainPipeline(pipeline);
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexVoxelParams)) {
                 throw new IllegalStateException(
                         "L6 active local-shadow fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
