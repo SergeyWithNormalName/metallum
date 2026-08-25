@@ -1678,6 +1678,12 @@ public final class MetalDevice implements GpuDeviceBackend {
     /** Publishes one final world-camera snapshot into its reusable in-flight ABI slot. */
     public synchronized FrameState publishFrameState(final FrameCapture capture) {
         Objects.requireNonNull(capture, "capture");
+        // A frozen-reflection layout change closes PSOs and, by design, drains the current
+        // command buffer.  It must happen before this method snapshots the submit index for
+        // L4; doing it lazily from the shadow/reflection terrain pass would advance that index
+        // after SunShadowRenderer has captured its frame and force Advanced Lighting to fail
+        // closed for the rest of the session.
+        this.invalidatePipelinesForVertexReflectionToggle();
         this.activeEnvironmentProfile = capture.environment() != null
                 ? capture.environment().profile()
                 : EnvironmentDescriptor.Profile.CELESTIAL;
