@@ -139,6 +139,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec4 cloudParams;
                 vec4 cloudColorAndReflectionStrength;
                 uvec4 cloudContract;
+                vec4 skyReflectionColorAndHorizonStrength;
+                vec4 horizonReflectionColorAndCloudFogEnd;
             } metallumEnvironment;
 
             layout(binding = 13) uniform sampler2DShadow metallumSunShadow0;
@@ -782,7 +784,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
 
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
-                if (metallumEnvironment.cloudContract.x != 2u
+                if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 4u) == 0u) {
                     return 1.0;
                 }
@@ -2743,7 +2745,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
 
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
-                if (metallumEnvironment.cloudContract.x != 2u
+                if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 4u) == 0u) {
                     return 1.0;
                 }
@@ -3147,19 +3149,67 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return f0 + (grazingLimit - f0) * grazing5;
             }
 
-            vec4 metallumWaterCloudReflectionV1(
+            vec3 metallumWaterSkyReflectionV2(
+                    vec3 worldReflectedDirection,
+                    vec3 fallbackEnvironment) {
+                if (metallumEnvironment.cloudContract.x != 3u
+                        || (metallumEnvironment.cloudContract.w & 8u) == 0u) {
+                    return fallbackEnvironment;
+                }
+                vec3 skyColor = max(
+                        metallumEnvironment.skyReflectionColorAndHorizonStrength.rgb,
+                        vec3(0.0));
+                vec3 horizonColor = max(
+                        metallumEnvironment.horizonReflectionColorAndCloudFogEnd.rgb,
+                        vec3(0.0));
+                float elevation = clamp(worldReflectedDirection.y, 0.0, 1.0);
+                float horizonBand = 1.0 - smoothstep(0.04, 0.38, elevation);
+
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldToLight = metallumSafeNormalV1(
+                        worldFromView * metallumEnvironment.directionAndFlags.xyz);
+                vec2 rayHorizontal = worldReflectedDirection.xz;
+                vec2 lightHorizontal = worldToLight.xz;
+                float rayHorizontalLength = length(rayHorizontal);
+                float lightHorizontalLength = length(lightHorizontal);
+                float sunriseFacing = 0.0;
+                if (rayHorizontalLength > 0.0001 && lightHorizontalLength > 0.0001) {
+                    float alignment = dot(
+                            rayHorizontal / rayHorizontalLength,
+                            lightHorizontal / lightHorizontalLength);
+                    sunriseFacing = smoothstep(-0.15, 0.82, alignment);
+                }
+                float horizonStrength = clamp(
+                        metallumEnvironment.skyReflectionColorAndHorizonStrength.w,
+                        0.0,
+                        1.0);
+                return mix(
+                        skyColor,
+                        horizonColor,
+                        horizonBand * sunriseFacing * horizonStrength);
+            }
+
+            vec4 metallumWaterCloudReflectionV2(
                     vec3 viewPosition,
-                    vec3 reflectedDirection) {
-                if (metallumEnvironment.cloudContract.x != 2u
+                    vec3 viewDirection,
+                    vec3 waterNormal) {
+                if (metallumEnvironment.cloudContract.x != 3u
+                        || (metallumEnvironment.cloudContract.w & 1u) == 0u
                         || metallumEnvironment.cloudContract.y == 0u
                         || metallumEnvironment.cloudParams.z <= 0.005) {
                     return vec4(0.0);
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldUp = vec3(0.0, 1.0, 0.0);
+                vec3 worldNormal = metallumSafeNormalV1(worldFromView * waterNormal);
+                vec3 stableWorldNormal = metallumSafeNormalV1(
+                        mix(worldUp, worldNormal, 0.08));
+                vec3 worldViewDirection = metallumSafeNormalV1(
+                        worldFromView * viewDirection);
                 vec3 worldReflectedDirection = metallumSafeNormalV1(
-                        worldFromView * reflectedDirection);
+                        reflect(-worldViewDirection, stableWorldNormal));
                 float rayElevation = worldReflectedDirection.y;
-                if (rayElevation <= 0.035) {
+                if (rayElevation <= 0.02) {
                     return vec4(0.0);
                 }
 
@@ -3175,9 +3225,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (worldPosition.y >= cloudTop) {
                     return vec4(0.0);
                 }
-                float targetHeight = metallumEnvironment.cloudContract.y == 2u
-                        ? cloudHeight + cloudThickness * 0.5
-                        : cloudHeight;
+                // From water the visible Fancy surface is the 0.7-lit underside at cloudHeight;
+                // FAST clouds use the same plane with the top-color flag, exactly as vanilla.
+                float targetHeight = cloudHeight;
                 if (worldPosition.y >= cloudHeight) {
                     targetHeight = cloudTop;
                 }
@@ -3195,14 +3245,22 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float coverage = texture(
                         metallumCloudShadow, shiftedPosition / gridSize).g;
                 float opacity = clamp(metallumEnvironment.cloudParams.z, 0.0, 1.0);
-                float elevationWeight = smoothstep(0.035, 0.12, rayElevation);
+                float cloudFogEnd = max(
+                        metallumEnvironment.horizonReflectionColorAndCloudFogEnd.w,
+                        16.0);
+                float fogVisibility = clamp(1.0 - t / cloudFogEnd, 0.0, 1.0);
+                float elevationWeight = smoothstep(0.02, 0.06, rayElevation);
                 float reflectionStrength = clamp(
                         metallumEnvironment.cloudColorAndReflectionStrength.w, 0.0, 1.0);
                 float weight = clamp(
-                        coverage * opacity * elevationWeight * reflectionStrength,
+                        coverage * opacity * fogVisibility * elevationWeight
+                                * reflectionStrength,
                         0.0, 1.0);
+                float faceLight = metallumEnvironment.cloudContract.y == 2u
+                        && worldPosition.y < cloudHeight ? 0.70 : 1.0;
                 return vec4(
-                        max(metallumEnvironment.cloudColorAndReflectionStrength.rgb, vec3(0.0)),
+                        max(metallumEnvironment.cloudColorAndReflectionStrength.rgb, vec3(0.0))
+                                * faceLight,
                         weight);
             }
 
@@ -3236,6 +3294,16 @@ public final class AdvancedDirectLightingShaderPatcher {
                         reflectedDirection, normal, material.roughness, waterCelestialShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                    vec3 worldReflectedDirection = metallumSafeNormalV1(
+                            worldFromView * reflectedDirection);
+                    reflectedEnvironment = metallumWaterSkyReflectionV2(
+                            worldReflectedDirection, reflectedEnvironment);
+                    vec4 cloudReflection = metallumWaterCloudReflectionV2(
+                            viewPosition, viewDirection, normal);
+                    reflectedEnvironment = mix(
+                            reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
+
                     // The voxel receiver is an exclusive reflection architecture. Never mix the
                     // legacy mirrored-camera target here: its fogged twilight capture changes
                     // with camera height and can paint the whole water surface orange.
@@ -3249,13 +3317,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                             reflectedEnvironment,
                             max(coarseReflection.rgb, vec3(0.0)),
                             coarseWeight);
-                    // Clouds are a separate dynamic sky layer. Intersect the procedural-wave
-                    // reflection ray with their slab and overlay the actual Minecraft coverage;
-                    // the voxel field remains reserved for coarse world geometry.
-                    vec4 cloudReflection = metallumWaterCloudReflectionV1(
-                            viewPosition, reflectedDirection);
-                    reflectedEnvironment = mix(
-                            reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
                     float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
                     bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
                     float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;

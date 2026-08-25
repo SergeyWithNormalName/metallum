@@ -224,6 +224,22 @@ public final class CloudShadowTests {
         require(solidVal == 26, "Solid flat cloud byte value mismatch: expected 26, got " + solidVal);
         require(solidCoverage == 255,
                 "Solid cloud cell must preserve full arbitrary-direction reflection coverage");
+
+        boolean[][] isolatedGrid = new boolean[3][3];
+        isolatedGrid[1][1] = true;
+        CloudShadowSource isolatedSource = CloudShadowSource.createSynthetic(
+                3, 3, isolatedGrid, 12L);
+        ByteBuffer isolatedBuffer = ByteBuffer.allocate(3 * 3 * 2);
+        isolatedSource.generateTextureBytes(
+                CloudShadowMode.FLAT, 0.0f, 1.0f, 0.0f, 1.0f, isolatedBuffer);
+        isolatedBuffer.flip();
+        int neighborTransmittance = Byte.toUnsignedInt(isolatedBuffer.get(1 * 2));
+        int neighborVisualCoverage = Byte.toUnsignedInt(isolatedBuffer.get(1 * 2 + 1));
+        int centerVisualCoverage = Byte.toUnsignedInt(isolatedBuffer.get((1 * 3 + 1) * 2 + 1));
+        require(neighborTransmittance < 255,
+                "shadow density must retain the soft prefilter around an occupied cell");
+        require(neighborVisualCoverage == 0 && centerVisualCoverage == 255,
+                "visual coverage must retain the raw vanilla cloud-cell silhouette");
     }
 
     private static void testVolumetricThicknessPathLength() {
@@ -304,6 +320,9 @@ public final class CloudShadowTests {
                 CloudStatus.FANCY,
                 192.0f,
                 0xffc08040,
+                0xff80a0d0,
+                0x80ff7040,
+                12,
                 23500L,
                 0.0f,
                 dusk,
@@ -313,8 +332,12 @@ public final class CloudShadowTests {
                 "visible dusk clouds must remain available to water reflections without sun shadows");
         require(!state.directShadowEnabled(),
                 "dusk reflection availability must not re-enable direct cloud shadows");
+        require(state.skyReflectionEnabled() && approxEqual(state.cloudFogEnd(), 192.0f),
+                "water sky reflection must retain the exact sky contract and vanilla cloud range");
         require(state.cloudRed() > state.cloudGreen() && state.cloudGreen() > state.cloudBlue(),
                 "water reflection state must preserve the actual linearized Minecraft cloud tint");
+        require(state.horizonStrength() > 0.49f && state.horizonStrength() < 0.51f,
+                "water reflection state must preserve the sunrise/sunset overlay alpha");
     }
 
     private static boolean approxEqual(final float a, final float b) {

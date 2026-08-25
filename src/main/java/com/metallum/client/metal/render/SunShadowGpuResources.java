@@ -371,18 +371,25 @@ final class SunShadowGpuResources implements AutoCloseable {
                 cloudShadow.gridWidth(), cloudShadow.gridHeight());
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET,
                 cloudShadow.cloudHeight(), cloudShadow.cloudThickness(),
-                cloudShadow.cloudOpacity(), (float) cloudShadow.mode().id());
+                cloudShadow.cloudOpacity(), cloudShadow.cloudFogEnd());
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET,
                 cloudShadow.cloudRed(), cloudShadow.cloudGreen(), cloudShadow.cloudBlue(),
                 com.metallum.client.lighting.cloud.CloudShadowPolicy.WATER_REFLECTION_STRENGTH);
         int cloudFlags = (cloudShadow.enabled() ? 1 : 0)
                 | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0)
-                | (cloudShadow.directShadowEnabled() ? 4 : 0);
+                | (cloudShadow.directShadowEnabled() ? 4 : 0)
+                | (cloudShadow.skyReflectionEnabled() ? 8 : 0);
         putInt4(packet, EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.CLOUD_CONTRACT_VERSION,
                 cloudShadow.mode().id(),
                 (int) cloudShadow.patternGeneration(),
                 cloudFlags);
+        putVec4(packet, EnvironmentShadowBindingAbi.SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET,
+                cloudShadow.skyRed(), cloudShadow.skyGreen(), cloudShadow.skyBlue(),
+                cloudShadow.horizonStrength());
+        putVec4(packet, EnvironmentShadowBindingAbi.HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET,
+                cloudShadow.horizonRed(), cloudShadow.horizonGreen(), cloudShadow.horizonBlue(),
+                cloudShadow.cloudFogEnd());
         this.frame = selected;
         this.renderedSubmitIndex = selected.needsShadowPass()
                 ? Long.MIN_VALUE

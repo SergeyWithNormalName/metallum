@@ -3811,3 +3811,48 @@ water normals; top-down underwater scene остаётся читаемой. Dawn
 последовательность также увидела существующий L6 dynamic fallback, поэтому её FPS не
 используется. Shader/resource contract и targeted cloud/reflection/Metal tests прошли;
 полный `./gradlew build` прошёл 97 задач.
+
+#### Sky-correlated cloud reflection correction — HUMAN PENDING
+
+Human review отклонил первую cloud-layer версию: её белые кольца и
+разводы на воде не были узнаваемым отражением облаков. Source audit выявил
+четыре причины: G-channel хранил 3x3-prefiltered coverage вместо исходной
+vanilla cell mask; полный procedural-wave normal проецировал малые slopes на
+высокую cloud plane как десятки блоков сдвига; cloud lookup не повторял
+vanilla cloud-range fog; cloud color накладывался после coarse-world mix и мог
+закрашивать отражённый берег.
+
+Исправленный layer читает raw occupied-cell mask из G с точными vanilla
+12-block topology/animation offsets. Cloud ray использует 8% procedural normal
+вокруг stable world-up: волны мягко искажают силуэт, но не растягивают
+его в кольца. Intersection идёт с видимой снизу cloud underside, применяет
+actual `cloudRange * 16` linear fog и Fancy underside light `0.70`. Слой облаков
+теперь составляет sky до confidence-weighted coarse geometry, поэтом мир может
+окклюдировать облака. Base sky больше не берётся из irradiance approximation:
+per-frame packet передаёт actual linear `SkyRenderState.skyColor` и
+`sunriseAndSunsetColor`; последний локализуется только в нужном направлении
+и возле горизонта. Environment packet вырос `448 -> 480` bytes, contract v3;
+новых passes, textures, uploads и steady allocations нет.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`, 15,327 chars),
+fragment SHA `9fc0b31269c7...`, 154,466 chars, varyings `10/10`. Water fragment имеет
+ровно один cloud `texture2d` sample; planar и `texture3d` resources/reads по-прежнему
+отсутствуют. Полный `./gradlew build` прошёл 97 tasks.
+
+Exact-route `300+300` capture receipts, Advanced/Balanced, MetalFX OFF, field READY:
+
+- broad/day: `run/lighting-reference/l0/20260825T192108Z-...-sky-cloud-reflection-v2-broad-off.png`;
+- top-down: `run/lighting-reference/l0/20260825T192305Z-...-sky-cloud-reflection-v2-topdown-off.png`;
+- grazing: `run/lighting-reference/l0/20260825T192517Z-...-sky-cloud-reflection-v2-grazing-off.png`;
+- dawn tick 23500: `run/lighting-reference/l0/20260825T192841Z-...-sky-cloud-reflection-v2-dawn-off.png`.
+
+В captures прежние closed white/oil contours исчезли; при grazing остались
+перспективно вытянутые, но непрерывные cloud bands. Dawn оранжевый вклад
+локализован в воде, отражающей окрашенный горизон; ближняя вода
+остаётся blue/gray. Это fixture observation, не subjective acceptance.
+
+Короткий capture-instrumented broad screen против отклонённой v1: FPS
+`67.297 -> 66.535` (`-1.13%`), presenting-CB GPU average `17.075 -> 17.465 ms`
+(`+2.29%`), p50 `16.209 -> 16.648 ms` (`+2.71%`). Это short non-attested screen и
+не production performance claim; он не показывает явной большой регрессии.
+Первая v1 считается visually rejected; v2 остаётся HUMAN PENDING.

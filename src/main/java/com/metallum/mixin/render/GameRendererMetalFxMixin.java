@@ -275,6 +275,8 @@ abstract class GameRendererMetalFxMixin {
         net.minecraft.client.CloudStatus cloudStatus = this.minecraft.options.cloudStatus().get();
         float cloudHeight = this.gameRenderState.levelRenderState.cloudHeight;
         int cloudColor = this.gameRenderState.levelRenderState.cloudColor;
+        SkyRenderState sky = this.gameRenderState.levelRenderState.skyRenderState;
+        int cloudRange = this.minecraft.options.cloudRange().get();
         long gameTime = this.gameRenderState.levelRenderState.gameTime;
         float partialTick = deltaTracker.getGameTimeDeltaPartialTick(false);
         com.metallum.client.lighting.cloud.CloudShadowSource source = device.cloudShadowSource();
@@ -282,6 +284,9 @@ abstract class GameRendererMetalFxMixin {
                 cloudStatus,
                 cloudHeight,
                 cloudColor,
+                sky.skyColor,
+                sky.sunriseAndSunsetColor,
+                cloudRange,
                 gameTime,
                 partialTick,
                 environment,

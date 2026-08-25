@@ -404,7 +404,8 @@ public final class RealWorldVertexReflectionTests {
         require(!onMslFragment.contains("metallumPlanarReflection"),
                 "voxel reflection fragment must have ZERO planar-reflection resources");
         require(onMslFragment.contains("texture2d<float> metallumCloudShadow [[texture(12)]]")
-                        && onMslFragment.contains("cloudColorAndReflectionStrength"),
+                        && onMslFragment.contains("cloudColorAndReflectionStrength")
+                        && onMslFragment.contains("skyReflectionColorAndHorizonStrength"),
                 "voxel reflection fragment must reuse the existing cloud texture and environment packet");
         require(onGlslFragment.contains("color.a = 1.0"),
                 "contribution-only output must be opaque so underlying terrain cannot masquerade as voxel radiance");
@@ -426,7 +427,7 @@ public final class RealWorldVertexReflectionTests {
                         && !voxelEnvironmentHelper.contains("planarWeight"),
                 "voxel receiver must never sample or blend the legacy planar target");
         int cloudHelperStart = onGlslFragment.indexOf(
-                "vec4 metallumWaterCloudReflectionV1(");
+                "vec3 metallumWaterSkyReflectionV2(");
         int cloudHelperEnd = onGlslFragment.indexOf(
                 "vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(",
                 cloudHelperStart);
@@ -434,15 +435,24 @@ public final class RealWorldVertexReflectionTests {
         require(countOccurrences(cloudHelper, "texture(") == 1
                         && cloudHelper.contains("metallumCloudShadow")
                         && cloudHelper.contains(").g")
-                        && cloudHelper.contains("worldFromView * reflectedDirection")
+                        && cloudHelper.contains("mix(worldUp, worldNormal, 0.08)")
+                        && cloudHelper.contains("1.0 - t / cloudFogEnd")
+                        && cloudHelper.contains("? 0.70 : 1.0")
                         && !cloudHelper.contains("cloudContract.w & 4u"),
-                "cloud reflection must use exactly one 2D coverage sample along the wave reflection ray");
+                "cloud reflection must use one raw coverage sample, subtle waves, vanilla fog and face light");
         require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
                 "direct cloud shadows must retain their daylight eligibility gate");
-        require(voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV1(")
+        require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV2(")
                         && voxelEnvironmentHelper.contains(
                         "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
-                "clouds must replace the rough environment lobe without touching direct GGX");
+                "the exact sky and matching clouds must compose into one water environment lobe");
+        int cloudComposite = voxelEnvironmentHelper.indexOf(
+                "metallumWaterCloudReflectionV2(");
+        int coarseWeight = voxelEnvironmentHelper.indexOf(
+                "float coarseWeight =", cloudComposite);
+        require(cloudComposite >= 0 && coarseWeight > cloudComposite,
+                "clouds must composite into sky before coarse world geometry replaces that lobe");
         require(onGlslFragment.contains("color.rgb = metallumReflectionDiagnostic"),
                 "contribution-only mode must isolate confidence- and wave-modulated voxel radiance");
         require(onGlslFragment.contains("-metallumCoarseReflection.a - 1.0"),

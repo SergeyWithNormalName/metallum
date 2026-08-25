@@ -36,6 +36,8 @@ public final class EnvironmentShadowBindingAbi {
     public static final int CLOUD_PARAMS_OFFSET = CloudShadowBindingAbi.CLOUD_PARAMS_OFFSET;                             // 400
     public static final int CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET = CloudShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET; // 416
     public static final int CLOUD_CONTRACT_OFFSET = CloudShadowBindingAbi.CLOUD_CONTRACT_OFFSET;                         // 432
+    public static final int SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET = CloudShadowBindingAbi.SKY_REFLECTION_COLOR_AND_HORIZON_STRENGTH_OFFSET; // 448
+    public static final int HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET = CloudShadowBindingAbi.HORIZON_REFLECTION_COLOR_AND_CLOUD_FOG_END_OFFSET; // 464
     public static final int CLOUD_CONTRACT_VERSION = CloudShadowBindingAbi.VERSION;
 
     private static final int[] SHADOW_TEXTURE_SLOTS = {
