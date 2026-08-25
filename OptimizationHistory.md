@@ -4249,3 +4249,38 @@ Contemporaneous 600+600 A/B recovery control -> G1:
 28 FPS. Поэтому `.accepted.json` receipt не трактуется как product acceptance и
 переход к G2 заблокирован до нового Tier C подтверждения либо явного решения
 пользователя.
+
+---
+
+## 2026-08-25 — G2 accepted semantic material/emission field
+
+**Статус:** `PASS_STRUCTURALLY_OFF_DIAGNOSTIC`; implementation `d750491`
+сохранён. G3 не начат.
+
+G2 получает occupancy/medium, diffuse albedo, emission RGB/intensity,
+шесть face weights, validity/provenance и dominant palette ID только из
+accepted Sodium output. Mutable live world, brightness/lightmap и L3/L4
+источники не читаются. Неизвестные и stale sections остаются UNKNOWN;
+resource/material/world/clipmap/content epochs разделены. Весь mixin set
+структурно закрыт без `METALLUM_GI_G2_CAPTURE=1` и exact version gate.
+
+Частный Metal context хранит семь planes, делает conditional-mean mips без
+`coverage^2` и даёт one-shot raw debug slice. Actual M1 Pro census:
+`4,128,768` private texture bytes, `9,666,560` native peak и `18,022,528`
+conservative end-to-end peak при бюджете `25,165,824`. Source и bundled
+Metal validation прошли; полный project `check` — 105 tasks. Тест 10 000
+publications завершился с одним resident tag и нулём active leases.
+
+Предварительная same-source/artifact 600+600 пара на native HDR
+3024x1964, Advanced/Balanced:
+
+- structural-off: `27.331 FPS`, 1% low `21.650`, GPU p95 `40.734 ms`;
+- capture-on: `27.434 FPS`, 1% low `23.249`, GPU p95 `39.595 ms`;
+- delta: `+0.37%` FPS, `+7.39%` 1% low, `-1.139 ms` GPU p95.
+
+Enabled run принял 768 snapshots, имел zero stale/outside/capacity rejects, peak
+13 candidates / 204,984 bytes и zero active candidates при shutdown. Это Tier B
+dirty-worktree screening, а не Tier C claim. Качество и resolution не снижались;
+production GI resources/passes/bindings остались нулевыми. G2 сохранён только
+как diagnostic infrastructure; существующий G1 floor gate по-прежнему блокирует
+любую новую production-GI стадию.

@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "id": "gi-g2-semantic-evidence-v1",
+  "stage": "G2",
+  "decision": "PASS_STRUCTURALLY_OFF_DIAGNOSTIC",
+  "g3_contract_gate": true,
+  "g3_started": false,
+  "implementation": {
+    "commit": "d7504916a4c5e1fdf56eb2ff994b5b8b8fc9a636",
+    "runtime_source_sha256": "afa9f6527de47b0e0f910e493a7f3523f244c51a9f1a957cdd79fab91166fdfe",
+    "runtime_artifact_sha256": "f49d6fb49f13f06178e8f0751a626ea51e938aeaccef9597d52f515e5cf26589"
+  },
+  "scope": {
+    "mode": "accepted_semantic_field_diagnostic",
+    "production_receiver_bindings": 0,
+    "production_frame_graph_passes": 0,
+    "production_gpu_contexts": 0,
+    "transport_or_bounce": false,
+    "source_or_direct_lighting_injection": false,
+    "enabled_environment": "METALLUM_GI_G2_CAPTURE=1"
+  },
+  "source_chain": {
+    "minecraft": "26.2",
+    "sodium": "0.9.1+mc26.2",
+    "fabric_renderer_api": "14.0.1+eec4cc519c",
+    "mixin_extras": "0.5.4",
+    "publication_boundary": "RenderRegionManager.uploadResults_RETURN",
+    "mutable_live_world_reads_after_publication": 0,
+    "camera_dependent_lightmap_inputs": 0,
+    "atlas_or_native_image_references_in_candidates": 0,
+    "runtime_accepted_snapshots": 768,
+    "runtime_stale_snapshots": 0,
+    "runtime_capacity_rejects": 0
+  },
+  "topology": {
+    "cascade_count": 3,
+    "cells_per_axis": 32,
+    "cell_sizes_blocks": [2, 4, 8],
+    "spans_blocks": [64, 128, 256],
+    "mip_levels": 6,
+    "storage_mode": "Private",
+    "planes": [
+      "RGBA16Unorm material",
+      "RGBA16Float emission",
+      "RGBA8Unorm faces0",
+      "RG8Unorm faces1",
+      "RGBA8Uint state",
+      "R16Uint palette",
+      "R8Unorm coverage"
+    ]
+  },
+  "semantic_contract": {
+    "palette_reserved_ids": {
+      "unknown": 0,
+      "air": 1,
+      "fallback": 2
+    },
+    "palette_capacity": 65536,
+    "section_cells": 584,
+    "candidate_payload_bytes": 15768,
+    "maximum_concurrent_candidates": 64,
+    "maximum_resident_section_tags": 4913,
+    "unknown_is_black_opaque_zero_emission": true,
+    "fallback_is_black_opaque_zero_emission": true,
+    "emission_rgb_is_nonpremultiplied": true,
+    "accepted_quad_overrides_seed_material_and_medium": true,
+    "scroll_preserves_overlap_and_invalidates_exposed_slabs": true,
+    "synthetic_publications": 10000,
+    "steady_active_candidates_after_test": 0,
+    "steady_resident_tags_after_test": 1
+  },
+  "memory": {
+    "private_texture_bytes": 4128768,
+    "peak_upload_staging_bytes": 5505024,
+    "peak_capture_readback_bytes": 32768,
+    "native_peak_bytes": 9666560,
+    "conservative_end_to_end_bytes": 18022528,
+    "diffuse_gi_budget_bytes": 25165824,
+    "within_budget": true
+  },
+  "mechanical_verification": {
+    "gradle_check": "PASS_105_TASKS",
+    "cpu_semantic_contracts": "PASS",
+    "sodium_source_chain": "PASS",
+    "cpu_to_gpu_sanitization": "PASS",
+    "java_ffm_swift_metal_abi": "PASS",
+    "forced_source_metal_validation": "PASS",
+    "bundled_metallib_validation": "PASS",
+    "conditional_mean_recursive_mips": "PASS",
+    "raw_seven_plane_debug_slice": "PASS",
+    "generation_and_stale_rejection": "PASS",
+    "wrong_thread_rejection": "PASS",
+    "release_while_upload_in_flight": "PASS",
+    "g1_gpu_regression": "PASS"
+  },
+  "runtime_screening": {
+    "classification": "TIER_B_PROVISIONAL_DIRTY_SOURCE_MATCH",
+    "warmup_frames": 600,
+    "measure_frames": 600,
+    "windows": 2,
+    "thermal_state": "nominal",
+    "dropped_timing_events": 0,
+    "source_digest_match": true,
+    "artifact_digest_match": true,
+    "user_tolerance_fps": 2.0,
+    "control": {
+      "average_fps": 27.33146070567613,
+      "one_percent_low_fps": 21.649802625715026,
+      "zero_point_one_percent_low_fps": 20.182593827834268,
+      "gpu_p95_ms": 40.73414590675384,
+      "cpu_submission_p95_ms": 5.330999500000001,
+      "raw": "run/logs/metallum-benchmarks/20260825T113849Z-g5c3562f53fce-dirty-gi-g2-control-off-off.raw.jsonl",
+      "raw_sha256": "e8692a2f909a1407a9550f2ce2ba6781cf82d4e95546e2324cb34d6ddd2e3d10",
+      "summary": "run/logs/metallum-benchmarks/20260825T113849Z-g5c3562f53fce-dirty-gi-g2-control-off-off.summary.json",
+      "summary_sha256": "7fa8a66f6764a59aafcae04c6081807d2aff01427517b7156bff041555dab8b9",
+      "minecraft_log": "run/logs/metallum-benchmarks/20260825T113849Z-g5c3562f53fce-dirty-gi-g2-control-off-off.minecraft.log",
+      "minecraft_log_sha256": "32e5b9ac6fabf1fef0af05fef67311831b103b21beb089091f569f7e9550c49c"
+    },
+    "candidate": {
+      "average_fps": 27.433561019150723,
+      "one_percent_low_fps": 23.249494832428585,
+      "zero_point_one_percent_low_fps": 22.139487129104793,
+      "gpu_p95_ms": 39.595270820427686,
+      "cpu_submission_p95_ms": 4.749125,
+      "raw": "run/logs/metallum-benchmarks/20260825T114023Z-g5c3562f53fce-dirty-gi-g2-capture-on-off.raw.jsonl",
+      "raw_sha256": "f648bd654bc991eb9abe0220d04407c7eb47f2591a85d01c540e6c84a59cd2cd",
+      "summary": "run/logs/metallum-benchmarks/20260825T114023Z-g5c3562f53fce-dirty-gi-g2-capture-on-off.summary.json",
+      "summary_sha256": "a058802820e350f9e5d1b883a7f7e1cf55bdc738e57e386fcbdd6027cb95cc10",
+      "minecraft_log": "run/logs/metallum-benchmarks/20260825T114023Z-g5c3562f53fce-dirty-gi-g2-capture-on-off.minecraft.log",
+      "minecraft_log_sha256": "005a7298eb7e670908b5254f76a105e0f9fadf738106074e24fcbea449d15d1b"
+    },
+    "deltas": {
+      "average_fps_percent": 0.373563325,
+      "one_percent_low_percent": 7.388945915,
+      "gpu_p95_percent": -2.795873243,
+      "gpu_p95_ms": -1.138875086326152,
+      "cpu_submission_p95_percent": -10.914923177
+    },
+    "relative_gate": "PASS_NO_MEASURED_REGRESSION",
+    "absolute_floor_interpretation": "WITHIN_USER_ACCEPTED_1_TO_2_FPS_VARIANCE",
+    "attestation": "PROVISIONAL_DIRTY_WORKTREE_SCREENING_NOT_TIER_C"
+  },
+  "runtime_telemetry": {
+    "accepted": 768,
+    "stale": 0,
+    "outside": 0,
+    "capacity_rejected": 0,
+    "discarded": 0,
+    "resident_tags": 768,
+    "active_candidates_at_shutdown": 0,
+    "peak_candidates": 13,
+    "peak_candidate_bytes": 204984,
+    "production_gi_resources": 0,
+    "production_gi_passes": 0,
+    "production_gi_bindings": 0
+  },
+  "limitations": [
+    "The runtime A/B is a 600+600 provisional screening on a dirty worktree, not a Tier C release claim.",
+    "The native seven-plane context is validated from source and bundled metallib but has no production caller.",
+    "G2 produces no receiver-visible image and makes no visual GI claim.",
+    "G3 direct source injection and all transport or bounce work remain absent."
+  ],
+  "next_gate": "G2 technical stop-gate passes. G3 is not started and requires a separate scoped request."
+}

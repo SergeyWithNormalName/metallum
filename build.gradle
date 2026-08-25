@@ -1411,6 +1411,24 @@ tasks.register("giG1FieldContractTest", Exec) {
     commandLine "python3", "tools/gi_g1_contract.py", "--root", "."
 }
 
+tasks.register("giG2SemanticContractTest", Exec) {
+	group = "verification"
+	description = "Validates G2 accepted semantic evidence, bounded memory and structural-off scope"
+	inputs.file("tools/gi_g2_contract.py")
+	inputs.file("benchmark/gi/g2-semantic-evidence-v1.json")
+	inputs.dir("src/main/java/com/metallum/client/gi/capture")
+	inputs.dir("src/main/java/com/metallum/client/gi/semantic")
+	inputs.files(
+		"src/main/java/com/metallum/client/gi/field/GiSemanticFieldGpuResources.java",
+		"src/main/java/com/metallum/client/gi/field/GiSemanticGpuEncoder.java",
+		"src/main/java/com/metallum/client/gi/field/GiSemanticGpuSnapshot.java"
+	)
+	inputs.dir("src/main/java/com/metallum/mixin/gi")
+	inputs.file("src/main/metal/MetallumGiField.metal")
+	inputs.file("src/main/native/MetallumNative.swift")
+	commandLine "python3", "tools/gi_g2_contract.py", "--root", "."
+}
+
 tasks.register("benchmarkFixtureContractTest", Exec) {
     group = "verification"
     description = "Runs immutable fixture/settings digest parser self-tests"
@@ -1433,6 +1451,7 @@ tasks.named("test", Test) {
 tasks.named("check") {
     dependsOn(tasks.named("giG0FixtureContractTest"))
     dependsOn(tasks.named("giG1FieldContractTest"))
+    dependsOn(tasks.named("giG2SemanticContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
     dependsOn(tasks.named("benchmarkReportContractTest"))
 	dependsOn(tasks.named("hdrUnitTest"))

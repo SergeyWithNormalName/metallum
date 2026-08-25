@@ -310,6 +310,17 @@ Stop-gate:
 - Неизвестная section остаётся unknown; использование данных предыдущего world
   или camera-dependent lightmap запрещает переход к G3.
 
+Результат G2 от 2026-08-25: `PASS_STRUCTURALLY_OFF_DIAGNOSTIC`. Commit
+`d750491` публикует truth только после accepted Sodium output, различает
+UNKNOWN/AIR/FALLBACK, отбрасывает stale generations и не читает lightmap.
+10 000 publications оставляют один resident tag и ноль active leases.
+Source/bundled Metal проверки дали 18 022 528 bytes conservative peak
+при бюджете 24 MiB. Live 600+600 screening принял 768 snapshots без
+stale/capacity rejects и показал 27.331 FPS OFF против 27.434 FPS ON;
+это Tier B, не Tier C claim. Production GI resources/passes/bindings равны
+нулю. Технический gate к отдельно запрошенному G3 пройден, но G3
+не начат. Полный контракт: `docs/GI_G2.md`.
+
 ### G3 — direct source injection без bounce
 
 Цель: построить детерминированное outgoing/source radiance field.
