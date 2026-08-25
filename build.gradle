@@ -266,6 +266,28 @@ tasks.register("frozenReflectionNativeValidation", JavaExec) {
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 }
 
+tasks.register("giFieldUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded field-only G1 topology, memory and generation contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiFieldTests")
+}
+
+tasks.register("giFieldGpuValidation", JavaExec) {
+	group = "verification"
+	description = "Validates G1 Java/FFM/private-3D Metal upload, mips, capture and lifetime"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiFieldGpuValidation")
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
 tasks.register("shadowValueValidation", JavaExec) {
 	group = "verification"
 	description = "Validates L4 environment, cascade stability, preset and shadow ABI contracts"
@@ -1357,6 +1379,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("realWorldVertexReflectionUnitTest"))
 	dependsOn(tasks.named("benchmarkLightingAdmissionUnitTest"))
 	dependsOn(tasks.named("frozenReflectionNativeValidation"))
+	dependsOn(tasks.named("giFieldUnitTest"))
+	dependsOn(tasks.named("giFieldGpuValidation"))
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("godRayWorldSpaceUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))

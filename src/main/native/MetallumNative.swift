@@ -140,7 +140,10 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .dynamicVoxelShadow:
             ["metallum_dynamic_voxel_shadow_v1"]
         case .radianceClipmap:
-            ["metallum_radiance_downsample_mip"]
+            [
+                "metallum_gi_field_downsample_v1",
+                "metallum_radiance_downsample_mip"
+            ]
         }
     }
 }
@@ -14713,6 +14716,517 @@ public func metallum_MTLDevice_makeRenderPipelineState(
             return nil
         }
     }
+}
+
+// MARK: - G1 isolated field infrastructure
+
+private let metallumGiFieldAbiVersionV1: Int32 = 1
+private let metallumGiFieldLayoutBytesV1 = 64
+private let metallumGiFieldStatsBytesV1 = 80
+private let metallumGiFieldCascadeCount = 3
+private let metallumGiFieldEdge = 32
+private let metallumGiFieldMipCount = 6
+private let metallumGiFieldStatusOK: Int32 = 1
+private let metallumGiFieldStatusInvalid: Int32 = -1
+private let metallumGiFieldStatusBusy: Int32 = -2
+private let metallumGiFieldStatusStale: Int32 = -3
+private let metallumGiFieldStatusCaptureConsumed: Int32 = -4
+
+public struct MetallumGiFieldStatsV1 {
+    public var ready: Int32
+    public var buildInFlight: Int32
+    public var worldGeneration: UInt64
+    public var persistentBytes: UInt64
+    public var uploadCount: UInt64
+    public var mipDispatchCount: UInt64
+    public var rejectedCount: UInt64
+    public var resetCount: UInt64
+    public var captureCount: UInt64
+    public var nearOriginX: Int32
+    public var nearOriginY: Int32
+    public var nearOriginZ: Int32
+    public var padding0: Int32 = 0
+}
+
+private final class MetallumGiFieldContextV1 {
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let fieldTextures: [MTLTexture]
+    private let coverageTextures: [MTLTexture]
+    private let fieldMipViews: [[MTLTexture]]
+    private let coverageMipViews: [[MTLTexture]]
+    private let mipPipeline: MTLComputePipelineState
+    private let condition = NSCondition()
+
+    private var ready = false
+    private var buildInFlight = false
+    private var captureConsumed = false
+    private var worldGeneration: UInt64
+    private var origins = Array(repeating: Int32(0), count: metallumGiFieldCascadeCount * 3)
+    private var uploadCount: UInt64 = 0
+    private var mipDispatchCount: UInt64 = 0
+    private var rejectedCount: UInt64 = 0
+    private var resetCount: UInt64 = 0
+    private var captureCount: UInt64 = 0
+
+    init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
+        guard worldGeneration > 0 else { return nil }
+        self.device = device
+        self.commandQueue = commandQueue
+        self.worldGeneration = worldGeneration
+
+        var fields: [MTLTexture] = []
+        var coverages: [MTLTexture] = []
+        var fieldViews: [[MTLTexture]] = []
+        var coverageViews: [[MTLTexture]] = []
+        for cascade in 0..<metallumGiFieldCascadeCount {
+            let fieldDescriptor = MTLTextureDescriptor()
+            fieldDescriptor.textureType = .type3D
+            fieldDescriptor.pixelFormat = .rgba16Float
+            fieldDescriptor.width = metallumGiFieldEdge
+            fieldDescriptor.height = metallumGiFieldEdge
+            fieldDescriptor.depth = metallumGiFieldEdge
+            fieldDescriptor.mipmapLevelCount = metallumGiFieldMipCount
+            fieldDescriptor.usage = [.shaderRead, .shaderWrite]
+            fieldDescriptor.storageMode = .private
+
+            let coverageDescriptor = fieldDescriptor.copy() as? MTLTextureDescriptor
+            coverageDescriptor?.pixelFormat = .r8Unorm
+            guard let coverageDescriptor,
+                  let field = device.makeTexture(descriptor: fieldDescriptor),
+                  let coverage = device.makeTexture(descriptor: coverageDescriptor)
+            else { return nil }
+            field.label = "Metallum G1 field cascade \(cascade)"
+            coverage.label = "Metallum G1 coverage cascade \(cascade)"
+
+            var perField: [MTLTexture] = []
+            var perCoverage: [MTLTexture] = []
+            for mip in 0..<metallumGiFieldMipCount {
+                guard let fieldView = field.makeTextureView(
+                        pixelFormat: .rgba16Float,
+                        textureType: .type3D,
+                        levels: mip..<(mip + 1),
+                        slices: 0..<1),
+                      let coverageView = coverage.makeTextureView(
+                        pixelFormat: .r8Unorm,
+                        textureType: .type3D,
+                        levels: mip..<(mip + 1),
+                        slices: 0..<1)
+                else { return nil }
+                perField.append(fieldView)
+                perCoverage.append(coverageView)
+            }
+            fields.append(field)
+            coverages.append(coverage)
+            fieldViews.append(perField)
+            coverageViews.append(perCoverage)
+        }
+
+        do {
+            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .radianceClipmap)
+            guard let function = library.makeFunction(name: "metallum_gi_field_downsample_v1") else {
+                return nil
+            }
+            self.mipPipeline = try device.makeComputePipelineState(function: function)
+        } catch {
+            NSLog("[metallum] G1 field pipeline creation failed: %@", String(describing: error))
+            return nil
+        }
+        self.fieldTextures = fields
+        self.coverageTextures = coverages
+        self.fieldMipViews = fieldViews
+        self.coverageMipViews = coverageViews
+    }
+
+    func queueUpload(
+        worldGeneration: UInt64,
+        rawOrigins: UnsafeRawPointer,
+        originsBytes: UInt64,
+        rawField: UnsafeRawPointer,
+        fieldBytes: UInt64,
+        rawCoverage: UnsafeRawPointer,
+        coverageBytes: UInt64
+    ) -> Int32 {
+        let cellsPerCascade = metallumGiFieldEdge * metallumGiFieldEdge * metallumGiFieldEdge
+        let expectedOriginsBytes = UInt64(metallumGiFieldCascadeCount * 3 * MemoryLayout<Int32>.size)
+        let fieldBytesPerCascade = cellsPerCascade * 4 * MemoryLayout<UInt16>.size
+        let expectedFieldBytes = UInt64(metallumGiFieldCascadeCount * fieldBytesPerCascade)
+        let coverageBytesPerCascade = cellsPerCascade
+        let expectedCoverageBytes = UInt64(metallumGiFieldCascadeCount * coverageBytesPerCascade)
+        guard originsBytes == expectedOriginsBytes,
+              fieldBytes == expectedFieldBytes,
+              coverageBytes == expectedCoverageBytes else {
+            return metallumGiFieldStatusInvalid
+        }
+
+        condition.lock()
+        defer { condition.unlock() }
+        guard worldGeneration == self.worldGeneration else {
+            rejectedCount &+= 1
+            return metallumGiFieldStatusStale
+        }
+        guard !buildInFlight else {
+            rejectedCount &+= 1
+            return metallumGiFieldStatusBusy
+        }
+
+        let alignedCoverageRowBytes = 256
+        let coverageImageBytes = alignedCoverageRowBytes * metallumGiFieldEdge
+        let paddedCoverageBytesPerCascade = coverageImageBytes * metallumGiFieldEdge
+        guard let fieldStaging = device.makeBuffer(
+                bytes: rawField, length: Int(expectedFieldBytes), options: .storageModeShared),
+              let coverageStaging = device.makeBuffer(
+                length: metallumGiFieldCascadeCount * paddedCoverageBytesPerCascade,
+                options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder()
+        else {
+            rejectedCount &+= 1
+            return metallumGiFieldStatusInvalid
+        }
+
+        for cascade in 0..<metallumGiFieldCascadeCount {
+            let compactCascadeOffset = cascade * coverageBytesPerCascade
+            let paddedCascadeOffset = cascade * paddedCoverageBytesPerCascade
+            for z in 0..<metallumGiFieldEdge {
+                for y in 0..<metallumGiFieldEdge {
+                    let sourceOffset = compactCascadeOffset + (z * metallumGiFieldEdge + y) * metallumGiFieldEdge
+                    let destinationOffset = paddedCascadeOffset + z * coverageImageBytes + y * alignedCoverageRowBytes
+                    memcpy(
+                        coverageStaging.contents().advanced(by: destinationOffset),
+                        rawCoverage.advanced(by: sourceOffset),
+                        metallumGiFieldEdge
+                    )
+                }
+            }
+        }
+
+        let nextOrigins = (0..<(metallumGiFieldCascadeCount * 3)).map {
+            rawOrigins.load(fromByteOffset: $0 * MemoryLayout<Int32>.size, as: Int32.self)
+        }
+        ready = false
+        buildInFlight = true
+        captureConsumed = false
+        commandBuffer.label = "Metallum G1 Field Upload"
+        blit.label = "G1 field private texture upload"
+        for cascade in 0..<metallumGiFieldCascadeCount {
+            blit.copy(
+                from: fieldStaging,
+                sourceOffset: cascade * fieldBytesPerCascade,
+                sourceBytesPerRow: metallumGiFieldEdge * 4 * MemoryLayout<UInt16>.size,
+                sourceBytesPerImage: metallumGiFieldEdge * metallumGiFieldEdge * 4 * MemoryLayout<UInt16>.size,
+                sourceSize: MTLSize(width: metallumGiFieldEdge, height: metallumGiFieldEdge, depth: metallumGiFieldEdge),
+                to: fieldTextures[cascade], destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+            blit.copy(
+                from: coverageStaging,
+                sourceOffset: cascade * paddedCoverageBytesPerCascade,
+                sourceBytesPerRow: alignedCoverageRowBytes,
+                sourceBytesPerImage: coverageImageBytes,
+                sourceSize: MTLSize(width: metallumGiFieldEdge, height: metallumGiFieldEdge, depth: metallumGiFieldEdge),
+                to: coverageTextures[cascade], destinationSlice: 0, destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        }
+        blit.endEncoding()
+
+        for cascade in 0..<metallumGiFieldCascadeCount {
+            for mip in 1..<metallumGiFieldMipCount {
+                guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                    buildInFlight = false
+                    rejectedCount &+= 1
+                    return metallumGiFieldStatusInvalid
+                }
+                let edge = metallumGiFieldEdge >> mip
+                encoder.label = "G1 coverage mip c\(cascade) m\(mip)"
+                encoder.setComputePipelineState(mipPipeline)
+                encoder.setTexture(fieldMipViews[cascade][mip - 1], index: 0)
+                encoder.setTexture(coverageMipViews[cascade][mip - 1], index: 1)
+                encoder.setTexture(fieldMipViews[cascade][mip], index: 2)
+                encoder.setTexture(coverageMipViews[cascade][mip], index: 3)
+                encoder.dispatchThreads(
+                    MTLSize(width: edge, height: edge, depth: edge),
+                    threadsPerThreadgroup: MTLSize(width: min(4, edge), height: min(4, edge), depth: min(4, edge)))
+                encoder.endEncoding()
+            }
+        }
+
+        commandBuffer.addCompletedHandler { [self, fieldStaging, coverageStaging] completed in
+            _ = fieldStaging
+            _ = coverageStaging
+            condition.lock()
+            defer {
+                condition.broadcast()
+                condition.unlock()
+            }
+            buildInFlight = false
+            if completed.status == .completed {
+                ready = true
+                origins = nextOrigins
+                uploadCount &+= 1
+                mipDispatchCount &+= UInt64(metallumGiFieldCascadeCount * (metallumGiFieldMipCount - 1))
+            } else {
+                rejectedCount &+= 1
+                NSLog("[metallum] G1 field upload failed: %@", String(describing: completed.error))
+            }
+        }
+        commandBuffer.commit()
+        return metallumGiFieldStatusOK
+    }
+
+    func awaitReady(timeoutMilliseconds: UInt64) -> Int32 {
+        guard timeoutMilliseconds > 0 else { return metallumGiFieldStatusInvalid }
+        let deadline = Date(timeIntervalSinceNow: Double(timeoutMilliseconds) / 1000.0)
+        condition.lock()
+        defer { condition.unlock() }
+        while buildInFlight {
+            if !condition.wait(until: deadline) {
+                return metallumGiFieldStatusBusy
+            }
+        }
+        return ready ? metallumGiFieldStatusOK : metallumGiFieldStatusInvalid
+    }
+
+    func reset(worldGeneration: UInt64) -> Int32 {
+        condition.lock()
+        defer { condition.unlock() }
+        guard worldGeneration > self.worldGeneration else { return metallumGiFieldStatusInvalid }
+        guard !buildInFlight else { return metallumGiFieldStatusBusy }
+        self.worldGeneration = worldGeneration
+        ready = false
+        captureConsumed = false
+        resetCount &+= 1
+        return metallumGiFieldStatusOK
+    }
+
+    func captureMipOnce(
+        cascade: Int32,
+        mip: Int32,
+        outField: UnsafeMutableRawPointer,
+        fieldBytes: UInt64,
+        outCoverage: UnsafeMutableRawPointer,
+        coverageBytes: UInt64
+    ) -> Int32 {
+        guard cascade >= 0 && cascade < Int32(metallumGiFieldCascadeCount),
+              mip >= 0 && mip < Int32(metallumGiFieldMipCount) else {
+            return metallumGiFieldStatusInvalid
+        }
+        guard awaitReady(timeoutMilliseconds: 10_000) == metallumGiFieldStatusOK else {
+            return metallumGiFieldStatusBusy
+        }
+        condition.lock()
+        if captureConsumed {
+            condition.unlock()
+            return metallumGiFieldStatusCaptureConsumed
+        }
+        captureConsumed = true
+        condition.unlock()
+
+        let cascadeIndex = Int(cascade)
+        let mipIndex = Int(mip)
+        let edge = metallumGiFieldEdge >> mipIndex
+        let expectedFieldBytes = UInt64(edge * edge * edge * 4 * MemoryLayout<UInt16>.size)
+        let expectedCoverageBytes = UInt64(edge * edge * edge)
+        guard fieldBytes == expectedFieldBytes, coverageBytes == expectedCoverageBytes else {
+            return metallumGiFieldStatusInvalid
+        }
+        let fieldRowBytes = ((edge * 4 * MemoryLayout<UInt16>.size + 255) / 256) * 256
+        let coverageRowBytes = ((edge + 255) / 256) * 256
+        let fieldImageBytes = fieldRowBytes * edge
+        let coverageImageBytes = coverageRowBytes * edge
+        guard let fieldReadback = device.makeBuffer(
+                length: fieldImageBytes * edge, options: .storageModeShared),
+              let coverageReadback = device.makeBuffer(
+                length: coverageImageBytes * edge, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder()
+        else { return metallumGiFieldStatusInvalid }
+        blit.copy(
+            from: fieldTextures[cascadeIndex], sourceSlice: 0, sourceLevel: mipIndex,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: edge, height: edge, depth: edge),
+            to: fieldReadback, destinationOffset: 0,
+            destinationBytesPerRow: fieldRowBytes, destinationBytesPerImage: fieldImageBytes)
+        blit.copy(
+            from: coverageTextures[cascadeIndex], sourceSlice: 0, sourceLevel: mipIndex,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: edge, height: edge, depth: edge),
+            to: coverageReadback, destinationOffset: 0,
+            destinationBytesPerRow: coverageRowBytes, destinationBytesPerImage: coverageImageBytes)
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return metallumGiFieldStatusInvalid }
+
+        let compactFieldRowBytes = edge * 4 * MemoryLayout<UInt16>.size
+        for z in 0..<edge {
+            for y in 0..<edge {
+                memcpy(
+                    outField.advanced(by: (z * edge + y) * compactFieldRowBytes),
+                    fieldReadback.contents().advanced(by: z * fieldImageBytes + y * fieldRowBytes),
+                    compactFieldRowBytes)
+                memcpy(
+                    outCoverage.advanced(by: (z * edge + y) * edge),
+                    coverageReadback.contents().advanced(by: z * coverageImageBytes + y * coverageRowBytes),
+                    edge)
+            }
+        }
+        condition.lock()
+        captureCount &+= 1
+        condition.unlock()
+        return metallumGiFieldStatusOK
+    }
+
+    func stats() -> MetallumGiFieldStatsV1 {
+        condition.lock()
+        defer { condition.unlock() }
+        let persistentBytes = zip(fieldTextures, coverageTextures).reduce(UInt64(0)) {
+            $0 + UInt64($1.0.allocatedSize) + UInt64($1.1.allocatedSize)
+        }
+        return MetallumGiFieldStatsV1(
+            ready: ready ? 1 : 0,
+            buildInFlight: buildInFlight ? 1 : 0,
+            worldGeneration: worldGeneration,
+            persistentBytes: persistentBytes,
+            uploadCount: uploadCount,
+            mipDispatchCount: mipDispatchCount,
+            rejectedCount: rejectedCount,
+            resetCount: resetCount,
+            captureCount: captureCount,
+            nearOriginX: origins[0],
+            nearOriginY: origins[1],
+            nearOriginZ: origins[2])
+    }
+}
+
+@_cdecl("metallum_gi_field_abi_version_v1")
+public func metallum_gi_field_abi_version_v1() -> Int32 {
+    metallumGiFieldAbiVersionV1
+}
+
+@_cdecl("metallum_gi_field_layout_v1")
+public func metallum_gi_field_layout_v1(
+    _ destination: UnsafeMutableRawPointer?, _ destinationBytes: UInt64
+) -> Int32 {
+    guard MemoryLayout<MetallumGiFieldStatsV1>.size == metallumGiFieldStatsBytesV1,
+          let destination, destinationBytes >= UInt64(metallumGiFieldLayoutBytesV1) else {
+        return metallumGiFieldStatusInvalid
+    }
+    let words: [Int32] = [
+        metallumGiFieldAbiVersionV1,
+        Int32(metallumGiFieldLayoutBytesV1),
+        Int32(metallumGiFieldStatsBytesV1),
+        Int32(metallumGiFieldCascadeCount),
+        Int32(metallumGiFieldEdge),
+        Int32(metallumGiFieldMipCount),
+        2, 4, 8, 8, 1, 1,
+        metallumGiFieldStatusStale,
+        metallumGiFieldStatusBusy,
+        metallumGiFieldStatusCaptureConsumed,
+        0
+    ]
+    words.withUnsafeBytes { bytes in
+        destination.copyMemory(from: bytes.baseAddress!, byteCount: metallumGiFieldLayoutBytesV1)
+    }
+    return metallumGiFieldStatusOK
+}
+
+@_cdecl("metallum_gi_field_create_context_v1")
+public func metallum_gi_field_create_context_v1(
+    _ rawDevice: UnsafeMutableRawPointer?,
+    _ rawQueue: UnsafeMutableRawPointer?,
+    _ worldGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let rawDevice, let rawQueue,
+              let device = Unmanaged<AnyObject>.fromOpaque(rawDevice).takeUnretainedValue() as? MTLDevice,
+              let queue = Unmanaged<AnyObject>.fromOpaque(rawQueue).takeUnretainedValue() as? MTLCommandQueue,
+              let context = MetallumGiFieldContextV1(
+                device: device, commandQueue: queue, worldGeneration: worldGeneration)
+        else { return nil }
+        return Unmanaged.passRetained(context).toOpaque()
+    }
+}
+
+@_cdecl("metallum_gi_field_upload_once_v1")
+public func metallum_gi_field_upload_once_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ worldGeneration: UInt64,
+    _ origins: UnsafeRawPointer?, _ originsBytes: UInt64,
+    _ field: UnsafeRawPointer?, _ fieldBytes: UInt64,
+    _ coverage: UnsafeRawPointer?, _ coverageBytes: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let origins, let field, let coverage else {
+            return metallumGiFieldStatusInvalid
+        }
+        let context = Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext).takeUnretainedValue()
+        return context.queueUpload(
+            worldGeneration: worldGeneration,
+            rawOrigins: origins, originsBytes: originsBytes,
+            rawField: field, fieldBytes: fieldBytes,
+            rawCoverage: coverage, coverageBytes: coverageBytes)
+    }
+}
+
+@_cdecl("metallum_gi_field_await_ready_v1")
+public func metallum_gi_field_await_ready_v1(
+    _ rawContext: UnsafeMutableRawPointer?, _ timeoutMilliseconds: UInt64
+) -> Int32 {
+    guard let rawContext else { return metallumGiFieldStatusInvalid }
+    return Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext)
+        .takeUnretainedValue().awaitReady(timeoutMilliseconds: timeoutMilliseconds)
+}
+
+@_cdecl("metallum_gi_field_reset_v1")
+public func metallum_gi_field_reset_v1(
+    _ rawContext: UnsafeMutableRawPointer?, _ worldGeneration: UInt64
+) -> Int32 {
+    guard let rawContext else { return metallumGiFieldStatusInvalid }
+    return Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext)
+        .takeUnretainedValue().reset(worldGeneration: worldGeneration)
+}
+
+@_cdecl("metallum_gi_field_capture_mip_once_v1")
+public func metallum_gi_field_capture_mip_once_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ cascade: Int32,
+    _ mip: Int32,
+    _ outField: UnsafeMutableRawPointer?, _ fieldBytes: UInt64,
+    _ outCoverage: UnsafeMutableRawPointer?, _ coverageBytes: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let outField, let outCoverage else {
+            return metallumGiFieldStatusInvalid
+        }
+        return Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext)
+            .takeUnretainedValue().captureMipOnce(
+                cascade: cascade, mip: mip,
+                outField: outField, fieldBytes: fieldBytes,
+                outCoverage: outCoverage, coverageBytes: coverageBytes)
+    }
+}
+
+@_cdecl("metallum_gi_field_get_stats_v1")
+public func metallum_gi_field_get_stats_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ destination: UnsafeMutableRawPointer?,
+    _ destinationBytes: UInt64
+) -> Int32 {
+    let nativeStatsBytes = MemoryLayout<MetallumGiFieldStatsV1>.size
+    guard nativeStatsBytes == metallumGiFieldStatsBytesV1,
+          let rawContext, let destination,
+          destinationBytes >= UInt64(nativeStatsBytes) else {
+        return metallumGiFieldStatusInvalid
+    }
+    var stats = Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext).takeUnretainedValue().stats()
+    destination.copyMemory(from: &stats, byteCount: nativeStatsBytes)
+    return metallumGiFieldStatusOK
+}
+
+@_cdecl("metallum_gi_field_release_context_v1")
+public func metallum_gi_field_release_context_v1(_ rawContext: UnsafeMutableRawPointer?) {
+    guard let rawContext else { return }
+    _ = Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext).takeRetainedValue()
 }
 
 // MARK: - Frozen real-world reflection prototype
