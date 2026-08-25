@@ -4222,3 +4222,30 @@ functional/tail smoke, не Tier C FPS evidence и не основание за�
 optical/material или reflection-quality contracts. Окончательный статус остаётся
 `SUPPORTED`; для `PROVEN` performance acceptance нужны clean same-source Tier C A/B,
 а для пользовательского симптома — ручная ходьба туда-обратно после перезапуска.
+
+---
+
+## 2026-08-25 — G1 isolated field infrastructure
+
+**Статус:** `SUPPORTED_PENDING_ABSOLUTE_FLOOR`; implementation `88f9dda`
+сохранён, `g2_allowed=false`.
+
+Старый L7 не переносился целиком. Новый namespace содержит только topology
+`3 × 32^3`, spacing `2/4/8`, bounded candidate accounting, render-thread
+generation/reset, private `RGBA16Float + R8Unorm` textures, coverage-aware mips,
+versioned ABI, deferred release hook и one-shot capture. Appearance estimator,
+Sodium radiance extractor, directional probe, receiver и terrain bindings не
+используются. Фактический Metal allocation `1,277,952 bytes` против
+арифметических `1,011,123` и лимита `25,165,824`; полный `check` прошёл 98 задач.
+
+Contemporaneous 600+600 A/B recovery control -> G1:
+
+- FPS `27.390 -> 27.337` (`-0.20%`);
+- 1% low `21.705 -> 20.749` (`-4.40%`);
+- GPU p95 `40.445 -> 40.033 ms` (`-1.02%`).
+
+Относительный gate проходит, GI_OFF telemetry и production work строго нулевые.
+Но валидный G1 Tier C Overworld run дал `27.430 FPS`, ниже отдельно утверждённых
+28 FPS. Поэтому `.accepted.json` receipt не трактуется как product acceptance и
+переход к G2 заблокирован до нового Tier C подтверждения либо явного решения
+пользователя.

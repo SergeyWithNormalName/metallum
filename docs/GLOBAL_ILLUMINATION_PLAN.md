@@ -272,6 +272,15 @@ Stop-gate:
 - Если инфраструктуру нельзя отделить от rejected shader/benchmark hooks узким
   diff, перенос отменяется и минимальный field scaffold пишется заново.
 
+Результат G1 от 2026-08-25: `SUPPORTED_PENDING_ABSOLUTE_FLOOR`. Новый
+изолированный scaffold в `88f9dda` прошёл Java/FFM/Swift/Metal ABI, private 3D
+allocation, coverage mip, generation/reset, bounded accounting, in-flight
+lifetime, one-shot capture и полный `check`. Production bindings/passes равны
+нулю. Contemporaneous control/candidate A/B не показал регрессии, однако точный
+Tier C Overworld receipt дал `27.430 FPS`, `22.473` 1% low и `39.483 ms` GPU p95:
+условный average floor `28 FPS` не пройден. Поэтому
+`benchmark/gi/g1-field-evidence-v1.json` сохраняет `g2_allowed=false`.
+
 ### G2 — semantic material/emission field
 
 Цель: получить данные, необходимые transport, но отсутствующие в L5.
