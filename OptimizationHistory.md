@@ -3655,3 +3655,42 @@ vertex trace direction и coarse spatial field. Один следующий эк
 human review — заменить single-direction carrier на bounded two-lobe directional
 representation при неизменном fragment zero-volume-read contract; не добавлять
 planar/SSR/temporal/cloud/live updates.
+
+#### Grazing shoreline and dawn-color confidence correction — HUMAN PENDING
+
+Последующий human review подтвердил, что top-down/дальний refined receiver заметно
+лучше, но почти горизонтальный взгляд у поверхности воды всё ещё превращал песок в
+широкие грязно-жёлтые полосы. Отдельный редкий рассветный ракурс давал однородный
+мутно-розовый wash. Source audit выявил две связанные причины: минимальный
+directional response `0.45` не учитывал, что двухблочный voxel cell особенно плохо
+представляет почти горизонтальный cone ray, а обычный Schlick доводил весь rough
+environment lobe до идеального зеркала при `NdotV -> 0`.
+
+Исправление не меняет поле, vertex trace, ABI, ресурсы или прямой specular. При
+включённом `Representation Confidence` fragment теперь умножает directional response
+на bounded horizon confidence: `0.30` при elevation `<=0.035`, плавно до `1.0` при
+`>=0.18`. Это сохраняет сильные horizon landmarks, но не позволяет одному shoreline
+cell занимать длинную полосу воды. Общий environment/body composition использует
+roughness-aware Schlick с grazing limit `max(1-roughness,F0)`; при coarse roughness
+`0.28` предел равен `0.72`, поэтому низкочастотное рассветное небо не вытесняет всё
+тело воды. Sun GGX и local clustered GGX остаются отдельными и неизменными.
+
+Generated MSL: vertex SHA и размер не изменились
+(`7120b44b6c...`, 15,327 chars), fragment стал `0e97ea58d4b6...`, 148,774 chars;
+varyings остались `10/10`, одна syntactic vertex `texture3d.sample`, fragment volume
+resources/reads — ноль. Полный `./gradlew build` прошёл 97 задач.
+
+Детерминированный `reflection-house-voxel-grazing-v1` capture текущего кандидата:
+`run/lighting-reference/l0/20260825T161949Z-...-grazing-horizon-fix-capture-off.png`.
+Против прежнего exact-route capture `20260825T134306Z-...-grazing-final-r028-off.png`
+широкие жёлтая/зелёная/красная shoreline-полосы существенно ослаблены; top-down
+transmission в ближней части кадра сохранён. Это fixture observation, не human
+acceptance пользовательского рассветного ракурса.
+
+Короткий одинаковый `600+600` Advanced/Balanced screen, field READY, MetalFX OFF:
+confidence OFF `85.028 FPS`, GPU p95 `14.4943 ms`; refined ON `85.336 FPS`, GPU p95
+`14.2929 ms`. p99 изменился `15.4443 -> 15.8807 ms`, поэтому результат считается
+Tier-B/noise-level и доказывает только отсутствие явной большой регрессии, не
+production improvement. **Решение:** оставить узкий receiver fix и передать точные
+water-level sand/dawn ракурсы на повторную human review; не ослаблять redstone или
+весь world reflection глобальной strength-константой.

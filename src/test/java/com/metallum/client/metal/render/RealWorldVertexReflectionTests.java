@@ -236,22 +236,42 @@ public final class RealWorldVertexReflectionTests {
     private static void testReceiverFresnelCompositionMath() {
         float baseAlpha = 0.55F;
         float f0 = 0.0204F;
-        float normalFresnel = schlick(f0, 1.0F);
-        float grazingFresnel = schlick(f0, 0.10F);
+        float roughness = 0.28F;
+        float normalFresnel = schlickEnvironment(f0, 1.0F, roughness);
+        float grazingFresnel = schlickEnvironment(f0, 0.10F, roughness);
+        float horizonFresnel = schlickEnvironment(f0, 0.0F, roughness);
         float normalAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - normalFresnel);
         float grazingAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - grazingFresnel);
 
         require(normalAlpha - baseAlpha < 0.011F,
                 "near-normal water must retain almost all existing transparency");
-        require(grazingAlpha > normalAlpha + 0.20F,
+        require(grazingAlpha > normalAlpha + 0.16F,
                 "grazing Fresnel must materially suppress framebuffer transmission");
+        require(Math.abs(horizonFresnel - (1.0F - roughness)) < 1.0e-6F,
+                "rough environment Fresnel must remain bounded at the horizon");
+        require(horizonConfidence(0.0F) >= 0.30F && horizonConfidence(0.0F) < 0.31F,
+                "grazing voxel rays must retain only the bounded landmark floor");
+        require(horizonConfidence(0.18F) > 0.99F,
+                "elevated voxel rays must retain full representation confidence");
         require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F,
                 "coarse world reflection roughness must stay in the reviewed 0.28-0.35 range");
     }
 
-    private static float schlick(final float f0, final float nDotV) {
+    private static float schlickEnvironment(
+            final float f0,
+            final float nDotV,
+            final float roughness
+    ) {
         float oneMinus = 1.0F - Math.clamp(nDotV, 0.0F, 1.0F);
-        return f0 + (1.0F - f0) * oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
+        float grazingLimit = Math.max(1.0F - Math.clamp(roughness, 0.0F, 1.0F), f0);
+        return f0 + (grazingLimit - f0)
+                * oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
+    }
+
+    private static float horizonConfidence(final float elevation) {
+        float t = Math.clamp((elevation - 0.035F) / (0.18F - 0.035F), 0.0F, 1.0F);
+        float smooth = t * t * (3.0F - 2.0F * t);
+        return 0.30F + 0.70F * smooth;
     }
 
     private static void testMslGeneratedShaderContractProof() throws Exception {
@@ -268,7 +288,7 @@ public final class RealWorldVertexReflectionTests {
                 .build();
 
         String onGlslVertex = patchQualityVertex(matVertex, true, true);
-        String onGlslFragment = AdvancedDirectLightingShaderPatcher.patch("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT, LightingModel.ADVANCED, matFragment, TerrainEnvironmentSpecialization.FULL, true).source();
+        String onGlslFragment = patchQualityFragment(matFragment, true);
 
         String onMslVertex = compileToMsl(onGlslVertex, ShaderType.VERTEX, onDefines);
         String onMslFragment = compileToMsl(onGlslFragment, ShaderType.FRAGMENT, onDefines);
@@ -378,6 +398,12 @@ public final class RealWorldVertexReflectionTests {
         require(onGlslFragment.contains("metallumCoarseReflectionDirectionalResponseV1")
                         && onGlslFragment.contains("worldFromView * reflectedDirection"),
                 "fragment must evaluate directional response from the procedural water normal");
+        require(onGlslFragment.contains("horizonRepresentationConfidence")
+                        && onGlslFragment.contains("smoothstep(0.035, 0.18, coarseRayElevation)"),
+                "representation confidence must reduce near-horizontal two-block voxel smearing");
+        require(onGlslFragment.contains("metallumSchlickEnvironmentFresnelV1")
+                        && onGlslFragment.contains("vec3(1.0 - clamp(roughness, 0.0, 1.0))"),
+                "rough environment Fresnel must not become a perfect grazing mirror");
         require(onGlslFragment.contains("metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1")
                         && onGlslFragment.contains("reflectedEnvironment = mix("),
                 "coarse world radiance must replace analytic reflected environment inside one lobe");
@@ -390,6 +416,13 @@ public final class RealWorldVertexReflectionTests {
                 "coarse world radiance must not return to the diffuse-environment artistic floor");
         require(onGlslFragment.contains("color.a = clamp(1.0 - (1.0 - color.a)"),
                 "grazing Fresnel must reduce framebuffer transmission without touching direct specular");
+
+        String confidenceOffFragment = patchQualityFragment(matFragment, false);
+        require(!confidenceOffFragment.contains("horizonRepresentationConfidence")
+                        && confidenceOffFragment.contains("return mix(0.45, 1.0, alignedLobe);"),
+                "disabling representation confidence must strip the grazing voxel confidence gate");
+        require(confidenceOffFragment.contains("metallumSchlickEnvironmentFresnelV1"),
+                "the energy-correct rough environment Fresnel is a core water composition fix");
     }
 
     private static String patchQualityVertex(
@@ -412,6 +445,25 @@ public final class RealWorldVertexReflectionTests {
             ).source();
         } finally {
             restoreProperty(firstKey, oldFirst);
+            restoreProperty(confidenceKey, oldConfidence);
+        }
+    }
+
+    private static String patchQualityFragment(
+            final String materialFragment,
+            final boolean representationConfidence
+    ) {
+        String confidenceKey = WaterReflectionQualityConfig.REPRESENTATION_CONFIDENCE_PROPERTY;
+        String oldConfidence = System.getProperty(confidenceKey);
+        try {
+            System.setProperty(confidenceKey, Boolean.toString(representationConfidence));
+            return AdvancedDirectLightingShaderPatcher.patch(
+                    "sodium", "blocks/block_layer_opaque",
+                    MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                    LightingModel.ADVANCED, materialFragment,
+                    TerrainEnvironmentSpecialization.FULL, true
+            ).source();
+        } finally {
             restoreProperty(confidenceKey, oldConfidence);
         }
     }

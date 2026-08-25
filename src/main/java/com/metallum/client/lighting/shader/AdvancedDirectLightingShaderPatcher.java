@@ -3084,7 +3084,28 @@ public final class AdvancedDirectLightingShaderPatcher {
     }
 
     /** Reflection-ON fragment helpers are injected only into the water experiment flavor. */
-    private static final String SODIUM_REFLECTION_FRAGMENT_HELPERS = """
+    private static String sodiumReflectionFragmentHelpers() {
+        String horizonRepresentationConfidence =
+                WaterReflectionQualityConfig.isRepresentationConfidenceEnabled()
+                        ? """
+                vec3 worldUp = metallumSafeNormalV1(
+                        metallumEnvironment.worldUpAndMedium.xyz);
+                float referenceElevation = max(dot(referenceDirection, worldUp), 0.0);
+                float reflectedElevation = max(dot(worldReflectedDirection, worldUp), 0.0);
+                float coarseRayElevation = min(referenceElevation, reflectedElevation);
+                // A two-block voxel cell is least representative when a reflected cone travels
+                // almost parallel to the water plane: one shoreline cell then covers a long,
+                // visibly dirty band. Keep a bounded floor for real horizon landmarks, but do not
+                // let that low-frequency cell claim the same confidence as an elevated ray.
+                float horizonRepresentationConfidence = mix(
+                        0.30, 1.0, smoothstep(0.035, 0.18, coarseRayElevation));
+                return mix(0.45, 1.0, alignedLobe)
+                        * horizonRepresentationConfidence;
+                        """
+                        : """
+                return mix(0.45, 1.0, alignedLobe);
+                        """;
+        return """
 
             float metallumCoarseReflectionDirectionalResponseV1(
                     vec3 viewDirection,
@@ -3108,7 +3129,22 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float roughness = clamp(traceDirectionAndRoughness.w, 0.28, 0.35);
                 float lobeWidth = max(roughness * roughness * 0.55, 0.02);
                 float alignedLobe = smoothstep(1.0 - lobeWidth, 1.0, alignment);
-                return mix(0.45, 1.0, alignedLobe);
+            """ + horizonRepresentationConfidence + """
+            }
+
+            vec3 metallumSchlickEnvironmentFresnelV1(
+                    vec3 f0,
+                    float cosine,
+                    float roughness) {
+                float grazing = 1.0 - clamp(cosine, 0.0, 1.0);
+                float grazing2 = grazing * grazing;
+                float grazing5 = grazing2 * grazing2 * grazing;
+                // The coarse world/environment lobe is deliberately rough. Its integrated
+                // Fresnel response must not converge to a perfectly sharp mirror at grazing
+                // angles, otherwise a low-frequency dawn sky becomes an opaque color wash.
+                vec3 grazingLimit = max(
+                        vec3(1.0 - clamp(roughness, 0.0, 1.0)), f0);
+                return f0 + (grazingLimit - f0) * grazing5;
             }
 
             vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(
@@ -3202,6 +3238,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return result * material.specularScale;
             }
             """;
+    }
 
     private static final String SODIUM_VERTEX_DECLARATION =
             "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
@@ -3541,9 +3578,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                             + "                float metallumWaterNoV = clamp(dot(\n"
                             + "                        metallumDirectNormal, metallumViewDirection),\n"
                             + "                        0.0, 1.0);\n"
+                            + "                float metallumWaterEnvironmentRoughness = max(\n"
+                            + "                        metallumSurfaceMaterial.roughness, clamp(\n"
+                            + "                        metallumCoarseReflectionDirection.w, 0.0, 1.0));\n"
                             + "                metallumWaterEnvironmentFresnel =\n"
-                            + "                        metallumSchlickFresnelV1(\n"
-                            + "                        metallumWaterF0, metallumWaterNoV);\n"
+                            + "                        metallumSchlickEnvironmentFresnelV1(\n"
+                            + "                        metallumWaterF0, metallumWaterNoV,\n"
+                            + "                        metallumWaterEnvironmentRoughness);\n"
                             + "                metallumCoarseDirectionalResponse =\n"
                             + "                        metallumCoarseReflectionDirectionalResponseV1(\n"
                             + "                        metallumViewDirection, metallumDirectNormal,\n"
@@ -4073,7 +4114,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 : FRAGMENT_ABI_AND_HELPERS;
         helpers = fragmentHelpersForCurrentDiagnostic(helpers);
         if (vertexReflection) {
-            helpers += SODIUM_REFLECTION_FRAGMENT_HELPERS;
+            helpers += sodiumReflectionFragmentHelpers();
         }
         return replaceExactlyOnce(
                 source,
