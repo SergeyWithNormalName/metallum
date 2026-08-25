@@ -206,43 +206,12 @@ abstract class RenderSectionManagerAdvancedLightMixin {
                     camera.y(),
                     camera.z()
             );
-            if (FrozenReflectionFieldController.global().activateAtCamera(
+            // Enrollment is intentionally deferred to the bounded preload below. Starting a
+            // guarded replacement must never materialize or invalidate all 8^3 Sodium sections
+            // synchronously on the render thread.
+            FrozenReflectionFieldController.global().activateAtCamera(
                     this.level, camera.x(), camera.y(), camera.z()
-            )) {
-                // One bounded collection pass per guarded world-snapped domain. The native side
-                // keeps the previous completed field live while this replacement is collected and
-                // built. Missing sections remain unknown rather than borrowed from another region.
-                FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
-                for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
-                    for (int y = 0; y < FrozenReflectionFieldController.SECTIONS_PER_EDGE; y++) {
-                        for (int x = 0; x < FrozenReflectionFieldController.SECTIONS_PER_EDGE; x++) {
-                            int sectionX = (snapshot.originX() >> 4) + x;
-                            int sectionY = (snapshot.originY() >> 4) + y;
-                            int sectionZ = (snapshot.originZ() >> 4) + z;
-                            long sectionKey = SectionPos.asLong(sectionX, sectionY, sectionZ);
-                            if (metallum$isAuthoritativeEmptySection(sectionX, sectionY, sectionZ)) {
-                                FrozenReflectionFieldController.global().publishAuthoritativeEmpty(this.level, sectionKey);
-                                continue;
-                            }
-                            // Sodium only rebuilds a section which already exists in its storage.
-                            // The frozen 8x8x8 cube contains occluded vertical sections that the
-                            // view-driven renderer never materializes on its own.  Create those
-                            // sections through Sodium's normal lifecycle first; their meshes or
-                            // authoritative empty outputs still travel through the usual accepted
-                            // output path before becoming reflection source data.
-                            if (!this.renderSections.hasSectionConsistent(sectionKey)) {
-                                this.onSectionAdded(sectionX, sectionY, sectionZ);
-                            }
-                            this.scheduleRebuild(
-                                    sectionX,
-                                    sectionY,
-                                    sectionZ,
-                                    true
-                            );
-                        }
-                    }
-                }
-            }
+            );
             metallum$submitFrozenReflectionPreload();
         }
     }
@@ -259,25 +228,46 @@ abstract class RenderSectionManagerAdvancedLightMixin {
         if (snapshot.state() != FrozenReflectionFieldController.State.COLLECTING) {
             return;
         }
-        int submitted = 0;
+        int processed = 0;
         for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
             for (int y = 0; y < FrozenReflectionFieldController.SECTIONS_PER_EDGE; y++) {
                 for (int x = 0; x < FrozenReflectionFieldController.SECTIONS_PER_EDGE; x++) {
-                    if (submitted >= FROZEN_REFLECTION_PRELOAD_TASKS_PER_FRAME) {
+                    if (processed >= FROZEN_REFLECTION_PRELOAD_TASKS_PER_FRAME) {
                         return;
                     }
+                    int sectionX = (snapshot.originX() >> 4) + x;
+                    int sectionY = (snapshot.originY() >> 4) + y;
+                    int sectionZ = (snapshot.originZ() >> 4) + z;
                     long sectionKey = SectionPos.asLong(
-                            (snapshot.originX() >> 4) + x,
-                            (snapshot.originY() >> 4) + y,
-                            (snapshot.originZ() >> 4) + z
+                            sectionX,
+                            sectionY,
+                            sectionZ
                     );
-                    RenderSection section = this.renderSections.getConsistent(sectionKey);
-                    if (section == null || section.isDisposed()
-                            || !controller.needsSectionTask(this.level, sectionKey)) {
+                    if (!controller.needsSectionTask(this.level, sectionKey)) {
                         continue;
                     }
+                    if (metallum$isAuthoritativeEmptySection(sectionX, sectionY, sectionZ)) {
+                        controller.publishAuthoritativeEmpty(this.level, sectionKey);
+                        processed++;
+                        continue;
+                    }
+                    if (!this.renderSections.hasSectionConsistent(sectionKey)) {
+                        // Queue only this bounded slice through Sodium's normal lifecycle. Its
+                        // pending update is consumed by this preload on a later frame once storage
+                        // publication makes the new RenderSection visible.
+                        this.onSectionAdded(sectionX, sectionY, sectionZ);
+                        processed++;
+                        continue;
+                    }
+                    RenderSection section = this.renderSections.getConsistent(sectionKey);
+                    if (section == null || section.isDisposed()) {
+                        continue;
+                    }
+                    // Preserve the old collection's freshness contract, but invalidate and rebuild
+                    // no more than the bounded number of sections in this frame.
+                    this.scheduleRebuild(sectionX, sectionY, sectionZ, true);
                     metallum$submitFrozenReflectionTask(section);
-                    submitted++;
+                    processed++;
                 }
             }
         }

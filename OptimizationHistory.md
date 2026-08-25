@@ -3856,3 +3856,53 @@ Exact-route `300+300` capture receipts, Advanced/Balanced, MetalFX OFF, field RE
 (`+2.29%`), p50 `16.209 -> 16.648 ms` (`+2.71%`). Это short non-attested screen и
 не production performance claim; он не показывает явной большой регрессии.
 Первая v1 считается visually rejected; v2 остаётся HUMAN PENDING.
+
+---
+
+## 2026-08-26 — Movement/recenter allocation-tail repair — SUPPORTED, Tier C pending
+
+**Наблюдаемая проблема:** при ходьбе с поворотами F3 показывал frame max
+`104–228 ms`, allocation rate `600–1438 MiB/s` и циклически заполненный heap при
+текущем GPU около `16 ms`. Статический кадр симптом не воспроизводил. Это указывало
+на CPU producer/GC, активируемый перемещением, а не на steady GPU stage.
+
+**Атрибуция:** отдельный JFR motion diagnostic (не FPS evidence) показал, что
+`VoxelShapeEncoder.encode` и создание его immutable результата давали `44.91%` и
+`7.32%` allocation pressure. Sodium voxel extractor вызывал этот allocating API для
+каждого из 4096 блоков заново принятой секции, включая воздух. Один encode создавал
+coverage/output arrays, box/list objects, result и повторные defensive array copies.
+Камерный guarded recenter одновременно имел независимый burst: render thread сразу
+материализовал/помечал на rebuild все `8^3 = 512` секций frozen reflection field,
+хотя task submission ниже уже декларировал предел 8 секций на кадр.
+
+**Исправление:** Sodium section extraction теперь использует один caller-owned
+scratch на всю секцию, пропускает AIR, имеет allocation-free full-cube path и не
+создаёт per-block `EncodedShape`/coverage/optical arrays. Immutable reference API и
+его bit-exact tests сохранены. Default material descriptors переиспользуются, а
+transient optical byte пакуется без descriptor allocation. Guarded reflection
+replacement сохраняет 384 перекрывающиеся секции при обычном 32-block recenter,
+собирает только 128 входящих и ограничивает materialization/rebuild теми же 8
+секциями на кадр; предыдущий READY field остаётся активным до готовности замены.
+
+**Повторный JFR diagnostic:** на том же route/settings `VoxelShapeEncoder.encode`,
+`EncodedShape`, encoder `double[]` и default material descriptors исчезли из top
+allocation sites. Capture duration изменился `46 -> 43 s`, поэтому абсолютные числа
+не считаются throughput A/B. GC pauses изменились `134 -> 94` (rate примерно
+`2.91 -> 2.19/s`), total pause `689 -> 530 ms` (примерно `14.98 -> 12.33 ms/s`),
+maximum `26.2 -> 17.8 ms`. Это `SUPPORTED` causal evidence; JFR меняет workload и
+не является production performance acceptance.
+
+**Runtime smoke:** final `300+300` motion/recenter run
+`20260825T201816Z-g0559db72df6c-dirty-movement-stutter-fix-committed-smoke-off`
+завершился `COMPLETE`, Advanced/Balanced, MetalFX/VSync OFF, Built-in Retina
+`3024x1964`, active L3/L5/L6, zero timing drops. В measured window CPU submission
+max `35.38 ms`, present max `44.97 ms`; recenter зарегистрировал
+`reused_sections=384 pending_sections=128` и стал READY в ту же секунду. Это short
+functional/tail smoke, не Tier C FPS evidence и не основание заявлять PROVEN win.
+
+**Проверки и статус:** `voxelOccupancyUnitTest`, `localVoxelShadowUnitTest`,
+`frozenReflectionFieldUnitTest` и `rendererArchitectureUnitTest` прошли. Кодовый
+источник массовых movement allocations устранён без изменения voxel occupancy,
+optical/material или reflection-quality contracts. Окончательный статус остаётся
+`SUPPORTED`; для `PROVEN` performance acceptance нужны clean same-source Tier C A/B,
+а для пользовательского симптома — ручная ходьба туда-обратно после перезапуска.

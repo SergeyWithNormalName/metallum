@@ -52,7 +52,7 @@ public final class FrozenReflectionFieldControllerTests {
                     );
                     FrozenReflectionSectionTask task = controller.beginSectionTask(world, section);
                     require(task != null, "expected section must receive exactly one stamped task");
-                    CompactSectionPayload payload = x == 0 && y == 0 && z == 0
+                    CompactSectionPayload payload = x == 2 && y == 0 && z == 0
                             ? oddCoordinateLandmark(section, task.worldGeneration())
                             : CompactSectionPayload.empty(section, task.worldGeneration());
                     require(controller.publishAccepted(new FrozenReflectionSectionCandidate(task, payload)),
@@ -66,9 +66,10 @@ public final class FrozenReflectionFieldControllerTests {
         for (byte valid : source.validity()) {
             require((valid & 0xff) == 255, "transparent-but-known source cells must remain valid");
         }
-        require(Float16Compressor.unpackFloat(source.packedRgba()[0]) > 0.9F
-                        && Float16Compressor.unpackFloat(source.packedRgba()[2]) == 0.0F
-                        && Float16Compressor.unpackFloat(source.packedRgba()[3]) > 0.9F,
+        int initialLandmarkRgba = 2 * 8 * 4;
+        require(Float16Compressor.unpackFloat(source.packedRgba()[initialLandmarkRgba]) > 0.9F
+                        && Float16Compressor.unpackFloat(source.packedRgba()[initialLandmarkRgba + 2]) == 0.0F
+                        && Float16Compressor.unpackFloat(source.packedRgba()[initialLandmarkRgba + 3]) > 0.9F,
                 "2x2x2 source aggregation must retain an odd landmark without water self-radiance");
         require(controller.snapshot().state() == FrozenReflectionFieldController.State.READY_FOR_GPU_UPLOAD,
                 "snapshot must wait for one native GPU build");
@@ -96,6 +97,44 @@ public final class FrozenReflectionFieldControllerTests {
                         && recentered.originY() == initial.originY()
                         && recentered.originZ() == initial.originZ(),
                 "recenter must preserve every axis which remains inside its guard band");
+        int shiftedSections = Math.abs(recentered.originX() - initial.originX()) >> 4;
+        int reusedSections = (8 - shiftedSections) * 8 * 8;
+        require(recentered.publishedContent() + recentered.knownEmpty() == reusedSections,
+                "guarded recenter must reuse every overlapping accepted section");
+        require(recentered.expectedSections()
+                        - recentered.publishedContent() - recentered.knownEmpty()
+                        == shiftedSections * 8 * 8,
+                "guarded recenter must recollect only the entering section slabs");
+        for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
+            for (int y = 0; y < FrozenReflectionFieldController.SECTIONS_PER_EDGE; y++) {
+                for (int x = 0; x < FrozenReflectionFieldController.SECTIONS_PER_EDGE; x++) {
+                    long section = SectionPos.asLong(
+                            (recentered.originX() >> 4) + x,
+                            (recentered.originY() >> 4) + y,
+                            (recentered.originZ() >> 4) + z
+                    );
+                    if (!controller.needsSectionTask(world, section)) {
+                        continue;
+                    }
+                    FrozenReflectionSectionTask task = controller.beginSectionTask(world, section);
+                    require(task != null, "entering section must receive a replacement task");
+                    require(controller.publishAccepted(new FrozenReflectionSectionCandidate(
+                                    task,
+                                    CompactSectionPayload.empty(section, task.worldGeneration())
+                            )),
+                            "entering section must publish into the replacement domain");
+                }
+            }
+        }
+        FrozenReflectionFieldController.SourceSnapshot replacement = controller.sourceSnapshotForTests();
+        require(replacement != null, "reused overlap plus entering slabs must complete replacement");
+        int landmarkWorldX = initial.originX() + 2 * 16;
+        int replacementLandmarkCellX = (landmarkWorldX - recentered.originX()) / 2;
+        int replacementLandmarkRgba = replacementLandmarkCellX * 4;
+        require(Float16Compressor.unpackFloat(
+                        replacement.packedRgba()[replacementLandmarkRgba]
+                ) > 0.9F,
+                "overlap reuse must preserve accepted reflection cell contents at world position");
         controller.closeWorld(world);
     }
 

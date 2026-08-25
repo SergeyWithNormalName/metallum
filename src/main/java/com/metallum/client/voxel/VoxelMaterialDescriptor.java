@@ -12,6 +12,7 @@ public record VoxelMaterialDescriptor(VoxelMaterialClass materialClass, float tr
     public static final int TRANSMITTANCE_MAX = (1 << TRANSMITTANCE_BITS) - 1;
     public static final int CLASS_SHIFT = TRANSMITTANCE_BITS;
     public static final int PACKED_MASK = 0xff;
+    private static final VoxelMaterialDescriptor[] DEFAULTS = createDefaults();
 
     public VoxelMaterialDescriptor {
         Objects.requireNonNull(materialClass, "materialClass");
@@ -24,7 +25,7 @@ public record VoxelMaterialDescriptor(VoxelMaterialClass materialClass, float tr
 
     public static VoxelMaterialDescriptor defaults(final VoxelMaterialClass materialClass) {
         Objects.requireNonNull(materialClass, "materialClass");
-        return new VoxelMaterialDescriptor(materialClass, materialClass.defaultTransmittance());
+        return DEFAULTS[materialClass.ordinal()];
     }
 
     public int quantizedTransmittance() {
@@ -37,6 +38,19 @@ public record VoxelMaterialDescriptor(VoxelMaterialClass materialClass, float tr
 
     public int packedUnsignedByte() {
         return ((this.materialClass.abiId() << CLASS_SHIFT) | quantizedTransmittance()) & PACKED_MASK;
+    }
+
+    /** Packs a transient material value without allocating a descriptor in section hot paths. */
+    public static int packedUnsignedByte(
+            final VoxelMaterialClass materialClass,
+            final float transmittance
+    ) {
+        Objects.requireNonNull(materialClass, "materialClass");
+        if (!Float.isFinite(transmittance) || transmittance < 0.0f || transmittance > 1.0f) {
+            throw new IllegalArgumentException("Voxel transmittance must be finite and in [0, 1]");
+        }
+        return ((materialClass.abiId() << CLASS_SHIFT) | quantizedTransmittance(transmittance))
+                & PACKED_MASK;
     }
 
     public static VoxelMaterialDescriptor fromPackedUnsignedByte(final int packed) {
@@ -53,5 +67,17 @@ public record VoxelMaterialDescriptor(VoxelMaterialClass materialClass, float tr
 
     private static int quantizedTransmittance(final float transmittance) {
         return Math.round(transmittance * TRANSMITTANCE_MAX);
+    }
+
+    private static VoxelMaterialDescriptor[] createDefaults() {
+        VoxelMaterialClass[] classes = VoxelMaterialClass.values();
+        VoxelMaterialDescriptor[] defaults = new VoxelMaterialDescriptor[classes.length];
+        for (VoxelMaterialClass materialClass : classes) {
+            defaults[materialClass.ordinal()] = new VoxelMaterialDescriptor(
+                    materialClass,
+                    materialClass.defaultTransmittance()
+            );
+        }
+        return defaults;
     }
 }

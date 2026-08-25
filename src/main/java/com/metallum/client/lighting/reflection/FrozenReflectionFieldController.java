@@ -90,12 +90,16 @@ public final class FrozenReflectionFieldController {
     private int originX;
     private int originY;
     private int originZ;
-    private final Set<Long> expectedSections = new HashSet<>();
-    private final Map<Long, SectionState> sections = new HashMap<>();
+    private Set<Long> expectedSections = new HashSet<>();
+    private Set<Long> spareExpectedSections = new HashSet<>();
+    private Map<Long, SectionState> sections = new HashMap<>();
+    private Map<Long, SectionState> spareSections = new HashMap<>();
     private final Map<Long, Long> latestTaskGenerations = new HashMap<>();
     private final Map<Long, Integer> latestTaskFailures = new HashMap<>();
     private short[] packedRgba = new short[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE * 4];
     private byte[] validity = new byte[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE];
+    private short[] sparePackedRgba = new short[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE * 4];
+    private byte[] spareValidity = new byte[SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE];
     private @Nullable SourceSnapshot uploadSnapshot;
     private @Nullable String invalidationReason;
 
@@ -143,6 +147,9 @@ public final class FrozenReflectionFieldController {
         int previousOriginX = this.originX;
         int previousOriginY = this.originY;
         int previousOriginZ = this.originZ;
+        Map<Long, SectionState> previousSections = this.sections;
+        short[] previousPackedRgba = this.packedRgba;
+        byte[] previousValidity = this.validity;
         this.fieldGeneration++;
         this.originX = previousState == State.READY
                 && !coordinateRequiresRecenter(cameraX, previousOriginX)
@@ -153,12 +160,33 @@ public final class FrozenReflectionFieldController {
         this.originZ = previousState == State.READY
                 && !coordinateRequiresRecenter(cameraZ, previousOriginZ)
                 ? previousOriginZ : sectionAlignedOrigin(cameraZ);
-        this.expectedSections.clear();
-        this.sections.clear();
+        Set<Long> nextExpectedSections = this.spareExpectedSections;
+        Map<Long, SectionState> nextSections = this.spareSections;
+        nextExpectedSections.clear();
+        nextSections.clear();
+        this.spareExpectedSections = this.expectedSections;
+        this.expectedSections = nextExpectedSections;
+        this.spareSections = previousSections;
+        this.sections = nextSections;
         this.latestTaskGenerations.clear();
         this.latestTaskFailures.clear();
+        if (previousState == State.READY) {
+            this.packedRgba = this.sparePackedRgba;
+            this.validity = this.spareValidity;
+            this.sparePackedRgba = previousPackedRgba;
+            this.spareValidity = previousValidity;
+        }
         Arrays.fill(this.packedRgba, (short) 0);
         Arrays.fill(this.validity, (byte) 0);
+        if (previousState == State.READY) {
+            copyOverlappingSource(
+                    previousOriginX,
+                    previousOriginY,
+                    previousOriginZ,
+                    previousPackedRgba,
+                    previousValidity
+            );
+        }
         this.uploadSnapshot = null;
         this.invalidationReason = null;
         for (int z = 0; z < SECTIONS_PER_EDGE; z++) {
@@ -166,20 +194,29 @@ public final class FrozenReflectionFieldController {
                 for (int x = 0; x < SECTIONS_PER_EDGE; x++) {
                     long key = SectionPos.asLong((this.originX >> 4) + x, (this.originY >> 4) + y, (this.originZ >> 4) + z);
                     this.expectedSections.add(key);
-                    this.sections.put(key, SectionState.PENDING);
+                    SectionState previous = previousState == State.READY
+                            ? previousSections.get(key) : null;
+                    this.sections.put(
+                            key,
+                            previous == SectionState.PUBLISHED_CONTENT
+                                    || previous == SectionState.KNOWN_EMPTY
+                                    ? previous
+                                    : SectionState.PENDING
+                    );
                 }
             }
         }
         this.state = State.COLLECTING;
         if (System.getenv("METALLUM_BENCHMARK") != null) {
             Metallum.LOGGER.info(
-                    "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_FIELD_START previous_state={} generation={}->{} origin=[{},{},{}]->[{},{},{}] camera=[{},{},{}]",
+                    "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_FIELD_START previous_state={} generation={}->{} origin=[{},{},{}]->[{},{},{}] camera=[{},{},{}] reused_sections={} pending_sections={}",
                     previousState,
                     previousFieldGeneration,
                     this.fieldGeneration,
                     previousOriginX, previousOriginY, previousOriginZ,
                     this.originX, this.originY, this.originZ,
-                    cameraX, cameraY, cameraZ
+                    cameraX, cameraY, cameraZ,
+                    publishedSections(), EXPECTED_SECTION_COUNT - publishedSections()
             );
         }
     }
@@ -193,6 +230,56 @@ public final class FrozenReflectionFieldController {
     private static boolean coordinateRequiresRecenter(final double cameraCoordinate, final int origin) {
         return cameraCoordinate < origin + RECENTER_GUARD_BLOCKS
                 || cameraCoordinate >= origin + SPAN_BLOCKS - RECENTER_GUARD_BLOCKS;
+    }
+
+    /**
+     * Reuses the immutable cells shared by two guarded domains. A guarded recenter therefore
+     * recollects only the entering slabs instead of rebuilding every overlapping section.
+     */
+    private void copyOverlappingSource(
+            final int previousOriginX,
+            final int previousOriginY,
+            final int previousOriginZ,
+            final short[] previousPackedRgba,
+            final byte[] previousValidity
+    ) {
+        int deltaX = (this.originX - previousOriginX) / SOURCE_CELL_BLOCKS;
+        int deltaY = (this.originY - previousOriginY) / SOURCE_CELL_BLOCKS;
+        int deltaZ = (this.originZ - previousOriginZ) / SOURCE_CELL_BLOCKS;
+        int copyWidth = SOURCE_EDGE - Math.abs(deltaX);
+        int copyHeight = SOURCE_EDGE - Math.abs(deltaY);
+        int copyDepth = SOURCE_EDGE - Math.abs(deltaZ);
+        if (copyWidth <= 0 || copyHeight <= 0 || copyDepth <= 0) {
+            return;
+        }
+        int newStartX = Math.max(0, -deltaX);
+        int newStartY = Math.max(0, -deltaY);
+        int newStartZ = Math.max(0, -deltaZ);
+        int oldStartX = Math.max(0, deltaX);
+        int oldStartY = Math.max(0, deltaY);
+        int oldStartZ = Math.max(0, deltaZ);
+        for (int y = 0; y < copyHeight; y++) {
+            int oldY = oldStartY + y;
+            int newY = newStartY + y;
+            for (int z = 0; z < copyDepth; z++) {
+                int oldIndex = sourceIndex(oldStartX, oldY, oldStartZ + z);
+                int newIndex = sourceIndex(newStartX, newY, newStartZ + z);
+                System.arraycopy(
+                        previousValidity,
+                        oldIndex,
+                        this.validity,
+                        newIndex,
+                        copyWidth
+                );
+                System.arraycopy(
+                        previousPackedRgba,
+                        oldIndex * 4,
+                        this.packedRgba,
+                        newIndex * 4,
+                        copyWidth * 4
+                );
+            }
+        }
     }
 
     public synchronized @Nullable FrozenReflectionSectionTask beginSectionTask(final Object identity, final long sectionKey) {
