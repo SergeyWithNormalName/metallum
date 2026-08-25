@@ -1,9 +1,9 @@
 package com.metallum.client.lighting.cloud;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.renderer.style.LinearColor;
 import net.minecraft.client.CloudStatus;
 import net.minecraft.util.ARGB;
-import net.minecraft.world.phys.Vec3;
 
 import java.util.Objects;
 
@@ -22,8 +22,11 @@ public record CloudShadowFrameState(
         float toLightX,
         float toLightY,
         float toLightZ,
-        float shadowStrength,
+        float cloudRed,
+        float cloudGreen,
+        float cloudBlue,
         long patternGeneration,
+        boolean directShadowEnabled,
         boolean enabled
 ) {
     public static final CloudShadowFrameState DISABLED = new CloudShadowFrameState(
@@ -39,7 +42,10 @@ public record CloudShadowFrameState(
             1.0f,
             0.0f,
             0.0f,
+            0.0f,
+            0.0f,
             0L,
+            false,
             false
     );
 
@@ -67,9 +73,15 @@ public record CloudShadowFrameState(
         boolean sourceAvailable = source != null && source.isAvailable();
         CloudShadowMode mode = CloudShadowMode.fromMinecraft(cloudStatus, cloudHeight, opacity, sourceAvailable);
 
-        if (mode == CloudShadowMode.NONE || environment == null || !environment.sunShadowEligible()) {
+        if (mode == CloudShadowMode.NONE || environment == null) {
             return DISABLED;
         }
+
+        LinearColor cloudColor = LinearColor.fromSrgb(
+                ARGB.red(cloudColorArgb) / 255.0f,
+                ARGB.green(cloudColorArgb) / 255.0f,
+                ARGB.blue(cloudColorArgb) / 255.0f
+        );
 
         int width = source.width();
         int height = source.height();
@@ -78,10 +90,6 @@ public record CloudShadowFrameState(
 
         float offsetX = CloudShadowPolicy.computeCloudOffsetX(gameTime, partialTick, width);
         float offsetZ = CloudShadowPolicy.computeCloudOffsetZ();
-
-        float strength = (mode == CloudShadowMode.VOLUMETRIC)
-                ? CloudShadowPolicy.VOLUMETRIC_SHADOW_MAX_ATTENUATION
-                : CloudShadowPolicy.FLAT_SHADOW_MAX_ATTENUATION;
 
         return new CloudShadowFrameState(
                 mode,
@@ -95,8 +103,11 @@ public record CloudShadowFrameState(
                 environment.toLightX(),
                 environment.toLightY(),
                 environment.toLightZ(),
-                strength,
+                cloudColor.red(),
+                cloudColor.green(),
+                cloudColor.blue(),
                 source.generation(),
+                environment.sunShadowEligible(),
                 true
         );
     }

@@ -81,13 +81,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "cd2ac61eaa8ea5f916b3cb82802748a47709dbb20decbe5db178cad3cf7bcb14",
+            "sodium-solid-fsh", "9b0896fad7c1e110b7582461513cf6a5e3a456cddb52b3ea1385fa76f55caca0",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "4628cf8e857738656bd620250c6c2c861283b1e3518717eda3f69c945ccbdbc0",
+            "sodium-cutout-fsh", "1de96833464b71057a209ffc09c482c012c3a4d62f52ceb4501b3a2364807218",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "e1ea3834ffea62fbfb56befd1aaf07ea839c32af661d79cb5d2571fb5efdce0b",
+            "minecraft-entity-fsh", "c7ae49c38d52f4f344b567d4bbfa064ecf8ed13ae6388f861227e831179e2aa6",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "1c0bb38894ab333305287378538954bb06e91e8aad5316b3878c113e8dd8cf5f"
+            "minecraft-end-portal-fsh", "6c65cb4d6fc0d7351bd45c6f5bc1a4b534590dad2ed5d879f13e97ff6c425dce"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -159,8 +159,9 @@ public final class AdvancedDirectLightingShaderTests {
                         && EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION == 1
                         && EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET == 384
                         && EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET == 400
-                        && EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET == 416
+                        && EnvironmentShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET == 416
                         && EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET == 432
+                        && EnvironmentShadowBindingAbi.CLOUD_CONTRACT_VERSION == 2
                         && CloudShadowBindingAbi.TEXTURE_SLOT == 12
                         && java.util.Arrays.equals(
                         EnvironmentShadowBindingAbi.shadowTextureSlots(),

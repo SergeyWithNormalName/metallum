@@ -137,7 +137,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 uvec4 materialContract;
                 vec4 cloudOffsetAndGridSize;
                 vec4 cloudParams;
-                vec4 cloudShadowFadeAndStrength;
+                vec4 cloudColorAndReflectionStrength;
                 uvec4 cloudContract;
             } metallumEnvironment;
 
@@ -782,7 +782,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
 
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
-                if (metallumEnvironment.cloudContract.x != 1u) {
+                if (metallumEnvironment.cloudContract.x != 2u
+                        || (metallumEnvironment.cloudContract.w & 4u) == 0u) {
                     return 1.0;
                 }
                 uint mode = metallumEnvironment.cloudContract.y;
@@ -825,9 +826,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec2 uv = shiftedPos / max(gridSize, vec2(1.0));
 
                 float sampledTransmittance = texture(metallumCloudShadow, uv).r;
-                float lowElevation = metallumEnvironment.cloudShadowFadeAndStrength.y;
-                float stableElevation = metallumEnvironment.cloudShadowFadeAndStrength.z;
-                float projectionWeight = smoothstep(lowElevation, stableElevation, lightY);
+                float projectionWeight = smoothstep(0.04, 0.10, lightY);
                 return mix(1.0, sampledTransmittance, projectionWeight);
             }
 
@@ -2744,7 +2743,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
 
             float metallumCloudTransmittanceV1(vec3 viewPosition) {
-                if (metallumEnvironment.cloudContract.x != 1u) {
+                if (metallumEnvironment.cloudContract.x != 2u
+                        || (metallumEnvironment.cloudContract.w & 4u) == 0u) {
                     return 1.0;
                 }
                 uint mode = metallumEnvironment.cloudContract.y;
@@ -2787,9 +2787,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec2 uv = shiftedPos / max(gridSize, vec2(1.0));
 
                 float sampledTransmittance = texture(metallumCloudShadow, uv).r;
-                float lowElevation = metallumEnvironment.cloudShadowFadeAndStrength.y;
-                float stableElevation = metallumEnvironment.cloudShadowFadeAndStrength.z;
-                float projectionWeight = smoothstep(lowElevation, stableElevation, lightY);
+                float projectionWeight = smoothstep(0.04, 0.10, lightY);
                 return mix(1.0, sampledTransmittance, projectionWeight);
             }
 
@@ -3149,6 +3147,65 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return f0 + (grazingLimit - f0) * grazing5;
             }
 
+            vec4 metallumWaterCloudReflectionV1(
+                    vec3 viewPosition,
+                    vec3 reflectedDirection) {
+                if (metallumEnvironment.cloudContract.x != 2u
+                        || metallumEnvironment.cloudContract.y == 0u
+                        || metallumEnvironment.cloudParams.z <= 0.005) {
+                    return vec4(0.0);
+                }
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldReflectedDirection = metallumSafeNormalV1(
+                        worldFromView * reflectedDirection);
+                float rayElevation = worldReflectedDirection.y;
+                if (rayElevation <= 0.035) {
+                    return vec4(0.0);
+                }
+
+                vec3 cameraRelativePosition = worldFromView * viewPosition;
+                vec3 cameraBlockRelativePosition =
+                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
+                        + cameraRelativePosition;
+                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + cameraBlockRelativePosition;
+                float cloudHeight = metallumEnvironment.cloudParams.x;
+                float cloudThickness = metallumEnvironment.cloudParams.y;
+                float cloudTop = cloudHeight + cloudThickness;
+                if (worldPosition.y >= cloudTop) {
+                    return vec4(0.0);
+                }
+                float targetHeight = metallumEnvironment.cloudContract.y == 2u
+                        ? cloudHeight + cloudThickness * 0.5
+                        : cloudHeight;
+                if (worldPosition.y >= cloudHeight) {
+                    targetHeight = cloudTop;
+                }
+                float t = (targetHeight - worldPosition.y) / rayElevation;
+                if (t < 0.0 || isnan(t) || isinf(t)) {
+                    return vec4(0.0);
+                }
+
+                vec2 cloudWorldPosition = worldPosition.xz
+                        + worldReflectedDirection.xz * t;
+                vec2 shiftedPosition = cloudWorldPosition
+                        + metallumEnvironment.cloudOffsetAndGridSize.xy;
+                vec2 gridSize = max(
+                        metallumEnvironment.cloudOffsetAndGridSize.zw, vec2(1.0));
+                float coverage = texture(
+                        metallumCloudShadow, shiftedPosition / gridSize).g;
+                float opacity = clamp(metallumEnvironment.cloudParams.z, 0.0, 1.0);
+                float elevationWeight = smoothstep(0.035, 0.12, rayElevation);
+                float reflectionStrength = clamp(
+                        metallumEnvironment.cloudColorAndReflectionStrength.w, 0.0, 1.0);
+                float weight = clamp(
+                        coverage * opacity * elevationWeight * reflectionStrength,
+                        0.0, 1.0);
+                return vec4(
+                        max(metallumEnvironment.cloudColorAndReflectionStrength.rgb, vec3(0.0)),
+                        weight);
+            }
+
             vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(
                     vec3 viewPosition,
                     vec3 normal,
@@ -3192,6 +3249,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                             reflectedEnvironment,
                             max(coarseReflection.rgb, vec3(0.0)),
                             coarseWeight);
+                    // Clouds are a separate dynamic sky layer. Intersect the procedural-wave
+                    // reflection ray with their slab and overlay the actual Minecraft coverage;
+                    // the voxel field remains reserved for coarse world geometry.
+                    vec4 cloudReflection = metallumWaterCloudReflectionV1(
+                            viewPosition, reflectedDirection);
+                    reflectedEnvironment = mix(
+                            reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
                     float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
                     bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
                     float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;

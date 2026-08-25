@@ -27,6 +27,7 @@ public final class CloudShadowTests {
         testVolumetricThicknessPathLength();
         testAnimationMovementOffset();
         testResourceGenerationAndFailOpen();
+        testCloudReflectionStateSurvivesDusk();
         System.out.println("All CloudShadowTests passed successfully.");
     }
 
@@ -193,13 +194,17 @@ public final class CloudShadowTests {
         boolean[][] grid = new boolean[8][8];
         // All false (completely clear sky)
         CloudShadowSource emptySource = CloudShadowSource.createSynthetic(8, 8, grid, 10L);
-        ByteBuffer buffer = ByteBuffer.allocate(8 * 8);
+        ByteBuffer buffer = ByteBuffer.allocate(8 * 8 * 2);
 
-        emptySource.generateTransmittanceBytes(CloudShadowMode.FLAT, 0.0f, 1.0f, 0.0f, 1.0f, buffer);
+        emptySource.generateTextureBytes(CloudShadowMode.FLAT, 0.0f, 1.0f, 0.0f, 1.0f, buffer);
         buffer.flip();
         while (buffer.hasRemaining()) {
-            int val = Byte.toUnsignedInt(buffer.get());
-            require(val == 255, "Empty cloud pattern must produce unshadowed 255 transmittance byte");
+            int transmittance = Byte.toUnsignedInt(buffer.get());
+            int coverage = Byte.toUnsignedInt(buffer.get());
+            require(transmittance == 255,
+                    "Empty cloud pattern must produce unshadowed 255 transmittance byte");
+            require(coverage == 0,
+                    "Empty cloud pattern must produce zero reflection coverage");
         }
 
         // Fully solid cloud sky
@@ -211,11 +216,14 @@ public final class CloudShadowTests {
         }
         CloudShadowSource solidSource = CloudShadowSource.createSynthetic(8, 8, solidGrid, 11L);
         buffer.clear();
-        solidSource.generateTransmittanceBytes(CloudShadowMode.FLAT, 0.0f, 1.0f, 0.0f, 1.0f, buffer);
+        solidSource.generateTextureBytes(CloudShadowMode.FLAT, 0.0f, 1.0f, 0.0f, 1.0f, buffer);
         buffer.flip();
         int solidVal = Byte.toUnsignedInt(buffer.get());
+        int solidCoverage = Byte.toUnsignedInt(buffer.get());
         // 0.10 * 255 = 26
         require(solidVal == 26, "Solid flat cloud byte value mismatch: expected 26, got " + solidVal);
+        require(solidCoverage == 255,
+                "Solid cloud cell must preserve full arbitrary-direction reflection coverage");
     }
 
     private static void testVolumetricThicknessPathLength() {
@@ -226,13 +234,13 @@ public final class CloudShadowTests {
             }
         }
         CloudShadowSource solidSource = CloudShadowSource.createSynthetic(8, 8, solidGrid, 20L);
-        ByteBuffer bufferVertical = ByteBuffer.allocate(8 * 8);
-        ByteBuffer bufferOblique = ByteBuffer.allocate(8 * 8);
+        ByteBuffer bufferVertical = ByteBuffer.allocate(8 * 8 * 2);
+        ByteBuffer bufferOblique = ByteBuffer.allocate(8 * 8 * 2);
 
         // Sun at zenith (Ly = 1.0)
-        solidSource.generateTransmittanceBytes(CloudShadowMode.VOLUMETRIC, 0.0f, 1.0f, 0.0f, 1.0f, bufferVertical);
+        solidSource.generateTextureBytes(CloudShadowMode.VOLUMETRIC, 0.0f, 1.0f, 0.0f, 1.0f, bufferVertical);
         // Sun low in sky (Ly = 0.50, Lx = 0.866)
-        solidSource.generateTransmittanceBytes(CloudShadowMode.VOLUMETRIC, 0.866f, 0.50f, 0.0f, 1.0f, bufferOblique);
+        solidSource.generateTextureBytes(CloudShadowMode.VOLUMETRIC, 0.866f, 0.50f, 0.0f, 1.0f, bufferOblique);
 
         bufferVertical.flip();
         bufferOblique.flip();
@@ -274,6 +282,39 @@ public final class CloudShadowTests {
         require(gen1.generation() == 100L, "gen1 generation mismatch");
         require(gen2.generation() == 200L, "gen2 generation mismatch");
         require(gen1.generation() != gen2.generation(), "Distinct generations must differ");
+    }
+
+    private static void testCloudReflectionStateSurvivesDusk() {
+        boolean[][] grid = new boolean[2][2];
+        grid[0][0] = true;
+        CloudShadowSource source = CloudShadowSource.createSynthetic(2, 2, grid, 300L);
+        EnvironmentDescriptor dusk = new EnvironmentDescriptor(
+                EnvironmentDescriptor.VERSION,
+                EnvironmentDescriptor.Profile.CELESTIAL,
+                EnvironmentDescriptor.Medium.AIR,
+                0.0f, 1.0f, 0.0f,
+                0.0f, 0.0f, 0.0f,
+                0.20f, 0.18f, 0.16f,
+                0.04f, 0.04f, 0.04f,
+                0.0f, 0.0f, 0.5f,
+                false,
+                false
+        );
+        CloudShadowFrameState state = CloudShadowFrameState.extract(
+                CloudStatus.FANCY,
+                192.0f,
+                0xffc08040,
+                23500L,
+                0.0f,
+                dusk,
+                source
+        );
+        require(state.enabled() && state.mode() == CloudShadowMode.VOLUMETRIC,
+                "visible dusk clouds must remain available to water reflections without sun shadows");
+        require(!state.directShadowEnabled(),
+                "dusk reflection availability must not re-enable direct cloud shadows");
+        require(state.cloudRed() > state.cloudGreen() && state.cloudGreen() > state.cloudBlue(),
+                "water reflection state must preserve the actual linearized Minecraft cloud tint");
     }
 
     private static boolean approxEqual(final float a, final float b) {

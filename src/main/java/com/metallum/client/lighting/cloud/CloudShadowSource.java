@@ -111,16 +111,17 @@ public final class CloudShadowSource {
     }
 
     /**
-     * Populates a contiguous R8_UNORM byte buffer representing one periodic transmittance tile.
+     * Populates a contiguous RG8_UNORM tile. R stores sun-direction transmittance and G stores
+     * the original prefiltered coverage used by arbitrary-direction water reflection rays.
      *
      * @param mode active cloud shadow mode (FLAT or VOLUMETRIC)
      * @param toLightX celestial ray direction X
      * @param toLightY celestial ray direction Y
      * @param toLightZ celestial ray direction Z
      * @param cloudOpacity resolved cloud visual opacity [0..1]
-     * @param output destination byte buffer with capacity >= width * height
+     * @param output destination byte buffer with capacity >= width * height * 2
      */
-    public void generateTransmittanceBytes(
+    public void generateTextureBytes(
             final CloudShadowMode mode,
             final float toLightX,
             final float toLightY,
@@ -131,14 +132,15 @@ public final class CloudShadowSource {
         Objects.requireNonNull(mode, "mode");
         Objects.requireNonNull(output, "output");
         int totalPixels = this.width * this.height;
-        if (output.remaining() < totalPixels) {
-            throw new IllegalArgumentException("Destination buffer is too small for transmittance tile");
+        if (output.remaining() < totalPixels * 2) {
+            throw new IllegalArgumentException("Destination buffer is too small for cloud data tile");
         }
 
         if (mode == CloudShadowMode.NONE || !this.available || cloudOpacity <= 0.005f) {
-            // Unshadowed: all 255 (1.0)
+            // Unshadowed and no visible cloud coverage.
             for (int index = 0; index < totalPixels; index++) {
                 output.put((byte) 0xFF);
+                output.put((byte) 0x00);
             }
             return;
         }
@@ -149,6 +151,7 @@ public final class CloudShadowSource {
                 float trans = CloudShadowPolicy.flatTransmittance(cov, cloudOpacity);
                 int byteVal = Math.clamp(Math.round(trans * 255.0f), 0, 255);
                 output.put((byte) byteVal);
+                output.put((byte) Math.clamp(Math.round(cov * 255.0f), 0, 255));
             }
             return;
         }
@@ -179,6 +182,8 @@ public final class CloudShadowSource {
                 float trans = CloudShadowPolicy.volumetricTransmittance(opticalDensity, cloudOpacity);
                 int byteVal = Math.clamp(Math.round(trans * 255.0f), 0, 255);
                 output.put((byte) byteVal);
+                float base = this.baseCoverage[z * this.width + x];
+                output.put((byte) Math.clamp(Math.round(base * 255.0f), 0, 255));
             }
         }
     }

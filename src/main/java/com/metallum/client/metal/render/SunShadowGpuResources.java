@@ -372,13 +372,12 @@ final class SunShadowGpuResources implements AutoCloseable {
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET,
                 cloudShadow.cloudHeight(), cloudShadow.cloudThickness(),
                 cloudShadow.cloudOpacity(), (float) cloudShadow.mode().id());
-        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET,
-                cloudShadow.shadowStrength(),
-                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_LOW_ELEVATION,
-                com.metallum.client.lighting.cloud.CloudShadowPolicy.HORIZON_STABLE_ELEVATION,
-                0.0f);
+        putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET,
+                cloudShadow.cloudRed(), cloudShadow.cloudGreen(), cloudShadow.cloudBlue(),
+                com.metallum.client.lighting.cloud.CloudShadowPolicy.WATER_REFLECTION_STRENGTH);
         int cloudFlags = (cloudShadow.enabled() ? 1 : 0)
-                | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0);
+                | (cloudShadow.mode() == com.metallum.client.lighting.cloud.CloudShadowMode.VOLUMETRIC ? 2 : 0)
+                | (cloudShadow.directShadowEnabled() ? 4 : 0);
         putInt4(packet, EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET,
                 EnvironmentShadowBindingAbi.CLOUD_CONTRACT_VERSION,
                 cloudShadow.mode().id(),

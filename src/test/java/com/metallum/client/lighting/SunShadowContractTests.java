@@ -737,7 +737,7 @@ public final class SunShadowContractTests {
                         && EnvironmentShadowBindingAbi.CASCADE_NORMAL_BIAS_OFFSET == 336
                         && EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET == 384
                         && EnvironmentShadowBindingAbi.CLOUD_PARAMS_OFFSET == 400
-                        && EnvironmentShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET == 416
+                        && EnvironmentShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET == 416
                         && EnvironmentShadowBindingAbi.CLOUD_CONTRACT_OFFSET == 432,
                 "environment packet offsets changed");
     }

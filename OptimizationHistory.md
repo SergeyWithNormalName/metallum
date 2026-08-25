@@ -3764,3 +3764,50 @@ Capture-прогоны `300+300` не являются performance evidence; у�
 fragment — механический cost gate, не заявление об ускорении. Точный пользовательский
 ракурс остаётся HUMAN PENDING после перезапуска клиента. Targeted reflection/shader/
 Sodium tests и полный `./gradlew build` прошли; build выполнил 97 задач.
+
+#### Water cloud reflection layer — HUMAN PENDING
+
+После human review voxel-only water отражал coarse environment и отдельный celestial
+GGX, но видимые Minecraft clouds отсутствовали. Planar/cubemap/replay rejected: они
+добавили бы отдельный scene pass и вернули бы уже устранённую camera-height
+contamination. Cloud-shadow R8 также нельзя читать как arbitrary reflection coverage:
+его R уже preintegrated вдоль направления солнца.
+
+Выбран water-only analytic layer без нового pass/binding/history. Существующая
+периодическая cloud texture в slot 12 расширена `R8 -> RG8`: R сохраняет прежнюю
+sun-direction transmittance, G хранит исходный 3x3-prefiltered vanilla coverage.
+Размер 256x256 ресурса меняется с 64 до 128 KiB. Fragment только в voxel-water ветке
+пересекает отражённый procedural-wave луч с flat/fancy cloud slab, делает ровно один
+дополнительный 2D sample G, применяет actual linearized Minecraft `cloudColor`,
+opacity и bounded low-elevation fade, затем заменяет эту часть rough environment
+lobe. Direct sun/local GGX, voxel field, vertex carrier, Fresnel/transmission и
+cloud-shadow R остаются отдельными.
+
+Cloud contract поднят до v2 без увеличения 448-byte environment packet: прежний
+unused/fade vec4 в offset 416 теперь несёт cloud RGB + reflection strength; shadow
+horizon thresholds стали compile-time constants. Отдельный flag сохраняет прежнее
+daylight-only attenuation direct light, тогда как видимые clouds остаются доступны
+water reflection на закате и рассвете. Когда direct shadow уже не eligible,
+CPU generation переключается на дешёвый flat путь: G coverage сохраняется, но
+восьмиточечная volumetric preintegration R больше не пересчитывается вслед за солнцем.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`, 15,327 chars),
+varyings остались `10/10`, одна syntactic vertex 3D sample site. Fragment SHA
+`e94d11b138cf...`, 150,699 chars против voxel-only 146,785; fragment по-прежнему
+имеет zero texture3d/planar resources и использует существующий `texture(12)` с одной
+bounded coverage sample в cloud helper.
+
+Immutable-fixture visual captures, Advanced/Balanced, MetalFX OFF, field READY:
+
+- broad/day: `run/lighting-reference/l0/20260825T182620Z-...-cloud-reflection-candidate-off.png`;
+- top-down: `run/lighting-reference/l0/20260825T183027Z-...-cloud-reflection-topdown-off.png`;
+- dawn tick 23500: `run/lighting-reference/l0/20260825T183234Z-...-cloud-reflection-dawn-off.png`.
+
+В captures облачная coverage появляется отдельными мягкими пятнами и изгибается
+water normals; top-down underwater scene остаётся читаемой. Dawn capture сохраняет
+синюю/серую воду с локальными cloud shapes вместо прежней сплошной оранжевой заливки.
+Это fixture observation, не subjective acceptance или motion proof. Все три запуска
+`300+300` сделаны с capture instrumentation и не являются performance evidence;
+последовательность также увидела существующий L6 dynamic fallback, поэтому её FPS не
+используется. Shader/resource contract и targeted cloud/reflection/Metal tests прошли;
+полный `./gradlew build` прошёл 97 задач.

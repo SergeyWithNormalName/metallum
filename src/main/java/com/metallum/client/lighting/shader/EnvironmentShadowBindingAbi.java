@@ -34,7 +34,7 @@ public final class EnvironmentShadowBindingAbi {
     /** CLOUD-1: Vanilla-synchronized cloud shadow parameters appended to environment packet. */
     public static final int CLOUD_OFFSET_AND_GRID_SIZE_OFFSET = CloudShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET; // 384
     public static final int CLOUD_PARAMS_OFFSET = CloudShadowBindingAbi.CLOUD_PARAMS_OFFSET;                             // 400
-    public static final int CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET = CloudShadowBindingAbi.CLOUD_SHADOW_FADE_AND_STRENGTH_OFFSET; // 416
+    public static final int CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET = CloudShadowBindingAbi.CLOUD_COLOR_AND_REFLECTION_STRENGTH_OFFSET; // 416
     public static final int CLOUD_CONTRACT_OFFSET = CloudShadowBindingAbi.CLOUD_CONTRACT_OFFSET;                         // 432
     public static final int CLOUD_CONTRACT_VERSION = CloudShadowBindingAbi.VERSION;
 
