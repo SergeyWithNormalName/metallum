@@ -378,6 +378,11 @@ public final class MetalNativeBridge {
                     "metallum_radiance_context_get_stats",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
             );
+            radianceContextBuildStatus = downcall(
+                    lookup,
+                    "metallum_radiance_context_build_status",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
             radianceContextDestroy = downcall(
                     lookup,
                     "metallum_radiance_context_destroy",
@@ -906,6 +911,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle radianceContextUploadSourceFrozen;
     private static final MethodHandle radianceContextBindVertexResources;
     private static final MethodHandle radianceContextGetStats;
+    private static final MethodHandle radianceContextBuildStatus;
     private static final MethodHandle radianceContextDestroy;
     private static final MethodHandle MTLDeviceMaxMemoryAllocationSize;
     private static final MethodHandle MTLFXSpatialScalerSupportsDevice;
@@ -1606,6 +1612,14 @@ public final class MetalNativeBridge {
             return result == 1;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_radiance_context_get_stats", throwable);
+        }
+    }
+
+    public static int metallum_radiance_context_build_status(final MemorySegment context) {
+        try {
+            return (int) radianceContextBuildStatus.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_radiance_context_build_status", throwable);
         }
     }
 

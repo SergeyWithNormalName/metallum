@@ -638,7 +638,7 @@ final class MetalCrossShaderCompiler {
 
     /**
      * Reflection textures are native-owned external vertex bindings, not ordinary pipeline
-     * descriptors. Keep their GLSL names in SPIR-V so MSL declares slots 10/11, but omit them
+     * descriptors. Keep the GLSL name in SPIR-V so MSL declares slot 10, but omit it
      * from the canonical bind group (which otherwise tries to create Java-owned samplers).
      */
     private static IntermediaryShaderModule withoutExternalVertexReflectionSamplers(

@@ -9,6 +9,7 @@ import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.lighting.LocalShadowSourceClass;
 import com.metallum.client.lighting.ShadowEmitterFootprint;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLBlitCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
@@ -779,13 +780,22 @@ final class LocalVoxelShadowGpuResources implements AutoCloseable {
                 VoxelShadowBindingAbi.PROXY_BUFFER_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
+        int paramsStages = reflectionParamsStageMask(VertexReflectionExperiment.isRuntimeEnabled());
         encoder.setBuffer(
                 this.paramsRing.nativeHandle(),
                 (long) inFlightSlot * LocalVoxelShadowLayout.PARAMS_BYTES,
                 VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT,
-                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                paramsStages
         );
         bindVoxelLevels(encoder);
+    }
+
+    static int reflectionParamsStageMask(final boolean vertexReflectionRuntimeEnabled) {
+        // The quarantined reflection vertex shader reconstructs an exact world point from this
+        // packet's current camera block/fraction. Its generated MSL already owns slot 16; binding
+        // only the fragment stage leaves that vertex read undefined/zero.
+        return MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                | (vertexReflectionRuntimeEnabled ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0);
     }
 
     @Override

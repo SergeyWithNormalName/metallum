@@ -224,6 +224,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private RadianceGpuResources frozenReflectionResources;
     private long frozenReflectionFieldGeneration = Long.MIN_VALUE;
     @Nullable
+    private RadianceGpuResources pendingFrozenReflectionResources;
+    private long pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
+    @Nullable
     private SodiumLightSidecarBindings sodiumLightSidecarBindings;
     private final ShaderSource defaultShaderSource;
     @Nullable
@@ -2686,7 +2689,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         // The reflection define changes the vertex function's Metal resource layout immediately,
         // while a Sodium snapshot arrives later on a worker thread.  Materialize a native context
         // first so its zero-ready resources cover that gap; otherwise the translucent Advanced
-        // draw executes with slots 10, 11 and 27 unbound.
+        // draw executes with texture/sampler slot 10 and buffer slot 27 unbound.
         if (this.frozenReflectionResources == null) {
             this.frozenReflectionResources = RadianceGpuResources.create(
                     this.metalDeviceHandle,
@@ -2698,7 +2701,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 throw new IllegalStateException("Vertex reflection fallback resources are unavailable");
             }
         }
-        FrozenReflectionFieldController.SourceSnapshot snapshot = field.claimReadySnapshotForGpuUpload();
+        FrozenReflectionFieldController.SourceSnapshot snapshot = this.pendingFrozenReflectionResources == null
+                ? field.claimReadySnapshotForGpuUpload()
+                : null;
         if (snapshot != null) {
             RadianceGpuResources replacement = RadianceGpuResources.create(
                     this.metalDeviceHandle,
@@ -2717,18 +2722,36 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
                 field.noteGpuFailure(snapshot.worldGeneration(), snapshot.fieldGeneration());
             } else {
-                RadianceGpuResources previous = this.frozenReflectionResources;
-                this.frozenReflectionResources = replacement;
-                this.frozenReflectionFieldGeneration = snapshot.fieldGeneration();
-                if (previous != null) {
-                    previous.close();
+                this.pendingFrozenReflectionResources = replacement;
+                this.pendingFrozenReflectionFieldGeneration = snapshot.fieldGeneration();
+            }
+        }
+        RadianceGpuResources pending = this.pendingFrozenReflectionResources;
+        if (pending != null) {
+            switch (pending.buildStatus()) {
+                case READY -> {
+                    RadianceGpuResources previous = this.frozenReflectionResources;
+                    this.frozenReflectionResources = pending;
+                    this.frozenReflectionFieldGeneration = this.pendingFrozenReflectionFieldGeneration;
+                    this.pendingFrozenReflectionResources = null;
+                    this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
+                    field.noteGpuReady(pending.worldGeneration(), this.frozenReflectionFieldGeneration);
+                    if (previous != null) {
+                        previous.close();
+                    }
                 }
+                case FAILED -> {
+                    pending.close();
+                    this.pendingFrozenReflectionResources = null;
+                    field.noteGpuFailure(pending.worldGeneration(), this.pendingFrozenReflectionFieldGeneration);
+                    this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
+                }
+                case PENDING -> { }
             }
         }
         RadianceGpuResources resources = this.frozenReflectionResources;
-        if (resources != null && resources.bindVertexResources(encoder.handle())
-                && this.frozenReflectionFieldGeneration != Long.MIN_VALUE) {
-            field.noteGpuReady(resources.worldGeneration(), this.frozenReflectionFieldGeneration);
+        if (resources != null) {
+            resources.bindVertexResources(encoder.handle());
         }
     }
 
@@ -2737,7 +2760,12 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.frozenReflectionResources.close();
             this.frozenReflectionResources = null;
         }
+        if (this.pendingFrozenReflectionResources != null) {
+            this.pendingFrozenReflectionResources.close();
+            this.pendingFrozenReflectionResources = null;
+        }
         this.frozenReflectionFieldGeneration = Long.MIN_VALUE;
+        this.pendingFrozenReflectionFieldGeneration = Long.MIN_VALUE;
     }
 
     public com.metallum.client.lighting.cloud.CloudShadowSource cloudShadowSource() {

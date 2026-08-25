@@ -37,7 +37,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Map;
 
 /**
@@ -48,8 +50,9 @@ import java.util.Map;
  * 2. Strict distinction between occupied, emissive, empty, and out-of-bounds cells.
  * 3. Finite domain world-space mapping with 4-block snapping and out-of-bounds zero confidence.
  * 4. Camera fractional motion and integer block shift invariance.
- * 5. MSL generation proof: exactly two vertex 3D texture samples, buffer 27 parameter binding,
- *    exact zero fragment 3D texture samples, and full Solid/Cutout isolation.</p>
+ * 5. MSL generation proof: one water-gated vertex cone-trace sampler, buffer 27 parameter binding,
+ *    two bounded reflection varyings, exact zero fragment 3D texture samples, and full
+ *    Solid/Cutout isolation.</p>
  */
 public final class RealWorldVertexReflectionTests {
 
@@ -62,7 +65,8 @@ public final class RealWorldVertexReflectionTests {
         testProvenanceAndMemoryTracking();
         testFiniteDomainOriginMappingAndSnapping();
         testCameraFractionAndBlockShiftInvariance();
-        testDirectionalProbeMomentMath();
+        testConeTraceFrontToBackMath();
+        testReceiverFresnelCompositionMath();
         testMslGeneratedShaderContractProof();
 
         System.out.println("RealWorldVertexReflectionTests passed successfully!");
@@ -142,7 +146,7 @@ public final class RealWorldVertexReflectionTests {
     }
 
     private static void testFiniteDomainOriginMappingAndSnapping() {
-        int span = RealWorldReflectionField.SPAN_BLOCKS; // 128
+        int span = RealWorldReflectionField.SPAN_BLOCKS;
         require(span == 128, "Span must be 128 blocks");
 
         // Test 4-block snapping across positive, zero, and negative coordinates
@@ -214,27 +218,39 @@ public final class RealWorldVertexReflectionTests {
         require(Math.abs(worldZ1 - worldZ2) < 1.0e-5F, "World Z must be invariant under camera fraction motion");
     }
 
-    private static void testDirectionalProbeMomentMath() {
-        // Cartesian moment XYZ in [-1, 1]
-        float momX = 0.0F;
-        float momY = 1.0F; // dominant upward radiance (e.g. from sky)
-        float momZ = 0.0F;
+    private static void testConeTraceFrontToBackMath() {
+        float accumulatedOpacity = 0.0F;
+        float nearWeight = (1.0F - accumulatedOpacity) * 0.75F;
+        accumulatedOpacity += nearWeight;
+        float farWeight = (1.0F - accumulatedOpacity) * 1.0F;
+        accumulatedOpacity += farWeight;
+        require(Math.abs(nearWeight - 0.75F) < 1.0e-6F,
+                "near voxel must retain its front-to-back weight");
+        require(Math.abs(farWeight - 0.25F) < 1.0e-6F,
+                "far voxel must receive only remaining transmittance");
+        require(Math.abs(accumulatedOpacity - 1.0F) < 1.0e-6F,
+                "opaque cone samples must close accumulated opacity");
+    }
 
-        // Upward reflection vector R = (0, 1, 0)
-        float reflX = 0.0F;
-        float reflY = 1.0F;
-        float reflZ = 0.0F;
+    private static void testReceiverFresnelCompositionMath() {
+        float baseAlpha = 0.55F;
+        float f0 = 0.0204F;
+        float normalFresnel = schlick(f0, 1.0F);
+        float grazingFresnel = schlick(f0, 0.10F);
+        float normalAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - normalFresnel);
+        float grazingAlpha = 1.0F - (1.0F - baseAlpha) * (1.0F - grazingFresnel);
 
-        float dot = momX * reflX + momY * reflY + momZ * reflZ;
-        float align = Math.max(-1.0F, Math.min(1.0F, dot));
-        float dirWeight = Math.max(0.0F, Math.min(2.0F, 1.0F + align));
-        require(dirWeight == 2.0F, "Perfect alignment with upward moment must give weight 2.0 (got " + dirWeight + ")");
+        require(normalAlpha - baseAlpha < 0.011F,
+                "near-normal water must retain almost all existing transparency");
+        require(grazingAlpha > normalAlpha + 0.20F,
+                "grazing Fresnel must materially suppress framebuffer transmission");
+        require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F,
+                "coarse world reflection roughness must stay in the reviewed 0.28-0.35 range");
+    }
 
-        // Downward reflection vector R = (0, -1, 0)
-        float downDot = momX * 0.0F + momY * (-1.0F) + momZ * 0.0F;
-        float downAlign = Math.max(-1.0F, Math.min(1.0F, downDot));
-        float downWeight = Math.max(0.0F, Math.min(2.0F, 1.0F + downAlign));
-        require(downWeight == 0.0F, "Opposite alignment with moment must give weight 0.0 (got " + downWeight + ")");
+    private static float schlick(final float f0, final float nDotV) {
+        float oneMinus = 1.0F - Math.clamp(nDotV, 0.0F, 1.0F);
+        return f0 + (1.0F - f0) * oneMinus * oneMinus * oneMinus * oneMinus * oneMinus;
     }
 
     private static void testMslGeneratedShaderContractProof() throws Exception {
@@ -256,29 +272,98 @@ public final class RealWorldVertexReflectionTests {
         String onMslVertex = compileToMsl(onGlslVertex, ShaderType.VERTEX, onDefines);
         String onMslFragment = compileToMsl(onGlslFragment, ShaderType.FRAGMENT, onDefines);
 
-        // 1. Vertex MSL contains exactly 2 3D texture samples and buffer(27) parameter binding
+        ShaderDefines offDefines = ShaderDefines.builder()
+                .define("USE_VERTEX_COMPRESSION")
+                .define("USE_FOG")
+                .build();
+        String offGlslVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, matVertex, TerrainEnvironmentSpecialization.FULL, false).source();
+        String offGlslFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, matFragment, TerrainEnvironmentSpecialization.FULL, false).source();
+        String offMslVertex = compileToMsl(offGlslVertex, ShaderType.VERTEX, offDefines);
+        String offMslFragment = compileToMsl(offGlslFragment, ShaderType.FRAGMENT, offDefines);
+
+        System.out.println("REFLECTION_GENERATED_MSL vertex_sha256=" + sha256(onMslVertex)
+                + " fragment_sha256=" + sha256(onMslFragment)
+                + " vertex_chars=" + onMslVertex.length()
+                + " fragment_chars=" + onMslFragment.length()
+                + " vertex_user_varyings=" + countOccurrences(onMslVertex, "[[user(locn")
+                + " fragment_user_varyings=" + countOccurrences(onMslFragment, "[[user(locn")
+                + " reflection_samples="
+                + countOccurrences(onMslVertex, "metallumReflectionRadiance.sample"));
+
+        // 1. Vertex MSL contains one source field sampler and a bounded conservative cone trace.
         require(onMslVertex.contains("texture3d<float> metallumReflectionRadiance [[texture(10)]]"), "Vertex must have texture(10)");
-        require(onMslVertex.contains("texture3d<float> metallumReflectionMoment [[texture(11)]]"), "Vertex must have texture(11)");
         require(onMslVertex.contains("sampler metallumReflectionRadianceSmplr [[sampler(10)]]"), "Vertex must have sampler(10)");
-        require(onMslVertex.contains("sampler metallumReflectionMomentSmplr [[sampler(11)]]"), "Vertex must have sampler(11)");
         require(onMslVertex.contains("buffer(27)"), "Vertex must bind dedicated reflection params buffer at slot 27");
         require(onMslVertex.contains("metallumCoarseReflection"), "Vertex must output metallumCoarseReflection");
-        require(countOccurrences(onGlslVertex, "texture(metallumReflection") == 2,
-                "vertex carrier must issue exactly two 3D reads");
+        require(onMslVertex.contains("metallumCoarseReflectionDirection"),
+                "Vertex must output the flat trace direction and receiver roughness");
+        require(countOccurrences(onMslVertex, "[[user(locn")
+                        == countOccurrences(offMslVertex, "[[user(locn") + 2,
+                "reflection vertex carrier must add exactly two float4 varyings");
+        require(countOccurrences(onMslFragment, "[[user(locn")
+                        == countOccurrences(offMslFragment, "[[user(locn") + 2,
+                "reflection fragment carrier must consume exactly two additional varyings");
+        require(countOccurrences(onMslVertex, "metallumReflectionRadiance.sample") == 1,
+                "generated vertex MSL must retain one syntactic volume sample in the bounded loop");
+        require(countOccurrences(onGlslVertex, "textureLod(metallumReflection") == 1,
+                "vertex carrier must have exactly one syntactic 3D sample in its bounded loop");
+        require(onGlslVertex.contains("metallumTraceStep < 40")
+                        && onGlslVertex.contains("metallumTraceDistance += 1.75"),
+                "vertex carrier must stay statically bounded without stepping over a two-block source cell");
+        require(onGlslVertex.contains("bool metallumVertexReflectionWater = metallumVertexSurfaceEmission == 0u"),
+                "vertex carrier must identify water before sampling the reflection field");
+        int waterGate = onGlslVertex.indexOf("if (metallumVertexReflectionWater");
+        int firstReflectionSample = onGlslVertex.indexOf("textureLod(metallumReflection");
+        require(waterGate >= 0 && firstReflectionSample > waterGate,
+                "non-water translucent vertices must branch around all reflection texture reads");
+        require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
+                        && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
+                "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");
         require(onGlslVertex.contains(
-                        "float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0) * metallumStrength"),
+                        "float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength"),
                 "reflection strength must limit the blend confidence, not merely darken its target");
 
         // 2. Fragment MSL has EXACT ZERO texture3d parameters and reads only vertex varying
-        require(!onMslFragment.contains("texture3d"), "Fragment must have ZERO texture3d parameters");
+        require(!onMslFragment.contains("texture3d<"), "Fragment must have ZERO texture3d parameters");
         require(!onMslFragment.contains("sampler3D"), "Fragment must have ZERO sampler3D");
         require(!onMslFragment.contains("metallumReflectionRadiance"), "Fragment must have ZERO radiance texture reads");
-        require(!onMslFragment.contains("metallumReflectionMoment"), "Fragment must have ZERO moment texture reads");
+        require(onGlslFragment.contains("color.a = 1.0"),
+                "contribution-only output must be opaque so underlying terrain cannot masquerade as voxel radiance");
         require(onMslFragment.contains("in.metallumCoarseReflection"), "Fragment must read interpolated varying in.metallumCoarseReflection");
-        require(countOccurrences(onGlslFragment, "texture(metallumReflection") == 0,
+        require(onMslFragment.contains("in.metallumCoarseReflectionDirection"),
+                "Fragment must read the interpolated trace direction");
+        require(countOccurrences(onGlslFragment, "textureLod(metallumReflection") == 0,
                 "fragment must issue exactly zero 3D reads");
         require(onGlslFragment.contains("metallumFrozenReflectionWater"),
                 "reflection blend must remain explicitly water-only");
+        require(onGlslFragment.contains("color.rgb = metallumReflectionDiagnostic"),
+                "contribution-only mode must isolate confidence- and wave-modulated voxel radiance");
+        require(onGlslFragment.contains("-metallumCoarseReflection.a - 1.0"),
+                "contribution-only encoding must distinguish a valid zero-hit diagnostic from production");
+        require(onGlslFragment.contains("metallumCoarseReflectionDirectionalResponseV1")
+                        && onGlslFragment.contains("worldFromView * reflectedDirection"),
+                "fragment must evaluate directional response from the procedural water normal");
+        require(onGlslFragment.contains("metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1")
+                        && onGlslFragment.contains("reflectedEnvironment = mix("),
+                "coarse world radiance must replace analytic reflected environment inside one lobe");
+        int coarseMix = onGlslFragment.indexOf("reflectedEnvironment = mix(");
+        int sunGgx = onGlslFragment.indexOf("result += metallumEvaluateGgxV1(", coarseMix);
+        int localGgx = onGlslFragment.indexOf("metallumEvaluateClusteredMaterialSpecularV1(");
+        require(coarseMix >= 0 && sunGgx > coarseMix && localGgx > coarseMix,
+                "sun and local-light GGX must remain separate after coarse environment replacement");
+        require(!onGlslFragment.contains("0.08 + 0.92 * metallumReflectionFresnel"),
+                "coarse world radiance must not return to the diffuse-environment artistic floor");
+        require(onGlslFragment.contains("color.a = clamp(1.0 - (1.0 - color.a)"),
+                "grazing Fresnel must reduce framebuffer transmission without touching direct specular");
+    }
+
+    private static String sha256(final String source) throws Exception {
+        return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(source.getBytes(StandardCharsets.UTF_8)));
     }
 
     private static String compileToMsl(final String glslSource, final ShaderType stage, final ShaderDefines defines) throws ShaderCompileException {

@@ -140,11 +140,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .dynamicVoxelShadow:
             ["metallum_dynamic_voxel_shadow_v1"]
         case .radianceClipmap:
-            [
-                "metallum_radiance_downsample_mip",
-                "metallum_directional_probe_build_frozen",
-                "metallum_directional_probe_downsample_mip"
-            ]
+            ["metallum_radiance_downsample_mip"]
         }
     }
 }
@@ -14672,6 +14668,13 @@ public func metallum_MTLDevice_makeRenderPipelineState(
 
 // MARK: - Frozen real-world reflection prototype
 
+private let frozenReflectionSourceEdge = 64
+private let frozenReflectionSpanBlocks: Int32 = 128
+private let frozenReflectionMipLevels = 6
+private let frozenReflectionRadianceBytesPerVoxel = 4 * MemoryLayout<UInt16>.size
+private let frozenReflectionRadianceBytesPerRow = 512 // 64 * 8 bytes, already 256-aligned
+private let frozenReflectionValidityBytesPerRow = 256
+
 // The Java layout is deliberately explicit: Int32 plus four bytes of padding before UInt64.
 // Keep these offsets synchronized with RadianceGpuResources.GpuStats.
 public struct MetallumFrozenReflectionStats {
@@ -14684,20 +14687,15 @@ public struct MetallumFrozenReflectionStats {
     public var originX: Int32
     public var originY: Int32
     public var originZ: Int32
-    public var probeReady: Int32
-    public var probeBytes: UInt64
-    public var probeBuildCount: UInt64
-    public var probeMipBuildCount: UInt64
+    public var traceReady: Int32
+    public var auxiliaryBytes: UInt64
+    public var auxiliaryBuildCount: UInt64
+    public var auxiliaryMipBuildCount: UInt64
     public var preparationGpuNanoseconds: UInt64
-    public var probeOriginX: Int32
-    public var probeOriginY: Int32
-    public var probeOriginZ: Int32
+    public var traceOriginX: Int32
+    public var traceOriginY: Int32
+    public var traceOriginZ: Int32
     public var buildInFlight: Int32
-}
-
-private struct MetallumFrozenReflectionBuildParameters {
-    var sourceOriginAndSpan: SIMD4<Int32>
-    var probeOriginAndSpan: SIMD4<Int32>
 }
 
 private final class MetallumFrozenReflectionContext {
@@ -14707,26 +14705,19 @@ private final class MetallumFrozenReflectionContext {
     private let sourceValidity: MTLTexture
     private let sourceRadianceMips: [MTLTexture]
     private let sourceValidityMips: [MTLTexture]
-    private let probeRadiance: MTLTexture
-    private let probeMoment: MTLTexture
-    private let probeRadianceMips: [MTLTexture]
-    private let probeMomentMips: [MTLTexture]
     private let vertexSampler: MTLSamplerState
     private let parameters: MTLBuffer
     private let sourceMipPipeline: MTLComputePipelineState
-    private let probeBuildPipeline: MTLComputePipelineState
-    private let probeMipPipeline: MTLComputePipelineState
     private let lock = NSLock()
 
     private var ready = false
-    private var probeReady = false
+    private var traceReady = false
+    private var buildFailed = false
     private var buildInFlight = false
     private var worldGeneration: UInt64
     private var origin: (Int32, Int32, Int32) = (0, 0, 0)
     private var uploadCount: UInt64 = 0
     private var sourceMipBuildCount: UInt64 = 0
-    private var probeBuildCount: UInt64 = 0
-    private var probeMipBuildCount: UInt64 = 0
     private var preparationGpuNanoseconds: UInt64 = 0
 
     init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
@@ -14741,49 +14732,36 @@ private final class MetallumFrozenReflectionContext {
             descriptor.width = edge
             descriptor.height = edge
             descriptor.depth = edge
-            descriptor.mipmapLevelCount = edge == 64 ? 6 : 6
+            descriptor.mipmapLevelCount = frozenReflectionMipLevels
             descriptor.usage = [.shaderRead, .shaderWrite]
             descriptor.storageMode = .private
             return descriptor
         }
 
-        let sourceRadianceDescriptor = textureDescriptor(.rgba16Float, edge: 64)
-        let sourceValidityDescriptor = textureDescriptor(.r8Unorm, edge: 64)
-        let probeDescriptor = textureDescriptor(.rgba16Float, edge: 32)
+        let sourceRadianceDescriptor = textureDescriptor(.rgba16Float, edge: frozenReflectionSourceEdge)
+        let sourceValidityDescriptor = textureDescriptor(.r8Unorm, edge: frozenReflectionSourceEdge)
         guard let sourceRadiance = device.makeTexture(descriptor: sourceRadianceDescriptor),
               let sourceValidity = device.makeTexture(descriptor: sourceValidityDescriptor),
-              let probeRadiance = device.makeTexture(descriptor: probeDescriptor),
-              let probeMoment = device.makeTexture(descriptor: probeDescriptor),
               let parameterBuffer = device.makeBuffer(length: 64, options: .storageModeShared)
         else {
             return nil
         }
         sourceRadiance.label = "Metallum frozen reflection source radiance"
         sourceValidity.label = "Metallum frozen reflection source validity"
-        probeRadiance.label = "Metallum frozen reflection directional radiance"
-        probeMoment.label = "Metallum frozen reflection directional moment"
         parameterBuffer.label = "Metallum frozen reflection vertex parameters"
 
         var radianceMips: [MTLTexture] = []
         var validityMips: [MTLTexture] = []
-        var probeRadianceMips: [MTLTexture] = []
-        var probeMomentMips: [MTLTexture] = []
-        for mip in 0..<6 {
+        for mip in 0..<frozenReflectionMipLevels {
             guard let radianceView = sourceRadiance.makeTextureView(
                     pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
                   let validityView = sourceValidity.makeTextureView(
-                    pixelFormat: .r8Unorm, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
-                  let probeRadianceView = probeRadiance.makeTextureView(
-                    pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1),
-                  let probeMomentView = probeMoment.makeTextureView(
-                    pixelFormat: .rgba16Float, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1)
+                    pixelFormat: .r8Unorm, textureType: .type3D, levels: mip..<(mip + 1), slices: 0..<1)
             else {
                 return nil
             }
             radianceMips.append(radianceView)
             validityMips.append(validityView)
-            probeRadianceMips.append(probeRadianceView)
-            probeMomentMips.append(probeMomentView)
         }
 
         let samplerDescriptor = MTLSamplerDescriptor()
@@ -14799,15 +14777,10 @@ private final class MetallumFrozenReflectionContext {
 
         do {
             let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .radianceClipmap)
-            guard let sourceMip = library.makeFunction(name: "metallum_radiance_downsample_mip"),
-                  let probeBuild = library.makeFunction(name: "metallum_directional_probe_build_frozen"),
-                  let probeMip = library.makeFunction(name: "metallum_directional_probe_downsample_mip")
-            else {
+            guard let sourceMip = library.makeFunction(name: "metallum_radiance_downsample_mip") else {
                 return nil
             }
             self.sourceMipPipeline = try device.makeComputePipelineState(function: sourceMip)
-            self.probeBuildPipeline = try device.makeComputePipelineState(function: probeBuild)
-            self.probeMipPipeline = try device.makeComputePipelineState(function: probeMip)
         } catch {
             NSLog("[metallum] frozen reflection pipeline creation failed: %@", String(describing: error))
             return nil
@@ -14817,16 +14790,12 @@ private final class MetallumFrozenReflectionContext {
         self.sourceValidity = sourceValidity
         self.sourceRadianceMips = radianceMips
         self.sourceValidityMips = validityMips
-        self.probeRadiance = probeRadiance
-        self.probeMoment = probeMoment
-        self.probeRadianceMips = probeRadianceMips
-        self.probeMomentMips = probeMomentMips
         self.vertexSampler = sampler
         self.parameters = parameterBuffer
         // The shader layout is enabled before Sodium has produced the first immutable field.
         // Keep every declared vertex resource bound in that interval and make the shader's
         // ready flag explicitly false, so the dynamic branch cannot sample the unpopulated
-        // private probe textures.  Leaving these slots unbound is a Metal validation error
+        // private source texture. Leaving this slot unbound is a Metal validation error
         // and can invalidate the complete Advanced terrain pass.
         writeVertexParameters(originX: 0, originY: 0, originZ: 0,
                 ready: false, strength: 0.0, roughness: 0.0, contributionOnly: false)
@@ -14850,9 +14819,11 @@ private final class MetallumFrozenReflectionContext {
             return false
         }
         guard let radianceStaging = device.makeBuffer(
-                bytes: rgba, length: 64 * 64 * 64 * 4 * MemoryLayout<UInt16>.size, options: .storageModeShared),
+                length: frozenReflectionRadianceBytesPerRow * frozenReflectionSourceEdge * frozenReflectionSourceEdge,
+                options: .storageModeShared),
               let validityStaging = device.makeBuffer(
-                length: 256 * 64 * 64, options: .storageModeShared) else {
+                length: frozenReflectionValidityBytesPerRow * frozenReflectionSourceEdge * frozenReflectionSourceEdge,
+                options: .storageModeShared) else {
             NSLog("[metallum] frozen reflection build rejected: staging allocation failed")
             return false
         }
@@ -14862,20 +14833,32 @@ private final class MetallumFrozenReflectionContext {
             return false
         }
 
-        // Buffer-to-texture copies require an aligned row pitch. Keep the Java snapshot compact,
-        // then expand only this transient native staging buffer; the private R8 field itself stays
-        // exactly 64^3 bytes (plus its allocated mip chain).
+        // Buffer-to-texture copies require an aligned row pitch. Keep the Java snapshots compact,
+        // then expand only these transient native staging buffers.
+        let radianceDestination = radianceStaging.contents()
         let validityDestination = validityStaging.contents()
-        for z in 0..<64 {
-            for y in 0..<64 {
-                let sourceOffset = (z * 64 + y) * 64
-                let destinationOffset = (z * 64 + y) * 256
-                memcpy(validityDestination.advanced(by: destinationOffset), validity.advanced(by: sourceOffset), 64)
+        for z in 0..<frozenReflectionSourceEdge {
+            for y in 0..<frozenReflectionSourceEdge {
+                // Java packs sourceIndex as ((y * edge + z) * edge + x), while Metal's
+                // buffer-to-3D-texture layout advances rows in y and images in z. Preserve
+                // world-space XYZ here; using the destination row for both sides transposes
+                // Y/Z and makes upward reflection rays sample horizontal terrain slices.
+                let destinationRow = z * frozenReflectionSourceEdge + y
+                let sourceVoxelOffset = (y * frozenReflectionSourceEdge + z) * frozenReflectionSourceEdge
+                memcpy(
+                        radianceDestination.advanced(by: destinationRow * frozenReflectionRadianceBytesPerRow),
+                        rgba.advanced(by: sourceVoxelOffset * frozenReflectionRadianceBytesPerVoxel),
+                        frozenReflectionSourceEdge * frozenReflectionRadianceBytesPerVoxel)
+                memcpy(
+                        validityDestination.advanced(by: destinationRow * frozenReflectionValidityBytesPerRow),
+                        validity.advanced(by: sourceVoxelOffset),
+                        frozenReflectionSourceEdge)
             }
         }
 
         self.ready = false
-        self.probeReady = false
+        self.traceReady = false
+        self.buildFailed = false
         self.buildInFlight = true
         self.worldGeneration = worldGeneration
         self.origin = (originX, originY, originZ)
@@ -14883,23 +14866,29 @@ private final class MetallumFrozenReflectionContext {
                 ready: false, strength: strength, roughness: roughness, contributionOnly: contributionOnly)
         commandBuffer.label = "Metallum Frozen Reflection Build"
         blit.label = "Frozen reflection source upload"
-        blit.copy(from: radianceStaging, sourceOffset: 0, sourceBytesPerRow: 64 * 4 * 2,
-                sourceBytesPerImage: 64 * 64 * 4 * 2, sourceSize: MTLSize(width: 64, height: 64, depth: 64),
+        blit.copy(from: radianceStaging, sourceOffset: 0,
+                sourceBytesPerRow: frozenReflectionRadianceBytesPerRow,
+                sourceBytesPerImage: frozenReflectionRadianceBytesPerRow * frozenReflectionSourceEdge,
+                sourceSize: MTLSize(width: frozenReflectionSourceEdge, height: frozenReflectionSourceEdge,
+                        depth: frozenReflectionSourceEdge),
                 to: sourceRadiance, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-        blit.copy(from: validityStaging, sourceOffset: 0, sourceBytesPerRow: 256,
-                sourceBytesPerImage: 256 * 64, sourceSize: MTLSize(width: 64, height: 64, depth: 64),
+        blit.copy(from: validityStaging, sourceOffset: 0,
+                sourceBytesPerRow: frozenReflectionValidityBytesPerRow,
+                sourceBytesPerImage: frozenReflectionValidityBytesPerRow * frozenReflectionSourceEdge,
+                sourceSize: MTLSize(width: frozenReflectionSourceEdge, height: frozenReflectionSourceEdge,
+                        depth: frozenReflectionSourceEdge),
                 to: sourceValidity, destinationSlice: 0, destinationLevel: 0,
                 destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
 
-        for mip in 0..<5 {
+        for mip in 0..<(frozenReflectionMipLevels - 1) {
             guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 self.buildInFlight = false
                 NSLog("[metallum] frozen reflection build rejected: source mip encoder %d unavailable", mip)
                 return false
             }
-            let edge = 64 >> (mip + 1)
+            let edge = frozenReflectionSourceEdge >> (mip + 1)
             encoder.setComputePipelineState(sourceMipPipeline)
             encoder.setTexture(sourceRadianceMips[mip], index: 0)
             encoder.setTexture(sourceValidityMips[mip], index: 1)
@@ -14907,43 +14896,6 @@ private final class MetallumFrozenReflectionContext {
             encoder.setTexture(sourceValidityMips[mip + 1], index: 3)
             encoder.dispatchThreads(MTLSize(width: edge, height: edge, depth: edge),
                     threadsPerThreadgroup: MTLSize(width: min(8, edge), height: min(8, edge), depth: min(8, edge)))
-            encoder.endEncoding()
-        }
-
-        guard let probeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-            self.buildInFlight = false
-            NSLog("[metallum] frozen reflection build rejected: directional probe encoder unavailable")
-            return false
-        }
-        var parameters = MetallumFrozenReflectionBuildParameters(
-                sourceOriginAndSpan: SIMD4<Int32>(originX, originY, originZ, 128),
-                probeOriginAndSpan: SIMD4<Int32>(originX, originY, originZ, 128))
-        probeEncoder.setComputePipelineState(probeBuildPipeline)
-        probeEncoder.setTexture(sourceRadiance, index: 0)
-        probeEncoder.setTexture(sourceValidity, index: 1)
-        probeEncoder.setTexture(probeRadianceMips[0], index: 2)
-        probeEncoder.setTexture(probeMomentMips[0], index: 3)
-        withUnsafeBytes(of: &parameters) { bytes in
-            probeEncoder.setBytes(bytes.baseAddress!, length: bytes.count, index: 0)
-        }
-        probeEncoder.dispatchThreads(MTLSize(width: 32, height: 32, depth: 32),
-                threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 4))
-        probeEncoder.endEncoding()
-
-        for mip in 1..<6 {
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-                self.buildInFlight = false
-                NSLog("[metallum] frozen reflection build rejected: probe mip encoder %d unavailable", mip)
-                return false
-            }
-            let edge = 32 >> mip
-            encoder.setComputePipelineState(probeMipPipeline)
-            encoder.setTexture(probeRadianceMips[mip - 1], index: 0)
-            encoder.setTexture(probeMomentMips[mip - 1], index: 1)
-            encoder.setTexture(probeRadianceMips[mip], index: 2)
-            encoder.setTexture(probeMomentMips[mip], index: 3)
-            encoder.dispatchThreads(MTLSize(width: edge, height: edge, depth: edge),
-                    threadsPerThreadgroup: MTLSize(width: min(4, edge), height: min(4, edge), depth: min(4, edge)))
             encoder.endEncoding()
         }
 
@@ -14955,16 +14907,15 @@ private final class MetallumFrozenReflectionContext {
             buildInFlight = false
             if completed.status == .completed {
                 ready = true
-                probeReady = true
+                traceReady = true
                 uploadCount &+= 1
                 sourceMipBuildCount &+= 1
-                probeBuildCount &+= 1
-                probeMipBuildCount &+= 1
                 let elapsed = max(0.0, completed.gpuEndTime - completed.gpuStartTime)
                 preparationGpuNanoseconds = UInt64((elapsed * 1_000_000_000.0).rounded())
                 writeVertexParameters(originX: originX, originY: originY, originZ: originZ,
                         ready: true, strength: strength, roughness: roughness, contributionOnly: contributionOnly)
             } else {
+                buildFailed = true
                 NSLog("[metallum] frozen reflection build failed: %@", String(describing: completed.error))
             }
         }
@@ -14979,12 +14930,18 @@ private final class MetallumFrozenReflectionContext {
         // zeroed ready flag installed at construction (and again while building) disables the
         // sample path, but the declared slots must still be bound for every draw using the ON
         // vertex function.
-        encoder.setVertexTexture(probeRadiance, index: 10)
+        encoder.setVertexTexture(sourceRadiance, index: 10)
         encoder.setVertexSamplerState(vertexSampler, index: 10)
-        encoder.setVertexTexture(probeMoment, index: 11)
-        encoder.setVertexSamplerState(vertexSampler, index: 11)
         encoder.setVertexBuffer(parameters, offset: 0, index: 27)
-        return true
+        return traceReady
+    }
+
+    /** 0 = pending/not built, 1 = exact build completed, -1 = asynchronous build failed. */
+    func buildStatus() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        if buildFailed { return -1 }
+        return traceReady ? 1 : 0
     }
 
     func stats() -> MetallumFrozenReflectionStats {
@@ -14997,12 +14954,12 @@ private final class MetallumFrozenReflectionContext {
                 uploadCount: uploadCount,
                 sourceMipBuildCount: sourceMipBuildCount,
                 originX: origin.0, originY: origin.1, originZ: origin.2,
-                probeReady: probeReady ? 1 : 0,
-                probeBytes: UInt64(probeRadiance.allocatedSize + probeMoment.allocatedSize),
-                probeBuildCount: probeBuildCount,
-                probeMipBuildCount: probeMipBuildCount,
+                traceReady: traceReady ? 1 : 0,
+                auxiliaryBytes: 0,
+                auxiliaryBuildCount: 0,
+                auxiliaryMipBuildCount: 0,
                 preparationGpuNanoseconds: preparationGpuNanoseconds,
-                probeOriginX: origin.0, probeOriginY: origin.1, probeOriginZ: origin.2,
+                traceOriginX: origin.0, traceOriginY: origin.1, traceOriginZ: origin.2,
                 buildInFlight: buildInFlight ? 1 : 0)
     }
 
@@ -15014,10 +14971,11 @@ private final class MetallumFrozenReflectionContext {
         raw.storeBytes(of: originX, toByteOffset: 0, as: Int32.self)
         raw.storeBytes(of: originY, toByteOffset: 4, as: Int32.self)
         raw.storeBytes(of: originZ, toByteOffset: 8, as: Int32.self)
-        raw.storeBytes(of: Int32(128), toByteOffset: 12, as: Int32.self)
-        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 16, as: Float.self)
-        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 20, as: Float.self)
-        raw.storeBytes(of: Float(1.0 / 128.0), toByteOffset: 24, as: Float.self)
+        raw.storeBytes(of: frozenReflectionSpanBlocks, toByteOffset: 12, as: Int32.self)
+        let inverseSpan = 1.0 / Float(frozenReflectionSpanBlocks)
+        raw.storeBytes(of: inverseSpan, toByteOffset: 16, as: Float.self)
+        raw.storeBytes(of: inverseSpan, toByteOffset: 20, as: Float.self)
+        raw.storeBytes(of: inverseSpan, toByteOffset: 24, as: Float.self)
         raw.storeBytes(of: ready ? Float(1.0) : Float(0.0), toByteOffset: 28, as: Float.self)
         raw.storeBytes(of: strength, toByteOffset: 32, as: Float.self)
         raw.storeBytes(of: roughness, toByteOffset: 36, as: Float.self)
@@ -15084,6 +15042,15 @@ public func metallum_radiance_context_get_stats(
         var snapshot = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeUnretainedValue().stats()
         destination.copyMemory(from: &snapshot, byteCount: MemoryLayout<MetallumFrozenReflectionStats>.size)
         return 1
+    }
+}
+
+@_cdecl("metallum_radiance_context_build_status")
+public func metallum_radiance_context_build_status(_ rawContext: UnsafeMutableRawPointer?) -> Int32 {
+    autoreleasepool {
+        guard let rawContext else { return -1 }
+        return Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext)
+                .takeUnretainedValue().buildStatus()
     }
 }
 

@@ -426,11 +426,13 @@ public final class MetalFxBenchmarkController {
     private final AtomicBoolean routeServerTaskPending = new AtomicBoolean();
     private boolean routeApplyRequested;
     private boolean routeApplyLogged;
+    private boolean routeServerTicksFrozenLogged;
     private long routeApplyToken;
     private long nextRouteServerToken;
     private volatile long completedRouteServerToken;
     private volatile String routeServerMismatch;
     private volatile String routeServerFailure;
+    private volatile boolean routeServerTicksFrozen;
     private int routeServerCheckCountdown;
     private int routeStableFrames;
     private final AtomicBoolean torchEpochServerTaskPending = new AtomicBoolean();
@@ -1687,6 +1689,14 @@ public final class MetalFxBenchmarkController {
                     this.route.dimensionName()
             );
         }
+        if (shouldEmitServerTicksFrozenEvidence(
+                this.routeApplyLogged,
+                this.routeServerTicksFrozenLogged,
+                this.routeServerTicksFrozen
+        )) {
+            this.routeServerTicksFrozenLogged = true;
+            Metallum.LOGGER.info("METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN");
+        }
 
         if (this.routeApplyLogged && this.routeServerCheckCountdown-- <= 0) {
             if (!this.routeServerTaskPending.get()) {
@@ -1709,6 +1719,7 @@ public final class MetalFxBenchmarkController {
                     clientMismatch, this.routeServerMismatch, this.routeStableFrames, this.route.stableFrames());
         }
         if (this.routeApplyLogged
+                && this.routeServerTicksFrozenLogged
                 && this.routeServerMismatch == null
                 && clientMismatch == null) {
             this.routeStableFrames++;
@@ -1927,6 +1938,7 @@ public final class MetalFxBenchmarkController {
             final IntegratedServer server,
             final boolean apply
     ) {
+        this.routeServerTicksFrozen = false;
         ServerLevel level = server.getLevel(this.route.dimension());
         ServerPlayer player = server.getPlayerList().getPlayer(this.route.playerUuid());
         Minecraft mc = Minecraft.getInstance();
@@ -2004,8 +2016,8 @@ public final class MetalFxBenchmarkController {
         if (player.level().dimension().equals(this.route.dimension()) && clientDimensionMatches) {
             if (!server.tickRateManager().isFrozen()) {
                 server.tickRateManager().setFrozen(true);
-                Metallum.LOGGER.info("METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN");
             }
+            this.routeServerTicksFrozen = server.tickRateManager().isFrozen();
             if (!samePose(player)) {
                 player.teleportTo(
                         level,
@@ -2021,6 +2033,14 @@ public final class MetalFxBenchmarkController {
             }
         }
         return serverRouteMismatch(server, level, player, clock, chunkX, chunkZ);
+    }
+
+    static boolean shouldEmitServerTicksFrozenEvidence(
+            final boolean routeApplyLogged,
+            final boolean evidenceLogged,
+            final boolean serverTicksFrozen
+    ) {
+        return routeApplyLogged && !evidenceLogged && serverTicksFrozen;
     }
 
     private String serverRouteMismatch(

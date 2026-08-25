@@ -10,6 +10,7 @@ public final class BenchmarkWindowContractTests {
         acceptsHiDpiLogicalWindowForExactBackingFramebuffer();
         rejectsWrongBackingFramebuffer();
         rejectsNonLiveLogicalWindow();
+        emitsFrozenEvidenceOnlyAfterRouteApply();
         acceptsRequiredOnGlassGeneratedDelta();
         rejectsInsufficientOrRegressingGeneratedCounter();
         derivesMonotonicFiTransportCounterDelta();
@@ -37,6 +38,17 @@ public final class BenchmarkWindowContractTests {
         require(!MetalFxBenchmarkController.hasExactTargetFramebuffer(
                         3024, 1964, 3024, 1964, 0, 982),
                 "zero-width logical window must fail the benchmark contract");
+    }
+
+    private static void emitsFrozenEvidenceOnlyAfterRouteApply() {
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(false, false, true),
+                "server freeze evidence must not precede ROUTE_APPLY");
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, false, false),
+                "server freeze evidence requires an observed frozen server");
+        require(MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, false, true),
+                "server freeze evidence must follow ROUTE_APPLY after server confirmation");
+        require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, true, true),
+                "server freeze evidence must be emitted exactly once");
     }
 
     private static void acceptsRequiredOnGlassGeneratedDelta() {

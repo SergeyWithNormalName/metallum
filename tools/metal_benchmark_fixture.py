@@ -1284,8 +1284,8 @@ def route_values(path: Path) -> list[str]:
             "l6_dynamic_shadow.camera_orbit.period_frames",
             1,
         )
-        if not 0.0 < orbit_radius <= 2.0:
-            raise FixtureError("route l6_dynamic_shadow.camera_orbit.radius must be in (0, 2]")
+        if not 0.0 < orbit_radius <= 24.0:
+            raise FixtureError("route l6_dynamic_shadow.camera_orbit.radius must be in (0, 24]")
         if not 0.0 < yaw_amplitude <= 45.0:
             raise FixtureError(
                 "route l6_dynamic_shadow.camera_orbit.yaw_amplitude_degrees must be in (0, 45]"

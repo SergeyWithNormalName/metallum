@@ -3,6 +3,7 @@ package com.metallum.client.radiance;
 import net.caffeinemc.mods.sodium.client.world.LevelSlice;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.LightLayer;
 import net.minecraft.world.level.block.state.BlockState;
@@ -110,13 +111,13 @@ public final class SodiumRadianceSectionExtractor {
             try {
                 BlockState state = stateAccessor.getBlockState(worldX, worldY, worldZ);
                 if (state == null || state.isAir()) {
-                    classification[localIndex] = 0;
+                    classification[localIndex] = CompactSectionPayload.CLASS_EMPTY;
                     continue;
                 }
 
                 float selfOpacity = RadianceAppearanceModel.opacityFor(state);
                 if (selfOpacity <= 0.0F) {
-                    classification[localIndex] = 0;
+                    classification[localIndex] = CompactSectionPayload.CLASS_EMPTY;
                     continue;
                 }
 
@@ -186,15 +187,20 @@ public final class SodiumRadianceSectionExtractor {
                 packedRgba[radIdx + 2] = Float16Compressor.packFloat(app.blue());
                 packedRgba[radIdx + 3] = Float16Compressor.packFloat(app.opacity());
 
-                if (app.emissive()) {
-                    classification[localIndex] = 2;
+                if (state.getFluidState().is(FluidTags.WATER)) {
+                    // The reflection reducer discards this receiver medium so shallow reflected
+                    // rays cannot hit the water plane before reaching actual scene geometry.
+                    classification[localIndex] = CompactSectionPayload.CLASS_WATER;
+                    occupiedCount++;
+                } else if (app.emissive()) {
+                    classification[localIndex] = CompactSectionPayload.CLASS_EMISSIVE;
                     emissiveCount++;
                     occupiedCount++;
                 } else if (app.occupied()) {
-                    classification[localIndex] = 1;
+                    classification[localIndex] = CompactSectionPayload.CLASS_OCCUPIED;
                     occupiedCount++;
                 } else {
-                    classification[localIndex] = 0;
+                    classification[localIndex] = CompactSectionPayload.CLASS_EMPTY;
                 }
             } catch (RuntimeException ignored) {
                 // Modded block query failed; deterministic conservative fallback
@@ -203,7 +209,7 @@ public final class SodiumRadianceSectionExtractor {
                 packedRgba[radIdx + 1] = 0;
                 packedRgba[radIdx + 2] = 0;
                 packedRgba[radIdx + 3] = Float16Compressor.packFloat(1.0F);
-                classification[localIndex] = 1;
+                classification[localIndex] = CompactSectionPayload.CLASS_OCCUPIED;
                 occupiedCount++;
                 moddedFallbackCount++;
             }

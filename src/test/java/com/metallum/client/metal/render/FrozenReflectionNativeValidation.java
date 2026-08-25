@@ -8,6 +8,7 @@ import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLStorageMode;
 import com.metallum.client.metal.render.mtl.MTLTextureUsage;
 import com.metallum.client.radiance.RadianceGpuResources;
+import com.metallum.client.lighting.reflection.RealWorldReflectionField;
 
 import java.lang.foreign.MemorySegment;
 import java.util.Arrays;
@@ -30,8 +31,8 @@ public final class FrozenReflectionNativeValidation {
             layer = MetalNativeBridge.metallum_create_metal_layer(device, 1.0);
             require(!MetalNativeBridge.isNullHandle(layer), "Metal layer creation failed");
             queue = MTLCommandQueue.create(device, layer);
-            short[] rgba = new short[64 * 64 * 64 * 4];
-            byte[] validity = new byte[64 * 64 * 64];
+            short[] rgba = new short[RealWorldReflectionField.SOURCE_BLOCK_COUNT * 4];
+            byte[] validity = new byte[RealWorldReflectionField.SOURCE_BLOCK_COUNT];
             Arrays.fill(validity, (byte) 0xff);
             try (RadianceGpuResources resources = requireNonNull(RadianceGpuResources.create(
                     device,
@@ -40,9 +41,11 @@ public final class FrozenReflectionNativeValidation {
                     MetalNativeBridge::metallum_radiance_context_destroy
             ), "frozen reflection native context creation failed")) {
                 RadianceGpuResources.GpuStats initialStats = resources.getStats();
-                require(initialStats != null && !initialStats.ready() && !initialStats.probeReady(),
+                require(initialStats != null && !initialStats.ready() && !initialStats.traceReady(),
                         "new frozen reflection context must start in the safe disabled state");
-                validateDedicatedVertexBinding(device, queue, resources);
+                require(resources.buildStatus() == RadianceGpuResources.BuildStatus.PENDING,
+                        "new native context must report pending rather than a false READY");
+                validateDedicatedVertexBinding(device, queue, resources, false);
                 require(resources.queueFrozenBuild(71L, -64, 0, 128, rgba, validity, 0.35F, 0.30F, false),
                         "frozen private-texture upload and compute build was not queued");
                 long deadline = System.nanoTime() + 2_000_000_000L;
@@ -51,22 +54,26 @@ public final class FrozenReflectionNativeValidation {
                     Thread.sleep(5L);
                     stats = resources.getStats();
                 } while ((stats == null || stats.buildInFlight()) && System.nanoTime() < deadline);
-                require(stats != null && stats.ready() && stats.probeReady() && !stats.buildInFlight(),
+                require(stats != null && stats.ready() && stats.traceReady() && !stats.buildInFlight(),
                         "native frozen reflection build did not complete");
+                require(resources.buildStatus() == RadianceGpuResources.BuildStatus.READY,
+                        "completion handler must publish exact native READY state");
                 require(stats.worldGeneration() == 71L
                                 && stats.sourceOriginX() == -64
                                 && stats.sourceOriginY() == 0
                                 && stats.sourceOriginZ() == 128
-                                && stats.probeOriginX() == -64
-                                && stats.probeOriginY() == 0
-                                && stats.probeOriginZ() == 128,
-                        "source and directional fields must share one fixed snapped origin");
-                require(stats.persistentBytes() > 0L && stats.probePersistentBytes() > 0L
+                                && stats.traceOriginX() == -64
+                                && stats.traceOriginY() == 0
+                                && stats.traceOriginZ() == 128,
+                        "source and trace domains must share one fixed snapped origin");
+                require(stats.persistentBytes() > 0L
+                                && stats.allocatedBytes() <= 8L * 1024L * 1024L
+                                && stats.auxiliaryPersistentBytes() == 0L
                                 && stats.sourceMipBuildCount() == 1L
-                                && stats.probeBuildCount() == 1L
-                                && stats.probeMipBuildCount() == 1L,
-                        "native stats did not prove one bounded source/probe build");
-                validateDedicatedVertexBinding(device, queue, resources);
+                                && stats.auxiliaryBuildCount() == 0L
+                                && stats.auxiliaryMipBuildCount() == 0L,
+                        "native stats did not prove one bounded source-only cone field build: " + stats);
+                validateDedicatedVertexBinding(device, queue, resources, true);
             }
             System.out.println("Frozen reflection Java/FFM/Swift/Metal validation passed");
         } finally {
@@ -84,7 +91,8 @@ public final class FrozenReflectionNativeValidation {
     private static void validateDedicatedVertexBinding(
             final MemorySegment device,
             final MTLCommandQueue queue,
-            final RadianceGpuResources resources
+            final RadianceGpuResources resources,
+            final boolean expectedReady
     ) {
         MemorySegment target = MetalNativeBridge.metallum_create_texture_2d(
                 device,
@@ -105,8 +113,8 @@ public final class FrozenReflectionNativeValidation {
                     0, 0, 1.0, 0
             );
             try {
-                require(resources.bindVertexResources(encoder.handle()),
-                        "dedicated raw reflection binding rejected a live render encoder");
+                require(resources.bindVertexResources(encoder.handle()) == expectedReady,
+                        "binding readiness must match the exact native completion state");
             } finally {
                 encoder.endEncoding();
             }

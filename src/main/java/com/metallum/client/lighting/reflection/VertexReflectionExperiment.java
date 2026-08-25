@@ -15,12 +15,10 @@ public final class VertexReflectionExperiment {
      */
     public static final String RUNTIME_PROPERTY = "metallum.vertex.reflection.runtime";
 
-    public static final int GRID_SIZE = 32;
+    public static final int GRID_SIZE = FrozenReflectionFieldController.SOURCE_EDGE;
     public static final String RADIANCE_SAMPLER_NAME = "metallumReflectionRadiance";
-    public static final String MOMENT_SAMPLER_NAME = "metallumReflectionMoment";
     public static final String PARAMS_BUFFER_NAME = "metallumVertexReflection";
     public static final int RADIANCE_BINDING_SLOT = VertexReflectionBindingAbi.RADIANCE_TEXTURE_AND_SAMPLER_SLOT;
-    public static final int MOMENT_BINDING_SLOT = VertexReflectionBindingAbi.MOMENT_TEXTURE_AND_SAMPLER_SLOT;
     public static final int PARAMS_BINDING_SLOT = VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT;
 
     private static volatile Boolean activeOverride = null;
@@ -52,6 +50,6 @@ public final class VertexReflectionExperiment {
     }
 
     public static boolean isExperimentSampler(final String name) {
-        return RADIANCE_SAMPLER_NAME.equals(name) || MOMENT_SAMPLER_NAME.equals(name);
+        return RADIANCE_SAMPLER_NAME.equals(name);
     }
 }

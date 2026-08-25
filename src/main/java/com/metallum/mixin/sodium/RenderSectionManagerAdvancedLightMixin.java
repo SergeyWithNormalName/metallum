@@ -209,9 +209,9 @@ abstract class RenderSectionManagerAdvancedLightMixin {
             if (FrozenReflectionFieldController.global().activateAtCamera(
                     this.level, camera.x(), camera.y(), camera.z()
             )) {
-                // One bounded initial collection pass; the frozen field deliberately never follows
-                // later camera movement. If an expected section cannot publish, the controller
-                // remains invalid/pending rather than borrowing data from a different region.
+                // One bounded collection pass per guarded world-snapped domain. The native side
+                // keeps the previous completed field live while this replacement is collected and
+                // built. Missing sections remain unknown rather than borrowed from another region.
                 FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
                 for (int z = 0; z < FrozenReflectionFieldController.SECTIONS_PER_EDGE; z++) {
                     for (int y = 0; y < FrozenReflectionFieldController.SECTIONS_PER_EDGE; y++) {

@@ -1,6 +1,8 @@
 package com.metallum.client.lighting.reflection;
 
+import com.metallum.Metallum;
 import com.metallum.client.radiance.CompactSectionPayload;
+import com.metallum.client.radiance.Float16Compressor;
 import com.metallum.client.radiance.RadianceRuntimeStorage;
 import net.minecraft.core.SectionPos;
 import org.jspecify.annotations.Nullable;
@@ -13,12 +15,12 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Accepted-Sodium-only producer for one fixed 128-block reflection domain.
+ * Accepted-Sodium-only producer for a world-snapped 128-block reflection domain.
  *
- * <p>It is intentionally not a clipmap: the first camera pose selects a section-aligned origin;
- * all 512 sections must be published from Sodium's successful geometry uploads before a source
- * snapshot exists.  An empty section is known transparent data. A missing, stale, or removed
- * section invalidates the build rather than being treated as empty.</p>
+ * <p>The camera stays inside a 32-block guard band while the current domain is stable. Crossing
+ * that band starts a new accepted-Sodium collection while Metal keeps the previous completed
+ * field bound. All 512 sections of a new domain must publish before the replacement is eligible.
+ * An empty section is known transparent data; missing data never becomes implicit air.</p>
  */
 public final class FrozenReflectionFieldController {
     public static final int SPAN_BLOCKS = 128;
@@ -26,6 +28,7 @@ public final class FrozenReflectionFieldController {
     public static final int SOURCE_CELL_BLOCKS = 2;
     public static final int SECTIONS_PER_EDGE = SPAN_BLOCKS / 16;
     public static final int EXPECTED_SECTION_COUNT = SECTIONS_PER_EDGE * SECTIONS_PER_EDGE * SECTIONS_PER_EDGE;
+    public static final int RECENTER_GUARD_BLOCKS = 32;
     private static final int MAX_LATEST_TASK_FAILURES = 4;
 
     public enum State {
@@ -121,15 +124,35 @@ public final class FrozenReflectionFieldController {
         }
     }
 
-    /** Latches the only domain origin once; later camera motion deliberately does nothing. */
+    /** Starts the first domain or a guarded, section-aligned replacement after camera motion. */
     public synchronized boolean activateAtCamera(final Object identity, final double cameraX, final double cameraY, final double cameraZ) {
-        if (!VertexReflectionExperiment.isRuntimeEnabled() || this.worldIdentity != identity || this.state != State.OFF) {
+        if (!VertexReflectionExperiment.isRuntimeEnabled() || this.worldIdentity != identity) {
             return false;
         }
+        if (this.state != State.OFF
+                && (this.state != State.READY || !cameraRequiresRecenter(cameraX, cameraY, cameraZ))) {
+            return false;
+        }
+        startCollection(cameraX, cameraY, cameraZ);
+        return true;
+    }
+
+    private void startCollection(final double cameraX, final double cameraY, final double cameraZ) {
+        State previousState = this.state;
+        long previousFieldGeneration = this.fieldGeneration;
+        int previousOriginX = this.originX;
+        int previousOriginY = this.originY;
+        int previousOriginZ = this.originZ;
         this.fieldGeneration++;
-        this.originX = sectionAlignedOrigin(cameraX);
-        this.originY = sectionAlignedOrigin(cameraY);
-        this.originZ = sectionAlignedOrigin(cameraZ);
+        this.originX = previousState == State.READY
+                && !coordinateRequiresRecenter(cameraX, previousOriginX)
+                ? previousOriginX : sectionAlignedOrigin(cameraX);
+        this.originY = previousState == State.READY
+                && !coordinateRequiresRecenter(cameraY, previousOriginY)
+                ? previousOriginY : sectionAlignedOrigin(cameraY);
+        this.originZ = previousState == State.READY
+                && !coordinateRequiresRecenter(cameraZ, previousOriginZ)
+                ? previousOriginZ : sectionAlignedOrigin(cameraZ);
         this.expectedSections.clear();
         this.sections.clear();
         this.latestTaskGenerations.clear();
@@ -148,7 +171,28 @@ public final class FrozenReflectionFieldController {
             }
         }
         this.state = State.COLLECTING;
-        return true;
+        if (System.getenv("METALLUM_BENCHMARK") != null) {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_FIELD_START previous_state={} generation={}->{} origin=[{},{},{}]->[{},{},{}] camera=[{},{},{}]",
+                    previousState,
+                    previousFieldGeneration,
+                    this.fieldGeneration,
+                    previousOriginX, previousOriginY, previousOriginZ,
+                    this.originX, this.originY, this.originZ,
+                    cameraX, cameraY, cameraZ
+            );
+        }
+    }
+
+    private boolean cameraRequiresRecenter(final double cameraX, final double cameraY, final double cameraZ) {
+        return coordinateRequiresRecenter(cameraX, this.originX)
+                || coordinateRequiresRecenter(cameraY, this.originY)
+                || coordinateRequiresRecenter(cameraZ, this.originZ);
+    }
+
+    private static boolean coordinateRequiresRecenter(final double cameraCoordinate, final int origin) {
+        return cameraCoordinate < origin + RECENTER_GUARD_BLOCKS
+                || cameraCoordinate >= origin + SPAN_BLOCKS - RECENTER_GUARD_BLOCKS;
     }
 
     public synchronized @Nullable FrozenReflectionSectionTask beginSectionTask(final Object identity, final long sectionKey) {
@@ -261,6 +305,14 @@ public final class FrozenReflectionFieldController {
                 && this.nextWorldGeneration == worldGeneration
                 && this.fieldGeneration == completedFieldGeneration) {
             this.state = State.READY;
+            if (System.getenv("METALLUM_BENCHMARK") != null) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_FIELD_READY generation={} origin=[{},{},{}] sections={}/{}",
+                        this.fieldGeneration,
+                        this.originX, this.originY, this.originZ,
+                        publishedSections(), EXPECTED_SECTION_COUNT
+                );
+            }
         }
     }
 
@@ -339,14 +391,55 @@ public final class FrozenReflectionFieldController {
                     int target = sourceIndex(sourceX, sourceY, sourceZ);
                     this.validity[target] = (byte) 0xff;
                     if (!payload.isEmpty()) {
-                        int local = (y * 2 << 8) | (z * 2 << 4) | (x * 2);
-                        int src = local * 4;
                         int dst = target * 4;
-                        System.arraycopy(payload.packedRgba(), src, this.packedRgba, dst, 4);
+                        aggregateSourceCell(payload, x * 2, y * 2, z * 2, this.packedRgba, dst);
                     }
                 }
             }
         }
+    }
+
+    /** Aggregates the complete 2x2x2 block footprint so thin/off-grid landmarks survive. */
+    private static void aggregateSourceCell(
+            final CompactSectionPayload payload,
+            final int baseX,
+            final int baseY,
+            final int baseZ,
+            final short[] destination,
+            final int destinationOffset
+    ) {
+        float red = 0.0F;
+        float green = 0.0F;
+        float blue = 0.0F;
+        float totalWeight = 0.0F;
+        float maxOpacity = 0.0F;
+        for (int oz = 0; oz < 2; oz++) {
+            for (int oy = 0; oy < 2; oy++) {
+                for (int ox = 0; ox < 2; ox++) {
+                    int local = ((baseY + oy) << 8) | ((baseZ + oz) << 4) | (baseX + ox);
+                    byte classification = payload.classification()[local];
+                    if (classification == CompactSectionPayload.CLASS_WATER) {
+                        continue;
+                    }
+                    int source = local * 4;
+                    float opacity = Math.clamp(Float16Compressor.unpackFloat(payload.packedRgba()[source + 3]), 0.0F, 1.0F);
+                    float emissiveBoost = classification == CompactSectionPayload.CLASS_EMISSIVE ? 2.0F : 0.0F;
+                    float weight = opacity + emissiveBoost;
+                    if (weight > 0.0F) {
+                        red += Math.max(0.0F, Float16Compressor.unpackFloat(payload.packedRgba()[source])) * weight;
+                        green += Math.max(0.0F, Float16Compressor.unpackFloat(payload.packedRgba()[source + 1])) * weight;
+                        blue += Math.max(0.0F, Float16Compressor.unpackFloat(payload.packedRgba()[source + 2])) * weight;
+                        totalWeight += weight;
+                    }
+                    maxOpacity = Math.max(maxOpacity, opacity);
+                }
+            }
+        }
+        float inverseWeight = totalWeight > 1.0e-6F ? 1.0F / totalWeight : 0.0F;
+        destination[destinationOffset] = Float16Compressor.packFloat(red * inverseWeight);
+        destination[destinationOffset + 1] = Float16Compressor.packFloat(green * inverseWeight);
+        destination[destinationOffset + 2] = Float16Compressor.packFloat(blue * inverseWeight);
+        destination[destinationOffset + 3] = Float16Compressor.packFloat(maxOpacity);
     }
 
     private int publishedSections() {
@@ -374,7 +467,9 @@ public final class FrozenReflectionFieldController {
     }
 
     private static int sectionAlignedOrigin(final double cameraCoordinate) {
-        return ((int) Math.floor((cameraCoordinate - SPAN_BLOCKS * 0.5) / 16.0)) << 4;
+        // Round the ideal centered origin to the nearest section. Always flooring could bias the
+        // camera by almost one complete section and needlessly clip forward reflection landmarks.
+        return ((int) Math.floor((cameraCoordinate - SPAN_BLOCKS * 0.5 + 8.0) / 16.0)) << 4;
     }
 
     private static int sourceIndex(final int x, final int y, final int z) {

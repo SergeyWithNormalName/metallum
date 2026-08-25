@@ -3082,6 +3082,126 @@ public final class AdvancedDirectLightingShaderPatcher {
         return source;
     }
 
+    /** Reflection-ON fragment helpers are injected only into the water experiment flavor. */
+    private static final String SODIUM_REFLECTION_FRAGMENT_HELPERS = """
+
+            float metallumCoarseReflectionDirectionalResponseV1(
+                    vec3 viewDirection,
+                    vec3 normal,
+                    vec4 traceDirectionAndRoughness) {
+                if (traceDirectionAndRoughness.w <= 0.0) {
+                    return 0.0;
+                }
+                vec3 referenceDirection = metallumSafeNormalV1(
+                        traceDirectionAndRoughness.xyz);
+                vec3 reflectedDirection = reflect(-viewDirection, normal);
+                mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                vec3 worldReflectedDirection = metallumSafeNormalV1(
+                        worldFromView * reflectedDirection);
+                if (dot(referenceDirection, referenceDirection) == 0.0
+                        || dot(worldReflectedDirection, worldReflectedDirection) == 0.0) {
+                    return 0.0;
+                }
+                float alignment = clamp(dot(
+                        worldReflectedDirection, referenceDirection), 0.0, 1.0);
+                float roughness = clamp(traceDirectionAndRoughness.w, 0.28, 0.35);
+                float lobeWidth = max(roughness * roughness * 0.55, 0.02);
+                float alignedLobe = smoothstep(1.0 - lobeWidth, 1.0, alignment);
+                return mix(0.45, 1.0, alignedLobe);
+            }
+
+            vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(
+                    vec3 viewPosition,
+                    vec3 normal,
+                    vec3 albedo,
+                    float skyVisibility,
+                    MetallumSurfaceMaterialV1 material,
+                    vec4 coarseReflection,
+                    vec4 traceDirectionAndRoughness,
+                    vec3 waterEnvironmentFresnel,
+                    float coarseDirectionalResponse) {
+                vec3 viewDirection = metallumSafeNormalV1(-viewPosition);
+                if (dot(viewDirection, viewDirection) == 0.0) {
+                    return vec3(0.0);
+                }
+                float skyOcclusion = clamp(skyVisibility, 0.0, 1.0);
+                vec3 f0 = metallumMaterialF0V1(material, albedo);
+                float nDotV = max(dot(normal, viewDirection), 0.0);
+                vec3 environmentFresnel = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? waterEnvironmentFresnel
+                        : metallumSchlickFresnelV1(f0, nDotV);
+                vec3 reflectedDirection = reflect(-viewDirection, normal);
+                vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                bool waterCelestialLit = material.kind == METALLUM_SURFACE_WATER_V1;
+                float waterCelestialShape = waterCelestialLit
+                        ? metallumWaterSquareCelestialMaskV1(reflectedDirection, toLight)
+                        : 1.0;
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
+                        reflectedDirection, normal, material.roughness, waterCelestialShape);
+                float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
+                if (material.kind == METALLUM_SURFACE_WATER_V1) {
+                    vec2 screenUv = gl_FragCoord.xy / max(
+                            vec2(metallumLighting.extentAndClusterCap.xy), vec2(1.0));
+                    mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
+                    vec3 flatWaterNormal = metallumSafeNormalV1(
+                            transpose(worldFromView) * vec3(0.0, 1.0, 0.0));
+                    vec2 waveScreenOffset = (normal.xy - flatWaterNormal.xy) * 0.085;
+                    vec2 reflectionUv = screenUv + waveScreenOffset;
+                    float edgeDistance = min(
+                            min(reflectionUv.x, reflectionUv.y),
+                            min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
+                    vec4 planarSample = texture(metallumPlanarReflection,
+                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
+                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance);
+                    if (planarWeight > 0.0) {
+                        reflectedEnvironment = mix(
+                                reflectedEnvironment, planarSample.rgb, planarWeight);
+                        float planarFresnel = clamp(
+                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
+                        environmentFresnel = mix(
+                                environmentFresnel, vec3(planarFresnel), planarWeight);
+                    }
+                    bool contributionOnly = coarseReflection.a < -0.5;
+                    float confidence = contributionOnly
+                            ? clamp(-coarseReflection.a - 1.0, 0.0, 1.0)
+                            : clamp(coarseReflection.a, 0.0, 1.0);
+                    float coarseWeight = clamp(
+                            confidence * coarseDirectionalResponse, 0.0, 1.0);
+                    reflectedEnvironment = mix(
+                            reflectedEnvironment,
+                            max(coarseReflection.rgb, vec3(0.0)),
+                            coarseWeight);
+                    float waterOpenSky = smoothstep(0.20, 0.85, skyOcclusion);
+                    bool waterMoonlit = (metallumEnvironment.contract.w & 2u) != 0u;
+                    float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;
+                    environmentVisibility = waterOpenSky * waterCelestialReflection;
+                }
+                float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1
+                        ? 0.92 : 1.0;
+                vec3 result = reflectedEnvironment * environmentFresnel
+                        * environmentVisibility * (1.0 - material.roughness * 0.48)
+                        * environmentStyleWeight;
+                float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
+                if (directionalWeight > 0.0) {
+                    float sunVisibility = material.kind == METALLUM_SURFACE_WATER_V1
+                            ? 1.0 : metallumSunVisibilityV1(viewPosition, normal);
+                    float cloudTransmittance = (sunVisibility > 0.0)
+                            ? metallumCloudTransmittanceV1(viewPosition)
+                            : 1.0;
+                    result += metallumEvaluateGgxV1(
+                            normal,
+                            viewDirection,
+                            toLight,
+                            max(metallumEnvironment.directionalRadiance.rgb, vec3(0.0))
+                                    * (skyOcclusion * sunVisibility * cloudTransmittance
+                                    * waterCelestialShape),
+                            f0,
+                            material.roughness);
+                }
+                return result * material.specularScale;
+            }
+            """;
+
     private static final String SODIUM_VERTEX_DECLARATION =
             "out vec2 v_TexCoord;\nout vec3 metallumLightingPosition;\n"
                     + "out float metallumSkyVisibility;\n// " + MARKER;
@@ -3090,8 +3210,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "out float metallumSkyVisibility;\n"
                     + "layout(binding = " + VertexReflectionExperiment.RADIANCE_BINDING_SLOT + ") uniform sampler3D "
                     + VertexReflectionExperiment.RADIANCE_SAMPLER_NAME + ";\n"
-                    + "layout(binding = " + VertexReflectionExperiment.MOMENT_BINDING_SLOT + ") uniform sampler3D "
-                    + VertexReflectionExperiment.MOMENT_SAMPLER_NAME + ";\n"
                     + "layout(std430, binding = " + VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT + ") readonly buffer MetallumVoxelShadowParamsV1 {\n"
                     + "    mat4 worldFromView;\n"
                     + "    ivec4 cameraBlockAndFlags;\n"
@@ -3115,7 +3233,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    vec4 reflectionStrengthAndSettings;\n"
                     + "    vec4 reserved;\n"
                     + "} metallumVertexReflection;\n"
-                    + "out vec4 metallumCoarseReflection;\n// " + MARKER;
+                    + "out vec4 metallumCoarseReflection;\n"
+                    + "out vec4 metallumCoarseReflectionDirection;\n// " + MARKER;
     private static final String SODIUM_VERTEX_ASSIGNMENT =
             "    vec3 position = _vert_position + translation;\n"
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;";
@@ -3124,23 +3243,53 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;\n"
                     + "    vec3 metallumCameraBlockRel = metallumVoxelShadow.cameraFractionAndMinTrans.xyz + position;\n"
                     + "    vec3 metallumWorldPos = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz) + metallumCameraBlockRel;\n"
-                    + "    vec3 metallumFieldOrigin = vec3(metallumVertexReflection.fieldOriginAndSpan.xyz);\n"
-                    + "    vec3 metallumUvw = (metallumWorldPos - metallumFieldOrigin) * metallumVertexReflection.fieldScaleAndFlags.xyz;\n"
                     + "    vec4 metallumCoarseReflectionVal = vec4(0.0);\n"
-                    + "    if (metallumVertexReflection.fieldScaleAndFlags.w > 0.5\n"
-                    + "            && all(greaterThanEqual(metallumUvw, vec3(0.0)))\n"
-                    + "            && all(lessThan(metallumUvw, vec3(1.0)))) {\n"
-                    + "        vec4 metallumReflRad = texture(" + VertexReflectionExperiment.RADIANCE_SAMPLER_NAME + ", metallumUvw);\n"
-                    + "        vec4 metallumReflMom = texture(" + VertexReflectionExperiment.MOMENT_SAMPLER_NAME + ", metallumUvw);\n"
-                    + "        vec3 metallumReflDir = reflect(normalize(position), vec3(0.0, 1.0, 0.0));\n"
-                    + "        float metallumDirectionalWeight = clamp(1.0 + dot(metallumReflMom.xyz, metallumReflDir), 0.0, 2.0);\n"
+                    + "    vec4 metallumCoarseReflectionDirectionVal = vec4(0.0);\n"
+                    + "    uint metallumVertexSurfaceEmission = (metallumMaterial >> 3u) & 15u;\n"
+                    + "    uint metallumVertexSurfaceBase = metallumMaterial & 7u;\n"
+                    + "    bool metallumVertexReflectionWater = metallumVertexSurfaceEmission == 0u\n"
+                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
+                    + "            && metallumVertexSurfaceBase == 3u;\n"
+                    + "    if (metallumVertexReflectionWater\n"
+                    + "            && metallumVertexReflection.fieldScaleAndFlags.w > 0.5) {\n"
+                    + "        vec3 metallumFieldOrigin = vec3(metallumVertexReflection.fieldOriginAndSpan.xyz);\n"
+                    + "        vec3 metallumViewRay = position * inversesqrt(max(dot(position, position), 1.0e-6));\n"
+                    + "        vec3 metallumReflDir = reflect(metallumViewRay, vec3(0.0, 1.0, 0.0));\n"
+                    + "        float metallumRoughness = clamp(metallumVertexReflection.reflectionStrengthAndSettings.y, 0.02, 1.0);\n"
+                    + "        metallumCoarseReflectionDirectionVal = vec4(metallumReflDir, metallumRoughness);\n"
+                    + "        vec3 metallumDirectionalRadiance = vec3(0.0);\n"
+                    + "        float metallumAccumulatedOpacity = 0.0;\n"
+                    + "        float metallumTraceDistance = 0.75;\n"
+                    + "        for (int metallumTraceStep = 0; metallumTraceStep < 40; ++metallumTraceStep) {\n"
+                    + "            float metallumConeDiameter = max(2.0, metallumTraceDistance * metallumRoughness * 0.45);\n"
+                    + "            float metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5), 0.0, 5.0);\n"
+                    + "            vec3 metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance;\n"
+                    + "            vec3 metallumSampleUvw = (metallumSampleWorld - metallumFieldOrigin)\n"
+                    + "                    * metallumVertexReflection.fieldScaleAndFlags.xyz;\n"
+                    + "            if (any(lessThan(metallumSampleUvw, vec3(0.0)))\n"
+                    + "                    || any(greaterThanEqual(metallumSampleUvw, vec3(1.0)))) {\n"
+                    + "                break;\n"
+                    + "            }\n"
+                    + "            vec4 metallumTraceSample = textureLod(" + VertexReflectionExperiment.RADIANCE_SAMPLER_NAME
+                    + ", metallumSampleUvw, metallumTraceLod);\n"
+                    + "            float metallumSampleOpacity = clamp(metallumTraceSample.a * 1.75, 0.0, 1.0);\n"
+                    + "            float metallumTraceWeight = (1.0 - metallumAccumulatedOpacity) * metallumSampleOpacity;\n"
+                    + "            metallumDirectionalRadiance += max(metallumTraceSample.rgb, vec3(0.0)) * metallumTraceWeight;\n"
+                    + "            metallumAccumulatedOpacity += metallumTraceWeight;\n"
+                    + "            if (metallumAccumulatedOpacity > 0.92) {\n"
+                    + "                break;\n"
+                    + "            }\n"
+                    + "            metallumTraceDistance += 1.75;\n"
+                    + "        }\n"
                     + "        float metallumStrength = clamp(metallumVertexReflection.reflectionStrengthAndSettings.x, 0.0, 1.0);\n"
-                    + "        float metallumConfidence = clamp(metallumReflRad.a, 0.0, 1.0) * metallumStrength;\n"
+                    + "        float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength;\n"
                     + "        float metallumContributionOnly = metallumVertexReflection.reflectionStrengthAndSettings.z;\n"
-                    + "        metallumCoarseReflectionVal = vec4(metallumReflRad.rgb * metallumDirectionalWeight,\n"
-                    + "                metallumContributionOnly > 0.5 ? -metallumConfidence : metallumConfidence);\n"
+                    + "        metallumCoarseReflectionVal = vec4(metallumDirectionalRadiance,\n"
+                    + "                metallumContributionOnly > 0.5\n"
+                    + "                ? -(1.0 + metallumConfidence) : metallumConfidence);\n"
                     + "    }\n"
-                    + "    metallumCoarseReflection = metallumCoarseReflectionVal;";
+                    + "    metallumCoarseReflection = metallumCoarseReflectionVal;\n"
+                    + "    metallumCoarseReflectionDirection = metallumCoarseReflectionDirectionVal;";
     private static final String SODIUM_MATERIAL_LIGHTMAP =
             "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
                     + "texture(u_LightTex, _vert_tex_light_coord));";
@@ -3154,7 +3303,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "in float metallumSkyVisibility;";
     private static final String SODIUM_FRAGMENT_INPUT_REFL =
             "in vec2 v_TexCoord;\nin vec3 metallumLightingPosition;\n"
-                    + "in float metallumSkyVisibility;\nin vec4 metallumCoarseReflection;";
+                    + "in float metallumSkyVisibility;\nin vec4 metallumCoarseReflection;\n"
+                    + "in vec4 metallumCoarseReflectionDirection;";
     private static final String SODIUM_FOG_ANCHOR =
             "    fragColor = _linearFog(color, v_FragDistance, "
                     + "metallumMaterialDecodeColor(u_FogColor), u_EnvironmentFog, "
@@ -3163,6 +3313,36 @@ public final class AdvancedDirectLightingShaderPatcher {
             "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n";
+    private static final String SODIUM_ENVIRONMENT_ACCUMULATION =
+            "    color.rgb += metallumEvaluateEnvironmentV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "            metallumMaterial, metallumTintColor.a);\n";
+    private static final String SODIUM_ENVIRONMENT_ACCUMULATION_REFL =
+            "    color.rgb += metallumEvaluateEnvironmentV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo, metallumSkyVisibility,\n"
+                    + "            metallumMaterial, metallumTintColor.a);\n"
+                    + "    bool metallumFrozenReflectionWater = metallumSurfaceEmission == 0u\n"
+                    + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
+                    + "            && metallumSurfaceBase == 3u;\n"
+                    + "    bool metallumReflectionContributionOnly = metallumCoarseReflection.a < -0.5;\n"
+                    + "    float metallumReflectionConfidence = metallumReflectionContributionOnly\n"
+                    + "            ? clamp(-metallumCoarseReflection.a - 1.0, 0.0, 1.0)\n"
+                    + "            : clamp(metallumCoarseReflection.a, 0.0, 1.0);\n"
+                    + "    vec3 metallumReflectionDiagnostic = vec3(0.0);\n"
+                    + "    if (metallumFrozenReflectionWater && metallumReflectionContributionOnly) {\n"
+                    + "        vec3 metallumReflectionView = metallumSafeNormalV1(\n"
+                    + "                -metallumLightingPosition);\n"
+                    + "        float metallumReflectionDirectionalDiagnostic =\n"
+                    + "                metallumCoarseReflectionDirectionalResponseV1(\n"
+                    + "                metallumReflectionView, metallumDirectNormal,\n"
+                    + "                metallumCoarseReflectionDirection);\n"
+                    + "        metallumReflectionDiagnostic = max(\n"
+                    + "                metallumCoarseReflection.rgb, vec3(0.0))\n"
+                    + "                * metallumReflectionConfidence\n"
+                    + "                * metallumReflectionDirectionalDiagnostic;\n"
+                    + "    }\n";
     private static final String SODIUM_DIRECT_BLOCK =
             "    vec3 metallumDerivativeNormal = cross(\n"
                     + "            dFdx(metallumLightingPosition),\n"
@@ -3263,28 +3443,72 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "                    metallumVanillaAlbedo, metallumSurfaceMaterial);\n"
                     + "        }\n"
                     + "    }\n"
-                    + "    color.rgb += metallumEvaluateEnvironmentV1(\n"
-                    + "            metallumLightingPosition, metallumDirectNormal,\n"
-                    + "            metallumPreparedAlbedo, metallumSkyVisibility,\n"
-                    + "            metallumMaterial, metallumTintColor.a);\n"
+                    + SODIUM_ENVIRONMENT_ACCUMULATION
                     + "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
                     + "            metallumLightingPosition, metallumDirectNormal,\n"
                     + "            metallumPreparedAlbedo);\n"
                     + SODIUM_FOG_ANCHOR;
     private static final String SODIUM_DIRECT_BLOCK_REFL =
             SODIUM_DIRECT_BLOCK.replace(
+                    SODIUM_ENVIRONMENT_ACCUMULATION,
+                    SODIUM_ENVIRONMENT_ACCUMULATION_REFL
+            ).replace(
+                    "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n",
+                    "            metallumL8ReactiveWeight = metallumSurfaceMaterial.reactiveWeight;\n"
+                            + "            float metallumReflectionBodyEnergy = 1.0;\n"
+                            + "            vec3 metallumWaterEnvironmentFresnel = vec3(0.0);\n"
+                            + "            float metallumCoarseDirectionalResponse = 0.0;\n"
+            ).replace(
+                    "            vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;\n",
+                    "            if (metallumSurfaceMaterial.kind\n"
+                            + "                    == METALLUM_SURFACE_WATER_V1) {\n"
+                            + "                vec3 metallumWaterF0 = metallumMaterialF0V1(\n"
+                            + "                        metallumSurfaceMaterial, metallumPreparedAlbedo);\n"
+                            + "                float metallumWaterNoV = clamp(dot(\n"
+                            + "                        metallumDirectNormal, metallumViewDirection),\n"
+                            + "                        0.0, 1.0);\n"
+                            + "                metallumWaterEnvironmentFresnel =\n"
+                            + "                        metallumSchlickFresnelV1(\n"
+                            + "                        metallumWaterF0, metallumWaterNoV);\n"
+                            + "                metallumCoarseDirectionalResponse =\n"
+                            + "                        metallumCoarseReflectionDirectionalResponseV1(\n"
+                            + "                        metallumViewDirection, metallumDirectNormal,\n"
+                            + "                        metallumCoarseReflectionDirection);\n"
+                            + "                if (metallumCoarseReflectionDirection.w > 0.0) {\n"
+                            + "                    float metallumSurfaceFresnel = clamp(max(\n"
+                            + "                            metallumWaterEnvironmentFresnel.r, max(\n"
+                            + "                            metallumWaterEnvironmentFresnel.g,\n"
+                            + "                            metallumWaterEnvironmentFresnel.b)),\n"
+                            + "                            0.0, 1.0);\n"
+                            + "                    metallumReflectionBodyEnergy = 1.0\n"
+                            + "                            - metallumSurfaceFresnel;\n"
+                            + "                    color.rgb *= metallumReflectionBodyEnergy;\n"
+                            + "                    color.a = clamp(1.0 - (1.0 - color.a)\n"
+                            + "                            * metallumReflectionBodyEnergy, 0.0, 1.0);\n"
+                            + "                }\n"
+                            + "            }\n"
+                            + "            vec3 metallumVanillaAlbedo = metallumPreparedAlbedo;\n"
+            ).replace(
+                    "            float metallumDiffuseWeight =\n",
+                    "            metallumPreparedAlbedo *= metallumReflectionBodyEnergy;\n"
+                            + "            float metallumDiffuseWeight =\n"
+            ).replace(
+                    "                    * metallumEvaluateMaterialEnvironmentV1(\n"
+                            + "                    metallumLightingPosition, metallumDirectNormal,\n"
+                            + "                    metallumVanillaAlbedo, metallumSkyVisibility,\n"
+                            + "                    metallumSurfaceMaterial);\n",
+                    "                    * metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(\n"
+                            + "                    metallumLightingPosition, metallumDirectNormal,\n"
+                            + "                    metallumVanillaAlbedo, metallumSkyVisibility,\n"
+                            + "                    metallumSurfaceMaterial, metallumCoarseReflection,\n"
+                            + "                    metallumCoarseReflectionDirection,\n"
+                            + "                    metallumWaterEnvironmentFresnel,\n"
+                            + "                    metallumCoarseDirectionalResponse);\n"
+            ).replace(
                     SODIUM_FOG_ANCHOR,
-                    "    bool metallumFrozenReflectionWater = metallumSurfaceEmission == 0u\n"
-                            + "            && ((metallumMaterial >> 7u) & 1u) != 0u\n"
-                            + "            && metallumSurfaceBase == 3u;\n"
-                            + "    float metallumReflectionConfidence = abs(metallumCoarseReflection.a);\n"
-                            + "    if (metallumFrozenReflectionWater && metallumReflectionConfidence > 0.001) {\n"
-                            + "        float metallumReflectionWeight = clamp(metallumReflectionConfidence, 0.0, 1.0);\n"
-                            + "        if (metallumCoarseReflection.a < 0.0) {\n"
-                            + "            color.rgb += metallumCoarseReflection.rgb * metallumReflectionWeight;\n"
-                            + "        } else {\n"
-                            + "            color.rgb = mix(color.rgb, metallumCoarseReflection.rgb, metallumReflectionWeight);\n"
-                            + "        }\n"
+                    "    if (metallumFrozenReflectionWater && metallumReflectionContributionOnly) {\n"
+                            + "        color.rgb = metallumReflectionDiagnostic;\n"
+                            + "        color.a = 1.0;\n"
                             + "    }\n"
                             + SODIUM_FOG_ANCHOR
             );
@@ -3626,7 +3850,8 @@ public final class AdvancedDirectLightingShaderPatcher {
         patched = installFragmentAbi(
                 patched,
                 true,
-                specialization
+                specialization,
+                vertexReflection
         );
         String directBlock = vertexReflection
                 ? SODIUM_DIRECT_BLOCK_REFL
@@ -3686,7 +3911,8 @@ public final class AdvancedDirectLightingShaderPatcher {
         patched = installFragmentAbi(
                 patched,
                 false,
-                TerrainEnvironmentSpecialization.FULL
+                TerrainEnvironmentSpecialization.FULL,
+                false
         );
         patched = replaceExactlyOnce(patched, ENTITY_COLOR_ANCHOR, ENTITY_DIRECT_ALBEDO);
         patched = replaceExactlyOnce(
@@ -3743,7 +3969,8 @@ public final class AdvancedDirectLightingShaderPatcher {
         patched = installFragmentAbi(
                 patched,
                 false,
-                TerrainEnvironmentSpecialization.FULL
+                TerrainEnvironmentSpecialization.FULL,
+                false
         );
         String directBlock = directBlockForCurrentDiagnostic(
                 END_PORTAL_DIRECT_BLOCK,
@@ -3761,7 +3988,8 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static String installFragmentAbi(
             final String source,
             final boolean terrainReceiver,
-            final TerrainEnvironmentSpecialization specialization
+            final TerrainEnvironmentSpecialization specialization,
+            final boolean vertexReflection
     ) {
         if (source == null) {
             return null;
@@ -3770,6 +3998,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 ? FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY
                 : FRAGMENT_ABI_AND_HELPERS;
         helpers = fragmentHelpersForCurrentDiagnostic(helpers);
+        if (vertexReflection) {
+            helpers += SODIUM_REFLECTION_FRAGMENT_HELPERS;
+        }
         return replaceExactlyOnce(
                 source,
                 "out vec4 fragColor;",

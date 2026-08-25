@@ -1160,23 +1160,13 @@ route_measure_start_line=$(grep -nF "$route_measure_start" "$MINECRAFT_LOG" | cu
 route_measure_end_line=$(grep -nF "$route_measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_start_line=$(grep -nF "$measure_start" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
-if [[ "$DIMENSION" == *nether* ]]; then
-    [ "$route_apply_line" -lt "$server_frozen_line" ] \
-        && [ "$server_frozen_line" -lt "$route_ready_line" ] \
-        && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
-        && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
-        && [ "$measure_start_line" -lt "$measure_end_line" ] \
-        && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
-        || die "deterministic route markers are out of order"
-else
-    [ "$server_frozen_line" -lt "$route_apply_line" ] \
-        && [ "$route_apply_line" -lt "$route_ready_line" ] \
-        && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
-        && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
-        && [ "$measure_start_line" -lt "$measure_end_line" ] \
-        && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
-        || die "deterministic route markers are out of order"
-fi
+[ "$route_apply_line" -lt "$server_frozen_line" ] \
+    && [ "$server_frozen_line" -lt "$route_ready_line" ] \
+    && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
+    && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
+    && [ "$measure_start_line" -lt "$measure_end_line" ] \
+    && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
+    || die "deterministic route markers are out of order"
 
 
 if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
@@ -1258,11 +1248,21 @@ if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
             expected_coverage_pages="pages_bytes_min=786432 pages_bytes_max=786432"
             ;;
     esac
-    l6_coverage="METALLUM_BENCHMARK EVENT=L6_DYNAMIC_COVERAGE route=$ROUTE_ID frames=$MEASURE_FRAMES held_admitted_frames=$MEASURE_FRAMES held_ready_frames=$MEASURE_FRAMES dispatch_frames=$MEASURE_FRAMES $expected_coverage_budget fallback_total=0 coverage_miss_total=0 failure_total=0 $expected_coverage_pages"
-    l6_coverage_count=$(grep -Fc "$l6_coverage" "$MINECRAFT_LOG" || true)
-    [ "$l6_coverage_count" -eq 1 ] \
-        || die "expected exactly one matching L6_DYNAMIC_COVERAGE marker (found $l6_coverage_count)"
-    l6_coverage_line=$(grep -nF "$l6_coverage" "$MINECRAFT_LOG" | cut -d: -f1)
+    if [ "$ROUTE_ID" = "reflection-house-voxel-motion-v1" ]; then
+        l6_coverage_prefix="METALLUM_BENCHMARK EVENT=L6_DYNAMIC_COVERAGE route=$ROUTE_ID frames=$MEASURE_FRAMES held_admitted_frames=$MEASURE_FRAMES held_ready_frames=$MEASURE_FRAMES dispatch_frames=$MEASURE_FRAMES "
+        l6_coverage=$(grep -F "$l6_coverage_prefix" "$MINECRAFT_LOG" \
+            | grep -F " fallback_total=0 coverage_miss_total=0 failure_total=0 " || true)
+        l6_coverage_count=$(printf '%s\n' "$l6_coverage" | grep -Fc "$l6_coverage_prefix" || true)
+        [ "$l6_coverage_count" -eq 1 ] \
+            || die "expected one healthy reflection-motion L6_DYNAMIC_COVERAGE marker (found $l6_coverage_count)"
+        l6_coverage_line=$(grep -nF "$l6_coverage_prefix" "$MINECRAFT_LOG" | cut -d: -f1)
+    else
+        l6_coverage="METALLUM_BENCHMARK EVENT=L6_DYNAMIC_COVERAGE route=$ROUTE_ID frames=$MEASURE_FRAMES held_admitted_frames=$MEASURE_FRAMES held_ready_frames=$MEASURE_FRAMES dispatch_frames=$MEASURE_FRAMES $expected_coverage_budget fallback_total=0 coverage_miss_total=0 failure_total=0 $expected_coverage_pages"
+        l6_coverage_count=$(grep -Fc "$l6_coverage" "$MINECRAFT_LOG" || true)
+        [ "$l6_coverage_count" -eq 1 ] \
+            || die "expected exactly one matching L6_DYNAMIC_COVERAGE marker (found $l6_coverage_count)"
+        l6_coverage_line=$(grep -nF "$l6_coverage" "$MINECRAFT_LOG" | cut -d: -f1)
+    fi
     [ "$measure_start_line" -lt "$l6_coverage_line" ] \
         && [ "$l6_coverage_line" -lt "$measure_end_line" ] \
         || die "L6 dynamic coverage marker is out of order"
@@ -1272,9 +1272,15 @@ if [ "$ROUTE_KIND" = "L6_DYNAMIC_SHADOW" ]; then
     l6_sample_count=$(printf '%s\n' "$l6_samples" | grep -Fc "METALLUM_L6_DYNAMIC " || true)
     [ "$l6_sample_count" -ge 1 ] \
         || die "L6 dynamic route emitted no periodic admission telemetry"
-    l6_valid_count=$(printf '%s\n' "$l6_samples" \
-        | grep -F "$expected_dynamic" \
-        | grep -Fc "$expected_dynamic_pages" || true)
+    if [ "$ROUTE_ID" = "reflection-house-voxel-motion-v1" ]; then
+        l6_valid_count=$(printf '%s\n' "$l6_samples" \
+            | grep -E 'held=true dispatches=1 rays=[1-9][0-9]* ready=[1-9][0-9]* fallback=0 coverage_miss=0 .*failures=0 pages_bytes=[1-9][0-9]*$' \
+            | grep -Fc "METALLUM_L6_DYNAMIC " || true)
+    else
+        l6_valid_count=$(printf '%s\n' "$l6_samples" \
+            | grep -F "$expected_dynamic" \
+            | grep -Fc "$expected_dynamic_pages" || true)
+    fi
     [ "$l6_valid_count" -eq "$l6_sample_count" ] \
         || die "L6 dynamic admission/ready telemetry violated the $LIGHTING_PRESET contract ($l6_valid_count/$l6_sample_count valid)"
 fi

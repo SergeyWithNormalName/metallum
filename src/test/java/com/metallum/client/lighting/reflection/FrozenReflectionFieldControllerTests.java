@@ -1,6 +1,7 @@
 package com.metallum.client.lighting.reflection;
 
 import com.metallum.client.radiance.CompactSectionPayload;
+import com.metallum.client.radiance.Float16Compressor;
 import net.minecraft.core.SectionPos;
 
 /** Dependency-free ownership and provenance checks for the one-shot frozen reflection domain. */
@@ -31,7 +32,9 @@ public final class FrozenReflectionFieldControllerTests {
         require(controller.activateAtCamera(world, 12.75, 68.0, -33.25), "first camera pose must latch the field");
         FrozenReflectionFieldController.Snapshot initial = controller.snapshot();
         require(initial.state() == FrozenReflectionFieldController.State.COLLECTING, "field must collect once");
-        require(initial.expectedSections() == 512, "fixed 128-block field must require exactly 8^3 sections");
+        require(initial.expectedSections() == FrozenReflectionFieldController.EXPECTED_SECTION_COUNT
+                        && initial.expectedSections() == 512,
+                "128-block field must require exactly 8^3 sections");
         long firstSection = SectionPos.asLong(
                 initial.originX() >> 4, initial.originY() >> 4, initial.originZ() >> 4
         );
@@ -49,9 +52,11 @@ public final class FrozenReflectionFieldControllerTests {
                     );
                     FrozenReflectionSectionTask task = controller.beginSectionTask(world, section);
                     require(task != null, "expected section must receive exactly one stamped task");
-                    require(controller.publishAccepted(new FrozenReflectionSectionCandidate(
-                            task, CompactSectionPayload.empty(section, task.worldGeneration())
-                    )), "accepted transparent section must publish");
+                    CompactSectionPayload payload = x == 0 && y == 0 && z == 0
+                            ? oddCoordinateLandmark(section, task.worldGeneration())
+                            : CompactSectionPayload.empty(section, task.worldGeneration());
+                    require(controller.publishAccepted(new FrozenReflectionSectionCandidate(task, payload)),
+                            "accepted section must publish");
                 }
             }
         }
@@ -61,6 +66,10 @@ public final class FrozenReflectionFieldControllerTests {
         for (byte valid : source.validity()) {
             require((valid & 0xff) == 255, "transparent-but-known source cells must remain valid");
         }
+        require(Float16Compressor.unpackFloat(source.packedRgba()[0]) > 0.9F
+                        && Float16Compressor.unpackFloat(source.packedRgba()[2]) == 0.0F
+                        && Float16Compressor.unpackFloat(source.packedRgba()[3]) > 0.9F,
+                "2x2x2 source aggregation must retain an odd landmark without water self-radiance");
         require(controller.snapshot().state() == FrozenReflectionFieldController.State.READY_FOR_GPU_UPLOAD,
                 "snapshot must wait for one native GPU build");
         FrozenReflectionFieldController.SourceSnapshot claimed = controller.claimReadySnapshotForGpuUpload();
@@ -71,7 +80,37 @@ public final class FrozenReflectionFieldControllerTests {
                 "matching native completion must make the field ready");
         require(!controller.retainsSectionDuringCollection(world, firstSection),
                 "ready frozen source must not retain Sodium sections");
+        require(!controller.activateAtCamera(world,
+                        initial.originX() + 64.0, initial.originY() + 64.0, initial.originZ() + 64.0),
+                "camera motion inside the guard band must keep the completed domain stable");
+        require(controller.activateAtCamera(world,
+                        initial.originX() + FrozenReflectionFieldController.RECENTER_GUARD_BLOCKS - 0.5,
+                        initial.originY() + 64.0,
+                        initial.originZ() + 64.0),
+                "camera leaving one guard axis must start a world-snapped replacement domain");
+        FrozenReflectionFieldController.Snapshot recentered = controller.snapshot();
+        require(recentered.state() == FrozenReflectionFieldController.State.COLLECTING
+                        && recentered.fieldGeneration() > initial.fieldGeneration(),
+                "recentered domain must have a fresh collection generation");
+        require(recentered.originX() != initial.originX()
+                        && recentered.originY() == initial.originY()
+                        && recentered.originZ() == initial.originZ(),
+                "recenter must preserve every axis which remains inside its guard band");
         controller.closeWorld(world);
+    }
+
+    private static CompactSectionPayload oddCoordinateLandmark(final long sectionKey, final long worldGeneration) {
+        short[] rgba = new short[CompactSectionPayload.SECTION_BLOCK_COUNT * CompactSectionPayload.SHORTS_PER_BLOCK];
+        byte[] classification = new byte[CompactSectionPayload.SECTION_BLOCK_COUNT];
+        int local = (1 << 8) | (1 << 4) | 1;
+        rgba[local * 4] = Float16Compressor.packFloat(1.0F);
+        rgba[local * 4 + 3] = Float16Compressor.packFloat(1.0F);
+        classification[local] = CompactSectionPayload.CLASS_OCCUPIED;
+        int water = 0;
+        rgba[water * 4 + 2] = Float16Compressor.packFloat(1.0F);
+        rgba[water * 4 + 3] = Float16Compressor.packFloat(0.30F);
+        classification[water] = CompactSectionPayload.CLASS_WATER;
+        return new CompactSectionPayload(sectionKey, worldGeneration, false, rgba, classification);
     }
 
     private static void testStaleOrUnavailableSectionInvalidatesTheField() {

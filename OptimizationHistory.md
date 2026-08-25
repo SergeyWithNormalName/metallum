@@ -3477,3 +3477,181 @@ specular isolation), `rendererArchitectureUnitTest`, `metalRuntimeUnitTest`,
 реконструируется во времени. Проверить прежде всего slow camera orbit, тонкие цветные
 полупрозрачные границы рядом с opaque terrain, появление/исчезновение факела,
 disocclusion и возможный shimmer/ghosting. До такой проверки не включать по умолчанию.
+
+#### Water-only frozen voxel cone reflection — RETAINED as default-OFF experiment
+
+Planar rendering в этом кандидате отсутствует. Retained carrier использует один
+accepted-Sodium source `64^3`, два блока на cell, `RGBA16F` radiance/optical presence,
+R8 validity и шесть mip levels. Только water vertices выполняют ограниченный
+40-шаговый world-space cone trace (`0.75` start, `1.75` block step, около 69 blocks)
+вдоль `reflect(view, up)`; roughness выбирает mip LOD. Fragment получает один
+интерполированный `vec4`, не делает `texture3D` reads и смешивает результат только с
+environment term через water Fresnel. Solid/cutout/translucent non-water paths обходят
+все reflection reads. Retained visual constants: strength `0.75`, roughness `0.18`.
+
+Dedicated immutable fixture `reflection-house-voxel-v1` имеет digest
+`6c2d00ee96ecfead1b0dac27d21b95323b02980e84084e3dd79d718c4045d2bb`; static route
+digest — `2316274b3b58814788391ff76217f91ec7f59ba8458ec985ee0d028b8a06b286`.
+Source-level contribution capture
+`20260825T071756Z-...-voxel-house-quality-candidate-contribution-v8-off.png`
+(`27827ea52f43...`) сохраняет узнаваемые redstone columns/wall, sand, brown house и
+green shore. Final production capture
+`20260825T081052Z-...-voxel-house-final-production-v6-off.png`
+(`8e7010dc5295...`) сохраняет дальний красный reflection, тёплую полосу дома/берега и
+rough water breakup без чёрных chunk-like псевдоотражений. Это voxel lookup: никакого
+scene/planar capture pass нет.
+
+Три реальные причины первоначально нулевого/ложного результата исправлены узко:
+
+- Java source layout `(y,z,x)` раньше копировался в Metal staging как `(z,y,x)` без
+  transpose; upload теперь явно переставляет destination rows;
+- contribution-only диагностика раньше оставляла прозрачный water alpha, и видимое
+  дно ошибочно принималось за reflection; diagnostic output теперь opaque;
+- L6 camera/world params в slot 16 были fragment-only, хотя reflection vertex shader
+  использует их для world origin. При включённом experiment slot 16 теперь bindится и
+  во vertex stage; до этого все rays фактически стартовали около world origin.
+
+CPU source исключает receiver water, агрегирует все восемь blocks каждого `2x2x2`
+cell и центрирует domain к ближайшей section. Native ownership остаётся double-buffered:
+старое READY field bound до exact completion нового `PENDING/READY/FAILED` build.
+Motion route `reflection-house-voxel-motion-v1` выявил дополнительный recenter bug:
+выход за X guard заново центрировал также стабильный Z и вызывал rebuild oscillation.
+Per-axis recenter сохраняет оси внутри guard. Validated motion receipt
+`20260825T080811Z-...-voxel-house-motion-recenter-v3-off` дал ровно initial + one
+recenter: `[176,0,80] -> [144,0,80]`, два `512/512 READY`, final admission `READY`,
+`COMPLETE`, zero timing drops и ни одного `INVALID/FAILED`.
+
+Tier C M1 Pro, built-in `3024x1964` HDR, Advanced/Balanced, MetalFX/VSync OFF,
+immutable fixture, source `0d338d5141fae79357e7592407f688193f0337e536a9a61341085fdf314359a0`,
+artifact `269bba90ca8d2f8c309c75018f1b5873f448fbdc756bf3c8bc4c9ec52fe8f26b`,
+`1800 warmup + 3000 measure`, `COMPLETE`, zero drops, exact Advanced L3/L5/L6 and
+reflection READY admission; все четыре run имеют `.accepted.json`:
+
+| run | FPS | 1% / 0.1% low | GPU p50 / p95 / p99 ms |
+|---|---:|---:|---:|
+| OFF A `20260825T081216Z-...-tierc-a-off-off` | 77.067 | 55.091 / 51.078 | 14.9284 / 15.6984 / 16.2654 |
+| ON A `20260825T081410Z-...-tierc-a-on-off` | 75.362 | 53.289 / 49.732 | 15.2264 / 16.0152 / 16.6019 |
+| ON B `20260825T081605Z-...-tierc-b-on-off` | 75.658 | 54.233 / 50.425 | 15.1305 / 15.9190 / 16.5548 |
+| OFF B `20260825T081803Z-...-tierc-b-off-off` | 76.640 | 54.723 / 50.926 | 15.0102 / 15.7620 / 16.5105 |
+
+`compare-multi`: baseline mean `76.85 FPS`, GPU p95 `15.73 ms`; candidate mean
+`75.51 FPS`, GPU p95 `15.97 ms`. Delta `-1.75% FPS`, `+0.24 ms / +1.51% GPU p95`;
+строгий `+0.20 ms` gate не пройден. ON также закономерно поднимает instrumented
+GPU-shared upload high-water `155668 -> 160848` bytes. UVW recurrence, polynomial LOD
+approximation и `35 x 2.0` same-range march были измерены по одному и отклонены: все
+ухудшили timing; не повторять без нового shader/counter evidence. `80^3` source также
+отклонён: persistent bytes `14,417,920` превышают экспериментальный 8 MiB budget.
+
+Benchmark evidence ordering исправлен без ослабления attestor: единственный
+`SERVER_TICKS_FROZEN` теперь публикуется после server confirmation и `ROUTE_APPLY`;
+shell runner использует ту же каноническую последовательность.
+
+**Решение:** визуально и lifecycle-корректный voxel reflection carrier retained, но
+остаётся restart-gated default-OFF opt-in из-за воспроизводимого `+0.24 ms` Tier C
+near-miss. Не включать по умолчанию и не снижать дальность/roughness ради FPS. Future
+wet/glossy receivers могут переиспользовать carrier только после явного material
+predicate и отдельного performance/visual gate; не расширять water predicate неявно.
+
+#### Water voxel-reflection receiver refinement — HUMAN PENDING
+
+Термин `frozen` уточнён: READY texture snapshot не обновляется по block edits и не
+имеет per-frame upload, но полный replacement build запускается после выхода камеры
+за 32-block per-axis guard. Это snapshot-built/recentered voxel reflection, не planar
+reflection. Текущая topology также не совпадала со старым audit: один `RGBA16F`
+radiance resource, один syntactic `texture3d.sample` внутри bounded 40-step vertex
+cone loop, без Cartesian moment texture. Следовательно, это до 40 runtime samples на
+water vertex, а не «ровно два lookup».
+
+Старая receiver-композиция сначала вычисляла общий
+`metallumEvaluateEnvironmentV1(...)`, затем для water заменяла весь этот term через
+`mix(environmentTerm, coarseRGB, confidence * (0.08 + 0.92 * F))` и прибавляла его к
+`color.rgb`. Direction был заранее выбран в vertex как `reflect(viewRay, up)`; wave
+normal влиял на Fresnel, но не менял coarse reflection direction. При этом material
+environment/sun GGX добавлялись отдельным L8 block, а framebuffer alpha/body
+transmission не получали complementary Fresnel. Поэтому broad world RGB выглядел как
+окрашенная diffuse-подсветка, а дно оставалось слишком сильным на grazing angles.
+
+Refined carrier сохраняет тот же vertex cone trace/resource и добавляет только второй
+`float4` varying: `coarseRGB/confidence` плюс `flatTraceDirection/roughness`. Fragment
+строит `Rwave = reflect(-V, Nprocedural)`, переводит его в world, считает bounded
+alignment lobe (`roughness=0.28`, floor `0.45`), затем
+`W=clamp(confidence*directionalResponse,0,1)`. Аналитическое environment заменяется
+через `mix(analyticEnvironment, max(coarseRGB,0), W)` до единственного water Fresnel.
+Для body используется `T=1-max(F)`: `color.rgb*=T`, prepared diffuse albedo `*=T`,
+`color.a=1-(1-color.a)*T`. Sun highlight и local clustered GGX остаются отдельными.
+Contribution-only теперь opaque и показывает только
+`max(coarseRGB,0)*confidence*directionalResponse`, не final water color.
+
+Generated GLSL -> SPIR-V -> MSL gate:
+
+| | OLD | REFINED |
+|---|---:|---:|
+| vertex SHA-256 | `ce76bdcf7244...` | `24acff3bcc20...` |
+| fragment SHA-256 | `be5bbc4134c8...` | `30aa7182fd7f...` |
+| vertex chars | 11,581 | 11,879 |
+| fragment chars | 143,064 | 147,370 |
+| user varyings vertex/fragment | 9/9 | 10/10 |
+| reflection resources/sample sites | 1/1 | 1/1 |
+| fragment `texture3d` | 0 | 0 |
+
+Delta: +298 vertex chars, +4306 fragment chars (~3.0%), exactly one additional
+`float4` varying. Generated source cannot prove physical register occupancy; runtime
+A/B is the occupancy/cost gate.
+
+Immutable-fixture visual receipts, all `3024x1964`, Advanced/Balanced, MetalFX OFF,
+same route pose/time/weather between OLD and NEW:
+
+| view | OLD | NEW production | NEW contribution-only |
+|---|---|---|---|
+| broad lake/shore | `voxel-reflection-house-v1/20260825T081052Z-...-voxel-house-final-production-v6-off.png` | `voxel-reflection-refinement-v1/20260825T133724Z-...-water-refine-wide-final-r028-off.png` | `.../20260825T133827Z-...-wide-final-contribution-r028-off.png` |
+| top-down | `.../20260825T132001Z-...-topdown-old-off.png` | `.../20260825T133931Z-...-topdown-final-r028-off.png` | `.../20260825T134048Z-...-topdown-final-contribution-r028-off.png` |
+| low/red landmark | `.../20260825T132132Z-...-low-red-old-off.png` | `.../20260825T133338Z-...-low-red-new-v3-r028-off.png` | `.../20260825T134203Z-...-low-red-final-contribution-r028-off.png` |
+| grazing/late sun | `.../20260825T132403Z-...-grazing-old-v2-off.png` | `.../20260825T134306Z-...-grazing-final-r028-off.png` | `.../20260825T134408Z-...-grazing-final-contribution-r028-off.png` |
+
+Observed, без объявления subjective acceptance: red landmark остаётся spatially
+localized, но более размытым; broad yellow/green shore bands значительно ослаблены;
+top-down transparency сохранена; grazing water получает более сильную reflection/
+alpha и менее доминирующее дно. Contribution diagnostic показывает, что coarse field
+остаётся low-frequency. Static captures не выявили явных vertex/probe facets, но
+shimmer/swimming требуют human motion review.
+
+Deterministic motion receipt
+`20260825T134833Z-...-water-refine-motion-final-r028-single-window-off`:
+initial `[176,0,80]` READY, ровно один per-axis recenter в `[144,0,80]`, replacement
+`512/512 READY`, measured admission READY, `COMPLETE`, zero timing drops, no measured
+reflection rebuild. Первоначальный 600-frame/2-window report сохранён как rejected:
+динамический маршрут дал разные renderer-generation declarations между окнами;
+single-window 300-frame receipt является валидным lifecycle evidence, но не видео-
+доказательством отсутствия shimmer.
+
+Tier C detail-OFF, два независимых `1800+3000` run, source
+`dda14fd9a9c3a17de91a8e32a9ecbb3e6cbda446eefea484c28e036fc85466d2`, artifact
+`bcdbe67bf714712736b49fa6151f01c89746e811b98cc454e23f927ff352da46`, Advanced/
+Balanced, MetalFX/VSync OFF, READY, `COMPLETE`, zero drops:
+
+| state | run FPS | mean FPS | run GPU p95 ms | mean GPU p95 ms |
+|---|---|---:|---|---:|
+| refined ON | 74.091 / 74.140 | 74.116 | 16.273 / 16.287 | 16.280 |
+| refined source OFF | 76.266 / 77.272 | 76.769 | 15.706 / 15.532 | 15.619 |
+
+Против прежней current-prototype ON пары (`75.510 FPS`, `15.967 ms` mean GPU p95)
+refinement даёт `-1.847% FPS`, `+0.313 ms / +1.958% GPU p95`: GOOD по visual-task
+порогу `<=2%`, но у самой границы. Полная refined reflection цена против OFF той же
+source: `-3.456% FPS`, `+0.661 ms / +4.231% GPU p95`. Detailed stage receipts дают
+indicative translucent `3.866 -> 4.161 ms avg`, `4.518 -> 4.765 ms p95`; old side
+имеет только два 300-frame measured windows, поэтому это attribution, не отдельный
+release gate. Короткий `600+600` refined screen с GPU p95 `17.347 ms` отклонён как
+неустоявшийся и не используется в решении.
+
+Cloud feasibility audit: текущий R8 cloud-shadow texture — уже интегрированная вдоль
+sun direction transmittance и не подходит как arbitrary water reflection color.
+Позднее water-only cloud reflection можно сделать без voxel field: пересечь water
+reflection vector с cloud layer/slab и читать отдельное 2D coverage/density source с
+global cloud tint/opacity. В этой итерации cloud production code не добавлялся.
+
+**Решение:** сохранить refinement default-OFF для human review. Не усиливать coarse
+RGB и не делать поле резче: оставшийся tint/parallax — ограничение единственного
+vertex trace direction и coarse spatial field. Один следующий эксперимент после
+human review — заменить single-direction carrier на bounded two-lobe directional
+representation при неизменном fragment zero-volume-read contract; не добавлять
+planar/SSR/temporal/cloud/live updates.

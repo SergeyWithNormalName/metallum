@@ -89,6 +89,7 @@ public final class MetalRuntimeTests {
         testSodiumLightLegacyPatchPacketAndFacadeValidation();
         testCanonicalShaderResourceLayout();
         testVoxelShadowTraversalMslLoopContract();
+        testReflectionVertexParamsBindingMask();
         testPipelineLocalBindingRemap();
         testPendingUiSeedConsumeOnceLifecycle();
         testTrackedUiTextureAllocationScope();
@@ -120,6 +121,16 @@ public final class MetalRuntimeTests {
         require(MetalCrossShaderCompiler.preserveVoxelShadowTraversalLoop(cachedOnly)
                         .equals(cachedOnly),
                 "cached L6 MSL unexpectedly required a dead DDA traversal loop");
+    }
+
+    private static void testReflectionVertexParamsBindingMask() {
+        require(LocalVoxelShadowGpuResources.reflectionParamsStageMask(false)
+                        == MetalCompiledRenderPipeline.STAGE_FRAGMENT,
+                "ordinary L6 params must remain fragment-only");
+        require(LocalVoxelShadowGpuResources.reflectionParamsStageMask(true)
+                        == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                        | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                "voxel reflection must bind current camera params to both fragment and vertex stages");
     }
 
     private static void testLocalShadowResidentAtlasContracts() {

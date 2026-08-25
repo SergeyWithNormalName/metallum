@@ -14,10 +14,7 @@ public final class RealWorldReflectionField {
     public static final int SOURCE_EDGE = FrozenReflectionFieldController.SOURCE_EDGE;
     public static final int SOURCE_BLOCK_COUNT = SOURCE_EDGE * SOURCE_EDGE * SOURCE_EDGE;
     public static final int SOURCE_CELL_SPACING = FrozenReflectionFieldController.SOURCE_CELL_BLOCKS;
-    public static final int PROBE_EDGE = 32;
-    public static final int PROBE_CELL_SPACING = 4;
     public static final int BINDING_SLOT_RADIANCE = 10;
-    public static final int BINDING_SLOT_MOMENT = 11;
     public static final int BINDING_SLOT_PARAMS = 27;
 
     private static final RealWorldReflectionField INSTANCE = new RealWorldReflectionField();
@@ -25,8 +22,8 @@ public final class RealWorldReflectionField {
     private volatile boolean enabled = true;
     private volatile boolean contributionOnly = Boolean.getBoolean("metallum.reflection.contributionOnly")
             || "1".equals(System.getenv("METALLUM_REFLECTION_CONTRIBUTION_ONLY"));
-    private volatile float strength = 0.35F;
-    private volatile float roughness = 0.30F;
+    private volatile float strength = 0.75F;
+    private volatile float roughness = 0.28F;
 
     private RealWorldReflectionField() {
     }

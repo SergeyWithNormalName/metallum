@@ -13,8 +13,12 @@ public record CompactSectionPayload(
         long worldGeneration,
         boolean isEmpty,
         short[] packedRgba,     // 4096 * 4 shorts (RGBA16F) = 32,768 bytes
-        byte[] classification   // 4096 bytes: 0=empty, 1=occupied, 2=emissive
+        byte[] classification   // 4096 bytes: EMPTY, OCCUPIED, EMISSIVE, or WATER
 ) {
+    public static final byte CLASS_EMPTY = 0;
+    public static final byte CLASS_OCCUPIED = 1;
+    public static final byte CLASS_EMISSIVE = 2;
+    public static final byte CLASS_WATER = 3;
     public static final int SECTION_BLOCK_COUNT = 16 * 16 * 16; // 4096
     public static final int SHORTS_PER_BLOCK = 4; // R, G, B, A in half-precision
     public static final int CONTENT_PAYLOAD_BYTES = (SECTION_BLOCK_COUNT * SHORTS_PER_BLOCK * Short.BYTES) + SECTION_BLOCK_COUNT; // 36,864 bytes

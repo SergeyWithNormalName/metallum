@@ -1,6 +1,7 @@
 package com.metallum.client.radiance;
 
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
+import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
 import org.jspecify.annotations.Nullable;
 
 import java.lang.foreign.Arena;
@@ -19,9 +20,10 @@ import java.util.function.Consumer;
  * the private-texture blit and compute work have finished.</p>
  */
 public final class RadianceGpuResources implements AutoCloseable {
+    public enum BuildStatus { PENDING, READY, FAILED }
     private static final ValueLayout.OfInt LE_INT = ValueLayout.JAVA_INT.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfLong LE_LONG = ValueLayout.JAVA_LONG.withOrder(ByteOrder.LITTLE_ENDIAN);
-    private static final int SOURCE_EDGE = 64;
+    private static final int SOURCE_EDGE = FrozenReflectionFieldController.SOURCE_EDGE;
 
     public record GpuStats(
             boolean ready,
@@ -32,18 +34,18 @@ public final class RadianceGpuResources implements AutoCloseable {
             int sourceOriginX,
             int sourceOriginY,
             int sourceOriginZ,
-            boolean probeReady,
-            long probePersistentBytes,
-            long probeBuildCount,
-            long probeMipBuildCount,
-            long probeBuildGpuNanoseconds,
-            int probeOriginX,
-            int probeOriginY,
-            int probeOriginZ,
+            boolean traceReady,
+            long auxiliaryPersistentBytes,
+            long auxiliaryBuildCount,
+            long auxiliaryMipBuildCount,
+            long buildGpuNanoseconds,
+            int traceOriginX,
+            int traceOriginY,
+            int traceOriginZ,
             boolean buildInFlight
     ) {
         public long allocatedBytes() {
-            return this.persistentBytes + this.probePersistentBytes;
+            return this.persistentBytes + this.auxiliaryPersistentBytes;
         }
     }
 
@@ -89,8 +91,8 @@ public final class RadianceGpuResources implements AutoCloseable {
     }
 
     /**
-     * Copies the complete, immutable 64^3 source snapshot into owned native staging and enqueues
-     * exactly one private-texture upload plus directional-probe build. No FFM segment escapes the
+     * Copies the complete immutable source snapshot into owned native staging and enqueues
+     * exactly one private-texture upload plus source mip build. No FFM segment escapes the
      * downcall.
      */
     public synchronized boolean queueFrozenBuild(
@@ -150,6 +152,18 @@ public final class RadianceGpuResources implements AutoCloseable {
         return !this.closed
                 && this.nativeHandle != null
                 && MetalNativeBridge.metallum_radiance_context_bind_vertex_resources(this.nativeHandle, encoder);
+    }
+
+    /** Allocation-free native completion state for render-thread admission and double buffering. */
+    public synchronized BuildStatus buildStatus() {
+        if (this.closed || this.nativeHandle == null) {
+            return BuildStatus.FAILED;
+        }
+        return switch (MetalNativeBridge.metallum_radiance_context_build_status(this.nativeHandle)) {
+            case 1 -> BuildStatus.READY;
+            case 0 -> BuildStatus.PENDING;
+            default -> BuildStatus.FAILED;
+        };
     }
 
     /** Diagnostic-only snapshot; never call this from the frame loop. */
