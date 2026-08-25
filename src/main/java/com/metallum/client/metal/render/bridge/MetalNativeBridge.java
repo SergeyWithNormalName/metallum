@@ -28,6 +28,7 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumClusterBuild.metal",
             "/natives/macos/shaders/MetallumVoxelOccupancy.metal",
             "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal",
+            "/natives/macos/shaders/MetallumGiField.metal",
             "/natives/macos/shaders/MetallumRadianceClipmap.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
@@ -408,6 +409,75 @@ public final class MetalNativeBridge {
             giFieldReleaseContextV1 = downcall(
                     lookup,
                     "metallum_gi_field_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+
+            giSemanticAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_semantic_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giSemanticLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_semantic_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giSemanticCreateContextV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_create_context_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giSemanticUploadOnceV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_upload_once_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giSemanticAwaitReadyV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_await_ready_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giSemanticResetV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_reset_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG)
+            );
+            giSemanticCaptureSliceOnceV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_capture_slice_once_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giSemanticGetStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_semantic_get_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giSemanticReleaseContextV1 = downcall(
+                    lookup,
+                    "metallum_gi_semantic_release_context_v1",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
 
@@ -981,6 +1051,15 @@ public final class MetalNativeBridge {
     private static final MethodHandle giFieldCaptureMipOnceV1;
     private static final MethodHandle giFieldGetStatsV1;
     private static final MethodHandle giFieldReleaseContextV1;
+    private static final MethodHandle giSemanticAbiVersionV1;
+    private static final MethodHandle giSemanticLayoutV1;
+    private static final MethodHandle giSemanticCreateContextV1;
+    private static final MethodHandle giSemanticUploadOnceV1;
+    private static final MethodHandle giSemanticAwaitReadyV1;
+    private static final MethodHandle giSemanticResetV1;
+    private static final MethodHandle giSemanticCaptureSliceOnceV1;
+    private static final MethodHandle giSemanticGetStatsV1;
+    private static final MethodHandle giSemanticReleaseContextV1;
     private static final MethodHandle radianceContextCreate;
     private static final MethodHandle radianceContextUploadSourceFrozen;
     private static final MethodHandle radianceContextBindVertexResources;
@@ -1746,6 +1825,146 @@ public final class MetalNativeBridge {
             giFieldReleaseContextV1.invokeExact(segment(context));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_field_release_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_abi_version_v1() {
+        try {
+            return (int) giSemanticAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giSemanticLayoutV1.invokeExact(segment(destination), destinationBytes);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_gi_semantic_create_context_v1(
+            final MemorySegment device,
+            final MemorySegment queue,
+            final long worldGeneration
+    ) {
+        try {
+            return (MemorySegment) giSemanticCreateContextV1.invokeExact(
+                    segment(device), segment(queue), worldGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_upload_once_v1(
+            final MemorySegment context,
+            final MemorySegment header,
+            final MemorySegment material,
+            final MemorySegment emission,
+            final MemorySegment faces0,
+            final MemorySegment faces1,
+            final MemorySegment state,
+            final MemorySegment palette,
+            final MemorySegment coverage
+    ) {
+        try {
+            return (int) giSemanticUploadOnceV1.invokeExact(
+                    segment(context),
+                    segment(header), header.byteSize(),
+                    segment(material), material.byteSize(),
+                    segment(emission), emission.byteSize(),
+                    segment(faces0), faces0.byteSize(),
+                    segment(faces1), faces1.byteSize(),
+                    segment(state), state.byteSize(),
+                    segment(palette), palette.byteSize(),
+                    segment(coverage), coverage.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_upload_once_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_await_ready_v1(
+            final MemorySegment context,
+            final long timeoutMilliseconds
+    ) {
+        try {
+            return (int) giSemanticAwaitReadyV1.invokeExact(segment(context), timeoutMilliseconds);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_await_ready_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_reset_v1(
+            final MemorySegment context,
+            final long worldGeneration,
+            final long clipmapGeneration,
+            final long paletteGeneration,
+            final long contentGeneration
+    ) {
+        try {
+            return (int) giSemanticResetV1.invokeExact(
+                    segment(context), worldGeneration, clipmapGeneration, paletteGeneration, contentGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_reset_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_capture_slice_once_v1(
+            final MemorySegment context,
+            final MemorySegment request,
+            final MemorySegment info,
+            final MemorySegment material,
+            final MemorySegment emission,
+            final MemorySegment faces0,
+            final MemorySegment faces1,
+            final MemorySegment state,
+            final MemorySegment palette,
+            final MemorySegment coverage
+    ) {
+        try {
+            return (int) giSemanticCaptureSliceOnceV1.invokeExact(
+                    segment(context),
+                    segment(request), request.byteSize(),
+                    segment(info), info.byteSize(),
+                    segment(material), material.byteSize(),
+                    segment(emission), emission.byteSize(),
+                    segment(faces0), faces0.byteSize(),
+                    segment(faces1), faces1.byteSize(),
+                    segment(state), state.byteSize(),
+                    segment(palette), palette.byteSize(),
+                    segment(coverage), coverage.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_capture_slice_once_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_semantic_get_stats_v1(
+            final MemorySegment context,
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giSemanticGetStatsV1.invokeExact(
+                    segment(context), segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_get_stats_v1", throwable);
+        }
+    }
+
+    public static void metallum_gi_semantic_release_context_v1(final MemorySegment context) {
+        try {
+            giSemanticReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_semantic_release_context_v1", throwable);
         }
     }
 

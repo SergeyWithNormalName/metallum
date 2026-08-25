@@ -177,7 +177,7 @@ def verify(root: Path) -> None:
     wrapper = (gi_root / "GiFieldGpuResources.java").read_text(encoding="utf-8")
     if re.search(r"\b(?:bind|bind[A-Z]\w*)\s*\(", wrapper):
         raise ContractError("G1 wrapper exposes a production bind method")
-    metal = (root / "src/main/metal/MetallumRadianceClipmap.metal").read_text(encoding="utf-8")
+    metal = (root / "src/main/metal/MetallumGiField.metal").read_text(encoding="utf-8")
     if "kernel void metallum_gi_field_downsample_v1" not in metal:
         raise ContractError("G1 coverage-aware Metal kernel is missing")
     for production_path in (

@@ -2,44 +2,6 @@
 using namespace metal;
 
 /**
- * G1 field-only coverage reduction. The four payload channels are deliberately semantic-free:
- * G2 will define material/source meaning. Unknown children contribute no payload weight, while
- * the parent coverage records the known fraction of its 2x2x2 footprint.
- */
-kernel void metallum_gi_field_downsample_v1(
-    texture3d<half, access::read> sourceField [[texture(0)]],
-    texture3d<half, access::read> sourceCoverage [[texture(1)]],
-    texture3d<half, access::write> destinationField [[texture(2)]],
-    texture3d<half, access::write> destinationCoverage [[texture(3)]],
-    uint3 destinationPosition [[thread_position_in_grid]]
-) {
-    if (destinationPosition.x >= destinationField.get_width()
-            || destinationPosition.y >= destinationField.get_height()
-            || destinationPosition.z >= destinationField.get_depth()) {
-        return;
-    }
-
-    uint3 sourceBase = destinationPosition * 2u;
-    float4 weightedPayload = float4(0.0f);
-    float support = 0.0f;
-    for (uint z = 0u; z < 2u; ++z) {
-        for (uint y = 0u; y < 2u; ++y) {
-            for (uint x = 0u; x < 2u; ++x) {
-                uint3 sourcePosition = sourceBase + uint3(x, y, z);
-                float childCoverage = clamp(float(sourceCoverage.read(sourcePosition).r), 0.0f, 1.0f);
-                weightedPayload += float4(sourceField.read(sourcePosition)) * childCoverage;
-                support += childCoverage;
-            }
-        }
-    }
-
-    float inverseSupport = support > 1.0e-6f ? 1.0f / support : 0.0f;
-    destinationField.write(half4(weightedPayload * inverseSupport), destinationPosition);
-    destinationCoverage.write(half4(half(support * 0.125f), 0.0h, 0.0h, 0.0h),
-            destinationPosition);
-}
-
-/**
  * Coverage-aware 3D radiance and opacity downsampling compute kernel for the frozen source field.
  *
  * Each invocation at dstPos computes 1 parent texel in mip (d + 1) from an 8-texel 2x2x2 sub-block in mip d.

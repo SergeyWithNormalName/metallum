@@ -20,6 +20,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String SODIUM_RELIGHT_ORACLE_ENV = "METALLUM_SODIUM_RELIGHT_ORACLE";
     private static final String SODIUM_RELIGHT_FAST_PATH_ENV = "METALLUM_SODIUM_RELIGHT_FAST_PATH";
     private static final String SODIUM_LIGHT_PATCH_ENV = "METALLUM_SODIUM_LIGHT_PATCH";
+    private static final String GI_G2_CAPTURE_ENV = "METALLUM_GI_G2_CAPTURE";
     private static final String MINECRAFT_MOD_ID = "minecraft";
     private static final String MINECRAFT_EXACT_VERSION = "26.2";
     private static final String SODIUM_MOD_ID = "sodium";
@@ -64,6 +65,20 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.sodium.TerrainRenderPassShadowMixin",
             "com.metallum.mixin.sodium.UniformBufferManagerShadowMixin"
     );
+    private static final Set<String> GI_G2_CAPTURE_MIXINS = Set.of(
+            "com.metallum.mixin.gi.GiSemanticAtlasMixin",
+            "com.metallum.mixin.gi.GiSemanticBlockRendererMixin",
+            "com.metallum.mixin.gi.GiSemanticClientLevelMixin",
+            "com.metallum.mixin.gi.GiSemanticFluidRendererMixin",
+            "com.metallum.mixin.gi.GiSemanticLevelExtractorMixin",
+            "com.metallum.mixin.gi.GiSemanticMeshingScopeMixin",
+            "com.metallum.mixin.gi.GiSemanticOutputMixin",
+            "com.metallum.mixin.gi.GiSemanticRenderSectionManagerMixin",
+            "com.metallum.mixin.gi.GiSemanticRenderSectionMixin",
+            "com.metallum.mixin.gi.GiSemanticSpriteContentsAccessor",
+            "com.metallum.mixin.gi.GiSemanticTaskMixin",
+            "com.metallum.mixin.gi.GiSemanticUploadMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -74,6 +89,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean sodiumRelightOracleEnabled;
     private boolean sodiumRelightFastPathEnabled;
     private boolean sodiumShadowCompatible;
+    private boolean giG2CaptureEnabled;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -93,6 +109,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.sodiumRelightOracleEnabled = (relightOracleRequested
                 || this.sodiumRelightFastPathEnabled)
                 && exactRelightVersions;
+        this.giG2CaptureEnabled = isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
+                && exactRelightVersions;
     }
 
     @Override
@@ -104,6 +122,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
         if (!this.isMacOs) {
             return false;
+        }
+        if (GI_G2_CAPTURE_MIXINS.contains(mixinClassName)) {
+            return this.giG2CaptureEnabled && this.isDefaultGraphicsApi;
         }
         if (SODIUM_RELIGHT_ORACLE_MIXINS.contains(mixinClassName)) {
             return this.sodiumRelightOracleEnabled && this.isDefaultGraphicsApi;

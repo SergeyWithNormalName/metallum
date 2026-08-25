@@ -44,6 +44,7 @@ def macMetalSources = [
 	ClusterBuild: layout.projectDirectory.file("src/main/metal/MetallumClusterBuild.metal"),
 	VoxelOccupancy: layout.projectDirectory.file("src/main/metal/MetallumVoxelOccupancy.metal"),
 	DynamicVoxelShadow: layout.projectDirectory.file("src/main/metal/MetallumDynamicVoxelShadow.metal"),
+	GiField: layout.projectDirectory.file("src/main/metal/MetallumGiField.metal"),
 	RadianceClipmap: layout.projectDirectory.file("src/main/metal/MetallumRadianceClipmap.metal")
 ]
 def macMetalAirFiles = macMetalSources.collectEntries { name, ignored ->
@@ -283,6 +284,60 @@ tasks.register("giFieldGpuValidation", JavaExec) {
 	mainClass.set("com.metallum.client.gi.field.GiFieldGpuValidation")
 	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giSemanticGpuEncoderUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic fail-closed CPU semantic truth to G2 GPU planes"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticGpuEncoderTests")
+}
+
+tasks.register("giSemanticCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic G2 palette, accepted snapshots, scrolling and bounded retirement"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.semantic.GiSemanticCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giSemanticSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the version-locked structurally-off Sodium accepted-output source chain"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.capture.GiSemanticSourceChainTests")
+}
+
+tasks.register("giSemanticFieldGpuValidationSource", JavaExec) {
+	group = "verification"
+	description = "Validates G2 semantic ABI/private textures/mips/raw slice using actual MSL source"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticFieldGpuValidation")
+	args "source"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giSemanticFieldGpuValidationBundled", JavaExec) {
+	group = "verification"
+	description = "Validates G2 semantic ABI/private textures/mips/raw slice using bundled metallib"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.field.GiSemanticFieldGpuValidation")
+	args "bundled"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
 	environment "MTL_DEBUG_LAYER", "1"
 	environment "MTL_SHADER_VALIDATION", "1"
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
@@ -1352,7 +1407,7 @@ tasks.register("giG1FieldContractTest", Exec) {
     inputs.file("tools/gi_g1_contract.py")
     inputs.file("benchmark/gi/g1-field-evidence-v1.json")
     inputs.dir("src/main/java/com/metallum/client/gi/field")
-    inputs.file("src/main/metal/MetallumRadianceClipmap.metal")
+	inputs.file("src/main/metal/MetallumGiField.metal")
     commandLine "python3", "tools/gi_g1_contract.py", "--root", "."
 }
 
@@ -1392,6 +1447,11 @@ tasks.named("check") {
 	dependsOn(tasks.named("frozenReflectionNativeValidation"))
 	dependsOn(tasks.named("giFieldUnitTest"))
 	dependsOn(tasks.named("giFieldGpuValidation"))
+	dependsOn(tasks.named("giSemanticCpuUnitTest"))
+	dependsOn(tasks.named("giSemanticSourceChainUnitTest"))
+	dependsOn(tasks.named("giSemanticGpuEncoderUnitTest"))
+	dependsOn(tasks.named("giSemanticFieldGpuValidationSource"))
+	dependsOn(tasks.named("giSemanticFieldGpuValidationBundled"))
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("godRayWorldSpaceUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))

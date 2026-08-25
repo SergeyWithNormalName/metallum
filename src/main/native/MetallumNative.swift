@@ -54,12 +54,17 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
     // A missing voxel metallib/source must fail context creation, never Vanilla/L3/L4.
     case voxelOccupancy
     case dynamicVoxelShadow
+    // G1/G2 fields are explicit diagnostic contexts and never participate in startup warm-up.
+    case giField
     // This is opt-in frozen-prototype work. A missing source/metallib must fail only the
     // prototype context; it must never affect ordinary Advanced startup.
     case radianceClipmap
 
     static var startupMandatory: [Self] {
-        allCases.filter { $0 != .clusterBuild && $0 != .voxelOccupancy && $0 != .dynamicVoxelShadow && $0 != .radianceClipmap }
+        allCases.filter {
+            $0 != .clusterBuild && $0 != .voxelOccupancy && $0 != .dynamicVoxelShadow
+                && $0 != .giField && $0 != .radianceClipmap
+        }
     }
 
     var sourceFileName: String {
@@ -72,6 +77,7 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
         case .clusterBuild: "MetallumClusterBuild.metal"
         case .voxelOccupancy: "MetallumVoxelOccupancy.metal"
         case .dynamicVoxelShadow: "MetallumDynamicVoxelShadow.metal"
+        case .giField: "MetallumGiField.metal"
         case .radianceClipmap: "MetallumRadianceClipmap.metal"
         }
     }
@@ -139,11 +145,13 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
             ]
         case .dynamicVoxelShadow:
             ["metallum_dynamic_voxel_shadow_v1"]
-        case .radianceClipmap:
+        case .giField:
             [
                 "metallum_gi_field_downsample_v1",
-                "metallum_radiance_downsample_mip"
+                "metallum_gi_semantic_downsample_v1"
             ]
+        case .radianceClipmap:
+            ["metallum_radiance_downsample_mip"]
         }
     }
 }
@@ -14823,7 +14831,7 @@ private final class MetallumGiFieldContextV1 {
         }
 
         do {
-            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .radianceClipmap)
+            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .giField)
             guard let function = library.makeFunction(name: "metallum_gi_field_downsample_v1") else {
                 return nil
             }
@@ -15227,6 +15235,945 @@ public func metallum_gi_field_get_stats_v1(
 public func metallum_gi_field_release_context_v1(_ rawContext: UnsafeMutableRawPointer?) {
     guard let rawContext else { return }
     _ = Unmanaged<MetallumGiFieldContextV1>.fromOpaque(rawContext).takeRetainedValue()
+}
+
+// MARK: - G2 structurally-off semantic field
+
+private let metallumGiSemanticAbiVersionV1: Int32 = 1
+private let metallumGiSemanticLayoutBytesV1 = 160
+private let metallumGiSemanticUploadHeaderBytesV1 = 128
+private let metallumGiSemanticStatsBytesV1 = 160
+private let metallumGiSemanticCaptureRequestBytesV1 = 32
+private let metallumGiSemanticCaptureInfoBytesV1 = 176
+private let metallumGiSemanticVersionV1: UInt32 = 1
+private let metallumGiSemanticStatusOK: Int32 = 1
+private let metallumGiSemanticStatusInvalid: Int32 = -1
+private let metallumGiSemanticStatusBusy: Int32 = -2
+private let metallumGiSemanticStatusStale: Int32 = -3
+private let metallumGiSemanticStatusCaptureConsumed: Int32 = -4
+private let metallumGiSemanticStatusWrongThread: Int32 = -5
+
+public struct MetallumGiSemanticUploadHeaderV1 {
+    public var abiVersion: UInt32
+    public var headerBytes: UInt32
+    public var worldGeneration: UInt64
+    public var clipmapGeneration: UInt64
+    public var contentGeneration: UInt64
+    public var origin0X: Int32
+    public var origin0Y: Int32
+    public var origin0Z: Int32
+    public var origin1X: Int32
+    public var origin1Y: Int32
+    public var origin1Z: Int32
+    public var origin2X: Int32
+    public var origin2Y: Int32
+    public var origin2Z: Int32
+    public var semanticVersion: UInt32
+    public var flags: UInt32
+    public var reserved0: UInt32
+    public var digest0: UInt64
+    public var digest1: UInt64
+    public var digest2: UInt64
+    public var digest3: UInt64
+    public var paletteGeneration: UInt64
+    public var reserved2: UInt64
+}
+
+public struct MetallumGiSemanticStatsV1 {
+    public var ready: Int32
+    public var buildInFlight: Int32
+    public var worldGeneration: UInt64
+    public var clipmapGeneration: UInt64
+    public var contentGeneration: UInt64
+    public var persistentBytes: UInt64
+    public var peakUploadStagingBytes: UInt64
+    public var peakCaptureReadbackBytes: UInt64
+    public var uploadCount: UInt64
+    public var mipDispatchCount: UInt64
+    public var rejectedCount: UInt64
+    public var resetCount: UInt64
+    public var captureCount: UInt64
+    public var uploadSerial: UInt64
+    public var nearOriginX: Int32
+    public var nearOriginY: Int32
+    public var nearOriginZ: Int32
+    public var shaderLibraryMode: Int32
+    public var digest0: UInt64
+    public var digest1: UInt64
+    public var digest2: UInt64
+    public var digest3: UInt64
+    public var paletteGeneration: UInt64
+}
+
+public struct MetallumGiSemanticCaptureRequestV1 {
+    public var abiVersion: UInt32
+    public var requestBytes: UInt32
+    public var cascade: Int32
+    public var mip: Int32
+    public var sliceZ: Int32
+    public var flags: UInt32
+    public var reserved0: UInt32
+    public var reserved1: UInt32
+}
+
+public struct MetallumGiSemanticCaptureInfoV1 {
+    public var abiVersion: UInt32
+    public var infoBytes: UInt32
+    public var worldGeneration: UInt64
+    public var clipmapGeneration: UInt64
+    public var contentGeneration: UInt64
+    public var uploadSerial: UInt64
+    public var captureSerial: UInt64
+    public var cascade: Int32
+    public var mip: Int32
+    public var axis: Int32
+    public var slice: Int32
+    public var edge: Int32
+    public var originX: Int32
+    public var originY: Int32
+    public var originZ: Int32
+    public var cellSizeBlocks: Int32
+    public var shaderLibraryMode: Int32
+    public var semanticVersion: UInt32
+    public var reserved0: UInt32
+    public var digest0: UInt64
+    public var digest1: UInt64
+    public var digest2: UInt64
+    public var digest3: UInt64
+    public var materialPixelFormat: UInt32
+    public var emissionPixelFormat: UInt32
+    public var faces0PixelFormat: UInt32
+    public var faces1PixelFormat: UInt32
+    public var statePixelFormat: UInt32
+    public var palettePixelFormat: UInt32
+    public var coveragePixelFormat: UInt32
+    public var reserved1: UInt32
+    public var persistentBytes: UInt64
+    public var paletteGeneration: UInt64
+}
+
+private final class MetallumGiSemanticContextV1 {
+    fileprivate static let cascadeCount = 3
+    fileprivate static let edge = 32
+    fileprivate static let mipCount = 6
+    private static let cellSizes = [2, 4, 8]
+
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let materialTextures: [MTLTexture]
+    private let emissionTextures: [MTLTexture]
+    private let faces0Textures: [MTLTexture]
+    private let faces1Textures: [MTLTexture]
+    private let stateTextures: [MTLTexture]
+    private let paletteTextures: [MTLTexture]
+    private let coverageTextures: [MTLTexture]
+    private let materialMipViews: [[MTLTexture]]
+    private let emissionMipViews: [[MTLTexture]]
+    private let faces0MipViews: [[MTLTexture]]
+    private let faces1MipViews: [[MTLTexture]]
+    private let stateMipViews: [[MTLTexture]]
+    private let paletteMipViews: [[MTLTexture]]
+    private let coverageMipViews: [[MTLTexture]]
+    private let mipPipeline: MTLComputePipelineState
+    private let ownerThread: UInt64
+    private let shaderLibraryMode: Int32
+    private let condition = NSCondition()
+
+    private var ready = false
+    private var buildInFlight = false
+    private var captureConsumed = false
+    private var worldGeneration: UInt64
+    private var clipmapGeneration: UInt64 = 0
+    private var paletteGeneration: UInt64 = 0
+    private var contentGeneration: UInt64 = 0
+    private var origins = Array(repeating: Int32(0), count: cascadeCount * 3)
+    private var sourceDigest = Array(repeating: UInt64(0), count: 4)
+    private var peakUploadStagingBytes: UInt64 = 0
+    private var peakCaptureReadbackBytes: UInt64 = 0
+    private var uploadCount: UInt64 = 0
+    private var mipDispatchCount: UInt64 = 0
+    private var rejectedCount: UInt64 = 0
+    private var resetCount: UInt64 = 0
+    private var captureCount: UInt64 = 0
+    private var uploadSerial: UInt64 = 0
+
+    init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
+        guard worldGeneration > 0 else { return nil }
+        self.device = device
+        self.commandQueue = commandQueue
+        self.worldGeneration = worldGeneration
+        self.ownerThread = UInt64(pthread_mach_thread_np(pthread_self()))
+
+        func makeTexture(_ format: MTLPixelFormat, _ label: String) -> MTLTexture? {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type3D
+            descriptor.pixelFormat = format
+            descriptor.width = Self.edge
+            descriptor.height = Self.edge
+            descriptor.depth = Self.edge
+            descriptor.mipmapLevelCount = Self.mipCount
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            descriptor.storageMode = .private
+            let texture = device.makeTexture(descriptor: descriptor)
+            texture?.label = label
+            return texture
+        }
+
+        func makeViews(_ texture: MTLTexture, _ format: MTLPixelFormat) -> [MTLTexture]? {
+            var views: [MTLTexture] = []
+            for mip in 0..<Self.mipCount {
+                guard let view = texture.makeTextureView(
+                    pixelFormat: format,
+                    textureType: .type3D,
+                    levels: mip..<(mip + 1),
+                    slices: 0..<1
+                ) else { return nil }
+                views.append(view)
+            }
+            return views
+        }
+
+        var materials: [MTLTexture] = []
+        var emissions: [MTLTexture] = []
+        var faces0: [MTLTexture] = []
+        var faces1: [MTLTexture] = []
+        var states: [MTLTexture] = []
+        var palettes: [MTLTexture] = []
+        var coverages: [MTLTexture] = []
+        var materialViews: [[MTLTexture]] = []
+        var emissionViews: [[MTLTexture]] = []
+        var faces0Views: [[MTLTexture]] = []
+        var faces1Views: [[MTLTexture]] = []
+        var stateViews: [[MTLTexture]] = []
+        var paletteViews: [[MTLTexture]] = []
+        var coverageViews: [[MTLTexture]] = []
+        for cascade in 0..<Self.cascadeCount {
+            guard let material = makeTexture(.rgba16Unorm, "Metallum G2 material cascade \(cascade)"),
+                  let emission = makeTexture(.rgba16Float, "Metallum G2 emission cascade \(cascade)"),
+                  let face0 = makeTexture(.rgba8Unorm, "Metallum G2 face weights 0 cascade \(cascade)"),
+                  let face1 = makeTexture(.rg8Unorm, "Metallum G2 face weights 1 cascade \(cascade)"),
+                  let state = makeTexture(.rgba8Uint, "Metallum G2 state cascade \(cascade)"),
+                  let palette = makeTexture(.r16Uint, "Metallum G2 palette cascade \(cascade)"),
+                  let coverage = makeTexture(.r8Unorm, "Metallum G2 coverage cascade \(cascade)"),
+                  let materialPerMip = makeViews(material, .rgba16Unorm),
+                  let emissionPerMip = makeViews(emission, .rgba16Float),
+                  let face0PerMip = makeViews(face0, .rgba8Unorm),
+                  let face1PerMip = makeViews(face1, .rg8Unorm),
+                  let statePerMip = makeViews(state, .rgba8Uint),
+                  let palettePerMip = makeViews(palette, .r16Uint),
+                  let coveragePerMip = makeViews(coverage, .r8Unorm)
+            else { return nil }
+            materials.append(material)
+            emissions.append(emission)
+            faces0.append(face0)
+            faces1.append(face1)
+            states.append(state)
+            palettes.append(palette)
+            coverages.append(coverage)
+            materialViews.append(materialPerMip)
+            emissionViews.append(emissionPerMip)
+            faces0Views.append(face0PerMip)
+            faces1Views.append(face1PerMip)
+            stateViews.append(statePerMip)
+            paletteViews.append(palettePerMip)
+            coverageViews.append(coveragePerMip)
+        }
+
+        do {
+            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .giField)
+            guard let function = library.makeFunction(name: "metallum_gi_semantic_downsample_v1") else {
+                return nil
+            }
+            self.mipPipeline = try device.makeComputePipelineState(function: function)
+        } catch {
+            NSLog("[metallum] G2 semantic field pipeline creation failed: %@", String(describing: error))
+            return nil
+        }
+        switch existingBuiltinShaderState(device: device)?.snapshot().mode {
+        case .precompiled: self.shaderLibraryMode = 1
+        case .sourceFallback: self.shaderLibraryMode = 2
+        default: self.shaderLibraryMode = 0
+        }
+        self.materialTextures = materials
+        self.emissionTextures = emissions
+        self.faces0Textures = faces0
+        self.faces1Textures = faces1
+        self.stateTextures = states
+        self.paletteTextures = palettes
+        self.coverageTextures = coverages
+        self.materialMipViews = materialViews
+        self.emissionMipViews = emissionViews
+        self.faces0MipViews = faces0Views
+        self.faces1MipViews = faces1Views
+        self.stateMipViews = stateViews
+        self.paletteMipViews = paletteViews
+        self.coverageMipViews = coverageViews
+    }
+
+    private func isOwnerThread() -> Bool {
+        UInt64(pthread_mach_thread_np(pthread_self())) == ownerThread
+    }
+
+    private func persistentBytes() -> UInt64 {
+        var total: UInt64 = 0
+        for cascade in 0..<Self.cascadeCount {
+            total &+= UInt64(materialTextures[cascade].allocatedSize)
+            total &+= UInt64(emissionTextures[cascade].allocatedSize)
+            total &+= UInt64(faces0Textures[cascade].allocatedSize)
+            total &+= UInt64(faces1Textures[cascade].allocatedSize)
+            total &+= UInt64(stateTextures[cascade].allocatedSize)
+            total &+= UInt64(paletteTextures[cascade].allocatedSize)
+            total &+= UInt64(coverageTextures[cascade].allocatedSize)
+        }
+        return total
+    }
+
+    private func copyCompactVolume(
+        source: UnsafeRawPointer,
+        compactBytesPerRow: Int,
+        compactBytesPerCascade: Int,
+        destination: MTLBuffer,
+        paddedBytesPerRow: Int,
+        paddedBytesPerImage: Int
+    ) {
+        let paddedBytesPerCascade = paddedBytesPerImage * Self.edge
+        for cascade in 0..<Self.cascadeCount {
+            for z in 0..<Self.edge {
+                for y in 0..<Self.edge {
+                    let sourceOffset = cascade * compactBytesPerCascade
+                        + (z * Self.edge + y) * compactBytesPerRow
+                    let destinationOffset = cascade * paddedBytesPerCascade
+                        + z * paddedBytesPerImage + y * paddedBytesPerRow
+                    memcpy(
+                        destination.contents().advanced(by: destinationOffset),
+                        source.advanced(by: sourceOffset),
+                        compactBytesPerRow
+                    )
+                }
+            }
+        }
+    }
+
+    func queueUpload(
+        rawHeader: UnsafeRawPointer,
+        headerBytes: UInt64,
+        rawMaterial: UnsafeRawPointer,
+        materialBytes: UInt64,
+        rawEmission: UnsafeRawPointer,
+        emissionBytes: UInt64,
+        rawFaces0: UnsafeRawPointer,
+        faces0Bytes: UInt64,
+        rawFaces1: UnsafeRawPointer,
+        faces1Bytes: UInt64,
+        rawState: UnsafeRawPointer,
+        stateBytes: UInt64,
+        rawPalette: UnsafeRawPointer,
+        paletteBytes: UInt64,
+        rawCoverage: UnsafeRawPointer,
+        coverageBytes: UInt64
+    ) -> Int32 {
+        guard isOwnerThread() else { return metallumGiSemanticStatusWrongThread }
+        guard headerBytes == UInt64(metallumGiSemanticUploadHeaderBytesV1),
+              MemoryLayout<MetallumGiSemanticUploadHeaderV1>.size == metallumGiSemanticUploadHeaderBytesV1
+        else { return metallumGiSemanticStatusInvalid }
+        let header = rawHeader.load(as: MetallumGiSemanticUploadHeaderV1.self)
+        let baseCells = Self.cascadeCount * Self.edge * Self.edge * Self.edge
+        guard header.abiVersion == UInt32(metallumGiSemanticAbiVersionV1),
+              header.headerBytes == UInt32(metallumGiSemanticUploadHeaderBytesV1),
+              header.semanticVersion == metallumGiSemanticVersionV1,
+              header.flags == 0, header.reserved0 == 0, header.reserved2 == 0,
+              header.worldGeneration > 0, header.clipmapGeneration > 0,
+              header.paletteGeneration > 0, header.contentGeneration > 0,
+              materialBytes == UInt64(baseCells * 8),
+              emissionBytes == UInt64(baseCells * 4 * MemoryLayout<UInt16>.size),
+              faces0Bytes == UInt64(baseCells * 4),
+              faces1Bytes == UInt64(baseCells * 2),
+              stateBytes == UInt64(baseCells * 4),
+              paletteBytes == UInt64(baseCells * MemoryLayout<UInt16>.size),
+              coverageBytes == UInt64(baseCells)
+        else { return metallumGiSemanticStatusInvalid }
+
+        condition.lock()
+        defer { condition.unlock() }
+        guard header.worldGeneration == worldGeneration,
+              header.clipmapGeneration >= clipmapGeneration,
+              header.paletteGeneration >= paletteGeneration,
+              header.contentGeneration > contentGeneration
+        else {
+            rejectedCount &+= 1
+            return metallumGiSemanticStatusStale
+        }
+        guard !buildInFlight else {
+            rejectedCount &+= 1
+            return metallumGiSemanticStatusBusy
+        }
+
+        let paddedRowBytes = 256
+        let paddedImageBytes = paddedRowBytes * Self.edge
+        let paddedCascadeBytes = paddedImageBytes * Self.edge
+        let stagingBytes = Self.cascadeCount * paddedCascadeBytes
+        guard let materialStaging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let emissionStaging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let faces0Staging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let faces1Staging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let stateStaging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let paletteStaging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let coverageStaging = device.makeBuffer(length: stagingBytes, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder()
+        else {
+            rejectedCount &+= 1
+            return metallumGiSemanticStatusInvalid
+        }
+
+        let cellsPerCascade = Self.edge * Self.edge * Self.edge
+        copyCompactVolume(source: rawMaterial, compactBytesPerRow: Self.edge * 8,
+            compactBytesPerCascade: cellsPerCascade * 8, destination: materialStaging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawEmission, compactBytesPerRow: Self.edge * 8,
+            compactBytesPerCascade: cellsPerCascade * 8, destination: emissionStaging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawFaces0, compactBytesPerRow: Self.edge * 4,
+            compactBytesPerCascade: cellsPerCascade * 4, destination: faces0Staging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawFaces1, compactBytesPerRow: Self.edge * 2,
+            compactBytesPerCascade: cellsPerCascade * 2, destination: faces1Staging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawState, compactBytesPerRow: Self.edge * 4,
+            compactBytesPerCascade: cellsPerCascade * 4, destination: stateStaging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawPalette, compactBytesPerRow: Self.edge * 2,
+            compactBytesPerCascade: cellsPerCascade * 2, destination: paletteStaging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+        copyCompactVolume(source: rawCoverage, compactBytesPerRow: Self.edge,
+            compactBytesPerCascade: cellsPerCascade, destination: coverageStaging,
+            paddedBytesPerRow: paddedRowBytes, paddedBytesPerImage: paddedImageBytes)
+
+        let nextOrigins = [
+            header.origin0X, header.origin0Y, header.origin0Z,
+            header.origin1X, header.origin1Y, header.origin1Z,
+            header.origin2X, header.origin2Y, header.origin2Z
+        ]
+        let nextDigest = [header.digest0, header.digest1, header.digest2, header.digest3]
+        let nextClipmapGeneration = header.clipmapGeneration
+        let nextPaletteGeneration = header.paletteGeneration
+        let nextContentGeneration = header.contentGeneration
+        ready = false
+        buildInFlight = true
+        captureConsumed = false
+        peakUploadStagingBytes = max(
+            peakUploadStagingBytes,
+            UInt64(materialStaging.allocatedSize + emissionStaging.allocatedSize
+                + faces0Staging.allocatedSize + faces1Staging.allocatedSize
+                + stateStaging.allocatedSize + paletteStaging.allocatedSize + coverageStaging.allocatedSize)
+        )
+        commandBuffer.label = "Metallum G2 Semantic Field Upload"
+        blit.label = "G2 semantic private texture upload"
+        let stagingBuffers = [materialStaging, emissionStaging, faces0Staging, faces1Staging,
+            stateStaging, paletteStaging, coverageStaging]
+        let destinationTextures = [materialTextures, emissionTextures, faces0Textures, faces1Textures,
+            stateTextures, paletteTextures, coverageTextures]
+        for cascade in 0..<Self.cascadeCount {
+            for plane in 0..<stagingBuffers.count {
+                blit.copy(
+                    from: stagingBuffers[plane],
+                    sourceOffset: cascade * paddedCascadeBytes,
+                    sourceBytesPerRow: paddedRowBytes,
+                    sourceBytesPerImage: paddedImageBytes,
+                    sourceSize: MTLSize(width: Self.edge, height: Self.edge, depth: Self.edge),
+                    to: destinationTextures[plane][cascade],
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+            }
+        }
+        blit.endEncoding()
+
+        for cascade in 0..<Self.cascadeCount {
+            for mip in 1..<Self.mipCount {
+                guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+                    buildInFlight = false
+                    rejectedCount &+= 1
+                    return metallumGiSemanticStatusInvalid
+                }
+                let edge = Self.edge >> mip
+                encoder.label = "G2 semantic mip c\(cascade) m\(mip)"
+                encoder.setComputePipelineState(mipPipeline)
+                encoder.setTexture(materialMipViews[cascade][mip - 1], index: 0)
+                encoder.setTexture(emissionMipViews[cascade][mip - 1], index: 1)
+                encoder.setTexture(faces0MipViews[cascade][mip - 1], index: 2)
+                encoder.setTexture(faces1MipViews[cascade][mip - 1], index: 3)
+                encoder.setTexture(stateMipViews[cascade][mip - 1], index: 4)
+                encoder.setTexture(paletteMipViews[cascade][mip - 1], index: 5)
+                encoder.setTexture(coverageMipViews[cascade][mip - 1], index: 6)
+                encoder.setTexture(materialMipViews[cascade][mip], index: 7)
+                encoder.setTexture(emissionMipViews[cascade][mip], index: 8)
+                encoder.setTexture(faces0MipViews[cascade][mip], index: 9)
+                encoder.setTexture(faces1MipViews[cascade][mip], index: 10)
+                encoder.setTexture(stateMipViews[cascade][mip], index: 11)
+                encoder.setTexture(paletteMipViews[cascade][mip], index: 12)
+                encoder.setTexture(coverageMipViews[cascade][mip], index: 13)
+                encoder.dispatchThreads(
+                    MTLSize(width: edge, height: edge, depth: edge),
+                    threadsPerThreadgroup: MTLSize(width: min(4, edge), height: min(4, edge), depth: min(4, edge))
+                )
+                encoder.endEncoding()
+            }
+        }
+
+        commandBuffer.addCompletedHandler {
+            [self, materialStaging, emissionStaging, faces0Staging, faces1Staging,
+                stateStaging, paletteStaging, coverageStaging] completed in
+            _ = materialStaging
+            _ = emissionStaging
+            _ = faces0Staging
+            _ = faces1Staging
+            _ = stateStaging
+            _ = paletteStaging
+            _ = coverageStaging
+            condition.lock()
+            defer {
+                condition.broadcast()
+                condition.unlock()
+            }
+            buildInFlight = false
+            if completed.status == .completed {
+                ready = true
+                clipmapGeneration = nextClipmapGeneration
+                paletteGeneration = nextPaletteGeneration
+                contentGeneration = nextContentGeneration
+                origins = nextOrigins
+                sourceDigest = nextDigest
+                uploadCount &+= 1
+                uploadSerial &+= 1
+                mipDispatchCount &+= UInt64(Self.cascadeCount * (Self.mipCount - 1))
+            } else {
+                rejectedCount &+= 1
+                NSLog("[metallum] G2 semantic upload failed: %@", String(describing: completed.error))
+            }
+        }
+        commandBuffer.commit()
+        return metallumGiSemanticStatusOK
+    }
+
+    func awaitReady(timeoutMilliseconds: UInt64) -> Int32 {
+        guard isOwnerThread() else { return metallumGiSemanticStatusWrongThread }
+        guard timeoutMilliseconds > 0 else { return metallumGiSemanticStatusInvalid }
+        let deadline = Date(timeIntervalSinceNow: Double(timeoutMilliseconds) / 1_000.0)
+        condition.lock()
+        defer { condition.unlock() }
+        while buildInFlight {
+            if !condition.wait(until: deadline) {
+                return metallumGiSemanticStatusBusy
+            }
+        }
+        return ready ? metallumGiSemanticStatusOK : metallumGiSemanticStatusInvalid
+    }
+
+    func reset(world: UInt64, clipmap: UInt64, palette: UInt64, content: UInt64) -> Int32 {
+        guard isOwnerThread() else { return metallumGiSemanticStatusWrongThread }
+        guard world > 0, clipmap > 0, palette > 0, content > 0 else {
+            return metallumGiSemanticStatusInvalid
+        }
+        condition.lock()
+        defer { condition.unlock() }
+        guard !buildInFlight else { return metallumGiSemanticStatusBusy }
+        let newer = world > worldGeneration
+            || (world == worldGeneration && clipmap > clipmapGeneration)
+            || (world == worldGeneration && clipmap == clipmapGeneration && palette > paletteGeneration)
+            || (world == worldGeneration && clipmap == clipmapGeneration
+                && palette == paletteGeneration && content > contentGeneration)
+        guard newer else { return metallumGiSemanticStatusStale }
+        worldGeneration = world
+        clipmapGeneration = clipmap
+        paletteGeneration = palette
+        contentGeneration = content
+        origins = Array(repeating: 0, count: Self.cascadeCount * 3)
+        sourceDigest = Array(repeating: 0, count: 4)
+        ready = false
+        captureConsumed = false
+        resetCount &+= 1
+        return metallumGiSemanticStatusOK
+    }
+
+    private func copyReadbackPlane(
+        source: MTLBuffer,
+        sourceOffset: Int,
+        sourceRowBytes: Int,
+        compactRowBytes: Int,
+        edge: Int,
+        destination: UnsafeMutableRawPointer
+    ) {
+        for y in 0..<edge {
+            memcpy(
+                destination.advanced(by: y * compactRowBytes),
+                source.contents().advanced(by: sourceOffset + y * sourceRowBytes),
+                compactRowBytes
+            )
+        }
+    }
+
+    func captureSliceOnce(
+        rawRequest: UnsafeRawPointer,
+        requestBytes: UInt64,
+        outInfo: UnsafeMutableRawPointer,
+        infoBytes: UInt64,
+        outMaterial: UnsafeMutableRawPointer,
+        materialBytes: UInt64,
+        outEmission: UnsafeMutableRawPointer,
+        emissionBytes: UInt64,
+        outFaces0: UnsafeMutableRawPointer,
+        faces0Bytes: UInt64,
+        outFaces1: UnsafeMutableRawPointer,
+        faces1Bytes: UInt64,
+        outState: UnsafeMutableRawPointer,
+        stateBytes: UInt64,
+        outPalette: UnsafeMutableRawPointer,
+        paletteBytes: UInt64,
+        outCoverage: UnsafeMutableRawPointer,
+        coverageBytes: UInt64
+    ) -> Int32 {
+        guard isOwnerThread() else { return metallumGiSemanticStatusWrongThread }
+        guard requestBytes == UInt64(metallumGiSemanticCaptureRequestBytesV1),
+              infoBytes >= UInt64(metallumGiSemanticCaptureInfoBytesV1),
+              MemoryLayout<MetallumGiSemanticCaptureRequestV1>.size == metallumGiSemanticCaptureRequestBytesV1,
+              MemoryLayout<MetallumGiSemanticCaptureInfoV1>.size == metallumGiSemanticCaptureInfoBytesV1
+        else { return metallumGiSemanticStatusInvalid }
+        let request = rawRequest.load(as: MetallumGiSemanticCaptureRequestV1.self)
+        guard request.abiVersion == UInt32(metallumGiSemanticAbiVersionV1),
+              request.requestBytes == UInt32(metallumGiSemanticCaptureRequestBytesV1),
+              request.flags == 0, request.reserved0 == 0, request.reserved1 == 0,
+              request.cascade >= 0 && request.cascade < Int32(Self.cascadeCount),
+              request.mip >= 0 && request.mip < Int32(Self.mipCount)
+        else { return metallumGiSemanticStatusInvalid }
+        let edge = Self.edge >> Int(request.mip)
+        guard request.sliceZ >= 0 && request.sliceZ < Int32(edge),
+              materialBytes == UInt64(edge * edge * 8),
+              emissionBytes == UInt64(edge * edge * 8),
+              faces0Bytes == UInt64(edge * edge * 4),
+              faces1Bytes == UInt64(edge * edge * 2),
+              stateBytes == UInt64(edge * edge * 4),
+              paletteBytes == UInt64(edge * edge * 2),
+              coverageBytes == UInt64(edge * edge)
+        else { return metallumGiSemanticStatusInvalid }
+        guard awaitReady(timeoutMilliseconds: 10_000) == metallumGiSemanticStatusOK else {
+            return metallumGiSemanticStatusBusy
+        }
+
+        condition.lock()
+        guard !captureConsumed else {
+            condition.unlock()
+            return metallumGiSemanticStatusCaptureConsumed
+        }
+        let cascade = Int(request.cascade)
+        let mip = Int(request.mip)
+        let snapshotWorld = worldGeneration
+        let snapshotClipmap = clipmapGeneration
+        let snapshotPalette = paletteGeneration
+        let snapshotContent = contentGeneration
+        let snapshotSerial = uploadSerial
+        let snapshotOrigins = origins
+        let snapshotDigest = sourceDigest
+        condition.unlock()
+
+        let rowBytes = 256
+        let planeBytes = rowBytes * edge
+        let planeCount = 7
+        guard let readback = device.makeBuffer(length: planeBytes * planeCount, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder()
+        else { return metallumGiSemanticStatusInvalid }
+        let textures = [
+            materialTextures[cascade], emissionTextures[cascade], faces0Textures[cascade],
+            faces1Textures[cascade], stateTextures[cascade], paletteTextures[cascade],
+            coverageTextures[cascade]
+        ]
+        for plane in 0..<planeCount {
+            blit.copy(
+                from: textures[plane],
+                sourceSlice: 0,
+                sourceLevel: mip,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: Int(request.sliceZ)),
+                sourceSize: MTLSize(width: edge, height: edge, depth: 1),
+                to: readback,
+                destinationOffset: plane * planeBytes,
+                destinationBytesPerRow: rowBytes,
+                destinationBytesPerImage: planeBytes
+            )
+        }
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return metallumGiSemanticStatusInvalid }
+
+        copyReadbackPlane(source: readback, sourceOffset: 0 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 8, edge: edge, destination: outMaterial)
+        copyReadbackPlane(source: readback, sourceOffset: 1 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 8, edge: edge, destination: outEmission)
+        copyReadbackPlane(source: readback, sourceOffset: 2 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 4, edge: edge, destination: outFaces0)
+        copyReadbackPlane(source: readback, sourceOffset: 3 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 2, edge: edge, destination: outFaces1)
+        copyReadbackPlane(source: readback, sourceOffset: 4 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 4, edge: edge, destination: outState)
+        copyReadbackPlane(source: readback, sourceOffset: 5 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge * 2, edge: edge, destination: outPalette)
+        copyReadbackPlane(source: readback, sourceOffset: 6 * planeBytes, sourceRowBytes: rowBytes,
+            compactRowBytes: edge, edge: edge, destination: outCoverage)
+
+        condition.lock()
+        guard ready, worldGeneration == snapshotWorld, clipmapGeneration == snapshotClipmap,
+              paletteGeneration == snapshotPalette, contentGeneration == snapshotContent,
+              uploadSerial == snapshotSerial, !captureConsumed
+        else {
+            condition.unlock()
+            return metallumGiSemanticStatusStale
+        }
+        captureConsumed = true
+        captureCount &+= 1
+        peakCaptureReadbackBytes = max(peakCaptureReadbackBytes, UInt64(readback.allocatedSize))
+        let captureSerial = captureCount
+        condition.unlock()
+
+        var info = MetallumGiSemanticCaptureInfoV1(
+            abiVersion: UInt32(metallumGiSemanticAbiVersionV1),
+            infoBytes: UInt32(metallumGiSemanticCaptureInfoBytesV1),
+            worldGeneration: snapshotWorld,
+            clipmapGeneration: snapshotClipmap,
+            contentGeneration: snapshotContent,
+            uploadSerial: snapshotSerial,
+            captureSerial: captureSerial,
+            cascade: request.cascade,
+            mip: request.mip,
+            axis: 2,
+            slice: request.sliceZ,
+            edge: Int32(edge),
+            originX: snapshotOrigins[cascade * 3],
+            originY: snapshotOrigins[cascade * 3 + 1],
+            originZ: snapshotOrigins[cascade * 3 + 2],
+            cellSizeBlocks: Int32(Self.cellSizes[cascade]),
+            shaderLibraryMode: shaderLibraryMode,
+            semanticVersion: metallumGiSemanticVersionV1,
+            reserved0: 0,
+            digest0: snapshotDigest[0],
+            digest1: snapshotDigest[1],
+            digest2: snapshotDigest[2],
+            digest3: snapshotDigest[3],
+            materialPixelFormat: UInt32(MTLPixelFormat.rgba16Unorm.rawValue),
+            emissionPixelFormat: UInt32(MTLPixelFormat.rgba16Float.rawValue),
+            faces0PixelFormat: UInt32(MTLPixelFormat.rgba8Unorm.rawValue),
+            faces1PixelFormat: UInt32(MTLPixelFormat.rg8Unorm.rawValue),
+            statePixelFormat: UInt32(MTLPixelFormat.rgba8Uint.rawValue),
+            palettePixelFormat: UInt32(MTLPixelFormat.r16Uint.rawValue),
+            coveragePixelFormat: UInt32(MTLPixelFormat.r8Unorm.rawValue),
+            reserved1: 0,
+            persistentBytes: persistentBytes(),
+            paletteGeneration: snapshotPalette
+        )
+        outInfo.copyMemory(from: &info, byteCount: metallumGiSemanticCaptureInfoBytesV1)
+        return metallumGiSemanticStatusOK
+    }
+
+    func stats() -> MetallumGiSemanticStatsV1? {
+        guard isOwnerThread() else { return nil }
+        condition.lock()
+        defer { condition.unlock() }
+        return MetallumGiSemanticStatsV1(
+            ready: ready ? 1 : 0,
+            buildInFlight: buildInFlight ? 1 : 0,
+            worldGeneration: worldGeneration,
+            clipmapGeneration: clipmapGeneration,
+            contentGeneration: contentGeneration,
+            persistentBytes: persistentBytes(),
+            peakUploadStagingBytes: peakUploadStagingBytes,
+            peakCaptureReadbackBytes: peakCaptureReadbackBytes,
+            uploadCount: uploadCount,
+            mipDispatchCount: mipDispatchCount,
+            rejectedCount: rejectedCount,
+            resetCount: resetCount,
+            captureCount: captureCount,
+            uploadSerial: uploadSerial,
+            nearOriginX: origins[0],
+            nearOriginY: origins[1],
+            nearOriginZ: origins[2],
+            shaderLibraryMode: shaderLibraryMode,
+            digest0: sourceDigest[0],
+            digest1: sourceDigest[1],
+            digest2: sourceDigest[2],
+            digest3: sourceDigest[3],
+            paletteGeneration: paletteGeneration
+        )
+    }
+}
+
+@_cdecl("metallum_gi_semantic_abi_version_v1")
+public func metallum_gi_semantic_abi_version_v1() -> Int32 {
+    metallumGiSemanticAbiVersionV1
+}
+
+@_cdecl("metallum_gi_semantic_layout_v1")
+public func metallum_gi_semantic_layout_v1(
+    _ destination: UnsafeMutableRawPointer?, _ destinationBytes: UInt64
+) -> Int32 {
+    guard MemoryLayout<MetallumGiSemanticUploadHeaderV1>.size == metallumGiSemanticUploadHeaderBytesV1,
+          MemoryLayout<MetallumGiSemanticStatsV1>.size == metallumGiSemanticStatsBytesV1,
+          MemoryLayout<MetallumGiSemanticCaptureRequestV1>.size == metallumGiSemanticCaptureRequestBytesV1,
+          MemoryLayout<MetallumGiSemanticCaptureInfoV1>.size == metallumGiSemanticCaptureInfoBytesV1,
+          let destination, destinationBytes >= UInt64(metallumGiSemanticLayoutBytesV1)
+    else { return metallumGiSemanticStatusInvalid }
+    let words: [Int32] = [
+        metallumGiSemanticAbiVersionV1,
+        Int32(metallumGiSemanticLayoutBytesV1),
+        Int32(metallumGiSemanticUploadHeaderBytesV1),
+        Int32(metallumGiSemanticStatsBytesV1),
+        Int32(metallumGiSemanticCaptureRequestBytesV1),
+        Int32(metallumGiSemanticCaptureInfoBytesV1),
+        Int32(MetallumGiSemanticContextV1.cascadeCount),
+        Int32(MetallumGiSemanticContextV1.edge),
+        Int32(MetallumGiSemanticContextV1.mipCount),
+        2, 4, 8,
+        8, 8, 4, 2, 4, 2, 1,
+        Int32(metallumGiSemanticVersionV1),
+        metallumGiSemanticStatusStale,
+        metallumGiSemanticStatusBusy,
+        metallumGiSemanticStatusCaptureConsumed,
+        metallumGiSemanticStatusWrongThread,
+        0x001f, 3, 0x00ff, 2,
+        Int32(MTLPixelFormat.rgba16Unorm.rawValue),
+        Int32(MTLPixelFormat.rgba16Float.rawValue),
+        Int32(MTLPixelFormat.rgba8Unorm.rawValue),
+        Int32(MTLPixelFormat.rg8Unorm.rawValue),
+        Int32(MTLPixelFormat.rgba8Uint.rawValue),
+        Int32(MTLPixelFormat.r16Uint.rawValue),
+        Int32(MTLPixelFormat.r8Unorm.rawValue),
+        1, 0, 0, 0, 0
+    ]
+    words.withUnsafeBytes { bytes in
+        destination.copyMemory(from: bytes.baseAddress!, byteCount: metallumGiSemanticLayoutBytesV1)
+    }
+    return metallumGiSemanticStatusOK
+}
+
+@_cdecl("metallum_gi_semantic_create_context_v1")
+public func metallum_gi_semantic_create_context_v1(
+    _ rawDevice: UnsafeMutableRawPointer?,
+    _ rawQueue: UnsafeMutableRawPointer?,
+    _ worldGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let rawDevice, let rawQueue,
+              let device = Unmanaged<AnyObject>.fromOpaque(rawDevice).takeUnretainedValue() as? MTLDevice,
+              let queue = Unmanaged<AnyObject>.fromOpaque(rawQueue).takeUnretainedValue() as? MTLCommandQueue,
+              let context = MetallumGiSemanticContextV1(
+                device: device, commandQueue: queue, worldGeneration: worldGeneration)
+        else { return nil }
+        return Unmanaged.passRetained(context).toOpaque()
+    }
+}
+
+@_cdecl("metallum_gi_semantic_upload_once_v1")
+public func metallum_gi_semantic_upload_once_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ header: UnsafeRawPointer?, _ headerBytes: UInt64,
+    _ material: UnsafeRawPointer?, _ materialBytes: UInt64,
+    _ emission: UnsafeRawPointer?, _ emissionBytes: UInt64,
+    _ faces0: UnsafeRawPointer?, _ faces0Bytes: UInt64,
+    _ faces1: UnsafeRawPointer?, _ faces1Bytes: UInt64,
+    _ state: UnsafeRawPointer?, _ stateBytes: UInt64,
+    _ palette: UnsafeRawPointer?, _ paletteBytes: UInt64,
+    _ coverage: UnsafeRawPointer?, _ coverageBytes: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let header, let material, let emission, let faces0, let faces1,
+              let state, let palette, let coverage
+        else { return metallumGiSemanticStatusInvalid }
+        return Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext).takeUnretainedValue().queueUpload(
+            rawHeader: header, headerBytes: headerBytes,
+            rawMaterial: material, materialBytes: materialBytes,
+            rawEmission: emission, emissionBytes: emissionBytes,
+            rawFaces0: faces0, faces0Bytes: faces0Bytes,
+            rawFaces1: faces1, faces1Bytes: faces1Bytes,
+            rawState: state, stateBytes: stateBytes,
+            rawPalette: palette, paletteBytes: paletteBytes,
+            rawCoverage: coverage, coverageBytes: coverageBytes
+        )
+    }
+}
+
+@_cdecl("metallum_gi_semantic_await_ready_v1")
+public func metallum_gi_semantic_await_ready_v1(
+    _ rawContext: UnsafeMutableRawPointer?, _ timeoutMilliseconds: UInt64
+) -> Int32 {
+    guard let rawContext else { return metallumGiSemanticStatusInvalid }
+    return Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext)
+        .takeUnretainedValue().awaitReady(timeoutMilliseconds: timeoutMilliseconds)
+}
+
+@_cdecl("metallum_gi_semantic_reset_v1")
+public func metallum_gi_semantic_reset_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ worldGeneration: UInt64,
+    _ clipmapGeneration: UInt64,
+    _ paletteGeneration: UInt64,
+    _ contentGeneration: UInt64
+) -> Int32 {
+    guard let rawContext else { return metallumGiSemanticStatusInvalid }
+    return Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext).takeUnretainedValue().reset(
+        world: worldGeneration, clipmap: clipmapGeneration,
+        palette: paletteGeneration, content: contentGeneration)
+}
+
+@_cdecl("metallum_gi_semantic_capture_slice_once_v1")
+public func metallum_gi_semantic_capture_slice_once_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ request: UnsafeRawPointer?, _ requestBytes: UInt64,
+    _ outInfo: UnsafeMutableRawPointer?, _ infoBytes: UInt64,
+    _ outMaterial: UnsafeMutableRawPointer?, _ materialBytes: UInt64,
+    _ outEmission: UnsafeMutableRawPointer?, _ emissionBytes: UInt64,
+    _ outFaces0: UnsafeMutableRawPointer?, _ faces0Bytes: UInt64,
+    _ outFaces1: UnsafeMutableRawPointer?, _ faces1Bytes: UInt64,
+    _ outState: UnsafeMutableRawPointer?, _ stateBytes: UInt64,
+    _ outPalette: UnsafeMutableRawPointer?, _ paletteBytes: UInt64,
+    _ outCoverage: UnsafeMutableRawPointer?, _ coverageBytes: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let request, let outInfo, let outMaterial, let outEmission,
+              let outFaces0, let outFaces1, let outState, let outPalette, let outCoverage
+        else { return metallumGiSemanticStatusInvalid }
+        return Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext)
+            .takeUnretainedValue().captureSliceOnce(
+                rawRequest: request, requestBytes: requestBytes,
+                outInfo: outInfo, infoBytes: infoBytes,
+                outMaterial: outMaterial, materialBytes: materialBytes,
+                outEmission: outEmission, emissionBytes: emissionBytes,
+                outFaces0: outFaces0, faces0Bytes: faces0Bytes,
+                outFaces1: outFaces1, faces1Bytes: faces1Bytes,
+                outState: outState, stateBytes: stateBytes,
+                outPalette: outPalette, paletteBytes: paletteBytes,
+                outCoverage: outCoverage, coverageBytes: coverageBytes)
+    }
+}
+
+@_cdecl("metallum_gi_semantic_get_stats_v1")
+public func metallum_gi_semantic_get_stats_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ destination: UnsafeMutableRawPointer?,
+    _ destinationBytes: UInt64
+) -> Int32 {
+    guard MemoryLayout<MetallumGiSemanticStatsV1>.size == metallumGiSemanticStatsBytesV1,
+          let rawContext, let destination,
+          destinationBytes >= UInt64(metallumGiSemanticStatsBytesV1),
+          var stats = Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext).takeUnretainedValue().stats()
+    else { return metallumGiSemanticStatusInvalid }
+    destination.copyMemory(from: &stats, byteCount: metallumGiSemanticStatsBytesV1)
+    return metallumGiSemanticStatusOK
+}
+
+@_cdecl("metallum_gi_semantic_release_context_v1")
+public func metallum_gi_semantic_release_context_v1(_ rawContext: UnsafeMutableRawPointer?) {
+    guard let rawContext else { return }
+    _ = Unmanaged<MetallumGiSemanticContextV1>.fromOpaque(rawContext).takeRetainedValue()
 }
 
 // MARK: - Frozen real-world reflection prototype

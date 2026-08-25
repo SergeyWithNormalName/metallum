@@ -6,6 +6,18 @@
   "mixins": [
   ],
   "client": [
+    "gi.GiSemanticAtlasMixin",
+    "gi.GiSemanticBlockRendererMixin",
+    "gi.GiSemanticClientLevelMixin",
+    "gi.GiSemanticFluidRendererMixin",
+    "gi.GiSemanticLevelExtractorMixin",
+    "gi.GiSemanticMeshingScopeMixin",
+    "gi.GiSemanticOutputMixin",
+    "gi.GiSemanticRenderSectionManagerMixin",
+    "gi.GiSemanticRenderSectionMixin",
+    "gi.GiSemanticSpriteContentsAccessor",
+    "gi.GiSemanticTaskMixin",
+    "gi.GiSemanticUploadMixin",
     "benchmark.MinecraftBenchmarkMixin",
     "benchmark.MinecraftServerBenchmarkMixin",
     "benchmark.sodium.ClientChunkCacheTorchTelemetryMixin",
