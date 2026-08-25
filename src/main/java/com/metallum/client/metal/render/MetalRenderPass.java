@@ -282,12 +282,6 @@ final class MetalRenderPass implements RenderPassBackend {
         if (suppressUnsupportedMaterialDraw()) {
             return;
         }
-        MTLPrimitiveType primitiveType = primitiveTopology();
-        if (primitiveType == MTLPrimitiveType.TriangleFan) {
-            throw new UnsupportedOperationException("Metal backend does not support triangle fan indirect draws");
-        }
-
-        MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MetalGpuBuffer nativeCommandBuffer = (MetalGpuBuffer) commands.buffer();
         long requiredCommandBytes = requiredIndexedIndirectCommandBytes(drawCount, commands.length());
         if (requiredCommandBytes == 0L) {
@@ -308,6 +302,34 @@ final class MetalRenderPass implements RenderPassBackend {
             indirectBufferOffset = snapshot.offset();
         }
 
+        drawIndexedIndirectOwned(indirectBuffer, indirectBufferOffset, drawCount);
+    }
+
+    void drawIndexedIndirectOwned(final @NonNull GpuBufferSlice commands, final int drawCount) {
+        if (suppressUnsupportedMaterialDraw()) {
+            return;
+        }
+        MetalGpuBuffer commandBuffer = (MetalGpuBuffer) commands.buffer();
+        long requiredBytes = requiredIndexedIndirectCommandBytes(drawCount, commands.length());
+        if (requiredBytes == 0L) {
+            return;
+        }
+        if (commandBuffer.hasCpuVisibleStorage()) {
+            throw new IllegalArgumentException("Prepared Sodium indirect commands must use private GPU storage");
+        }
+        drawIndexedIndirectOwned(commandBuffer, commands.offset(), drawCount);
+    }
+
+    private void drawIndexedIndirectOwned(
+            final MetalGpuBuffer indirectBuffer,
+            final long indirectBufferOffset,
+            final int drawCount
+    ) {
+        MTLPrimitiveType primitiveType = primitiveTopology();
+        if (primitiveType == MTLPrimitiveType.TriangleFan) {
+            throw new UnsupportedOperationException("Metal backend does not support triangle fan indirect draws");
+        }
+        MetalGpuBuffer nativeIndexBuffer = (MetalGpuBuffer) indexBuffer;
         MTLRenderCommandEncoder enc = renderEncoder();
         bindDrawState(enc);
         enc.drawIndexedPrimitivesIndirect(
@@ -499,6 +521,9 @@ final class MetalRenderPass implements RenderPassBackend {
         boolean reactiveOutput = compiledPipeline != null && compiledPipeline.reactiveOutput(
                 colorAttachment.mtlPixelFormat(), materialSceneAttachment
         );
+        boolean l6TemporalOutput = compiledPipeline != null && compiledPipeline.l6TemporalOutput(
+                colorAttachment.mtlPixelFormat(), materialSceneAttachment
+        );
         SceneLinearClearColor.Rgb linearClear = decodeClearColor
                 ? SceneLinearClearColor.extendedSrgbToLinear(clearColor.x(), clearColor.y(), clearColor.z())
                 : null;
@@ -507,6 +532,7 @@ final class MetalRenderPass implements RenderPassBackend {
                 depthTextureView,
                 semanticOutput,
                 reactiveOutput,
+                l6TemporalOutput,
                 colorTexture.getWidth(0),
                 colorTexture.getHeight(0),
                 clearColorNow,

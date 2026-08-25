@@ -466,6 +466,31 @@ public final class RendererArchitectureTests {
                             && Files.readString(configPath).contains("visualStyle=vanilla"),
                     "schema-3 renderer config did not migrate with visualStyle Vanilla");
 
+            Files.writeString(
+                    configPath,
+                    "#Metallum renderer settings (schema 5)\n"
+                            + "frameInterpolation=false\n"
+                            + "improvedLighting=true\n"
+                            + "lightingPreset=balanced\n"
+                            + "localShadowFilterMode=full\n"
+                            + "schemaVersion=5\n"
+                            + "visualStyle=natural\n"
+                            + "voxelDebugChecksum=false\n"
+            );
+            RendererConfig schemaFive = RendererConfig.load(configPath);
+            require(schemaFive.improvedLighting()
+                            && schemaFive.lightingPreset() == LightingPreset.BALANCED
+                            && !schemaFive.frameInterpolation()
+                            && !schemaFive.voxelDebugChecksum()
+                            && schemaFive.visualStyle() == VisualStyle.NATURAL
+                            && Files.readString(configPath).contains("schemaVersion=4")
+                            && Files.readString(configPath).contains("visualStyle=natural")
+                            && Files.readString(configPath).contains("improvedLighting=true"),
+                    "schema-5 renderer config did not migrate properly to schema 4");
+            RendererConfig schemaFiveReloaded = RendererConfig.load(configPath);
+            require(schemaFiveReloaded.equals(schemaFive),
+                    "schema-5 reloaded config diverged after migration");
+
             RendererConfig original = new RendererConfig(
                     false, LightingPreset.ULTRA, true, true, VisualStyle.NATURAL
             );
@@ -484,7 +509,9 @@ public final class RendererArchitectureTests {
                     "schemaVersion=broken\nimprovedLighting=true\n",
                     "schemaVersion=4\nimprovedLighting=maybe\n",
                     "schemaVersion=4\nimprovedLighting=true\nvoxelDebugChecksum=maybe\n",
-                    "schemaVersion=4\nimprovedLighting=true\nvisualStyle=unknown_style\n"
+                    "schemaVersion=4\nimprovedLighting=true\nvisualStyle=unknown_style\n",
+                    "schemaVersion=5\nimprovedLighting=maybe\n",
+                    "schemaVersion=5\nimprovedLighting=true\nvisualStyle=unknown_style\n"
             }) {
                 Files.writeString(configPath, invalid);
                 require(RendererConfig.load(configPath).equals(RendererConfig.defaults()),
@@ -1183,6 +1210,7 @@ public final class RendererArchitectureTests {
                 "cluster_membership_scratch",
                 "cluster_compact_indices",
                 "lighting_params",
+                "l6_temporal_params_ring",
                 "cluster_statistics",
                 "environment_shadow_params_ring",
                 "sun_shadow_static_cascades",

@@ -1,5 +1,6 @@
 package com.metallum.client.lighting.shader;
 
+import com.metallum.client.benchmark.DiagnosticAblationMode;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
@@ -23,6 +24,11 @@ import java.util.regex.Pattern;
  * {@link LightingModel#ADVANCED} adds only the L3 resources and direct-light evaluation.</p>
  */
 public final class AdvancedDirectLightingShaderPatcher {
+    private static final String L6_STOCHASTIC_TWO_TAP_PROPERTY =
+            "metallum.experimental.l6StochasticTwoTap";
+    private static final String L6_STOCHASTIC_TAP_COUNT_PROPERTY =
+            "metallum.experimental.l6StochasticTapCount";
+    private static boolean l6StochasticTwoTapLogged;
     public record Result(String source, boolean success, String failureReason) {
         private static Result success(final String source) {
             return new Result(source, true, "");
@@ -180,7 +186,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             } metallumVoxelVisibilityCache;
 
             layout(std430, binding = 15) readonly buffer MetallumVoxelProxiesV1 {
-                MetallumVoxelProxyV1 proxies[];
+                MetallumVoxelProxyV1 proxies[32];
+                uint lightMasks[];
             } metallumVoxelProxyBuffer;
 
             layout(std430, binding = 16) readonly buffer MetallumVoxelShadowParamsV1 {
@@ -499,7 +506,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 normal,
                     MetallumSurfaceMaterialV1 material) {
                 if (material.kind != METALLUM_SURFACE_WATER_V1
-                        || metallumVoxelShadow.caps.x != 4u) {
+                        || metallumVoxelShadow.caps.x != 5u) {
                     return normal;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
@@ -841,7 +848,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (dot(metallumEnvironment.directionalRadiance.rgb, vec3(1.0)) <= 0.0001) {
                     return 1.0;
                 }
-                if (metallumVoxelShadow.caps.x != 4u) {
+                if (metallumVoxelShadow.caps.x != 5u) {
                     return 1.0;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
@@ -1183,19 +1190,29 @@ public final class AdvancedDirectLightingShaderPatcher {
             bool metallumProxyVisibilityV1(
                     vec3 startWorldRelative,
                     vec3 endWorldRelative,
-                    uvec2 lightStableId,
+                    uint lightIndex,
                     out bool failOpen) {
                 failOpen = false;
                 uint proxyCount = metallumVoxelShadow.proxyAndFrame.x;
                 uint proxyCapacity = metallumVoxelShadow.proxyAndFrame.y;
-                if (proxyCapacity > 32u || proxyCount > proxyCapacity) {
+                if (proxyCapacity > 32u || proxyCount > proxyCapacity
+                        || lightIndex >= metallumVoxelShadow.caps.w) {
                     failOpen = true;
                     return true;
                 }
-                for (uint proxyIndex = 0u; proxyIndex < 32u; ++proxyIndex) {
-                    if (proxyIndex >= proxyCount) {
-                        break;
-                    }
+                if (proxyCount == 0u) {
+                    return true;
+                }
+                uint proxyMask = metallumVoxelProxyBuffer.lightMasks[lightIndex];
+                if (proxyCount < 32u && (proxyMask >> proxyCount) != 0u) {
+                    failOpen = true;
+                    return true;
+                }
+                vec3 segmentMinimum = min(startWorldRelative, endWorldRelative);
+                vec3 segmentMaximum = max(startWorldRelative, endWorldRelative);
+                while (proxyMask != 0u) {
+                    uint proxyIndex = uint(findLSB(proxyMask));
+                    proxyMask &= proxyMask - 1u;
                     MetallumVoxelProxyV1 proxy =
                             metallumVoxelProxyBuffer.proxies[proxyIndex];
                     vec3 minimum = proxy.minWorldRelative.xyz;
@@ -1210,7 +1227,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                         failOpen = true;
                         return true;
                     }
-                    if (all(equal(proxyStableId, lightStableId))) {
+                    // A segment cannot intersect an AABB outside its own conservative AABB.
+                    // Reject those proxies with six comparisons before the exact slab test;
+                    // equality remains included, so contact shadows and grazing rays survive.
+                    if (any(lessThan(maximum, segmentMinimum))
+                            || any(greaterThan(minimum, segmentMaximum))) {
                         continue;
                     }
                     if (metallumSegmentIntersectsProxyV1(
@@ -1251,8 +1272,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldRelative,
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
-                    uvec2 lightStableId) {
-                if (metallumVoxelShadow.caps.x != 4u
+                    uint lightIndex) {
+                if (metallumVoxelShadow.caps.x != 5u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -1382,7 +1403,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverCameraRelative,
                         endWorldRelative
                                 - metallumVoxelShadow.cameraFractionAndMinTrans.xyz,
-                        lightStableId,
+                        lightIndex,
                         proxyFailOpen)) {
                     return 0.0;
                 }
@@ -1771,6 +1792,28 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverWorldNormal);
             }
 
+            bool metallumVoxelTapLayer0ProvesVisibleV1(
+                    uint baseHitIndex,
+                    uint cacheFaceEdge,
+                    uvec3 tap,
+                    float receiverDistance) {
+                if (tap.x >= 6u || tap.y >= cacheFaceEdge || tap.z >= cacheFaceEdge) {
+                    return false;
+                }
+                uint texelIndex = (tap.x * cacheFaceEdge + tap.z)
+                        * cacheFaceEdge + tap.y;
+                uint firstHit = baseHitIndex + texelIndex * 4u;
+                uvec2 packed = metallumVoxelVisibilityCache.hits[firstHit];
+                float hitDistance = uintBitsToFloat(packed.x);
+                if (isnan(hitDistance) || hitDistance < 0.0
+                        || (packed.y & 0xff000000u) != 0xff000000u) {
+                    return false;
+                }
+                const float receiverCoincidenceEpsilon = 0.002;
+                return isinf(hitDistance)
+                        || receiverDistance <= hitDistance + receiverCoincidenceEpsilon;
+            }
+
             vec3 metallumVoxelCachedVisibilityV1(
                     uint baseHitIndex,
                     uint cacheFaceEdge,
@@ -1850,86 +1893,145 @@ public final class AdvancedDirectLightingShaderPatcher {
                         * cacheFaceEdgeFloat - vec2(0.5);
                 ivec2 lowerTexel = ivec2(floor(texelPosition));
                 vec2 blend = texelPosition - vec2(lowerTexel);
-                uvec3 tap00 = metallumVoxelResolveTapV1(
-                        cacheFaceEdge, face, lowerTexel);
-                uvec3 tap10 = metallumVoxelResolveTapV1(
-                        cacheFaceEdge, face, lowerTexel + ivec2(1, 0));
-                uvec3 tap01 = metallumVoxelResolveTapV1(
-                        cacheFaceEdge, face, lowerTexel + ivec2(0, 1));
-                uvec3 tap11 = metallumVoxelResolveTapV1(
-                        cacheFaceEdge, face, lowerTexel + ivec2(1, 1));
-                uint id00 = metallumVoxelTapIdV1(tap00, cacheFaceEdge);
-                uint id10 = metallumVoxelTapIdV1(tap10, cacheFaceEdge);
-                uint id01 = metallumVoxelTapIdV1(tap01, cacheFaceEdge);
-                uint id11 = metallumVoxelTapIdV1(tap11, cacheFaceEdge);
-                vec4 bilinearWeight = vec4(
-                        (1.0 - blend.x) * (1.0 - blend.y),
-                        blend.x * (1.0 - blend.y),
-                        (1.0 - blend.x) * blend.y,
-                        blend.x * blend.y);
-                uvec2 diagonal00And11 = uvec2(min(id00, id11), max(id00, id11));
-                uvec2 diagonal10And01 = uvec2(min(id10, id01), max(id10, id01));
-                bool use00And11 = diagonal00And11.x < diagonal10And01.x
-                        || (diagonal00And11.x == diagonal10And01.x
-                        && diagonal00And11.y <= diagonal10And01.y);
-                vec4 triangleWeight;
-                if (use00And11 && blend.x >= blend.y) {
-                    triangleWeight = vec4(
-                            1.0 - blend.x, blend.x - blend.y, 0.0, blend.y);
-                } else if (use00And11) {
-                    triangleWeight = vec4(
-                            1.0 - blend.y, 0.0, blend.y - blend.x, blend.x);
-                } else if (blend.x + blend.y <= 1.0) {
-                    triangleWeight = vec4(
-                            1.0 - blend.x - blend.y, blend.x, blend.y, 0.0);
-                } else {
-                    triangleWeight = vec4(
-                            0.0, 1.0 - blend.y, 1.0 - blend.x,
-                            blend.x + blend.y - 1.0);
-                }
                 float faceEdgeDistanceTexels = (1.0 - max(
                         abs(faceUv.y), abs(faceUv.z))) * 0.5 * cacheFaceEdgeFloat;
-                float interiorWeight = smoothstep(
-                        0.0, 1.5, faceEdgeDistanceTexels);
-                vec4 softWeight = mix(
-                        triangleWeight, bilinearWeight, interiorWeight);
-                ivec2 nearestTexel = clamp(
-                        ivec2(floor(texelPosition + vec2(0.5))),
-                        ivec2(0),
-                        ivec2(int(cacheFaceEdge) - 1));
-                uint nearestId = (face * cacheFaceEdge + uint(nearestTexel.y))
-                        * cacheFaceEdge + uint(nearestTexel.x);
                 uvec3 extraTap0;
                 uvec3 extraTap1;
                 uvec3 extraTap2;
                 vec3 extraWeight;
                 float nearestWeight;
-                if (id00 == nearestId) {
-                    nearestWeight = softWeight.x;
-                    extraTap0 = tap10;
-                    extraTap1 = tap01;
-                    extraTap2 = tap11;
-                    extraWeight = softWeight.yzw;
-                } else if (id10 == nearestId) {
-                    nearestWeight = softWeight.y;
-                    extraTap0 = tap00;
-                    extraTap1 = tap01;
-                    extraTap2 = tap11;
-                    extraWeight = softWeight.xzw;
-                } else if (id01 == nearestId) {
-                    nearestWeight = softWeight.z;
-                    extraTap0 = tap00;
-                    extraTap1 = tap10;
-                    extraTap2 = tap11;
-                    extraWeight = softWeight.xyw;
-                } else if (id11 == nearestId) {
-                    nearestWeight = softWeight.w;
-                    extraTap0 = tap00;
-                    extraTap1 = tap10;
-                    extraTap2 = tap01;
-                    extraWeight = softWeight.xyz;
+                if (faceEdgeDistanceTexels >= 1.5) {
+                    // Here the full bilinear footprint is inside the source face and the
+                    // old smoothstep is exactly one. Keep the same four taps and ordered
+                    // accumulation while skipping seam remapping and dead triangle math.
+                    uvec3 tap00 = uvec3(face, uvec2(lowerTexel));
+                    uvec3 tap10 = uvec3(face, uvec2(lowerTexel + ivec2(1, 0)));
+                    uvec3 tap01 = uvec3(face, uvec2(lowerTexel + ivec2(0, 1)));
+                    uvec3 tap11 = uvec3(face, uvec2(lowerTexel + ivec2(1, 1)));
+                    vec4 softWeight = vec4(
+                            (1.0 - blend.x) * (1.0 - blend.y),
+                            blend.x * (1.0 - blend.y),
+                            (1.0 - blend.x) * blend.y,
+                            blend.x * blend.y);
+                    if (blend.x < 0.5 && blend.y < 0.5) {
+                        nearestWeight = softWeight.x;
+                        extraTap0 = tap10;
+                        extraTap1 = tap01;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.yzw;
+                    } else if (blend.x >= 0.5 && blend.y < 0.5) {
+                        nearestWeight = softWeight.y;
+                        extraTap0 = tap00;
+                        extraTap1 = tap01;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.xzw;
+                    } else if (blend.x < 0.5) {
+                        nearestWeight = softWeight.z;
+                        extraTap0 = tap00;
+                        extraTap1 = tap10;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.xyw;
+                    } else {
+                        nearestWeight = softWeight.w;
+                        extraTap0 = tap00;
+                        extraTap1 = tap10;
+                        extraTap2 = tap01;
+                        extraWeight = softWeight.xyz;
+                    }
                 } else {
-                    return vec3(0.0);
+                    uvec3 tap00 = metallumVoxelResolveTapV1(
+                            cacheFaceEdge, face, lowerTexel);
+                    uvec3 tap10 = metallumVoxelResolveTapV1(
+                            cacheFaceEdge, face, lowerTexel + ivec2(1, 0));
+                    uvec3 tap01 = metallumVoxelResolveTapV1(
+                            cacheFaceEdge, face, lowerTexel + ivec2(0, 1));
+                    uvec3 tap11 = metallumVoxelResolveTapV1(
+                            cacheFaceEdge, face, lowerTexel + ivec2(1, 1));
+                    uint id00 = metallumVoxelTapIdV1(tap00, cacheFaceEdge);
+                    uint id10 = metallumVoxelTapIdV1(tap10, cacheFaceEdge);
+                    uint id01 = metallumVoxelTapIdV1(tap01, cacheFaceEdge);
+                    uint id11 = metallumVoxelTapIdV1(tap11, cacheFaceEdge);
+                    vec4 bilinearWeight = vec4(
+                            (1.0 - blend.x) * (1.0 - blend.y),
+                            blend.x * (1.0 - blend.y),
+                            (1.0 - blend.x) * blend.y,
+                            blend.x * blend.y);
+                    uvec2 diagonal00And11 = uvec2(min(id00, id11), max(id00, id11));
+                    uvec2 diagonal10And01 = uvec2(min(id10, id01), max(id10, id01));
+                    bool use00And11 = diagonal00And11.x < diagonal10And01.x
+                            || (diagonal00And11.x == diagonal10And01.x
+                            && diagonal00And11.y <= diagonal10And01.y);
+                    vec4 triangleWeight;
+                    if (use00And11 && blend.x >= blend.y) {
+                        triangleWeight = vec4(
+                                1.0 - blend.x, blend.x - blend.y, 0.0, blend.y);
+                    } else if (use00And11) {
+                        triangleWeight = vec4(
+                                1.0 - blend.y, 0.0, blend.y - blend.x, blend.x);
+                    } else if (blend.x + blend.y <= 1.0) {
+                        triangleWeight = vec4(
+                                1.0 - blend.x - blend.y, blend.x, blend.y, 0.0);
+                    } else {
+                        triangleWeight = vec4(
+                                0.0, 1.0 - blend.y, 1.0 - blend.x,
+                                blend.x + blend.y - 1.0);
+                    }
+                    float interiorWeight = smoothstep(
+                            0.0, 1.5, faceEdgeDistanceTexels);
+                    vec4 softWeight = mix(
+                            triangleWeight, bilinearWeight, interiorWeight);
+                    ivec2 nearestTexel = clamp(
+                            ivec2(floor(texelPosition + vec2(0.5))),
+                            ivec2(0),
+                            ivec2(int(cacheFaceEdge) - 1));
+                    uint nearestId = (face * cacheFaceEdge + uint(nearestTexel.y))
+                            * cacheFaceEdge + uint(nearestTexel.x);
+                    if (id00 == nearestId) {
+                        nearestWeight = softWeight.x;
+                        extraTap0 = tap10;
+                        extraTap1 = tap01;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.yzw;
+                    } else if (id10 == nearestId) {
+                        nearestWeight = softWeight.y;
+                        extraTap0 = tap00;
+                        extraTap1 = tap01;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.xzw;
+                    } else if (id01 == nearestId) {
+                        nearestWeight = softWeight.z;
+                        extraTap0 = tap00;
+                        extraTap1 = tap10;
+                        extraTap2 = tap11;
+                        extraWeight = softWeight.xyw;
+                    } else if (id11 == nearestId) {
+                        nearestWeight = softWeight.w;
+                        extraTap0 = tap00;
+                        extraTap1 = tap10;
+                        extraTap2 = tap01;
+                        extraWeight = softWeight.xyz;
+                    } else {
+                        return vec3(0.0);
+                    }
+                }
+                if (all(equal(nearestVisibility, vec3(1.0)))) {
+                    if (metallumVoxelTapLayer0ProvesVisibleV1(
+                            baseHitIndex, cacheFaceEdge, extraTap0, receiverDistance)) {
+                        if (metallumVoxelTapLayer0ProvesVisibleV1(
+                                baseHitIndex, cacheFaceEdge, extraTap1, receiverDistance)) {
+                            if (metallumVoxelTapLayer0ProvesVisibleV1(
+                                    baseHitIndex, cacheFaceEdge, extraTap2, receiverDistance)) {
+                                vec3 allVisible = nearestVisibility * nearestWeight
+                                        + vec3(1.0) * extraWeight.x
+                                        + vec3(1.0) * extraWeight.y
+                                        + vec3(1.0) * extraWeight.z;
+                                if (!metallumFiniteVec3V1(allVisible)) {
+                                    return vec3(0.0);
+                                }
+                                return clamp(allVisible, vec3(0.0), vec3(1.0));
+                            }
+                        }
+                    }
                 }
                 vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(
                         baseHitIndex, cacheFaceEdge, extraTap0,
@@ -1971,7 +2073,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                     vec3 receiverWorldNormal,
                     vec3 lightViewPosition,
                     float lightRadius,
-                    uvec2 lightStableId,
                     uvec4 shadowRef) {
                 uint atlasByteOffset = shadowRef.y;
                 uint atlasOffsetHigh = shadowRef.z;
@@ -2070,7 +2171,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 // Its packet can be absent during a voxel/world transition, so a bad L6
                 // contract must fall back to unshadowed direct light instead of blacking out
                 // every clustered source in the fragment.
-                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 4u
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 5u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -2204,7 +2305,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         bool entityVisible = metallumProxyVisibilityV1(
                                 receiverCameraRelative,
                                 lightCameraRelative,
-                                light.metadata.xy,
+                                lightIndex,
                                 proxyFailOpen);
 #else
                         bool entityVisible =
@@ -2225,7 +2326,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                                         receiverWorldNormal,
                                         light.positionRadius.xyz,
                                         radius,
-                                        light.metadata.xy,
                                         shadowRef);
                             } else {
                                 visibility = vec3(1.0);
@@ -2328,7 +2428,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 // emitter behind solid terrain appear as a mirror-like glint. Require the same
                 // completed/retained L6 page that proves direct-light visibility; environment
                 // reflection remains independent of this local-light term.
-                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 4u
+                bool localShadowContractValid = !(metallumVoxelShadow.caps.x != 5u
                         || metallumVoxelShadow.worldAndFlags.z != 1u
                         || metallumVoxelShadow.caps.y == 0u
                         || metallumVoxelShadow.caps.y > 3u
@@ -2386,7 +2486,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 bool entityVisible = metallumProxyVisibilityV1(
                         receiverCameraRelative,
                         lightCameraRelative,
-                        dominantLight.metadata.xy,
+                        dominantLightIndex,
                         proxyFailOpen);
 #else
                 bool entityVisible =
@@ -2407,7 +2507,6 @@ public final class AdvancedDirectLightingShaderPatcher {
                         receiverWorldNormal,
                         dominantLight.positionRadius.xyz,
                         max(dominantLight.positionRadius.w, 0.0),
-                        dominantLight.metadata.xy,
                         dominantShadowRef);
                 if (!any(greaterThan(visibility, vec3(0.0)))) {
                     return vec3(0.0);
@@ -2539,7 +2638,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             throw new IllegalStateException("Failed to specialize environment lookup for AMBIENT_ONLY helper");
         }
 
-        // 3. Remove celestial helper functions: PCF, cascade visibility, sun visibility, cloud transmittance, underwater caustics
+        // 3. Remove celestial helper functions: PCF, cascade visibility, water receiver
+        // visibility, cloud transmittance, and underwater caustics.
         String celestialHelpers = """
             float metallumPcfV1(sampler2DShadow shadowMap, vec3 coordinate) {
                 if (any(lessThan(coordinate.xy, vec2(0.0)))
@@ -2710,7 +2810,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 if (dot(metallumEnvironment.directionalRadiance.rgb, vec3(1.0)) <= 0.0001) {
                     return 1.0;
                 }
-                if (metallumVoxelShadow.caps.x != 4u) {
+                if (metallumVoxelShadow.caps.x != 5u) {
                     return 1.0;
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
@@ -3234,6 +3334,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "cylindricalVertexDistance, FogEnvironmentalStart, FogEnvironmentalEnd, "
                     + "FogRenderDistanceStart, FogRenderDistanceEnd, "
                     + "metallumMaterialDecodeColor(FogColor));";
+    private static final String ENTITY_CLUSTERED_DIRECT_ACCUMULATION =
+            "    color.rgb += metallumEvaluateClusteredDirectV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n";
     private static final String ENTITY_DIRECT_BLOCK =
             "    vec3 metallumEntityNormal = gl_FrontFacing\n"
                     + "            ? metallumLightingNormal\n"
@@ -3263,6 +3367,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "cylindricalVertexDistance, FogEnvironmentalStart, FogEnvironmentalEnd, "
                     + "FogRenderDistanceStart, FogRenderDistanceEnd, "
                     + "metallumMaterialDecodeColor(FogColor));";
+    private static final String END_PORTAL_CLUSTERED_DIRECT_ACCUMULATION =
+            "    color += metallumEvaluateClusteredDirectV1(\n"
+                    + "            metallumLightingPosition, metallumDirectNormal,\n"
+                    + "            metallumPreparedAlbedo);\n";
     private static final String END_PORTAL_DIRECT_BLOCK =
             "    vec3 metallumPortalDerivativeNormal = cross(\n"
                     + "            dFdx(metallumLightingPosition),\n"
@@ -3357,7 +3465,12 @@ public final class AdvancedDirectLightingShaderPatcher {
             );
         }
         if (materialSource.contains(MARKER)) {
-            return validateAlreadyPatched(namespace, path, stage, materialSource);
+            return validateAlreadyPatched(
+                    namespace,
+                    path,
+                    stage,
+                    materialSource
+            );
         }
         String collision = helperCollision(materialSource);
         if (collision != null) {
@@ -3450,7 +3563,8 @@ public final class AdvancedDirectLightingShaderPatcher {
             }
             Result advanced = patch(
                     key.namespace(), key.path(), key.stage(), LightingModel.ADVANCED,
-                    material.source()
+                    material.source(),
+                    TerrainEnvironmentSpecialization.FULL
             );
             if (!advanced.success()) {
                 return Preflight.rejected(
@@ -3516,7 +3630,10 @@ public final class AdvancedDirectLightingShaderPatcher {
         );
         String directBlock = vertexReflection
                 ? SODIUM_DIRECT_BLOCK_REFL
-                : SODIUM_DIRECT_BLOCK;
+                : directBlockForCurrentDiagnostic(
+                        SODIUM_DIRECT_BLOCK,
+                        SODIUM_CLUSTERED_DIRECT_ACCUMULATION
+                );
         patched = replaceExactlyOnce(patched, SODIUM_FOG_ANCHOR, directBlock);
         if (patched == null
                 || !patched.contains("dFdx(metallumLightingPosition)")
@@ -3566,18 +3683,26 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec2 texCoord0;",
                 ENTITY_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, false, TerrainEnvironmentSpecialization.FULL);
+        patched = installFragmentAbi(
+                patched,
+                false,
+                TerrainEnvironmentSpecialization.FULL
+        );
         patched = replaceExactlyOnce(patched, ENTITY_COLOR_ANCHOR, ENTITY_DIRECT_ALBEDO);
         patched = replaceExactlyOnce(
                 patched,
                 ENTITY_OVERLAY_ANCHOR,
                 ENTITY_OVERLAY_WITH_DIRECT_ALBEDO
         );
-        patched = replaceExactlyOnce(patched, ENTITY_FOG_ANCHOR, ENTITY_DIRECT_BLOCK);
+        String directBlock = directBlockForCurrentDiagnostic(
+                ENTITY_DIRECT_BLOCK,
+                ENTITY_CLUSTERED_DIRECT_ACCUMULATION
+        );
+        patched = replaceExactlyOnce(patched, ENTITY_FOG_ANCHOR, directBlock);
         if (patched == null
                 || !patched.contains("? metallumLightingNormal")
                 || !patched.contains(ENTITY_DIRECT_ALBEDO)
-                || !patched.contains(ENTITY_DIRECT_BLOCK)) {
+                || !patched.contains(directBlock)) {
             return Result.failure(source, "entity Advanced fragment anchors changed");
         }
         return Result.success(patched);
@@ -3615,11 +3740,19 @@ public final class AdvancedDirectLightingShaderPatcher {
                 "in vec4 texProj0;",
                 END_PORTAL_FRAGMENT_INPUT
         );
-        patched = installFragmentAbi(patched, false, TerrainEnvironmentSpecialization.FULL);
-        patched = replaceExactlyOnce(patched, END_PORTAL_FOG_ANCHOR, END_PORTAL_DIRECT_BLOCK);
+        patched = installFragmentAbi(
+                patched,
+                false,
+                TerrainEnvironmentSpecialization.FULL
+        );
+        String directBlock = directBlockForCurrentDiagnostic(
+                END_PORTAL_DIRECT_BLOCK,
+                END_PORTAL_CLUSTERED_DIRECT_ACCUMULATION
+        );
+        patched = replaceExactlyOnce(patched, END_PORTAL_FOG_ANCHOR, directBlock);
         if (patched == null
                 || !patched.contains("metallumPortalDerivativeNormal")
-                || !patched.contains(END_PORTAL_DIRECT_BLOCK)) {
+                || !patched.contains(directBlock)) {
             return Result.failure(source, "end portal Advanced fragment anchors changed");
         }
         return Result.success(patched);
@@ -3636,6 +3769,7 @@ public final class AdvancedDirectLightingShaderPatcher {
         String helpers = (terrainReceiver && specialization == TerrainEnvironmentSpecialization.AMBIENT_ONLY)
                 ? FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY
                 : FRAGMENT_ABI_AND_HELPERS;
+        helpers = fragmentHelpersForCurrentDiagnostic(helpers);
         return replaceExactlyOnce(
                 source,
                 "out vec4 fragColor;",
@@ -3645,6 +3779,345 @@ public final class AdvancedDirectLightingShaderPatcher {
                         : "")
                         + helpers
         );
+    }
+
+    private static String fragmentHelpersForCurrentDiagnostic(final String productionHelpers) {
+        DiagnosticAblationMode diagnostic = DiagnosticAblationMode.getSystemCurrent();
+        String result = productionHelpers;
+        if (diagnostic.l6NearestOnly() == 1) {
+            final String filterStart =
+                    "vec3 softVisibility = metallumVoxelSoftCachedVisibilityV1(";
+            final String filterEnd =
+                    "receiverWorldNormal, nearestVisibility);";
+            int callStart = result.indexOf(filterStart);
+            int callEnd = callStart < 0 ? -1 : result.indexOf(filterEnd, callStart);
+            if (callStart < 0 || callEnd < 0
+                    || result.indexOf(filterStart, callStart + filterStart.length()) >= 0) {
+                throw new IllegalStateException(
+                        "L6_NEAREST_ONLY diagnostic no longer matches the resident filter call"
+                );
+            }
+            callEnd += filterEnd.length();
+            String nearestVisibility =
+                    "                vec3 softVisibility = nearestVisibility;\n"
+                            + "                // METALLUM_DIAGNOSTIC_L6_NEAREST_ONLY";
+            result = result.substring(0, callStart)
+                    + nearestVisibility
+                    + result.substring(callEnd);
+        }
+        if (diagnostic.l6NoProxy() == 1) {
+            final String proxyStart = "            bool metallumProxyVisibilityV1(";
+            final String proxyBody = "                    out bool failOpen) {";
+            int proxyStartIndex = result.indexOf(proxyStart);
+            int proxyBodyIndex = proxyStartIndex < 0
+                    ? -1 : result.indexOf(proxyBody, proxyStartIndex);
+            if (proxyStartIndex < 0 || proxyBodyIndex < 0
+                    || result.indexOf(proxyStart, proxyStartIndex + proxyStart.length()) >= 0) {
+                throw new IllegalStateException(
+                        "L6_NEAREST_NO_PROXY diagnostic no longer matches the proxy helper"
+                );
+            }
+            int insertAt = proxyBodyIndex + proxyBody.length();
+            String proxyDisabled =
+                    "\n                failOpen = false;\n"
+                            + "                // METALLUM_DIAGNOSTIC_L6_NO_PROXY\n"
+                            + "                return true;";
+            result = result.substring(0, insertAt)
+                    + proxyDisabled
+                    + result.substring(insertAt);
+        }
+        // The temporal experiment owns its stochastic estimator in a separate diffuse-only
+        // helper.  Do not let the older diagnostic rewrite the shared visibility helper here:
+        // that helper is also used by material specular and must remain exact.
+        if (!L6TemporalShadowExperiment.enabled()) {
+            int stochasticTapCount = l6StochasticTapCount();
+            if (stochasticTapCount == 1) {
+                result = installL6StochasticOneTapDiagnostic(result);
+            } else if (stochasticTapCount == 2) {
+                result = installL6StochasticTwoTapDiagnostic(result);
+            }
+        }
+        if (diagnostic.ablateL6() == 0) {
+            return result;
+        }
+        final String start = "                bool localShadowContractValid = !(";
+        final String end = "                        > metallumVoxelShadow.proxyAndFrame.y);";
+        final String replacement =
+                "                bool localShadowContractValid = false;\n"
+                        + "                // METALLUM_DIAGNOSTIC_NO_L6_RECEIVER";
+        int replacements = 0;
+        int searchFrom = 0;
+        while (true) {
+            int blockStart = result.indexOf(start, searchFrom);
+            if (blockStart < 0) {
+                break;
+            }
+            int blockEnd = result.indexOf(end, blockStart + start.length());
+            if (blockEnd < 0) {
+                throw new IllegalStateException(
+                        "NO_L6_RECEIVER diagnostic found an unterminated local-shadow contract"
+                );
+            }
+            blockEnd += end.length();
+            result = result.substring(0, blockStart)
+                    + replacement
+                    + result.substring(blockEnd);
+            searchFrom = blockStart + replacement.length();
+            replacements++;
+        }
+        if (replacements != 2) {
+            throw new IllegalStateException(
+                    "NO_L6_RECEIVER diagnostic expected two local-shadow receiver contracts, found "
+                            + replacements
+            );
+        }
+        return result;
+    }
+
+    private static int l6StochasticTapCount() {
+        String configured = System.getProperty(L6_STOCHASTIC_TAP_COUNT_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv("METALLUM_L6_STOCHASTIC_TAPS");
+        }
+        int tapCount = 0;
+        if ("1".equals(configured)) {
+            tapCount = 1;
+        } else if ("2".equals(configured)) {
+            tapCount = 2;
+        } else {
+            String legacyTwoTap = System.getProperty(L6_STOCHASTIC_TWO_TAP_PROPERTY);
+            if (legacyTwoTap == null || legacyTwoTap.isBlank()) {
+                legacyTwoTap = System.getenv("METALLUM_L6_STOCHASTIC_TWO_TAP");
+            }
+            if ("1".equals(legacyTwoTap) || Boolean.parseBoolean(legacyTwoTap)) {
+                tapCount = 2;
+            }
+        }
+        if (tapCount != 0 && !l6StochasticTwoTapLogged) {
+            l6StochasticTwoTapLogged = true;
+            com.metallum.Metallum.LOGGER.info(
+                    "L6 diagnostic active: stochastic {}-tap estimator",
+                    tapCount
+            );
+        }
+        return tapCount;
+    }
+
+    private static String installL6StochasticOneTapDiagnostic(final String productionHelpers) {
+        String result = productionHelpers;
+        final String nearestStart =
+                "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(";
+        final String nearestEnd = "receiverWorldNormal);";
+        int nearestCallStart = result.indexOf(nearestStart);
+        int nearestCallEnd = nearestCallStart < 0
+                ? -1 : result.indexOf(nearestEnd, nearestCallStart);
+        if (nearestCallStart < 0 || nearestCallEnd < 0
+                || result.indexOf(nearestStart, nearestCallStart + nearestStart.length()) >= 0) {
+            throw new IllegalStateException(
+                    "L6 stochastic one-tap diagnostic no longer matches the nearest call"
+            );
+        }
+        nearestCallEnd += nearestEnd.length();
+        result = result.substring(0, nearestCallStart)
+                + "vec3 nearestVisibility = vec3(0.0);\n"
+                + "                // METALLUM_DIAGNOSTIC_L6_STOCHASTIC_ONE_TAP"
+                + result.substring(nearestCallEnd);
+
+        final String tapDeclaration = "uvec3 extraTap0;";
+        if (countOccurrences(result, tapDeclaration) != 1) {
+            throw new IllegalStateException(
+                    "L6 stochastic one-tap diagnostic no longer matches tap declarations"
+            );
+        }
+        result = result.replace(tapDeclaration, "uvec3 nearestTap;\n                " + tapDeclaration);
+
+        String[] weightAssignments = {
+                "nearestWeight = softWeight.x;",
+                "nearestWeight = softWeight.y;",
+                "nearestWeight = softWeight.z;",
+                "nearestWeight = softWeight.w;"
+        };
+        String[] nearestAssignments = {
+                "nearestTap = tap00;",
+                "nearestTap = tap10;",
+                "nearestTap = tap01;",
+                "nearestTap = tap11;"
+        };
+        for (int index = 0; index < weightAssignments.length; index++) {
+            String assignment = weightAssignments[index];
+            if (countOccurrences(result, assignment) != 2) {
+                throw new IllegalStateException(
+                        "L6 stochastic one-tap diagnostic no longer matches nearest-weight branches"
+                );
+            }
+            result = result.replace(
+                    assignment,
+                    assignment + "\n                        " + nearestAssignments[index]
+            );
+        }
+
+        final String visibleWitnessStart =
+                "if (all(equal(nearestVisibility, vec3(1.0)))) {";
+        final String fullFilterStart =
+                "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(";
+        int witnessStart = result.indexOf(visibleWitnessStart);
+        int filterStart = witnessStart < 0 ? -1 : result.indexOf(fullFilterStart, witnessStart);
+        if (witnessStart < 0 || filterStart < 0
+                || result.indexOf(
+                visibleWitnessStart, witnessStart + visibleWitnessStart.length()) >= 0) {
+            throw new IllegalStateException(
+                    "L6 stochastic one-tap diagnostic no longer matches the all-visible witness"
+            );
+        }
+        result = result.substring(0, witnessStart) + result.substring(filterStart);
+
+        final String fullFilterEnd = "+ visibility2 * extraWeight.z;";
+        filterStart = result.indexOf(fullFilterStart);
+        int filterEnd = filterStart < 0 ? -1 : result.indexOf(fullFilterEnd, filterStart);
+        if (filterStart < 0 || filterEnd < 0
+                || result.indexOf(fullFilterStart, filterStart + fullFilterStart.length()) >= 0) {
+            throw new IllegalStateException(
+                    "L6 stochastic one-tap diagnostic no longer matches the resident filter tail"
+            );
+        }
+        filterEnd += fullFilterEnd.length();
+        final String stochasticFilterTail = """
+                uint stochasticHash = uint(gl_FragCoord.x)
+                        + uint(gl_FragCoord.y) * 0x9e3779b9u
+                        + metallumLighting.frameIdAndGeneration.x * 0x85ebca6bu
+                        + metallumLighting.frameIdAndGeneration.y * 0xc2b2ae35u
+                        + baseHitIndex * 0x27d4eb2du;
+                stochasticHash ^= stochasticHash >> 16u;
+                stochasticHash *= 0x7feb352du;
+                stochasticHash ^= stochasticHash >> 15u;
+                stochasticHash *= 0x846ca68bu;
+                stochasticHash ^= stochasticHash >> 16u;
+                vec4 stochasticWeight = vec4(nearestWeight, extraWeight);
+                float totalWeight = dot(stochasticWeight, vec4(1.0));
+                vec3 visibility = vec3(0.0);
+                if (totalWeight > 0.000001) {
+                    float stochasticUnit = float(stochasticHash >> 8u)
+                            * (1.0 / 16777216.0);
+                    float stochasticTarget = stochasticUnit * totalWeight;
+                    uvec3 stochasticTap = stochasticTarget < stochasticWeight.x
+                            ? nearestTap
+                            : (stochasticTarget < stochasticWeight.x + stochasticWeight.y
+                            ? extraTap0
+                            : (stochasticTarget < stochasticWeight.x + stochasticWeight.y
+                            + stochasticWeight.z ? extraTap1 : extraTap2));
+                    vec3 stochasticVisibility = metallumVoxelResolvedTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, stochasticTap,
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    visibility = stochasticVisibility * totalWeight;
+                }
+                """;
+        result = result.substring(0, filterStart)
+                + stochasticFilterTail
+                + result.substring(filterEnd);
+        if (countOccurrences(
+                result, "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_ONE_TAP") != 1
+                || result.contains(fullFilterStart)
+                || result.contains(visibleWitnessStart)
+                || countOccurrences(result, "nearestTap = tap") != 8) {
+            throw new IllegalStateException(
+                    "L6 stochastic one-tap diagnostic did not replace the complete filter"
+            );
+        }
+        return result;
+    }
+
+    /**
+     * Rewrites an isolated copy of the L6 visibility helpers for the temporal diffuse path.
+     * Keeping the copy private to that path prevents the one-tap estimator from changing the
+     * material-specular visibility contract of the normal Advanced flavor.
+     */
+    static String installL6TemporalStochasticOneTap(final String visibilityHelpers) {
+        String patched = installL6StochasticOneTapDiagnostic(visibilityHelpers).replace(
+                "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_ONE_TAP",
+                "METALLUM_EXPERIMENTAL_L6_TEMPORAL_ONE_TAP"
+        );
+        if (countOccurrences(patched, "METALLUM_EXPERIMENTAL_L6_TEMPORAL_ONE_TAP") != 1
+                || patched.contains("METALLUM_DIAGNOSTIC_L6_STOCHASTIC_ONE_TAP")) {
+            throw new IllegalStateException("Temporal L6 one-tap helper rewrite was not canonical");
+        }
+        return patched;
+    }
+
+    private static String installL6StochasticTwoTapDiagnostic(final String productionHelpers) {
+        final String fullFilterStart =
+                "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(";
+        final String fullFilterEnd = "+ visibility2 * extraWeight.z;";
+        final String stochasticFilterTail = """
+                // METALLUM_DIAGNOSTIC_L6_STOCHASTIC_TWO_TAP
+                uint stochasticHash = uint(gl_FragCoord.x)
+                        + uint(gl_FragCoord.y) * 0x9e3779b9u
+                        + metallumLighting.frameIdAndGeneration.x * 0x85ebca6bu
+                        + metallumLighting.frameIdAndGeneration.y * 0xc2b2ae35u
+                        + baseHitIndex * 0x27d4eb2du;
+                stochasticHash ^= stochasticHash >> 16u;
+                stochasticHash *= 0x7feb352du;
+                stochasticHash ^= stochasticHash >> 15u;
+                stochasticHash *= 0x846ca68bu;
+                stochasticHash ^= stochasticHash >> 16u;
+                float remainingWeight = extraWeight.x + extraWeight.y + extraWeight.z;
+                vec3 visibility = nearestVisibility;
+                if (remainingWeight > 0.000001) {
+                    float stochasticUnit = float(stochasticHash >> 8u)
+                            * (1.0 / 16777216.0);
+                    float stochasticTarget = stochasticUnit * remainingWeight;
+                    uvec3 stochasticTap = stochasticTarget < extraWeight.x
+                            ? extraTap0
+                            : (stochasticTarget < extraWeight.x + extraWeight.y
+                            ? extraTap1 : extraTap2);
+                    vec3 stochasticVisibility = metallumVoxelResolvedTapVisibilityV1(
+                            baseHitIndex, cacheFaceEdge, stochasticTap,
+                            lightToReceiver, receiverDistance, receiverWorldNormal);
+                    visibility = nearestVisibility * nearestWeight
+                            + stochasticVisibility * remainingWeight;
+                }
+                """;
+        int filterStart = productionHelpers.indexOf(fullFilterStart);
+        int filterEnd = filterStart < 0
+                ? -1 : productionHelpers.indexOf(fullFilterEnd, filterStart);
+        if (filterStart < 0 || filterEnd < 0
+                || productionHelpers.indexOf(
+                fullFilterStart, filterStart + fullFilterStart.length()) >= 0) {
+            throw new IllegalStateException(
+                    "L6 stochastic two-tap diagnostic no longer matches the resident filter tail"
+            );
+        }
+        filterEnd += fullFilterEnd.length();
+        String patched = productionHelpers.substring(0, filterStart)
+                + stochasticFilterTail
+                + productionHelpers.substring(filterEnd);
+        if (countOccurrences(
+                patched, "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_TWO_TAP") != 1
+                || patched.contains(fullFilterStart)) {
+            throw new IllegalStateException(
+                    "L6 stochastic two-tap diagnostic did not replace the resident filter tail"
+            );
+        }
+        return patched;
+    }
+
+    private static String directBlockForCurrentDiagnostic(
+            final String productionBlock,
+            final String clusteredDirectAccumulation
+    ) {
+        if (DiagnosticAblationMode.getSystemCurrent().ablateL3() == 0) {
+            return productionBlock;
+        }
+        String ablated = replaceExactlyOnce(
+                productionBlock,
+                clusteredDirectAccumulation,
+                "    // METALLUM_DIAGNOSTIC_NO_L3_RECEIVER\n"
+        );
+        if (ablated == null) {
+            throw new IllegalStateException(
+                    "NO_L3_RECEIVER diagnostic no longer matches the clustered-direct call"
+            );
+        }
+        return ablated;
     }
 
     private static String installStorageBufferVersion(final String source) {
@@ -3677,8 +4150,14 @@ public final class AdvancedDirectLightingShaderPatcher {
             if (!source.contains("#version 430 core")) {
                 return Result.failure(source, "Advanced fragment marker retained a non-storage GLSL version");
             }
-            boolean isAmbientOnly = source.contains(FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY);
-            if (!source.contains(FRAGMENT_ABI_AND_HELPERS) && !isAmbientOnly) {
+            String expectedFullHelpers = fragmentHelpersForCurrentDiagnostic(
+                    FRAGMENT_ABI_AND_HELPERS
+            );
+            String expectedAmbientHelpers = fragmentHelpersForCurrentDiagnostic(
+                    FRAGMENT_ABI_AND_HELPERS_AMBIENT_ONLY
+            );
+            boolean isAmbientOnly = source.contains(expectedAmbientHelpers);
+            if (!source.contains(expectedFullHelpers) && !isAmbientOnly) {
                 return Result.failure(source, "Advanced fragment helper ABI is not canonical");
             }
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
@@ -3732,7 +4211,12 @@ public final class AdvancedDirectLightingShaderPatcher {
                     }
                 }
             }
-            if (countOccurrences(source, "metallumEvaluateClusteredDirectV1(") != 2) {
+            int expectedDirectOccurrences =
+                    DiagnosticAblationMode.getSystemCurrent().ablateL3() == 1 ? 1 : 2;
+            if (countOccurrences(
+                    source,
+                    "metallumEvaluateClusteredDirectV1("
+            ) != expectedDirectOccurrences) {
                 return Result.failure(source, "Advanced fragment marker has no direct-light helper");
             }
             if (countOccurrences(source, "metallumEvaluateEnvironmentV1(") != 2) {
@@ -3749,20 +4233,34 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return Result.failure(source, "Advanced fragment marker has a partial L8 material ABI");
             }
             if (isSodiumTerrain(namespace, path)) {
+                String directBlock = directBlockForCurrentDiagnostic(
+                        SODIUM_DIRECT_BLOCK,
+                        SODIUM_CLUSTERED_DIRECT_ACCUMULATION
+                );
                 if (!source.contains(SODIUM_FRAGMENT_INPUT)
-                        || !source.contains(SODIUM_DIRECT_BLOCK)) {
+                        || !source.contains(directBlock)) {
                     return Result.failure(source, "Advanced terrain fragment body is not canonical");
                 }
             } else if (isEntity(namespace, path)) {
+                String directBlock = directBlockForCurrentDiagnostic(
+                        ENTITY_DIRECT_BLOCK,
+                        ENTITY_CLUSTERED_DIRECT_ACCUMULATION
+                );
                 if (!source.contains(ENTITY_FRAGMENT_INPUT)
                         || !source.contains(ENTITY_DIRECT_ALBEDO)
                         || !source.contains(ENTITY_OVERLAY_WITH_DIRECT_ALBEDO)
-                        || !source.contains(ENTITY_DIRECT_BLOCK)) {
+                        || !source.contains(directBlock)) {
                     return Result.failure(source, "Advanced entity fragment body is not canonical");
                 }
-            } else if (!source.contains(END_PORTAL_FRAGMENT_INPUT)
-                    || !source.contains(END_PORTAL_DIRECT_BLOCK)) {
-                return Result.failure(source, "Advanced end portal fragment body is not canonical");
+            } else {
+                String directBlock = directBlockForCurrentDiagnostic(
+                        END_PORTAL_DIRECT_BLOCK,
+                        END_PORTAL_CLUSTERED_DIRECT_ACCUMULATION
+                );
+                if (!source.contains(END_PORTAL_FRAGMENT_INPUT)
+                        || !source.contains(directBlock)) {
+                    return Result.failure(source, "Advanced end portal fragment body is not canonical");
+                }
             }
         } else if (isSodiumTerrain(namespace, path)) {
             if (!source.contains(SODIUM_VERTEX_DECLARATION)
@@ -3921,9 +4419,12 @@ public final class AdvancedDirectLightingShaderPatcher {
                 || EnvironmentShadowBindingAbi.VERSION != SunShadowLayout.ABI_VERSION) {
             throw new ExceptionInInitializerError("Environment/shadow shader ABI does not match its layout");
         }
-        if (VoxelShadowBindingAbi.VERSION != 4
+        if (VoxelShadowBindingAbi.VERSION != 5
                 || VoxelShadowBindingAbi.PARAMS_BYTES != 256
                 || VoxelShadowBindingAbi.PROXY_STRIDE_BYTES != 32
+                || VoxelShadowBindingAbi.PROXY_MASK_STRIDE_BYTES != 4
+                || VoxelShadowBindingAbi.PROXY_MASKS_OFFSET_BYTES != 1024
+                || VoxelShadowBindingAbi.PROXY_PACKET_BYTES != 17408
                 || VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT != 14
                 || VoxelShadowBindingAbi.PROXY_BUFFER_SLOT != 15
                 || VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT != 16

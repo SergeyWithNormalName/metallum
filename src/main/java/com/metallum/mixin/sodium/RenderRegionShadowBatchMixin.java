@@ -91,6 +91,10 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess, 
         if (this.metallum$reflectionBatchCache != null) {
             this.metallum$reflectionBatchCache.clearAll();
         }
+        com.metallum.client.metal.render.MetalDevice device = com.metallum.client.metal.render.MetalDevice.getInstance();
+        if (device != null) {
+            device.invalidateSunShadowCache();
+        }
     }
 
     @Inject(method = "removeSection", at = @At("TAIL"))
@@ -100,6 +104,10 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess, 
         }
         if (this.metallum$reflectionBatchCache != null) {
             this.metallum$reflectionBatchCache.clearAll();
+        }
+        com.metallum.client.metal.render.MetalDevice device = com.metallum.client.metal.render.MetalDevice.getInstance();
+        if (device != null) {
+            device.invalidateSunShadowCache();
         }
     }
 
@@ -119,6 +127,10 @@ abstract class RenderRegionShadowBatchMixin implements SodiumShadowBatchAccess, 
         }
         if (this.metallum$reflectionBatchCache != null) {
             this.metallum$reflectionBatchCache.clearAll();
+        }
+        com.metallum.client.metal.render.MetalDevice device = com.metallum.client.metal.render.MetalDevice.getInstance();
+        if (device != null) {
+            device.invalidateSunShadowCache();
         }
     }
 

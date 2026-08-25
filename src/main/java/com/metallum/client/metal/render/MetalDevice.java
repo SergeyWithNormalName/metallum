@@ -28,6 +28,7 @@ import com.metallum.client.lighting.DirectLightFrustum;
 import com.metallum.client.lighting.EntityShadowProxyRegistry;
 import com.metallum.client.lighting.EntityShadowProxySnapshot;
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.lighting.GodRayVisibilityDiagnostic;
 import com.metallum.client.lighting.LightFrameSnapshot;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
@@ -35,6 +36,8 @@ import com.metallum.client.lighting.reflection.RealWorldReflectionField;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.lighting.shader.L8ReactiveShaderPatcher;
+import com.metallum.client.lighting.shader.L6TemporalShadowExperiment;
+import com.metallum.client.lighting.shader.L6TemporalShaderPatcher;
 import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
@@ -93,8 +96,8 @@ import com.mojang.blaze3d.shaders.ShaderSource;
 import com.mojang.blaze3d.shaders.ShaderType;
 import com.mojang.blaze3d.systems.*;
 import com.mojang.blaze3d.textures.*;
-import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
 import com.mojang.blaze3d.vulkan.glsl.IntermediaryShaderModule;
+import com.mojang.blaze3d.vulkan.glsl.GlslCompiler;
 import com.mojang.blaze3d.vulkan.glsl.ShaderCompileException;
 import net.fabricmc.api.EnvType;
 import net.fabricmc.api.Environment;
@@ -251,6 +254,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private MemorySegment hdrUiHandle = MemorySegment.NULL;
     private long hdrUiSubmitIndex = Long.MIN_VALUE;
     private boolean hdrUiSuppressSceneEnhancement;
+    private final GodRayVisibilityRenderer godRayVisibilityRenderer;
+    @Nullable
+    private TextureTarget godRayVisibilityTarget;
     private boolean materialWorldPassActive;
     private boolean spatialSceneAvailable;
     private long spatialSceneSubmitIndex = Long.MIN_VALUE;
@@ -302,6 +308,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean temporalDiagnosticFailureLogged;
     @Nullable
     private AdvancedLightingGpuResources advancedLightingResources;
+    @Nullable
+    private L6TemporalHistoryResources l6TemporalHistoryResources;
+    private long l6TemporalHistoryClearedSubmitIndex = Long.MIN_VALUE;
     @Nullable
     private SunShadowGpuResources sunShadowResources;
     @Nullable
@@ -499,6 +508,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.rendererConfig.lightingPreset(),
                 this.rendererConfig.frameInterpolation()
         );
+        this.godRayVisibilityRenderer = new GodRayVisibilityRenderer(this);
     }
 
     MetalCapabilities rendererCapabilities() {
@@ -688,6 +698,13 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrSceneDepthSnapshot.close();
             this.hdrSceneDepthSnapshot = null;
         }
+        if (this.godRayVisibilityRenderer != null) {
+            this.godRayVisibilityRenderer.close();
+        }
+        if (this.godRayVisibilityTarget != null) {
+            this.godRayVisibilityTarget.destroyBuffers();
+            this.godRayVisibilityTarget = null;
+        }
         this.resetHdrSceneColor();
         this.hdrSceneDepthHandle = MemorySegment.NULL;
         if (this.hdrSemanticMask != null) {
@@ -704,6 +721,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (this.advancedLightingResources != null) {
             this.advancedLightingResources.close();
             this.advancedLightingResources = null;
+        }
+        if (this.l6TemporalHistoryResources != null) {
+            this.l6TemporalHistoryResources.close();
+            this.l6TemporalHistoryResources = null;
         }
         if (this.sunShadowResources != null) {
             this.sunShadowResources.close();
@@ -932,6 +953,12 @@ public final class MetalDevice implements GpuDeviceBackend {
                     telemetry.blockInvalidations(),
                     telemetry.resourceBytes()
             );
+        }
+    }
+
+    public synchronized void invalidateSunShadowCache() {
+        if (this.sunShadowResources != null) {
+            this.sunShadowResources.invalidate();
         }
     }
 
@@ -1970,8 +1997,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                     if (MetalGpuTiming.isReportEnabled()
                             && (submitIndex + 1L) % 300L == 0L) {
+                        LocalVoxelShadowGpuResources.DescriptorEdgeCoverage edgeCoverage =
+                                localShadowResources.descriptorEdgeCoverage();
                         Metallum.LOGGER.info(
-                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, capacityWaitSkips={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
+                                "L6 local shadows: active={}, descriptors={}/snapshot={}, READY={}, STALE={}, APPROXIMATE={}, BUILDING={}, FAIL_CLOSED={}, cachedEdges=8:{}/16:{}/32:{}/64:{}, cacheCovered={}, coverageLimited={}, residents={}, pendingBuilds={}, pendingUploads={} ({} bytes), capacityBlocked={}, capacityWaitSkips={}, retryBackoff={}, uploads={} ({} bytes), proxies={}/{}, maxSteps={}, dynamic={}/{}/{} candidates/selected/dropped, held={}, dispatches={}, rays={}, ready={}, fallback={}, coverageMiss={}, transitions={}->{}, failures={}, pages={} bytes",
                                 localPrepared.active(),
                                 localPrepared.descriptorLights(),
                                 lightSnapshot.lights().size(),
@@ -1980,6 +2009,10 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 localPrepared.approximateDirectLights(),
                                 localPrepared.buildingLights(),
                                 localPrepared.failClosedLights(),
+                                edgeCoverage.edge8(),
+                                edgeCoverage.edge16(),
+                                edgeCoverage.edge32(),
+                                edgeCoverage.edge64(),
                                 localPrepared.cacheCoveredLights(),
                                 localPrepared.coverageLimitedLights(),
                                 localPrepared.residentPages(),
@@ -2545,6 +2578,41 @@ public final class MetalDevice implements GpuDeviceBackend {
         return resources.pair(slot).reactive() != null;
     }
 
+    boolean isL6TemporalWorldPassActive() {
+        return L6TemporalShadowExperiment.enabled()
+                && !this.temporalScalingActive
+                && this.isAdvancedLightingWorldPassActive();
+    }
+
+    SemanticAttachment prepareL6TemporalHistoryAttachment(final MetalGpuTexture source) {
+        if (!this.isL6TemporalWorldPassActive()) {
+            throw new IllegalStateException(
+                    "L6 temporal history requires an active native-resolution Advanced world pass"
+            );
+        }
+        int width = source.getWidth(0);
+        int height = source.getHeight(0);
+        if (this.l6TemporalHistoryResources == null
+                || !this.l6TemporalHistoryResources.matches(width, height)) {
+            L6TemporalHistoryResources replacement =
+                    new L6TemporalHistoryResources(this, width, height);
+            L6TemporalHistoryResources previous = this.l6TemporalHistoryResources;
+            this.l6TemporalHistoryResources = replacement;
+            this.l6TemporalHistoryClearedSubmitIndex = Long.MIN_VALUE;
+            replacement.materializeInitialClears(this.commandEncoder);
+            if (previous != null) {
+                previous.close();
+            }
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        L6TemporalHistoryResources.Pair pair =
+                this.l6TemporalHistoryResources.pair(submitIndex);
+        this.commandEncoder.prepareTextureForRead(pair.read());
+        boolean clear = this.l6TemporalHistoryClearedSubmitIndex != submitIndex;
+        this.l6TemporalHistoryClearedSubmitIndex = submitIndex;
+        return new SemanticAttachment(pair.write().nativeHandle(), clear);
+    }
+
     void bindAdvancedLighting(final MTLRenderCommandEncoder encoder) {
         if (!this.isAdvancedLightingWorldPassActive() || this.advancedLightingResources == null) {
             throw new IllegalStateException("Advanced lighting bindings are not ready for this frame");
@@ -2566,6 +2634,25 @@ public final class MetalDevice implements GpuDeviceBackend {
                 bindings.indices(), 0L, AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT,
                 MetalCompiledRenderPipeline.STAGE_FRAGMENT
         );
+        if (this.isL6TemporalWorldPassActive()
+                && this.l6TemporalHistoryResources != null) {
+            long submitIndex = this.commandEncoder.currentSubmitIndex();
+            int inFlightSlot = (int) (submitIndex % FrameStatePacketRing.SLOT_COUNT);
+            L6TemporalHistoryResources.Pair pair =
+                    this.l6TemporalHistoryResources.pair(submitIndex);
+            encoder.setBuffer(
+                    bindings.l6TemporalParams(),
+                    (long) inFlightSlot * AdvancedLightingLayout.L6_TEMPORAL_PARAMS_BYTES,
+                    AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT,
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+            encoder.setTextureAndSampler(
+                    pair.read().nativeHandle(),
+                    this.l6TemporalHistoryResources.sampler().nativeHandle(),
+                    AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT,
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+        }
         SunShadowGpuResources shadows = this.sunShadowResources;
         LocalVoxelShadowGpuResources localShadows = this.localVoxelShadowResources;
         if (shadows == null || localShadows == null) {
@@ -2855,28 +2942,33 @@ public final class MetalDevice implements GpuDeviceBackend {
         this.hdrSceneAvailable = false;
         this.hdrSemanticSceneAvailable = false;
         this.resetHdrSceneColor();
+        boolean diagnosticActive = GodRayVisibilityDiagnostic.isActive();
         boolean materialScene = this.isMaterialGenerationActive();
         RendererGenerationConfig generation = this.activeRendererGeneration;
         boolean legacyHdrScene = generation != null && usesLegacyHdrDepthSnapshot(
                 generation.renderContractMode(), this.hdrEnhancedActive
         );
         boolean temporalScene = this.temporalScalingActive;
-        if ((!materialScene && !legacyHdrScene && !temporalScene) || source.isClosed()) {
+        boolean needsDepthSnapshot = legacyHdrScene || temporalScene || diagnosticActive;
+        if ((!materialScene && !legacyHdrScene && !temporalScene && !diagnosticActive) || source.isClosed()) {
             return;
         }
         this.hdrWorldSceneAvailable = worldSceneRendered;
 
         int width = source.getWidth(0);
         int height = source.getHeight(0);
-        if ((legacyHdrScene || temporalScene)
+        if (needsDepthSnapshot
                 && (depth == null
                 || depth.isClosed()
                 || depth.getWidth(0) != width
                 || depth.getHeight(0) != height)) {
+            if (diagnosticActive) {
+                GodRayVisibilityDiagnostic.reportStatus(GodRayVisibilityDiagnostic.ExecutionStatus.ACTIVE_BUT_NO_DEPTH);
+            }
             return;
         }
         boolean directSpatialScene = MetalFxUpscaling.isActive();
-        if (legacyHdrScene || temporalScene) {
+        if (needsDepthSnapshot) {
             if (this.hdrSceneDepthSnapshot == null
                     || this.hdrSceneDepthSnapshot.isClosed()
                     || this.hdrSceneDepthSnapshot.getWidth(0) != width
@@ -2924,10 +3016,58 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.hdrDirectSceneSource = source;
             this.hdrSceneColorState = HdrSceneColorState.PENDING_REDIRECT;
         }
-        if (legacyHdrScene || temporalScene) {
+        if (needsDepthSnapshot) {
             this.commandEncoder.copyTextureToTexture(
                     depth, this.hdrSceneDepthSnapshot, 0, 0, 0, 0, 0, width, height
             );
+        }
+        if (diagnosticActive
+                && this.hdrSceneDepthSnapshot != null
+                && !this.hdrSceneDepthSnapshot.isClosed()) {
+            boolean froxelMode = GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.WORLD_GRID_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FREEZE_PHYSICAL_CAMERA
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.CAMERA_DELTA_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.HDR_PREVIEW
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_RAW_VISIBILITY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_SCATTERING_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_PHASE_FUNCTION_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_EXTINCTION_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.COMPONENT_FINAL_RADIANCE
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL_CELL_ID_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.SUN_VISIBILITY_ONLY
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.FROXEL_WORLD_POSITION_DEBUG
+                    || GodRayVisibilityDiagnostic.mode() == GodRayVisibilityDiagnostic.Mode.SUN_SHAFT_ONLY;
+            boolean fullRes = GodRayVisibilityDiagnostic.resolution() == GodRayVisibilityDiagnostic.Resolution.FULL;
+            int targetWidth = froxelMode ? 512 : (fullRes ? width : (width + 1) / 2);
+            int targetHeight = froxelMode ? 144 : (fullRes ? height : (height + 1) / 2);
+            if (this.godRayVisibilityTarget == null
+                    || this.godRayVisibilityTarget.width != targetWidth
+                    || this.godRayVisibilityTarget.height != targetHeight) {
+                if (this.godRayVisibilityTarget != null) {
+                    this.godRayVisibilityTarget.destroyBuffers();
+                }
+                this.godRayVisibilityTarget = this.createTrackedTextureTarget(
+                        "Metallum God-Ray visibility target",
+                        targetWidth,
+                        targetHeight,
+                        false,
+                        GpuFormat.R16_FLOAT
+                );
+            }
+            SunShadowGpuResources sunShadow = this.sunShadowResourcesForCurrentFrame();
+            FrameState frameState = this.frameStateTracker.previous();
+            if (this.godRayVisibilityRenderer != null) {
+                int inFlightSlot = (int) (this.commandEncoder.currentSubmitIndex() % MetalCommandEncoder.MAX_SUBMITS_IN_FLIGHT);
+                this.godRayVisibilityRenderer.render(
+                        this.godRayVisibilityTarget,
+                        this.hdrSceneDepthSnapshot,
+                        sunShadow,
+                        frameState,
+                        inFlightSlot,
+                        source
+                );
+            }
         }
         this.hdrSceneAvailable = true;
         this.hdrSceneWidth = width;
@@ -3088,6 +3228,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         long submitIndex = this.commandEncoder.currentSubmitIndex();
         boolean materialHdr = this.isMaterialHdrGenerationActive();
         boolean precomposeHdr = hdrPrecomposeAllowed
+                && !GodRayVisibilityDiagnostic.isActive()
                 && (materialHdr || this.hdrEnhancedActive)
                 && this.hdrWorldSceneAvailable
                 && this.hdrSceneAvailable
@@ -3232,6 +3373,15 @@ public final class MetalDevice implements GpuDeviceBackend {
         MemorySegment uiHandle = this.hdrUiSubmitIndex == submitIndex
                 ? this.hdrUiHandle
                 : MemorySegment.NULL;
+        if (GodRayVisibilityDiagnostic.isActive()) {
+            return new HdrSceneInputs(
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    MemorySegment.NULL,
+                    uiHandle,
+                    false
+            );
+        }
         boolean directSourcePresent = this.hdrDirectSceneSource != null;
         boolean directRouteActive = !this.hdrDirectSceneRequiresSpatialScaling
                 || MetalFxUpscaling.isActive();
@@ -3415,6 +3565,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (key.flavor() == HdrShaderFlavor.METALLUM
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
+                || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
                 || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY) {
@@ -3463,6 +3614,23 @@ public final class MetalDevice implements GpuDeviceBackend {
             if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
                     || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY) {
                 return advanced.source();
+            }
+            if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL) {
+                L6TemporalShaderPatcher.Result temporal = L6TemporalShaderPatcher.patch(
+                        key.id().getNamespace(),
+                        key.id().getPath(),
+                        key.type() == ShaderType.VERTEX
+                                ? MetallumMaterialShaderPatcher.Stage.VERTEX
+                                : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                        advanced.source()
+                );
+                if (!temporal.success()) {
+                    throw new IllegalStateException(
+                            "Failed to prepare L6 temporal shader " + key.id() + ": "
+                                    + temporal.failureReason()
+                    );
+                }
+                return temporal.source();
             }
             L8ReactiveShaderPatcher.Result reactive = L8ReactiveShaderPatcher.patch(
                     key.id().getNamespace(),

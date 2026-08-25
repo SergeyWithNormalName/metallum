@@ -12,8 +12,12 @@ public final class AdvancedLightingBindingAbi {
     public static final int LIGHTS_SLOT = 28;
     public static final int CLUSTER_HEADERS_SLOT = 29;
     public static final int CLUSTER_INDICES_SLOT = 30;
+    public static final int L6_TEMPORAL_PARAMS_SLOT = 12;
+    public static final int L6_TEMPORAL_HISTORY_SLOT = 10;
 
     public static final int PARAMS_BYTES = AdvancedLightingLayout.LIGHTING_PARAMS_BYTES;
+    public static final int L6_TEMPORAL_PARAMS_BYTES =
+            AdvancedLightingLayout.L6_TEMPORAL_PARAMS_BYTES;
     public static final int GPU_LIGHT_STRIDE = AdvancedLightingLayout.GPU_LIGHT_STRIDE;
     public static final int CLUSTER_HEADER_STRIDE = AdvancedLightingLayout.CLUSTER_HEADER_STRIDE;
     public static final int CLUSTER_INDEX_STRIDE = AdvancedLightingLayout.LIGHT_INDEX_STRIDE;

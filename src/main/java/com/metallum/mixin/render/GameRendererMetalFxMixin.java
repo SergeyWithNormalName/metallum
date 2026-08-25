@@ -229,7 +229,7 @@ abstract class GameRendererMetalFxMixin {
             Matrix4 view = matrix(camera.viewRotationMatrix);
             Matrix4 cameraMatrix = matrix(this.metallum$cameraInverse);
             Matrix4 projection = matrix(jitteredProjection);
-            Matrix4 unjitteredProjection = matrix(finalProjection);
+            Matrix4 unjitteredProjection = matrix(camera.projectionMatrix);
             FrameState.Transforms transforms = new FrameState.Transforms(
                     cameraMatrix,
                     view,

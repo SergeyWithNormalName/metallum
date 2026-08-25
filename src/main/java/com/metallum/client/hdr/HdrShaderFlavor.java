@@ -14,6 +14,8 @@ public enum HdrShaderFlavor {
     SCENE_POST_LINEAR,
     METALLUM,
     METALLUM_ADVANCED,
+    /** Opaque Sodium terrain only: color(1) carries RGBA16F L6 temporal history. */
+    METALLUM_ADVANCED_L6_TEMPORAL,
     METALLUM_ADVANCED_REACTIVE,
     METALLUM_ADVANCED_AMBIENT_ONLY,
     METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY,

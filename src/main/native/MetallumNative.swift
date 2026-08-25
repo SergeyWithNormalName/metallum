@@ -108,7 +108,9 @@ private enum MetallumBuiltinShaderSet: String, CaseIterable {
                 "metallum_hdr_blur",
                 "metallum_hdr_ui_backdrop_fs",
                 "metallum_hdr_ui_compare_fs",
-                "metallum_hdr_ui_dilate_fs"
+                "metallum_hdr_ui_dilate_fs",
+                "metallum_god_ray_visibility_fs",
+                "metallum_god_ray_visualize_fs"
             ]
         case .clear:
             ["metallum_clear_vs", "metallum_clear_fs"]
@@ -1128,6 +1130,7 @@ private enum MetallumLightingAbiV1 {
     static let clusterScratchBytes = 512
     static let lightIndexBytes = 2
     static let paramsBytes = 256
+    static let l6TemporalParamsBytes = 320
     static let statisticsBytes = 256
     static let completedStatsBytes = 128
     static let ringSlots = 3
@@ -1168,6 +1171,17 @@ private struct MetallumLightingParamsV1 {
     var reserved0: SIMD4<UInt32>
     var reserved1: SIMD4<UInt32>
     var reserved2: SIMD4<UInt32>
+}
+
+private struct MetallumL6TemporalParamsV1 {
+    var previousViewProjection: simd_float4x4
+    var inversePreviousProjection: simd_float4x4
+    var previousView: simd_float4x4
+    var inversePreviousView: simd_float4x4
+    var cameraDelta: SIMD4<Float>
+    var extentAndFlags: SIMD4<UInt32>
+    var jitter: SIMD4<Float>
+    var reserved: SIMD4<UInt32>
 }
 
 private final class MetallumLightingPipelines {
@@ -1417,6 +1431,7 @@ private final class MetallumLightingContext: @unchecked Sendable {
     let lightIndices: MTLBuffer
     let params: MTLBuffer
     let statistics: MTLBuffer
+    let l6TemporalParams: MTLBuffer
     let slots: [MetallumLightingRingSlot]
 
     private let lock = NSLock()
@@ -1448,6 +1463,7 @@ private final class MetallumLightingContext: @unchecked Sendable {
         lightIndices: MTLBuffer,
         params: MTLBuffer,
         statistics: MTLBuffer,
+        l6TemporalParams: MTLBuffer,
         slots: [MetallumLightingRingSlot]
     ) {
         self.device = device
@@ -1466,6 +1482,7 @@ private final class MetallumLightingContext: @unchecked Sendable {
         self.lightIndices = lightIndices
         self.params = params
         self.statistics = statistics
+        self.l6TemporalParams = l6TemporalParams
         self.slots = slots
     }
 
@@ -5275,6 +5292,18 @@ private func makeLightingContext(
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.frameIdAndGeneration) == 176,
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.capacitiesAndFlags) == 192,
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.reserved0) == 208,
+          MemoryLayout<MetallumL6TemporalParamsV1>.size
+            == MetallumLightingAbiV1.l6TemporalParamsBytes,
+          MemoryLayout<MetallumL6TemporalParamsV1>.stride
+            == MetallumLightingAbiV1.l6TemporalParamsBytes,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.previousViewProjection) == 0,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.inversePreviousProjection) == 64,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.previousView) == 128,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.inversePreviousView) == 192,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.cameraDelta) == 256,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.extentAndFlags) == 272,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.jitter) == 288,
+          MemoryLayout<MetallumL6TemporalParamsV1>.offset(of: \.reserved) == 304,
           generation > 0,
           maxLights > 0, maxLights <= MetallumLightingAbiV1.maximumLights,
           indexCapacity > 0, indexCapacity <= MetallumLightingAbiV1.maximumIndices,
@@ -5330,6 +5359,11 @@ private func makeLightingContext(
           let statistics = device.makeBuffer(
               length: MetallumLightingAbiV1.statisticsBytes + MetallumLightingAbiV1.guardBytes,
               options: privateOptions
+          ),
+          let l6TemporalParams = device.makeBuffer(
+              length: MetallumLightingAbiV1.l6TemporalParamsBytes
+                  * MetallumLightingAbiV1.ringSlots,
+              options: [.storageModeShared, .cpuCacheModeWriteCombined]
           ) else {
         return nil
     }
@@ -5352,6 +5386,7 @@ private func makeLightingContext(
     lightIndices.label = "Metallum compact cluster light indices v1"
     params.label = "Metallum clustered-lighting parameters v1"
     statistics.label = "Metallum clustered-lighting statistics v1"
+    l6TemporalParams.label = "Metallum L6 temporal params ring v1"
     let telemetryToken = MetallumLightingTelemetryStore.shared.activate(
         generation: generation,
         clusterCount: clusterCount
@@ -5373,6 +5408,7 @@ private func makeLightingContext(
         lightIndices: lightIndices,
         params: params,
         statistics: statistics,
+        l6TemporalParams: l6TemporalParams,
         slots: slots
     )
     return context
@@ -9476,6 +9512,29 @@ private func lightingParamsV1(
     )
 }
 
+private func l6TemporalParamsV1(
+    frame: MetallumRendererFrameStateSnapshot
+) -> MetallumL6TemporalParamsV1 {
+    let cameraDelta = frame.currentCameraPosition - frame.previousCameraPosition
+    return MetallumL6TemporalParamsV1(
+        previousViewProjection: frame.previousProjection * frame.previousView,
+        inversePreviousProjection: frame.previousProjection.inverse,
+        previousView: frame.previousView,
+        inversePreviousView: frame.previousView.inverse,
+        cameraDelta: SIMD4(
+            Float(cameraDelta.x), Float(cameraDelta.y), Float(cameraDelta.z), 0
+        ),
+        extentAndFlags: SIMD4(
+            frame.renderWidth,
+            frame.renderHeight,
+            frame.resetMask == 0 ? 1 : 0,
+            1
+        ),
+        jitter: SIMD4(frame.jitterX, frame.jitterY, 0, 0),
+        reserved: SIMD4(repeating: 0)
+    )
+}
+
 private func lightingBufferPayloadBytes(_ context: MetallumLightingContext, kind: Int32) -> Int {
     switch kind {
     case 0: Int(context.maxLights) * MetallumLightingAbiV1.gpuLightBytes
@@ -9489,6 +9548,7 @@ private func lightingBufferPayloadBytes(_ context: MetallumLightingContext, kind
     case 3: MetallumLightingAbiV1.paramsBytes
     case 4: MetallumLightingAbiV1.statisticsBytes
     case 5: Int(context.clusterCount) * MetallumLightingAbiV1.clusterScratchBytes
+    case 6: MetallumLightingAbiV1.l6TemporalParamsBytes * MetallumLightingAbiV1.ringSlots
     default: 0
     }
 }
@@ -9501,6 +9561,7 @@ private func lightingBuffer(_ context: MetallumLightingContext, kind: Int32) -> 
     case 3: context.params
     case 4: context.statistics
     case 5: context.clusterScratch
+    case 6: context.l6TemporalParams
     default: nil
     }
 }
@@ -9648,6 +9709,15 @@ public func metallum_lighting_upload_and_build_v1(
         let slot = context.slots[slotIndex]
         memcpy(slot.staging.contents(), packet, Int(byteSize))
         var params = lightingParamsV1(context: context, frame: frame, batch: batch)
+        var temporalParams = l6TemporalParamsV1(frame: frame)
+        let temporalOffset = slotIndex * MetallumLightingAbiV1.l6TemporalParamsBytes
+        _ = withUnsafeBytes(of: &temporalParams) { bytes in
+            memcpy(
+                context.l6TemporalParams.contents().advanced(by: temporalOffset),
+                bytes.baseAddress!,
+                MetallumLightingAbiV1.l6TemporalParamsBytes
+            )
+        }
 
         let uploadPass = MTLBlitPassDescriptor()
         attachGpuTiming(
@@ -14481,21 +14551,32 @@ public func metallum_create_shader_function(
     _ sourcePtr: UnsafePointer<CChar>?,
     _ entryPtr: UnsafePointer<CChar>?
 ) -> UnsafeMutableRawPointer? {
-    return autoreleasepool {
-        guard let sourcePtr, let entryPtr else {
+    return autoreleasepool { () -> UnsafeMutableRawPointer? in
+        guard let entryPtr else {
             return nil
         }
-        do {
-            let library = try device.makeLibrary(source: String(cString: sourcePtr), options: nil)
-            guard let function = library.makeFunction(name: String(cString: entryPtr)) else {
-                NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
+        let entryName = String(cString: entryPtr)
+        if let sourcePtr, sourcePtr.pointee != 0 {
+            do {
+                let library = try device.makeLibrary(source: String(cString: sourcePtr), options: nil)
+                guard let function = library.makeFunction(name: entryName) else {
+                    NSLog("[metallum] Failed to resolve MSL entry point '%s'", entryPtr)
+                    return nil
+                }
+                return retainedPointer(function)
+            } catch {
+                NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
                 return nil
             }
-            return retainedPointer(function)
-        } catch {
-            NSLog("[metallum] Failed to compile MSL: %@", String(describing: error))
-            return nil
         }
+        for set in MetallumBuiltinShaderSet.allCases {
+            if let lib = try? resolveBuiltinShaderLibrary(device: device, shaderSet: set),
+               let function = lib.makeFunction(name: entryName) {
+                return retainedPointer(function)
+            }
+        }
+        NSLog("[metallum] Built-in MSL entry point '%s' not found", entryPtr)
+        return nil
     }
 }
 

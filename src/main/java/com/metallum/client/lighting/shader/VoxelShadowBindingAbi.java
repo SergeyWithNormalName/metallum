@@ -25,6 +25,11 @@ public final class VoxelShadowBindingAbi {
 
     public static final int PARAMS_BYTES = LocalVoxelShadowLayout.PARAMS_BYTES;
     public static final int PROXY_STRIDE_BYTES = LocalVoxelShadowLayout.PROXY_STRIDE_BYTES;
+    public static final int PROXY_MASK_STRIDE_BYTES =
+            LocalVoxelShadowLayout.PROXY_MASK_STRIDE_BYTES;
+    public static final int PROXY_MASKS_OFFSET_BYTES =
+            LocalVoxelShadowLayout.PROXY_MASKS_OFFSET_BYTES;
+    public static final int PROXY_PACKET_BYTES = LocalVoxelShadowLayout.PROXY_PACKET_BYTES;
     public static final int LEVEL_COUNT = 3;
     public static final int LEVEL_STRIDE_BYTES = 32;
     public static final int SHADOW_REF_DESCRIPTOR_STRIDE_BYTES =

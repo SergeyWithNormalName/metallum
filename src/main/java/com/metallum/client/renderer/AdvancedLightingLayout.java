@@ -17,11 +17,14 @@ public final class AdvancedLightingLayout {
             CLUSTER_MEMBERSHIP_WORDS * Integer.BYTES;
     public static final int LIGHT_INDEX_STRIDE = Short.BYTES;
     public static final int LIGHTING_PARAMS_BYTES = 256;
+    public static final int L6_TEMPORAL_PARAMS_BYTES = 320;
     public static final int STATISTICS_BYTES = 256;
     public static final int UPLOAD_HEADER_BYTES = 64;
     public static final int UPLOAD_RING_SLOTS = 3;
+    public static final int L6_TEMPORAL_PARAMS_RING_BYTES =
+            L6_TEMPORAL_PARAMS_BYTES * UPLOAD_RING_SLOTS;
     public static final int NATIVE_BUFFER_GUARD_BYTES = 64;
-    public static final int GUARDED_NATIVE_BUFFER_COUNT = 6;
+    public static final int GUARDED_NATIVE_BUFFER_COUNT = 7;
 
     public record Budget(
             int maxLights,
@@ -108,7 +111,11 @@ public final class AdvancedLightingLayout {
                 Math.addExact(uploadRingBytes, gpuLightBytes),
                 Math.addExact(
                         Math.addExact(clusterHeaderBytes, clusterScratchBytes),
-                        Math.addExact(clusterIndexBytes, LIGHTING_PARAMS_BYTES + STATISTICS_BYTES)
+                        Math.addExact(
+                                clusterIndexBytes,
+                                LIGHTING_PARAMS_BYTES + STATISTICS_BYTES
+                                        + L6_TEMPORAL_PARAMS_RING_BYTES
+                        )
                 )
         );
         totalBytes = Math.addExact(

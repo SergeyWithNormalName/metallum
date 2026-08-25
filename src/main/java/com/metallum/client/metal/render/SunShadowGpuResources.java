@@ -38,6 +38,7 @@ final class SunShadowGpuResources implements AutoCloseable {
     private final TextureTarget[] workingCascades;
     private final ProjectionMatrixBuffer projectionBuffer;
     private final MetalGpuSampler comparisonSampler;
+    private final MetalGpuSampler godRayComparisonSampler;
     private final SunShadowStabilizer stabilizer;
     private final SunShadowCache cache;
     private SunShadowFrame frame;
@@ -66,7 +67,8 @@ final class SunShadowGpuResources implements AutoCloseable {
             final TextureTarget[] staticCascades,
             final TextureTarget[] workingCascades,
             final ProjectionMatrixBuffer projectionBuffer,
-            final MetalGpuSampler comparisonSampler
+            final MetalGpuSampler comparisonSampler,
+            final MetalGpuSampler godRayComparisonSampler
     ) {
         this.generation = generation;
         this.budget = budget;
@@ -75,6 +77,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         this.workingCascades = workingCascades;
         this.projectionBuffer = projectionBuffer;
         this.comparisonSampler = comparisonSampler;
+        this.godRayComparisonSampler = godRayComparisonSampler;
         this.stabilizer = new SunShadowStabilizer();
         this.cache = new SunShadowCache(budget.totalBytes());
     }
@@ -94,6 +97,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         TextureTarget[] workingCascades = new TextureTarget[budget.cascadeCount()];
         ProjectionMatrixBuffer projection = null;
         MetalGpuSampler comparisonSampler = null;
+        MetalGpuSampler godRayComparisonSampler = null;
         try {
             params = new MetalGpuBuffer(
                     device,
@@ -132,6 +136,16 @@ final class SunShadowGpuResources implements AutoCloseable {
                     OptionalDouble.of(0.0),
                     MTLCompareFunction.GreaterEqual
             );
+            godRayComparisonSampler = new MetalGpuSampler(
+                    device,
+                    AddressMode.CLAMP_TO_EDGE,
+                    AddressMode.CLAMP_TO_EDGE,
+                    FilterMode.NEAREST,
+                    FilterMode.NEAREST,
+                    1,
+                    OptionalDouble.of(0.0),
+                    MTLCompareFunction.GreaterEqual
+            );
             return new SunShadowGpuResources(
                     generation,
                     budget,
@@ -139,9 +153,13 @@ final class SunShadowGpuResources implements AutoCloseable {
                     staticCascades,
                     workingCascades,
                     projection,
-                    comparisonSampler
+                    comparisonSampler,
+                    godRayComparisonSampler
             );
         } catch (RuntimeException | Error failure) {
+            if (godRayComparisonSampler != null) {
+                godRayComparisonSampler.close();
+            }
             if (comparisonSampler != null) {
                 comparisonSampler.close();
             }
@@ -498,6 +516,38 @@ final class SunShadowGpuResources implements AutoCloseable {
         }
     }
 
+    MetalGpuSampler godRayComparisonSampler() {
+        ensureOpen();
+        return this.godRayComparisonSampler;
+    }
+
+    void bindGodRayVisibility(final MTLRenderCommandEncoder encoder, final int inFlightSlot) {
+        ensureOpen();
+        if (this.frame == null || !isReady(this.frame.submitIndex())) {
+            throw new IllegalStateException("Sun-shadow bindings are not ready for God-Ray visibility");
+        }
+        long paramsOffset = (long) inFlightSlot * SunShadowLayout.PARAMS_BYTES;
+        encoder.setBuffer(
+                this.paramsRing.nativeHandle(),
+                paramsOffset,
+                EnvironmentShadowBindingAbi.PARAMS_SLOT,
+                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+        );
+        int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
+        for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
+            TextureTarget target = this.workingCascades[Math.min(
+                    cascade, this.workingCascades.length - 1
+            )];
+            MetalGpuTexture depth = (MetalGpuTexture) target.getDepthTexture();
+            encoder.setTextureAndSampler(
+                    depth.nativeHandle(),
+                    this.godRayComparisonSampler.nativeHandle(),
+                    slots[cascade],
+                    MetalCompiledRenderPipeline.STAGE_FRAGMENT
+            );
+        }
+    }
+
     @Override
     public void close() {
         if (this.closed) {
@@ -506,6 +556,7 @@ final class SunShadowGpuResources implements AutoCloseable {
         this.closed = true;
         this.frame = null;
         this.cacheDecision = null;
+        this.godRayComparisonSampler.close();
         this.comparisonSampler.close();
         this.projectionBuffer.close();
         for (TextureTarget target : this.staticCascades) {

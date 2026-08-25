@@ -199,6 +199,24 @@ final class MetalTransientMemory implements TransientMemory {
         return upload(data, alignment, usage, minimumAllocation, elementSize);
     }
 
+    GpuBufferSlice uploadStagingFromAddress(
+            final long sourceAddress,
+            final int byteLength,
+            final long alignment,
+            @Usage final int usage
+    ) {
+        if (sourceAddress == MemoryUtil.NULL || byteLength <= 0) {
+            throw new IllegalArgumentException("Raw staging upload requires a non-empty source range");
+        }
+        try (MappedView mapped = allocateMapped(byteLength, alignment, usage, byteLength, 1L)) {
+            MemoryUtil.memCopy(sourceAddress, MemoryUtil.memAddress(mapped.data()), byteLength);
+            if (this.workloadTelemetry != null) {
+                this.workloadTelemetry.recordCpuToShared(byteLength);
+            }
+            return mapped.slice();
+        }
+    }
+
     private GpuBufferSlice upload(final List<ByteBuffer> data, final long alignment, @Usage final int usage, final long minimumAllocation, final long elementSize) {
         long totalSize = 0L;
         for (ByteBuffer buffer : data) {

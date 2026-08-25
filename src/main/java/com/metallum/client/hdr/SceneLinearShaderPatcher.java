@@ -83,7 +83,7 @@ public final class SceneLinearShaderPatcher {
             case LEGACY_HDR_SEMANTIC -> Result.success(source);
             case SCENE_RASTER_LINEAR -> patchRasterBoundary(source);
             case SCENE_POST_LINEAR -> patchPost(namespace, path, source);
-            case METALLUM, METALLUM_ADVANCED, METALLUM_ADVANCED_REACTIVE,
+            case METALLUM, METALLUM_ADVANCED, METALLUM_ADVANCED_L6_TEMPORAL, METALLUM_ADVANCED_REACTIVE,
                     METALLUM_ADVANCED_AMBIENT_ONLY, METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY,
                     SUN_SHADOW -> Result.failure(
                     source,

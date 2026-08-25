@@ -56,4 +56,11 @@ public final class MetalDrawContext extends VKIndirectContext {
         GpuBufferSlice pushConstantsBufferSlice = ringSlice.slice(byteOffset, PUSH_CONSTANT_SIZE);
         this.metalPass.setUniform("push_constants", pushConstantsBufferSlice);
     }
+
+    public void drawPreparedIndexedIndirect(final GpuBufferSlice commands, final int drawCount) {
+        if (this.metalPass == null) {
+            throw new IllegalStateException("Sodium indirect draw has no active Metal render pass");
+        }
+        this.metalPass.drawIndexedIndirectOwned(commands, drawCount);
+    }
 }

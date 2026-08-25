@@ -5,6 +5,7 @@ import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.lighting.reflection.VertexReflectionExperimentConfig;
+import com.metallum.client.lighting.shader.L6TemporalShadowExperimentConfig;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metal.render.PlanarReflectionConfig;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
@@ -203,6 +204,23 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                 .addOptionGroup(builder.createOptionGroup()
                     .setName(Component.translatable("metallum.options.group.experimental"))
                     .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "experimental_shadows"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.experimental_shadows.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.experimental_shadows.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    L6TemporalShadowExperimentConfig::setEnabled,
+                                    L6TemporalShadowExperimentConfig::isEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
                                     "metallum", "vertex_reflection_experiment"
                             ))
                             .setStorageHandler(STORAGE_HANDLER)
@@ -322,6 +340,52 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             val -> updateConfig(c -> new HdrConfig(c.mode(), c.sourceEncoding(), c.hdrStrength(), c.bloomStrength(), c.diagnosticPattern(), val)),
                             () -> getConfig().experimentalFp16()
                         )
+                    )
+                )
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.god_rays"))
+                    .addOption(builder.createBooleanOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_debug")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_debug.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_debug.tooltip"))
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::setActive,
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::isActive
+                            )
+                    )
+                    .addOption(builder.createEnumOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_debug_mode"),
+                                com.metallum.client.lighting.GodRayVisibilityDiagnostic.Mode.class
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_debug_mode.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_debug_mode.tooltip"))
+                            .setElementNameProvider(mode -> Component.translatable(
+                                    "metallum.options.god_ray_debug_mode."
+                                            + mode.name().toLowerCase(Locale.ROOT)
+                            ))
+                            .setDefaultValue(com.metallum.client.lighting.GodRayVisibilityDiagnostic.Mode.FROXEL)
+                            .setBinding(
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::setMode,
+                                    com.metallum.client.lighting.GodRayVisibilityDiagnostic::mode
+                            )
+                    )
+                    .addOption(builder.createIntegerOption(
+                                Identifier.fromNamespaceAndPath("metallum", "god_ray_intensity")
+                            )
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable("metallum.options.god_ray_intensity.name"))
+                            .setTooltip(Component.translatable("metallum.options.god_ray_intensity.tooltip"))
+                            .setDefaultValue(30)
+                            .setRange(0, 100, 5)
+                            .setValueFormatter(val -> Component.literal(val + "%"))
+                            .setBinding(
+                                    val -> com.metallum.client.lighting.GodRayVisibilityDiagnostic.setIntensity(val / 100.0f),
+                                    () -> (int) (com.metallum.client.lighting.GodRayVisibilityDiagnostic.intensity() * 100.0f)
+                            )
                     )
                 )
             );

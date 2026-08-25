@@ -158,6 +158,24 @@ public record RendererConfig(
             }
             return loaded(migrated, "3", false, LoadDisposition.MIGRATED_V3);
         }
+        if ("5".equals(normalizedVersion)) {
+            RendererConfig migrated = parseV5(properties);
+            if (migrated == null) {
+                Metallum.LOGGER.warn(
+                        "Malformed renderer config schema 5 at {}; using defaults without rewriting it",
+                        path
+                );
+                return loaded(defaults(), normalizedVersion, true, LoadDisposition.FALLBACK_MALFORMED);
+            }
+            if (migrated.save(path)) {
+                Metallum.LOGGER.info(
+                        "Migrated renderer config {} from schema 5 to {}",
+                        path,
+                        SCHEMA_VERSION
+                );
+            }
+            return loaded(migrated, "5", false, LoadDisposition.MIGRATED_V5);
+        }
         if (!Integer.toString(SCHEMA_VERSION).equals(normalizedVersion)) {
             Metallum.LOGGER.warn(
                     "Unknown renderer config schema '{}' at {}; using defaults without rewriting it",
@@ -234,6 +252,7 @@ public record RendererConfig(
                     case "2" -> parseV2(properties);
                     case "3" -> parseV3(properties);
                     case "4" -> parseV4(properties);
+                    case "5" -> parseV5(properties);
                     default -> null;
                 };
         return parsed != null ? parsed : defaults();
@@ -271,6 +290,18 @@ public record RendererConfig(
     }
 
     private static RendererConfig parseV4(final Properties properties) {
+        Boolean advanced = strictBoolean(properties, "improvedLighting", false);
+        Boolean interpolation = strictBoolean(properties, "frameInterpolation", false);
+        Boolean voxelChecksum = strictBoolean(properties, "voxelDebugChecksum", false);
+        LightingPreset preset = strictPreset(properties, "lightingPreset", LightingPreset.BALANCED);
+        VisualStyle style = strictStyle(properties, "visualStyle", VisualStyle.VANILLA);
+        if (advanced == null || interpolation == null || voxelChecksum == null || preset == null || style == null) {
+            return null;
+        }
+        return new RendererConfig(advanced, preset, interpolation, voxelChecksum, style);
+    }
+
+    private static RendererConfig parseV5(final Properties properties) {
         Boolean advanced = strictBoolean(properties, "improvedLighting", false);
         Boolean interpolation = strictBoolean(properties, "frameInterpolation", false);
         Boolean voxelChecksum = strictBoolean(properties, "voxelDebugChecksum", false);

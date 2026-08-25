@@ -9,6 +9,21 @@ def artifactProjectName = project.name
 
 loom {
 	accessWidenerPath = file("src/main/resources/metallum.accesswidener")
+	runs {
+		client {
+			client()
+			System.getProperties().each { k, v ->
+				if (k.toString().startsWith("metallum.")) {
+					property k.toString(), v.toString()
+				}
+			}
+			System.getenv().each { k, v ->
+				if (k.toString().startsWith("METALLUM_")) {
+					environmentVariable k.toString(), v.toString()
+				}
+			}
+		}
+	}
 }
 
 repositories {
@@ -243,6 +258,14 @@ tasks.register("shadowValueValidation", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.SunShadowContractTests")
 }
 
+tasks.register("godRayWorldSpaceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates GOD-RAYS-0 world-space directional god rays mathematical contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.GodRayWorldSpaceContractTests")
+}
+
 tasks.register("lightningEnvironmentUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates atmospheric lightning environment lighting pulses and descriptors"
@@ -404,6 +427,14 @@ tasks.register("visualStyleUnitTest", JavaExec) {
 	dependsOn(tasks.named("testClasses"))
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.renderer.style.VisualStyleTests")
+}
+
+tasks.register("atmosphereStyleUnitTest", JavaExec) {
+	group = "verification"
+	description = "Runs dependency-free ATMOSPHERE-1 style-aware aerial perspective and fog modulation tests"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.renderer.style.AtmosphereStyleTests")
 }
 
 tasks.register("rendererArchitectureUnitTest", JavaExec) {
@@ -1279,6 +1310,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("benchmarkLightingAdmissionUnitTest"))
 	dependsOn(tasks.named("frozenReflectionNativeValidation"))
 	dependsOn(tasks.named("shadowValueValidation"))
+	dependsOn(tasks.named("godRayWorldSpaceUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))
 	dependsOn(tasks.named("localVoxelShadowUnitTest"))
 	dependsOn(tasks.named("localShadowAtlasUnitTest"))
@@ -1298,6 +1330,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("sodiumRelightOracleUnitTest"))
 	dependsOn(tasks.named("frameGraphValidation"))
 	dependsOn(tasks.named("visualStyleUnitTest"))
+	dependsOn(tasks.named("atmosphereStyleUnitTest"))
 	dependsOn(tasks.named("rendererArchitectureUnitTest"))
 	dependsOn(tasks.named("sodiumConfigUnitTest"))
 	dependsOn(tasks.named("temporalContractValidation"))

@@ -241,6 +241,7 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             @Nullable final MetalGpuTextureView depthTextureView,
             final boolean semanticOutput,
             final boolean reactiveOutput,
+            final boolean l6TemporalOutput,
             final int viewportWidth,
             final int viewportHeight,
             final boolean clearColorEnabled,
@@ -251,12 +252,13 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             final boolean clearDepthEnabled,
             final double clearDepthValue
     ) {
-        if (semanticOutput && reactiveOutput) {
+        if ((semanticOutput && reactiveOutput)
+                || (l6TemporalOutput && (semanticOutput || reactiveOutput))) {
             throw new IllegalStateException(
-                    "Legacy HDR semantic and L8 reactive outputs cannot share one draw"
+                    "Auxiliary fragment-output roles are inconsistent for one draw"
             );
         }
-        boolean auxiliaryOutput = semanticOutput || reactiveOutput;
+        boolean auxiliaryOutput = semanticOutput || reactiveOutput || l6TemporalOutput;
         MemorySegment colorAttachment = colorTextureView.nativeHandle();
         PendingUiSeed seed = this.pendingUiSeeds.peek();
         boolean fusePendingSeed = seed != null
@@ -273,7 +275,11 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             materializePendingUiSeed();
             seed = null;
         }
-        MetalDevice.SemanticAttachment semanticAttachment = semanticOutput
+        MetalDevice.SemanticAttachment semanticAttachment = l6TemporalOutput
+                ? this.device.prepareL6TemporalHistoryAttachment(
+                        (MetalGpuTexture) colorTextureView.texture()
+                )
+                : semanticOutput
                 ? this.device.prepareHdrSemanticAttachment((MetalGpuTexture) colorTextureView.texture())
                 : reactiveOutput
                         ? this.device.prepareL8ReactiveAttachment(
@@ -1096,11 +1102,48 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
             throw new IllegalArgumentException("Invalid CPU-visible Sodium indexed-indirect command range");
         }
 
+        return snapshotSodiumIndexedIndirectCommands(source.sliceStorage(sourceOffset, byteLength));
+    }
+
+    GpuBufferSlice snapshotSodiumIndexedIndirectCommands(final ByteBuffer commands) {
+        int byteLength = commands.remaining();
+        if (byteLength <= 0) {
+            throw new IllegalArgumentException("Sodium indexed-indirect snapshot cannot be empty");
+        }
         SodiumIndexedIndirectSnapshotArena arena = sodiumIndexedIndirectSnapshots[
                 (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT)
         ];
         GpuBufferSlice snapshot = arena.allocate(device, currentSubmitIndex, byteLength);
-        writeToBuffer(snapshot, source.sliceStorage(sourceOffset, byteLength));
+        writeToBuffer(snapshot, commands);
+        return snapshot;
+    }
+
+    GpuBufferSlice snapshotSodiumIndexedIndirectCommands(
+            final long sourceAddress,
+            final int byteLength
+    ) {
+        if (sourceAddress == org.lwjgl.system.MemoryUtil.NULL || byteLength <= 0) {
+            throw new IllegalArgumentException("Sodium indexed-indirect snapshot cannot be empty");
+        }
+        SodiumIndexedIndirectSnapshotArena arena = sodiumIndexedIndirectSnapshots[
+                (int) (currentSubmitIndex % MAX_SUBMITS_IN_FLIGHT)
+        ];
+        GpuBufferSlice snapshot = arena.allocate(device, currentSubmitIndex, byteLength);
+        GpuBufferSlice staging = transientMemory.uploadStagingFromAddress(
+                sourceAddress,
+                byteLength,
+                Integer.BYTES,
+                GpuBuffer.USAGE_COPY_SRC
+        );
+        MetalGpuBuffer stagingBuffer = (MetalGpuBuffer) staging.buffer();
+        MTLBlitCommandEncoder blit = blitCommandEncoder();
+        blit.copyFromBufferToBuffer(
+                stagingBuffer.nativeHandle(),
+                staging.offset(),
+                ((MetalGpuBuffer) snapshot.buffer()).nativeHandle(),
+                snapshot.offset(),
+                byteLength
+        );
         return snapshot;
     }
 

@@ -1,5 +1,6 @@
 package com.metallum.client.lighting.shader;
 
+import com.metallum.client.benchmark.DiagnosticAblationMode;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
@@ -22,6 +23,8 @@ import org.lwjgl.util.spvc.SpvcReflectedResource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.IntBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -78,13 +81,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "21d670096f7b0c5fbb7dfc2d6eb12e2dd468b833b5fba4d0f11c8300f9de1f95",
+            "sodium-solid-fsh", "cd2ac61eaa8ea5f916b3cb82802748a47709dbb20decbe5db178cad3cf7bcb14",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "773f5999c287581a02a3d15e6642ec4c7f5eaee387a3ee40497213ec5bdc2eea",
+            "sodium-cutout-fsh", "4628cf8e857738656bd620250c6c2c861283b1e3518717eda3f69c945ccbdbc0",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "dfa18f0bee9902ff813ca40aafee1fead0be08c00afd995becdf0a1e32dc86af",
+            "minecraft-entity-fsh", "e1ea3834ffea62fbfb56befd1aaf07ea839c32af661d79cb5d2571fb5efdce0b",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "b36ad081b1d12d1a1af15b0671a195b189960b7c3bb5991111093a2506266610"
+            "minecraft-end-portal-fsh", "1c0bb38894ab333305287378538954bb06e91e8aad5316b3878c113e8dd8cf5f"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -100,14 +103,23 @@ public final class AdvancedDirectLightingShaderTests {
         testWaterSquareCelestialMask();
         testScaleInvariantSurfaceNormal();
         testL6ShadowFilterContinuityAndBlur();
+        testL6InteriorFastPathMatchesResolvedTaps();
         testLightingModelIsAnIndependentVariantAxis();
         testSharedDirectFormulaAndGeometryInputs();
         testL8MaterialOpticsAndBoundedCost();
         testL8ReactiveTemporalVariant();
+        testL6TemporalShadowVariant();
+        testL6TemporalShadowConfigDefaultsOff();
         testFailClosedSourceContracts();
         testTwoPhasePreflightGate();
         testActualSourcesCompileAndMatchGoldens();
         testDedicatedSunShadowVariants();
+        testL3DiagnosticChangesCompiledSourceOnly();
+        testL6DiagnosticChangesCompiledSourceOnly();
+        testL6NearestOnlyDiagnosticChangesCompiledSourceOnly();
+        testL6NearestNoProxyDiagnosticChangesCompiledSourceOnly();
+        testL6StochasticOneTapDiagnosticChangesCompiledSourceOnly();
+        testL6StochasticTwoTapDiagnosticChangesCompiledSourceOnly();
         testAmbientOnlyTerrainSpecialization();
     }
 
@@ -155,7 +167,7 @@ public final class AdvancedDirectLightingShaderTests {
                         new int[]{13, 14, 15})
                         && SunShadowLayout.MAX_CASCADES == 3,
                 "L4 environment/shadow binding ABI changed");
-        require(VoxelShadowBindingAbi.VERSION == 4
+        require(VoxelShadowBindingAbi.VERSION == 5
                         && VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT == 14
                         && VoxelShadowBindingAbi.PROXY_BUFFER_SLOT == 15
                         && VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT == 16
@@ -183,6 +195,9 @@ public final class AdvancedDirectLightingShaderTests {
                 "L6 local-shadow binding slots changed");
         require(VoxelShadowBindingAbi.PARAMS_BYTES == 256
                         && VoxelShadowBindingAbi.PROXY_STRIDE_BYTES == 32
+                        && VoxelShadowBindingAbi.PROXY_MASK_STRIDE_BYTES == 4
+                        && VoxelShadowBindingAbi.PROXY_MASKS_OFFSET_BYTES == 1_024
+                        && VoxelShadowBindingAbi.PROXY_PACKET_BYTES == 17_408
                         && VoxelShadowBindingAbi.WORLD_FROM_VIEW_MATRIX_OFFSET == 0
                         && VoxelShadowBindingAbi.CAMERA_BLOCK_AND_FLAGS_OFFSET == 64
                         && VoxelShadowBindingAbi.ATLAS_HIT_CAPACITY_OFFSET == 76
@@ -486,6 +501,89 @@ public final class AdvancedDirectLightingShaderTests {
         }
     }
 
+    private static void testL6InteriorFastPathMatchesResolvedTaps() {
+        double[] blends = {
+                0.0,
+                Math.nextDown(0.5f),
+                0.5,
+                Math.nextUp(0.5f),
+                Math.nextDown(1.0f)
+        };
+        for (int edge : new int[]{8, 16, 32, 64}) {
+            for (int face = 0; face < 6; face++) {
+                for (int lowerY = 1; lowerY <= edge - 2; lowerY++) {
+                    for (int lowerX = 1; lowerX <= edge - 2; lowerX++) {
+                        for (double blendY : blends) {
+                            for (double blendX : blends) {
+                                double positionX = lowerX + blendX;
+                                double positionY = lowerY + blendY;
+                                double[] direction = cubeDirection(face,
+                                        texelPositionUv(edge, positionX, positionY));
+                                CubeFaceUv faceUv = cubeFaceUv(direction);
+                                double edgeDistance = (1.0 - Math.max(
+                                        Math.abs(faceUv.u()), Math.abs(faceUv.v())))
+                                        * 0.5 * edge;
+                                if (edgeDistance < 1.5) {
+                                    continue;
+                                }
+
+                                ResolvedTap[] legacy = {
+                                        resolveTap(edge, face, lowerX, lowerY),
+                                        resolveTap(edge, face, lowerX + 1, lowerY),
+                                        resolveTap(edge, face, lowerX, lowerY + 1),
+                                        resolveTap(edge, face, lowerX + 1, lowerY + 1)
+                                };
+                                ResolvedTap[] direct = {
+                                        new ResolvedTap(face, lowerX, lowerY),
+                                        new ResolvedTap(face, lowerX + 1, lowerY),
+                                        new ResolvedTap(face, lowerX, lowerY + 1),
+                                        new ResolvedTap(face, lowerX + 1, lowerY + 1)
+                                };
+                                for (int tap = 0; tap < legacy.length; tap++) {
+                                    require(legacy[tap].equals(direct[tap]),
+                                            "L6 interior fast path changed a resolved tap");
+                                }
+
+                                int nearestX = clamp(
+                                        (int) Math.floor(positionX + 0.5), 0, edge - 1);
+                                int nearestY = clamp(
+                                        (int) Math.floor(positionY + 0.5), 0, edge - 1);
+                                int legacyNearestId = (face * edge + nearestY) * edge + nearestX;
+                                int fastNearestIndex = blendY < 0.5
+                                        ? (blendX < 0.5 ? 0 : 1)
+                                        : (blendX < 0.5 ? 2 : 3);
+                                require(resolvedTapId(edge, direct[fastNearestIndex])
+                                                == legacyNearestId,
+                                        "L6 interior fast path changed nearest tap tie handling");
+
+                                double[] bilinear = {
+                                        (1.0 - blendX) * (1.0 - blendY),
+                                        blendX * (1.0 - blendY),
+                                        (1.0 - blendX) * blendY,
+                                        blendX * blendY
+                                };
+                                Map<Integer, Double> expected = new LinkedHashMap<>();
+                                for (int tap = 0; tap < direct.length; tap++) {
+                                    addShadowWeight(expected,
+                                            resolvedTapId(edge, direct[tap]), bilinear[tap]);
+                                }
+                                Map<Integer, Double> legacyWeights =
+                                        softShadowWeights(edge, direction);
+                                require(expected.keySet().equals(legacyWeights.keySet()),
+                                        "L6 interior fast path changed weighted tap coverage");
+                                for (Map.Entry<Integer, Double> entry : expected.entrySet()) {
+                                    require(Math.abs(entry.getValue()
+                                                    - legacyWeights.get(entry.getKey())) <= 1.0e-12,
+                                            "L6 interior fast path changed a bilinear weight");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private static void testLightingModelIsAnIndependentVariantAxis() throws IOException {
         for (ShaderCase shader : actualTargetSources()) {
             String material = materialSource(shader);
@@ -732,6 +830,12 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("0.0, 1.5, faceEdgeDistanceTexels")
                         && sodiumFragment.contains(
                         "triangleWeight, bilinearWeight, interiorWeight")
+                        && sodiumFragment.contains(
+                        "if (faceEdgeDistanceTexels >= 1.5)")
+                        && sodiumFragment.contains(
+                        "uvec3 tap00 = uvec3(face, uvec2(lowerTexel));")
+                        && sodiumFragment.contains(
+                        "uvec3 tap11 = uvec3(face, uvec2(lowerTexel + ivec2(1, 1)));")
                         && countOccurrences(sodiumFragment,
                         "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && countOccurrences(sodiumFragment,
@@ -740,6 +844,17 @@ public final class AdvancedDirectLightingShaderTests {
                         "vec3 visibility2 = metallumVoxelResolvedTapVisibilityV1(") == 1
                         && sodiumFragment.contains(
                         "vec3 visibility = nearestVisibility * nearestWeight")
+                        && sodiumFragment.contains(
+                        "bool metallumVoxelTapLayer0ProvesVisibleV1(")
+                        && sodiumFragment.contains(
+                        "if (all(equal(nearestVisibility, vec3(1.0))))")
+                        && countOccurrences(sodiumFragment,
+                        "metallumVoxelTapLayer0ProvesVisibleV1(\n") == 4
+                        && sodiumFragment.contains(
+                        "vec3 allVisible = nearestVisibility * nearestWeight")
+                        && before(sodiumFragment,
+                        "vec3 allVisible = nearestVisibility * nearestWeight",
+                        "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1(")
                         && !sodiumFormula.contains("softShadowLightIndex")
                         && !sodiumFormula.contains("float shadowScore = dot(")
                         && before(sodiumFormula,
@@ -761,6 +876,10 @@ public final class AdvancedDirectLightingShaderTests {
                         "metallumVoxelVisibilityCache.hits[firstHit + layer]")
                         && sodiumFragment.contains(
                         "uint firstHit = baseHitIndex + texelIndex * 4u;")
+                        && sodiumFragment.contains(
+                        "float cacheDirectionLengthSquared = dot(cacheDirection, cacheDirection);")
+                        && sodiumFragment.contains(
+                        "|| !metallumFiniteVec3V1(cacheDirection)")
                         && sodiumFragment.contains(
                         "float cacheFaceEdgeFloat = float(cacheFaceEdge);")
                         && sodiumFragment.contains(
@@ -903,7 +1022,11 @@ public final class AdvancedDirectLightingShaderTests {
                         && before(visibilityCall,
                         "receiverWorldNormal,", "light.positionRadius.xyz,"),
                 "L6 receiver shadow context is not hoisted once outside the per-light loop");
-        require(sodiumFragment.contains(
+        require(sodiumFragment.contains("while (proxyMask != 0u)")
+                        && sodiumFragment.contains(
+                        "uint proxyIndex = uint(findLSB(proxyMask));")
+                        && sodiumFragment.contains("proxyMask &= proxyMask - 1u;")
+                        && !sodiumFragment.contains(
                         "for (uint proxyIndex = 0u; proxyIndex < 32u; ++proxyIndex)")
                         && sodiumFragment.contains("proxyCapacity > 32u")
                         && sodiumFragment.contains(
@@ -919,8 +1042,27 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains(
                         "floatBitsToUint(proxy.maxWorldRelative.w)")
                         && sodiumFragment.contains(
+                        "MetallumVoxelProxyV1 proxies[32];")
+                        && sodiumFragment.contains("uint lightMasks[];")
+                        && sodiumFragment.contains(
+                        "uint proxyMask = metallumVoxelProxyBuffer.lightMasks[lightIndex];")
+                        && !sodiumFragment.contains(
                         "all(equal(proxyStableId, lightStableId))")
-                        && sodiumFormula.contains("light.metadata.xy,")
+                        && sodiumFragment.contains(
+                        "vec3 segmentMinimum = min(startWorldRelative, endWorldRelative);")
+                        && sodiumFragment.contains(
+                        "vec3 segmentMaximum = max(startWorldRelative, endWorldRelative);")
+                        && sodiumFragment.contains(
+                        "any(lessThan(maximum, segmentMinimum))")
+                        && sodiumFragment.contains(
+                        "any(greaterThan(minimum, segmentMaximum))")
+                        && before(sodiumFragment,
+                        "any(lessThan(maximum, segmentMinimum))",
+                        "metallumSegmentIntersectsProxyV1(")
+                        && sodiumFormula.contains(
+                        "lightCameraRelative,\n                                lightIndex,")
+                        && !sodiumFormula.contains(
+                        "lightCameraRelative,\n                                light.metadata.xy,")
                         && sodiumFragment.contains("return false;"),
                 "L6 bounded proxy AABB occlusion or stable-ID self-exclusion is missing");
         require(sodiumFragment.contains("metallumVoxelStepBudgetFitsV1(")
@@ -1047,7 +1189,7 @@ public final class AdvancedDirectLightingShaderTests {
                         && before(environment,
                         "if (material.kind == METALLUM_SURFACE_WATER_V1) {",
                         "float environmentStyleWeight = material.kind == METALLUM_SURFACE_WATER_V1"),
-                "water sky reflection is not gated by existing skylight and moon state");
+                "analytic water environment is not gated by existing skylight and moon state");
         require(sodiumFragment.contains("float metallumWaterSquareCelestialMaskV1(")
                         && sodiumFragment.contains("vec3 squareRight = cross(")
                         && sodiumFragment.contains(
@@ -1205,6 +1347,55 @@ public final class AdvancedDirectLightingShaderTests {
                 reactive.source(),
                 SODIUM_SOLID_DEFINES
         );
+    }
+
+    private static void testL6TemporalShadowVariant() throws IOException {
+        ShaderCase[] sources = actualTargetSources();
+        String sodiumVertex = advancedSource(sources[0]);
+        String sodiumFragment = advancedSource(sources[1]);
+        L6TemporalShaderPatcher.Result temporal = L6TemporalShaderPatcher.patch(
+                sources[1].namespace(),
+                sources[1].path(),
+                sources[1].stage(),
+                sodiumFragment
+        );
+        require(temporal.success(), "L6 temporal terrain variant failed: "
+                + temporal.failureReason());
+        String temporalSource = temporal.source();
+        require(temporalSource.contains("layout(location = 1) out vec4 metallumL6TemporalHistory;")
+                        && temporalSource.contains(
+                        "layout(binding = 10) uniform sampler2D metallumL6TemporalHistorySampler;")
+                        && temporalSource.contains(
+                        "layout(std430, binding = 12) readonly buffer MetallumL6TemporalParamsV1")
+                        && temporalSource.contains("METALLUM_EXPERIMENTAL_L6_TEMPORAL_ONE_TAP")
+                        && temporalSource.contains("metallumEvaluateClusteredDirectTemporalV1(")
+                        && temporalSource.contains("metallumL6TemporalHistory = vec4(")
+                        && temporalSource.contains("metallumEvaluateClusteredMaterialSpecularV1(")
+                        && temporalSource.contains("vec3 visibility = metallumVoxelVisibilityV1("),
+                "L6 temporal variant does not keep an exact specular path plus isolated diffuse history");
+        L6TemporalShaderPatcher.Result second = L6TemporalShaderPatcher.patch(
+                sources[1].namespace(), sources[1].path(), sources[1].stage(), temporalSource
+        );
+        require(second.success() && second.source().equals(temporalSource),
+                "L6 temporal patching is not idempotent");
+        require(!L6TemporalShaderPatcher.patch(
+                        sources[3].namespace(), sources[3].path(), sources[3].stage(),
+                        advancedSource(sources[3])
+                ).success(), "L6 temporal MRT escaped Sodium terrain");
+        compilePair("sodium-l6-temporal", sodiumVertex, temporalSource, SODIUM_SOLID_DEFINES);
+    }
+
+    private static void testL6TemporalShadowConfigDefaultsOff() throws IOException {
+        Path directory = Files.createTempDirectory("metallum-l6-temporal-config-");
+        Path config = directory.resolve("experimental-shadows.properties");
+        require(!L6TemporalShadowExperimentConfig.load(config),
+                "missing temporal-shadow config must default off");
+        Files.writeString(config, "enabled=true\n", StandardCharsets.UTF_8);
+        require(L6TemporalShadowExperimentConfig.load(config),
+                "temporal-shadow config did not accept enabled=true");
+        Files.writeString(config, "enabled=false\n", StandardCharsets.UTF_8);
+        require(!L6TemporalShadowExperimentConfig.load(config),
+                "temporal-shadow config did not accept enabled=false");
     }
 
     private static void testFailClosedSourceContracts() throws IOException {
@@ -1437,10 +1628,10 @@ public final class AdvancedDirectLightingShaderTests {
         String endPortalFragment = advancedSource(sources[5]);
         String expectedClusterDepthGuard = "metallumLighting.gridAndLightCount.z != "
                 + AdvancedLightingLayout.DEPTH_SLICES + "u";
+
         boolean sodiumClusterDepthMatches = sodiumFragment.contains(expectedClusterDepthGuard);
         boolean entityClusterDepthMatches = entityFragment.contains(expectedClusterDepthGuard);
         boolean endPortalClusterDepthMatches = endPortalFragment.contains(expectedClusterDepthGuard);
-
         require(sodiumClusterDepthMatches
                         && entityClusterDepthMatches
                         && endPortalClusterDepthMatches,
@@ -1657,6 +1848,538 @@ public final class AdvancedDirectLightingShaderTests {
         }
     }
 
+    private static void testL3DiagnosticChangesCompiledSourceOnly() throws IOException {
+        final String property = "metallum.diagnostic.ablation";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result production =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(production.success(),
+                    "production shader failed before the L3 diagnostic contract check");
+            require(countOccurrences(
+                            production.source(),
+                            "metallumEvaluateClusteredDirectV1("
+                    ) == 2,
+                    "production shader does not retain its clustered-direct definition and call");
+
+            System.setProperty(property, "NO_L3_RECEIVER");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "NO_L3_RECEIVER shader patch failed: " + diagnostic.failureReason());
+            require(diagnostic.source().contains("METALLUM_DIAGNOSTIC_NO_L3_RECEIVER")
+                            && countOccurrences(
+                            diagnostic.source(),
+                            "metallumEvaluateClusteredDirectV1("
+                    ) == 1,
+                    "NO_L3_RECEIVER did not physically remove the terrain clustered-direct call");
+            require(!diagnostic.source().equals(production.source()),
+                    "NO_L3_RECEIVER produced the production shader byte-for-byte");
+            require(AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            diagnostic.source(),
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    ).success(),
+                    "NO_L3_RECEIVER shader failed the already-patched source contract");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-no-l3.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-no-l3.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "NO_L3_RECEIVER shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError("NO_L3_RECEIVER shader compilation failed", exception);
+            }
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result restored =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(restored.success() && restored.source().equals(production.source()),
+                    "disabling diagnostics did not restore the byte-identical production shader");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static void testL6DiagnosticChangesCompiledSourceOnly() throws IOException {
+        final String property = "metallum.diagnostic.ablation";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result production =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(production.success(),
+                    "production shader failed before the L6 diagnostic contract check");
+            require(countOccurrences(
+                            production.source(),
+                            "bool localShadowContractValid = !("
+                    ) == 2,
+                    "production shader does not retain both L6 receiver contracts");
+
+            System.setProperty(property, "NO_L6_RECEIVER");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "NO_L6_RECEIVER shader patch failed: " + diagnostic.failureReason());
+            require(countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_NO_L6_RECEIVER"
+                    ) == 2
+                            && !diagnostic.source().contains(
+                            "bool localShadowContractValid = !("
+                    )
+                            && countOccurrences(
+                            diagnostic.source(),
+                            "metallumEvaluateClusteredDirectV1("
+                    ) == 2,
+                    "NO_L6_RECEIVER did not remove both L6 contracts while preserving L3");
+            require(!diagnostic.source().equals(production.source()),
+                    "NO_L6_RECEIVER produced the production shader byte-for-byte");
+            require(AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            diagnostic.source(),
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    ).success(),
+                    "NO_L6_RECEIVER shader failed the already-patched source contract");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-no-l6.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-no-l6.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "NO_L6_RECEIVER shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError("NO_L6_RECEIVER shader compilation failed", exception);
+            }
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result restored =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(restored.success() && restored.source().equals(production.source()),
+                    "disabling diagnostics did not restore the byte-identical L6 production shader");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static void testL6NearestOnlyDiagnosticChangesCompiledSourceOnly() throws IOException {
+        final String property = "metallum.diagnostic.ablation";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result production =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(production.success(),
+                    "production shader failed before the L6 nearest-only diagnostic check");
+            require(countOccurrences(
+                            production.source(),
+                            "vec3 softVisibility = metallumVoxelSoftCachedVisibilityV1("
+                    ) == 1,
+                    "production shader no longer retains the all-resident L6 filter call");
+
+            System.setProperty(property, "L6_NEAREST_ONLY");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "L6_NEAREST_ONLY shader patch failed: " + diagnostic.failureReason());
+            require(countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_L6_NEAREST_ONLY"
+                    ) == 1
+                            && !diagnostic.source().contains(
+                            "vec3 softVisibility = metallumVoxelSoftCachedVisibilityV1("
+                    )
+                            && diagnostic.source().contains(
+                            "vec3 softVisibility = nearestVisibility;"
+                    )
+                            && countOccurrences(
+                            diagnostic.source(),
+                            "bool localShadowContractValid = !("
+                    ) == 2,
+                    "L6_NEAREST_ONLY did not remove only the three extra filter taps");
+            require(!diagnostic.source().equals(production.source()),
+                    "L6_NEAREST_ONLY produced the production shader byte-for-byte");
+            require(AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            diagnostic.source(),
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    ).success(),
+                    "L6_NEAREST_ONLY shader failed the already-patched source contract");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-l6-nearest-only.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-l6-nearest-only.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "L6_NEAREST_ONLY shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError("L6_NEAREST_ONLY shader compilation failed", exception);
+            }
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result restored =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(restored.success() && restored.source().equals(production.source()),
+                    "disabling diagnostics did not restore the byte-identical L6 production shader");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static void testL6NearestNoProxyDiagnosticChangesCompiledSourceOnly() throws IOException {
+        final String property = "metallum.diagnostic.ablation";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result production =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(production.success(),
+                    "production shader failed before the L6 proxy diagnostic check");
+            require(!production.source().contains("METALLUM_DIAGNOSTIC_L6_NO_PROXY"),
+                    "production shader unexpectedly contains the no-proxy diagnostic marker");
+
+            System.setProperty(property, "L6_NEAREST_NO_PROXY");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "L6_NEAREST_NO_PROXY shader patch failed: " + diagnostic.failureReason());
+            require(countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_L6_NEAREST_ONLY"
+                    ) == 1
+                            && countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_L6_NO_PROXY"
+                    ) == 1
+                            && diagnostic.source().contains(
+                            "failOpen = false;\n"
+                                    + "                // METALLUM_DIAGNOSTIC_L6_NO_PROXY\n"
+                                    + "                return true;"
+                    )
+                            && countOccurrences(
+                            diagnostic.source(),
+                            "bool localShadowContractValid = !("
+                    ) == 2,
+                    "L6_NEAREST_NO_PROXY did not isolate nearest cached visibility from proxies");
+            require(!diagnostic.source().equals(production.source()),
+                    "L6_NEAREST_NO_PROXY produced the production shader byte-for-byte");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-l6-nearest-no-proxy.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-l6-nearest-no-proxy.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "L6_NEAREST_NO_PROXY shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError(
+                        "L6_NEAREST_NO_PROXY shader compilation failed",
+                        exception
+                );
+            }
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result restored =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(restored.success() && restored.source().equals(production.source()),
+                    "disabling diagnostics did not restore production after the proxy probe");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static void testL6StochasticOneTapDiagnosticChangesCompiledSourceOnly()
+            throws IOException {
+        final String property = "metallum.experimental.l6StochasticTapCount";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+            System.setProperty(property, "1");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "one-tap stochastic L6 shader patch failed: " + diagnostic.failureReason());
+            require(countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_ONE_TAP"
+                    ) == 1
+                            && diagnostic.source().contains("uvec3 nearestTap;")
+                            && diagnostic.source().contains(
+                            "vec4 stochasticWeight = vec4(nearestWeight, extraWeight);")
+                            && diagnostic.source().contains(
+                            "visibility = stochasticVisibility * totalWeight;")
+                            && !diagnostic.source().contains(
+                            "vec3 nearestVisibility = metallumVoxelCachedVisibilityV1(")
+                            && !diagnostic.source().contains(
+                            "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1("),
+                    "one-tap stochastic L6 mode retained more than one filter evaluation");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-l6-stochastic-one.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-l6-stochastic-one.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "one-tap stochastic L6 shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError("one-tap stochastic L6 shader compilation failed", exception);
+            }
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static void testL6StochasticTwoTapDiagnosticChangesCompiledSourceOnly()
+            throws IOException {
+        final String property = "metallum.experimental.l6StochasticTwoTap";
+        String previous = System.getProperty(property);
+        try {
+            ShaderCase sodiumFragmentCase = actualTargetSources()[1];
+            String material = materialSource(sodiumFragmentCase);
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result production =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(production.success()
+                            && !production.source().contains(
+                            "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_TWO_TAP"),
+                    "production shader contains the stochastic L6 diagnostic");
+
+            System.setProperty(property, "true");
+            AdvancedDirectLightingShaderPatcher.Result diagnostic =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(diagnostic.success(),
+                    "stochastic L6 shader patch failed: " + diagnostic.failureReason());
+            require(countOccurrences(
+                            diagnostic.source(),
+                            "METALLUM_DIAGNOSTIC_L6_STOCHASTIC_TWO_TAP"
+                    ) == 1
+                            && diagnostic.source().contains(
+                            "metallumLighting.frameIdAndGeneration.x")
+                            && diagnostic.source().contains(
+                            "visibility = nearestVisibility * nearestWeight")
+                            && diagnostic.source().contains(
+                            "+ stochasticVisibility * remainingWeight")
+                            && !diagnostic.source().contains(
+                            "vec3 visibility0 = metallumVoxelResolvedTapVisibilityV1("),
+                    "stochastic L6 mode did not replace the three extra taps with one sample");
+            require(!diagnostic.source().equals(production.source()),
+                    "stochastic L6 mode produced the production shader byte-for-byte");
+
+            String sodiumVertex = advancedSource(actualTargetSources()[0]);
+            try (GlslCompiler compiler = new GlslCompiler();
+                 IntermediaryShaderModule vertexModule = compiler.createIntermediary(
+                         "sodium-solid-l6-stochastic.vsh",
+                         withDefines(sodiumVertex, SODIUM_SOLID_DEFINES),
+                         ShaderType.VERTEX);
+                 IntermediaryShaderModule fragmentModule = compiler.createIntermediary(
+                         "sodium-solid-l6-stochastic.fsh",
+                         withDefines(diagnostic.source(), SODIUM_SOLID_DEFINES),
+                         ShaderType.FRAGMENT)) {
+                require(vertexModule.spirv() != null && fragmentModule.spirv() != null,
+                        "stochastic L6 shader produced invalid SPIR-V");
+            } catch (ShaderCompileException exception) {
+                throw new AssertionError("stochastic L6 shader compilation failed", exception);
+            }
+
+            System.clearProperty(property);
+            AdvancedDirectLightingShaderPatcher.Result restored =
+                    AdvancedDirectLightingShaderPatcher.patch(
+                            sodiumFragmentCase.namespace(),
+                            sodiumFragmentCase.path(),
+                            sodiumFragmentCase.stage(),
+                            LightingModel.ADVANCED,
+                            material,
+                            TerrainEnvironmentSpecialization.AMBIENT_ONLY
+                    );
+            require(restored.success() && restored.source().equals(production.source()),
+                    "disabling stochastic L6 did not restore byte-identical production source");
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
     private static void compileShadowPair(
             final String name,
             final String vertex,
@@ -1753,7 +2476,7 @@ public final class AdvancedDirectLightingShaderTests {
                     name + " fragment module dropped the Advanced position varying");
 
             StorageReflection storage = storageBufferLayout(fragmentModule);
-            require(storage.bytes().equals(Map.ofEntries(
+            Map<Integer, Long> expectedStorage = new LinkedHashMap<>(Map.ofEntries(
                             Map.entry(VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT, 8L),
                             Map.entry(VoxelShadowBindingAbi.PROXY_BUFFER_SLOT, 32L),
                             Map.entry(VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT, 256L),
@@ -1772,7 +2495,14 @@ public final class AdvancedDirectLightingShaderTests {
                                     (long) AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE),
                             Map.entry(VoxelShadowBindingAbi.SHADOW_REF_BUFFER_SLOT,
                                     (long) VoxelShadowBindingAbi.SHADOW_REF_DESCRIPTOR_STRIDE_BYTES)
-                    )),
+                    ));
+            if (name.equals("sodium-l6-temporal")) {
+                expectedStorage.put(
+                        AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT,
+                        (long) AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_BYTES
+                );
+            }
+            require(storage.bytes().equals(expectedStorage),
                     name + " compiled storage-buffer ABI changed: " + storage.bytes());
             require(storage.paramsOffsets().equals(List.of(
                             0, 64, 128, 144, 160, 176, 192, 208, 224, 240)),
@@ -1793,6 +2523,15 @@ public final class AdvancedDirectLightingShaderTests {
             for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
                 require(fragmentMsl.contains("[[buffer(" + slot + ")]]"),
                         name + " SPIRV-Cross output lost Metal fragment slot " + slot);
+            }
+            if (name.equals("sodium-l6-temporal")) {
+                require(countOccurrences(fragmentMsl, "[[buffer("
+                                + AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT + ")]]") == 1
+                                && countOccurrences(fragmentMsl, "[[texture("
+                                + AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT + ")]]") == 1
+                                && countOccurrences(fragmentMsl, "[[sampler("
+                                + AdvancedLightingBindingAbi.L6_TEMPORAL_HISTORY_SLOT + ")]]") == 1,
+                        name + " SPIRV-Cross output lost temporal native bindings");
             }
             require(fragmentMsl.contains("[[buffer(26)]]"),
                     name + " SPIRV-Cross output lost L4 environment slot");
@@ -1941,6 +2680,14 @@ public final class AdvancedDirectLightingShaderTests {
                                 Spvc.spvc_compiler_get_declared_struct_size(
                                         compiler, blockType, size),
                                 "read environment block size"
+                        );
+                        bytes = size.get(0);
+                    } else if (binding == AdvancedLightingBindingAbi.L6_TEMPORAL_PARAMS_SLOT) {
+                        PointerBuffer size = stack.mallocPointer(1);
+                        checkSpvc(
+                                Spvc.spvc_compiler_get_declared_struct_size(
+                                        compiler, blockType, size),
+                                "read L6 temporal params block size"
                         );
                         bytes = size.get(0);
                     } else {
@@ -2094,7 +2841,8 @@ public final class AdvancedDirectLightingShaderTests {
                         shader.path(),
                         shader.stage(),
                         LightingModel.ADVANCED,
-                        materialSource(shader)
+                        materialSource(shader),
+                        TerrainEnvironmentSpecialization.FULL
                 );
         require(advanced.success(), shader.key() + " Advanced patch failed: " + advanced.failureReason());
         return advanced.source();
@@ -2277,6 +3025,13 @@ public final class AdvancedDirectLightingShaderTests {
     }
 
     private static Map<Integer, Double> softShadowWeights(
+            final int edge,
+            final double[] direction
+    ) {
+        return shadowWeights(edge, direction);
+    }
+
+    private static Map<Integer, Double> shadowWeights(
             final int edge,
             final double[] direction
     ) {

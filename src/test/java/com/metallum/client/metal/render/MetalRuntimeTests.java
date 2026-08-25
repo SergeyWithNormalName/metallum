@@ -346,6 +346,9 @@ public final class MetalRuntimeTests {
                 oldOffset, 16
         );
         require(descriptors.getInt(
+                        LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_OFFSET)
+                        == LocalVoxelShadowAtlasLayout.DESCRIPTOR_STATE_STALE_RETAINED
+                        && descriptors.getInt(
                         LocalVoxelShadowAtlasLayout.DESCRIPTOR_ATLAS_OFFSET_LO_OFFSET
                 ) == 0x100
                         && descriptors.getInt(
@@ -465,7 +468,7 @@ public final class MetalRuntimeTests {
     private static void testLocalShadowIndependentEntityProxyContract() {
         ByteBuffer params = ByteBuffer.allocateDirect(LocalVoxelShadowLayout.PARAMS_BYTES)
                 .order(ByteOrder.nativeOrder());
-        int proxySlotBytes = 32 * LocalVoxelShadowLayout.PROXY_STRIDE_BYTES;
+        int proxySlotBytes = LocalVoxelShadowLayout.PROXY_PACKET_BYTES;
         ByteBuffer proxies = ByteBuffer.allocateDirect(proxySlotBytes)
                 .order(ByteOrder.nativeOrder());
         ByteBuffer descriptors = ByteBuffer.allocateDirect(16 * 64)
@@ -527,6 +530,42 @@ public final class MetalRuntimeTests {
         LocalVoxelShadowGpuResources.CameraParts camera =
                 LocalVoxelShadowGpuResources.cameraParts(frame.currentCameraPosition());
 
+        List<AdvancedLight> maskLights = List.of(
+                new AdvancedLight(
+                        201L, 1L, LightSourceKind.BLOCK,
+                        0.0, 1.0, 0.0, 4.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f, 1),
+                new AdvancedLight(
+                        101L, 1L, LightSourceKind.ENTITY,
+                        0.0, 1.0, 0.0, 4.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f, 1),
+                new AdvancedLight(
+                        202L, 1L, LightSourceKind.BLOCK,
+                        100.0, 1.0, 0.0, 2.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f, 1),
+                new AdvancedLight(
+                        203L, 1L, LightSourceKind.BLOCK,
+                        3.5, 1.0, 0.0, 1.0f,
+                        1.0f, 1.0f, 1.0f, 1.0f, 1)
+        );
+        LocalVoxelShadowGpuResources.packProxyMasks(
+                proxies, maskLights, proxySnapshot2, 2,
+                frame.currentCameraPosition()
+        );
+        int maskOffset = LocalVoxelShadowLayout.PROXY_MASKS_OFFSET_BYTES;
+        require(proxies.getInt(maskOffset) == 0b11,
+                "A nearby light must retain every intersecting proxy");
+        require(proxies.getInt(maskOffset + 4) == 0b10,
+                "A carried light must exclude all proxy primitives with its stable ID");
+        require(proxies.getInt(maskOffset + 8) == 0,
+                "A proxy outside the light sphere must be rejected conservatively");
+        require(proxies.getInt(maskOffset + 12) == 0b10,
+                "A sphere tangent to a proxy must remain a shadow candidate");
+        expectIllegalArgument(() -> LocalVoxelShadowGpuResources.packProxyMasks(
+                ByteBuffer.allocateDirect(LocalVoxelShadowLayout.PROXY_PACKET_BYTES - 1),
+                maskLights, proxySnapshot2, 2, frame.currentCameraPosition()
+        ));
+
         VoxelWorldToken voxelWorldA = new VoxelWorldToken(1L, "minecraft:overworld");
         VoxelClipmapSnapshot.Level level0 = new VoxelClipmapSnapshot.Level(0, 1, 32, 0L, 0L, 0L, 1);
         VoxelClipmapSnapshot voxelSnapshot = new VoxelClipmapSnapshot(
@@ -546,7 +585,6 @@ public final class MetalRuntimeTests {
                 "CASE A params proxyCount must be 2");
         require(params.getInt(VoxelShadowBindingAbi.ACTIVE_OFFSET) == 1,
                 "CASE A params active must be 1");
-
         // CASE B: voxelActive = false, proxySnapshot = 2 -> GPU params proxyCount MUST STILL = 2
         params.clear(); proxies.clear(); descriptors.clear();
         int countB = LocalVoxelShadowGpuResources.packFrameParameters(
@@ -810,8 +848,7 @@ public final class MetalRuntimeTests {
                         && localShadowed.dispatchCount() == shadowed.dispatchCount() + 1
                         && localShadowed.uploadBytes() == shadowed.uploadBytes()
                         + com.metallum.client.renderer.LocalVoxelShadowLayout.PARAMS_BYTES
-                        + (long) localBudget.maxEntityProxies()
-                        * com.metallum.client.renderer.LocalVoxelShadowLayout.PROXY_STRIDE_BYTES
+                        + com.metallum.client.renderer.LocalVoxelShadowLayout.PROXY_PACKET_BYTES
                         + localBudget.shadowReferenceRingBytes()
                         / LocalVoxelShadowAtlasLayout.DESCRIPTOR_RING_SLOTS,
                 "L6 local-shadow packet/proxy/reference work is not explicitly bounded");
@@ -1036,6 +1073,18 @@ public final class MetalRuntimeTests {
         require(MetalRenderPass.requiredIndexedIndirectCommandBytes(drawCount, expandedRing.capacity())
                         == commandBytes,
                 "Sodium indexed-indirect snapshot size changed");
+        require(SodiumIndexedIndirectBatcher.preparedSnapshotMatches(
+                        12L, 12L, 7L, 7L, commandBytes, commandBytes),
+                "same-submit prepared Sodium snapshot was rejected");
+        require(!SodiumIndexedIndirectBatcher.preparedSnapshotMatches(
+                        11L, 12L, 7L, 7L, commandBytes, commandBytes),
+                "stale-submit prepared Sodium snapshot was accepted");
+        require(!SodiumIndexedIndirectBatcher.preparedSnapshotMatches(
+                        12L, 12L, 6L, 7L, commandBytes, commandBytes),
+                "stale render-invocation prepared Sodium snapshot was accepted");
+        require(!SodiumIndexedIndirectBatcher.preparedSnapshotMatches(
+                        12L, 12L, 7L, 7L, commandBytes - 1L, commandBytes),
+                "undersized prepared Sodium snapshot was accepted");
         expectIllegalArgument(() -> MetalRenderPass.requiredIndexedIndirectCommandBytes(-1, commandBytes));
         expectIllegalArgument(() -> MetalRenderPass.requiredIndexedIndirectCommandBytes(
                 drawCount,

@@ -5,11 +5,12 @@ import java.util.Objects;
 /** Fixed L6 local-shadow work and upload limits; no preset may exceed the compile-time caps. */
 public final class LocalVoxelShadowLayout {
     /**
-     * Version 4 stores per-hit RGB transmittance in the existing eight-byte cache stride.
+     * Version 5 adds conservative per-light proxy masks without changing the existing
+     * eight-byte cache hit stride.
      * Descriptor state zero remains the explicit approximate-direct path, so an unavailable
      * resident page still fails open instead of blacking out a valid local light.
      */
-    public static final int ABI_VERSION = 4;
+    public static final int ABI_VERSION = 5;
     /** Compatibility bound for the legacy contiguous builder; production uses atlas descriptors. */
     public static final int MAX_SHADOWED_LOCAL_LIGHTS = 2;
     public static final int MAX_SHADOW_DESCRIPTORS =
@@ -20,6 +21,14 @@ public final class LocalVoxelShadowLayout {
     public static final int PARAMS_BYTES = 256;
     public static final int PARAMS_RING_SLOTS = 3;
     public static final int PROXY_STRIDE_BYTES = 32;
+    public static final int PROXY_MASK_STRIDE_BYTES = Integer.BYTES;
+    /** Fixed shader-visible proxy array followed by one conservative mask per L3 light. */
+    public static final int PROXY_MASKS_OFFSET_BYTES =
+            MAX_ENTITY_PROXIES * PROXY_STRIDE_BYTES;
+    public static final int PROXY_PACKET_BYTES = Math.addExact(
+            PROXY_MASKS_OFFSET_BYTES,
+            Math.multiplyExact(MAX_SHADOW_DESCRIPTORS, PROXY_MASK_STRIDE_BYTES)
+    );
     public static final int CACHE_FACE_EDGE = 64;
     public static final int CACHE_FACE_COUNT = 6;
     public static final int CACHE_LAYER_COUNT = 4;
@@ -52,7 +61,7 @@ public final class LocalVoxelShadowLayout {
                 throw new IllegalArgumentException("L6 dynamic-shadow preset differs from its owner");
             }
             if (paramsRingBytes != (long) PARAMS_BYTES * PARAMS_RING_SLOTS
-                    || proxyRingBytes != (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
+                    || proxyRingBytes != (long) PROXY_PACKET_BYTES * PARAMS_RING_SLOTS
                     || shadowReferenceRingBytes
                     != LocalVoxelShadowAtlasLayout.descriptorRingBytes()
                     || visibilityCacheBytes
@@ -68,6 +77,7 @@ public final class LocalVoxelShadowLayout {
         public long totalVisibilityAtlasBytes() {
             return Math.addExact(this.visibilityCacheBytes, this.dynamicShadows.atlasBytes());
         }
+
     }
 
     /** One centrally editable quality/admission declaration for moving shadow sources. */
@@ -157,12 +167,12 @@ public final class LocalVoxelShadowLayout {
                 maxSteps,
                 maxEntityProxies,
                 (long) PARAMS_BYTES * PARAMS_RING_SLOTS,
-                (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS,
+                (long) PROXY_PACKET_BYTES * PARAMS_RING_SLOTS,
                 LocalVoxelShadowAtlasLayout.descriptorRingBytes(),
                 LocalVoxelShadowAtlasLayout.forPreset(preset).atlasBytes(),
                 dynamicShadows,
                 (long) PARAMS_BYTES * PARAMS_RING_SLOTS
-                        + (long) PROXY_STRIDE_BYTES * maxEntityProxies * PARAMS_RING_SLOTS
+                        + (long) PROXY_PACKET_BYTES * PARAMS_RING_SLOTS
                         + LocalVoxelShadowAtlasLayout.descriptorRingBytes()
                         + LocalVoxelShadowAtlasLayout.forPreset(preset).atlasBytes()
                         + dynamicAtlasBytes
