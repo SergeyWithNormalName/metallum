@@ -253,6 +253,13 @@ public final class RealWorldVertexReflectionTests {
                 "grazing voxel rays must retain only the bounded landmark floor");
         require(horizonConfidence(0.18F) > 0.99F,
                 "elevated voxel rays must retain full representation confidence");
+        float typicalWaveResponse = directionalResponse(0.95F, roughness);
+        float nearAlignedWaveResponse = directionalResponse(0.99F, roughness);
+        require(typicalWaveResponse > 0.80F,
+                "ordinary wave slopes must not punch holes in a rough reflection");
+        require(nearAlignedWaveResponse > typicalWaveResponse
+                        && nearAlignedWaveResponse <= 1.0F,
+                "wave modulation must remain smooth, bounded, and directional");
         require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F,
                 "coarse world reflection roughness must stay in the reviewed 0.28-0.35 range");
     }
@@ -272,6 +279,14 @@ public final class RealWorldVertexReflectionTests {
         float t = Math.clamp((elevation - 0.035F) / (0.18F - 0.035F), 0.0F, 1.0F);
         float smooth = t * t * (3.0F - 2.0F * t);
         return 0.30F + 0.70F * smooth;
+    }
+
+    private static float directionalResponse(final float alignment, final float roughness) {
+        float safeRoughness = Math.clamp(roughness, 0.28F, 0.35F);
+        float lobeWidth = Math.max(safeRoughness * 0.55F, 0.12F);
+        float t = Math.clamp((alignment - (1.0F - lobeWidth)) / lobeWidth, 0.0F, 1.0F);
+        float alignedLobe = t * t * (3.0F - 2.0F * t);
+        return 0.45F + 0.55F * alignedLobe;
     }
 
     private static void testMslGeneratedShaderContractProof() throws Exception {
@@ -399,8 +414,13 @@ public final class RealWorldVertexReflectionTests {
                         && onGlslFragment.contains("worldFromView * reflectedDirection"),
                 "fragment must evaluate directional response from the procedural water normal");
         require(onGlslFragment.contains("horizonRepresentationConfidence")
-                        && onGlslFragment.contains("smoothstep(0.035, 0.18, coarseRayElevation)"),
+                        && onGlslFragment.contains("smoothstep(0.035, 0.18, coarseRayElevation)")
+                        && onGlslFragment.contains("coarseRayElevation = referenceElevation;")
+                        && !onGlslFragment.contains("reflectedElevation"),
                 "representation confidence must reduce near-horizontal two-block voxel smearing");
+        require(onGlslFragment.contains("lobeWidth = max(roughness * 0.55, 0.12)")
+                        && !onGlslFragment.contains("roughness * roughness * 0.55"),
+                "rough wave response must use a broad continuous lobe rather than on/off bands");
         require(onGlslFragment.contains("metallumSchlickEnvironmentFresnelV1")
                         && onGlslFragment.contains("vec3(1.0 - clamp(roughness, 0.0, 1.0))"),
                 "rough environment Fresnel must not become a perfect grazing mirror");

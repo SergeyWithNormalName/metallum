@@ -3091,12 +3091,11 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 worldUp = metallumSafeNormalV1(
                         metallumEnvironment.worldUpAndMedium.xyz);
                 float referenceElevation = max(dot(referenceDirection, worldUp), 0.0);
-                float reflectedElevation = max(dot(worldReflectedDirection, worldUp), 0.0);
-                float coarseRayElevation = min(referenceElevation, reflectedElevation);
+                float coarseRayElevation = referenceElevation;
                 // A two-block voxel cell is least representative when a reflected cone travels
-                // almost parallel to the water plane: one shoreline cell then covers a long,
-                // visibly dirty band. Keep a bounded floor for real horizon landmarks, but do not
-                // let that low-frequency cell claim the same confidence as an elevated ray.
+                // almost parallel to the water plane. This confidence describes the vertex trace,
+                // so keep it independent of the procedural fragment wave normal; applying the wave
+                // here as well as in the directional lobe creates alternating reflection holes.
                 float horizonRepresentationConfidence = mix(
                         0.30, 1.0, smoothstep(0.035, 0.18, coarseRayElevation));
                 return mix(0.45, 1.0, alignedLobe)
@@ -3127,7 +3126,10 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float alignment = clamp(dot(
                         worldReflectedDirection, referenceDirection), 0.0, 1.0);
                 float roughness = clamp(traceDirectionAndRoughness.w, 0.28, 0.35);
-                float lobeWidth = max(roughness * roughness * 0.55, 0.02);
+                // The carried world reflection is already rough. A squared-roughness lobe made
+                // ordinary wave slopes cross a very narrow smoothstep and appear as on/off bands.
+                // A roughness-linear footprint preserves wave response without punching holes.
+                float lobeWidth = max(roughness * 0.55, 0.12);
                 float alignedLobe = smoothstep(1.0 - lobeWidth, 1.0, alignment);
             """ + horizonRepresentationConfidence + """
             }

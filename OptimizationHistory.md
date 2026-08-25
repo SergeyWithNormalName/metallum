@@ -3694,3 +3694,35 @@ Tier-B/noise-level и доказывает только отсутствие я�
 production improvement. **Решение:** оставить узкий receiver fix и передать точные
 water-level sand/dawn ракурсы на повторную human review; не ослаблять redstone или
 весь world reflection глобальной strength-константой.
+
+#### Rough reflection continuity follow-up — HUMAN PENDING
+
+Human review следующего кандидата выявил, что песчаное отражение местами распадается
+на горизонтальные полосы «есть/нет». Причина находилась в receiver, а не в voxel
+field: при roughness `0.28` прежний squared-roughness directional lobe имел ширину
+около `0.043`, поэтому обычный procedural wave slope пересекал узкий `smoothstep`.
+Кроме того, тот же fragment wave повторно уменьшал representation confidence через
+`min(referenceElevation, reflectedElevation)`, то есть одна волна дважды гасила
+coarse reflection.
+
+Исправление разделяет семантику сигналов. Representation confidence теперь зависит
+только от стабильного vertex-trace `referenceElevation`; fragment wave остаётся лишь
+в directional alignment. Lobe использует roughness-linear bounded footprint
+`max(roughness * 0.55, 0.12)`: он сохраняет мягкую wave modulation, но не вырезает
+отражение в ноль между соседними гребнями. Field, trace, ABI, texture resources,
+varyings, Fresnel/composition и direct sun/local GGX не менялись.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...` и размер `15,327` chars;
+fragment SHA стал `8bb21901f488...`, размер уменьшился `148,774 -> 148,642` chars.
+Varyings остались `10/10`, vertex содержит одну syntactic reflection sample site,
+fragment volume resources/reads — ноль. Targeted reflection/shader tests и полный
+`./gradlew build` прошли; build выполнил 97 задач.
+
+Exact-route visual comparison: прежний candidate
+`run/lighting-reference/l0/20260825T161949Z-...-grazing-horizon-fix-capture-off.png`;
+continuity candidate
+`run/lighting-reference/l0/20260825T164847Z-...-grazing-continuity-candidate-off.png`.
+Новый capture имеет Advanced/Balanced admission PASS, reflection field READY и все
+три quality-флага ON. Он показывает непрерывную широкую rough response вместо
+жёстких wave holes, сохраняя мягкие водные полосы. Exact night/sand clipboard pose
+не воспроизведена, поэтому окончательная оценка остаётся за human review.
