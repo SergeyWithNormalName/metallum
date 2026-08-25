@@ -4,6 +4,7 @@ import com.metallum.client.benchmark.DiagnosticAblationMode;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import com.metallum.client.lighting.shader.VoxelShadowBindingAbi;
 import com.metallum.client.renderer.AdvancedLightingLayout;
 import com.metallum.client.renderer.LightingModel;
@@ -3238,8 +3239,77 @@ public final class AdvancedDirectLightingShaderPatcher {
     private static final String SODIUM_VERTEX_ASSIGNMENT =
             "    vec3 position = _vert_position + translation;\n"
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;";
-    private static final String SODIUM_VERTEX_ASSIGNMENT_REFL =
-            "    vec3 position = _vert_position + translation;\n"
+    private static String sodiumVertexAssignmentReflection() {
+        return buildSodiumVertexAssignmentReflection(
+                WaterReflectionQualityConfig.isFirstSurfaceBiasedIntegrationEnabled(),
+                WaterReflectionQualityConfig.isRepresentationConfidenceEnabled()
+        );
+    }
+
+    private static String buildSodiumVertexAssignmentReflection(
+            final boolean firstSurfaceBiasedIntegration,
+            final boolean representationConfidence
+    ) {
+        String firstSurfaceDeclaration = firstSurfaceBiasedIntegration
+                ? "        float metallumSelectedOpacity = 0.0;\n" : "";
+        String representationDeclaration = representationConfidence
+                ? "        vec4 metallumRepresentationColorMoments = vec4(0.0);\n"
+                    + "        vec4 metallumRepresentationDepthMoments = vec4(0.0);\n"
+                : "";
+        String localWeight = firstSurfaceBiasedIntegration
+                ? "            float metallumFirstSurfaceWindow = 1.0 - smoothstep(0.28, 0.60, metallumAccumulatedOpacity);\n"
+                    + "            metallumSelectedWeight *= metallumFirstSurfaceWindow;\n"
+                    + "            metallumSelectedOpacity += metallumSelectedWeight;\n"
+                : "";
+        String representationAccumulation = representationConfidence
+                ? "            float metallumSamplePeak = max(max(metallumSampleRadiance.r, metallumSampleRadiance.g), metallumSampleRadiance.b);\n"
+                    + "            float metallumRepresentationWeight = metallumSelectedWeight\n"
+                    + "                    * smoothstep(0.02, 0.08, metallumSamplePeak);\n"
+                    + "            vec3 metallumSampleChroma = metallumSampleRadiance / max(metallumSamplePeak, 0.04);\n"
+                    + "            metallumRepresentationColorMoments.xyz += metallumSampleChroma * metallumRepresentationWeight;\n"
+                    + "            metallumRepresentationColorMoments.w += dot(metallumSampleChroma, metallumSampleChroma)\n"
+                    + "                    * metallumRepresentationWeight;\n"
+                    + "            metallumRepresentationDepthMoments.xyz += vec3(\n"
+                    + "                    metallumSelectedWeight,\n"
+                    + "                    metallumTraceDistance * metallumSelectedWeight,\n"
+                    + "                    metallumTraceDistance * metallumTraceDistance * metallumSelectedWeight);\n"
+                    + "            metallumRepresentationDepthMoments.w += metallumRepresentationWeight;\n"
+                : "";
+        String integrationOpacity = firstSurfaceBiasedIntegration
+                ? "metallumSelectedOpacity" : "metallumAccumulatedOpacity";
+        String refinedIntegration = firstSurfaceBiasedIntegration || representationConfidence
+                ? "            float metallumSelectedWeight = metallumTraceWeight;\n"
+                    + localWeight
+                    + "            vec3 metallumSampleRadiance = max(metallumTraceSample.rgb, vec3(0.0));\n"
+                    + "            metallumDirectionalRadiance += metallumSampleRadiance * metallumSelectedWeight;\n"
+                    + representationAccumulation
+                : "            metallumDirectionalRadiance += max(metallumTraceSample.rgb, vec3(0.0)) * metallumTraceWeight;\n";
+        String representationEvaluation = representationConfidence
+                ? "        float metallumRepresentationConfidence = 1.0;\n"
+                    + "        float metallumChromaWeight = metallumRepresentationDepthMoments.w;\n"
+                    + "        if (metallumChromaWeight > 0.06) {\n"
+                    + "            vec3 metallumMeanChroma = metallumRepresentationColorMoments.xyz / metallumChromaWeight;\n"
+                    + "            float metallumChromaVariance = max(\n"
+                    + "                    metallumRepresentationColorMoments.w / metallumChromaWeight\n"
+                    + "                    - dot(metallumMeanChroma, metallumMeanChroma), 0.0);\n"
+                    + "            float metallumColorCoherence = 1.0 - smoothstep(0.03, 0.16, metallumChromaVariance);\n"
+                    + "            float metallumDepthWeight = max(metallumRepresentationDepthMoments.x, 1.0e-6);\n"
+                    + "            float metallumMeanDistance = metallumRepresentationDepthMoments.y / metallumDepthWeight;\n"
+                    + "            float metallumRelativeDepthVariance = max(\n"
+                    + "                    metallumRepresentationDepthMoments.z / metallumDepthWeight\n"
+                    + "                    - metallumMeanDistance * metallumMeanDistance, 0.0)\n"
+                    + "                    / max(metallumMeanDistance * metallumMeanDistance, 1.0);\n"
+                    + "            float metallumDepthCoherence = 1.0 - smoothstep(0.06, 0.30, metallumRelativeDepthVariance);\n"
+                    + "            metallumRepresentationConfidence = mix(\n"
+                    + "                    0.18, 1.0, min(metallumColorCoherence, metallumDepthCoherence));\n"
+                    + "        }\n"
+                : "";
+        String confidenceEvaluation = representationConfidence
+                ? "        float metallumConfidence = clamp(" + integrationOpacity + ", 0.0, 1.0)\n"
+                    + "                * metallumStrength * metallumRepresentationConfidence;\n"
+                : "        float metallumConfidence = clamp(" + integrationOpacity + ", 0.0, 1.0) * metallumStrength;\n";
+
+        return "    vec3 position = _vert_position + translation;\n"
                     + "    metallumLightingPosition = (u_ModelViewMatrix * vec4(position, 1.0)).xyz;\n"
                     + "    vec3 metallumCameraBlockRel = metallumVoxelShadow.cameraFractionAndMinTrans.xyz + position;\n"
                     + "    vec3 metallumWorldPos = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz) + metallumCameraBlockRel;\n"
@@ -3259,6 +3329,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "        metallumCoarseReflectionDirectionVal = vec4(metallumReflDir, metallumRoughness);\n"
                     + "        vec3 metallumDirectionalRadiance = vec3(0.0);\n"
                     + "        float metallumAccumulatedOpacity = 0.0;\n"
+                    + firstSurfaceDeclaration
+                    + representationDeclaration
                     + "        float metallumTraceDistance = 0.75;\n"
                     + "        for (int metallumTraceStep = 0; metallumTraceStep < 40; ++metallumTraceStep) {\n"
                     + "            float metallumConeDiameter = max(2.0, metallumTraceDistance * metallumRoughness * 0.45);\n"
@@ -3274,7 +3346,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + ", metallumSampleUvw, metallumTraceLod);\n"
                     + "            float metallumSampleOpacity = clamp(metallumTraceSample.a * 1.75, 0.0, 1.0);\n"
                     + "            float metallumTraceWeight = (1.0 - metallumAccumulatedOpacity) * metallumSampleOpacity;\n"
-                    + "            metallumDirectionalRadiance += max(metallumTraceSample.rgb, vec3(0.0)) * metallumTraceWeight;\n"
+                    + refinedIntegration
                     + "            metallumAccumulatedOpacity += metallumTraceWeight;\n"
                     + "            if (metallumAccumulatedOpacity > 0.92) {\n"
                     + "                break;\n"
@@ -3282,7 +3354,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "            metallumTraceDistance += 1.75;\n"
                     + "        }\n"
                     + "        float metallumStrength = clamp(metallumVertexReflection.reflectionStrengthAndSettings.x, 0.0, 1.0);\n"
-                    + "        float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength;\n"
+                    + representationEvaluation
+                    + confidenceEvaluation
                     + "        float metallumContributionOnly = metallumVertexReflection.reflectionStrengthAndSettings.z;\n"
                     + "        metallumCoarseReflectionVal = vec4(metallumDirectionalRadiance,\n"
                     + "                metallumContributionOnly > 0.5\n"
@@ -3290,6 +3363,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                     + "    }\n"
                     + "    metallumCoarseReflection = metallumCoarseReflectionVal;\n"
                     + "    metallumCoarseReflectionDirection = metallumCoarseReflectionDirectionVal;";
+    }
     private static final String SODIUM_MATERIAL_LIGHTMAP =
             "    vec4 metallumLightmap = metallumMaterialDecodeLegacyLightmap("
                     + "texture(u_LightTex, _vert_tex_light_coord));";
@@ -3822,7 +3896,7 @@ public final class AdvancedDirectLightingShaderPatcher {
             patched = replaceExactlyOnce(
                     patched,
                     "    vec3 position = _vert_position + translation;",
-                    vertexReflection ? SODIUM_VERTEX_ASSIGNMENT_REFL : SODIUM_VERTEX_ASSIGNMENT
+                    vertexReflection ? sodiumVertexAssignmentReflection() : SODIUM_VERTEX_ASSIGNMENT
             );
             patched = replaceExactlyOnce(
                     patched,

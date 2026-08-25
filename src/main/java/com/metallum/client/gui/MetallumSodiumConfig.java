@@ -5,6 +5,7 @@ import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSourceEncoding;
 import com.metallum.client.lighting.reflection.VertexReflectionExperimentConfig;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import com.metallum.client.lighting.shader.L6TemporalShadowExperimentConfig;
 import com.metallum.client.metal.render.MetalDevice;
 import com.metallum.client.metal.render.PlanarReflectionConfig;
@@ -385,6 +386,60 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     val -> com.metallum.client.lighting.GodRayVisibilityDiagnostic.setIntensity(val / 100.0f),
                                     () -> (int) (com.metallum.client.lighting.GodRayVisibilityDiagnostic.intensity() * 100.0f)
+                            )
+                    )
+                )
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.water_reflection_quality"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_face_aware_appearance"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.water_reflection_face_aware_appearance.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.water_reflection_face_aware_appearance.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setFaceAwareAppearanceEnabled,
+                                    WaterReflectionQualityConfig::isFaceAwareAppearanceEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_first_surface_integration"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.water_reflection_first_surface_integration.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.water_reflection_first_surface_integration.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setFirstSurfaceBiasedIntegrationEnabled,
+                                    WaterReflectionQualityConfig::isFirstSurfaceBiasedIntegrationEnabled
+                            )
+                    )
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "water_reflection_representation_confidence"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.water_reflection_representation_confidence.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.water_reflection_representation_confidence.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(true)
+                            .setBinding(
+                                    WaterReflectionQualityConfig::setRepresentationConfidenceEnabled,
+                                    WaterReflectionQualityConfig::isRepresentationConfidenceEnabled
                             )
                     )
                 )

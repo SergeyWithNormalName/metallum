@@ -87,6 +87,25 @@ public final class MetallumSodiumConfigTests {
                 "Metallum frozen-reflection experiment option is missing or has the wrong type");
         require(frozenReflection.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum frozen-reflection experiment must require a full game restart");
+        OptionGroup waterReflectionQuality = findGroup(
+                page,
+                idField,
+                "water_reflection_face_aware_appearance"
+        );
+        require(waterReflectionQuality.options().size() == 3,
+                "Water Reflection Quality must be an isolated group with exactly three refinements");
+        requireRestartBoolean(
+                findOption(page, idField, "water_reflection_face_aware_appearance"),
+                "face-aware TOP/SIDE/BOTTOM appearance"
+        );
+        requireRestartBoolean(
+                findOption(page, idField, "water_reflection_first_surface_integration"),
+                "first-surface-biased local integration"
+        );
+        requireRestartBoolean(
+                findOption(page, idField, "water_reflection_representation_confidence"),
+                "representation confidence"
+        );
         require(findOption(page, idField, "voxel_preview_mode") instanceof EnumOption,
                 "Metallum L5 preview mode is missing or has the wrong type");
         require(findOption(page, idField, "voxel_preview_level") instanceof IntegerOption,
@@ -111,6 +130,29 @@ public final class MetallumSodiumConfigTests {
             }
         }
         throw new AssertionError("Missing Metallum Sodium option " + expected);
+    }
+
+    private static OptionGroup findGroup(
+            final OptionPage page,
+            final Field idField,
+            final String optionPath
+    ) throws IllegalAccessException {
+        Identifier expected = Identifier.fromNamespaceAndPath("metallum", optionPath);
+        for (OptionGroup group : page.groups()) {
+            for (Option candidate : group.options()) {
+                if (expected.equals(idField.get(candidate))) {
+                    return group;
+                }
+            }
+        }
+        throw new AssertionError("Missing Metallum Sodium option group containing " + expected);
+    }
+
+    private static void requireRestartBoolean(final Option option, final String name) {
+        require(option instanceof BooleanOption,
+                "Metallum " + name + " option is missing or has the wrong type");
+        require(option.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "Metallum " + name + " must require a full game restart");
     }
 
     private static void require(final boolean condition, final String message) {

@@ -107,6 +107,36 @@ public final class RadianceAppearanceModel {
             final int skyLight,
             final int blockLight
     ) {
+        return evaluate(state, blockGetter, pos, skyLight, blockLight, Float.NaN, Float.NaN, Float.NaN);
+    }
+
+    /** Same radiance model with a resource-pack/face-aware linear albedo override. */
+    public static EvaluatedAppearance evaluateWithLinearAlbedo(
+            final BlockState state,
+            final BlockGetter blockGetter,
+            final BlockPos pos,
+            final int skyLight,
+            final int blockLight,
+            final float albedoRed,
+            final float albedoGreen,
+            final float albedoBlue
+    ) {
+        return evaluate(
+                state, blockGetter, pos, skyLight, blockLight,
+                albedoRed, albedoGreen, albedoBlue
+        );
+    }
+
+    private static EvaluatedAppearance evaluate(
+            final BlockState state,
+            final BlockGetter blockGetter,
+            final BlockPos pos,
+            final int skyLight,
+            final int blockLight,
+            final float overrideAlbedoRed,
+            final float overrideAlbedoGreen,
+            final float overrideAlbedoBlue
+    ) {
         if (state == null || state.isAir()) {
             return new EvaluatedAppearance(0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, false, false);
         }
@@ -119,7 +149,17 @@ public final class RadianceAppearanceModel {
         float albedoR = 0.8F;
         float albedoG = 0.8F;
         float albedoB = 0.8F;
-        try {
+        boolean validOverride = Float.isFinite(overrideAlbedoRed)
+                && Float.isFinite(overrideAlbedoGreen)
+                && Float.isFinite(overrideAlbedoBlue)
+                && overrideAlbedoRed >= 0.0F
+                && overrideAlbedoGreen >= 0.0F
+                && overrideAlbedoBlue >= 0.0F;
+        if (validOverride) {
+            albedoR = overrideAlbedoRed;
+            albedoG = overrideAlbedoGreen;
+            albedoB = overrideAlbedoBlue;
+        } else try {
             BlockGetter targetGetter = blockGetter != null ? blockGetter : EMPTY_GETTER;
             BlockPos targetPos = pos != null ? pos : BlockPos.ZERO;
             MapColor mapColor = state.getMapColor(targetGetter, targetPos);

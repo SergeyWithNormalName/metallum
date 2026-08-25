@@ -220,6 +220,22 @@ tasks.register("frozenReflectionFieldUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.lighting.reflection.FrozenReflectionFieldControllerTests")
 }
 
+tasks.register("waterReflectionQualityConfigUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates independent, default-on water-reflection quality settings"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.lighting.reflection.WaterReflectionQualityConfigTests")
+}
+
+tasks.register("faceAwareRadianceAppearanceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates exposed TOP/SIDE/BOTTOM source appearance reduction"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.radiance.FaceAwareRadianceAppearanceTests")
+}
+
 tasks.register("realWorldVertexReflectionUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates real-world reflection appearance extraction and vertex-only shader carrier"

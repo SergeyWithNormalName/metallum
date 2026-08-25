@@ -4,6 +4,7 @@ import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.reflection.RealWorldReflectionField;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
 import com.metallum.client.radiance.CompactSectionPayload;
 import com.metallum.client.radiance.Float16Compressor;
@@ -266,7 +267,7 @@ public final class RealWorldVertexReflectionTests {
                 .define("METALLUM_VERTEX_REFLECTION", 1)
                 .build();
 
-        String onGlslVertex = AdvancedDirectLightingShaderPatcher.patch("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX, LightingModel.ADVANCED, matVertex, TerrainEnvironmentSpecialization.FULL, true).source();
+        String onGlslVertex = patchQualityVertex(matVertex, true, true);
         String onGlslFragment = AdvancedDirectLightingShaderPatcher.patch("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT, LightingModel.ADVANCED, matFragment, TerrainEnvironmentSpecialization.FULL, true).source();
 
         String onMslVertex = compileToMsl(onGlslVertex, ShaderType.VERTEX, onDefines);
@@ -323,9 +324,39 @@ public final class RealWorldVertexReflectionTests {
         require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
                         && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
                 "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");
-        require(onGlslVertex.contains(
-                        "float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength"),
-                "reflection strength must limit the blend confidence, not merely darken its target");
+        require(onGlslVertex.contains("metallumFirstSurfaceWindow")
+                        && onGlslVertex.contains("metallumSelectedOpacity"),
+                "default receiver must bias radiance/confidence toward the first local surface");
+        require(onGlslVertex.contains("metallumRepresentationColorMoments")
+                        && onGlslVertex.contains("metallumRepresentationConfidence"),
+                "default receiver must estimate whether one coarse radiance represents the trace");
+        require(onGlslVertex.contains("* metallumStrength * metallumRepresentationConfidence"),
+                "reflection strength and representation confidence must limit the environment blend");
+
+        String firstOnlyGlsl = patchQualityVertex(matVertex, true, false);
+        String confidenceOnlyGlsl = patchQualityVertex(matVertex, false, true);
+        String legacyReceiverGlsl = patchQualityVertex(matVertex, false, false);
+        require(firstOnlyGlsl.contains("metallumFirstSurfaceWindow")
+                        && !firstOnlyGlsl.contains("metallumRepresentationColorMoments"),
+                "first-surface refinement must specialize independently");
+        require(!confidenceOnlyGlsl.contains("metallumFirstSurfaceWindow")
+                        && confidenceOnlyGlsl.contains("metallumRepresentationColorMoments"),
+                "representation-confidence refinement must specialize independently");
+        require(!legacyReceiverGlsl.contains("metallumSelectedWeight")
+                        && !legacyReceiverGlsl.contains("metallumRepresentationColorMoments")
+                        && legacyReceiverGlsl.contains(
+                                "metallumDirectionalRadiance += max(metallumTraceSample.rgb, vec3(0.0)) * metallumTraceWeight")
+                        && legacyReceiverGlsl.contains(
+                                "float metallumConfidence = clamp(metallumAccumulatedOpacity, 0.0, 1.0) * metallumStrength"),
+                "disabling both receiver refinements must restore the exact legacy trace integration");
+        for (String qualityGlsl : new String[]{firstOnlyGlsl, confidenceOnlyGlsl, legacyReceiverGlsl}) {
+            String qualityMsl = compileToMsl(qualityGlsl, ShaderType.VERTEX, onDefines);
+            require(countOccurrences(qualityMsl, "metallumReflectionRadiance.sample") == 1,
+                    "every quality specialization must retain one syntactic vertex 3D sample site");
+            require(countOccurrences(qualityMsl, "[[user(locn")
+                            == countOccurrences(onMslVertex, "[[user(locn"),
+                    "quality refinements must not expand the vertex carrier");
+        }
 
         // 2. Fragment MSL has EXACT ZERO texture3d parameters and reads only vertex varying
         require(!onMslFragment.contains("texture3d<"), "Fragment must have ZERO texture3d parameters");
@@ -359,6 +390,38 @@ public final class RealWorldVertexReflectionTests {
                 "coarse world radiance must not return to the diffuse-environment artistic floor");
         require(onGlslFragment.contains("color.a = clamp(1.0 - (1.0 - color.a)"),
                 "grazing Fresnel must reduce framebuffer transmission without touching direct specular");
+    }
+
+    private static String patchQualityVertex(
+            final String materialVertex,
+            final boolean firstSurface,
+            final boolean representationConfidence
+    ) {
+        String firstKey = WaterReflectionQualityConfig.FIRST_SURFACE_BIASED_INTEGRATION_PROPERTY;
+        String confidenceKey = WaterReflectionQualityConfig.REPRESENTATION_CONFIDENCE_PROPERTY;
+        String oldFirst = System.getProperty(firstKey);
+        String oldConfidence = System.getProperty(confidenceKey);
+        try {
+            System.setProperty(firstKey, Boolean.toString(firstSurface));
+            System.setProperty(confidenceKey, Boolean.toString(representationConfidence));
+            return AdvancedDirectLightingShaderPatcher.patch(
+                    "sodium", "blocks/block_layer_opaque",
+                    MetallumMaterialShaderPatcher.Stage.VERTEX,
+                    LightingModel.ADVANCED, materialVertex,
+                    TerrainEnvironmentSpecialization.FULL, true
+            ).source();
+        } finally {
+            restoreProperty(firstKey, oldFirst);
+            restoreProperty(confidenceKey, oldConfidence);
+        }
+    }
+
+    private static void restoreProperty(final String key, final String value) {
+        if (value == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, value);
+        }
     }
 
     private static String sha256(final String source) throws Exception {

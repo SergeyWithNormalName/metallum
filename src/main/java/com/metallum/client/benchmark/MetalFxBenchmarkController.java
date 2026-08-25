@@ -9,6 +9,7 @@ import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
 import com.metallum.client.sodium.SodiumLightSidecar;
@@ -2595,10 +2596,13 @@ public final class MetalFxBenchmarkController {
      */
     private @org.jspecify.annotations.Nullable String verifyVertexReflectionAdmission() {
         boolean enabled = VertexReflectionExperiment.isRuntimeEnabled();
+        boolean faceAware = WaterReflectionQualityConfig.isFaceAwareAppearanceEnabled();
+        boolean firstSurface = WaterReflectionQualityConfig.isFirstSurfaceBiasedIntegrationEnabled();
+        boolean representationConfidence = WaterReflectionQualityConfig.isRepresentationConfidenceEnabled();
         FrozenReflectionFieldController.Snapshot snapshot = FrozenReflectionFieldController.global().snapshot();
         boolean ready = snapshot.state() == FrozenReflectionFieldController.State.READY;
         Metallum.LOGGER.info(
-                "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled={} state={} ready={} generation={}/{} origin=[{},{},{}] sections={}/{}/{} expected={} invalidation={}",
+                "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled={} state={} ready={} generation={}/{} origin=[{},{},{}] sections={}/{}/{} expected={} invalidation={} quality_face_aware={} quality_first_surface={} quality_confidence={}",
                 enabled,
                 snapshot.state(),
                 ready,
@@ -2606,12 +2610,28 @@ public final class MetalFxBenchmarkController {
                 snapshot.fieldGeneration(),
                 snapshot.originX(), snapshot.originY(), snapshot.originZ(),
                 snapshot.publishedContent(), snapshot.knownEmpty(), snapshot.unavailable(), snapshot.expectedSections(),
-                snapshot.invalidationReason()
+                snapshot.invalidationReason(),
+                faceAware,
+                firstSurface,
+                representationConfidence
         );
         if (enabled && !ready) {
             return "vertex reflection experiment was enabled but its frozen field was not READY";
         }
+        if (enabled && (!matchesBooleanEnvironment(
+                "METALLUM_BENCHMARK_WATER_REFLECTION_FACE_AWARE", faceAware)
+                || !matchesBooleanEnvironment(
+                        "METALLUM_BENCHMARK_WATER_REFLECTION_FIRST_SURFACE", firstSurface)
+                || !matchesBooleanEnvironment(
+                        "METALLUM_BENCHMARK_WATER_REFLECTION_CONFIDENCE", representationConfidence))) {
+            return "vertex reflection quality did not match the benchmark launch contract";
+        }
         return null;
+    }
+
+    private static boolean matchesBooleanEnvironment(final String name, final boolean actual) {
+        String expected = System.getenv(name);
+        return expected == null || Boolean.parseBoolean(expected) == actual;
     }
 
     private String completeL6DynamicShadowCoverage() {

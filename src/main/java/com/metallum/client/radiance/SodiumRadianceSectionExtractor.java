@@ -1,7 +1,10 @@
 package com.metallum.client.radiance;
 
+import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import net.caffeinemc.mods.sodium.client.world.LevelSlice;
+import net.minecraft.client.renderer.block.BlockAndTintGetter;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.BlockGetter;
@@ -27,6 +30,14 @@ public final class SodiumRadianceSectionExtractor {
             {-1, 0, 0},  // -X
             {0, 0, 1},   // +Z
             {0, 0, -1}   // -Z
+    };
+    private static final Direction[] NEIGHBOR_DIRECTIONS = {
+            Direction.UP,
+            Direction.DOWN,
+            Direction.EAST,
+            Direction.WEST,
+            Direction.SOUTH,
+            Direction.NORTH
     };
 
     @FunctionalInterface
@@ -88,6 +99,10 @@ public final class SodiumRadianceSectionExtractor {
 
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         BlockPos.MutableBlockPos neighborPos = new BlockPos.MutableBlockPos();
+        BlockAndTintGetter tintWorld = blockGetter instanceof BlockAndTintGetter getter ? getter : null;
+        boolean faceAwareEnabled = WaterReflectionQualityConfig.isFaceAwareAppearanceEnabled()
+                && tintWorld != null;
+        float[] faceAwareAlbedo = faceAwareEnabled ? new float[3] : null;
 
         int emissiveCount = 0;
         int occupiedCount = 0;
@@ -133,9 +148,11 @@ public final class SodiumRadianceSectionExtractor {
                 int maxNeighborSky = 0;
                 int maxNeighborBlock = 0;
                 int exposedCount = 0;
+                int exposedFaceMask = 0;
 
                 // Inspect 6 face-adjacent neighbors in LevelSlice
-                for (int[] offset : NEIGHBOR_OFFSETS) {
+                for (int faceIndex = 0; faceIndex < NEIGHBOR_OFFSETS.length; faceIndex++) {
+                    int[] offset = NEIGHBOR_OFFSETS[faceIndex];
                     int nx = worldX + offset[0];
                     int ny = worldY + offset[1];
                     int nz = worldZ + offset[2];
@@ -147,6 +164,7 @@ public final class SodiumRadianceSectionExtractor {
                         if (nOpacity < selfOpacity || nOpacity < 0.9F) {
                             exposedFaces++;
                             exposedCount++;
+                            exposedFaceMask |= 1 << NEIGHBOR_DIRECTIONS[faceIndex].ordinal();
                             neighborPos.set(nx, ny, nz);
                             int nSky = lightAccessor.getBrightness(LightLayer.SKY, neighborPos);
                             int nBlock = lightAccessor.getBrightness(LightLayer.BLOCK, neighborPos);
@@ -178,8 +196,17 @@ public final class SodiumRadianceSectionExtractor {
                     }
                 }
 
-                RadianceAppearanceModel.EvaluatedAppearance app =
-                        RadianceAppearanceModel.evaluate(state, blockGetter, pos, effectiveSky, effectiveBlock);
+                boolean faceAwareResolved = faceAwareEnabled && FaceAwareRadianceAppearance.resolve(
+                        state, tintWorld, pos, exposedFaceMask, faceAwareAlbedo
+                );
+                RadianceAppearanceModel.EvaluatedAppearance app = faceAwareResolved
+                        ? RadianceAppearanceModel.evaluateWithLinearAlbedo(
+                                state, blockGetter, pos, effectiveSky, effectiveBlock,
+                                faceAwareAlbedo[0], faceAwareAlbedo[1], faceAwareAlbedo[2]
+                        )
+                        : RadianceAppearanceModel.evaluate(
+                                state, blockGetter, pos, effectiveSky, effectiveBlock
+                        );
 
                 int radIdx = localIndex * 4;
                 packedRgba[radIdx] = Float16Compressor.packFloat(app.red());

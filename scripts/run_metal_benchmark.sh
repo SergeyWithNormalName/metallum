@@ -37,6 +37,7 @@ FI_VALIDATION=0
 SETTINGS_SPEC_EXPLICIT=0
 METALFX_MODE_EXPLICIT=0
 VERTEX_REFLECTION_EXPERIMENT=0
+WATER_REFLECTION_QUALITY=refined
 
 RUN_WORLD_PATH=""
 RUN_WORLD_NAME=""
@@ -82,6 +83,10 @@ Options:
                      opt in to the quarantined frozen vertex-reflection
                      experiment for a diagnostic comparison; ordinary runs
                      remain forced OFF
+  --water-reflection-quality MODE
+                     explicitly specialize the vertex-reflection receiver as
+                     refined, legacy, face-off, first-surface-off, or
+                     confidence-off (default: refined)
   --preflight-only   validate route/config/release settings contract/immutable fixture
                      without cloning
   --capture-reference capture one ignored screenshot; this run is not attested
@@ -150,6 +155,11 @@ while [ "$#" -gt 0 ]; do
             VERTEX_REFLECTION_EXPERIMENT=1
             shift
             ;;
+        --water-reflection-quality)
+            need_value "$@"
+            WATER_REFLECTION_QUALITY=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+            shift 2
+            ;;
         --preflight-only)
             PREFLIGHT_ONLY=1
             shift
@@ -188,6 +198,34 @@ esac
 case "$LIGHTING_PRESET" in
     performance|balanced|ultra) ;;
     *) die "--lighting-preset must be performance, balanced, or ultra" ;;
+esac
+case "$WATER_REFLECTION_QUALITY" in
+    refined)
+        WATER_REFLECTION_FACE_AWARE=true
+        WATER_REFLECTION_FIRST_SURFACE=true
+        WATER_REFLECTION_CONFIDENCE=true
+        ;;
+    legacy)
+        WATER_REFLECTION_FACE_AWARE=false
+        WATER_REFLECTION_FIRST_SURFACE=false
+        WATER_REFLECTION_CONFIDENCE=false
+        ;;
+    face-off)
+        WATER_REFLECTION_FACE_AWARE=false
+        WATER_REFLECTION_FIRST_SURFACE=true
+        WATER_REFLECTION_CONFIDENCE=true
+        ;;
+    first-surface-off)
+        WATER_REFLECTION_FACE_AWARE=true
+        WATER_REFLECTION_FIRST_SURFACE=false
+        WATER_REFLECTION_CONFIDENCE=true
+        ;;
+    confidence-off)
+        WATER_REFLECTION_FACE_AWARE=true
+        WATER_REFLECTION_FIRST_SURFACE=true
+        WATER_REFLECTION_CONFIDENCE=false
+        ;;
+    *) die "--water-reflection-quality must be refined, legacy, face-off, first-surface-off, or confidence-off" ;;
 esac
 
 case "$WARMUP_FRAMES:$MEASURE_FRAMES:$TIMING_DETAIL:$METAL_VALIDATION" in
@@ -709,6 +747,9 @@ echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
 echo "  MetalFX: $METALFX_MODE (persistent config remains off)"
+if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
+    echo "  water reflection: $WATER_REFLECTION_QUALITY (face=$WATER_REFLECTION_FACE_AWARE, first-surface=$WATER_REFLECTION_FIRST_SURFACE, confidence=$WATER_REFLECTION_CONFIDENCE)"
+fi
 if [ "$FI_VALIDATION" -eq 1 ]; then
     echo "  Frame Interpolation: required, overlay=$FI_OVERLAY, minimum generated=$FI_MINIMUM_GENERATED_FRAMES/$MEASURE_FRAMES ($FI_MINIMUM_GENERATED_PERCENT%)"
 fi
@@ -988,7 +1029,7 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
 fi
 VERTEX_REFLECTION_JAVA_TOOL_OPTIONS=${JAVA_TOOL_OPTIONS:-}
 if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
-    VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.vertex.reflection.runtime=true"
+    VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.vertex.reflection.runtime=true -Dmetallum.waterReflection.faceAwareAppearance=${WATER_REFLECTION_FACE_AWARE} -Dmetallum.waterReflection.firstSurfaceBiasedIntegration=${WATER_REFLECTION_FIRST_SURFACE} -Dmetallum.waterReflection.representationConfidence=${WATER_REFLECTION_CONFIDENCE}"
 fi
 set +e
 METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
@@ -1005,6 +1046,9 @@ METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
 METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL="$EXPECTED_LIGHTING_MODEL" \
 METALLUM_VERTEX_REFLECTION_EXPERIMENT="$VERTEX_REFLECTION_EXPERIMENT" \
+METALLUM_BENCHMARK_WATER_REFLECTION_FACE_AWARE="$WATER_REFLECTION_FACE_AWARE" \
+METALLUM_BENCHMARK_WATER_REFLECTION_FIRST_SURFACE="$WATER_REFLECTION_FIRST_SURFACE" \
+METALLUM_BENCHMARK_WATER_REFLECTION_CONFIDENCE="$WATER_REFLECTION_CONFIDENCE" \
 JAVA_TOOL_OPTIONS="$VERTEX_REFLECTION_JAVA_TOOL_OPTIONS" \
 METALLUM_BENCHMARK_SCREENSHOTS="$CAPTURE_REFERENCE" \
 METALLUM_BENCHMARK_COMMIT="$commit" \
@@ -1306,6 +1350,16 @@ fi
 admission="METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=$EXPECTED_LIGHTING_MODEL schema=4 defaults_used=false requested=$EXPECTED_LIGHTING_MODEL resolved=$EXPECTED_LIGHTING_MODEL l3=$admission_health l5=$admission_health l6=$admission_health status=PASS"
 grep -Fq "$admission" "$MINECRAFT_LOG" \
     || die "benchmark lighting admission did not prove the requested $EXPECTED_LIGHTING_MODEL contract"
+if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
+    reflection_admission=$(grep -F "METALLUM_BENCHMARK EVENT=VERTEX_REFLECTION_ADMISSION enabled=true state=READY ready=true" "$MINECRAFT_LOG" | tail -n 1 || true)
+    [ -n "$reflection_admission" ] \
+        || die "vertex-reflection admission did not prove a READY field"
+    reflection_quality="quality_face_aware=$WATER_REFLECTION_FACE_AWARE quality_first_surface=$WATER_REFLECTION_FIRST_SURFACE quality_confidence=$WATER_REFLECTION_CONFIDENCE"
+    case "$reflection_admission" in
+        *"$reflection_quality"*) ;;
+        *) die "vertex-reflection admission did not prove quality mode $WATER_REFLECTION_QUALITY: $reflection_admission" ;;
+    esac
+fi
 if [ "$FI_VALIDATION" -eq 1 ]; then
     fi_generated_prefix="METALLUM_BENCHMARK EVENT=FI_GENERATED_COMPLETE generated_delta="
     fi_generated_count=$(grep -Fc "$fi_generated_prefix" "$MINECRAFT_LOG" || true)
