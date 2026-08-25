@@ -3726,3 +3726,41 @@ continuity candidate
 три quality-флага ON. Он показывает непрерывную широкую rough response вместо
 жёстких wave holes, сохраняя мягкие водные полосы. Exact night/sand clipboard pose
 не воспроизведена, поэтому окончательная оценка остаётся за human review.
+
+#### Dawn/sunset planar contamination removal — HUMAN PENDING
+
+Повторный human review показал, что при tick `23500` и изменении высоты камеры вода
+иногда снова становится однородно розово-оранжевой. Первая гипотеза — чрезмерно
+окрашенный analytic `skyIrradiance` — была проверена и отклонена: ограничение его
+chroma уменьшило синюю составляющую воды и относительно усилило оранжевый fog.
+Кандидат полностью удалён и не оставлен в production source.
+
+Source audit обнаружил архитектурное загрязнение refined voxel receiver: перед
+coarse-world mix он всё ещё читал `metallumPlanarReflection` и подмешивал
+mirrored-camera HDR target. Такой target уже содержит ракурсный sky/fog и меняется с
+высотой камеры, поэтому сохранённая planar-конфигурация могла перекрасить весь water
+receiver на рассвете. Это нарушало выбранный voxel-only контракт.
+
+Voxel mode теперь эксклюзивен на двух уровнях. Generated fragment helper не читает
+и не смешивает planar texture; runtime не создаёт planar pass, если фактический
+`VertexReflectionExperiment.isRuntimeEnabled()` возвращает true. Включение voxel
+опции в Sodium также сбрасывает сохранённый planar toggle. Отдельный legacy planar
+режим остаётся доступен только когда voxel reflections выключены.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...`, `15,327` chars, `10/10`
+varyings и одну syntactic vertex sample site. Fragment SHA стал `9089c6943f5c...`,
+размер уменьшился `148,642 -> 146,785` chars; `metallumPlanarReflection` отсутствует
+в generated voxel fragment вместе с любыми 3D resources/reads.
+
+Детерминированный dawn route `reflection-house-voxel-dawn-elevated-v1` фиксирует
+tick `23500`, y=`82`, clear/frozen. Конфликтный runtime запуск с принудительным
+`-Dmetallum.planar_reflections=true` до окончательного guard зарегистрировал
+`Live water planar reflection active`:
+`run/lighting-reference/l0/20260825T175957Z-...-dawn-voxel-exclusive-candidate-off.png`.
+После runtime guard тот же контракт не зарегистрировал planar activation, сохранил
+Advanced PASS и voxel field READY:
+`run/lighting-reference/l0/20260825T180230Z-...-dawn-voxel-exclusive-candidate-v2-off.png`.
+Capture-прогоны `300+300` не являются performance evidence; уменьшение generated
+fragment — механический cost gate, не заявление об ускорении. Точный пользовательский
+ракурс остаётся HUMAN PENDING после перезапуска клиента. Targeted reflection/shader/
+Sodium tests и полный `./gradlew build` прошли; build выполнил 97 задач.

@@ -234,7 +234,12 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
                             .setDefaultValue(false)
                             .setBinding(
-                                    VertexReflectionExperimentConfig::setEnabled,
+                                    enabled -> {
+                                        VertexReflectionExperimentConfig.setEnabled(enabled);
+                                        if (enabled) {
+                                            PlanarReflectionConfig.setEnabled(false);
+                                        }
+                                    },
                                     VertexReflectionExperimentConfig::isEnabled
                             )
                     )

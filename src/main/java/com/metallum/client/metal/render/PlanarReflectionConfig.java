@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.renderer.PlanarReflectionLayout;
 import net.fabricmc.loader.api.FabricLoader;
 
@@ -41,6 +42,15 @@ public final class PlanarReflectionConfig {
             }
             return enabled;
         }
+    }
+
+    /** Planar capture and the voxel receiver are mutually exclusive water architectures. */
+    public static boolean isRuntimeEnabled() {
+        return runtimeEnabled(isEnabled(), VertexReflectionExperiment.isRuntimeEnabled());
+    }
+
+    static boolean runtimeEnabled(final boolean planarEnabled, final boolean voxelEnabled) {
+        return planarEnabled && !voxelEnabled;
     }
 
     public static void setEnabled(final boolean enabled) {

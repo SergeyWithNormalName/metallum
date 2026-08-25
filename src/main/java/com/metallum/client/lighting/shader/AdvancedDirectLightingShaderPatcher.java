@@ -3179,27 +3179,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                         reflectedDirection, normal, material.roughness, waterCelestialShape);
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
-                    vec2 screenUv = gl_FragCoord.xy / max(
-                            vec2(metallumLighting.extentAndClusterCap.xy), vec2(1.0));
-                    mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
-                    vec3 flatWaterNormal = metallumSafeNormalV1(
-                            transpose(worldFromView) * vec3(0.0, 1.0, 0.0));
-                    vec2 waveScreenOffset = (normal.xy - flatWaterNormal.xy) * 0.085;
-                    vec2 reflectionUv = screenUv + waveScreenOffset;
-                    float edgeDistance = min(
-                            min(reflectionUv.x, reflectionUv.y),
-                            min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
-                    vec4 planarSample = texture(metallumPlanarReflection,
-                            clamp(reflectionUv, vec2(0.001), vec2(0.999)));
-                    float planarWeight = planarSample.a * smoothstep(0.0, 0.020, edgeDistance);
-                    if (planarWeight > 0.0) {
-                        reflectedEnvironment = mix(
-                                reflectedEnvironment, planarSample.rgb, planarWeight);
-                        float planarFresnel = clamp(
-                                0.06 + 0.54 * pow(1.0 - nDotV, 2.0), 0.06, 0.60);
-                        environmentFresnel = mix(
-                                environmentFresnel, vec3(planarFresnel), planarWeight);
-                    }
+                    // The voxel receiver is an exclusive reflection architecture. Never mix the
+                    // legacy mirrored-camera target here: its fogged twilight capture changes
+                    // with camera height and can paint the whole water surface orange.
                     bool contributionOnly = coarseReflection.a < -0.5;
                     float confidence = contributionOnly
                             ? clamp(-coarseReflection.a - 1.0, 0.0, 1.0)

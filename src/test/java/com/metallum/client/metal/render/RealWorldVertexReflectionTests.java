@@ -260,6 +260,10 @@ public final class RealWorldVertexReflectionTests {
         require(nearAlignedWaveResponse > typicalWaveResponse
                         && nearAlignedWaveResponse <= 1.0F,
                 "wave modulation must remain smooth, bounded, and directional");
+        require(!PlanarReflectionConfig.runtimeEnabled(true, true)
+                        && PlanarReflectionConfig.runtimeEnabled(true, false)
+                        && !PlanarReflectionConfig.runtimeEnabled(false, true),
+                "voxel reflection mode must suppress the legacy planar capture");
         require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F,
                 "coarse world reflection roughness must stay in the reviewed 0.28-0.35 range");
     }
@@ -397,6 +401,8 @@ public final class RealWorldVertexReflectionTests {
         require(!onMslFragment.contains("texture3d<"), "Fragment must have ZERO texture3d parameters");
         require(!onMslFragment.contains("sampler3D"), "Fragment must have ZERO sampler3D");
         require(!onMslFragment.contains("metallumReflectionRadiance"), "Fragment must have ZERO radiance texture reads");
+        require(!onMslFragment.contains("metallumPlanarReflection"),
+                "voxel reflection fragment must have ZERO planar-reflection resources");
         require(onGlslFragment.contains("color.a = 1.0"),
                 "contribution-only output must be opaque so underlying terrain cannot masquerade as voxel radiance");
         require(onMslFragment.contains("in.metallumCoarseReflection"), "Fragment must read interpolated varying in.metallumCoarseReflection");
@@ -406,6 +412,16 @@ public final class RealWorldVertexReflectionTests {
                 "fragment must issue exactly zero 3D reads");
         require(onGlslFragment.contains("metallumFrozenReflectionWater"),
                 "reflection blend must remain explicitly water-only");
+        int voxelEnvironmentStart = onGlslFragment.indexOf(
+                "vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(");
+        int voxelEnvironmentEnd = onGlslFragment.indexOf(
+                "return result * material.specularScale;", voxelEnvironmentStart);
+        String voxelEnvironmentHelper = onGlslFragment.substring(
+                voxelEnvironmentStart,
+                voxelEnvironmentEnd + "return result * material.specularScale;".length());
+        require(!voxelEnvironmentHelper.contains("texture(metallumPlanarReflection")
+                        && !voxelEnvironmentHelper.contains("planarWeight"),
+                "voxel receiver must never sample or blend the legacy planar target");
         require(onGlslFragment.contains("color.rgb = metallumReflectionDiagnostic"),
                 "contribution-only mode must isolate confidence- and wave-modulated voxel radiance");
         require(onGlslFragment.contains("-metallumCoarseReflection.a - 1.0"),

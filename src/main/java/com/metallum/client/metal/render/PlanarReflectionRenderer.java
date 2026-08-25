@@ -58,6 +58,7 @@ public final class PlanarReflectionRenderer {
     private static RenderTarget lastRenderedTarget;
     private static boolean activationLogged;
     private static boolean failureLogged;
+    private static boolean voxelConflictLogged;
 
     private PlanarReflectionRenderer() {
     }
@@ -70,6 +71,16 @@ public final class PlanarReflectionRenderer {
     ) {
         if (!PlanarReflectionConfig.isEnabled()) {
             activePassRendered = false;
+            return null;
+        }
+        if (!PlanarReflectionConfig.isRuntimeEnabled()) {
+            activePassRendered = false;
+            if (!voxelConflictLogged) {
+                voxelConflictLogged = true;
+                Metallum.LOGGER.info(
+                        "Planar water reflection suppressed: voxel reflection mode is active"
+                );
+            }
             return null;
         }
 
