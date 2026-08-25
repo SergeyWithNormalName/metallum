@@ -43,16 +43,46 @@ public final class VisualStyleProfiles {
             1.00f
     );
 
+    private static final AtmosphereProfile VANILLA_ATMOSPHERE = new AtmosphereProfile(
+            1.00f,
+            0.00f,
+            0.00f,
+            0.00f,
+            0.00f,
+            0.00f
+    );
+
+    private static final AtmosphereProfile NATURAL_ATMOSPHERE = new AtmosphereProfile(
+            0.75f,
+            0.28f,
+            0.12f,
+            0.15f,
+            0.15f,
+            0.10f
+    );
+
+    private static final AtmosphereProfile REALISM_ATMOSPHERE = new AtmosphereProfile(
+            0.55f,
+            0.45f,
+            0.22f,
+            0.25f,
+            0.20f,
+            0.20f
+    );
+
     private static final VisualStyleProfile VANILLA_PROFILE = new VisualStyleProfile(
-            VANILLA_CELESTIAL
+            VANILLA_CELESTIAL,
+            VANILLA_ATMOSPHERE
     );
 
     private static final VisualStyleProfile NATURAL_PROFILE = new VisualStyleProfile(
-            NATURAL_CELESTIAL
+            NATURAL_CELESTIAL,
+            NATURAL_ATMOSPHERE
     );
 
     private static final VisualStyleProfile REALISM_PROFILE = new VisualStyleProfile(
-            REALISM_CELESTIAL
+            REALISM_CELESTIAL,
+            REALISM_ATMOSPHERE
     );
 
     private VisualStyleProfiles() {

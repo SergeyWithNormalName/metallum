@@ -67,6 +67,7 @@ public final class VisualStyleTests {
             VisualStyleProfile profile = VisualStyleProfiles.profile(style);
             require(profile != null, "Profile for " + style + " must not be null");
             require(profile.celestialLighting() != null, "CelestialLightingProfile for " + style + " must not be null");
+            require(profile.atmosphere() != null, "AtmosphereProfile for " + style + " must not be null");
         }
         require(VisualStyleProfiles.profile(null) != null, "Null style must resolve to safe fallback profile");
     }
@@ -75,6 +76,10 @@ public final class VisualStyleTests {
         CelestialLightingProfile vanilla = VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting();
         CelestialLightingProfile natural = VisualStyleProfiles.profile(VisualStyle.NATURAL).celestialLighting();
         CelestialLightingProfile realism = VisualStyleProfiles.profile(VisualStyle.REALISM).celestialLighting();
+
+        AtmosphereProfile vanillaAtmo = VisualStyleProfiles.profile(VisualStyle.VANILLA).atmosphere();
+        AtmosphereProfile naturalAtmo = VisualStyleProfiles.profile(VisualStyle.NATURAL).atmosphere();
+        AtmosphereProfile realismAtmo = VisualStyleProfiles.profile(VisualStyle.REALISM).atmosphere();
 
         // 1. VANILLA exact reference values
         require(vanilla.normalSunColor().equals(new LinearColor(1.00f, 0.93f, 0.78f)), "Vanilla sun mismatch");
@@ -87,6 +92,14 @@ public final class VisualStyleTests {
         require(Math.abs(vanilla.moonPhaseFloor() - 0.18f) < EPSILON, "Vanilla moon phase floor mismatch");
         require(Math.abs(vanilla.moonPhaseResponse() - 0.82f) < EPSILON, "Vanilla moon phase response mismatch");
 
+        require(vanillaAtmo.isVanillaIdentity(), "Vanilla atmosphere must be vanilla identity");
+        require(Math.abs(vanillaAtmo.fogDistanceStartRatio() - 1.00f) < EPSILON, "Vanilla start ratio mismatch");
+        require(vanillaAtmo.sunsetAtmosphereWeight() == 0.0f, "Vanilla sunset weight must be 0");
+        require(vanillaAtmo.nightCoolWeight() == 0.0f, "Vanilla night cool weight must be 0");
+        require(vanillaAtmo.rainDistanceScale() == 0.0f, "Vanilla rain distance scale must be 0");
+        require(vanillaAtmo.thunderDistanceScale() == 0.0f, "Vanilla thunder distance scale must be 0");
+        require(vanillaAtmo.weatherDarkeningScale() == 0.0f, "Vanilla weather darkening must be 0");
+
         // 2. NATURAL target values
         require(natural.normalSunColor().equals(new LinearColor(1.00f, 0.98f, 0.92f)), "Natural sun mismatch");
         require(natural.horizonSunColor().equals(new LinearColor(1.00f, 0.50f, 0.18f)), "Natural horizon sun mismatch");
@@ -98,6 +111,14 @@ public final class VisualStyleTests {
         require(Math.abs(natural.moonPhaseFloor() - 0.06f) < EPSILON, "Natural moon phase floor mismatch");
         require(Math.abs(natural.moonPhaseResponse() - 0.94f) < EPSILON, "Natural moon phase response mismatch");
 
+        require(!naturalAtmo.isVanillaIdentity(), "Natural atmosphere must not be vanilla identity");
+        require(Math.abs(naturalAtmo.fogDistanceStartRatio() - 0.75f) < EPSILON, "Natural start ratio mismatch");
+        require(Math.abs(naturalAtmo.sunsetAtmosphereWeight() - 0.28f) < EPSILON, "Natural sunset weight mismatch");
+        require(Math.abs(naturalAtmo.nightCoolWeight() - 0.12f) < EPSILON, "Natural night cool mismatch");
+        require(Math.abs(naturalAtmo.rainDistanceScale() - 0.15f) < EPSILON, "Natural rain distance scale mismatch");
+        require(Math.abs(naturalAtmo.thunderDistanceScale() - 0.15f) < EPSILON, "Natural thunder distance scale mismatch");
+        require(Math.abs(naturalAtmo.weatherDarkeningScale() - 0.10f) < EPSILON, "Natural weather darkening mismatch");
+
         // 3. REALISM target values
         require(realism.normalSunColor().equals(new LinearColor(1.00f, 0.995f, 0.97f)), "Realism sun mismatch");
         require(realism.horizonSunColor().equals(new LinearColor(1.00f, 0.32f, 0.07f)), "Realism horizon sun mismatch");
@@ -108,11 +129,20 @@ public final class VisualStyleTests {
         require(Math.abs(realism.moonIntensityScale() - 0.085f) < EPSILON, "Realism moon intensity scale mismatch");
         require(Math.abs(realism.moonPhaseFloor() - 0.00f) < EPSILON, "Realism moon phase floor mismatch");
         require(Math.abs(realism.moonPhaseResponse() - 1.00f) < EPSILON, "Realism moon phase response mismatch");
+
+        require(!realismAtmo.isVanillaIdentity(), "Realism atmosphere must not be vanilla identity");
+        require(Math.abs(realismAtmo.fogDistanceStartRatio() - 0.55f) < EPSILON, "Realism start ratio mismatch");
+        require(Math.abs(realismAtmo.sunsetAtmosphereWeight() - 0.45f) < EPSILON, "Realism sunset weight mismatch");
+        require(Math.abs(realismAtmo.nightCoolWeight() - 0.22f) < EPSILON, "Realism night cool mismatch");
+        require(Math.abs(realismAtmo.rainDistanceScale() - 0.25f) < EPSILON, "Realism rain distance scale mismatch");
+        require(Math.abs(realismAtmo.thunderDistanceScale() - 0.20f) < EPSILON, "Realism thunder distance scale mismatch");
+        require(Math.abs(realismAtmo.weatherDarkeningScale() - 0.20f) < EPSILON, "Realism weather darkening mismatch");
     }
 
     private static void testProfileValidation() {
         LinearColor sun = new LinearColor(1.00f, 0.93f, 0.78f);
         LinearColor moon = new LinearColor(0.50f, 0.62f, 0.90f);
+        AtmosphereProfile atmo = new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f);
 
         // LinearColor validation
         expectIllegalArgument(() -> new LinearColor(Float.NaN, 1.0f, 1.0f));
@@ -123,6 +153,32 @@ public final class VisualStyleTests {
         expectNullPointer(() -> LinearColor.lerp(null, moon, 0.5f));
         expectNullPointer(() -> LinearColor.lerp(sun, null, 0.5f));
         expectIllegalArgument(() -> LinearColor.lerp(sun, moon, Float.NaN));
+
+        // LinearColor sRGB conversions
+        expectIllegalArgument(() -> LinearColor.fromSrgb(Float.NaN, 0.5f, 0.5f));
+        expectIllegalArgument(() -> LinearColor.fromSrgb(0.5f, Float.POSITIVE_INFINITY, 0.5f));
+        LinearColor black = LinearColor.fromSrgb(0.0f, 0.0f, 0.0f);
+        require(black.red() == 0.0f && black.green() == 0.0f && black.blue() == 0.0f, "Black sRGB to linear mismatch");
+        require(black.toSrgbRed() == 0.0f && black.toSrgbGreen() == 0.0f && black.toSrgbBlue() == 0.0f, "Black linear to sRGB mismatch");
+        LinearColor white = LinearColor.fromSrgb(1.0f, 1.0f, 1.0f);
+        require(Math.abs(white.red() - 1.0f) < EPSILON, "White sRGB to linear mismatch");
+        require(Math.abs(white.toSrgbRed() - 1.0f) < EPSILON, "White linear to sRGB mismatch");
+
+        // AtmosphereProfile validation
+        expectIllegalArgument(() -> new AtmosphereProfile(0.0f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(-0.1f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(1.5f, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(Float.NaN, 0.28f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, -0.01f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 1.05f, 0.12f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, -0.1f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 1.1f, 0.15f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, -0.1f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 1.1f, 0.15f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, -0.1f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 1.1f, 0.10f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, -0.1f));
+        expectIllegalArgument(() -> new AtmosphereProfile(0.75f, 0.28f, 0.12f, 0.15f, 0.15f, 1.1f));
 
         // CelestialLightingProfile validation
         expectNullPointer(() -> new CelestialLightingProfile(
@@ -167,7 +223,9 @@ public final class VisualStyleTests {
         ));
 
         // VisualStyleProfile validation
-        expectNullPointer(() -> new VisualStyleProfile(null));
+        CelestialLightingProfile cel = VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting();
+        expectNullPointer(() -> new VisualStyleProfile(null, atmo));
+        expectNullPointer(() -> new VisualStyleProfile(cel, null));
     }
 
     private static void testRendererConfigDefaults() {
