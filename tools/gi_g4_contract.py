@@ -840,11 +840,14 @@ def verify_transcript_receipt(
             if transcript_text.count(token) != 1:
                 raise ContractError(f"G4 transcript identity token differs: {token}")
     if stem is not None:
+        validated_position = transcript_text.index(G4_VALIDATED_TOKEN)
+        binding_positions: dict[str, list[int]] = {}
         for suffix, label, expected_count in (
             (".raw.jsonl", "raw report", 1),
+            (".raw.jsonl", "raw", 1),
             (".summary.json", "summary", 1),
             (".minecraft.log", "Minecraft log", 1),
-            (".console.log", "console log", 1),
+            (".console.log", "console log", 2),
             (".transcript.log", "transcript", 2),
         ):
             pattern = re.compile(
@@ -852,10 +855,35 @@ def verify_transcript_receipt(
                 rf"{re.escape(stem + suffix)}(?:\r?$)",
                 re.MULTILINE,
             )
-            if len(pattern.findall(transcript_text)) != expected_count:
+            matches = list(pattern.finditer(transcript_text))
+            if len(matches) != expected_count:
                 raise ContractError(
                     f"G4 transcript does not bind the exact {label} artifact stem"
                 )
+            binding_positions[label] = [match.start() for match in matches]
+            before_validated = sum(
+                match.start() < validated_position for match in matches
+            )
+            if label == "raw report" and before_validated != 1 \
+                    or label in {"raw", "summary", "Minecraft log"} \
+                    and before_validated != 0 \
+                    or label in {"console log", "transcript"} \
+                    and before_validated != 1:
+                raise ContractError(
+                    f"G4 transcript {label} binding is outside its launch/final block"
+                )
+        if not (
+            binding_positions["raw report"][0]
+            < binding_positions["transcript"][0]
+            < binding_positions["console log"][0]
+            < validated_position
+            < binding_positions["raw"][0]
+            < binding_positions["summary"][0]
+            < binding_positions["Minecraft log"][0]
+            < binding_positions["console log"][1]
+            < binding_positions["transcript"][1]
+        ):
+            raise ContractError("G4 transcript artifact blocks are out of order")
 
 
 def verify_minecraft_receipt(minecraft_text: str) -> None:
@@ -1684,6 +1712,7 @@ def self_test_receipt_validator() -> None:
         f"  source: {metadata['source_sha256']}",
         "  raw report: /tmp/g4.raw.jsonl",
         "  transcript: /tmp/g4.transcript.log",
+        "  console log: /tmp/g4.console.log",
         G4_VALIDATED_TOKEN,
         "  raw: /tmp/g4.raw.jsonl",
         "  summary: /tmp/g4.summary.json",
@@ -1906,8 +1935,51 @@ def self_test_receipt_validator() -> None:
         "transcript token is missing",
     )
     expect_failure(
+        lambda: verify_transcript_receipt(
+            transcript.replace(
+                "  raw: /tmp/g4.raw.jsonl",
+                "  raw: /tmp/contradictory.raw.jsonl",
+            ),
+            derived,
+            "g4",
+        ),
+        "exact raw artifact stem",
+    )
+    expect_failure(
         lambda: verify_transcript_receipt(transcript + G4_REQUEST_TOKEN + "\n"),
         "one exact G4 request marker",
+    )
+    expect_failure(
+        lambda: verify_transcript_receipt(
+            transcript.replace("  console log: /tmp/g4.console.log\n", "", 1),
+            derived,
+            "g4",
+        ),
+        "exact console log artifact stem",
+    )
+    expect_failure(
+        lambda: verify_transcript_receipt(
+            transcript.replace(
+                "  console log: /tmp/g4.console.log\n" + G4_VALIDATED_TOKEN,
+                G4_VALIDATED_TOKEN + "\n  console log: /tmp/g4.console.log",
+                1,
+            ),
+            derived,
+            "g4",
+        ),
+        "outside its launch/final block",
+    )
+    expect_failure(
+        lambda: verify_transcript_receipt(
+            transcript.replace(
+                "  raw: /tmp/g4.raw.jsonl\n  summary: /tmp/g4.summary.json",
+                "  summary: /tmp/g4.summary.json\n  raw: /tmp/g4.raw.jsonl",
+                1,
+            ),
+            derived,
+            "g4",
+        ),
+        "artifact blocks are out of order",
     )
 
     with tempfile.TemporaryDirectory(prefix="metallum-g4-receipt-") as temporary:

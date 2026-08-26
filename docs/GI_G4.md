@@ -1,8 +1,8 @@
 # GI Stage G4: frozen one-bounce diffuse transport
 
-Status: implemented field-only candidate, pending the predeclared live Tier B
-stop-gate. Source and bundled Metal validation results are recorded before any
-claim of stage completion.
+Status: `G4_COMPLETE_FIELD_ONLY`, decision `PASS_FIELD_ONLY_ONE_BOUNCE`. The
+predeclared clean live Tier B stop-gate and source/bundled Metal validation have
+passed. This completion does not authorize a receiver or G5.
 
 G4 is a private field-only experiment. It consumes accepted G2 material truth
 and the completed G3 direct-irradiance field, but exposes no terrain/image
@@ -237,3 +237,33 @@ A sealed-wall leak, non-repeatable hash, energy amplification, non-finite SH,
 memory excess, unbounded/repeated work or any production image binding rejects
 G4 and blocks G5. Passing G4 proves only a private physical field and bounded
 diagnostic cost; it is not visual or product acceptance.
+
+## Accepted Tier B receipt
+
+The clean Apple M1 Pro run on 2026-08-27 attests implementation commit
+`460d29431321` and source identity
+`9085da37f69d31c7267a086acde895a021aa0c6a395564b40fc4b509b1ad5a07`.
+It completed the frozen 600-frame warmup and two exact 300-frame measurement
+windows at 3024x1964 HDR, Advanced/Balanced, native resolution, MetalFX and
+VSync off.
+
+- G3 completed 192/192 initial bricks in exactly 24 active injection frames;
+- G4 admitted one frozen near-cascade build and exactly one
+  `GI_TRANSPORT` dispatch during warmup;
+- that dispatch measured `0.923291 ms` p95 and maximum, below the predeclared
+  `4.0/6.0 ms` gates;
+- both measurement windows retained one total dispatch, so measured dispatch
+  growth was zero;
+- the receipt had zero timing drops, zero renderer fallbacks and `COMPLETE`;
+- combined G2+G3+G4 end-to-end memory is `22,637,928` bytes of the
+  `25,165,824`-byte budget;
+- source-compiled and bundled-metallib validation produced the same raw digest
+  `310720372c19146c4b1a83e5c031e6696dfed41c37f4a67fc42e85d929d0025a`.
+
+The whole-frame value, `43.391665 FPS`, is descriptive Tier B telemetry only.
+There is no production A/B, image-quality claim or Tier C acceptance because
+G4 has no receiver or image binding. The canonical hashes and five same-stem
+artifacts are recorded in
+`benchmark/gi/g4-transport-evidence-v1.json` and
+`benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/`. G5 remains blocked
+until a new explicit receiver request and stop-gate.

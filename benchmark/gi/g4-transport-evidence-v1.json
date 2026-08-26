@@ -2,8 +2,8 @@
   "schema_version": 1,
   "id": "gi-g4-transport-evidence-v1",
   "stage": "G4",
-  "status": "G4_IMPLEMENTED_FIELD_ONLY_PENDING_TIER_B",
-  "decision": "PENDING_TIER_B_STOP_GATE",
+  "status": "G4_COMPLETE_FIELD_ONLY",
+  "decision": "PASS_FIELD_ONLY_ONE_BOUNCE",
   "g5_allowed": false,
   "implementation": {
     "base_commit": "5be8561bea0f50f348e0189098491b59c4742781",
@@ -12,7 +12,7 @@
     "source_files_sha256": {
       "benchmark/routes/gi-g4-overworld-v1.json": "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d",
       "build.gradle": "25e260ed2950a9925f47d3c786dc06733996e411231662ecea03e24e81760ae0",
-      "docs/GI_G4.md": "4394dc55952e56d2fbdc55e0c74ceeb4d17e06c46d4b4c5c73f1e070e6a4ec12",
+      "docs/GI_G4.md": "661671be18ea3cd8f240e3680539de2a4a96e1664efa2c61f739d36fec6395a7",
       "scripts/run_metal_benchmark.sh": "e43819daf044dfa31933d91de9332ba177c635a171fe6f0ff0a1bfcf1d8457b7",
       "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "9248a26839a2cb2141c680a9bb860b50febd23b1ae07ee9f39def84cf4c80306",
       "src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java": "72b5db16d1b0dbdb16ebc5281a329ed5f635b5ebfe3b4c0f073b1c55ef315122",
@@ -50,7 +50,7 @@
       "src/test/java/com/metallum/client/metal/render/MetalRuntimeTests.java": "777be2ef8ac113f61c168184799b0bb00a8c5d9585e95e1162298e2a9664ba2e",
       "src/test/java/com/metallum/client/metal/render/framegraph/FrameGraphTests.java": "39dfdeea66a6f8b250d63f7add25e6d28a1488a21d107872a4b7cbc61a1058dd",
       "tools/gi_g3_contract.py": "4bdc7cc86dd45009aff8e9e5e7df4017f63a354a61d8d97144ad9fcefdc2227f",
-      "tools/gi_g4_contract.py": "80c9d23f4b63b1bae555016397f2235cf8050001f01c68855c74e6ad4fbb35c5",
+      "tools/gi_g4_contract.py": "405615793dacd5af3084015dc168cbc08e80f7eb848d8cf53c29d650b9c80efe",
       "tools/gi_release_contract_guard.sh": "65127b8f2fda3490c194c77e09c79558f7f05932778829e7ba23ac5335064145",
       "tools/metal_benchmark_report.py": "5c31adf44005c0c360ae8a7a75d4d9f0e736f40037d3781c4e1a1d2182420a58",
       "tools/test_gi_g4_runner_contract.sh": "e92c91cf11f8c83e3c6befc855b7c746e0f1934591fc609b06d4fd95594539c5",
@@ -226,9 +226,45 @@
     "maximum_single_dispatch_ms": 6.0,
     "requires_zero_timing_drops": true,
     "requires_no_renderer_fallback": true,
-    "completed": false,
-    "results": null,
-    "artifacts": {}
+    "completed": true,
+    "results": {
+      "artifact_sha256": "a70a02f40fdc266691635968d0d56dd8e29cd16d2893be0e49998184495db73f",
+      "builds": 1,
+      "commit": "460d29431321",
+      "dropped_timing_events": 0,
+      "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+      "gi_transport_maximum_ms": 0.923291,
+      "gi_transport_p95_ms": 0.923291,
+      "measured_dispatch_growth": 0,
+      "renderer_fallbacks": 0,
+      "route_sha256": "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d",
+      "settings_sha256": "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3",
+      "settings_spec_sha256": "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e",
+      "source_sha256": "9085da37f69d31c7267a086acde895a021aa0c6a395564b40fc4b509b1ad5a07",
+      "transport_dispatches": 1
+    },
+    "artifacts": {
+      "raw": {
+        "path": "benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off.raw.jsonl",
+        "sha256": "31c6dbe9f5ce22b7d462175cffcf7e2cfe209f824406c47d5763a9393fa9a3eb"
+      },
+      "summary": {
+        "path": "benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off.summary.json",
+        "sha256": "3705422cd30ff9e1cbfc7687b4dfb2238c0a51ccfc48f98b35ee2a66a58a8808"
+      },
+      "minecraft_log": {
+        "path": "benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off.minecraft.log",
+        "sha256": "fbc23bc15558dc815873ac1932af859af0d348d55093c56192b9931920ad966c"
+      },
+      "console_log": {
+        "path": "benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off.console.log",
+        "sha256": "fd4b229ea010f1958e356ad25808808d2acdf2d8f3939006f7b2a1a680cdf3f5"
+      },
+      "transcript_log": {
+        "path": "benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1/20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off.transcript.log",
+        "sha256": "371cc5edcba5054e503fa907fea2ce532f292cadaabf6bb1ee57acc7a7006272"
+      }
+    }
   },
   "mechanical_verification": {
     "gradle_check": "PASS",
@@ -244,10 +280,10 @@
     "benchmark_runner_contract": "PASS"
   },
   "limitations": [
-    "Pending evidence is not Tier C and contains no production FPS claim.",
+    "The completed Tier B receipt is not Tier C and contains no production FPS claim.",
     "A passing G4 private field is not visual or product acceptance; G5 remains unauthorized.",
     "The byte census includes actual native allocatedSize and persistent Java FFM packets; small on-heap control objects are excluded.",
-    "Source and bundled Metal correctness are complete; no live Tier B artifact is claimed by this pending receipt."
+    "Source and bundled Metal correctness and the clean live Tier B receipt are complete; the private field remains diagnostic-only."
   ],
-  "next_gate": "Run the predeclared Tier B stop-gate; keep G5 blocked."
+  "next_gate": "G4 is accepted only as a private field; keep G5 blocked until a new explicit receiver request and stop-gate."
 }

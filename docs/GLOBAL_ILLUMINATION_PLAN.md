@@ -1,7 +1,12 @@
 # Global illumination: архитектура, этапы и критерии приёмки
 
-Статус: архитектурный план, 22 августа 2026 года. Реализация GI в текущей
-ветке ещё не начата. Фактическое состояние voxel/radiance-наработок вынесено в
+Статус: архитектурный план, обновлён 27 августа 2026 года. Исторический результат
+G0 `REJECTED_BASELINE_FLOOR` сохранён; отдельный текущий recovery gate имеет
+`PASS_RECOVERED_BASELINE`, а G1 — `PASS_ABSOLUTE_FLOOR_REVALIDATED`. Эти новые
+receipts не переписывают исходный G0 no-win. G2 остаётся diagnostic material
+truth, а G3 и G4 завершены только как private field-only этапы. Production GI
+ещё не влияет на изображение: receiver G5 заблокирован до отдельного запроса и
+stop-gate. Исходный аудит voxel/radiance-наработок находится в
 [GI_VOXEL_AUDIT.md](GI_VOXEL_AUDIT.md).
 
 ## 1. Решение в одном абзаце
@@ -391,10 +396,9 @@ Live Tier B на frozen 600+600 fixture выполнил ровно одну ini
 `GI_INJECT` на 24 warmup-кадрах дал `0.081 ms` average и `0.122 ms` p95;
 оба измерительных окна имели нулевую работу и неизменный full-field counter. Два
 предыдущих прогона с dynamic-epoch и startup-publication churn сохранены как
-rejected evidence. Текущий статус — `G3_COMPLETE_FIELD_ONLY`; G4 разрешён
-отдельным запросом пользователя и теперь реализован как field-only candidate;
-его собственный Tier B stop-gate ещё не завершён. Полный контракт G3:
-`docs/GI_G3.md`.
+rejected evidence. Текущий статус — `G3_COMPLETE_FIELD_ONLY`; отдельно
+запрошенный G4 также прошёл собственный field-only stop-gate. Полный контракт
+G3: `docs/GI_G3.md`.
 
 ### G4 — детерминированный one-bounce diffuse transport
 
@@ -441,11 +445,14 @@ Stop-gate:
 - Light leaks через sealed wall, race-dependent hash, amplification без emissive
   source или unbounded convergence закрывают гипотезу до receiver.
 
-Статус реализации от 2026-08-27: frozen near-cascade candidate завершён в
+Статус реализации от 2026-08-27: `G4_COMPLETE_FIELD_ONLY`, решение
+`PASS_FIELD_ONLY_ONE_BOUNCE`. Frozen near-cascade candidate завершён в
 Java/Swift/Metal и остаётся default-off. Source/bundled Metal Validation, exact
-ABI/resource census и field-only source-chain прошли. Live G4 receipt пока
-`PENDING_TIER_B_STOP_GATE`; до его принятия G4 не считается завершённым, а G5
-остаётся заблокирован. Канонический контракт: `docs/GI_G4.md`.
+ABI/resource census, field-only source-chain и чистый live Tier B receipt
+прошли: один warmup transport dispatch дал `0.923291 ms` p95/max, а measured
+dispatch growth остался нулевым. Это не Tier C, не визуальная приёмка и не
+production FPS claim. G5 остаётся заблокирован. Канонический контракт:
+`docs/GI_G4.md`.
 
 ### G5 — receiver feasibility
 

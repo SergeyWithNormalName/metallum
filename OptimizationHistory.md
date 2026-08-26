@@ -4284,3 +4284,53 @@ dirty-worktree screening, а не Tier C claim. Качество и resolution �
 production GI resources/passes/bindings остались нулевыми. G2 сохранён только
 как diagnostic infrastructure; существующий G1 floor gate по-прежнему блокирует
 любую новую production-GI стадию.
+
+---
+
+## 2026-08-27 — G4 frozen one-bounce transport — COMPLETE FIELD ONLY
+
+**Решение:** `PASS_FIELD_ONLY_ONE_BOUNCE`; implementation `460d294` сохранён.
+Это принятие private diagnostic field, не production receiver, не визуальная
+приёмка и не Tier C. G5 остаётся заблокирован.
+
+G4 строит один frozen near cascade `32^3` с cell size 2 blocks. Он читает только
+accepted G2 material/geometry и завершённый G3 direct-irradiance source, один раз
+вычисляет `L_bounce0 = rho/pi * E_direct`, затем выполняет один детерминированный
+Jacobi gather по 26 направлениям и 8 distances. Результат хранится в private L1
+SH + confidence; terrain, image, fragment и render-pass bindings отсутствуют.
+Supercover visibility допускает transfer только через authoritative AIR,
+нормировка form factor сохраняет global energy bound, а второй bounce запрещён.
+
+Source-compiled и bundled-metallib Metal Validation дали одинаковый raw digest
+`310720372c19146c4b1a83e5c031e6696dfed41c37f4a67fc42e85d929d0025a`.
+Полный end-to-end census G2+G3+G4 равен `22,637,928` bytes при лимите
+`25,165,824`; G4 создаёт 5 private ресурсов и 2 compute passes, а field-only
+source-chain запрещает production consumer.
+
+Чистый Tier B run `20260826T175648Z-g460d29431321-clean-gi-g4-transport-final-off`
+прошёл на Apple M1 Pro, built-in Retina `3024x1964`, HDR,
+Advanced/Balanced, native resolution, MetalFX/VSync OFF. После 600 warmup кадров
+он завершил два точных 300-frame measured windows:
+
+- G3: 192/192 bricks, 0 pending/discarded, ровно 24 active injection frames;
+- G4: один build и один `GI_TRANSPORT` dispatch в warmup;
+- transport p95/max: `0.923291/0.923291 ms`, ниже gates `4.0/6.0 ms`;
+- measured dispatch growth: `0`; timing drops: `0`; renderer fallbacks: `0`;
+- descriptive whole-frame: `43.391665 FPS`, 1%/0.1% lows
+  `35.724/34.014 FPS`, без production A/B claim.
+
+Fail-closed telemetry до принятого прогона поймала две реальные проблемы
+доказательного контура. Первый v2 receipt был отвергнут, потому что старое окно
+не могло доказать pre-attachment memory/work для G4 contract v3. Следующий clean
+run `44dae31` завершился `FAIL` с ложным `frozen G3/G2 source drifted`: logical
+native G3 epoch сравнивался с process-local registry epoch из другого домена.
+`77f8938` разделил домены и сохранил отбрасывание настоящей post-freeze мутации;
+`460d294` дополнительно заморозил `OFF` до source capture. Отклонённый clean run
+сохранён отдельно без summary и не используется как положительное evidence.
+
+Пять same-stem артефактов финального run хэшированы, summary канонически
+пересчитывается из raw, а transcript связывает exact clean commit/source,
+artifact, route, fixture, settings и launch/final artifact blocks. Вывод этапа:
+стоимость одного bounded field build поддержана Tier B, steady-state work в
+measurement отсутствует. Влияние на изображение и production performance этим
+этапом намеренно не проверялись.
