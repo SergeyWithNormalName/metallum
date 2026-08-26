@@ -4120,6 +4120,13 @@ baseline; результат остаётся внутри visual-task допу�
 `20260826T103404Z-...cloud-v12-final-tierc-run1...` и
 `20260826T103646Z-...cloud-v12-final-tierc-run2...`.
 
+Финальная low/red ablation с `--water-reflection-quality confidence-off`
+(`20260826T104444Z-...cloud-v12-low-red-confidence-off...`) не дала заметного
+полезного усиления world silhouette относительно production capture, но отключает
+защиту от ранее наблюдавшихся цветных horizon bands. В production не переносить:
+coarse environment уже читается в low/grazing участках воды, а риск вернуть
+цветную «грязь» не оправдан.
+
 **Решение:** сохранить reverse-Z fix + bounded captured coverage на прежнем
 quarter-resolution target. `STATIC VISUAL CAPTURES PASSED`; clean Tier C performance
 `PROVEN`; automated orbit/lifecycle `SUPPORTED`; ручные jump/slow-fast walk/back/yaw
