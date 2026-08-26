@@ -404,11 +404,30 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                 && source.nearOriginY() == this.activeNearOriginY
                 && source.nearOriginZ() == this.activeNearOriginZ
                 && this.environment != null
-                && registry.staticSourceIdentityMatchesForGi(
-                        epoch.staticLightWorld(), epoch.staticLightRegistryEpoch()
+                && frozenStaticSourceIdentityStillCurrent(
+                        epoch, this.observedStaticState, registry
                 )
                 && GiEnvironmentSource.quantizedDigest(descriptor)
                 == this.environment.quantizedDigest();
+    }
+
+    /**
+     * G3 publishes a compact logical source epoch to native, while the registry retains its own
+     * process-local mutation epoch. Post-submit drift checks must compare the frozen registry
+     * identity captured for that logical epoch, rather than confusing the two counters.
+     */
+    static boolean frozenStaticSourceIdentityStillCurrent(
+            final GiDirectSourceEpoch logicalEpoch,
+            final @Nullable GiStaticSourceState frozenStaticState,
+            final AdvancedLightRegistry registry
+    ) {
+        Objects.requireNonNull(logicalEpoch, "logicalEpoch");
+        Objects.requireNonNull(registry, "registry");
+        return frozenStaticState != null
+                && frozenStaticState.world().equals(logicalEpoch.staticLightWorld())
+                && registry.staticSourceIdentityMatchesForGi(
+                        frozenStaticState.world(), frozenStaticState.registryEpoch()
+                );
     }
 
     /**

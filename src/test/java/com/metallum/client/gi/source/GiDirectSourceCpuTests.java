@@ -16,6 +16,7 @@ public final class GiDirectSourceCpuTests {
         negativeCoordinateMath();
         staticOrderingAndExclusion();
         dynamicFramesDoNotRotateStaticEpoch();
+        frozenTransportUsesActualStaticRegistryIdentity();
         environmentQuantization();
         staleEpochIsRejected();
         queueBoundsCoalescingAndStarvation();
@@ -66,6 +67,33 @@ public final class GiDirectSourceCpuTests {
         GiStaticSourceState after = registry.staticSourceStateForGi(world.dimensionId());
         check(before != null && before.equals(after),
                 "dynamic L3 frame rotated the camera-independent G3 source epoch");
+    }
+
+    private static void frozenTransportUsesActualStaticRegistryIdentity() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object worldIdentity = new Object();
+        LightWorldToken world = registry.openWorld(worldIdentity, "minecraft:overworld");
+        registry.recordBlockChange(
+                worldIdentity, world.dimensionId(), 7L, 3, 101L, null
+        );
+        registry.recordBlockChange(
+                worldIdentity, world.dimensionId(), 7L, 4, 102L, null
+        );
+        GiStaticSourceState frozen = registry.staticSourceStateForGi(world.dimensionId());
+        check(frozen != null && frozen.registryEpoch() > 1L,
+                "test registry did not separate its actual epoch from G3's logical epoch");
+        GiDirectSourceEpoch logical = new GiDirectSourceEpoch(
+                1L, 1L, 1L, 1L, 1L, 1L, world, 1L, 1L
+        );
+        check(GiDirectSourceCoordinator.frozenStaticSourceIdentityStillCurrent(
+                        logical, frozen, registry),
+                "frozen G4 source confused G3's logical epoch with the registry epoch");
+        registry.recordBlockChange(
+                worldIdentity, world.dimensionId(), 7L, 5, 103L, null
+        );
+        check(!GiDirectSourceCoordinator.frozenStaticSourceIdentityStillCurrent(
+                        logical, frozen, registry),
+                "real post-freeze registry drift was not rejected");
     }
 
     private static void staleEpochIsRejected() {
