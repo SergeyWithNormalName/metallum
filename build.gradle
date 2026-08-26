@@ -343,6 +343,52 @@ tasks.register("giSemanticFieldGpuValidationBundled", JavaExec) {
 	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
 }
 
+tasks.register("giDirectSourceCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 source epochs, static-only admission and dirty scheduling"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giDirectSourceSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Rejects view-dependent, dynamic, bounce and image-path dependencies from G3"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceSourceChainTests")
+}
+
+tasks.register("giDirectSourceGpuValidationSource", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 private fields and raw correctness using actual MSL source"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceGpuValidation")
+	args "source"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "METALLUM_NATIVE_SHADER_FORCE_SOURCE", "1"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
+tasks.register("giDirectSourceGpuValidationBundled", JavaExec) {
+	group = "verification"
+	description = "Validates bounded G3 private fields and raw correctness using bundled metallib"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("processResources"), tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDirectSourceGpuValidation")
+	args "bundled"
+	jvmArgs "--enable-native-access=ALL-UNNAMED"
+	environment "MTL_DEBUG_LAYER", "1"
+	environment "MTL_SHADER_VALIDATION", "1"
+	environment "MTL_SHADER_VALIDATION_REPORT_TO_STDERR", "1"
+}
+
 tasks.register("shadowValueValidation", JavaExec) {
 	group = "verification"
 	description = "Validates L4 environment, cascade stability, preset and shadow ABI contracts"
@@ -1429,6 +1475,20 @@ tasks.register("giG2SemanticContractTest", Exec) {
 	commandLine "python3", "tools/gi_g2_contract.py", "--root", "."
 }
 
+tasks.register("giG3SourceContractTest", Exec) {
+	group = "verification"
+	description = "Validates G3 direct-source evidence, bounded updates and absence of later-stage consumers"
+	inputs.file("tools/gi_g3_contract.py")
+	inputs.file("benchmark/gi/g3-direct-source-evidence-v1.json")
+	inputs.dir("src/main/java/com/metallum/client/gi/source")
+	inputs.files(
+		"src/main/java/com/metallum/client/gi/semantic/GiSemanticDirectFieldView.java",
+		"src/main/metal/MetallumGiField.metal",
+		"src/main/native/MetallumNative.swift"
+	)
+	commandLine "python3", "tools/gi_g3_contract.py", "--root", "."
+}
+
 tasks.register("giStageGateContractTest", Exec) {
 	group = "verification"
 	description = "Validates current G0 recovery, G1 revalidation and G2 completion evidence"
@@ -1467,7 +1527,8 @@ tasks.named("test", Test) {
 tasks.named("check") {
     dependsOn(tasks.named("giG0FixtureContractTest"))
     dependsOn(tasks.named("giG1FieldContractTest"))
-    dependsOn(tasks.named("giG2SemanticContractTest"))
+	dependsOn(tasks.named("giG2SemanticContractTest"))
+	dependsOn(tasks.named("giG3SourceContractTest"))
 	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
     dependsOn(tasks.named("benchmarkReportContractTest"))
@@ -1488,6 +1549,10 @@ tasks.named("check") {
 	dependsOn(tasks.named("giSemanticGpuEncoderUnitTest"))
 	dependsOn(tasks.named("giSemanticFieldGpuValidationSource"))
 	dependsOn(tasks.named("giSemanticFieldGpuValidationBundled"))
+	dependsOn(tasks.named("giDirectSourceCpuUnitTest"))
+	dependsOn(tasks.named("giDirectSourceSourceChainUnitTest"))
+	dependsOn(tasks.named("giDirectSourceGpuValidationSource"))
+	dependsOn(tasks.named("giDirectSourceGpuValidationBundled"))
 	dependsOn(tasks.named("shadowValueValidation"))
 	dependsOn(tasks.named("godRayWorldSpaceUnitTest"))
 	dependsOn(tasks.named("voxelOccupancyUnitTest"))

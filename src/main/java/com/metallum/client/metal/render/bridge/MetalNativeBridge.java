@@ -481,6 +481,67 @@ public final class MetalNativeBridge {
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
 
+            giDirectSourceAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_source_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giDirectSourceLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_source_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giDirectSourceCreateContextV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_create_context_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giDirectSourceEncodeDirtyV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_encode_dirty_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giDirectSourceAwaitReadyV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_await_ready_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giDirectSourceResetV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_reset_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG)
+            );
+            giDirectSourceCaptureSliceOnceV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_capture_slice_once_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, INT, INT,
+                            ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giDirectSourceGetStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_source_get_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giDirectSourcePublishSchedulerV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_source_publish_scheduler_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG
+                    )
+            );
+            giDirectSourceReleaseContextV1 = downcall(
+                    lookup,
+                    "metallum_gi_direct_source_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+
             radianceContextCreate = downcall(
                     lookup,
                     "metallum_radiance_context_create",
@@ -1060,6 +1121,16 @@ public final class MetalNativeBridge {
     private static final MethodHandle giSemanticCaptureSliceOnceV1;
     private static final MethodHandle giSemanticGetStatsV1;
     private static final MethodHandle giSemanticReleaseContextV1;
+    private static final MethodHandle giDirectSourceAbiVersionV1;
+    private static final MethodHandle giDirectSourceLayoutV1;
+    private static final MethodHandle giDirectSourceCreateContextV1;
+    private static final MethodHandle giDirectSourceEncodeDirtyV1;
+    private static final MethodHandle giDirectSourceAwaitReadyV1;
+    private static final MethodHandle giDirectSourceResetV1;
+    private static final MethodHandle giDirectSourceCaptureSliceOnceV1;
+    private static final MethodHandle giDirectSourceGetStatsV1;
+    private static final MethodHandle giDirectSourcePublishSchedulerV1;
+    private static final MethodHandle giDirectSourceReleaseContextV1;
     private static final MethodHandle radianceContextCreate;
     private static final MethodHandle radianceContextUploadSourceFrozen;
     private static final MethodHandle radianceContextBindVertexResources;
@@ -1965,6 +2036,145 @@ public final class MetalNativeBridge {
             giSemanticReleaseContextV1.invokeExact(segment(context));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_semantic_release_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_abi_version_v1() {
+        try {
+            return (int) giDirectSourceAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giDirectSourceLayoutV1.invokeExact(segment(destination), destinationBytes);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_gi_direct_source_create_context_v1(
+            final MemorySegment device,
+            final MemorySegment queue,
+            final long worldGeneration
+    ) {
+        try {
+            return (MemorySegment) giDirectSourceCreateContextV1.invokeExact(
+                    segment(device), segment(queue), worldGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_encode_dirty_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final MemorySegment fence,
+            final MemorySegment header,
+            final MemorySegment bricks,
+            final MemorySegment cells,
+            final MemorySegment sources
+    ) {
+        try {
+            return (int) giDirectSourceEncodeDirtyV1.invokeExact(
+                    segment(context), segment(commandBuffer), segment(fence),
+                    segment(header), header.byteSize(), segment(bricks), bricks.byteSize(),
+                    segment(cells), cells.byteSize(), segment(sources), sources.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_encode_dirty_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_await_ready_v1(
+            final MemorySegment context,
+            final long timeoutMilliseconds
+    ) {
+        try {
+            return (int) giDirectSourceAwaitReadyV1.invokeExact(segment(context), timeoutMilliseconds);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_await_ready_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_reset_v1(
+            final MemorySegment context,
+            final long worldGeneration,
+            final long clipmapGeneration,
+            final long paletteGeneration,
+            final long contentGeneration,
+            final long staticSourceEpoch,
+            final long environmentEpoch
+    ) {
+        try {
+            return (int) giDirectSourceResetV1.invokeExact(
+                    segment(context), worldGeneration, clipmapGeneration, paletteGeneration,
+                    contentGeneration, staticSourceEpoch, environmentEpoch
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_reset_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_capture_slice_once_v1(
+            final MemorySegment context,
+            final int cascade,
+            final int slice,
+            final MemorySegment direct,
+            final MemorySegment geometry
+    ) {
+        try {
+            return (int) giDirectSourceCaptureSliceOnceV1.invokeExact(
+                    segment(context), cascade, slice,
+                    segment(direct), direct.byteSize(), segment(geometry), geometry.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_capture_slice_once_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_get_stats_v1(
+            final MemorySegment context,
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giDirectSourceGetStatsV1.invokeExact(
+                    segment(context), segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_get_stats_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_direct_source_publish_scheduler_v1(
+            final MemorySegment context,
+            final long queued,
+            final long completed,
+            final long discarded,
+            final long pending,
+            final long fullVolumeRebuilds
+    ) {
+        try {
+            return (int) giDirectSourcePublishSchedulerV1.invokeExact(
+                    segment(context), queued, completed, discarded, pending, fullVolumeRebuilds
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_publish_scheduler_v1", throwable);
+        }
+    }
+
+    public static void metallum_gi_direct_source_release_context_v1(final MemorySegment context) {
+        try {
+            giDirectSourceReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_release_context_v1", throwable);
         }
     }
 

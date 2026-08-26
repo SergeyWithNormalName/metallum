@@ -1,5 +1,9 @@
 package com.metallum.client.lighting;
 
+import com.metallum.client.gi.source.GiDirectSourceLayout;
+import com.metallum.client.gi.source.GiStaticSourceSnapshot;
+import com.metallum.client.gi.source.GiStaticSourceState;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -271,6 +275,7 @@ public final class AdvancedLightRegistry {
         if (current == null) {
             if (nextBase.isEmpty()) {
                 world.epoch++;
+                world.staticEpoch++;
                 this.acceptedPublications++;
                 return true;
             }
@@ -291,6 +296,7 @@ public final class AdvancedLightRegistry {
             world.sections.remove(task.sectionKey());
         }
         world.epoch++;
+        world.staticEpoch++;
         this.acceptedPublications++;
         return true;
     }
@@ -321,6 +327,7 @@ public final class AdvancedLightRegistry {
         LightWorldToken token = this.openWorld(worldIdentity, dimensionId);
         WorldState world = requireActive(token);
         long mutationEpoch = ++world.epoch;
+        world.staticEpoch++;
         SectionState section = world.sections.get(sectionKey);
         if (section == null) {
             if (world.sections.size() >= this.maxResidentSections) {
@@ -370,6 +377,7 @@ public final class AdvancedLightRegistry {
             }
             this.activeWorld.sections.remove(sectionKey);
             this.activeWorld.epoch++;
+            this.activeWorld.staticEpoch++;
             this.sectionUnloads++;
             return true;
         }
@@ -485,6 +493,124 @@ public final class AdvancedLightRegistry {
             final int maxLights
     ) {
         return this.snapshotForFrameIfHealthy(cameraX, cameraY, cameraZ, maxLights, 0);
+    }
+
+    /**
+     * Returns a bounded world-space view of static L3 emitters before any camera/frustum or
+     * frame top-K admission. G3 is intentionally the sole consumer of this API.
+     */
+    public synchronized @Nullable GiStaticSourceState staticSourceStateForGi(
+            final String expectedDimension
+    ) {
+        if (expectedDimension == null || expectedDimension.isBlank()) {
+            throw new IllegalArgumentException("G3 expected dimension must not be blank");
+        }
+        if (!this.healthy || this.activeWorld == null
+                || !this.activeWorld.token.dimensionId().equals(expectedDimension)) {
+            return null;
+        }
+        return new GiStaticSourceState(this.activeWorld.token, this.activeWorld.staticEpoch);
+    }
+
+    public synchronized GiStaticSourceSnapshot queryStaticSourcesForGi(
+            final LightWorldToken expectedWorld,
+            final GiStaticSourceSnapshot.WorldAabb query,
+            final int maxSources
+    ) {
+        if (expectedWorld == null || query == null) {
+            throw new NullPointerException("G3 static-source query arguments");
+        }
+        if (!this.healthy) {
+            throw new IllegalStateException("Advanced light registry is unhealthy for G3 static sources");
+        }
+        if (maxSources < 0 || maxSources > GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK) {
+            throw new IllegalArgumentException("G3 static-source cap is outside its fixed contract");
+        }
+        WorldState world = requireActive(expectedWorld);
+        PriorityQueue<AdvancedLight> selected = new PriorityQueue<>(
+                Math.max(1, maxSources), AdvancedLight.PRIORITY_ORDER.reversed()
+        );
+        int offered = 0;
+        for (SectionState section : world.sections.values()) {
+            for (AdvancedLight source : section.compactedLights(world.token.dimensionId())) {
+                if (!GiStaticSourceSnapshot.isStaticSource(source) || !query.intersectsSphere(source)) {
+                    continue;
+                }
+                offered++;
+                offerTopK(selected, source, maxSources, AdvancedLight.PRIORITY_ORDER);
+            }
+        }
+        List<AdvancedLight> ordered = new ArrayList<>(selected);
+        ordered.sort(AdvancedLight.PRIORITY_ORDER);
+        return new GiStaticSourceSnapshot(world.token, world.staticEpoch, query, ordered,
+                offered - ordered.size());
+    }
+
+    /**
+     * Allocation-free render-loop form of the G3 query. It writes the same canonical top-K
+     * directly into caller-owned scratch storage and returns the selected count.
+     */
+    public synchronized int copyStaticSourcesForGi(
+            final LightWorldToken expectedWorld,
+            final double minX, final double minY, final double minZ,
+            final double maxX, final double maxY, final double maxZ,
+            final AdvancedLight[] destination,
+            final int destinationOffset,
+            final int maxSources
+    ) {
+        if (!this.healthy) {
+            throw new IllegalStateException("Advanced light registry is unhealthy for G3 static sources");
+        }
+        if (!Double.isFinite(minX) || !Double.isFinite(minY) || !Double.isFinite(minZ)
+                || !Double.isFinite(maxX) || !Double.isFinite(maxY) || !Double.isFinite(maxZ)
+                || minX > maxX || minY > maxY || minZ > maxZ) {
+            throw new IllegalArgumentException("G3 static-source bounds are invalid");
+        }
+        if (destination == null || destinationOffset < 0 || maxSources < 0
+                || maxSources > GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK
+                || destinationOffset + maxSources > destination.length) {
+            throw new IllegalArgumentException("G3 static-source destination is invalid");
+        }
+        WorldState world = requireActive(expectedWorld);
+        int selected = 0;
+        for (SectionState section : world.sections.values()) {
+            for (AdvancedLight source : section.compactedLights(world.token.dimensionId())) {
+                if (!GiStaticSourceSnapshot.isStaticSource(source)
+                        || !intersectsSphere(source, minX, minY, minZ, maxX, maxY, maxZ)) {
+                    continue;
+                }
+                int insertion = 0;
+                while (insertion < selected && AdvancedLight.PRIORITY_ORDER.compare(
+                        destination[destinationOffset + insertion], source) <= 0) {
+                    insertion++;
+                }
+                if (insertion >= maxSources) {
+                    continue;
+                }
+                int copyCount = Math.min(selected, maxSources - 1) - insertion;
+                if (copyCount > 0) {
+                    System.arraycopy(
+                            destination, destinationOffset + insertion,
+                            destination, destinationOffset + insertion + 1,
+                            copyCount
+                    );
+                }
+                destination[destinationOffset + insertion] = source;
+                selected = Math.min(maxSources, selected + 1);
+            }
+        }
+        return selected;
+    }
+
+    private static boolean intersectsSphere(
+            final AdvancedLight source,
+            final double minX, final double minY, final double minZ,
+            final double maxX, final double maxY, final double maxZ
+    ) {
+        double dx = Math.max(minX, Math.min(maxX, source.x())) - source.x();
+        double dy = Math.max(minY, Math.min(maxY, source.y())) - source.y();
+        double dz = Math.max(minZ, Math.min(maxZ, source.z())) - source.z();
+        return dx * dx + dy * dy + dz * dz <= (double) source.radius() * source.radius();
     }
 
     public synchronized @Nullable LightFrameSnapshot snapshotForFrameIfHealthy(
@@ -1045,6 +1171,8 @@ public final class AdvancedLightRegistry {
         private final LinkedHashMap<Long, SectionState> sections = new LinkedHashMap<>();
         private final RetainedAdmissionState retainedAdmission = new RetainedAdmissionState();
         private long epoch = 1L;
+        /** Camera-independent BLOCK/STATIC_CACHE mutation epoch; dynamic frames cannot advance it. */
+        private long staticEpoch = 1L;
         private List<AdvancedLight> dynamicLights = List.of();
 
         private WorldState(final Object identity, final LightWorldToken token) {

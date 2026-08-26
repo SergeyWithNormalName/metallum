@@ -343,9 +343,9 @@ screening (`+0.565 ms` GPU p95), затем локализовала `WORLD_OPAQ
 `+0.014 ms` и получила соседнюю десятиоконную ON/OFF пару: `44.718/44.151 FPS`,
 `30.469/32.527` 1% low, `24.411/24.518 ms` GPU p95. Неизменные stop-gates
 пройдены, 738 snapshots приняты без reject, cap 64 / 1,009,152 bytes не
-превышен, production resources/passes/bindings остались нулевыми. Текущий
-статус — `G2_COMPLETE_STRUCTURALLY_OFF`; G3 разрешён только отдельным запросом
-и не начат.
+превышен, production resources/passes/bindings остались нулевыми. Это
+зафиксированный prerequisite к отдельно запрошенному G3; текущий результат G3
+приведён ниже и не переписывает этот G2 receipt.
 
 ### G3 — direct source injection без bounce
 
@@ -377,6 +377,22 @@ Performance gate:
 - Tier B доказывает bounded work: стоимость зависит от числа dirty bricks, а не
   от полного объёма или разрешения экрана.
 - Любой full-volume rebuild в steady state — hard stop.
+
+Результат G3 от 2026-08-26: `PASS_FIELD_ONLY_BOUNDED_DIRECT_SOURCE`. Реализация
+строит private `E_direct` в трёх `32^3 RGBA16Float` каскадах, использует G2
+emission, camera-independent L4 AIR environment и только static L3
+`BLOCK/STATIC_CACHE` до view admission. Albedo/`rho/pi`, transport, bounce,
+receiver и image binding отсутствуют. Source/bundled Metal Validation прошли
+zero/red/sealed/aperture/repeat-hash/stale/thread/lifetime проверки. Учтённый
+объём — `1,104,096` bytes при 24 MiB cap.
+
+Live Tier B на frozen 600+600 fixture выполнил ровно одну initial population:
+192 queued/completed, 0 discarded, 0 pending, максимум 8 bricks/frame.
+`GI_INJECT` на 24 warmup-кадрах дал `0.081 ms` average и `0.122 ms` p95;
+оба измерительных окна имели нулевую работу и неизменный full-field counter. Два
+предыдущих прогона с dynamic-epoch и startup-publication churn сохранены как
+rejected evidence. Текущий статус — `G3_COMPLETE_FIELD_ONLY`; G4 разрешён
+только новым отдельным запросом и не начат. Полный контракт: `docs/GI_G3.md`.
 
 ### G4 — детерминированный one-bounce diffuse transport
 

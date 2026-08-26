@@ -329,6 +329,22 @@ public final class GiSemanticController {
         return state == null ? null : state.assembler.snapshot();
     }
 
+    /** Returns the sole active render-thread field without cloning its 3x32^3 payload. */
+    @Nullable
+    public synchronized GiSemanticDirectFieldView activeDirectField() {
+        if (this.worlds.size() != 1) {
+            return null;
+        }
+        WorldState state = this.worlds.values().iterator().next();
+        return state.paletteReady ? state.directField : null;
+    }
+
+    @Nullable
+    public synchronized GiSemanticDirectFieldView directField(final Object world) {
+        WorldState state = this.worlds.get(world);
+        return state == null || !state.paletteReady ? null : state.directField;
+    }
+
     public synchronized Telemetry telemetry() {
         int residentTags = this.worlds.values().stream()
                 .mapToInt(state -> state.assembler.residentSections()).sum();
@@ -368,6 +384,7 @@ public final class GiSemanticController {
         private GiSemanticPalette palette;
         private boolean paletteReady;
         private final GiSemanticFieldAssembler assembler;
+        private final GiSemanticDirectFieldView directField;
         private final Map<Long, Long> revisions = new HashMap<>();
         private final Map<Long, Long> newestOwners = new HashMap<>();
         private int cameraX;
@@ -396,6 +413,7 @@ public final class GiSemanticController {
             this.cameraY = cameraY;
             this.cameraZ = cameraZ;
             this.assembler = new GiSemanticFieldAssembler(token, palette, cameraX, cameraY, cameraZ);
+            this.directField = new GiSemanticDirectFieldView(this.assembler);
         }
     }
 }

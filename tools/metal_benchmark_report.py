@@ -165,6 +165,7 @@ LIGHT_CLUSTER_STAGE = "light upload + cluster build"
 SUN_SHADOW_STAGE = "sun shadow"
 VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
 DYNAMIC_LOCAL_SHADOW_STAGE = "dynamic local shadow"
+GI_INJECT_STAGE = "GI_INJECT"
 DYNAMIC_LOCAL_SHADOW_P95_BUDGET_MS = {
     "balanced": 1.0,
     "ultra": 2.0,
@@ -207,6 +208,7 @@ GI_INTEGER_KEYS = (
     "injection_dispatches", "transport_dispatches", "source_epoch",
     "probe_epoch", "field_epoch", "stale_cell_rejects",
 )
+GI_V2_INTEGER_KEYS = GI_INTEGER_KEYS + ("full_volume_rebuilds",)
 GI_RESET_REASON_KEYS = frozenset({
     "none", "world_change", "teleport", "scroll", "source_epoch",
     "explicit", "device_reset",
@@ -215,8 +217,11 @@ GI_FALLBACK_REASON_KEYS = frozenset({
     "none", "disabled", "unavailable", "invalid_input", "stale_data",
     "budget", "native_failure",
 })
-GI_KEYS = frozenset({
+GI_V1_KEYS = frozenset({
     "mode", "reset_reasons", "fallback_reasons", *GI_INTEGER_KEYS,
+})
+GI_V2_KEYS = frozenset({
+    "mode", "reset_reasons", "fallback_reasons", *GI_V2_INTEGER_KEYS,
 })
 VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
     "performance": 0.15,
@@ -294,6 +299,7 @@ class TimingWindow:
     sun_shadow_stage: dict[str, Any] | None
     voxel_upload_update_stage: dict[str, Any] | None
     dynamic_local_shadow_stage: dict[str, Any] | None
+    gi_inject_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -432,7 +438,13 @@ def _parse_reason_counters(
 
 
 def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != GI_KEYS:
+    if not isinstance(value, dict):
+        raise ReportError(f"line {line}: global_illumination has invalid keys")
+    contract_version = _integer(
+        value.get("contract_version"), "global_illumination.contract_version", line
+    )
+    expected_keys = GI_V1_KEYS if contract_version == 1 else GI_V2_KEYS
+    if contract_version not in (1, 2) or set(value) != expected_keys:
         raise ReportError(f"line {line}: global_illumination has invalid keys")
     mode = value.get("mode")
     if mode not in ("off", "active"):
@@ -442,10 +454,13 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
     result: dict[str, Any] = {"mode": mode}
     for key in GI_INTEGER_KEYS:
         result[key] = _integer(value.get(key), f"global_illumination.{key}", line)
-    if result["contract_version"] != 1:
-        raise ReportError(
-            f"line {line}: global_illumination.contract_version must be 1"
+    result["full_volume_rebuilds"] = (
+        _integer(
+            value.get("full_volume_rebuilds"),
+            "global_illumination.full_volume_rebuilds", line,
         )
+        if contract_version >= 2 else 0
+    )
     result["reset_reasons"] = _parse_reason_counters(
         value.get("reset_reasons"), "global_illumination.reset_reasons",
         GI_RESET_REASON_KEYS, line,
@@ -469,7 +484,7 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
         )
     if mode == "off":
         nonzero = [
-            key for key in GI_INTEGER_KEYS
+            key for key in GI_V2_INTEGER_KEYS
             if key != "contract_version" and result[key] != 0
         ]
         nonzero += [
@@ -1184,6 +1199,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_timing_stage(payload.get("stages"), DYNAMIC_LOCAL_SHADOW_STAGE, line)
             if schema >= 5 else None
         ),
+        gi_inject_stage=(
+            _parse_timing_stage(payload.get("stages"), GI_INJECT_STAGE, line)
+            if schema >= 6 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
@@ -1673,7 +1692,7 @@ def _aggregate_global_illumination(
                 "window_maximum": max(value[key] for value in values),
                 "last_window": values[-1][key],
             }
-            for key in GI_INTEGER_KEYS if key != "contract_version"
+            for key in GI_V2_INTEGER_KEYS if key != "contract_version"
         },
         "reset_reasons": {
             key: sum(value["reset_reasons"][key] for value in values)
@@ -1754,6 +1773,17 @@ def _aggregate_dynamic_local_shadow_stage(
         windows,
         "dynamic_local_shadow_stage",
         DYNAMIC_LOCAL_SHADOW_STAGE,
+        allow_absent_or_zero=True,
+    )
+
+
+def _aggregate_gi_inject_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "gi_inject_stage",
+        GI_INJECT_STAGE,
         allow_absent_or_zero=True,
     )
 
@@ -2386,6 +2416,9 @@ def summarize(
     dynamic_shadow_stage = _aggregate_dynamic_local_shadow_stage(selected)
     if dynamic_shadow_stage is not None:
         result.setdefault("stages", {})[DYNAMIC_LOCAL_SHADOW_STAGE] = dynamic_shadow_stage
+    gi_inject_stage = _aggregate_gi_inject_stage(selected)
+    if gi_inject_stage is not None:
+        result.setdefault("stages", {})[GI_INJECT_STAGE] = gi_inject_stage
     if selected[0].schema >= 2:
         meta = dict(selected[-1].metadata)
         if "ablation_mode" not in meta:
@@ -4968,6 +5001,37 @@ def self_test() -> None:
             value["window_maximum"] == 0
             for value in gi_off_summary["global_illumination"]["counters"].values()
         )
+
+        schema6_gi_active_v2 = root / "schema6-gi-active-v2.raw.jsonl"
+        active_payload = g0_line(0, advanced=True, detail=True)
+        active_gi = active_payload["global_illumination"]
+        active_gi.update({
+            "contract_version": 2,
+            "mode": "active",
+            "allocated_bytes": 1_104_096,
+            "resident_bytes": 884_736,
+            "resource_count": 6,
+            "pass_count": 2,
+            "dirty_queued_total": 192,
+            "dirty_completed_total": 192,
+            "injection_dispatches": 192,
+            "field_epoch": 24,
+            "full_volume_rebuilds": 1,
+        })
+        active_payload["stages"][GI_INJECT_STAGE] = {
+            "frames": 24,
+            "average_ms": 0.06,
+            "p50_ms": 0.05,
+            "p95_ms": 0.08,
+            "p99_ms": 0.09,
+            "maximum_ms": 0.10,
+        }
+        schema6_gi_active_v2.write_text(
+            json.dumps(active_payload) + "\n", encoding="utf-8"
+        )
+        active_window = load_report(schema6_gi_active_v2)[0]
+        assert active_window.global_illumination["full_volume_rebuilds"] == 1
+        assert active_window.gi_inject_stage["p95_ms"] == 0.08
 
         def invalid_gi_payload(
             stem: str, mutation: Any, expected_error: str,

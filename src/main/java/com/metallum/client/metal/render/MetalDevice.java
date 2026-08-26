@@ -4,6 +4,11 @@ import com.metallum.Metallum;
 import com.metallum.client.display.NativeFullscreen;
 import com.metallum.client.display.NativeFullscreenStartup;
 import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
+import com.metallum.client.gi.semantic.GiSemanticController;
+import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
+import com.metallum.client.gi.source.GiDirectSourceCoordinator;
+import com.metallum.client.gi.source.GiDirectSourceGpuResources;
+import com.metallum.client.gi.source.GiDirectSourceRuntime;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
@@ -42,6 +47,7 @@ import com.metallum.client.lighting.shader.AdvancedLightingBindingAbi;
 import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
+import com.metallum.client.metal.render.framegraph.GiDirectSourceFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -324,6 +330,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     private VoxelOccupancyGpuResources voxelOccupancyResources;
     @Nullable
     private LocalVoxelShadowGpuResources localVoxelShadowResources;
+    @Nullable
+    private GiDirectSourceCoordinator giDirectSourceCoordinator;
+    private boolean giDirectSourceFailureLogged;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
@@ -471,6 +480,22 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
+        if (GiDirectSourceRuntime.isRequested()) {
+            try {
+                GiDirectSourceFrameGraph.initialize();
+                GiDirectSourceGpuResources.validateNativeAbi();
+                this.giDirectSourceCoordinator = new GiDirectSourceCoordinator(
+                        handle -> this.commandEncoder.queueForDestroy(
+                                () -> MetalNativeBridge.metallum_gi_direct_source_release_context_v1(handle)
+                        )
+                );
+            } catch (RuntimeException exception) {
+                Metallum.LOGGER.warn(
+                        "G3 direct-source ABI preflight failed; keeping GI structurally inactive",
+                        exception
+                );
+            }
+        }
         this.cloudShadowResources = new CloudShadowGpuResources(this);
         // Persistent fallback binding is created once on the render thread.  The water-only
         // planar target itself is allocated lazily after the first eligible camera frame.
@@ -744,6 +769,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (this.localVoxelShadowResources != null) {
             this.localVoxelShadowResources.close();
             this.localVoxelShadowResources = null;
+        }
+        if (this.giDirectSourceCoordinator != null) {
+            this.giDirectSourceCoordinator.close();
+            this.giDirectSourceCoordinator = null;
         }
         this.commandEncoder.close();
         this.entityVelocityPackets.close();
@@ -1957,6 +1986,40 @@ public final class MetalDevice implements GpuDeviceBackend {
                             this.disableVoxelOccupancy(
                                     "native L5 voxel upload failed with status " + voxelStatus,
                                     null
+                            );
+                        }
+                    }
+                }
+                if (this.giDirectSourceCoordinator != null) {
+                    try {
+                        GiSemanticDirectFieldView directField =
+                                GiSemanticController.global().activeDirectField();
+                        if (directField != null) {
+                            int directStatus = this.commandEncoder.encodeGiDirectSource(
+                                    this.giDirectSourceCoordinator,
+                                    directField,
+                                    capture.giEnvironment(),
+                                    submitIndex
+                            );
+                            if (directStatus == GiDirectSourceGpuResources.STATUS_OK
+                                    || directStatus == GiDirectSourceCoordinator.STATUS_NO_WORK
+                                    || directStatus == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY
+                                    || directStatus == GiDirectSourceGpuResources.STATUS_BUSY) {
+                                this.giDirectSourceFailureLogged = false;
+                            } else if (!this.giDirectSourceFailureLogged) {
+                                this.giDirectSourceFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "G3 direct-source batch was rejected with status {}; retaining its private prior field",
+                                        directStatus
+                                );
+                            }
+                        }
+                    } catch (RuntimeException exception) {
+                        if (!this.giDirectSourceFailureLogged) {
+                            this.giDirectSourceFailureLogged = true;
+                            Metallum.LOGGER.warn(
+                                    "G3 direct-source update failed; retaining its private prior field",
+                                    exception
                             );
                         }
                     }

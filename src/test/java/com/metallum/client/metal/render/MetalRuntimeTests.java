@@ -1254,7 +1254,8 @@ public final class MetalRuntimeTests {
                 MetalGpuTimingStage.DYNAMIC_LOCAL_SHADOW,
                 MetalGpuTimingStage.TEMPORAL_INPUTS,
                 MetalGpuTimingStage.TEMPORAL_ENTITY_REPLAY,
-                MetalGpuTimingStage.FRAME_INTERPOLATION
+                MetalGpuTimingStage.FRAME_INTERPOLATION,
+                MetalGpuTimingStage.GI_INJECT
         };
         require(stages.length == MetalGpuTimingStage.PROFILED_STAGE_COUNT,
                 "GPU timing stage count does not match the append-only Java contract");

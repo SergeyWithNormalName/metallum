@@ -27,9 +27,11 @@ public enum MetalGpuTimingStage {
     /** Native depth-equal entity velocity replay, emitted only when packets exist. */
     TEMPORAL_ENTITY_REPLAY(18),
     /** MetalFX Frame Interpolator encode; presentation stages follow in stage 7. */
-    FRAME_INTERPOLATION(19);
+    FRAME_INTERPOLATION(19),
+    /** Bounded G3 geometry apply plus direct-source injection for dirty bricks. */
+    GI_INJECT(20);
 
-    public static final int PROFILED_STAGE_COUNT = 20;
+    public static final int PROFILED_STAGE_COUNT = 21;
 
     private final int nativeId;
 

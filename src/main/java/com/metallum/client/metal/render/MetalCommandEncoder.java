@@ -1,5 +1,7 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
+import com.metallum.client.gi.source.GiDirectSourceCoordinator;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -8,6 +10,8 @@ import com.metallum.client.hdr.HdrOutputMode;
 import com.metallum.client.hdr.HdrSceneState;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearClearColor;
+import com.metallum.client.lighting.AdvancedLightRegistry;
+import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
 import com.mojang.blaze3d.GpuFormat;
@@ -1287,6 +1291,26 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         return resources.upload(commandBuffer(), upload);
+    }
+
+    int encodeGiDirectSource(
+            final GiDirectSourceCoordinator coordinator,
+            final GiSemanticDirectFieldView field,
+            final EnvironmentDescriptor environment,
+            final long tick
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return coordinator.encodeFrame(
+                this.device.metalDeviceHandle(),
+                this.device.commandQueue.nativeHandle(),
+                commandBuffer().handle(),
+                this.fence,
+                field,
+                environment,
+                AdvancedLightRegistry.global(),
+                tick
+        );
     }
 
     int encodeVoxelDebugChecksum(

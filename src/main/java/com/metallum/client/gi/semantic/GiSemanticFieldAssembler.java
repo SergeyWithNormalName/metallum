@@ -2,6 +2,7 @@ package com.metallum.client.gi.semantic;
 
 import com.metallum.client.gi.field.GiFieldLayout;
 
+import java.lang.foreign.MemorySegment;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -28,6 +29,8 @@ public final class GiSemanticFieldAssembler {
     private final byte[] coverage = new byte[GiSemanticFieldSnapshot.TOTAL_CELLS];
     private final short[] materialIds = new short[GiSemanticFieldSnapshot.TOTAL_CELLS];
     private final long[] contentGenerations = new long[GiSemanticFieldSnapshot.TOTAL_CELLS];
+    private final long[] directBrickRevisions = new long[GiSemanticDirectFieldView.BRICK_COUNT];
+    private long nextDirectRevision;
     private final Map<Long, ResidentTag> residentTags = new HashMap<>();
 
     public GiSemanticFieldAssembler(
@@ -160,6 +163,81 @@ public final class GiSemanticFieldAssembler {
         return this.residentTags.size();
     }
 
+    long contentGeneration() {
+        assertOwnerThread();
+        return this.contentGeneration;
+    }
+
+    int originComponent(final int index) {
+        assertOwnerThread();
+        if (index < 0 || index >= this.origins.length) {
+            throw new IndexOutOfBoundsException("G2 origin component is outside the field");
+        }
+        return this.origins[index];
+    }
+
+    long directBrickContentStamp(final int brickId) {
+        assertOwnerThread();
+        GiSemanticDirectFieldView.requireBrickId(brickId);
+        return this.directBrickRevisions[brickId];
+    }
+
+    long copyDirectBrick(
+            final int brickId,
+            final MemorySegment destination,
+            final long destinationOffset,
+            final int cellStride
+    ) {
+        assertOwnerThread();
+        GiSemanticDirectFieldView.requireBrickId(brickId);
+        if (destination == null || destinationOffset < 0L
+                || cellStride < GiSemanticDirectFieldView.CELL_BYTES
+                || destinationOffset + (long) GiSemanticDirectFieldView.CELLS_PER_BRICK * cellStride
+                > destination.byteSize()) {
+            throw new IllegalArgumentException("G3 direct-source brick destination is too small");
+        }
+        int cascade = brickId / GiSemanticDirectFieldView.BRICKS_PER_CASCADE;
+        int localBrick = brickId % GiSemanticDirectFieldView.BRICKS_PER_CASCADE;
+        int brickX = localBrick % GiSemanticDirectFieldView.BRICKS_PER_AXIS;
+        int brickY = (localBrick / GiSemanticDirectFieldView.BRICKS_PER_AXIS)
+                % GiSemanticDirectFieldView.BRICKS_PER_AXIS;
+        int brickZ = localBrick / (GiSemanticDirectFieldView.BRICKS_PER_AXIS
+                * GiSemanticDirectFieldView.BRICKS_PER_AXIS);
+        int startX = brickX * GiSemanticDirectFieldView.BRICK_EDGE;
+        int startY = brickY * GiSemanticDirectFieldView.BRICK_EDGE;
+        int startZ = brickZ * GiSemanticDirectFieldView.BRICK_EDGE;
+        int cascadeOffset = cascade * GiFieldLayout.CELLS_PER_CASCADE;
+        int ordinal = 0;
+        long stamp = 0L;
+        for (int z = 0; z < GiSemanticDirectFieldView.BRICK_EDGE; z++) {
+            for (int y = 0; y < GiSemanticDirectFieldView.BRICK_EDGE; y++) {
+                for (int x = 0; x < GiSemanticDirectFieldView.BRICK_EDGE; x++) {
+                    int cell = cascadeOffset + GiFieldLayout.cellIndex(
+                            startX + x, startY + y, startZ + z,
+                            GiFieldLayout.CELLS_PER_AXIS
+                    );
+                    long offset = destinationOffset + (long) ordinal * cellStride;
+                    destination.asSlice(offset, cellStride).fill((byte) 0);
+                    int emissionBase = cell * 4;
+                    for (int channel = 0; channel < 4; channel++) {
+                        float normalized = Short.toUnsignedInt(this.emission[emissionBase + channel])
+                                / 65_535.0F;
+                        destination.set(
+                                GiSemanticDirectFieldView.LE_SHORT,
+                                offset + (long) channel * Short.BYTES,
+                                Float.floatToFloat16(normalized)
+                        );
+                    }
+                    destination.set(java.lang.foreign.ValueLayout.JAVA_BYTE, offset + 8L,
+                            this.validity[cell]);
+                    stamp = Math.max(stamp, this.contentGenerations[cell]);
+                    ordinal++;
+                }
+            }
+        }
+        return stamp;
+    }
+
     public GiSemanticFieldSnapshot snapshot() {
         assertOwnerThread();
         return new GiSemanticFieldSnapshot(
@@ -220,6 +298,7 @@ public final class GiSemanticFieldAssembler {
         this.coverage[destinationCell] = source.knownCoverageUnchecked(sourceCell);
         this.materialIds[destinationCell] = source.dominantMaterialIdUnchecked(sourceCell);
         this.contentGenerations[destinationCell] = contentGeneration;
+        touchDirectCell(destinationCell);
     }
 
     private void scrollCascade(final int cascade, final int deltaX, final int deltaY, final int deltaZ) {
@@ -266,6 +345,7 @@ public final class GiSemanticFieldAssembler {
         this.coverage[destination] = this.coverage[source];
         this.materialIds[destination] = this.materialIds[source];
         this.contentGenerations[destination] = this.contentGenerations[source];
+        touchDirectCell(destination);
     }
 
     private void clearCascade(final int cascade) {
@@ -287,6 +367,7 @@ public final class GiSemanticFieldAssembler {
         this.coverage[cell] = 0;
         this.materialIds[cell] = (short) GiSemanticPalette.UNKNOWN_ID;
         this.contentGenerations[cell] = 0L;
+        touchDirectCell(cell);
     }
 
     private boolean intersectsAnyCascade(final long sectionKey) {
@@ -323,6 +404,7 @@ public final class GiSemanticFieldAssembler {
         Arrays.fill(this.coverage, (byte) 0);
         Arrays.fill(this.materialIds, (short) GiSemanticPalette.UNKNOWN_ID);
         Arrays.fill(this.contentGenerations, 0L);
+        touchAllDirectBricks();
         this.residentTags.clear();
         if (advanceContentGeneration) {
             this.contentGeneration = Math.incrementExact(this.contentGeneration);
@@ -332,6 +414,28 @@ public final class GiSemanticFieldAssembler {
     private void setOrigins(final int x, final int y, final int z) {
         int[] next = centeredOrigins(x, y, z);
         System.arraycopy(next, 0, this.origins, 0, next.length);
+    }
+
+    private void touchDirectCell(final int globalCell) {
+        int cascade = globalCell / GiFieldLayout.CELLS_PER_CASCADE;
+        int local = globalCell % GiFieldLayout.CELLS_PER_CASCADE;
+        int x = local % GiFieldLayout.CELLS_PER_AXIS;
+        int y = (local / GiFieldLayout.CELLS_PER_AXIS) % GiFieldLayout.CELLS_PER_AXIS;
+        int z = local / (GiFieldLayout.CELLS_PER_AXIS * GiFieldLayout.CELLS_PER_AXIS);
+        int brick = cascade * GiSemanticDirectFieldView.BRICKS_PER_CASCADE
+                + (x / GiSemanticDirectFieldView.BRICK_EDGE)
+                + (y / GiSemanticDirectFieldView.BRICK_EDGE)
+                * GiSemanticDirectFieldView.BRICKS_PER_AXIS
+                + (z / GiSemanticDirectFieldView.BRICK_EDGE)
+                * GiSemanticDirectFieldView.BRICKS_PER_AXIS
+                * GiSemanticDirectFieldView.BRICKS_PER_AXIS;
+        this.directBrickRevisions[brick] = Math.incrementExact(this.nextDirectRevision);
+    }
+
+    private void touchAllDirectBricks() {
+        for (int brick = 0; brick < this.directBrickRevisions.length; brick++) {
+            this.directBrickRevisions[brick] = Math.incrementExact(this.nextDirectRevision);
+        }
     }
 
     private static int[] centeredOrigins(final int x, final int y, final int z) {

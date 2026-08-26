@@ -33,6 +33,7 @@ public final class FrameGraphTests {
         testNativeHdrGraphTopology();
         testSpatialHdrGraphTopology();
         testAdvancedLightingGraphTopology();
+        testGiDirectSourceGraphTopology();
         testAbiHeader();
         testDeterministicDiagnosticsAndGate();
     }
@@ -222,6 +223,35 @@ public final class FrameGraphTests {
                         access.resource().name().equals("scene_radiance")
                                 && access.kind() == FrameGraph.AccessKind.READ_WRITE),
                 "Direct lighting is not ordered after cluster, voxel and cached-shadow work");
+    }
+
+    private static void testGiDirectSourceGraphTopology() {
+        FrameGraph graph = GiDirectSourceFrameGraph.graph();
+        require(graph.resources().size() == 6 && graph.passes().size() == 2,
+                "G3 direct-source frame graph has the wrong bounded topology");
+        require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
+                        List.of(
+                                "gi_source_header_ring", "gi_source_brick_ring",
+                                "gi_source_cell_ring", "gi_static_source_ring",
+                                "gi_geometry_state_field", "gi_direct_irradiance_field"
+                        )),
+                "G3 resource order changed");
+        require(graph.passes().stream().map(pass -> pass.id().name()).toList().equals(
+                        List.of("gi_geometry_apply", "gi_source_inject")),
+                "G3 pass order changed");
+        FrameGraph.PassDesc apply = graph.passes().getFirst();
+        FrameGraph.PassDesc inject = graph.passes().getLast();
+        require(inject.dependencies().equals(List.of(apply.id()))
+                        && inject.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("gi_geometry_state_field")
+                                && access.kind() == FrameGraph.AccessKind.READ)
+                        && inject.accesses().stream().anyMatch(access ->
+                        access.resource().name().equals("gi_direct_irradiance_field")
+                                && access.kind() == FrameGraph.AccessKind.WRITE)
+                        && graph.resources().stream().noneMatch(resource ->
+                        resource.id().name().contains("scene")
+                                || resource.id().name().contains("terrain")),
+                "G3 output escaped its private field boundary");
     }
 
     private static void testReadBeforeWrite() {

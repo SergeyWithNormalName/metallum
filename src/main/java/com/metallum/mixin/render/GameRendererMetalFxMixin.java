@@ -1,6 +1,7 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.gi.source.GiDirectSourceRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.water.WaterCausticsPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -246,6 +247,9 @@ abstract class GameRendererMetalFxMixin {
                 );
             }
             EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
+            EnvironmentDescriptor giEnvironment = GiDirectSourceRuntime.isRequested()
+                    ? metallum$environmentDescriptor(camera, deltaTracker, true)
+                    : EnvironmentDescriptor.NONE;
             com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =
                     metallum$cloudShadowFrameState(environment, deltaTracker, device);
             device.publishFrameState(new FrameCapture(
@@ -257,7 +261,8 @@ abstract class GameRendererMetalFxMixin {
                     Integer.toUnsignedLong(System.identityHashCode(this.minecraft.level)),
                     this.metallum$dimensionIdentity,
                     environment,
-                    cloudShadow
+                    cloudShadow,
+                    giEnvironment
             ));
             return projectionBuffer.getBuffer(jitteredProjection);
         }
@@ -298,7 +303,17 @@ abstract class GameRendererMetalFxMixin {
             final CameraRenderState camera,
             final DeltaTracker deltaTracker
     ) {
-        EnvironmentDescriptor.Medium medium = switch (camera.fogType) {
+        return metallum$environmentDescriptor(camera, deltaTracker, false);
+    }
+
+    private EnvironmentDescriptor metallum$environmentDescriptor(
+            final CameraRenderState camera,
+            final DeltaTracker deltaTracker,
+            final boolean directSource
+    ) {
+        EnvironmentDescriptor.Medium medium = directSource
+                ? EnvironmentDescriptor.Medium.AIR
+                : switch (camera.fogType) {
             case WATER -> EnvironmentDescriptor.Medium.WATER;
             case LAVA -> EnvironmentDescriptor.Medium.LAVA;
             case POWDER_SNOW -> EnvironmentDescriptor.Medium.POWDER_SNOW;
@@ -331,7 +346,7 @@ abstract class GameRendererMetalFxMixin {
             float waterSurfaceY = 64.0f;
             com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution flash =
                     com.metallum.client.lighting.LightningEnvironmentPolicy.FlashContribution.NONE;
-            if (camera.pos != null && this.minecraft.level != null) {
+            if (!directSource && camera.pos != null && this.minecraft.level != null) {
                 waterSurfaceY = WaterCausticsPolicy.resolveWaterSurfaceY(
                         this.minecraft.level,
                         camera.pos.x,

@@ -273,7 +273,10 @@ def verify(root: Path) -> None:
             "src/main/java/com/metallum/client/lighting/shader/AdvancedDirectLightingShaderPatcher.java",
     ):
         production = source(root, production_path)
-        if "GiSemantic" in production or "metallum_gi_semantic" in production:
+        if any(token in production for token in (
+                "GiSemanticFieldGpuResources", "GiSemanticGpuEncoder",
+                "metallum_gi_semantic",
+        )):
             raise ContractError(f"G2 leaked into production rendering: {production_path}")
 
     print("GI G2 semantic/evidence/structural-off contract passed")

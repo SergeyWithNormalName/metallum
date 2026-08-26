@@ -721,6 +721,10 @@ else
 fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
 require_value "$RENDERER_GI_MODE" "off" "renderer globalIllumination"
+RUNTIME_GI_MODE="$RENDERER_GI_MODE"
+case "${METALLUM_GI_G3_INJECT:-}" in
+    1|true|TRUE|yes|YES|on|ON) RUNTIME_GI_MODE=g3_inject ;;
+esac
 if [ "$settings_field_count" -eq 34 ]; then
     require_value "$RENDERER_LIGHTING" "$BENCHMARK_RENDERER_IMPROVED_LIGHTING" \
         "tracked renderer improvedLighting"
@@ -776,7 +780,11 @@ else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
-echo "GI_OFF_ADMISSION mode=$RENDERER_GI_MODE resources=0 passes=0 bindings=0 status=PASS"
+if [ "$RUNTIME_GI_MODE" = "g3_inject" ]; then
+    echo "GI_G3_ADMISSION mode=g3_inject field_only=true bounce=false image_binding=false status=REQUESTED"
+else
+    echo "GI_OFF_ADMISSION mode=$RENDERER_GI_MODE resources=0 passes=0 bindings=0 status=PASS"
+fi
 echo "  settings: $SETTINGS_ID ($SETTINGS_SHA256; spec $SETTINGS_SPEC_SHA256)"
 echo "  workload: preset=$GRAPHICS_PRESET, render/simulation=${RENDER_DISTANCE}/${SIMULATION_DISTANCE}, entities=$ENTITY_DISTANCE_SCALING, particles=$PARTICLE_SETTING, mipmaps=$MIPMAP_LEVELS"
 echo "  runtime contract: GUI scale=auto, Sodium workers=$SODIUM_WORKER_THREADS, packs=$ACTIVE_RESOURCE_PACK_IDS"
@@ -1079,7 +1087,7 @@ METALLUM_BENCHMARK_MEASURE_FRAMES="$MEASURE_FRAMES" \
 METALLUM_BENCHMARK_SEQUENCE="$METALFX_MODE" \
 METALLUM_BENCHMARK_CURRENT_WINDOW=0 \
 METALLUM_BENCHMARK_EXPECTED_LIGHTING_MODEL="$EXPECTED_LIGHTING_MODEL" \
-METALLUM_BENCHMARK_GI_MODE="$RENDERER_GI_MODE" \
+METALLUM_BENCHMARK_GI_MODE="$RUNTIME_GI_MODE" \
 METALLUM_VERTEX_REFLECTION_EXPERIMENT="$VERTEX_REFLECTION_EXPERIMENT" \
 METALLUM_BENCHMARK_WATER_REFLECTION_FACE_AWARE="$WATER_REFLECTION_FACE_AWARE" \
 METALLUM_BENCHMARK_WATER_REFLECTION_FIRST_SURFACE="$WATER_REFLECTION_FIRST_SURFACE" \
