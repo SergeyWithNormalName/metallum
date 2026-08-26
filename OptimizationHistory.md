@@ -3923,7 +3923,7 @@ Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`,
 finite-plane/camera-correlated lookup больше не принимается как water-cloud
 architecture, даже если отдельная формула пересечения проходит static tests.
 
-#### Translation-invariant angular cloud environment — HUMAN PENDING
+#### Translation-invariant angular cloud environment — REJECTED BY HUMAN MOTION REVIEW
 
 V5 заменяет отвергнутую конечную cloud plane на удалённый angular sky layer.
 Lookup зависит только от отражённого world direction и vanilla animation offset:
@@ -3950,6 +3950,40 @@ Fragment стал на 1,529 chars меньше v4. Full Gradle `test build` и 
 cloud/reflection suites прошли. Статическая или математическая проверка не
 считается human motion acceptance; jump/walk/fast-forward результат остаётся
 HUMAN PENDING.
+
+Human motion review отклонил и V5: внешний вид отражения изменился, но при
+прыжке и быстром движении cloud reflection продолжала смещаться ровно так же.
+Это опровергло прежнюю атрибуцию finite-plane/camera translation: источник
+оставшегося движения находился до cloud lookup, в восстановлении направления.
+
+#### Exact raster-projection cloud receiver — HUMAN PENDING
+
+Повторный source audit сравнил не только формулы cloud lookup, но и полный
+projection path. Vanilla clouds растеризуются через финальную world projection
+кадра: base projection, view bob/portal transform и, когда активен Temporal,
+jitter. V5 получал направление из terrain `viewPosition`, вычисленного до
+финального view-bob transform. Поэтому смена plane/angular architecture меняла
+рисунок, но не могла устранить общий screen-space drift при прыжке и ходьбе.
+
+V6 восстанавливает view ray непосредственно из `gl_FragCoord` и inverse именно
+той raster projection, которой нарисован текущий кадр. Native params получают
+`frame.currentProjection.inverse`; fragment переводит пиксель в NDC, умножает
+на эту матрицу и затем на существующий `worldFromView`. Cloud lookup остаётся
+camera-translation-independent angular environment с одним texture sample, но
+теперь его направление следует тому же bob/jitter projection contract, что и
+видимое небо. Shader не вычисляет matrix inverse и не делает дополнительных
+texture reads.
+
+Lighting params ABI расширен `256 -> 320 bytes` одной `float4x4`; Java, Swift,
+Metal и native layout validation синхронизированы. Это не добавляет render pass,
+history, texture resource или steady allocation. Native regression отдельно
+проверяет, что при трёх view-bob angles в params действительно попадает inverse
+соответствующей raster projection. Static/source/build proof не заменяет живую
+проверку прыжка и быстрого движения. Generated MSL сохранил vertex SHA/size
+(`7120b44b6c01...`, 15,327 chars), `10/10` varyings и один reflection volume
+sample; fragment SHA `36d452237af5...`, 155,267 chars, один cloud `texture2d`
+sample и zero `texture3d` resources. Полный `./gradlew test build` прошёл 97
+tasks. Результат остаётся HUMAN PENDING.
 
 ---
 

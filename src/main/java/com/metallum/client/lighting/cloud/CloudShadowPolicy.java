@@ -41,19 +41,6 @@ public final class CloudShadowPolicy {
     /** Bounded artistic weight for the rough, water-only cloud reflection layer. */
     public static final float WATER_REFLECTION_STRENGTH = 1.0f;
 
-    /**
-     * Virtual distance of the translation-invariant water cloud environment.
-     *
-     * <p>This is deliberately not the physical cloud-plane height. Water reflections sample
-     * clouds as a distant angular sky layer so camera translation and eye bob cannot move the
-     * reflected pattern. Ninety-six blocks keeps vanilla 12-block cells broad enough to read as
-     * rough clouds rather than small noisy tiles.</p>
-     */
-    public static final float WATER_REFLECTION_ANGULAR_DISTANCE_BLOCKS = 96.0f;
-
-    /** Lower bound for the angular sky-layer projection near the horizon. */
-    public static final float WATER_REFLECTION_MIN_ELEVATION = 0.10f;
-
     private CloudShadowPolicy() {
     }
 
@@ -88,28 +75,17 @@ public final class CloudShadowPolicy {
         return (targetHeight - receiverWorldY) / lightY;
     }
 
-    /**
-     * One horizontal coordinate of the translation-invariant angular cloud environment.
-     *
-     * <p>Only reflected direction and vanilla animation phase are inputs. Camera X/Y/Z and the
-     * water receiver position are intentionally absent, making jump/bob/walk stability a data-flow
-     * invariant instead of a tuned cancellation.</p>
-     */
-    public static float waterReflectionAngularCoordinate(
-            final float horizontalDirection,
-            final float rayElevation,
-            final float animationOffset
+    /** Converts a fragment coordinate into the NDC coordinate consumed by raster-ray unprojection. */
+    public static float waterReflectionRasterNdc(
+            final float fragmentCoordinate,
+            final float rasterExtent
     ) {
-        if (!Float.isFinite(horizontalDirection)
-                || !Float.isFinite(rayElevation)
-                || !Float.isFinite(animationOffset)
-                || rayElevation <= 0.02f) {
+        if (!Float.isFinite(fragmentCoordinate)
+                || !Float.isFinite(rasterExtent)
+                || rasterExtent <= 0.0f) {
             return Float.NaN;
         }
-        float stableElevation = Math.max(rayElevation, WATER_REFLECTION_MIN_ELEVATION);
-        return horizontalDirection / stableElevation
-                * WATER_REFLECTION_ANGULAR_DISTANCE_BLOCKS
-                + animationOffset;
+        return fragmentCoordinate / rasterExtent * 2.0f - 1.0f;
     }
 
     /**

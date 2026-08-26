@@ -32,6 +32,7 @@ public final class AdvancedLightingBindingAbi {
     public static final int PARAMS_RESERVED0_OFFSET = 208;
     public static final int PARAMS_RESERVED1_OFFSET = 224;
     public static final int PARAMS_RESERVED2_OFFSET = 240;
+    public static final int PARAMS_INVERSE_RASTER_PROJECTION_OFFSET = 256;
 
     public static final int LIGHT_POSITION_RADIUS_OFFSET = 0;
     public static final int LIGHT_LINEAR_COLOR_INTENSITY_OFFSET = 16;

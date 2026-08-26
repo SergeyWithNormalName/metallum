@@ -16,7 +16,7 @@ public final class AdvancedLightingLayout {
     public static final int CLUSTER_SCRATCH_STRIDE =
             CLUSTER_MEMBERSHIP_WORDS * Integer.BYTES;
     public static final int LIGHT_INDEX_STRIDE = Short.BYTES;
-    public static final int LIGHTING_PARAMS_BYTES = 256;
+    public static final int LIGHTING_PARAMS_BYTES = 320;
     public static final int L6_TEMPORAL_PARAMS_BYTES = 320;
     public static final int STATISTICS_BYTES = 256;
     public static final int UPLOAD_HEADER_BYTES = 64;

@@ -435,29 +435,31 @@ public final class RealWorldVertexReflectionTests {
         require(countOccurrences(cloudHelper, "texture(") == 1
                         && cloudHelper.contains("metallumCloudShadow")
                         && cloudHelper.contains(").g")
-                        && cloudHelper.contains("reflect(-worldViewDirection, worldUp)")
+                        && cloudHelper.contains("metallumLighting.inverseRasterProjection")
+                        && cloudHelper.contains("vec4 metallumWaterCloudReflectionV6()")
+                        && cloudHelper.contains("gl_FragCoord.xy / rasterExtent * 2.0 - 1.0")
+                        && cloudHelper.contains("reflect(worldViewRay, worldUp)")
                         && !cloudHelper.contains("stableWorldNormal")
-                        && cloudHelper.contains("vec2 angularCloudPosition =")
+                        && cloudHelper.contains("vec3 cameraWorldPosition =")
+                        && cloudHelper.contains("float t =")
+                        && cloudHelper.contains("cameraWorldPosition.xz")
                         && cloudHelper.contains("worldReflectedDirection.xz")
-                        && cloudHelper.contains("/ stabilizedElevation * 96.0")
-                        && !cloudHelper.contains("cameraWorldPosition")
                         && !cloudHelper.contains("receiverWorldPosition")
-                        && !cloudHelper.contains("viewPosition")
-                        && !cloudHelper.contains("float t =")
+                        && cloudHelper.contains("1.0 - t / cloudFogEnd")
                         && cloudHelper.contains("mix(")
                         && cloudHelper.contains("0.88,")
                         && cloudHelper.contains("0.70,")
                         && !cloudHelper.contains("cloudContract.w & 4u"),
-                "cloud reflection must use one raw sample, translation-invariant angular projection and angle-aware face light");
+                "cloud reflection must use one raw sample, exact raster-ray reconstruction and angle-aware face light");
         require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
                 "direct cloud shadows must retain their daylight eligibility gate");
         require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
-                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV5(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV6(")
                         && voxelEnvironmentHelper.contains(
                         "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
                 "the exact sky and matching clouds must compose into one water environment lobe");
         int cloudComposite = voxelEnvironmentHelper.indexOf(
-                "metallumWaterCloudReflectionV5(");
+                "metallumWaterCloudReflectionV6(");
         int coarseWeight = voxelEnvironmentHelper.indexOf(
                 "float coarseWeight =", cloudComposite);
         require(cloudComposite >= 0 && coarseWeight > cloudComposite,

@@ -20,7 +20,7 @@ public final class CloudShadowTests {
     public static void runAll() {
         testModeResolution();
         testProjectionMathAndReceiverAboveClouds();
-        testWaterReflectionAngularProjectionIsTranslationInvariant();
+        testWaterReflectionRasterNdcContract();
         testNearHorizonStability();
         testPeriodicWrappingAndNegativeCoordinates();
         testOpacityScalingAndMonotonicity();
@@ -137,42 +137,15 @@ public final class CloudShadowTests {
         }
     }
 
-    private static void testWaterReflectionAngularProjectionIsTranslationInvariant() {
-        float rayElevation = 0.05f;
-        float horizontalDirection = 0.80f;
-        float animationOffset = 37.0f;
-        float coordinate = CloudShadowPolicy.waterReflectionAngularCoordinate(
-                horizontalDirection,
-                rayElevation,
-                animationOffset
-        );
-        float expected = horizontalDirection
-                / CloudShadowPolicy.WATER_REFLECTION_MIN_ELEVATION
-                * CloudShadowPolicy.WATER_REFLECTION_ANGULAR_DISTANCE_BLOCKS
-                + animationOffset;
-        require(approxEqual(coordinate, expected),
-                "near-horizon angular lookup must use the bounded virtual sky distance");
-
-        // Camera X/Y/Z and water position do not exist in this API. Re-evaluating after any
-        // translation therefore has to produce the same coordinate exactly.
-        float coordinateAfterJumpAndWalk = CloudShadowPolicy.waterReflectionAngularCoordinate(
-                horizontalDirection,
-                rayElevation,
-                animationOffset
-        );
-        require(approxEqual(coordinateAfterJumpAndWalk, coordinate),
-                "camera translation must not alter the reflected cloud angular coordinate");
-
-        float coordinateAfterAnimation = CloudShadowPolicy.waterReflectionAngularCoordinate(
-                horizontalDirection,
-                rayElevation,
-                animationOffset + 3.0f
-        );
-        require(approxEqual(coordinateAfterAnimation - coordinate, 3.0f),
-                "vanilla cloud animation must remain the only translational phase input");
-        require(Float.isNaN(CloudShadowPolicy.waterReflectionAngularCoordinate(
-                        horizontalDirection, 0.02f, animationOffset)),
-                "unstable horizon rays must fail closed");
+    private static void testWaterReflectionRasterNdcContract() {
+        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(0.0f, 1920.0f), -1.0f),
+                "left raster edge must reconstruct NDC -1");
+        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(960.0f, 1920.0f), 0.0f),
+                "raster center must reconstruct NDC 0");
+        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(1920.0f, 1920.0f), 1.0f),
+                "right raster edge must reconstruct NDC +1");
+        require(Float.isNaN(CloudShadowPolicy.waterReflectionRasterNdc(1.0f, 0.0f)),
+                "zero raster extent must fail closed");
     }
 
     private static void testPeriodicWrappingAndNegativeCoordinates() {
