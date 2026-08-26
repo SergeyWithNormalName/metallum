@@ -435,20 +435,26 @@ public final class RealWorldVertexReflectionTests {
         require(countOccurrences(cloudHelper, "texture(") == 1
                         && cloudHelper.contains("metallumCloudShadow")
                         && cloudHelper.contains(").g")
-                        && cloudHelper.contains("mix(worldUp, worldNormal, 0.08)")
+                        && cloudHelper.contains("reflect(-worldViewDirection, worldUp)")
+                        && !cloudHelper.contains("stableWorldNormal")
+                        && cloudHelper.contains("vec3 cameraWorldPosition =")
+                        && cloudHelper.contains("cameraWorldPosition.xz")
+                        && !cloudHelper.contains("worldFromView * viewPosition")
                         && cloudHelper.contains("1.0 - t / cloudFogEnd")
-                        && cloudHelper.contains("? 0.70 : 1.0")
+                        && cloudHelper.contains("mix(")
+                        && cloudHelper.contains("0.88,")
+                        && cloudHelper.contains("0.70,")
                         && !cloudHelper.contains("cloudContract.w & 4u"),
-                "cloud reflection must use one raw coverage sample, subtle waves, vanilla fog and face light");
+                "cloud reflection must use one raw sample, stable camera-correlated projection, vanilla fog and angle-aware face light");
         require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
                 "direct cloud shadows must retain their daylight eligibility gate");
         require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
-                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV2(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV3(")
                         && voxelEnvironmentHelper.contains(
                         "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
                 "the exact sky and matching clouds must compose into one water environment lobe");
         int cloudComposite = voxelEnvironmentHelper.indexOf(
-                "metallumWaterCloudReflectionV2(");
+                "metallumWaterCloudReflectionV3(");
         int coarseWeight = voxelEnvironmentHelper.indexOf(
                 "float coarseWeight =", cloudComposite);
         require(cloudComposite >= 0 && coarseWeight > cloudComposite,

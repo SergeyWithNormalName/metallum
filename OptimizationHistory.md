@@ -3857,6 +3857,38 @@ Exact-route `300+300` capture receipts, Advanced/Balanced, MetalFX OFF, field RE
 не production performance claim; он не показывает явной большой регрессии.
 Первая v1 считается visually rejected; v2 остаётся HUMAN PENDING.
 
+#### Camera-correlated cloud environment stabilization — HUMAN PENDING
+
+Human review v2 выявил ещё два дефекта: cloud shapes были слабыми/мелкими
+и сильно плыли при ходьбе или прыжке. Source audit vanilla `CloudRenderer`
+показал, что небесные clouds проецируются от camera world position,
+а v2 начинал cloud ray от каждого water receiver. Для высокой плоскости
+и grazing ray это давало большой, противоположный небу parallax.
+Даже 8% procedural normal перебрасывал lookup через несколько 12-block
+cloud cells возле горизонта.
+
+V3 трактует clouds как distant environment: сохраняет reflected angular
+direction, но начинает ray от camera world position и использует stable world-up
+для cloud silhouette. Procedural waves остаются в Fresnel, water brightness и coarse
+world environment, но больше не перемещают высокую cloud coverage. Fancy
+single-plane approximation теперь плавно переходит от vanilla-like side
+light `0.88` на grazing к underside `0.70` при вертикальном луче; bounded
+reflection strength поднят `0.90 -> 1.0`.
+
+Generated MSL сохранил vertex SHA `7120b44b6c01...`, 15,327 chars и `10/10`
+varyings. Fragment SHA `dbb6cf421fd1...`, 154,066 chars — на 400 chars меньше
+v2; cloud helper по-прежнему делает ровно один `texture2d` sample, а
+fragment не имеет planar/`texture3d` resources. Immutable grazing capture,
+Advanced/Balanced, MetalFX OFF, field READY:
+`run/lighting-reference/l0/20260826T040524Z-...-cloud-stable-environment-v3-grazing-off.png`.
+В нём cloud bands более связные и светлые, без возврата oil-ring pattern.
+Это static fixture observation; jump/walk motion acceptance остаётся HUMAN PENDING.
+
+Короткий capture-instrumented screen v3 против intermediate camera-origin+
+4%-wave варианта: FPS `83.898 -> 84.163`, GPU p50 `13.9418 -> 13.9042 ms`,
+p95 `14.6769 -> 14.6553 ms`. Это noise-level non-attested screen, не production
+performance claim; он лишь не показывает явной регрессии.
+
 ---
 
 ## 2026-08-26 — Movement/recenter allocation-tail repair — SUPPORTED, Tier C pending

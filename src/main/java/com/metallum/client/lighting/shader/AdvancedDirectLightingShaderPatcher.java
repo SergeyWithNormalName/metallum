@@ -3189,10 +3189,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         horizonBand * sunriseFacing * horizonStrength);
             }
 
-            vec4 metallumWaterCloudReflectionV2(
-                    vec3 viewPosition,
-                    vec3 viewDirection,
-                    vec3 waterNormal) {
+            vec4 metallumWaterCloudReflectionV3(vec3 viewDirection) {
                 if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 1u) == 0u
                         || metallumEnvironment.cloudContract.y == 0u
@@ -3201,42 +3198,39 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
                 vec3 worldUp = vec3(0.0, 1.0, 0.0);
-                vec3 worldNormal = metallumSafeNormalV1(worldFromView * waterNormal);
-                vec3 stableWorldNormal = metallumSafeNormalV1(
-                        mix(worldUp, worldNormal, 0.08));
                 vec3 worldViewDirection = metallumSafeNormalV1(
                         worldFromView * viewDirection);
                 vec3 worldReflectedDirection = metallumSafeNormalV1(
-                        reflect(-worldViewDirection, stableWorldNormal));
+                        reflect(-worldViewDirection, worldUp));
                 float rayElevation = worldReflectedDirection.y;
                 if (rayElevation <= 0.02) {
                     return vec4(0.0);
                 }
 
-                vec3 cameraRelativePosition = worldFromView * viewPosition;
-                vec3 cameraBlockRelativePosition =
-                        metallumVoxelShadow.cameraFractionAndMinTrans.xyz
-                        + cameraRelativePosition;
-                vec3 worldPosition = vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
-                        + cameraBlockRelativePosition;
+                vec3 cameraWorldPosition =
+                        vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + metallumVoxelShadow.cameraFractionAndMinTrans.xyz;
                 float cloudHeight = metallumEnvironment.cloudParams.x;
                 float cloudThickness = metallumEnvironment.cloudParams.y;
                 float cloudTop = cloudHeight + cloudThickness;
-                if (worldPosition.y >= cloudTop) {
+                if (cameraWorldPosition.y >= cloudTop) {
                     return vec4(0.0);
                 }
-                // From water the visible Fancy surface is the 0.7-lit underside at cloudHeight;
-                // FAST clouds use the same plane with the top-color flag, exactly as vanilla.
+                // Clouds are a distant environment layer. Start the lookup at the camera, just
+                // like vanilla CloudRenderer, rather than at the water receiver. A receiver-origin
+                // ray makes a one-block jump shift a high cloud plane in the opposite direction
+                // from the visible sky and changes its angular scale dramatically at grazing view.
+                // Camera origin keeps the reflected lookup correlated with the visible clouds.
                 float targetHeight = cloudHeight;
-                if (worldPosition.y >= cloudHeight) {
+                if (cameraWorldPosition.y >= cloudHeight) {
                     targetHeight = cloudTop;
                 }
-                float t = (targetHeight - worldPosition.y) / rayElevation;
+                float t = (targetHeight - cameraWorldPosition.y) / rayElevation;
                 if (t < 0.0 || isnan(t) || isinf(t)) {
                     return vec4(0.0);
                 }
 
-                vec2 cloudWorldPosition = worldPosition.xz
+                vec2 cloudWorldPosition = cameraWorldPosition.xz
                         + worldReflectedDirection.xz * t;
                 vec2 shiftedPosition = cloudWorldPosition
                         + metallumEnvironment.cloudOffsetAndGridSize.xy;
@@ -3256,8 +3250,17 @@ public final class AdvancedDirectLightingShaderPatcher {
                         coverage * opacity * fogVisibility * elevationWeight
                                 * reflectionStrength,
                         0.0, 1.0);
-                float faceLight = metallumEnvironment.cloudContract.y == 2u
-                        && worldPosition.y < cloudHeight ? 0.70 : 1.0;
+                float faceLight = 1.0;
+                if (metallumEnvironment.cloudContract.y == 2u
+                        && cameraWorldPosition.y < cloudHeight) {
+                    // Vanilla Fancy uses 0.70 for the underside and 0.80/0.90 for side faces.
+                    // A single coverage lookup has no explicit face, so use the reflected ray
+                    // elevation to approximate the increasing side-face share at grazing angles.
+                    faceLight = mix(
+                            0.88,
+                            0.70,
+                            smoothstep(0.20, 0.72, rayElevation));
+                }
                 return vec4(
                         max(metallumEnvironment.cloudColorAndReflectionStrength.rgb, vec3(0.0))
                                 * faceLight,
@@ -3299,8 +3302,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             worldFromView * reflectedDirection);
                     reflectedEnvironment = metallumWaterSkyReflectionV2(
                             worldReflectedDirection, reflectedEnvironment);
-                    vec4 cloudReflection = metallumWaterCloudReflectionV2(
-                            viewPosition, viewDirection, normal);
+                    vec4 cloudReflection = metallumWaterCloudReflectionV3(viewDirection);
                     reflectedEnvironment = mix(
                             reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
 

@@ -39,7 +39,7 @@ public final class CloudShadowPolicy {
     public static final int VOLUMETRIC_PREINTEGRATION_SAMPLES = 8;
 
     /** Bounded artistic weight for the rough, water-only cloud reflection layer. */
-    public static final float WATER_REFLECTION_STRENGTH = 0.90f;
+    public static final float WATER_REFLECTION_STRENGTH = 1.0f;
 
     private CloudShadowPolicy() {
     }
