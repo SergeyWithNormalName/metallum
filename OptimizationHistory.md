@@ -4047,6 +4047,86 @@ MSL remains one cloud `texture2d` sample, one vertex reflection-volume sample,
 zero fragment `texture3d`, and `10/10` user varyings. Runtime visual acceptance and
 GPU delta remain HUMAN PENDING.
 
+#### Reverse-Z captured-cloud recovery — STATIC PASS, HUMAN JUMP/WALK PENDING
+
+Повторная runtime-проверка V8 воспроизвела жалобу: cloud-only draw отправлялся,
+target создавался и Advanced/voxel admission проходили, но в broad capture облаков
+в воде не было. Причина оказалась не в strength или voxel field. Minecraft 26.2
+использует reverse-Z `GREATER_THAN_OR_EQUAL`, а отдельный reflection target очищал
+depth в `1.0`. Поэтому вся настоящая cloud geometry проигрывала depth test. Target
+теперь очищается в `0.0`; unit contract фиксирует reverse-Z clear вместе с
+transparent-black cloud clear.
+
+После восстановления geometry средняя premultiplied alpha Minecraft clouds всё ещё
+почти исчезала после water Fresnel/composition. Receiver теперь применяет bounded
+coverage remap только к уже захваченной валидной cloud alpha: края с fog остаются
+прозрачными, пустой target не создаёт цвет, а mid-opacity silhouette становится
+читаемым. Coarse voxel world reflection не усиливалась: production strength/roughness
+остались `0.75/0.28`, planar terrain replay по-прежнему выключен. Попытка поднять
+cloud target с `1/4` до `1/2` разрешения удалена: один полный `1800+3000` screening
+дал `57.262 FPS`, GPU p95 `17.2704 ms` против baseline около `67.3 FPS / 14.28 ms`.
+Финальный target сохранил прежний quarter-resolution budget (`427x240` при сцене
+`1708x960`).
+
+Generated MSL после финального shader edit: vertex SHA-256
+`7120b44b6c012b478575cf3f14cab2f8a37f56fd92b4c29d2f06ad0de1235bb8`,
+fragment SHA-256
+`21d00d3efc6c39eeaa5ac6900a6032928cc5064756f4ba26dcaaaaa336968188`,
+размер `15,327/153,412`, user varyings `10/10`, одна syntactic vertex reflection
+sample site; fragment не получил `texture3d` и по-прежнему читает один готовый
+cloud `texture2d` sample. `realWorldVertexReflectionUnitTest`,
+`rendererArchitectureUnitTest` и полный `./gradlew test build --no-daemon`
+прошли; полный build выполнил 97 задач.
+
+Финальные deterministic `300+300` captures, `3024x1964`, Advanced/Balanced,
+MetalFX/VSync OFF, field READY, cloud target `427x240`, все `COMPLETE`:
+
+- broad: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T101559Z-g0f12d16847a6-dirty-cloud-v12-quarter-broad-off.png`;
+- top-down: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102156Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-topdown-v1-off.png`;
+- low/red: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102257Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-low-red-v1-off.png`;
+- grazing: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102348Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-grazing-v1-off.png`;
+- dawn: `run/lighting-reference/cloud-reflection-v12-quarter/20260826T102440Z-g0f12d16847a6-dirty-cloud-v12-quarter-reflection-house-voxel-dawn-elevated-v1-off.png`.
+
+Agent fixture review: cloud shapes снова видимы в broad/low/grazing, strongest at
+grazing; top-down сохраняет дно и прозрачность; red landmark не превращается в
+общую красную/жёлтую заливку; dawn horizon остаётся локализованными направленными
+полосами, а не полноэкранным orange wash. Белых столбов, oil rings или непрозрачной
+cloud film не обнаружено. Это SDR full-frame review, не точная HDR-приёмка дисплея.
+
+Автоматический `reflection-house-voxel-motion-v1` на финальном quarter source
+завершился `COMPLETE`; screen recording сохранён в
+`run/lighting-reference/cloud-reflection-v12-quarter/motion/reflection-house-voxel-motion-v12.mov`.
+На видимых-water участках 20-block orbit + yaw/pitch cloud layer не уезжает отдельно
+от отражённого кадра и не исчезает отдельно от воды. Recenter сохранил 384 секции,
+достроил 128 и вернул field в READY. Полные чёрные кадры записи затрагивают весь
+экран при прохождении benchmark camera через geometry/window transition и не
+являются cloud-only popping. Route не моделирует прыжки и ручную ходьбу, поэтому
+это lifecycle/orbit evidence, а не human jump/walk signoff.
+
+Clean Tier C A/B, два независимых `1800+3000` run на immutable
+`reflection-house-voxel-v1`, Advanced/Balanced, MetalFX/VSync OFF, detail OFF,
+field READY, `COMPLETE`, zero timing drops:
+
+| state | source / artifact | run FPS | mean FPS | run GPU p95 ms | mean GPU p95 ms |
+|---|---|---:|---:|---:|---:|
+| V8 broken baseline `0f12d16` | `055976bf...` / `09793870...` | 67.449 / 67.143 | 67.296 | 14.2505 / 14.3070 | 14.2788 |
+| fixed quarter `dea4961` | `fee00a27...` / `ee82aa7b...` | 67.026 / 66.758 | 66.892 | 14.3301 / 14.3755 | 14.3528 |
+
+Цена исправления: `-0.60% FPS`, `+0.0740 ms / +0.52% GPU p95`. Это включает
+реально проходящую depth cloud geometry и coverage composition, а не пустой target
+baseline; результат остаётся внутри visual-task допуска. Accepted receipts сохранены
+в `run/logs/metallum-benchmarks/20260826T100756Z-...cloud-v8-tierc-run1...`,
+`20260826T101028Z-...cloud-v8-tierc-run2...`,
+`20260826T103404Z-...cloud-v12-final-tierc-run1...` и
+`20260826T103646Z-...cloud-v12-final-tierc-run2...`.
+
+**Решение:** сохранить reverse-Z fix + bounded captured coverage на прежнем
+quarter-resolution target. `STATIC VISUAL CAPTURES PASSED`; clean Tier C performance
+`PROVEN`; automated orbit/lifecycle `SUPPORTED`; ручные jump/slow-fast walk/back/yaw
+остаются `HUMAN MOTION ACCEPTANCE PENDING`. Не возвращать half-resolution target и
+не усиливать globally coarse voxel RGB: оба пути либо слишком дороги, либо возвращают
+цветную грязь вместо отражения.
+
 ---
 
 ## 2026-08-26 — Movement/recenter allocation-tail repair — SUPPORTED, Tier C pending
