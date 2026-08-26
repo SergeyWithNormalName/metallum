@@ -61,6 +61,7 @@ public final class PlanarReflectionRenderer {
     private static boolean activationLogged;
     private static boolean failureLogged;
     private static boolean voxelConflictLogged;
+    private static boolean activeCloudDraw;
 
     private PlanarReflectionRenderer() {
     }
@@ -177,6 +178,11 @@ public final class PlanarReflectionRenderer {
         return activeTarget != null;
     }
 
+    /** True only while Minecraft's cloud mesh is being drawn into the mirrored target. */
+    public static boolean isRenderingCloudDraw() {
+        return activeCloudDraw;
+    }
+
     public static @Nullable RenderTarget activeTarget() {
         return activeTarget;
     }
@@ -270,8 +276,9 @@ public final class PlanarReflectionRenderer {
             // RenderSystem model-view matrix.  Start from that exact matrix (rather than a
             // camera-state approximation) so view bobbing and any renderer-side adjustment
             // are reflected with the terrain as well.
+            Matrix4f mainModelView = RenderSystem.getModelViewMatrixCopy();
             Matrix4f reflModelView = computeReflectedModelView(
-                    RenderSystem.getModelViewMatrixCopy(),
+                    mainModelView,
                     camera.pos.y,
                     waterSurfaceY
             );
@@ -332,6 +339,16 @@ public final class PlanarReflectionRenderer {
                             cleanupTerrainDrawState();
                         }
                     }
+                    // CloudRenderer already expresses its mesh relative to the reflected camera
+                    // passed below. Reusing the terrain matrix would apply the water-plane Y
+                    // translation a second time. Clouds also must retain the ordinary perspective
+                    // projection: the terrain-only oblique near plane clips their mirrored image.
+                    modelViewStack.set(computeReflectedCloudModelView(mainModelView));
+                    RenderSystem.setProjectionMatrix(
+                            resources.projectionBuffer().getBuffer(camera.projectionMatrix),
+                            ProjectionType.PERSPECTIVE
+                    );
+                    RenderSystem.setShaderFog(terrainFog);
                     renderClouds(minecraft, levelRenderState, camera, waterSurfaceY);
                     activePassRendered = true;
                     lastRenderedTarget = target;
@@ -426,24 +443,30 @@ public final class PlanarReflectionRenderer {
                 camera.pos.z
         );
         var cloudRenderer = minecraft.levelRenderer.cloudRenderer();
-        cloudRenderer.render(
-                levelRenderState.cloudColor,
-                cloudStatus,
-                levelRenderState.cloudHeight,
-                minecraft.options.cloudRange().get(),
-                reflectedCamera,
-                levelRenderState.gameTime,
-                minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false)
-        );
-        // CloudRenderer normally rotates this dynamic UBO once after the main cloud draw. The
-        // reflected draw happens earlier in the same frame, so rotate here as well; otherwise the
-        // main draw overwrites CloudInfo while the GPU may still consume the reflected command.
-        // Mesh/UTB data remains shared read-only unless CloudRenderer itself rebuilds and rotates it.
-        cloudRenderer.endFrame();
+        activeCloudDraw = true;
+        try {
+            cloudRenderer.render(
+                    levelRenderState.cloudColor,
+                    cloudStatus,
+                    levelRenderState.cloudHeight,
+                    minecraft.options.cloudRange().get(),
+                    reflectedCamera,
+                    levelRenderState.gameTime,
+                    minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false)
+            );
+            // CloudRenderer normally rotates this dynamic UBO once after the main cloud draw. The
+            // reflected draw happens earlier in the same frame, so rotate here as well; otherwise
+            // the main draw overwrites CloudInfo while the GPU may still consume the reflected
+            // command. Mesh/UTB data remains shared read-only unless CloudRenderer rebuilds it.
+            cloudRenderer.endFrame();
+        } finally {
+            activeCloudDraw = false;
+        }
     }
 
     private static void deactivateTarget() {
         cleanupTerrainDrawState();
+        activeCloudDraw = false;
         activeTarget = null;
         activeTerrainProjection = null;
         activeTerrainModelView = null;
@@ -542,6 +565,14 @@ public final class PlanarReflectionRenderer {
     }
 
     /**
+     * Mirrors camera-relative cloud geometry without translating it a second time.
+     * CloudRenderer's CloudInfo already places its mesh relative to the reflected camera.
+     */
+    public static Matrix4f computeReflectedCloudModelView(final Matrix4fc mainModelView) {
+        return new Matrix4f(mainModelView).scale(1.0f, -1.0f, 1.0f);
+    }
+
+    /**
      * Modifies the perspective projection matrix using Eric Lengyel's oblique near-plane
      * clipping formulation, clipping all geometry below the horizontal water plane at waterSurfaceY.
      */
@@ -598,6 +629,7 @@ public final class PlanarReflectionRenderer {
         activeCameraPosition = null;
         activeTerrainToken = 0L;
         activeTerrainCleanup = null;
+        activeCloudDraw = false;
         activePassRendered = false;
         framesSinceReflectionUpdate = Integer.MAX_VALUE;
         lastRenderedTarget = null;

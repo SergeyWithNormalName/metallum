@@ -4027,6 +4027,26 @@ read-only и вращается самим Minecraft только при реа�
 GPU/FPS delta пока не измерен; static/source validation не заменяет живой
 jump/walk/fast-forward review.
 
+Human visual review rejected the first V7 capture: clouds were absent and the
+water environment lobe became much less visible. Source audit found two capture
+correctness faults rather than a strength-tuning problem. `CloudRenderer` already
+builds its vertices relative to the supplied reflected camera, while the pass also
+applied terrain's translated mirror matrix, reflecting the water-plane Y offset a
+second time. The same negative-determinant matrix reversed fancy-cloud winding but
+left the normal back-face-culling pipeline active.
+
+V8 gives clouds their own transform: reflected-camera-relative vertices receive
+only the Y mirror, use the ordinary perspective projection instead of terrain's
+oblique near-plane projection, and explicitly receive the current terrain fog.
+Only during that reflected draw, fancy `CLOUDS` is substituted with the otherwise
+equivalent non-culling `FLAT_CLOUDS` pipeline; the main cloud draw is unchanged.
+The receiver now also rejects alpha-only/black invalid capture samples before
+mixing with analytic sky, so a malformed cloud target cannot suppress the sky lobe
+and make the independently composed voxel-world reflection look absent. Generated
+MSL remains one cloud `texture2d` sample, one vertex reflection-volume sample,
+zero fragment `texture3d`, and `10/10` user varyings. Runtime visual acceptance and
+GPU delta remain HUMAN PENDING.
+
 ---
 
 ## 2026-08-26 — Movement/recenter allocation-tail repair — SUPPORTED, Tier C pending

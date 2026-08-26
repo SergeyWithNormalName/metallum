@@ -3189,7 +3189,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                         horizonBand * sunriseFacing * horizonStrength);
             }
 
-            vec4 metallumWaterCloudReflectionV7(vec3 waterNormal) {
+            vec4 metallumWaterCloudReflectionV8(vec3 waterNormal) {
                 if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 1u) == 0u
                         || metallumEnvironment.cloudContract.y == 0u
@@ -3224,11 +3224,18 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 capturedCloudColor = capturedCloud.a > 1.0e-4
                         ? capturedCloud.rgb / capturedCloud.a
                         : vec3(0.0);
+                // A malformed/fully clipped capture must be a no-op. In particular, alpha without
+                // useful cloud radiance must never replace the analytic sky with black and make
+                // the independent voxel-world reflection appear to disappear.
+                float capturedCloudEnergy = max(max(
+                        capturedCloudColor.r, capturedCloudColor.g), capturedCloudColor.b);
+                float capturedCloudValidity = smoothstep(0.001, 0.020, capturedCloudEnergy);
                 float reflectionStrength = clamp(
                         metallumEnvironment.cloudColorAndReflectionStrength.w, 0.0, 1.0);
                 return vec4(
                         max(capturedCloudColor, vec3(0.0)),
                         clamp(capturedCloud.a
+                                * capturedCloudValidity
                                 * smoothstep(0.0, 0.020, edgeDistance)
                                 * reflectionStrength, 0.0, 1.0));
             }
@@ -3268,7 +3275,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             worldFromView * reflectedDirection);
                     reflectedEnvironment = metallumWaterSkyReflectionV2(
                             worldReflectedDirection, reflectedEnvironment);
-                    vec4 cloudReflection = metallumWaterCloudReflectionV7(normal);
+                    vec4 cloudReflection = metallumWaterCloudReflectionV8(normal);
                     reflectedEnvironment = mix(
                             reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
 
