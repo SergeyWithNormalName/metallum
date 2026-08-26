@@ -438,8 +438,12 @@ public final class RealWorldVertexReflectionTests {
                         && cloudHelper.contains("reflect(-worldViewDirection, worldUp)")
                         && !cloudHelper.contains("stableWorldNormal")
                         && cloudHelper.contains("vec3 cameraWorldPosition =")
+                        && cloudHelper.contains("vec3 receiverWorldPosition =")
                         && cloudHelper.contains("cameraWorldPosition.xz")
-                        && !cloudHelper.contains("worldFromView * viewPosition")
+                        && cloudHelper.contains("worldFromView * viewPosition")
+                        && cloudHelper.contains("float projectionBaseHeight = receiverWorldPosition.y")
+                        && cloudHelper.contains("targetHeight - projectionBaseHeight")
+                        && !cloudHelper.contains("targetHeight - cameraWorldPosition.y")
                         && cloudHelper.contains("1.0 - t / cloudFogEnd")
                         && cloudHelper.contains("mix(")
                         && cloudHelper.contains("0.88,")
@@ -449,12 +453,12 @@ public final class RealWorldVertexReflectionTests {
         require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
                 "direct cloud shadows must retain their daylight eligibility gate");
         require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
-                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV3(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV4(")
                         && voxelEnvironmentHelper.contains(
                         "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
                 "the exact sky and matching clouds must compose into one water environment lobe");
         int cloudComposite = voxelEnvironmentHelper.indexOf(
-                "metallumWaterCloudReflectionV3(");
+                "metallumWaterCloudReflectionV4(");
         int coarseWeight = voxelEnvironmentHelper.indexOf(
                 "float coarseWeight =", cloudComposite);
         require(cloudComposite >= 0 && coarseWeight > cloudComposite,

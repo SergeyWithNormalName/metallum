@@ -20,6 +20,7 @@ public final class CloudShadowTests {
     public static void runAll() {
         testModeResolution();
         testProjectionMathAndReceiverAboveClouds();
+        testWaterReflectionProjectionIgnoresEyeHeight();
         testNearHorizonStability();
         testPeriodicWrappingAndNegativeCoordinates();
         testOpacityScalingAndMonotonicity();
@@ -134,6 +135,48 @@ public final class CloudShadowTests {
             require(weight >= prev && weight <= 1.0f, "Stability weight must increase monotonically in transition zone");
             prev = weight;
         }
+    }
+
+    private static void testWaterReflectionProjectionIgnoresEyeHeight() {
+        float waterY = 63.0f;
+        float cloudY = 192.0f;
+        float rayElevation = 0.05f;
+        float stableT = CloudShadowPolicy.waterReflectionProjectionT(
+                waterY,
+                rayElevation,
+                cloudY,
+                CloudShadowPolicy.CLOUD_THICKNESS_BLOCKS
+        );
+        require(approxEqual(stableT, (cloudY - waterY) / rayElevation),
+                "water reflection projection must use the reflecting surface height");
+
+        // The rejected camera-height projection shifted the entire lookup by 20 blocks for a
+        // one-block jump at this grazing elevation. The stable projection has no eye-height term.
+        float lowEyeT = (cloudY - 64.62f) / rayElevation;
+        float highEyeT = (cloudY - 65.62f) / rayElevation;
+        require(approxEqual(Math.abs(highEyeT - lowEyeT), 20.0f),
+                "test fixture must expose the rejected grazing jump amplification");
+        float stableAfterJump = CloudShadowPolicy.waterReflectionProjectionT(
+                waterY,
+                rayElevation,
+                cloudY,
+                CloudShadowPolicy.CLOUD_THICKNESS_BLOCKS
+        );
+        require(approxEqual(stableAfterJump, stableT),
+                "camera eye-height changes must not alter reflected cloud projection distance");
+
+        float reflectedHorizontalDirection = 0.80f;
+        float sampleBeforeForwardMove = 100.0f + reflectedHorizontalDirection * stableT;
+        float sampleAfterForwardMove = 106.0f + reflectedHorizontalDirection * stableAfterJump;
+        require(approxEqual(sampleAfterForwardMove - sampleBeforeForwardMove, 6.0f),
+                "forward motion must translate the world cloud phase only by camera XZ, without radial scale drift");
+
+        require(CloudShadowPolicy.waterReflectionProjectionT(
+                waterY, 0.02f, cloudY, CloudShadowPolicy.CLOUD_THICKNESS_BLOCKS) < 0.0f,
+                "unstable horizon rays must fail closed");
+        require(CloudShadowPolicy.waterReflectionProjectionT(
+                196.0f, 0.5f, cloudY, CloudShadowPolicy.CLOUD_THICKNESS_BLOCKS) < 0.0f,
+                "water above the cloud slab must fail closed");
     }
 
     private static void testPeriodicWrappingAndNegativeCoordinates() {

@@ -76,6 +76,40 @@ public final class CloudShadowPolicy {
     }
 
     /**
+     * Stable water-environment projection distance for the visible cloud slab.
+     *
+     * <p>The horizontal cloud phase follows the camera, exactly like vanilla clouds, but its
+     * angular scale is measured from the reflecting water surface rather than the camera eye.
+     * This deliberately removes camera bob/jump height from the projection: at low elevation a
+     * one-block eye-height delta would otherwise move the lookup by {@code 1 / rayElevation}
+     * blocks even though the reflecting plane did not move.</p>
+     *
+     * @return forward ray distance, or a negative value when the projection is invalid
+     */
+    public static float waterReflectionProjectionT(
+            final float waterSurfaceY,
+            final float rayElevation,
+            final float cloudHeight,
+            final float cloudThickness
+    ) {
+        if (!Float.isFinite(waterSurfaceY)
+                || !Float.isFinite(rayElevation)
+                || !Float.isFinite(cloudHeight)
+                || !Float.isFinite(cloudThickness)
+                || rayElevation <= 0.02f
+                || cloudThickness < 0.0f) {
+            return -1.0f;
+        }
+        float cloudTop = cloudHeight + cloudThickness;
+        if (waterSurfaceY >= cloudTop) {
+            return -1.0f;
+        }
+        float targetHeight = waterSurfaceY >= cloudHeight ? cloudTop : cloudHeight;
+        float distance = (targetHeight - waterSurfaceY) / rayElevation;
+        return Float.isFinite(distance) && distance >= 0.0f ? distance : -1.0f;
+    }
+
+    /**
      * Computes analytical flat cloud transmittance from coverage [0..1] and opacity [0..1].
      */
     public static float flatTransmittance(final float coverage, final float opacity) {

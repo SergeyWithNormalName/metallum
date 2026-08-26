@@ -3857,7 +3857,7 @@ Exact-route `300+300` capture receipts, Advanced/Balanced, MetalFX OFF, field RE
 не production performance claim; он не показывает явной большой регрессии.
 Первая v1 считается visually rejected; v2 остаётся HUMAN PENDING.
 
-#### Camera-correlated cloud environment stabilization — HUMAN PENDING
+#### Camera-correlated cloud environment stabilization — REJECTED BY HUMAN MOTION REVIEW
 
 Human review v2 выявил ещё два дефекта: cloud shapes были слабыми/мелкими
 и сильно плыли при ходьбе или прыжке. Source audit vanilla `CloudRenderer`
@@ -3888,6 +3888,37 @@ Advanced/Balanced, MetalFX OFF, field READY:
 4%-wave варианта: FPS `83.898 -> 84.163`, GPU p50 `13.9418 -> 13.9042 ms`,
 p95 `14.6769 -> 14.6553 ms`. Это noise-level non-attested screen, не production
 performance claim; он лишь не показывает явной регрессии.
+
+Human motion review отклонил v3: прыжок всё ещё сильно сдвигал
+cloud reflection, а при быстром движении вперёд вся reflection mass уезжала
+вперёд одновременно. Статический capture не обнаружил этот дефект.
+
+#### Water-height cloud projection stabilization — HUMAN PENDING
+
+Повторный math/source audit нашёл общую причину обоих motion symptoms:
+v3 использовал camera Y не только как origin, но и для cloud-plane
+distance `t = (cloudY - cameraY) / rayElevation`. На elevation `0.05` один
+блок jump/bobbing менял lookup на 20 blocks вдоль отражённого луча.
+Это и выглядело как одновременное движение всех clouds вперёд.
+
+V4 сохраняет exact vanilla camera XZ + animation phase, но вычисляет
+angular scale от reconstructed water receiver Y. Так horizontal movement сохраняет
+world-anchored cloud translation, а изменение eye height не может сдвинуть
+фазу или масштаб отражения. Pure regression фиксирует rejected
+20-block jump amplification и exact invariance новой distance при +1 camera Y.
+
+Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`,
+15,327 chars), fragment SHA `2d98cfd0b09d...`, 154,378 chars, varyings `10/10`,
+один cloud `texture2d` sample и zero planar/`texture3d` fragment resources.
+Пара identical-XZ/yaw/pitch captures с camera Y `65 -> 66`:
+
+- `run/lighting-reference/l0/20260826T044915Z-...-cloud-water-height-v4-grazing-off.png`;
+- `run/lighting-reference/l0/20260826T045250Z-...-cloud-water-height-v4-grazing-y66-off.png`.
+
+В static pair cloud reflection сохраняет фазу/масштаб при изменённой
+высоте; изменяется только геометрия видимого ракурса. Captures `300+300`
+и их FPS не являются performance evidence. Живой jump/forward motion review
+остаётся HUMAN PENDING.
 
 ---
 

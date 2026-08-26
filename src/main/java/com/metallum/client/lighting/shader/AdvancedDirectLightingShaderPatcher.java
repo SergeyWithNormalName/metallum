@@ -3189,7 +3189,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                         horizonBand * sunriseFacing * horizonStrength);
             }
 
-            vec4 metallumWaterCloudReflectionV3(vec3 viewDirection) {
+            vec4 metallumWaterCloudReflectionV4(
+                    vec3 viewPosition,
+                    vec3 viewDirection) {
                 if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 1u) == 0u
                         || metallumEnvironment.cloudContract.y == 0u
@@ -3210,22 +3212,28 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 cameraWorldPosition =
                         vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
                         + metallumVoxelShadow.cameraFractionAndMinTrans.xyz;
+                vec3 receiverWorldPosition = cameraWorldPosition
+                        + worldFromView * viewPosition;
                 float cloudHeight = metallumEnvironment.cloudParams.x;
                 float cloudThickness = metallumEnvironment.cloudParams.y;
                 float cloudTop = cloudHeight + cloudThickness;
                 if (cameraWorldPosition.y >= cloudTop) {
                     return vec4(0.0);
                 }
-                // Clouds are a distant environment layer. Start the lookup at the camera, just
-                // like vanilla CloudRenderer, rather than at the water receiver. A receiver-origin
-                // ray makes a one-block jump shift a high cloud plane in the opposite direction
-                // from the visible sky and changes its angular scale dramatically at grazing view.
-                // Camera origin keeps the reflected lookup correlated with the visible clouds.
+                // Keep vanilla's camera-relative horizontal phase, but measure the angular cloud
+                // scale from the reflecting water surface. Using cameraWorldPosition.y here makes
+                // jump/bobbing height change t by deltaY / rayElevation; near the horizon that
+                // pushes every reflected cloud tens of blocks forward at once. Water Y is stable,
+                // while camera XZ still gives the same world-anchored translation as CloudRenderer.
+                float projectionBaseHeight = receiverWorldPosition.y;
+                if (projectionBaseHeight >= cloudTop) {
+                    return vec4(0.0);
+                }
                 float targetHeight = cloudHeight;
-                if (cameraWorldPosition.y >= cloudHeight) {
+                if (projectionBaseHeight >= cloudHeight) {
                     targetHeight = cloudTop;
                 }
-                float t = (targetHeight - cameraWorldPosition.y) / rayElevation;
+                float t = (targetHeight - projectionBaseHeight) / rayElevation;
                 if (t < 0.0 || isnan(t) || isinf(t)) {
                     return vec4(0.0);
                 }
@@ -3302,7 +3310,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                             worldFromView * reflectedDirection);
                     reflectedEnvironment = metallumWaterSkyReflectionV2(
                             worldReflectedDirection, reflectedEnvironment);
-                    vec4 cloudReflection = metallumWaterCloudReflectionV3(viewDirection);
+                    vec4 cloudReflection = metallumWaterCloudReflectionV4(
+                            viewPosition, viewDirection);
                     reflectedEnvironment = mix(
                             reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
 
