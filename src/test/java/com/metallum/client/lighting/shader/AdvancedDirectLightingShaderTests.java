@@ -81,13 +81,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "c429975a9e6eb07c4614f860804d96cd57847becf5aed46670f06ad54c227e38",
+            "sodium-solid-fsh", "b890a9b4a530c9dfa70b20251e9059e2ed036d28906471a168d28469bda06761",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "20f6d83dcc261a73b1cd403fda571464588dff48a22b903132c21baa5f1a45bf",
+            "sodium-cutout-fsh", "274745bfbe55c3fffdf113403a8f889e5cffdfd0d57ba72b3da44446d1596d44",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "c53a48a3294760e4886e76a5c33bb3d4fcd0efc0fa648f52710fc6b15f09ca1b",
+            "minecraft-entity-fsh", "f19f37877c8aa9e4c8581d9944ed9cc1cc2eb36ea6b2774967f9fb1f6a426401",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "285891bcc1d5bf365a7ba935d8a91bd5b8a6321b1be8b4962747524107ac31ee"
+            "minecraft-end-portal-fsh", "797b2e8543a1334e6d2b9e54f67bf10f143a5037835c08cbb7c4a8afc56ddb1a"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -129,7 +129,7 @@ public final class AdvancedDirectLightingShaderTests {
         require(AdvancedLightingBindingAbi.LIGHTS_SLOT == 28, "lights slot changed");
         require(AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT == 29, "headers slot changed");
         require(AdvancedLightingBindingAbi.CLUSTER_INDICES_SLOT == 30, "indices slot changed");
-        require(AdvancedLightingBindingAbi.PARAMS_BYTES == 320, "params block is not 320 bytes");
+        require(AdvancedLightingBindingAbi.PARAMS_BYTES == 256, "params block is not 256 bytes");
         require(AdvancedLightingBindingAbi.GPU_LIGHT_STRIDE == 48, "GpuLight is not 48 bytes");
         require(AdvancedLightingBindingAbi.CLUSTER_HEADER_STRIDE == 8, "cluster header is not uint2");
         require(AdvancedLightingBindingAbi.CLUSTER_INDEX_STRIDE == 2,
@@ -145,9 +145,8 @@ public final class AdvancedDirectLightingShaderTests {
                         && AdvancedLightingBindingAbi.PARAMS_CAPACITIES_AND_FLAGS_OFFSET == 192
                         && AdvancedLightingBindingAbi.PARAMS_RESERVED0_OFFSET == 208
                         && AdvancedLightingBindingAbi.PARAMS_RESERVED1_OFFSET == 224
-                        && AdvancedLightingBindingAbi.PARAMS_RESERVED2_OFFSET == 240
-                        && AdvancedLightingBindingAbi.PARAMS_INVERSE_RASTER_PROJECTION_OFFSET == 256,
-                "params member offsets diverged from the native 320-byte ABI");
+                        && AdvancedLightingBindingAbi.PARAMS_RESERVED2_OFFSET == 240,
+                "params member offsets diverged from the native 256-byte ABI");
         require(AdvancedLightingLayout.TILE_SIZE == 64
                         && AdvancedLightingLayout.DEPTH_SLICES == 6
                         && AdvancedLightingLayout.MAX_LIGHTS_PER_CLUSTER == 256,
@@ -215,13 +214,13 @@ public final class AdvancedDirectLightingShaderTests {
                         && VoxelShadowBindingAbi.WORLD_AND_FLAGS_OFFSET == 240,
                 "L6 local-shadow parameter packet changed");
 
-        AdvancedLightingBindingAbi.requireCompatibleLayout(1, 320, 48, 8, 2);
+        AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 2);
         expectIllegalArgument(() ->
-                AdvancedLightingBindingAbi.requireCompatibleLayout(2, 320, 48, 8, 2));
+                AdvancedLightingBindingAbi.requireCompatibleLayout(2, 256, 48, 8, 2));
         expectIllegalArgument(() ->
                 AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 32, 8, 2));
         expectIllegalArgument(() ->
-                AdvancedLightingBindingAbi.requireCompatibleLayout(1, 320, 48, 8, 4));
+                AdvancedLightingBindingAbi.requireCompatibleLayout(1, 256, 48, 8, 4));
     }
 
     private static void testPowerOfTwoAddressingMatchesFloorArithmetic() {
@@ -2509,7 +2508,7 @@ public final class AdvancedDirectLightingShaderTests {
             require(storage.bytes().equals(expectedStorage),
                     name + " compiled storage-buffer ABI changed: " + storage.bytes());
             require(storage.paramsOffsets().equals(List.of(
-                            0, 64, 128, 144, 160, 176, 192, 208, 224, 240, 256)),
+                            0, 64, 128, 144, 160, 176, 192, 208, 224, 240)),
                     name + " compiled params offsets changed: " + storage.paramsOffsets());
             require(storage.paramsMatrixStrides().equals(List.of(16, 16)),
                     name + " compiled params matrix stride changed: "

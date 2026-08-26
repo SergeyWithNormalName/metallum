@@ -1125,7 +1125,7 @@ private enum MetallumLightingAbiV1 {
     static let clusterHeaderBytes = 8
     static let clusterScratchBytes = 512
     static let lightIndexBytes = 2
-    static let paramsBytes = 320
+    static let paramsBytes = 256
     static let l6TemporalParamsBytes = 320
     static let statisticsBytes = 256
     static let completedStatsBytes = 128
@@ -1167,7 +1167,6 @@ private struct MetallumLightingParamsV1 {
     var reserved0: SIMD4<UInt32>
     var reserved1: SIMD4<UInt32>
     var reserved2: SIMD4<UInt32>
-    var inverseRasterProjection: simd_float4x4
 }
 
 private struct MetallumL6TemporalParamsV1 {
@@ -5289,7 +5288,6 @@ private func makeLightingContext(
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.frameIdAndGeneration) == 176,
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.capacitiesAndFlags) == 192,
           MemoryLayout<MetallumLightingParamsV1>.offset(of: \.reserved0) == 208,
-          MemoryLayout<MetallumLightingParamsV1>.offset(of: \.inverseRasterProjection) == 256,
           MemoryLayout<MetallumL6TemporalParamsV1>.size
             == MetallumLightingAbiV1.l6TemporalParamsBytes,
           MemoryLayout<MetallumL6TemporalParamsV1>.stride
@@ -9506,8 +9504,7 @@ private func lightingParamsV1(
             MetallumLightingAbiV1.version
         ),
         reserved1: SIMD4(batch.lightCount, candidateLightCap, 0, 0),
-        reserved2: SIMD4(repeating: 0),
-        inverseRasterProjection: frame.currentProjection.inverse
+        reserved2: SIMD4(repeating: 0)
     )
 }
 
@@ -9590,7 +9587,7 @@ public func metallum_lighting_layout_v1(
         MetallumLightingAbiV1.tileSize,
         MetallumLightingAbiV1.depthSlices,
         MetallumLightingAbiV1.clusterCap,
-        0, 64, 128, 144, 160, 176, 192, 208, 224, 240, 256,
+        0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
         27, 28, 29, 30,
         UInt32(MetallumLightingAbiV1.guardBytes)
     ]

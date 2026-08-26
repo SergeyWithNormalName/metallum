@@ -3956,7 +3956,7 @@ Human motion review отклонил и V5: внешний вид отражен
 Это опровергло прежнюю атрибуцию finite-plane/camera translation: источник
 оставшегося движения находился до cloud lookup, в восстановлении направления.
 
-#### Exact raster-projection cloud receiver — HUMAN PENDING
+#### Exact raster-projection cloud receiver — REJECTED BY HUMAN MOTION REVIEW
 
 Повторный source audit сравнил не только формулы cloud lookup, но и полный
 projection path. Vanilla clouds растеризуются через финальную world projection
@@ -3984,6 +3984,48 @@ history, texture resource или steady allocation. Native regression отдел
 sample; fragment SHA `36d452237af5...`, 155,267 chars, один cloud `texture2d`
 sample и zero `texture3d` resources. Полный `./gradlew test build` прошёл 97
 tasks. Результат остаётся HUMAN PENDING.
+
+Human motion review отклонил V6: исходный jump/forward drift остался, а точное
+включение final raster projection добавило сильную тряску cloud reflection от
+анимации камеры. Это ожидаемо по исправленному data flow: V6 буквально передавал
+view bob в аналитический per-fragment lookup. После четырёх отклонённых вариантов
+дальнейшая настройка ray/plane/angular формулы прекращена.
+
+#### Cloud-only reflected image capture — HUMAN PENDING
+
+V7 меняет метод. Перед main pass отдельный quarter-resolution target каждый кадр
+рисует настоящий Minecraft `CloudRenderer` с отражённой камерой. Target очищается
+в transparent black и содержит только cloud geometry: sky, sun, terrain и другие
+world surfaces в него не рисуются. Поэтому voxel reflection остаётся единственным
+источником отражённого окружения, а новый target является только готовым RGBA
+слоем облаков, не planar world reflection.
+
+Water fragment больше не восстанавливает cloud ray, не пересекает cloud plane и
+не читает coverage pattern. Он делает один screen-space sample готового cloud
+target, слегка смещённый существующим procedural water normal, и смешивает его по
+captured alpha с analytic sky до confidence-weighted voxel world contribution.
+Vanilla `TRANSLUCENT` blend сохраняет в transparent target premultiplied RGB;
+receiver перед единственным mix восстанавливает straight cloud color, чтобы не
+умножать opacity второй раз и не делать облака искусственно слабыми.
+Capture обновляется каждый кадр: запрещено двухкадровое кеширование full-planar
+пути, которое дало бы lag при ходьбе. Full planar остаётся отдельным режимом и
+по-прежнему взаимно исключён с voxel world receiver.
+
+Один `CloudRenderer` используется также основным cloud draw. После reflected draw
+его dynamic CloudInfo UBO явно rotate-ится до main pass, чтобы CPU не перезаписал
+параметры отражённой камеры в ещё используемом GPU buffer. Cloud mesh/UTB остаётся
+read-only и вращается самим Minecraft только при реальном mesh rebuild.
+
+Предыдущая `inverseRasterProjection` удалена; lighting params ABI возвращён
+`320 -> 256 bytes`. Fragment MSL стал `155,267 -> 152,951 chars` (SHA-256
+`c15c4f9d6055...`), vertex остался
+15,327 chars, `10/10` varyings, один reflection volume sample и zero fragment
+`texture3d`. Cloud reflection использует один `texture2d` sample из slot 11;
+существующий slot 12 остаётся отдельно для direct cloud shadows. Цена новой
+архитектуры — дополнительный cloud-only draw в persistent 1/4-resolution target
+каждый кадр, без terrain draw, sky draw, history и per-frame texture allocation.
+GPU/FPS delta пока не измерен; static/source validation не заменяет живой
+jump/walk/fast-forward review.
 
 ---
 

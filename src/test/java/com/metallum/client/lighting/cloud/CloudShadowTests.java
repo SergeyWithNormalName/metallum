@@ -20,7 +20,6 @@ public final class CloudShadowTests {
     public static void runAll() {
         testModeResolution();
         testProjectionMathAndReceiverAboveClouds();
-        testWaterReflectionRasterNdcContract();
         testNearHorizonStability();
         testPeriodicWrappingAndNegativeCoordinates();
         testOpacityScalingAndMonotonicity();
@@ -135,17 +134,6 @@ public final class CloudShadowTests {
             require(weight >= prev && weight <= 1.0f, "Stability weight must increase monotonically in transition zone");
             prev = weight;
         }
-    }
-
-    private static void testWaterReflectionRasterNdcContract() {
-        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(0.0f, 1920.0f), -1.0f),
-                "left raster edge must reconstruct NDC -1");
-        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(960.0f, 1920.0f), 0.0f),
-                "raster center must reconstruct NDC 0");
-        require(approxEqual(CloudShadowPolicy.waterReflectionRasterNdc(1920.0f, 1920.0f), 1.0f),
-                "right raster edge must reconstruct NDC +1");
-        require(Float.isNaN(CloudShadowPolicy.waterReflectionRasterNdc(1.0f, 0.0f)),
-                "zero raster extent must fail closed");
     }
 
     private static void testPeriodicWrappingAndNegativeCoordinates() {

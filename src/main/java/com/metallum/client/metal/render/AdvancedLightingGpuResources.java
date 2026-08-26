@@ -315,7 +315,6 @@ final class AdvancedLightingGpuResources implements AutoCloseable {
                 AdvancedLightingBindingAbi.PARAMS_RESERVED0_OFFSET,
                 AdvancedLightingBindingAbi.PARAMS_RESERVED1_OFFSET,
                 AdvancedLightingBindingAbi.PARAMS_RESERVED2_OFFSET,
-                AdvancedLightingBindingAbi.PARAMS_INVERSE_RASTER_PROJECTION_OFFSET,
                 AdvancedLightingBindingAbi.PARAMS_SLOT,
                 AdvancedLightingBindingAbi.LIGHTS_SLOT,
                 AdvancedLightingBindingAbi.CLUSTER_HEADERS_SLOT,

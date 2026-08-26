@@ -37,7 +37,7 @@ private typealias NativeLastCompletedStats = @convention(c) (
 private let lightingMagic: UInt32 = 0x31424c4d
 private let headerBytes = 64
 private let lightBytes = 48
-private let paramsBytes = 320
+private let paramsBytes = 256
 private let guardBytes = 64
 private let clusterCap = 256
 private let tileSize = 64
@@ -153,31 +153,6 @@ private func readUInt64(_ bytes: [UInt8], at offset: Int) -> UInt64 {
 
 private func readFloat(_ bytes: [UInt8], at offset: Int) -> Float {
     Float(bitPattern: readUInt32(bytes, at: offset))
-}
-
-private func readMatrix(_ bytes: [UInt8], at offset: Int) -> simd_float4x4 {
-    func column(_ index: Int) -> SIMD4<Float> {
-        let base = offset + index * 16
-        return SIMD4(
-            readFloat(bytes, at: base),
-            readFloat(bytes, at: base + 4),
-            readFloat(bytes, at: base + 8),
-            readFloat(bytes, at: base + 12)
-        )
-    }
-    return simd_float4x4(columns: (column(0), column(1), column(2), column(3)))
-}
-
-private func matricesApproximatelyEqual(
-    _ lhs: simd_float4x4,
-    _ rhs: simd_float4x4,
-    tolerance: Float = 1e-5
-) -> Bool {
-    (0..<4).allSatisfy { column in
-        (0..<4).allSatisfy { row in
-            abs(lhs[column][row] - rhs[column][row]) <= tolerance
-        }
-    }
 }
 
 private func perspective(near: Float, far: Float, aspect: Float = 1) -> simd_float4x4 {
@@ -1254,7 +1229,7 @@ private enum LightClusterValidationMain {
             let expectedLayout: [UInt32] = [
                 1, 128, 64, 48, UInt32(paramsBytes), 8, 512, 2, 256, 3,
                 UInt32(tileSize), UInt32(depthSlices), 256,
-                0, 64, 128, 144, 160, 176, 192, 208, 224, 240, 256,
+                0, 64, 128, 144, 160, 176, 192, 208, 224, 240,
                 27, 28, 29, 30, 64
             ]
             try require(expectedLayout.enumerated().allSatisfy {
@@ -2290,13 +2265,6 @@ private enum LightClusterValidationMain {
                         lights: [nearEyeLight],
                         hdr: iteration.isMultiple(of: 2),
                         projectionOverride: projection
-                    )
-                    try require(
-                        matricesApproximatelyEqual(
-                            readMatrix(gpu.params, at: 256),
-                            projection.inverse
-                        ),
-                        "View-bob raster projection inverse was not preserved in lighting params"
                     )
                     let cpu = reference(
                         lights: [nearEyeLight],

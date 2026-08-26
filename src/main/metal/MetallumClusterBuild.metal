@@ -37,7 +37,6 @@ struct MetallumLightingParamsV1 {
     uint4 reserved0;
     uint4 reserved1;
     uint4 reserved2;
-    float4x4 inverseRasterProjection;
 };
 
 struct MetallumClusterStatisticsV1 {
@@ -87,7 +86,7 @@ static_assert(sizeof(MetallumClusterHeaderV1) == 8, "Cluster header ABI must sta
 static_assert(sizeof(MetallumClusterScratchV1) == 512, "Cluster scratch ABI must stay 512 bytes");
 static_assert(sizeof(MetallumClusterBlockStatisticsV1) == 160,
     "Block statistics scratch ABI must stay 160 bytes");
-static_assert(sizeof(MetallumLightingParamsV1) == 320, "Lighting params ABI must stay 320 bytes");
+static_assert(sizeof(MetallumLightingParamsV1) == 256, "Lighting params ABI must stay 256 bytes");
 static_assert(sizeof(MetallumClusterStatisticsV1) == 256, "Lighting statistics ABI must stay 256 bytes");
 static_assert(__builtin_offsetof(MetallumLightingParamsV1, viewRotation) == 0, "view offset ABI");
 static_assert(__builtin_offsetof(MetallumLightingParamsV1, projection) == 64, "projection offset ABI");
@@ -97,8 +96,6 @@ static_assert(__builtin_offsetof(MetallumLightingParamsV1, depth) == 160, "depth
 static_assert(__builtin_offsetof(MetallumLightingParamsV1, frameIdAndGeneration) == 176, "frame offset ABI");
 static_assert(__builtin_offsetof(MetallumLightingParamsV1, capacitiesAndFlags) == 192, "capacity offset ABI");
 static_assert(__builtin_offsetof(MetallumLightingParamsV1, reserved0) == 208, "reserved0 offset ABI");
-static_assert(__builtin_offsetof(MetallumLightingParamsV1, inverseRasterProjection) == 256,
-    "inverse raster projection offset ABI");
 
 inline uint metallum_depth_slice(float depth, constant MetallumLightingParamsV1& params) {
     const float nearPlane = params.depth.x;

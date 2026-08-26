@@ -75,19 +75,6 @@ public final class CloudShadowPolicy {
         return (targetHeight - receiverWorldY) / lightY;
     }
 
-    /** Converts a fragment coordinate into the NDC coordinate consumed by raster-ray unprojection. */
-    public static float waterReflectionRasterNdc(
-            final float fragmentCoordinate,
-            final float rasterExtent
-    ) {
-        if (!Float.isFinite(fragmentCoordinate)
-                || !Float.isFinite(rasterExtent)
-                || rasterExtent <= 0.0f) {
-            return Float.NaN;
-        }
-        return fragmentCoordinate / rasterExtent * 2.0f - 1.0f;
-    }
-
     /**
      * Computes analytical flat cloud transmittance from coverage [0..1] and opacity [0..1].
      */

@@ -15,6 +15,12 @@ import java.util.Properties;
 
 /** Runtime configuration for Planar Reflections. */
 public final class PlanarReflectionConfig {
+    public enum CaptureMode {
+        DISABLED,
+        CLOUDS_ONLY,
+        FULL_PLANAR
+    }
+
     public static final String PROPERTY_ENABLED = "metallum.planar_reflections";
     public static final String PROPERTY_RESOLUTION = "metallum.planar_reflection.resolution";
     public static final String PROPERTY_UPDATE_INTERVAL = "metallum.planar_reflection.update_interval";
@@ -50,7 +56,25 @@ public final class PlanarReflectionConfig {
     }
 
     static boolean runtimeEnabled(final boolean planarEnabled, final boolean voxelEnabled) {
-        return planarEnabled && !voxelEnabled;
+        return captureMode(planarEnabled, voxelEnabled) == CaptureMode.FULL_PLANAR;
+    }
+
+    /**
+     * Resolves the shared reflected-target owner.
+     *
+     * <p>The voxel receiver never renders reflected terrain. It does, however, need a stable
+     * image of Minecraft's real cloud geometry; that narrow capture may safely share the dormant
+     * planar target and binding without mixing the two world-reflection architectures.</p>
+     */
+    public static CaptureMode captureMode() {
+        return captureMode(isEnabled(), VertexReflectionExperiment.isRuntimeEnabled());
+    }
+
+    static CaptureMode captureMode(final boolean planarEnabled, final boolean voxelEnabled) {
+        if (voxelEnabled) {
+            return CaptureMode.CLOUDS_ONLY;
+        }
+        return planarEnabled ? CaptureMode.FULL_PLANAR : CaptureMode.DISABLED;
     }
 
     public static void setEnabled(final boolean enabled) {

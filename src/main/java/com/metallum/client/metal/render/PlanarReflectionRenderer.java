@@ -56,6 +56,8 @@ public final class PlanarReflectionRenderer {
     private static int framesSinceReflectionUpdate = Integer.MAX_VALUE;
     @Nullable
     private static RenderTarget lastRenderedTarget;
+    private static PlanarReflectionConfig.CaptureMode lastRenderedMode =
+            PlanarReflectionConfig.CaptureMode.DISABLED;
     private static boolean activationLogged;
     private static boolean failureLogged;
     private static boolean voxelConflictLogged;
@@ -69,19 +71,25 @@ public final class PlanarReflectionRenderer {
             final LevelRenderState levelRenderState,
             final GpuBufferSlice terrainFog
     ) {
-        if (!PlanarReflectionConfig.isEnabled()) {
+        PlanarReflectionConfig.CaptureMode captureMode = PlanarReflectionConfig.captureMode();
+        if (captureMode == PlanarReflectionConfig.CaptureMode.DISABLED) {
             activePassRendered = false;
             return null;
         }
-        if (!PlanarReflectionConfig.isRuntimeEnabled()) {
-            activePassRendered = false;
+        if (captureMode == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY) {
+            Minecraft minecraft = Minecraft.getInstance();
+            if (minecraft.options.cloudStatus().get() == CloudStatus.OFF
+                    || !Float.isFinite(levelRenderState.cloudHeight)) {
+                activePassRendered = false;
+                return null;
+            }
             if (!voxelConflictLogged) {
                 voxelConflictLogged = true;
                 Metallum.LOGGER.info(
-                        "Planar water reflection suppressed: voxel reflection mode is active"
+                        "Voxel water reflection active: using cloud-only reflected capture; "
+                                + "reflected terrain remains disabled"
                 );
             }
-            return null;
         }
 
         MetalDevice device = MetalDevice.getInstance();
@@ -127,23 +135,40 @@ public final class PlanarReflectionRenderer {
                 PlanarReflectionConfig.resolutionScale()
         );
 
-        if (target != lastRenderedTarget) {
+        if (target != lastRenderedTarget || captureMode != lastRenderedMode) {
             // A resized/recreated target contains no usable historical reflection.
             activePassRendered = false;
             framesSinceReflectionUpdate = Integer.MAX_VALUE;
         }
-        if (activePassRendered
-                && ++framesSinceReflectionUpdate < PlanarReflectionConfig.updateIntervalFrames()) {
+        if (mayReuseCachedCapture(
+                captureMode,
+                activePassRendered,
+                framesSinceReflectionUpdate,
+                PlanarReflectionConfig.updateIntervalFrames()
+        )) {
+            framesSinceReflectionUpdate++;
             // The cached world reflection stays valid for this one frame.  Water's normal and
             // UV perturbation still run in the main translucent pass every frame, so waves never
             // freeze; only the expensive sky/opaque terrain capture is limited to 30 Hz.
             return null;
         }
 
-        FramePass pass = frameGraph.addPass("metallum_planar_reflection");
+        FramePass pass = frameGraph.addPass(
+                captureMode == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY
+                        ? "metallum_cloud_reflection"
+                        : "metallum_planar_reflection"
+        );
         pass.disableCulling();
         pass.executes(() -> render(
-                device, resources, target, terrain, levelRenderState, terrainFog, camera, waterSurfaceY
+                device,
+                resources,
+                target,
+                terrain,
+                levelRenderState,
+                terrainFog,
+                camera,
+                waterSurfaceY,
+                captureMode
         ));
         return pass;
     }
@@ -228,7 +253,8 @@ public final class PlanarReflectionRenderer {
             final LevelRenderState levelRenderState,
             final GpuBufferSlice terrainFog,
             final CameraRenderState camera,
-            final double waterSurfaceY
+            final double waterSurfaceY,
+            final PlanarReflectionConfig.CaptureMode captureMode
     ) {
         GpuTextureView previousColorOverride = RenderSystem.outputColorTextureOverride;
         GpuTextureView previousDepthOverride = RenderSystem.outputDepthTextureOverride;
@@ -264,14 +290,14 @@ public final class PlanarReflectionRenderer {
             activeTerrainToken = device.currentSubmitIndex() * 16L + 7L;
 
             try {
-                // This pass owns the full reflection viewport: sky fills every uncovered pixel and
-                // opaque terrain overlays it.  Vanilla's sky and terrain pipelines do not promise
-                // an alpha write, so alpha must begin at one to mark this completed target as
-                // sampleable.  A failed/unavailable pass is represented by the separate transparent
-                // fallback texture bound outside this render scope.
+                // FULL_PLANAR owns the whole viewport, while CLOUDS_ONLY deliberately preserves
+                // transparent alpha outside actual cloud geometry. The voxel receiver can then
+                // overlay real Minecraft clouds on its analytic sky without importing reflected
+                // terrain or a second world-reflection architecture.
+                float clearAlpha = targetClearAlpha(captureMode);
                 RenderSystem.getDevice().createCommandEncoder().clearColorAndDepthTextures(
                         target.getColorTexture(),
-                        new Vector4f(0.0f, 0.0f, 0.0f, 1.0f),
+                        new Vector4f(0.0f, 0.0f, 0.0f, clearAlpha),
                         target.getDepthTexture(),
                         1.0
                 );
@@ -291,27 +317,34 @@ public final class PlanarReflectionRenderer {
                     RenderSystem.outputColorTextureOverride = target.getColorTextureView();
                     RenderSystem.outputDepthTextureOverride = target.getDepthTextureView();
 
-                    renderSky(minecraft, levelRenderState, terrainFog);
-                    try {
-                        // This enters Sodium with a reflected-camera list built from all loaded
-                        // sections intersecting the mirror frustum, rather than reusing the
-                        // primary camera's visibility result. Water itself remains excluded to
-                        // avoid recursive blending.
-                        terrain.renderGroup(
-                                ChunkSectionLayerGroup.OPAQUE,
-                                RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
-                        );
-                    } finally {
-                        cleanupTerrainDrawState();
+                    if (rendersReflectedWorld(captureMode)) {
+                        renderSky(minecraft, levelRenderState, terrainFog);
+                        try {
+                            // This enters Sodium with a reflected-camera list built from all loaded
+                            // sections intersecting the mirror frustum, rather than reusing the
+                            // primary camera's visibility result. Water itself remains excluded to
+                            // avoid recursive blending.
+                            terrain.renderGroup(
+                                    ChunkSectionLayerGroup.OPAQUE,
+                                    RenderSystem.getSamplerCache().getClampToEdge(FilterMode.LINEAR)
+                            );
+                        } finally {
+                            cleanupTerrainDrawState();
+                        }
                     }
                     renderClouds(minecraft, levelRenderState, camera, waterSurfaceY);
                     activePassRendered = true;
                     lastRenderedTarget = target;
+                    lastRenderedMode = captureMode;
                     framesSinceReflectionUpdate = 0;
                     if (!activationLogged) {
                         activationLogged = true;
+                        String label = captureMode == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY
+                                ? "Cloud-only water reflection capture active"
+                                : "Live water planar reflection active";
                         Metallum.LOGGER.info(
-                                "Live water planar reflection active: target={}x{}, scale={}, waterY={}",
+                                "{}: target={}x{}, scale={}, waterY={}",
+                                label,
                                 target.getColorTexture().getWidth(0),
                                 target.getColorTexture().getHeight(0),
                                 PlanarReflectionConfig.resolutionScale(), waterSurfaceY
@@ -392,7 +425,8 @@ public final class PlanarReflectionRenderer {
                 2.0 * waterSurfaceY - camera.pos.y,
                 camera.pos.z
         );
-        minecraft.levelRenderer.cloudRenderer().render(
+        var cloudRenderer = minecraft.levelRenderer.cloudRenderer();
+        cloudRenderer.render(
                 levelRenderState.cloudColor,
                 cloudStatus,
                 levelRenderState.cloudHeight,
@@ -401,6 +435,11 @@ public final class PlanarReflectionRenderer {
                 levelRenderState.gameTime,
                 minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false)
         );
+        // CloudRenderer normally rotates this dynamic UBO once after the main cloud draw. The
+        // reflected draw happens earlier in the same frame, so rotate here as well; otherwise the
+        // main draw overwrites CloudInfo while the GPU may still consume the reflected command.
+        // Mesh/UTB data remains shared read-only unless CloudRenderer itself rebuilds and rotates it.
+        cloudRenderer.endFrame();
     }
 
     private static void deactivateTarget() {
@@ -419,6 +458,25 @@ public final class PlanarReflectionRenderer {
         if (cleanup != null) {
             cleanup.run();
         }
+    }
+
+    static boolean rendersReflectedWorld(final PlanarReflectionConfig.CaptureMode captureMode) {
+        return captureMode == PlanarReflectionConfig.CaptureMode.FULL_PLANAR;
+    }
+
+    static float targetClearAlpha(final PlanarReflectionConfig.CaptureMode captureMode) {
+        return captureMode == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY ? 0.0f : 1.0f;
+    }
+
+    static boolean mayReuseCachedCapture(
+            final PlanarReflectionConfig.CaptureMode captureMode,
+            final boolean captureReady,
+            final int framesSinceUpdate,
+            final int updateIntervalFrames
+    ) {
+        return captureMode == PlanarReflectionConfig.CaptureMode.FULL_PLANAR
+                && captureReady
+                && framesSinceUpdate + 1 < updateIntervalFrames;
     }
 
     /**
@@ -543,6 +601,7 @@ public final class PlanarReflectionRenderer {
         activePassRendered = false;
         framesSinceReflectionUpdate = Integer.MAX_VALUE;
         lastRenderedTarget = null;
+        lastRenderedMode = PlanarReflectionConfig.CaptureMode.DISABLED;
         activationLogged = false;
         failureLogged = false;
     }
