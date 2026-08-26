@@ -111,10 +111,11 @@ reported zero active candidates. GI production resources, passes and bindings
 remained zero.
 
 This is a Tier B provisional screening, not an attested Tier C throughput or
-release claim. It is sufficient for the field-only G2 stop-gate because the
-enabled CPU source chain shows no measured regression and the user explicitly
-accepted a 1–2 FPS variance. G2 has no receiver-visible output, so there is no
-visual GI acceptance claim.
+release claim. It is sufficient only for the field-only G2 technical gate: the
+enabled CPU source chain shows no measured regression. G2 has no receiver-visible
+output, so there is no visual GI acceptance claim. The active G1 absolute-floor
+gate remains independent and is not overridden by this historical diagnostic
+screening or by the optional `1–2 FPS` tolerance recorded in its source evidence.
 
 ## Verification
 
@@ -140,5 +141,6 @@ world/resource/material/clipmap/content truth is rejected; no camera-dependent
 lightmap enters the field; memory and retirement are bounded; debug slices and
 live accepted publication are proven.
 
-This permits a separately scoped G3 proposal. It does not start G3 and does not
-authorize any production receiver or transport path.
+This does not start G3 or authorize any production receiver or transport path.
+On the active branch, the pending G1 absolute-floor gate also blocks a G3
+proposal until fresh Tier C baseline evidence or a new explicit user decision.

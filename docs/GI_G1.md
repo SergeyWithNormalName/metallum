@@ -67,7 +67,10 @@ does not mean the product floor passed.
 ## Stop gate
 
 G1 code is retained because its mechanical and relative gates pass and it adds
-no production work. G2 must not begin until either:
+no production work. The imported G2 semantic implementation remains an opt-in,
+structurally-off diagnostic only; it does not satisfy this G1 gate or authorize
+G3, a receiver, transport, or any production GI path. A later GI stage must not
+begin until either:
 
 1. the same clean G1 source produces the required independent Tier C evidence
    at or above `28/20 FPS`; or
