@@ -41,6 +41,19 @@ public final class CloudShadowPolicy {
     /** Bounded artistic weight for the rough, water-only cloud reflection layer. */
     public static final float WATER_REFLECTION_STRENGTH = 1.0f;
 
+    /**
+     * Virtual distance of the translation-invariant water cloud environment.
+     *
+     * <p>This is deliberately not the physical cloud-plane height. Water reflections sample
+     * clouds as a distant angular sky layer so camera translation and eye bob cannot move the
+     * reflected pattern. Ninety-six blocks keeps vanilla 12-block cells broad enough to read as
+     * rough clouds rather than small noisy tiles.</p>
+     */
+    public static final float WATER_REFLECTION_ANGULAR_DISTANCE_BLOCKS = 96.0f;
+
+    /** Lower bound for the angular sky-layer projection near the horizon. */
+    public static final float WATER_REFLECTION_MIN_ELEVATION = 0.10f;
+
     private CloudShadowPolicy() {
     }
 
@@ -76,37 +89,27 @@ public final class CloudShadowPolicy {
     }
 
     /**
-     * Stable water-environment projection distance for the visible cloud slab.
+     * One horizontal coordinate of the translation-invariant angular cloud environment.
      *
-     * <p>The horizontal cloud phase follows the camera, exactly like vanilla clouds, but its
-     * angular scale is measured from the reflecting water surface rather than the camera eye.
-     * This deliberately removes camera bob/jump height from the projection: at low elevation a
-     * one-block eye-height delta would otherwise move the lookup by {@code 1 / rayElevation}
-     * blocks even though the reflecting plane did not move.</p>
-     *
-     * @return forward ray distance, or a negative value when the projection is invalid
+     * <p>Only reflected direction and vanilla animation phase are inputs. Camera X/Y/Z and the
+     * water receiver position are intentionally absent, making jump/bob/walk stability a data-flow
+     * invariant instead of a tuned cancellation.</p>
      */
-    public static float waterReflectionProjectionT(
-            final float waterSurfaceY,
+    public static float waterReflectionAngularCoordinate(
+            final float horizontalDirection,
             final float rayElevation,
-            final float cloudHeight,
-            final float cloudThickness
+            final float animationOffset
     ) {
-        if (!Float.isFinite(waterSurfaceY)
+        if (!Float.isFinite(horizontalDirection)
                 || !Float.isFinite(rayElevation)
-                || !Float.isFinite(cloudHeight)
-                || !Float.isFinite(cloudThickness)
-                || rayElevation <= 0.02f
-                || cloudThickness < 0.0f) {
-            return -1.0f;
+                || !Float.isFinite(animationOffset)
+                || rayElevation <= 0.02f) {
+            return Float.NaN;
         }
-        float cloudTop = cloudHeight + cloudThickness;
-        if (waterSurfaceY >= cloudTop) {
-            return -1.0f;
-        }
-        float targetHeight = waterSurfaceY >= cloudHeight ? cloudTop : cloudHeight;
-        float distance = (targetHeight - waterSurfaceY) / rayElevation;
-        return Float.isFinite(distance) && distance >= 0.0f ? distance : -1.0f;
+        float stableElevation = Math.max(rayElevation, WATER_REFLECTION_MIN_ELEVATION);
+        return horizontalDirection / stableElevation
+                * WATER_REFLECTION_ANGULAR_DISTANCE_BLOCKS
+                + animationOffset;
     }
 
     /**

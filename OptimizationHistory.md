@@ -3893,7 +3893,7 @@ Human motion review отклонил v3: прыжок всё ещё сильно
 cloud reflection, а при быстром движении вперёд вся reflection mass уезжала
 вперёд одновременно. Статический capture не обнаружил этот дефект.
 
-#### Water-height cloud projection stabilization — HUMAN PENDING
+#### Water-height cloud projection stabilization — REJECTED BY HUMAN MOTION REVIEW
 
 Повторный math/source audit нашёл общую причину обоих motion symptoms:
 v3 использовал camera Y не только как origin, но и для cloud-plane
@@ -3918,7 +3918,38 @@ Generated MSL: vertex SHA/size не изменились (`7120b44b6c01...`,
 В static pair cloud reflection сохраняет фазу/масштаб при изменённой
 высоте; изменяется только геометрия видимого ракурса. Captures `300+300`
 и их FPS не являются performance evidence. Живой jump/forward motion review
-остаётся HUMAN PENDING.
+отклонил и v4: заметный jump shift сохранился, а при быстром движении облачная
+масса отражения по-прежнему двигалась вперёд относительно игрока. Поэтому
+finite-plane/camera-correlated lookup больше не принимается как water-cloud
+architecture, даже если отдельная формула пересечения проходит static tests.
+
+#### Translation-invariant angular cloud environment — HUMAN PENDING
+
+V5 заменяет отвергнутую конечную cloud plane на удалённый angular sky layer.
+Lookup зависит только от отражённого world direction и vanilla animation offset:
+camera X/Y/Z, receiver position и ray-plane distance полностью удалены из helper.
+В результате jump, bob и horizontal camera translation не могут изменить фазу
+узора по data-flow contract; поворот камеры и штатная анимация облаков сохранены.
+
+Angular distance `96 blocks` и minimum elevation `0.10` выбраны так, чтобы
+12-block vanilla cells оставались крупным rough cloud silhouette и не сжимались
+в быстрые полосы у горизонта. Runtime cost остаётся одним существующим RG cloud
+texture sample и bounded fragment ALU, без нового pass, history или resource.
+
+Осознанный компромисс: отдельные облака больше не имеют параллакса конечной
+Minecraft cloud plane при перемещении игрока. Exact same-frame image matching
+потребовал бы cloud prepass/render-order split и отдельную screen-space texture;
+это более дорогая и существенно более широкая архитектура. После двух human
+motion rejections стабильный sky-environment contract выбран приоритетно.
+
+Source/generated contract и pure translation-invariance test прошли. Generated
+MSL сохранил vertex SHA/size (`7120b44b6c01...`, 15,327 chars), `10/10`
+varyings и один reflection volume sample; fragment SHA `ef59676184f9...`,
+152,849 chars, один cloud `texture2d` sample и zero `texture3d` resources.
+Fragment стал на 1,529 chars меньше v4. Full Gradle `test build` и targeted
+cloud/reflection suites прошли. Статическая или математическая проверка не
+считается human motion acceptance; jump/walk/fast-forward результат остаётся
+HUMAN PENDING.
 
 ---
 
