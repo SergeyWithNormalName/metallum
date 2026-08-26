@@ -6,9 +6,13 @@ import com.metallum.client.display.NativeFullscreenStartup;
 import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.gi.semantic.GiSemanticController;
 import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
+import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
 import com.metallum.client.gi.source.GiDirectSourceGpuResources;
 import com.metallum.client.gi.source.GiDirectSourceRuntime;
+import com.metallum.client.gi.transport.GiTransportCoordinator;
+import com.metallum.client.gi.transport.GiTransportGpuResources;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
@@ -48,6 +52,7 @@ import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.framegraph.NativeHdrFrameGraph;
 import com.metallum.client.metal.render.framegraph.GiDirectSourceFrameGraph;
+import com.metallum.client.metal.render.framegraph.GiTransportFrameGraph;
 import com.metallum.client.metal.render.framegraph.TemporalDiagnosticFrameGraph;
 import com.metallum.client.metalfx.MetalFxSpatialScaling;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -333,6 +338,10 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private GiDirectSourceCoordinator giDirectSourceCoordinator;
     private boolean giDirectSourceFailureLogged;
+    @Nullable
+    private GiTransportCoordinator giTransportCoordinator;
+    private boolean giTransportFailureLogged;
+    private boolean giTransportDisabled;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
@@ -480,11 +489,21 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
-        if (GiDirectSourceRuntime.isRequested()) {
+        boolean giFieldRequested = GiDirectSourceRuntime.isRequested()
+                || GiTransportRuntime.isRequested();
+        if (giFieldRequested && !AdvancedLightingRuntime.isRequested()) {
+            Metallum.LOGGER.warn(
+                    "G3/G4 field diagnostics require the Advanced lighting contract; "
+                            + "keeping their native resources structurally inactive"
+            );
+        }
+        if (giFieldRequested && AdvancedLightingRuntime.isRequested()) {
             try {
                 GiDirectSourceFrameGraph.initialize();
                 GiDirectSourceGpuResources.validateNativeAbi();
                 this.giDirectSourceCoordinator = new GiDirectSourceCoordinator(
+                        this.metalDeviceHandle,
+                        this.commandQueue.nativeHandle(),
                         handle -> this.commandEncoder.queueForDestroy(
                                 () -> MetalNativeBridge.metallum_gi_direct_source_release_context_v1(handle)
                         )
@@ -494,6 +513,31 @@ public final class MetalDevice implements GpuDeviceBackend {
                         "G3 direct-source ABI preflight failed; keeping GI structurally inactive",
                         exception
                 );
+            }
+        }
+        if (GiTransportRuntime.isRequested()) {
+            if (this.giDirectSourceCoordinator == null) {
+                Metallum.LOGGER.warn(
+                        "G4 transport requested but its private G3 source failed admission; "
+                                + "keeping G4 structurally inactive"
+                );
+            } else {
+                try {
+                    GiTransportFrameGraph.initialize();
+                    GiTransportGpuResources.validateNativeAbi();
+                    this.giTransportCoordinator = new GiTransportCoordinator(
+                            this.metalDeviceHandle,
+                            this.commandQueue.nativeHandle(),
+                            handle -> this.commandEncoder.queueForDestroy(
+                                    () -> MetalNativeBridge.metallum_gi_transport_release_context_v1(handle)
+                            )
+                    );
+                } catch (RuntimeException exception) {
+                    Metallum.LOGGER.warn(
+                            "G4 frozen-transport ABI preflight failed; keeping G4 structurally inactive",
+                            exception
+                    );
+                }
             }
         }
         this.cloudShadowResources = new CloudShadowGpuResources(this);
@@ -769,6 +813,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         if (this.localVoxelShadowResources != null) {
             this.localVoxelShadowResources.close();
             this.localVoxelShadowResources = null;
+        }
+        if (this.giTransportCoordinator != null) {
+            this.giTransportCoordinator.close();
+            this.giTransportCoordinator = null;
         }
         if (this.giDirectSourceCoordinator != null) {
             this.giDirectSourceCoordinator.close();
@@ -1990,7 +2038,82 @@ public final class MetalDevice implements GpuDeviceBackend {
                         }
                     }
                 }
-                if (this.giDirectSourceCoordinator != null) {
+                GiSemanticTransportFieldView transportField = this.giTransportCoordinator == null
+                        ? null : GiSemanticController.global().activeTransportField();
+                if (this.giTransportCoordinator != null && !this.giTransportDisabled) {
+                    try {
+                        boolean accepted = this.giTransportCoordinator.hasAcceptedEpoch();
+                        int transportStatus;
+                        if (accepted) {
+                            GiDirectSourceCoordinator.TransportSourceIdentity observedSource =
+                                    this.giTransportCoordinator.submittedSourceIdentity();
+                            if (observedSource != null
+                                    && !this.giDirectSourceCoordinator
+                                    .transportSourceIdentityStillCurrent(
+                                            observedSource,
+                                            capture.giEnvironment(),
+                                            AdvancedLightRegistry.global()
+                                    )) {
+                                observedSource = null;
+                            }
+                            transportStatus = this.giTransportCoordinator.observeFrame(
+                                    transportField, observedSource, submitIndex
+                            );
+                        } else {
+                            GiDirectSourceCoordinator.TransportSource transportSource =
+                                    this.giDirectSourceCoordinator == null
+                                            ? null
+                                            : this.giDirectSourceCoordinator.transportSource();
+                            if (transportField != null && transportSource != null) {
+                                transportStatus = this.commandEncoder.encodeGiTransport(
+                                        this.giTransportCoordinator,
+                                        transportField,
+                                        transportSource,
+                                        submitIndex
+                                );
+                            } else {
+                                transportStatus = GiTransportCoordinator.STATUS_INPUT_NOT_READY;
+                            }
+                        }
+                        if (transportStatus == GiTransportGpuResources.STATUS_STALE && accepted) {
+                            if (!this.giTransportFailureLogged) {
+                                this.giTransportFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "G4 frozen transport input became stale; retaining the private field without rebuilding"
+                                );
+                            }
+                        } else if (transportStatus == GiTransportGpuResources.STATUS_OK
+                                || transportStatus == GiTransportCoordinator.STATUS_NO_WORK
+                                || transportStatus == GiTransportCoordinator.STATUS_INPUT_NOT_READY
+                                || transportStatus == GiTransportGpuResources.STATUS_BUSY
+                                || transportStatus == GiTransportGpuResources.STATUS_STALE) {
+                            this.giTransportFailureLogged = false;
+                        } else {
+                            this.giTransportDisabled = true;
+                            if (!this.giTransportFailureLogged) {
+                                this.giTransportFailureLogged = true;
+                                Metallum.LOGGER.warn(
+                                        "G4 frozen transport failed with status {}; disabling further one-shot work",
+                                        transportStatus
+                                );
+                            }
+                        }
+                    } catch (RuntimeException exception) {
+                        this.giTransportDisabled = true;
+                        if (!this.giTransportFailureLogged) {
+                            this.giTransportFailureLogged = true;
+                            Metallum.LOGGER.warn(
+                                    "G4 frozen transport failed; disabling further one-shot work",
+                                    exception
+                            );
+                        }
+                    }
+                }
+                // Give a completed G3 generation to G4 before admitting a new environment
+                // epoch. Once native accepts G4, G3 is latched for the fixture lifetime.
+                if (this.giDirectSourceCoordinator != null
+                        && (this.giTransportCoordinator == null
+                        || !this.giTransportCoordinator.hasAcceptedEpoch())) {
                     try {
                         GiSemanticDirectFieldView directField =
                                 GiSemanticController.global().activeDirectField();

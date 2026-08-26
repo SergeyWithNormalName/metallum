@@ -34,6 +34,7 @@ public final class FrameGraphTests {
         testSpatialHdrGraphTopology();
         testAdvancedLightingGraphTopology();
         testGiDirectSourceGraphTopology();
+        testGiTransportGraphTopology();
         testAbiHeader();
         testDeterministicDiagnosticsAndGate();
     }
@@ -252,6 +253,72 @@ public final class FrameGraphTests {
                         resource.id().name().contains("scene")
                                 || resource.id().name().contains("terrain")),
                 "G3 output escaped its private field boundary");
+    }
+
+    private static void testGiTransportGraphTopology() {
+        FrameGraph graph = GiTransportFrameGraph.graph();
+        require(GiTransportFrameGraph.GRAPH_ID.equals("gi-g4-frozen-transport-v1"),
+                "G4 transport frame graph ID changed");
+        require(graph.resources().size() == 8 && graph.passes().size() == 2,
+                "G4 transport frame graph has the wrong frozen topology");
+        require(graph.resources().stream().map(resource -> resource.id().name()).toList().equals(
+                        List.of(
+                                "gi_g2_transport_cells", "gi_g3_geometry_state",
+                                "gi_g3_direct_irradiance", "gi_bounce0_ping_source",
+                                "gi_indirect_sh_r", "gi_indirect_sh_g", "gi_indirect_sh_b",
+                                "gi_transport_confidence"
+                        )),
+                "G4 transport resource order changed");
+        require(graph.passes().stream().map(pass -> pass.id().name()).toList().equals(
+                        List.of("gi_bounce_init", "gi_jacobi_transport_sh")),
+                "G4 transport pass order changed");
+        FrameGraph.PassDesc init = graph.passes().getFirst();
+        FrameGraph.PassDesc transport = graph.passes().getLast();
+        require(init.dependencies().isEmpty()
+                        && init.accesses().equals(List.of(
+                        access(resourceId(0, "gi_g2_transport_cells"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(1, "gi_g3_geometry_state"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(2, "gi_g3_direct_irradiance"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(3, "gi_bounce0_ping_source"),
+                                FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE)
+                        ))
+                        && transport.dependencies().equals(List.of(init.id()))
+                        && transport.accesses().equals(List.of(
+                        access(resourceId(0, "gi_g2_transport_cells"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(1, "gi_g3_geometry_state"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(3, "gi_bounce0_ping_source"),
+                                FrameGraph.AccessKind.READ, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(4, "gi_indirect_sh_r"),
+                                FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(5, "gi_indirect_sh_g"),
+                                FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(6, "gi_indirect_sh_b"),
+                                FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE),
+                        access(resourceId(7, "gi_transport_confidence"),
+                                FrameGraph.AccessKind.WRITE, FrameGraph.PipelineStage.COMPUTE)
+                        ))
+                        && graph.passes().stream().allMatch(pass ->
+                        pass.encoder() == FrameGraph.EncoderClass.COMPUTE
+                                && pass.accesses().stream().allMatch(access ->
+                                access.stage() == FrameGraph.PipelineStage.COMPUTE)
+                                && pass.contract().presentationUiContract()
+                                == FrameGraph.PresentationUiContract.NOT_PRESENTATION)
+                        && graph.resources().stream().allMatch(resource ->
+                        resource.role() == FrameGraph.ResourceRole.GENERIC
+                                && resource.shape().extent().equals(
+                                "frozen_near_cascade_32x32x32")),
+                "G4 graph access sets are not the exact two-pass frozen transport contract");
+        require(graph.resources().stream().map(resource -> resource.id().name()).noneMatch(name ->
+                        name.contains("scene") || name.contains("depth")
+                                || name.contains("terrain") || name.contains("drawable")
+                                || name.contains("present") || name.contains("image")
+                                || name.contains("ui")),
+                "G4 transport escaped its private field boundary");
     }
 
     private static void testReadBeforeWrite() {

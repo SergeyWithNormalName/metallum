@@ -3,6 +3,8 @@ package com.metallum.client.gi.semantic;
 import com.metallum.client.gi.field.GiFieldLayout;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -10,6 +12,9 @@ import java.util.Map;
 /** Render-thread-owned bounded placement of accepted sections into the complete 3x32^3 CPU field. */
 public final class GiSemanticFieldAssembler {
     public static final int MAX_RESIDENT_SECTION_TAGS = 17 * 17 * 17;
+
+    private static final ValueLayout.OfShort LE_SHORT_UNALIGNED =
+            ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     public enum ApplyResult { ACCEPTED, STALE, OUTSIDE, CAPACITY }
 
@@ -236,6 +241,60 @@ public final class GiSemanticFieldAssembler {
             }
         }
         return stamp;
+    }
+
+    GiSemanticTransportFieldView.CopyResult copyTransportNearCascade(final MemorySegment destination) {
+        assertOwnerThread();
+        if (destination == null || destination.byteSize() != GiSemanticTransportFieldView.PAYLOAD_BYTES) {
+            throw new IllegalArgumentException("G4 transport destination must match the near cascade exactly");
+        }
+        long contentStamp = 0L;
+        int knownContentCells = 0;
+        int unknownCells = 0;
+        for (int cell = 0; cell < GiSemanticTransportFieldView.CELL_COUNT; cell++) {
+            long offset = (long) cell * GiSemanticTransportFieldView.CELL_BYTES;
+            int validityId = Byte.toUnsignedInt(this.validity[cell]);
+            boolean content = validityId == GiSemanticValidity.KNOWN_CONTENT.abiId();
+            boolean empty = validityId == GiSemanticValidity.KNOWN_EMPTY.abiId();
+            boolean unknown = validityId == GiSemanticValidity.UNKNOWN.abiId();
+            boolean fallback = validityId == GiSemanticValidity.KNOWN_FALLBACK.abiId();
+            int rgbBase = cell * 3;
+            if (content) {
+                destination.set(LE_SHORT_UNALIGNED, offset, this.albedoRgb[rgbBase]);
+                destination.set(LE_SHORT_UNALIGNED, offset + 2L, this.albedoRgb[rgbBase + 1]);
+                destination.set(LE_SHORT_UNALIGNED, offset + 4L, this.albedoRgb[rgbBase + 2]);
+                destination.set(LE_SHORT_UNALIGNED, offset + 6L,
+                        (short) (Byte.toUnsignedInt(this.occupancy[cell]) * 257));
+                int faceBase = cell * 6;
+                for (int face = 0; face < 6; face++) {
+                    destination.set(ValueLayout.JAVA_BYTE, offset + 8L + face,
+                            this.faces[faceBase + face]);
+                }
+                knownContentCells++;
+            } else {
+                destination.set(LE_SHORT_UNALIGNED, offset, (short) 0);
+                destination.set(LE_SHORT_UNALIGNED, offset + 2L, (short) 0);
+                destination.set(LE_SHORT_UNALIGNED, offset + 4L, (short) 0);
+                destination.set(LE_SHORT_UNALIGNED, offset + 6L,
+                        empty ? (short) 0 : (short) 0xffff);
+                for (int face = 0; face < 6; face++) {
+                    destination.set(ValueLayout.JAVA_BYTE, offset + 8L + face, (byte) 0);
+                }
+            }
+            destination.set(ValueLayout.JAVA_BYTE, offset + 14L, this.validity[cell]);
+            destination.set(ValueLayout.JAVA_BYTE, offset + 15L,
+                    unknown || fallback ? (byte) 0 : this.coverage[cell]);
+            if (unknown || fallback) {
+                unknownCells++;
+            }
+            contentStamp = Math.max(contentStamp, this.contentGenerations[cell]);
+        }
+        if (knownContentCells > 0 && contentStamp <= 0L) {
+            throw new IllegalStateException("G4 accepted content has no deterministic content stamp");
+        }
+        return new GiSemanticTransportFieldView.CopyResult(
+                contentStamp, knownContentCells, unknownCells
+        );
     }
 
     public GiSemanticFieldSnapshot snapshot() {

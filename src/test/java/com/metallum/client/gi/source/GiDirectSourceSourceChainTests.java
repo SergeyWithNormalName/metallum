@@ -5,7 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
-/** Ensures the CPU/domain package stays detached from view, receiver and transport paths. */
+/** Ensures G3 stays detached from view/receiver/G4 implementation paths except its opaque handoff. */
 public final class GiDirectSourceSourceChainTests {
     private GiDirectSourceSourceChainTests() {
     }
@@ -15,7 +15,7 @@ public final class GiDirectSourceSourceChainTests {
         List<String> forbidden = List.of(
                 "directlightfrustum", "snapshotforframe", "publishdynamicframe",
                 "lightmap", "brightness", "camera", "screen", "depth", "history",
-                "receiver", "transport", "albedo", "reflectance"
+                "receiver", "albedo", "reflectance"
         );
         try (var paths = Files.walk(root)) {
             for (Path source : paths.filter(path -> path.toString().endsWith(".java")).toList()) {
@@ -24,6 +24,11 @@ public final class GiDirectSourceSourceChainTests {
                     if (content.contains(forbiddenToken)) {
                         throw new AssertionError(source + " retains forbidden G3 source-chain token " + forbiddenToken);
                     }
+                }
+                if (content.contains("com.metallum.client.gi.transport")
+                        || content.contains("gisemantictransportfieldview")) {
+                    throw new AssertionError(source
+                            + " depends on G4 implementation instead of exposing an opaque source owner");
                 }
             }
         }

@@ -166,6 +166,7 @@ SUN_SHADOW_STAGE = "sun shadow"
 VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
 DYNAMIC_LOCAL_SHADOW_STAGE = "dynamic local shadow"
 GI_INJECT_STAGE = "GI_INJECT"
+GI_TRANSPORT_STAGE = "GI_TRANSPORT"
 DYNAMIC_LOCAL_SHADOW_P95_BUDGET_MS = {
     "balanced": 1.0,
     "ultra": 2.0,
@@ -300,6 +301,7 @@ class TimingWindow:
     voxel_upload_update_stage: dict[str, Any] | None
     dynamic_local_shadow_stage: dict[str, Any] | None
     gi_inject_stage: dict[str, Any] | None
+    gi_transport_stage: dict[str, Any] | None
 
 
 def _integer(value: Any, field: str, line: int, minimum: int = 0) -> int:
@@ -444,7 +446,10 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
         value.get("contract_version"), "global_illumination.contract_version", line
     )
     expected_keys = GI_V1_KEYS if contract_version == 1 else GI_V2_KEYS
-    if contract_version not in (1, 2) or set(value) != expected_keys:
+    # G4 schema v3 intentionally reuses the strict v2 key set: the version marks
+    # combined G3+G4 ownership while transport_dispatches/valid_probes/etc. are
+    # already reserved fields. Unknown keys remain a hard error.
+    if contract_version not in (1, 2, 3) or set(value) != expected_keys:
         raise ReportError(f"line {line}: global_illumination has invalid keys")
     mode = value.get("mode")
     if mode not in ("off", "active"):
@@ -482,6 +487,23 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
         raise ReportError(
             f"line {line}: global_illumination dirty_pending algebra is invalid"
         )
+    if contract_version == 3:
+        if mode != "active" \
+                or result["resource_count"] != 11 \
+                or result["pass_count"] != 4 \
+                or result["binding_count"] != 0 \
+                or result["shader_symbol_count"] != 0 \
+                or result["dirty_queued_total"] != 192 \
+                or result["dirty_completed_total"] != 192 \
+                or result["dirty_discarded_total"] != 0 \
+                or result["dirty_pending"] != 0 \
+                or result["injection_dispatches"] != 192 \
+                or result["full_volume_rebuilds"] != 1 \
+                or result["transport_dispatches"] not in (0, 1) \
+                or result["field_epoch"] != result["transport_dispatches"]:
+            raise ReportError(
+                f"line {line}: G4 global_illumination v3 shape is invalid"
+            )
     if mode == "off":
         nonzero = [
             key for key in GI_V2_INTEGER_KEYS
@@ -1203,6 +1225,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_timing_stage(payload.get("stages"), GI_INJECT_STAGE, line)
             if schema >= 6 else None
         ),
+        gi_transport_stage=(
+            _parse_timing_stage(payload.get("stages"), GI_TRANSPORT_STAGE, line)
+            if schema >= 6 else None
+        ),
     )
     if not window.p50_ms <= window.p95_ms <= window.p99_ms <= window.maximum_ms:
         raise ReportError(f"line {line}: GPU percentiles/maximum are not monotonic")
@@ -1224,6 +1250,21 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
                     f"line {line}: metadata.static_geometry_heaps_enabled differs "
                     "from workload.private_geometry_heap.enabled"
                 )
+    if schema >= 6 and window.global_illumination is not None:
+        contract_version = window.global_illumination["contract_version"]
+        metadata_gi_mode = window.metadata.get("global_illumination_mode")
+        if contract_version == 3 and metadata_gi_mode != "g4_transport":
+            raise ReportError(
+                f"line {line}: G4 contract v3 requires metadata mode g4_transport"
+            )
+        if metadata_gi_mode == "g4_transport" and contract_version != 3:
+            raise ReportError(
+                f"line {line}: metadata mode g4_transport requires G4 contract v3"
+            )
+        if window.gi_transport_stage is not None and contract_version != 3:
+            raise ReportError(
+                f"line {line}: GI_TRANSPORT timing requires G4 contract v3"
+            )
     return window
 
 
@@ -1784,6 +1825,17 @@ def _aggregate_gi_inject_stage(
         windows,
         "gi_inject_stage",
         GI_INJECT_STAGE,
+        allow_absent_or_zero=True,
+    )
+
+
+def _aggregate_gi_transport_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows,
+        "gi_transport_stage",
+        GI_TRANSPORT_STAGE,
         allow_absent_or_zero=True,
     )
 
@@ -2419,6 +2471,9 @@ def summarize(
     gi_inject_stage = _aggregate_gi_inject_stage(selected)
     if gi_inject_stage is not None:
         result.setdefault("stages", {})[GI_INJECT_STAGE] = gi_inject_stage
+    gi_transport_stage = _aggregate_gi_transport_stage(selected)
+    if gi_transport_stage is not None:
+        result.setdefault("stages", {})[GI_TRANSPORT_STAGE] = gi_transport_stage
     if selected[0].schema >= 2:
         meta = dict(selected[-1].metadata)
         if "ablation_mode" not in meta:
@@ -5002,22 +5057,24 @@ def self_test() -> None:
             for value in gi_off_summary["global_illumination"]["counters"].values()
         )
 
-        schema6_gi_active_v2 = root / "schema6-gi-active-v2.raw.jsonl"
+        schema6_gi_active_v3 = root / "schema6-gi-active-v3.raw.jsonl"
         active_payload = g0_line(0, advanced=True, detail=True)
         active_gi = active_payload["global_illumination"]
         active_gi.update({
-            "contract_version": 2,
+            "contract_version": 3,
             "mode": "active",
-            "allocated_bytes": 1_104_096,
-            "resident_bytes": 884_736,
-            "resource_count": 6,
-            "pass_count": 2,
+            "allocated_bytes": 4_020_576,
+            "resident_bytes": 1_966_080,
+            "resource_count": 11,
+            "pass_count": 4,
             "dirty_queued_total": 192,
             "dirty_completed_total": 192,
             "injection_dispatches": 192,
-            "field_epoch": 24,
+            "transport_dispatches": 1,
+            "field_epoch": 1,
             "full_volume_rebuilds": 1,
         })
+        active_payload["metadata"]["global_illumination_mode"] = "g4_transport"
         active_payload["stages"][GI_INJECT_STAGE] = {
             "frames": 24,
             "average_ms": 0.06,
@@ -5026,12 +5083,36 @@ def self_test() -> None:
             "p99_ms": 0.09,
             "maximum_ms": 0.10,
         }
-        schema6_gi_active_v2.write_text(
+        active_payload["stages"][GI_TRANSPORT_STAGE] = {
+            "frames": 1,
+            "average_ms": 0.31,
+            "p50_ms": 0.31,
+            "p95_ms": 0.34,
+            "p99_ms": 0.35,
+            "maximum_ms": 0.36,
+        }
+        schema6_gi_active_v3.write_text(
             json.dumps(active_payload) + "\n", encoding="utf-8"
         )
-        active_window = load_report(schema6_gi_active_v2)[0]
+        active_window = load_report(schema6_gi_active_v3)[0]
         assert active_window.global_illumination["full_volume_rebuilds"] == 1
         assert active_window.gi_inject_stage["p95_ms"] == 0.08
+        assert active_window.gi_transport_stage["p95_ms"] == 0.34
+        active_summary = summarize(schema6_gi_active_v3, 300, 0, "OFF")
+        assert active_summary["stages"][GI_TRANSPORT_STAGE]["frames"] == 1
+        assert active_summary["stages"][GI_TRANSPORT_STAGE]["p95_ms"][
+            "window_maximum"
+        ] == 0.34
+        invalid_v3_shape = json.loads(json.dumps(active_payload))
+        invalid_v3_shape["global_illumination"]["resource_count"] = 6
+        invalid_v3_path = root / "schema6-gi-active-v3-invalid-shape.raw.jsonl"
+        invalid_v3_path.write_text(
+            json.dumps(invalid_v3_shape) + "\n", encoding="utf-8"
+        )
+        expect_error(
+            lambda: load_report(invalid_v3_path),
+            "G4 global_illumination v3 shape is invalid",
+        )
 
         def invalid_gi_payload(
             stem: str, mutation: Any, expected_error: str,

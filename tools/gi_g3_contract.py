@@ -183,7 +183,8 @@ def verify_source(root: Path) -> None:
     if "Arena.allocate" in coordinator or "makeBuffer" in coordinator:
         raise ContractError("G3 render-loop coordinator allocates a native packet or Metal buffer")
 
-    if "resource_count" not in native or '"contract_version": 2' not in native \
+    if "resource_count" not in native \
+            or '"contract_version": transport == nil ? 2 : 3' not in native \
             or '"full_volume_rebuilds": fullVolumeRebuilds' not in native \
             or "attachGpuTiming(pass, commandBuffer: commandBuffer, stage: .giInject)" not in native:
         raise ContractError("G3 active telemetry or GI_INJECT attribution is missing")

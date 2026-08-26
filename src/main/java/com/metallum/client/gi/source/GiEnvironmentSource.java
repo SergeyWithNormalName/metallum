@@ -40,16 +40,61 @@ public record GiEnvironmentSource(
     }
 
     public long quantizedDigest() {
+        return quantizedDigest(
+                this.toLightX, this.toLightY, this.toLightZ,
+                this.directionalRed, this.directionalGreen, this.directionalBlue,
+                this.skyRed, this.skyGreen, this.skyBlue
+        );
+    }
+
+    /** Allocation-free digest for observing whether a latched G4 source became stale. */
+    public static long quantizedDigest(final EnvironmentDescriptor descriptor) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        if (descriptor.medium() != EnvironmentDescriptor.Medium.AIR) {
+            throw new IllegalArgumentException("G3 environment must be extracted for AIR");
+        }
+        float x = descriptor.toLightX();
+        float y = descriptor.toLightY();
+        float z = descriptor.toLightZ();
+        double length = Math.sqrt((double) x * x + (double) y * y + (double) z * z);
+        if (length == 0.0) {
+            x = 0.0F;
+            y = 0.0F;
+            z = 0.0F;
+        } else {
+            x = (float) (x / length);
+            y = (float) (y / length);
+            z = (float) (z / length);
+        }
+        return quantizedDigest(
+                x, y, z,
+                descriptor.directionalRed(), descriptor.directionalGreen(),
+                descriptor.directionalBlue(),
+                descriptor.skyRed(), descriptor.skyGreen(), descriptor.skyBlue()
+        );
+    }
+
+    private static long quantizedDigest(
+            final float toLightX,
+            final float toLightY,
+            final float toLightZ,
+            final float directionalRed,
+            final float directionalGreen,
+            final float directionalBlue,
+            final float skyRed,
+            final float skyGreen,
+            final float skyBlue
+    ) {
         long hash = 0xcbf29ce484222325L;
-        hash = mix(hash, quantize(this.toLightX));
-        hash = mix(hash, quantize(this.toLightY));
-        hash = mix(hash, quantize(this.toLightZ));
-        hash = mix(hash, quantize(this.directionalRed));
-        hash = mix(hash, quantize(this.directionalGreen));
-        hash = mix(hash, quantize(this.directionalBlue));
-        hash = mix(hash, quantize(this.skyRed));
-        hash = mix(hash, quantize(this.skyGreen));
-        return mix(hash, quantize(this.skyBlue));
+        hash = mix(hash, quantize(toLightX));
+        hash = mix(hash, quantize(toLightY));
+        hash = mix(hash, quantize(toLightZ));
+        hash = mix(hash, quantize(directionalRed));
+        hash = mix(hash, quantize(directionalGreen));
+        hash = mix(hash, quantize(directionalBlue));
+        hash = mix(hash, quantize(skyRed));
+        hash = mix(hash, quantize(skyGreen));
+        return mix(hash, quantize(skyBlue));
     }
 
     public GiEnvironmentSource withEpoch(final long nextEpoch) {

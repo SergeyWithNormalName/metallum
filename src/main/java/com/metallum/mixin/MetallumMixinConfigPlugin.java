@@ -22,6 +22,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String SODIUM_LIGHT_PATCH_ENV = "METALLUM_SODIUM_LIGHT_PATCH";
     private static final String GI_G2_CAPTURE_ENV = "METALLUM_GI_G2_CAPTURE";
     private static final String GI_G3_INJECT_ENV = "METALLUM_GI_G3_INJECT";
+    private static final String GI_G4_TRANSPORT_ENV = "METALLUM_GI_G4_TRANSPORT";
     private static final String MINECRAFT_MOD_ID = "minecraft";
     private static final String MINECRAFT_EXACT_VERSION = "26.2";
     private static final String SODIUM_MOD_ID = "sodium";
@@ -111,7 +112,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || this.sodiumRelightFastPathEnabled)
                 && exactRelightVersions;
         this.giG2CaptureEnabled = (isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
-                || isEnabled(System.getenv(GI_G3_INJECT_ENV)))
+                || isEnabled(System.getenv(GI_G3_INJECT_ENV))
+                || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV)))
                 && exactRelightVersions;
     }
 

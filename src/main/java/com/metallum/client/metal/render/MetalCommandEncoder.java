@@ -1,7 +1,9 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
+import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
+import com.metallum.client.gi.transport.GiTransportCoordinator;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -1302,14 +1304,29 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
         submitRenderPass();
         endEncoder();
         return coordinator.encodeFrame(
-                this.device.metalDeviceHandle(),
-                this.device.commandQueue.nativeHandle(),
                 commandBuffer().handle(),
                 this.fence,
                 field,
                 environment,
                 AdvancedLightRegistry.global(),
                 tick
+        );
+    }
+
+    int encodeGiTransport(
+            final GiTransportCoordinator coordinator,
+            final GiSemanticTransportFieldView field,
+            final GiDirectSourceCoordinator.TransportSource source,
+            final long frameIndex
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return coordinator.encodeFrame(
+                commandBuffer().handle(),
+                this.fence,
+                field,
+                source,
+                frameIndex
         );
     }
 

@@ -19,8 +19,55 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     public static final int STATUS_CREATE_FAILED = -8;
     static final long STATIC_SOURCE_SETTLE_TICKS = 16L;
 
+    private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
+    private static final long FNV_PRIME = 0x100000001b3L;
+
+    /** Public, handle-free identity used to compare an accepted G3 source with G2 truth. */
+    public record TransportSourceIdentity(
+            GiDirectSourceEpoch epoch,
+            long sourceStamp,
+            int nearOriginX,
+            int nearOriginY,
+            int nearOriginZ
+    ) {
+        public TransportSourceIdentity {
+            Objects.requireNonNull(epoch, "epoch");
+            if (sourceStamp == 0L || sourceStamp != transportSourceStamp(
+                    epoch, nearOriginX, nearOriginY, nearOriginZ)) {
+                throw new IllegalArgumentException("Invalid frozen G3 transport-source identity");
+            }
+        }
+    }
+
+    /**
+     * Unforgeable, fully converged G3 capability admitted to exactly one frozen G4 build.
+     * The raw native owner can only enter this object through {@link #transportSource()}.
+     */
+    public static final class TransportSource {
+        private final MemorySegment directContext;
+        private final TransportSourceIdentity identity;
+
+        private TransportSource(
+                final MemorySegment directContext,
+                final TransportSourceIdentity identity
+        ) {
+            this.directContext = Objects.requireNonNull(directContext, "directContext");
+            this.identity = Objects.requireNonNull(identity, "identity");
+            if (directContext.address() == 0L) {
+                throw new IllegalArgumentException("Invalid frozen G3 native capability");
+            }
+        }
+
+        public MemorySegment directContext() { return this.directContext; }
+        public TransportSourceIdentity identity() { return this.identity; }
+        public GiDirectSourceEpoch epoch() { return this.identity.epoch(); }
+        public long sourceStamp() { return this.identity.sourceStamp(); }
+        public int nearOriginX() { return this.identity.nearOriginX(); }
+        public int nearOriginY() { return this.identity.nearOriginY(); }
+        public int nearOriginZ() { return this.identity.nearOriginZ(); }
+    }
+
     private final Thread ownerThread = Thread.currentThread();
-    private final Consumer<MemorySegment> deferredRelease;
     private final int[] drainedBricks = new int[GiDirectSourceLayout.MAX_DRAIN_PER_FRAME];
     private final AdvancedLight[] sourceScratch =
             new AdvancedLight[GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK];
@@ -31,17 +78,30 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     @Nullable private GiEnvironmentSource environment;
     @Nullable private GiStaticSourceState staticState;
     @Nullable private GiStaticSourceState observedStaticState;
+    @Nullable private TransportSource cachedTransportSource;
     private long observedStaticSinceTick;
     private long logicalStaticSourceEpoch = 1L;
     private long logicalEnvironmentEpoch = 1L;
+    private int activeNearOriginX;
+    private int activeNearOriginY;
+    private int activeNearOriginZ;
 
-    public GiDirectSourceCoordinator(final Consumer<MemorySegment> deferredRelease) {
-        this.deferredRelease = Objects.requireNonNull(deferredRelease, "deferredRelease");
+    /** Precreates the fixed G3 field, staging ring and PSOs outside frame submission. */
+    public GiDirectSourceCoordinator(
+            final MemorySegment device,
+            final MemorySegment commandQueue,
+            final Consumer<MemorySegment> deferredRelease
+    ) {
+        this.resources = GiDirectSourceGpuResources.create(
+                device, commandQueue, 1L,
+                Objects.requireNonNull(deferredRelease, "deferredRelease")
+        );
+        if (this.resources == null) {
+            throw new IllegalStateException("Failed to precreate G3 direct-source resources");
+        }
     }
 
     public int encodeFrame(
-            final MemorySegment device,
-            final MemorySegment commandQueue,
             final MemorySegment commandBuffer,
             final MemorySegment fence,
             final GiSemanticDirectFieldView field,
@@ -57,14 +117,11 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         GiSemanticWorldToken world = field.world();
         if (this.activeEpoch != null
                 && this.activeEpoch.g2WorldGeneration() != world.worldGeneration()) {
-            if (this.resources != null) {
-                this.resources.close();
-                this.resources = null;
-            }
             this.activeEpoch = null;
             this.environment = null;
             this.staticState = null;
             this.observedStaticState = null;
+            this.cachedTransportSource = null;
         }
         GiStaticSourceState nextStatic = registry.staticSourceStateForGi(world.dimensionId());
         if (nextStatic == null) {
@@ -85,10 +142,8 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         GiEnvironmentSource desiredEnvironment = GiEnvironmentSource.fromDescriptor(
                 1L, environmentDescriptor);
 
-        boolean newContext = this.resources == null || this.activeEpoch == null
-                || this.activeEpoch.g2WorldGeneration() != world.worldGeneration();
+        boolean newContext = this.activeEpoch == null;
         if (newContext) {
-            replaceResources(device, commandQueue, world.worldGeneration());
             if (this.resources == null) {
                 return STATUS_CREATE_FAILED;
             }
@@ -123,20 +178,35 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                 this.staticState.world(), this.logicalStaticSourceEpoch,
                 this.logicalEnvironmentEpoch
         );
+        if (newContext) {
+            int resetStatus = this.resources.reset(nextEpoch);
+            if (resetStatus != GiDirectSourceGpuResources.STATUS_OK) {
+                return resetStatus;
+            }
+        }
         boolean epochChanged = !nextEpoch.equals(this.activeEpoch);
         if (epochChanged) {
+            this.cachedTransportSource = null;
             boolean allSourcesChanged = this.activeEpoch == null
                     || nextEpoch.staticLightRegistryEpoch()
                     != this.activeEpoch.staticLightRegistryEpoch()
                     || nextEpoch.environmentEpoch() != this.activeEpoch.environmentEpoch();
             this.dirtyQueue.rotateEpoch(nextEpoch);
             this.activeEpoch = nextEpoch;
+            this.activeNearOriginX = field.originComponent(0);
+            this.activeNearOriginY = field.originComponent(1);
+            this.activeNearOriginZ = field.originComponent(2);
             if (allSourcesChanged) {
                 this.dirtyQueue.enqueueAll(nextEpoch, tick);
             } else {
                 enqueueChangedBricks(field, nextEpoch, tick);
             }
         } else {
+            if (this.activeNearOriginX != field.originComponent(0)
+                    || this.activeNearOriginY != field.originComponent(1)
+                    || this.activeNearOriginZ != field.originComponent(2)) {
+                throw new IllegalStateException("G3 near origin changed without a clipmap epoch");
+            }
             enqueueChangedBricks(field, nextEpoch, tick);
         }
 
@@ -179,6 +249,104 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         return this.resources == null ? null : this.resources.stats();
     }
 
+    /**
+     * Returns G3's opaque private-field owner only after the single 192-brick population is
+     * complete and the native epoch/origin agrees with the render-thread scheduler.
+     */
+    public @Nullable TransportSource transportSource() {
+        assertOwnerThread();
+        if (this.resources == null || this.activeEpoch == null) {
+            return null;
+        }
+        GiDirectDirtyQueue.Telemetry queue = this.dirtyQueue.telemetry();
+        if (queue.completed() != GiDirectSourceLayout.TOTAL_BRICKS
+                || queue.pending() != 0 || queue.discarded() != 0L) {
+            return null;
+        }
+        GiDirectSourceGpuResources.Stats stats = this.resources.stats();
+        if (!stats.ready() || stats.buildInFlight()
+                || stats.worldGeneration() != this.activeEpoch.g2WorldGeneration()
+                || stats.clipmapGeneration() != this.activeEpoch.g2ClipmapGeneration()
+                || stats.paletteGeneration() != this.activeEpoch.g2PaletteGeneration()
+                || stats.contentGeneration() != this.activeEpoch.g2ContentGeneration()
+                || stats.staticSourceEpoch() != this.activeEpoch.staticLightRegistryEpoch()
+                || stats.environmentEpoch() != this.activeEpoch.environmentEpoch()
+                || stats.nearOriginX() != this.activeNearOriginX
+                || stats.nearOriginY() != this.activeNearOriginY
+                || stats.nearOriginZ() != this.activeNearOriginZ) {
+            return null;
+        }
+        long stamp = transportSourceStamp(
+                this.activeEpoch,
+                this.activeNearOriginX, this.activeNearOriginY, this.activeNearOriginZ
+        );
+        if (this.cachedTransportSource != null
+                && this.cachedTransportSource.sourceStamp() == stamp
+                && this.cachedTransportSource.epoch().equals(this.activeEpoch)) {
+            return this.cachedTransportSource;
+        }
+        TransportSourceIdentity identity = new TransportSourceIdentity(
+                this.activeEpoch, stamp,
+                this.activeNearOriginX, this.activeNearOriginY, this.activeNearOriginZ
+        );
+        this.cachedTransportSource = new TransportSource(
+                this.resources.transportContextHandle(), identity
+        );
+        return this.cachedTransportSource;
+    }
+
+    /** Allocation-free observation of source-only drift after G4 has latched this capability. */
+    public boolean transportSourceIdentityStillCurrent(
+            final TransportSourceIdentity source,
+            final EnvironmentDescriptor descriptor,
+            final AdvancedLightRegistry registry
+    ) {
+        assertOwnerThread();
+        Objects.requireNonNull(source, "source");
+        Objects.requireNonNull(descriptor, "descriptor");
+        Objects.requireNonNull(registry, "registry");
+        GiDirectSourceEpoch epoch = source.epoch();
+        return epoch.equals(this.activeEpoch)
+                && source.nearOriginX() == this.activeNearOriginX
+                && source.nearOriginY() == this.activeNearOriginY
+                && source.nearOriginZ() == this.activeNearOriginZ
+                && this.environment != null
+                && registry.staticSourceIdentityMatchesForGi(
+                        epoch.staticLightWorld(), epoch.staticLightRegistryEpoch()
+                )
+                && GiEnvironmentSource.quantizedDigest(descriptor)
+                == this.environment.quantizedDigest();
+    }
+
+    /**
+     * FNV-1a over the six native G3 epochs and signed near origin, followed by a fixed avalanche.
+     * Zero is remapped to one so a published opaque source can never alias an absent stamp.
+     */
+    public static long transportSourceStamp(
+            final GiDirectSourceEpoch epoch,
+            final int nearOriginX,
+            final int nearOriginY,
+            final int nearOriginZ
+    ) {
+        Objects.requireNonNull(epoch, "epoch");
+        long hash = FNV_OFFSET_BASIS;
+        hash = fnvLong(hash, epoch.g2WorldGeneration());
+        hash = fnvLong(hash, epoch.g2ClipmapGeneration());
+        hash = fnvLong(hash, epoch.g2PaletteGeneration());
+        hash = fnvLong(hash, epoch.g2ContentGeneration());
+        hash = fnvLong(hash, epoch.staticLightRegistryEpoch());
+        hash = fnvLong(hash, epoch.environmentEpoch());
+        hash = fnvLong(hash, nearOriginX);
+        hash = fnvLong(hash, nearOriginY);
+        hash = fnvLong(hash, nearOriginZ);
+        hash ^= hash >>> 33;
+        hash *= 0xff51afd7ed558ccdL;
+        hash ^= hash >>> 33;
+        hash *= 0xc4ceb9fe1a85ec53L;
+        hash ^= hash >>> 33;
+        return hash == 0L ? 1L : hash;
+    }
+
     private void enqueueChangedBricks(
             final GiSemanticDirectFieldView field,
             final GiDirectSourceEpoch epoch,
@@ -189,19 +357,6 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                 this.dirtyQueue.enqueue(epoch, brick, tick);
             }
         }
-    }
-
-    private void replaceResources(
-            final MemorySegment device,
-            final MemorySegment commandQueue,
-            final long worldGeneration
-    ) {
-        if (this.resources != null) {
-            this.resources.close();
-            this.resources = null;
-        }
-        this.resources = GiDirectSourceGpuResources.create(
-                device, commandQueue, worldGeneration, this.deferredRelease);
     }
 
     @Override
@@ -215,8 +370,21 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         this.environment = null;
         this.staticState = null;
         this.observedStaticState = null;
+        this.cachedTransportSource = null;
         this.observedStaticSinceTick = 0L;
+        this.activeNearOriginX = 0;
+        this.activeNearOriginY = 0;
+        this.activeNearOriginZ = 0;
         Arrays.fill(this.submittedBrickStamps, 0L);
+    }
+
+    private static long fnvLong(long hash, long value) {
+        for (int index = 0; index < Long.BYTES; index++) {
+            hash ^= value & 0xffL;
+            hash *= FNV_PRIME;
+            value >>>= Byte.SIZE;
+        }
+        return hash;
     }
 
     private void assertOwnerThread() {

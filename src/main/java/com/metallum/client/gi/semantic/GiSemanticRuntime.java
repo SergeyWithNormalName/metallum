@@ -1,6 +1,7 @@
 package com.metallum.client.gi.semantic;
 
 import com.metallum.client.gi.source.GiDirectSourceRuntime;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 
 /** Explicit opt-in admission gate; absence of the environment variable is structural off. */
 public final class GiSemanticRuntime {
@@ -10,7 +11,9 @@ public final class GiSemanticRuntime {
     }
 
     public static boolean isRequested() {
-        return isEnabled(System.getenv(CAPTURE_ENV)) || GiDirectSourceRuntime.isRequested();
+        return isEnabled(System.getenv(CAPTURE_ENV))
+                || GiDirectSourceRuntime.isRequested()
+                || GiTransportRuntime.isRequested();
     }
 
     private static boolean isEnabled(final String value) {

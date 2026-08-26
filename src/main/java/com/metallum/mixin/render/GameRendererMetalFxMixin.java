@@ -2,6 +2,7 @@ package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
 import com.metallum.client.gi.source.GiDirectSourceRuntime;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.water.WaterCausticsPolicy;
 import com.metallum.client.metalfx.MetalFxTemporalScaling;
@@ -247,7 +248,8 @@ abstract class GameRendererMetalFxMixin {
                 );
             }
             EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
-            EnvironmentDescriptor giEnvironment = GiDirectSourceRuntime.isRequested()
+            EnvironmentDescriptor giEnvironment = (GiDirectSourceRuntime.isRequested()
+                    || GiTransportRuntime.isRequested())
                     ? metallum$environmentDescriptor(camera, deltaTracker, true)
                     : EnvironmentDescriptor.NONE;
             com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =

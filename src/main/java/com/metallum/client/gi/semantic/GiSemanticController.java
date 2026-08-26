@@ -345,6 +345,22 @@ public final class GiSemanticController {
         return state == null || !state.paletteReady ? null : state.directField;
     }
 
+    /** Returns the sole active frozen-near-cascade transport view without cloning G2 truth. */
+    @Nullable
+    public synchronized GiSemanticTransportFieldView activeTransportField() {
+        if (this.worlds.size() != 1) {
+            return null;
+        }
+        WorldState state = this.worlds.values().iterator().next();
+        return state.paletteReady ? state.transportField : null;
+    }
+
+    @Nullable
+    public synchronized GiSemanticTransportFieldView transportField(final Object world) {
+        WorldState state = this.worlds.get(world);
+        return state == null || !state.paletteReady ? null : state.transportField;
+    }
+
     public synchronized Telemetry telemetry() {
         int residentTags = this.worlds.values().stream()
                 .mapToInt(state -> state.assembler.residentSections()).sum();
@@ -385,6 +401,7 @@ public final class GiSemanticController {
         private boolean paletteReady;
         private final GiSemanticFieldAssembler assembler;
         private final GiSemanticDirectFieldView directField;
+        private final GiSemanticTransportFieldView transportField;
         private final Map<Long, Long> revisions = new HashMap<>();
         private final Map<Long, Long> newestOwners = new HashMap<>();
         private int cameraX;
@@ -414,6 +431,7 @@ public final class GiSemanticController {
             this.cameraZ = cameraZ;
             this.assembler = new GiSemanticFieldAssembler(token, palette, cameraX, cameraY, cameraZ);
             this.directField = new GiSemanticDirectFieldView(this.assembler);
+            this.transportField = new GiSemanticTransportFieldView(this.assembler);
         }
     }
 }

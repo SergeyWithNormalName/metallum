@@ -6,6 +6,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ANALYZER="$ROOT/tools/metal_benchmark_report.py"
 FIXTURE_HELPER="$ROOT/tools/metal_benchmark_fixture.py"
+GI_RELEASE_GUARD="$ROOT/tools/gi_release_contract_guard.sh"
 RUN_DIR="$ROOT/run"
 OUTPUT_DIR="$RUN_DIR/logs/metallum-benchmarks"
 REFERENCE_OUTPUT_DIR=${METALLUM_L2_REFERENCE_OUTPUT_DIR:-"$RUN_DIR/lighting-reference/l0"}
@@ -107,6 +108,9 @@ L2 diagnostic environment:
       retain caller-provided Metal API/shader validation variables
   METALLUM_L2_REFERENCE_OUTPUT_DIR=DIR
       place ignored L2 captures outside the default L0 reference directory
+  METALLUM_GI_G4_TRANSPORT=1
+      request frozen near-cascade G4 diagnostics; this forces the G2/G3
+      prerequisites and can never produce a release attestation
 
 Compare completed reports with:
   python3 tools/metal_benchmark_report.py compare BASELINE.jsonl CANDIDATE.jsonl
@@ -117,6 +121,10 @@ die() {
     echo "ERROR: $*" >&2
     exit 2
 }
+
+[ -f "$GI_RELEASE_GUARD" ] || die "GI release-contract guard is missing: $GI_RELEASE_GUARD"
+# shellcheck source=tools/gi_release_contract_guard.sh
+. "$GI_RELEASE_GUARD"
 
 need_value() {
     [ "$#" -ge 2 ] || die "$1 requires a value"
@@ -721,10 +729,52 @@ else
 fi
 require_value "$RENDERER_VOXEL_DEBUG" "false" "renderer voxelDebugChecksum"
 require_value "$RENDERER_GI_MODE" "off" "renderer globalIllumination"
-RUNTIME_GI_MODE="$RENDERER_GI_MODE"
-case "${METALLUM_GI_G3_INJECT:-}" in
-    1|true|TRUE|yes|YES|on|ON) RUNTIME_GI_MODE=g3_inject ;;
+GI_G2_CAPTURE_ENV=0
+GI_G3_INJECT_ENV=0
+GI_G4_TRANSPORT_ENV=0
+case "${METALLUM_GI_G2_CAPTURE:-}" in
+    '') ;;
+    0|false|FALSE|no|NO|off|OFF) ;;
+    1|true|TRUE|yes|YES|on|ON) GI_G2_CAPTURE_ENV=1 ;;
+    *) die "METALLUM_GI_G2_CAPTURE must be a boolean diagnostic flag" ;;
 esac
+case "${METALLUM_GI_G3_INJECT:-}" in
+    '') ;;
+    0|false|FALSE|no|NO|off|OFF) ;;
+    1|true|TRUE|yes|YES|on|ON) GI_G3_INJECT_ENV=1 ;;
+    *) die "METALLUM_GI_G3_INJECT must be a boolean diagnostic flag" ;;
+esac
+case "${METALLUM_GI_G4_TRANSPORT:-}" in
+    '') ;;
+    0|false|FALSE|no|NO|off|OFF) ;;
+    1|true|TRUE|yes|YES|on|ON) GI_G4_TRANSPORT_ENV=1 ;;
+    *) die "METALLUM_GI_G4_TRANSPORT must be a boolean diagnostic flag" ;;
+esac
+RUNTIME_GI_MODE="$RENDERER_GI_MODE"
+if [ "$GI_G4_TRANSPORT_ENV" -eq 1 ]; then
+    # G4 consumes accepted G2 cells and the completed G3 field. Make both
+    # prerequisites explicit in the launched process instead of relying on a
+    # caller to discover and set transitive diagnostic flags.
+    GI_G2_CAPTURE_ENV=1
+    GI_G3_INJECT_ENV=1
+    RUNTIME_GI_MODE=g4_transport
+elif [ "$GI_G3_INJECT_ENV" -eq 1 ]; then
+    GI_G2_CAPTURE_ENV=1
+    RUNTIME_GI_MODE=g3_inject
+fi
+RELEASE_PROFILE_CANDIDATE=0
+if [ "$TIMING_DETAIL" -eq 0 ] \
+    && [ "$METAL_VALIDATION" -eq 0 ] \
+    && [ "$CAPTURE_REFERENCE" -eq 0 ] \
+    && [ "$FI_VALIDATION" -eq 0 ] \
+    && [ "$WARMUP_FRAMES" -eq 1800 ] \
+    && [ "$MEASURE_FRAMES" -eq 3000 ]; then
+    RELEASE_PROFILE_CANDIDATE=1
+fi
+metallum_require_release_gi_off \
+    "$RELEASE_PROFILE_CANDIDATE" \
+    "$GI_G2_CAPTURE_ENV" "$GI_G3_INJECT_ENV" "$GI_G4_TRANSPORT_ENV" \
+    || die "G2/G3/G4 diagnostics cannot run under the release-contract profile"
 if [ "$settings_field_count" -eq 34 ]; then
     require_value "$RENDERER_LIGHTING" "$BENCHMARK_RENDERER_IMPROVED_LIGHTING" \
         "tracked renderer improvedLighting"
@@ -780,7 +830,9 @@ else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
-if [ "$RUNTIME_GI_MODE" = "g3_inject" ]; then
+if [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
+    echo "GI_G4_TRANSPORT_ADMISSION mode=g4_transport g2_capture=true g3_inject=true frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false image_binding=false diagnostic_only=true release=false status=REQUESTED"
+elif [ "$RUNTIME_GI_MODE" = "g3_inject" ]; then
     echo "GI_G3_ADMISSION mode=g3_inject field_only=true bounce=false image_binding=false status=REQUESTED"
 else
     echo "GI_OFF_ADMISSION mode=$RENDERER_GI_MODE resources=0 passes=0 bindings=0 status=PASS"
@@ -1074,6 +1126,9 @@ if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
     VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.vertex.reflection.runtime=true -Dmetallum.waterReflection.faceAwareAppearance=${WATER_REFLECTION_FACE_AWARE} -Dmetallum.waterReflection.firstSurfaceBiasedIntegration=${WATER_REFLECTION_FIRST_SURFACE} -Dmetallum.waterReflection.representationConfidence=${WATER_REFLECTION_CONFIDENCE}"
 fi
 set +e
+METALLUM_GI_G2_CAPTURE="$GI_G2_CAPTURE_ENV" \
+METALLUM_GI_G3_INJECT="$GI_G3_INJECT_ENV" \
+METALLUM_GI_G4_TRANSPORT="$GI_G4_TRANSPORT_ENV" \
 METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
 METALLUM_BENCHMARK_FI_OVERLAY="$FI_OVERLAY_ENV" \
 METALLUM_BENCHMARK_FI_MIN_GENERATED="$FI_MINIMUM_GENERATED_FRAMES" \
@@ -1459,12 +1514,7 @@ fi
 
 RELEASE_ARG=""
 VALIDATION_ARG=""
-if [ "$TIMING_DETAIL" -eq 0 ] \
-    && [ "$METAL_VALIDATION" -eq 0 ] \
-    && [ "$CAPTURE_REFERENCE" -eq 0 ] \
-    && [ "$FI_VALIDATION" -eq 0 ] \
-    && [ "$WARMUP_FRAMES" -eq 1800 ] \
-    && [ "$MEASURE_FRAMES" -eq 3000 ]; then
+if [ "$RELEASE_PROFILE_CANDIDATE" -eq 1 ]; then
     RELEASE_ARG=--release-contract
 fi
 if [ "$METAL_VALIDATION" -eq 1 ]; then

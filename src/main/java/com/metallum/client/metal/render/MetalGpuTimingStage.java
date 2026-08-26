@@ -29,9 +29,11 @@ public enum MetalGpuTimingStage {
     /** MetalFX Frame Interpolator encode; presentation stages follow in stage 7. */
     FRAME_INTERPOLATION(19),
     /** Bounded G3 geometry apply plus direct-source injection for dirty bricks. */
-    GI_INJECT(20);
+    GI_INJECT(20),
+    /** Frozen near-cascade G4 bounce initialization plus one Jacobi transport. */
+    GI_TRANSPORT(21);
 
-    public static final int PROFILED_STAGE_COUNT = 21;
+    public static final int PROFILED_STAGE_COUNT = 22;
 
     private final int nativeId;
 

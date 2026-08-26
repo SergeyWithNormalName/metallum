@@ -29,6 +29,7 @@ public final class MetalNativeBridge {
             "/natives/macos/shaders/MetallumVoxelOccupancy.metal",
             "/natives/macos/shaders/MetallumDynamicVoxelShadow.metal",
             "/natives/macos/shaders/MetallumGiField.metal",
+            "/natives/macos/shaders/MetallumGiTransport.metal",
             "/natives/macos/shaders/MetallumRadianceClipmap.metal"
     };
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT;
@@ -491,12 +492,12 @@ public final class MetalNativeBridge {
                     "metallum_gi_direct_source_layout_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            giDirectSourceCreateContextV1 = downcall(
+            giDirectSourceCreateContextV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_create_context_v1",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
-            giDirectSourceEncodeDirtyV1 = downcall(
+            giDirectSourceEncodeDirtyV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_encode_dirty_v1",
                     FunctionDescriptor.of(
@@ -506,17 +507,17 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
                     )
             );
-            giDirectSourceAwaitReadyV1 = downcall(
+            giDirectSourceAwaitReadyV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_await_ready_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
-            giDirectSourceResetV1 = downcall(
+            giDirectSourceResetV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_reset_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG, LONG)
             );
-            giDirectSourceCaptureSliceOnceV1 = downcall(
+            giDirectSourceCaptureSliceOnceV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_capture_slice_once_v1",
                     FunctionDescriptor.of(
@@ -536,9 +537,68 @@ public final class MetalNativeBridge {
                             INT, ValueLayout.ADDRESS, LONG, LONG, LONG, LONG, LONG
                     )
             );
-            giDirectSourceReleaseContextV1 = downcall(
+            giDirectSourceReleaseContextV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+
+            giTransportAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giTransportLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giTransportCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_create_context_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giTransportEncodeFrozenV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_encode_frozen_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giTransportAwaitReadyV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_await_ready_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giTransportGetStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_get_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giTransportReportStaleV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_report_stale_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
+            giTransportCaptureVolumeOnceV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_capture_volume_once_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giTransportReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_release_context_v1",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
 
@@ -1131,6 +1191,15 @@ public final class MetalNativeBridge {
     private static final MethodHandle giDirectSourceGetStatsV1;
     private static final MethodHandle giDirectSourcePublishSchedulerV1;
     private static final MethodHandle giDirectSourceReleaseContextV1;
+    private static final MethodHandle giTransportAbiVersionV1;
+    private static final MethodHandle giTransportLayoutV1;
+    private static final MethodHandle giTransportCreateContextV1;
+    private static final MethodHandle giTransportEncodeFrozenV1;
+    private static final MethodHandle giTransportAwaitReadyV1;
+    private static final MethodHandle giTransportGetStatsV1;
+    private static final MethodHandle giTransportReportStaleV1;
+    private static final MethodHandle giTransportCaptureVolumeOnceV1;
+    private static final MethodHandle giTransportReleaseContextV1;
     private static final MethodHandle radianceContextCreate;
     private static final MethodHandle radianceContextUploadSourceFrozen;
     private static final MethodHandle radianceContextBindVertexResources;
@@ -2175,6 +2244,122 @@ public final class MetalNativeBridge {
             giDirectSourceReleaseContextV1.invokeExact(segment(context));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_direct_source_release_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_abi_version_v1() {
+        try {
+            return (int) giTransportAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giTransportLayoutV1.invokeExact(segment(destination), destinationBytes);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_gi_transport_create_context_v1(
+            final MemorySegment device,
+            final MemorySegment queue,
+            final long worldGeneration
+    ) {
+        try {
+            return (MemorySegment) giTransportCreateContextV1.invokeExact(
+                    segment(device), segment(queue), worldGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_encode_frozen_v1(
+            final MemorySegment context,
+            final MemorySegment directContext,
+            final MemorySegment commandBuffer,
+            final MemorySegment fence,
+            final MemorySegment header,
+            final MemorySegment cells
+    ) {
+        try {
+            return (int) giTransportEncodeFrozenV1.invokeExact(
+                    segment(context), segment(directContext),
+                    segment(commandBuffer), segment(fence),
+                    segment(header), header.byteSize(),
+                    segment(cells), cells.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_encode_frozen_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_await_ready_v1(
+            final MemorySegment context,
+            final long timeoutMilliseconds
+    ) {
+        try {
+            return (int) giTransportAwaitReadyV1.invokeExact(segment(context), timeoutMilliseconds);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_await_ready_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_get_stats_v1(
+            final MemorySegment context,
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giTransportGetStatsV1.invokeExact(
+                    segment(context), segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_get_stats_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_report_stale_v1(final MemorySegment context) {
+        try {
+            return (int) giTransportReportStaleV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_report_stale_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_capture_volume_once_v1(
+            final MemorySegment context,
+            final MemorySegment bounce,
+            final MemorySegment shR,
+            final MemorySegment shG,
+            final MemorySegment shB,
+            final MemorySegment confidence
+    ) {
+        try {
+            return (int) giTransportCaptureVolumeOnceV1.invokeExact(
+                    segment(context),
+                    segment(bounce), bounce.byteSize(),
+                    segment(shR), shR.byteSize(),
+                    segment(shG), shG.byteSize(),
+                    segment(shB), shB.byteSize(),
+                    segment(confidence), confidence.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_capture_volume_once_v1", throwable);
+        }
+    }
+
+    public static void metallum_gi_transport_release_context_v1(final MemorySegment context) {
+        try {
+            giTransportReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_release_context_v1", throwable);
         }
     }
 

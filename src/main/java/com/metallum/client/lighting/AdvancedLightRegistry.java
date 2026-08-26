@@ -512,6 +512,19 @@ public final class AdvancedLightRegistry {
         return new GiStaticSourceState(this.activeWorld.token, this.activeWorld.staticEpoch);
     }
 
+    /** Allocation-free identity check used after G4 has latched its private G3 source. */
+    public synchronized boolean staticSourceIdentityMatchesForGi(
+            final LightWorldToken expectedWorld,
+            final long expectedEpoch
+    ) {
+        if (expectedWorld == null || expectedEpoch <= 0L) {
+            throw new IllegalArgumentException("G3 expected static-source identity is invalid");
+        }
+        return this.healthy && this.activeWorld != null
+                && this.activeWorld.token.equals(expectedWorld)
+                && this.activeWorld.staticEpoch == expectedEpoch;
+    }
+
     public synchronized GiStaticSourceSnapshot queryStaticSourcesForGi(
             final LightWorldToken expectedWorld,
             final GiStaticSourceSnapshot.WorldAabb query,

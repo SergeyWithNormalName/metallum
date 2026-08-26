@@ -25,6 +25,13 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
     public static final int STATS_BYTES = 168;
     public static final int CAPTURE_DIRECT_BYTES = 8_192;
     public static final int CAPTURE_GEOMETRY_BYTES = 1_024;
+    public static final long JAVA_PERSISTENT_PACKET_BYTES = HEADER_BYTES
+            + (long) GiDirectSourceLayout.MAX_DRAIN_PER_FRAME * BRICK_BYTES
+            + (long) GiDirectSourceLayout.MAX_DRAIN_PER_FRAME
+            * GiSemanticDirectFieldView.CELLS_PER_BRICK * CELL_BYTES
+            + (long) GiDirectSourceLayout.MAX_DRAIN_PER_FRAME
+            * GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK * SOURCE_BYTES
+            + STATS_BYTES;
 
     public static final int STATUS_OK = 1;
     public static final int STATUS_INVALID = -1;
@@ -397,6 +404,12 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                 telemetry.queued(), telemetry.completed(), telemetry.discarded(), telemetry.pending(),
                 telemetry.fullVolumeRebuilds()
         );
+    }
+
+    /** Opaque native owner passed only to the separately gated frozen G4 build. */
+    MemorySegment transportContextHandle() {
+        assertUsable();
+        return this.context;
     }
 
     /** Test/debug-only raw slice; never used by the frame loop. */

@@ -1,0 +1,205 @@
+# GI Stage G4: frozen one-bounce diffuse transport
+
+Status: implemented field-only candidate, pending the predeclared live Tier B
+stop-gate. Source and bundled Metal validation results are recorded before any
+claim of stage completion.
+
+G4 is a private field-only experiment. It consumes accepted G2 material truth
+and the completed G3 direct-irradiance field, but exposes no terrain/image
+binding, changes no generated terrain shader and cannot affect the production
+image. G5 remains a separate stop-gated receiver stage.
+
+## Frozen input boundary
+
+The first candidate builds exactly one near cascade:
+
+- edge `32^3`, cell size `2` blocks and world-snapped G2/G3 near origin;
+- one immutable tuple of world, clipmap, palette, content, static-source and
+  environment epochs;
+- G3 must have completed and retired all 192 initial dirty bricks before G4 is
+  admitted;
+- G3 must be `ready`, not in flight and have zero pending/discarded work;
+- G2 rho/faces/validity and G3 geometry/direct origins and epochs must match;
+- native acceptance first enters `SUBMITTED`; Java promotes it to `READY` only
+  after stats prove one completed dispatch/build with the exact tuple. A failed
+  completion or a submission still in flight after 120 frames fails closed;
+- after `READY` the context never scrolls, rebuilds or admits a new epoch.
+  Changes to G2/world/origin, the static-light registry or quantized sun/sky
+  input are reported stale once and cannot replace the frozen field.
+
+The runtime flag is `METALLUM_GI_G4_TRANSPORT=1`. It is diagnostic-only and
+requires requested Advanced lighting, the G2 accepted-output capture path and
+G3 source injection. Absence
+of the flag preserves structural G4 OFF: zero G4 resources, passes, symbols,
+bindings and dispatches.
+
+## Accepted G2 transport cell
+
+G4 uses a dedicated immutable render-thread view; it does not reinterpret G3
+padding or the L5 optical byte. Each near-cascade cell is exactly 16 bytes:
+
+| Bytes | Meaning |
+|---:|---|
+| `0..5` | diffuse reflectance rho RGB, raw little-endian `UNorm16` from accepted G2 albedo |
+| `6..7` | G2 occupancy expanded to `UNorm16`; geometry admission only, never radiance |
+| `8..13` | signed face weights `-X,+X,-Y,+Y,-Z,+Z` as `UNorm8` |
+| `14` | G2 validity ABI |
+| `15` | accepted known-coverage `UNorm8` |
+
+UNKNOWN, AIR and FALLBACK cells cannot produce a bounce. Only accepted CONTENT
+with non-zero occupancy, coverage and at least one face has surface support.
+
+## Bounce and deterministic stencil
+
+The source bounce is initialized once in a private `RGBA16Float` volume:
+
+```text
+L_bounce0(q) = rho(q) / pi * E_direct(q)
+```
+
+There is no second bounce. Initialization reads G3 direct irradiance and the
+frozen G2 transport cell, then writes a distinct texture. Transport reads that
+immutable texture and writes separate SH outputs, so it is one fixed Jacobi
+iteration with no in-place feedback, float atomics or race-dependent reduction.
+
+For each receiver cell `p`, the gather visits a fixed lexicographic stencil:
+
+- every non-zero signed direction in `{-1,0,1}^3` (26 directions);
+- integer distance `k = 1..8` along each direction;
+- 208 possible source offsets in total, always in the same order.
+
+For direction vector `d` and distance `k`, the unnormalized weight is
+
+```text
+w(d,k) = 1 / (length(d) * k^2)
+S      = sum(w) = 29.17999846648958
+```
+
+The source-facing support is the L1-normalized interpolation of the six G2 face
+weights in the outward direction from `q` to `p`, so it is in `[0,1]` even when
+all six max-normalized G2 weights are one. The declared form factor is
+
+```text
+F(q,p) = pi * w(d,k) / S * sourceFaceSupport(q -> p)
+```
+
+Receiver CONTENT/coverage is a validity gate, not another reflectance
+multiplication. Because visibility and every support gate are in `[0,1]`, the
+complete destination set for any source satisfies `sum_p(F(q,p)) <= pi`.
+Therefore
+
+```text
+sum_p E_indirect_DC(p) <= sum_q rho(q) * E_direct(q)
+```
+
+before the declared FP16 tolerance. This prevents the max-normalized G2 face
+representation from multiplying source energy.
+
+Visibility is conservative supercover traversal. Every lattice cell touched
+between `q` and `p` must be authoritative AIR. CONTENT before the endpoint,
+UNKNOWN, FALLBACK, an out-of-range endpoint or a mismatched epoch transfers
+strictly zero. Diagonal corner/edge rays check all crossed subcells and cannot
+skip a one-cell sealed wall.
+
+## L1 SH contract
+
+The incoming direction `omega` points from receiver `p` toward source `q` in
+world axes `+X,+Y,+Z`. G4 stores the scaled real L1 basis `[1,x,y,z]`. Three
+private `RGBA16Float` volumes are channel-major:
+
+```text
+SH_R = [c0.r, cx.r, cy.r, cz.r]
+SH_G = [c0.g, cx.g, cy.g, cz.g]
+SH_B = [c0.b, cx.b, cy.b, cz.b]
+
+c0   = sum(T)
+cxyz = sum(T * omega)
+T    = L_bounce0(q) * V(q,p) * F(q,p)
+```
+
+The diagnostic reconstruction for a unit normal is
+`E(n) = c0 + dot(cxyz,n)`. Non-negative weights and unit directions guarantee
+`length(cxyz[channel]) <= c0[channel]`, hence a finite non-negative
+reconstruction in exact arithmetic. Before storing FP16, the shader clamps DC
+to the largest finite half value, quantizes DC first, and projects the
+directional lobe to at most `DC * (1 - 1/512)`. Independent half rounding can
+therefore neither overflow nor create a negative reconstruction beyond the
+declared tolerance. G5, if later authorized, must apply
+receiver `rho_receiver / pi` exactly once and must not reapply source rho.
+
+A private `R8Unorm` confidence volume stores the normalized weight of fully
+known paths. Known occlusion contributes confidence but zero energy; UNKNOWN or
+out-of-coverage paths contribute neither. Debug paths expose the G3 source
+separately; the G4 one-shot capture returns bounce, all three SH lobes,
+confidence and the separately retained accepted-cell validity without an image
+binding.
+
+## Fixed numerical and resource gates
+
+- Jacobi iteration count: exactly `1`.
+- Maximum transport distance: `8` near cells (`16` blocks).
+- Raw repeat on the same GPU, source and shader-library mode: byte-identical
+  captured bounce/SH/confidence hash.
+- FP16 reconstruction absolute tolerance: `1/1024` irradiance unit.
+- Global captured energy tolerance: `max(1/1024, reflectedInput / 512)` per
+  channel (`0.1953125%` relative above the absolute floor).
+- G2 conservative end-to-end (`18,022,528`) + G3 native `allocatedSize`
+  (`1,104,096`) and persistent Java FFM packets (`70,216`) + G4 native
+  `allocatedSize` (`2,916,480`) and persistent Java FFM packets (`524,608`)
+  totals `22,637,928` bytes and must remain at or below `25,165,824` bytes
+  (24 MiB). Small on-heap Java control objects are outside this byte census.
+- No `Arena.allocate`, `makeBuffer`, `makeTexture` or readback in repeated frame
+  iterations. G3/G4 staging/output/debug resources and PSOs are precreated at
+  device admission, outside frame submission, and retired through the existing
+  in-flight destruction discipline. The steady-state observer reuses the
+  accepted source identity and performs no G3 stats downcall.
+- Java makes the raw G3 owner an unforgeable capability. Native live-context
+  registries validate both G3 and G4 opaque handles before `Unmanaged` access,
+  so forged or already released owners return a clean invalid status.
+
+## Correctness gates
+
+Source and bundled Metal Validation must independently prove:
+
+- zero source and black rho produce exact zero bounce and SH;
+- red input cannot create green or blue energy;
+- a red wall can reach a visible white floor only through a known path;
+- a sealed supercover wall transfers exact zero;
+- opening/closing the synthetic aperture changes only the physically connected
+  field after a new independently created frozen context;
+- UNKNOWN, FALLBACK, AIR and occluded endpoints transfer zero;
+- DC energy respects the global reflected-input bound;
+- reconstructed L1 values are finite/non-negative within tolerance;
+- repeat contexts in the same shader mode produce the same raw hash;
+- stale epoch, wrong thread and release-while-in-flight are fail-closed;
+- a forged/stale native G3 capability is rejected without dereference;
+- source-fallback and bundled tasks assert the actual shader-library mode.
+
+The compute-only frame graph is `G2 cells + G3 direct/geometry -> bounce0 ->
+one Jacobi transport/SH + confidence`. It contains no scene color, depth,
+terrain, fragment, render, UI or present consumer.
+
+## Predeclared Tier B stop-gate
+
+The live diagnostic uses the frozen `600+600` M1 Pro profile from the accepted
+GI fixtures: 3024x1964 HDR, Advanced/Balanced, native resolution, MetalFX and
+VSync off, nominal/fair non-invalid thermals, zero timing drops and no renderer
+fallback.
+
+Every attested raw timing window must already use schema 6, GI contract v3 and
+metadata mode `g4_transport`; a v2 window cannot hide pre-attachment G4 memory
+or work inside a completed receipt.
+
+- exactly one frozen near-cascade build during warmup;
+- exactly one `GI_TRANSPORT` dispatch and no measured-window counter growth;
+- `GI_TRANSPORT` p95 no greater than `4.0 ms` and maximum no greater than
+  `6.0 ms`;
+- no second bounce, scroll, full-volume rebuild loop or steady-state work;
+- combined memory remains within 24 MiB;
+- whole-frame/FPS values are descriptive Tier B data only and are not compared
+  numerically with Tier C production baselines.
+
+A sealed-wall leak, non-repeatable hash, energy amplification, non-finite SH,
+memory excess, unbounded/repeated work or any production image binding rejects
+G4 and blocks G5. Passing G4 proves only a private physical field and bounded
+diagnostic cost; it is not visual or product acceptance.
