@@ -1,6 +1,9 @@
 package com.metallum.client.benchmark;
 
 import com.metallum.client.renderer.interpolation.FrameInterpolationRuntimeStatus;
+import com.metallum.client.metalfx.BenchmarkScalingMode;
+
+import java.util.List;
 
 public final class BenchmarkWindowContractTests {
     private BenchmarkWindowContractTests() {
@@ -11,6 +14,7 @@ public final class BenchmarkWindowContractTests {
         rejectsWrongBackingFramebuffer();
         rejectsNonLiveLogicalWindow();
         emitsFrozenEvidenceOnlyAfterRouteApply();
+        acceptsOnlyOneFrozenOffModeForG4();
         acceptsRequiredOnGlassGeneratedDelta();
         rejectsInsufficientOrRegressingGeneratedCounter();
         derivesMonotonicFiTransportCounterDelta();
@@ -49,6 +53,18 @@ public final class BenchmarkWindowContractTests {
                 "server freeze evidence must follow ROUTE_APPLY after server confirmation");
         require(!MetalFxBenchmarkController.shouldEmitServerTicksFrozenEvidence(true, true, true),
                 "server freeze evidence must be emitted exactly once");
+    }
+
+    private static void acceptsOnlyOneFrozenOffModeForG4() {
+        require(MetalFxBenchmarkController.isFrozenG4Sequence(
+                        List.of(BenchmarkScalingMode.OFF)),
+                "one OFF segment must be the only frozen G4 sequence");
+        require(!MetalFxBenchmarkController.isFrozenG4Sequence(List.of())
+                        && !MetalFxBenchmarkController.isFrozenG4Sequence(List.of(
+                        BenchmarkScalingMode.OFF, BenchmarkScalingMode.OFF))
+                        && !MetalFxBenchmarkController.isFrozenG4Sequence(List.of(
+                        BenchmarkScalingMode.QUALITY)),
+                "G4 admitted a missing, changing, or scaled benchmark sequence");
     }
 
     private static void acceptsRequiredOnGlassGeneratedDelta() {

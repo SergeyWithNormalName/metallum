@@ -43,6 +43,8 @@ EXPECTED_CORRECTNESS_GATES = [
     "MISALIGNED_PACKET_REJECTED",
     "SUBMITTED_COMPLETION_STATE_FAIL_CLOSED",
     "POST_FREEZE_SOURCE_DRIFT_STALE",
+    "LOGICAL_ACTUAL_STATIC_EPOCH_DOMAIN_SEPARATION",
+    "PRE_ROUTE_MODE_FREEZE",
     "TELEMETRY_ATTACH_WRONG_THREAD_REJECTED",
     "TELEMETRY_ATTACH_FORGED_G3_REJECTED",
     "TELEMETRY_ATTACH_IDEMPOTENT_SAME_PAIR",
@@ -104,6 +106,7 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
     "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java",
     "src/main/metal/MetallumGiTransport.metal",
     "src/main/native/MetallumNative.swift",
+    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldViewTests.java",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java",
     "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java",
@@ -875,6 +878,10 @@ def verify_minecraft_receipt(minecraft_text: str) -> None:
     if minecraft_text.count(admission_prefix) != 1 \
             or len(G4_ADMISSION_PATTERN.findall(minecraft_text)) != 1:
         raise ContractError("G4 Minecraft log must contain one exact G4 admission PASS")
+    mode_frozen = (
+        "METALLUM_BENCHMARK EVENT=GI_G4_MODE_FROZEN "
+        "mode=OFF phase=PRE_ROUTE status=PASS"
+    )
     prepare_pattern = re.compile(
         r"METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
         r"route=gi-g4-overworld-v1 stable_frames=[1-9][0-9]* "
@@ -886,10 +893,13 @@ def verify_minecraft_receipt(minecraft_text: str) -> None:
         "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT "
         "active_frames=24 drain_frames=300 status=PASS"
     )
-    if minecraft_text.count(prepare_prefix) != 1 \
+    if minecraft_text.count(mode_frozen) != 1 \
+            or minecraft_text.count(prepare_prefix) != 1 \
             or len(prepare_pattern.findall(minecraft_text)) != 1 \
             or minecraft_text.count(source_receipt) != 1:
-        raise ContractError("G4 Minecraft log does not prove frozen G3 startup admission")
+        raise ContractError(
+            "G4 Minecraft log does not prove pre-route mode freeze and G3 startup admission"
+        )
     segment = (
         "METALLUM_BENCHMARK EVENT=SEGMENT_START index=1 total=1 mode=OFF "
         "warmup=600 measure=600"
@@ -910,7 +920,8 @@ def verify_minecraft_receipt(minecraft_text: str) -> None:
         if minecraft_text.count(token) != 1:
             raise ContractError(f"G4 Minecraft log must contain one exact {label} marker")
     if not (
-        minecraft_text.index(prepare_prefix)
+        minecraft_text.index(mode_frozen)
+        < minecraft_text.index(prepare_prefix)
         < minecraft_text.index(source_receipt)
         < minecraft_text.index(segment)
         < minecraft_text.index(admission_prefix)
@@ -1256,6 +1267,9 @@ def verify_source_contract(root: Path) -> None:
     benchmark_controller = source(
         root, "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java"
     )
+    benchmark_tests = source(
+        root, "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java"
+    )
     timing = source(root, "src/main/java/com/metallum/client/metal/render/MetalGpuTimingStage.java")
     bridge = source(root, "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java")
     native = source(root, "src/main/native/MetallumNative.swift")
@@ -1377,6 +1391,10 @@ def verify_source_contract(root: Path) -> None:
         "status=PASS", "GiTransportRuntime.isBenchmarkWarmup()",
     ), "G4 MetalDevice structural admission")
     require_tokens(benchmark_controller, (
+        "isFrozenG4Sequence(parsed)", "this.sequence.getFirst().apply()",
+        "this.g4ModePreapplied = true", "this.routeStableFrames = 0",
+        "METALLUM_BENCHMARK EVENT=GI_G4_MODE_FROZEN",
+        "if (!this.g4ModePreapplied)",
         "GiTransportRuntime.beginSourcePreparation()",
         "GiTransportRuntime.beginBenchmarkWarmup()",
         "GiTransportRuntime.beginBenchmarkMeasurement()",
@@ -1385,6 +1403,12 @@ def verify_source_contract(root: Path) -> None:
         "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT",
         "G4 transport did not resolve READY before measurement",
     ), "G4 benchmark phase admission")
+    require_tokens(benchmark_tests, (
+        "acceptsOnlyOneFrozenOffModeForG4",
+        "MetalFxBenchmarkController.isFrozenG4Sequence",
+        "List.of(BenchmarkScalingMode.OFF)",
+        "BenchmarkScalingMode.QUALITY",
+    ), "G4 pre-route benchmark mode test")
 
     require_tokens(timing, ("GI_TRANSPORT(21)", "PROFILED_STAGE_COUNT = 22"),
                    "G4 Java timing ABI")
@@ -1671,6 +1695,8 @@ def self_test_receipt_validator() -> None:
         "METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=advanced schema=5 "
         "defaults_used=false requested=advanced resolved=advanced l3=true l5=true "
         "l6=true status=PASS generation=6 shader_epoch=5 reason=none",
+        "METALLUM_BENCHMARK EVENT=GI_G4_MODE_FROZEN "
+        "mode=OFF phase=PRE_ROUTE status=PASS",
         "METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
         "route=gi-g4-overworld-v1 stable_frames=120 candidates=0 status=PASS",
         "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT "
@@ -1705,6 +1731,14 @@ def self_test_receipt_validator() -> None:
     verify_transcript_receipt(transcript)
     verify_minecraft_receipt(minecraft)
     verify_declared_runtime_results(copy.deepcopy(derived), derived)
+
+    expect_failure(
+        lambda: verify_minecraft_receipt(minecraft.replace(
+            "METALLUM_BENCHMARK EVENT=GI_G4_MODE_FROZEN "
+            "mode=OFF phase=PRE_ROUTE status=PASS\n", ""
+        )),
+        "pre-route mode freeze",
+    )
 
     expect_failure(
         lambda: strict_json_text('{"outer":{"value":1,"value":2}}', "duplicate"),

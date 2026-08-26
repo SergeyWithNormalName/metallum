@@ -441,6 +441,7 @@ public final class MetalFxBenchmarkController {
     private int routeServerCheckCountdown;
     private int routeStableFrames;
     private int g4SourceReceiptFrames;
+    private boolean g4ModePreapplied;
     private final AtomicBoolean torchEpochServerTaskPending = new AtomicBoolean();
     private boolean torchEpochRequested;
     private boolean torchEpochAppliedLogged;
@@ -572,6 +573,10 @@ public final class MetalFxBenchmarkController {
             if (error == null) {
                 error = "invalid METALLUM_BENCHMARK_SEQUENCE";
             }
+        }
+        if (error == null && GiTransportRuntime.isRequested()
+                && !isFrozenG4Sequence(parsed)) {
+            error = "G4 requires exactly one frozen OFF benchmark segment";
         }
         if (error == null && parsedRoute != null && parsedRoute.torchEpoch() != null) {
             TorchEpochConfig torchEpoch = parsedRoute.torchEpoch();
@@ -1776,6 +1781,21 @@ public final class MetalFxBenchmarkController {
         boolean g4SourceReady = !GiTransportRuntime.isRequested()
                 || this.g4SourceReceiptFrames >= G4_SOURCE_RECEIPT_FRAMES;
         if (GiTransportRuntime.isRequested()
+                && !this.g4ModePreapplied
+                && this.routeStableFrames >= this.route.stableFrames()
+                && !GiSemanticController.global().hasActiveCandidates()
+                && !this.routeServerTaskPending.get()) {
+            this.sequence.getFirst().apply();
+            this.g4ModePreapplied = true;
+            this.routeStableFrames = 0;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G4_MODE_FROZEN "
+                            + "mode=OFF phase=PRE_ROUTE status=PASS"
+            );
+            return;
+        }
+        if (GiTransportRuntime.isRequested()
+                && this.g4ModePreapplied
                 && !GiTransportRuntime.hasSourcePreparationStarted()
                 && this.routeStableFrames >= this.route.stableFrames()
                 && !GiSemanticController.global().hasActiveCandidates()
@@ -2108,6 +2128,11 @@ public final class MetalFxBenchmarkController {
             final boolean serverTicksFrozen
     ) {
         return routeApplyLogged && !evidenceLogged && serverTicksFrozen;
+    }
+
+    static boolean isFrozenG4Sequence(final List<BenchmarkScalingMode> sequence) {
+        return sequence != null && sequence.size() == 1
+                && sequence.getFirst() == BenchmarkScalingMode.OFF;
     }
 
     private String serverRouteMismatch(
@@ -2628,7 +2653,9 @@ public final class MetalFxBenchmarkController {
         this.torchEpochFailure = null;
         this.torchEpochAppliedMeasuredFrame = -1;
         this.torchEpochRemovedMeasuredFrame = -1;
-        mode.apply();
+        if (!this.g4ModePreapplied) {
+            mode.apply();
+        }
         GiTransportRuntime.beginBenchmarkWarmup();
         MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode.name());
         this.segmentFrame = 0;

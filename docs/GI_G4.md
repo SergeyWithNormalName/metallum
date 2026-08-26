@@ -19,8 +19,10 @@ The first candidate builds exactly one near cascade:
 - G3 must have completed and retired all 192 initial dirty bricks before G4 is
   admitted;
 - benchmark preparation opens only after the route has been stable for 120
-  frames and G2 has zero active candidates. The complete G2/world/origin/static
-  source/environment tuple must then remain unchanged for 600 submitted frames;
+  frames and G2 has zero active candidates. The sole `OFF` benchmark mode is
+  applied at that boundary, stability is acquired again after its deferred
+  resize, and only then may G3 preparation begin. The complete
+  G2/world/origin/static source/environment tuple must remain unchanged for 600 submitted frames;
   once committed, any drift is terminal and cannot rotate or rebuild G3;
 - G3 must be `ready`, not in flight and have zero pending/discarded work;
 - G2 rho/faces/validity and G3 geometry/direct origins and epochs must match;
@@ -185,6 +187,11 @@ Source and bundled Metal Validation must independently prove:
 - reconstructed L1 values are finite/non-negative within tolerance;
 - repeat contexts in the same shader mode produce the same raw hash;
 - stale epoch, wrong thread and release-while-in-flight are fail-closed;
+- the compact logical native G3 epoch is kept separate from the captured
+  process-local static-registry epoch: a stable registry identity remains valid,
+  while a real post-freeze registry mutation is rejected;
+- the pre-route `OFF` mode freeze occurs before G3 preparation and cannot issue
+  another renderer resize at `SEGMENT_START`;
 - a forged/stale native G3 capability is rejected without dereference;
 - telemetry attach rejects wrong-thread, forged, released and different-queue
   G3 owners; same-pair attach is idempotent, a second G4 is rejected and an
@@ -208,6 +215,7 @@ or work inside a completed receipt.
 
 - the tracked route/settings digests, clean source/artifact identity and exact
   300-frame windows are immutable across startup, warmup and measurement;
+- the Minecraft receipt proves pre-route `OFF` mode freeze before G3 preparation;
 - startup contains at least 600 reported frames, the frozen epoch cannot drift
   after population begins, and `GI_INJECT` totals exactly 24 active frames;
 - exactly one frozen near-cascade build during warmup;

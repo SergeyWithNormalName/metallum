@@ -1586,6 +1586,7 @@ tasks.register("giG4TransportContractTest", Exec) {
 		"src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java",
 		"src/main/metal/MetallumGiTransport.metal",
 		"src/main/native/MetallumNative.swift",
+		"src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java",
 		"src/test/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldViewTests.java",
 		"src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java",
 		"src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java",
