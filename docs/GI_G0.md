@@ -1,10 +1,14 @@
 # GI Stage G0: baseline, fixtures and zero contract
 
-Status: `REJECTED_BASELINE_FLOOR`. The G0 contracts and all six Tier C receipts
-are complete, but the current renderer fails the approved Overworld absolute
-floor. `benchmark/gi/g0-acceptance-v1.json` records the exact evidence and keeps
-`g1_allowed=false`; G1 must not start until a separate quality-preserving
-baseline recovery passes the same matrix.
+Status: `PASS_RECOVERED_BASELINE`. The original 2026-08-24 result remains
+`REJECTED_BASELINE_FLOOR` in `benchmark/gi/g0-acceptance-v1.json`; it is not
+rewritten by later GI work. A fresh quality-preserving run on 2026-08-26 passed
+the same six-receipt matrix and is recorded in
+`benchmark/gi/gi-stage-gates-2026-08-26-v1.json` with `g1_allowed=true`.
+The manifest hashes a tracked immutable bundle under
+`benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/`; the gate fails closed if
+any current receipt, raw report, summary, Minecraft log or console log is
+missing or altered.
 
 ## Accepted M1 Pro profile
 
@@ -13,7 +17,7 @@ baseline recovery passes the same matrix.
 - Display: Built-in Retina Display, exclusive fullscreen,
   `3024x1964@120 Hz`.
 - Renderer: Metallum render contract, Advanced lighting, Balanced preset.
-- Output: native scene HDR/EDR, sRGB source encoding, Fancy graphics,
+- Output: native scene HDR/EDR, linear scene source encoding, Fancy graphics,
   render/simulation distance `16/12`, MetalFX Off, VSync Off, max FPS `260`.
 - Instrumentation: `METALLUM_L2_TIMING_DETAIL=0`, Metal validation Off, no
   screenshots or HUD/capture instrumentation.
@@ -46,7 +50,28 @@ candidate must simultaneously satisfy:
 Tier B stage timings can attribute `GI_INJECT`, `GI_TRANSPORT`, and
 `GI_RECEIVER` after those stages exist, but cannot replace these Tier C gates.
 
-## G0 decision on 2026-08-24
+## Current baseline recovery on 2026-08-26
+
+Commit `6a52f909d985` was measured from a clean isolated worktree with source
+digest `42e110e7adb5a63f4866c343ebd97faa4fee84e12630a3ae405bb3381c9650ba`
+and artifact digest
+`802cb8a6e831cd6bc5174fafaab9dd163d523a3d31ee3db4a3f668a29554c1b6`.
+All six runs produced ten complete windows, nominal thermals, zero timing drops,
+strict schema-v6 receipts, Advanced admission, healthy L3/L5/L6, and all-zero
+GI production telemetry.
+
+| Route | Run average FPS | Run 1% lows | Mean GPU p95 | Floor | Decision |
+| --- | --- | --- | ---: | --- | --- |
+| Overworld | `44.104 / 44.058` | `31.833 / 32.060` | `24.570 ms` | `30 / 20 FPS` | **PASS** |
+| Sealed cave | `87.949 / 87.581` | `51.442 / 50.060` | `13.937 ms` | `20 / 10 FPS` | **PASS** |
+| Nether | `35.705 / 35.739` | `27.837 / 28.420` | `32.214 ms` | `20 / 10 FPS` | **PASS** |
+
+No renderer change was introduced for this revalidation. The recovery comes
+from the current renderer state already present at `6a52f90`; a proposed extra
+indirect-buffer change was not made because a clean 600+600 control already
+measured `44.801 FPS` and invalidated the old bottleneck assumption.
+
+## Historical G0 decision on 2026-08-24
 
 All six final runs used commit `9c13e15b4669`, source digest
 `cd0d6a105368ad3cdb3cc9b7b3bc06bb5c312963c5d31f459bcfa046279d7b5b`,
@@ -62,11 +87,12 @@ GI_OFF telemetry.
 | Sealed cave | 55.789 / 55.862 | 36.182 / 37.146 | 20.812 ms | 20 / 10 FPS | PASS |
 | Nether | 21.691 / 20.699 | 19.082 / 17.600 | 50.468 ms | 20 / 10 FPS | PASS |
 
-The Overworld failure is repeatable and is not a GI allocation, fallback,
+That historical Overworld failure was repeatable and was not a GI allocation, fallback,
 thermal, dirty-build, or lighting-admission artifact. The floor is not lowered
 to fit the slow baseline. The next permitted action is a separate baseline
 diagnosis/recovery with its own hypotheses and A/B evidence; no G1 field work is
-admitted by this result.
+admitted by that result. The separate 2026-08-26 recovery above now satisfies
+that requirement without changing the original artifact or its decision.
 
 A follow-up Tier B attribution on the same route found `world opaque` at
 `42.227 ms` average / `42.971 ms` p95. Sequential `NO_L3_RECEIVER`,

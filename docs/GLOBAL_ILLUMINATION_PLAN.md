@@ -229,6 +229,17 @@ Nether прошли утверждённые floors, но два Overworld run �
 и `16.90 FPS` mean 1% low против `30/20`. Поэтому `g1_allowed=false`, floor не
 ослаблен, и перед G1 требуется отдельное восстановление baseline.
 
+Повторная проверка 2026-08-26 не переписывает этот исторический результат.
+Текущий clean source `6a52f90` прошёл новую полную матрицу: Overworld
+`44.104/44.058 FPS`, sealed cave `87.949/87.581`, Nether `35.705/35.739`; все
+шесть runs имеют строгие Tier C receipts, nominal thermals, Advanced admission
+и нулевой GI production contract. Текущий статус — `PASS_RECOVERED_BASELINE`,
+`g1_allowed=true`; evidence находится в
+`benchmark/gi/gi-stage-gates-2026-08-26-v1.json`.
+Current receipts, summaries, raw reports and logs are stored in its tracked
+immutable evidence bundle; the current gate does not pass from manifest claims
+alone.
+
 ### G1 — выборочное спасение L7 field infrastructure
 
 Цель: перенести полезную механику из
@@ -281,6 +292,12 @@ Tier C Overworld receipt дал `27.430 FPS`, `22.473` 1% low и `39.483 ms` GPU
 условный average floor `28 FPS` не пройден. Поэтому
 `benchmark/gi/g1-field-evidence-v1.json` сохраняет `g2_allowed=false`.
 
+Повторная проверка 2026-08-26 закрыла только этот outstanding blocker: два
+независимых current-source Overworld Tier C run дали `44.104/44.058 FPS` и
+`31.833/32.060` 1% low против неизменного `28/20` floor. Исторический artifact
+остаётся неизменным, а current gate artifact фиксирует
+`PASS_ABSOLUTE_FLOOR_REVALIDATED` и `g2_allowed=true`.
+
 ### G2 — semantic material/emission field
 
 Цель: получить данные, необходимые transport, но отсутствующие в L5.
@@ -320,6 +337,15 @@ stale/capacity rejects и показал 27.331 FPS OFF против 27.434 FPS 
 это Tier B, не Tier C claim. Production GI resources/passes/bindings равны
 нулю. Технический gate к отдельно запрошенному G3 пройден, но G3
 не начат. Полный контракт: `docs/GI_G2.md`.
+
+Текущая clean revalidation 2026-08-26 сохранила отрицательный короткий 2x2
+screening (`+0.565 ms` GPU p95), затем локализовала `WORLD_OPAQUE` delta как
+`+0.014 ms` и получила соседнюю десятиоконную ON/OFF пару: `44.718/44.151 FPS`,
+`30.469/32.527` 1% low, `24.411/24.518 ms` GPU p95. Неизменные stop-gates
+пройдены, 738 snapshots приняты без reject, cap 64 / 1,009,152 bytes не
+превышен, production resources/passes/bindings остались нулевыми. Текущий
+статус — `G2_COMPLETE_STRUCTURALLY_OFF`; G3 разрешён только отдельным запросом
+и не начат.
 
 ### G3 — direct source injection без bounce
 

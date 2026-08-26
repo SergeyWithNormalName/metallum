@@ -7,3 +7,6 @@
 # These are Windows script files and should use crlf
 *.bat           text eol=crlf
 
+# Raw benchmark console evidence is byte-for-byte receipt-bound; preserve the
+# launcher-emitted spaces instead of normalizing an immutable artifact.
+benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/*.console.log whitespace=-trailing-space

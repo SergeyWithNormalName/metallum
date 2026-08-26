@@ -1,10 +1,11 @@
 # GI Stage G1: isolated field infrastructure
 
-Status: `SUPPORTED_PENDING_ABSOLUTE_FLOOR`. Commit `88f9dda` implements and
-mechanically validates the bounded field-only scaffold, but the clean Tier C
-Overworld run measured `27.430 FPS`, below the explicit conditional 28 FPS
-average floor. `benchmark/gi/g1-field-evidence-v1.json` therefore keeps
-`g2_allowed=false`.
+Status: `PASS_ABSOLUTE_FLOOR_REVALIDATED`. Commit `88f9dda` remains the original
+mechanically validated field-only implementation, and
+`benchmark/gi/g1-field-evidence-v1.json` preserves its historical
+`SUPPORTED_PENDING_ABSOLUTE_FLOOR` result. Two fresh current-source Tier C
+Overworld receipts now clear the sole outstanding `28/20 FPS` gate;
+`benchmark/gi/gi-stage-gates-2026-08-26-v1.json` records `g2_allowed=true`.
 
 ## What G1 contains
 
@@ -64,17 +65,27 @@ passes, bindings, shader symbols, epochs, and work counters. It fails only the
 28 FPS average floor. `.accepted.json` means the receipt passed attestation; it
 does not mean the product floor passed.
 
+## Current floor revalidation
+
+The clean current source `6a52f909d985` includes the same structurally-off G1
+field infrastructure and produced two independent 1800+3000 Overworld runs:
+
+| Run | FPS | 1% low | GPU p95 | Decision |
+| --- | ---: | ---: | ---: | --- |
+| 1 | `44.104` | `31.833` | `24.583 ms` | PASS |
+| 2 | `44.058` | `32.060` | `24.557 ms` | PASS |
+
+Both pass the unchanged conditional `28/20 FPS` floor. The historical
+contemporaneous G1 control/candidate screening already passed the relative
+no-regression gate; the new receipts resolve only the absolute-floor blocker
+and do not convert the isolated field into production rendering work.
+
 ## Stop gate
 
-G1 code is retained because its mechanical and relative gates pass and it adds
-no production work. The imported G2 semantic implementation remains an opt-in,
-structurally-off diagnostic only; it does not satisfy this G1 gate or authorize
-G3, a receiver, transport, or any production GI path. A later GI stage must not
-begin until either:
-
-1. the same clean G1 source produces the required independent Tier C evidence
-   at or above `28/20 FPS`; or
-2. the user explicitly changes the conditional absolute decision again.
+G1 code is retained because its mechanical, relative, and current absolute
+gates pass while it adds no production work. The opt-in G2 semantic diagnostic
+still does not authorize a receiver, transport, or any production GI path.
+G3 remains a separately requested stage even after G2 completion.
 
 No quality setting, receiver, native resolution, Advanced lighting stage,
 shadow path, or MetalFX policy may be changed to satisfy this gate.

@@ -1,10 +1,18 @@
 # GI Stage G2: accepted semantic material/emission truth
 
-Status: `PASS_STRUCTURALLY_OFF_DIAGNOSTIC`. Commit `d750491` implements the
-complete G2 semantic field and keeps it absent from ordinary production
-execution. G2 is enabled only with `METALLUM_GI_G2_CAPTURE=1` on the exact
-Minecraft 26.2 / Sodium 0.9.1 / Fabric Renderer 14.0.1 / MixinExtras 0.5.4
-source contract.
+Status: `G2_COMPLETE_STRUCTURALLY_OFF`. Commit `d750491` implements the complete
+G2 semantic field and keeps it absent from ordinary production execution. The
+original technical evidence remains in `benchmark/gi/g2-semantic-evidence-v1.json`;
+fresh G0/G1 prerequisite and current clean runtime evidence is bound by
+`benchmark/gi/gi-stage-gates-2026-08-26-v1.json`. G2 is enabled only with
+`METALLUM_GI_G2_CAPTURE=1` on the exact Minecraft 26.2 / Sodium 0.9.1 / Fabric
+Renderer 14.0.1 / MixinExtras 0.5.4 source contract.
+
+The current manifest points only to tracked immutable evidence under
+`benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1/`. Its contract parses the
+four short summaries and both detailed raw reports to recompute the negative
+`+0.565 ms`, `WORLD_OPAQUE +0.014 ms`, and whole-GPU `-0.382 ms` results; a
+missing file or digest mismatch is a hard failure.
 
 G2 does not render GI. It provides deterministic, versioned material and
 emission truth for a later source/transport stage. No G3 source injection,
@@ -117,6 +125,29 @@ output, so there is no visual GI acceptance claim. The active G1 absolute-floor
 gate remains independent and is not overridden by this historical diagnostic
 screening or by the optional `1–2 FPS` tolerance recorded in its source evidence.
 
+## Current prerequisite and runtime revalidation
+
+On 2026-08-26 the current clean source first passed the full G0 matrix and the
+two-run G1 absolute floor. A fresh G2 diagnostic then retained all negative and
+positive evidence rather than selecting one convenient short run:
+
+- A 2x2 600+600 screening improved mean FPS and 1% low but reported a
+  `+0.565 ms` presenting-GPU p95 delta, failing the old `+0.2 ms` threshold.
+- Detailed-marker attribution found `WORLD_OPAQUE` p95 at `18.102 ms` OFF and
+  `18.116 ms` ON (`+0.014 ms`) while detailed whole-GPU p95 improved by
+  `0.382 ms`. This does not show a G2 draw-path regression.
+- The adjacent ten-window ON-to-OFF extended pair measured `44.718` versus
+  `44.151 FPS`, `30.469` versus `32.527` 1% low, and `24.411` versus
+  `24.518 ms` GPU p95. Deltas were `+1.285%`, `-6.328%`, and `-0.107 ms`,
+  passing the unchanged FPS, low, and GPU p95 gates.
+
+The enabled run accepted 738 snapshots with zero stale/outside/capacity
+rejects, reached the fixed cap of 64 candidates / 1,009,152 bytes without
+exceeding it, and shut down with zero active candidates. Production GI
+resources, passes, and bindings remained zero. This remains Tier B diagnostic
+evidence; the hidden capture environment is not promoted to a release FPS
+claim merely because the run length was 1800+3000.
+
 ## Verification
 
 Run:
@@ -131,8 +162,11 @@ Run:
 ./gradlew check
 ```
 
-The integration run completed 105 Gradle tasks. Canonical machine-readable
-evidence is `benchmark/gi/g2-semantic-evidence-v1.json`.
+The latest full integration run completed 108 actionable Gradle tasks. The
+original machine-readable technical evidence remains
+`benchmark/gi/g2-semantic-evidence-v1.json`; the current prerequisite/runtime
+gate and its immutable bundle are bound by
+`benchmark/gi/gi-stage-gates-2026-08-26-v1.json`.
 
 ## Stop gate
 
@@ -142,5 +176,5 @@ lightmap enters the field; memory and retirement are bounded; debug slices and
 live accepted publication are proven.
 
 This does not start G3 or authorize any production receiver or transport path.
-On the active branch, the pending G1 absolute-floor gate also blocks a G3
-proposal until fresh Tier C baseline evidence or a new explicit user decision.
+The G0 and G1 prerequisites are now satisfied, so G3 is eligible only as a new,
+separately requested and separately gated stage. `g3_started` remains false.

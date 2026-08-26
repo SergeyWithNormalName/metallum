@@ -1,0 +1,1190 @@
+{
+  "accepted": true,
+  "console_log": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/.codex-worktrees/gi-baseline-recovery/run/logs/metallum-benchmarks/20260826T125002Z-g6a52f909d985-clean-gi-current-g0-nether-tierc-2-off.console.log",
+  "console_log_sha256": "8be4a4437015b97d7ea80d58048ab838a38975b94073a1d551fc515538c9a013",
+  "measurement": {
+    "generation": 2,
+    "measure_frames": 3000,
+    "runtime": {
+      "active_resource_pack_ids": "vanilla,fabric-api-base,fabric-block-getter-api-v2,fabric-lifecycle-events-v1,fabric-renderer-api-v1,fabric-rendering-fluids-v1,fabric-rendering-v1,fabric-resource-loader-v0,fabric-resource-loader-v1,fabric-transitive-access-wideners-v1,fabricloader,metallum,sodium",
+      "resolved_gui_scale": 8,
+      "sodium_chunk_builder_threads": 4
+    },
+    "scaler_mode": "OFF",
+    "segment": 0
+  },
+  "metadata": {
+    "ablation_mode": "FULL_ADVANCED",
+    "active_resource_pack_ids": "vanilla,fabric-api-base,fabric-block-getter-api-v2,fabric-lifecycle-events-v1,fabric-renderer-api-v1,fabric-rendering-fluids-v1,fabric-rendering-v1,fabric-resource-loader-v0,fabric-resource-loader-v1,fabric-transitive-access-wideners-v1,fabricloader,metallum,sodium",
+    "ambient_occlusion": true,
+    "artifact_sha256": "802cb8a6e831cd6bc5174fafaab9dd163d523a3d31ee3db4a3f668a29554c1b6",
+    "benchmark_dimension": "minecraft:the_nether",
+    "benchmark_player_name": "MetallumBench",
+    "benchmark_player_uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9",
+    "benchmark_simulation_frozen": true,
+    "biome_blend_radius": 2,
+    "bloom_strength": 0.18000000715255737,
+    "cloud_range": 64,
+    "clouds_mode": "true",
+    "commit": "6a52f909d985",
+    "configured_gui_scale": 0,
+    "current_edr_headroom": 8,
+    "device_current_allocated_bytes": 1150271488,
+    "device_name": "Apple M1 Pro",
+    "device_recommended_max_working_set_bytes": 12713115648,
+    "diagnostic_pattern": false,
+    "dirty_worktree": false,
+    "display_height": 1964,
+    "display_initial_current_headroom": 1.2000000476837158,
+    "display_initial_potential_headroom": 16,
+    "display_maximum_fps": 120,
+    "display_sync_enabled": false,
+    "display_width": 3024,
+    "entity_distance_scaling": 1,
+    "executor": "METAL3",
+    "extended_promotion_scheduler": {
+      "adaptive_scheduling_active": true,
+      "display_generation": 5,
+      "display_id": 1,
+      "display_is_builtin": true,
+      "display_last_update_timestamp": 632417.526830416,
+      "display_maximum_fps": 120,
+      "display_maximum_interval_ms": 41.666667,
+      "display_minimum_interval_ms": 8.333291,
+      "display_minimum_refresh_hz": 23.999999808000002,
+      "display_update_granularity_ms": 4.1666669999999995,
+      "enabled": true,
+      "fullscreen": true,
+      "mean_present_interval_ms": 27.55862674655704,
+      "mode": "unmanaged",
+      "out_of_order_presentations": 0,
+      "plain_present_requests": 5932,
+      "presentation_interval_histogram_buckets": 17,
+      "presented_generated": 0,
+      "presented_interpolated_real": 0,
+      "presented_real_only": 5793,
+      "rate_transitions": 0,
+      "retarget_boundaries": 0,
+      "skipped_presentations": 137,
+      "stale_presentation_callbacks": 0,
+      "target_misses": 0,
+      "target_presented_fps": 0,
+      "timed_present_requests": 0,
+      "variable_refresh_supported": true
+    },
+    "fixture": "hdrtest-static-v1",
+    "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+    "frame_interpolation_pacing": {
+      "accepted_pairs": 0,
+      "admission_wait_nanoseconds_total": 0,
+      "admission_waits": 0,
+      "backpressure_drops": 0,
+      "coordinator_real_only_frames": 0,
+      "dropped_generated_late": 0,
+      "generated_drawable_wait_maximum_nanoseconds": 0,
+      "generated_drawable_wait_nanoseconds_total": 0,
+      "generated_drawable_wait_samples": 0,
+      "generated_presentations": 0,
+      "generated_to_real_intervals": 0,
+      "generated_to_real_misses": 0,
+      "generated_to_real_nanoseconds_total": 0,
+      "interpolation_failures": 0,
+      "intervals_over_22_ms": 0,
+      "maximum_pacing_histogram_buckets": 0,
+      "out_of_order_presentations": 0,
+      "production_gate_lateness_maximum_nanoseconds": 0,
+      "production_gate_lateness_nanoseconds_total": 0,
+      "production_gate_signals": 0,
+      "raw_cadence_too_slow_frames": 0,
+      "real_drawable_wait_maximum_nanoseconds": 0,
+      "real_drawable_wait_nanoseconds_total": 0,
+      "real_drawable_wait_samples": 0,
+      "real_only_presentations": 5793,
+      "real_presentations": 0,
+      "real_to_generated_intervals": 0,
+      "real_to_generated_misses": 0,
+      "real_to_generated_nanoseconds_total": 0,
+      "retarget_boundary_intervals": 0,
+      "scheduler_accepted_frames": 0,
+      "scheduler_too_fast_frames": 0,
+      "scheduler_too_slow_frames": 0,
+      "scheduler_warming_frames": 0,
+      "severe_generated_to_real_intervals": 0,
+      "severe_late_intervals": 0,
+      "severe_real_to_generated_intervals": 0,
+      "source_attempts": 0,
+      "source_delta_nanoseconds_total": 0,
+      "source_delta_samples": 0,
+      "target_120_intervals": 0,
+      "target_60_intervals": 0,
+      "target_80_intervals": 0,
+      "target_misses": 0,
+      "timed_interval_nanoseconds_total": 0,
+      "timed_intervals": 0,
+      "timed_mean_slack_nanoseconds_total": 0,
+      "timed_target_nanoseconds_total": 0
+    },
+    "global_illumination_mode": "off",
+    "graphics_preset": "fancy",
+    "hdr_bloom_strength": 0.18,
+    "hdr_output_mode": "ENHANCED",
+    "hdr_strength": 1,
+    "improved_transparency": false,
+    "max_anisotropy_bit": 1,
+    "max_fps": 260,
+    "mipmap_levels": 4,
+    "monitor": "Built-in Retina Display",
+    "native_pipeline_cache_hits": 5,
+    "native_pipeline_cache_misses": 60,
+    "native_pipeline_count": 60,
+    "native_pipeline_creations_after_warmup": 41,
+    "native_pipeline_failure_count": 0,
+    "native_pipeline_warmup_ms": 0.7469999836757779,
+    "native_shader_library_load_ms": 0.19908335525542498,
+    "native_shader_library_mode": "PRECOMPILED",
+    "native_shader_source_compile_count": 0,
+    "native_shader_source_compile_ms": 0,
+    "os_version": "Version 27.0 (Build 26A5416b)",
+    "particles": 0,
+    "persistent_metalfx_mode": "off",
+    "refresh_hz": 120,
+    "registry_id": "4294969881",
+    "render_distance": 16,
+    "render_height": 1964,
+    "render_width": 3024,
+    "renderer_capabilities_v1": {
+      "display_headroom": true,
+      "display_refresh": true,
+      "frame_interpolation_fixed_temporal_profile": true,
+      "metal3_base": true,
+      "metal4_argument_tables": true,
+      "metal4_command_lifecycle": true,
+      "metal4_compiler": true,
+      "metal4_core": true,
+      "metal4_explicit_barriers": true,
+      "metal4_gpu_family": true,
+      "metal4_os_api": true,
+      "metalfx_frame_interpolation": true,
+      "metalfx_frame_interpolation_metal4": true,
+      "metalfx_spatial": true,
+      "metalfx_temporal": true,
+      "metalfx_temporal_metal4": true,
+      "required_texture_formats_usages": true,
+      "temporal_diagnostic_profile": true
+    },
+    "renderer_capability_mask_v1": "0x007800000003ffff",
+    "resource_packs_sha256": "7b2614a3fcf6fb05d64d52debd0358c5506c90204442e96fda98b71d462949df",
+    "route": "gi-g0-nether-v1",
+    "route_sha256": "8777717930cafa4d54e35df00a12d516c0bcc6be7379131872f2145228556dbb",
+    "scaler_active": false,
+    "settings_id": "native-hdr-fancy-v1",
+    "settings_sha256": "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3",
+    "settings_spec_sha256": "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e",
+    "simulation_distance": 12,
+    "sodium_chunk_builder_threads": 4,
+    "sodium_settings_sha256": "b39f856e16d85f5bd53f7acf4b89092371451dd23ae9e41d296967960fddda2a",
+    "source_encoding": "LINEAR",
+    "source_sha256": "42e110e7adb5a63f4866c343ebd97faa4fee84e12630a3ae405bb3381c9650ba",
+    "static_geometry_heaps_enabled": false,
+    "texture_filtering": 1,
+    "thermal_state": "nominal",
+    "world": "hdrtest-static-v1"
+  },
+  "minecraft_log": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/.codex-worktrees/gi-baseline-recovery/run/logs/metallum-benchmarks/20260826T125002Z-g6a52f909d985-clean-gi-current-g0-nether-tierc-2-off.minecraft.log",
+  "minecraft_log_sha256": "cb13cbf50ae23ef7e4daffebf422dff4463146e65fc3e52da0b40b1995a555f9",
+  "presented_frames": 3000,
+  "raw_report": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/.codex-worktrees/gi-baseline-recovery/run/logs/metallum-benchmarks/20260826T125002Z-g6a52f909d985-clean-gi-current-g0-nether-tierc-2-off.raw.jsonl",
+  "raw_sha256": "60eab9a821f1762e0a238e1cb4cb596d9576e1b2c83f841942fab64fc4043a4a",
+  "schema_version": 6,
+  "summary": "/Users/sergejgenerozov/Documents/\u042d\u043a\u0441\u043f\u0435\u0440\u0438\u043c\u0435\u043d\u0442 \u0441 \u043c\u043e\u0434\u043e\u043c/metallum/.codex-worktrees/gi-baseline-recovery/run/logs/metallum-benchmarks/20260826T125002Z-g6a52f909d985-clean-gi-current-g0-nether-tierc-2-off.summary.json",
+  "summary_sha256": "2d392e2df7010aa08f1bd633c943f6152cf9048c6cd85dde5648391b07eafd98",
+  "workload": {
+    "aggregate_totals": {
+      "command_buffers": 3000,
+      "copy_bytes": {
+        "byte_count_unknown_commands": 0,
+        "cpu_to_shared": 13620000,
+        "cpu_to_shared_commands": 36000,
+        "gpu_internal": 0,
+        "gpu_internal_commands": 0,
+        "gpu_to_cpu": 0,
+        "gpu_to_cpu_commands": 0,
+        "shared_to_private": 223356000,
+        "shared_to_private_commands": 48000,
+        "unclassified": 0,
+        "unclassified_commands": 0
+      },
+      "encoders": {
+        "blit": 18093,
+        "compute": 6000,
+        "pass_boundaries": 49772,
+        "render": 25679
+      },
+      "resource_allocations": {
+        "buffers": {
+          "bytes": 0,
+          "count": 0
+        },
+        "textures": {
+          "bytes": 0,
+          "count": 0
+        }
+      }
+    },
+    "aggregation": "Counters are per-report-window totals. aggregate_totals sums selected windows; per_presented_frame divides those totals by selected frames. Transient memory values are high-water marks and are aggregated only with maxima.",
+    "direct_write_observed_any_window": true,
+    "observability": "GPU copy counters cover instrumented Metal encoder wrappers. CPU-to-shared bytes cover known upload/multiUpload paths and dynamic orphan writes including preserved ranges; generic externally mapped writes are excluded, so zero does not prove absence. Resource allocation counters cover successful exported metallum_create_buffer/metallum_create_texture_2d calls only; internal workspace, telemetry, and view allocations are outside coverage.",
+    "per_presented_frame": {
+      "command_buffers": 1.0,
+      "copy_bytes": {
+        "byte_count_unknown_commands": 0.0,
+        "cpu_to_shared": 4540.0,
+        "cpu_to_shared_commands": 12.0,
+        "gpu_internal": 0.0,
+        "gpu_internal_commands": 0.0,
+        "gpu_to_cpu": 0.0,
+        "gpu_to_cpu_commands": 0.0,
+        "shared_to_private": 74452.0,
+        "shared_to_private_commands": 16.0,
+        "unclassified": 0.0,
+        "unclassified_commands": 0.0
+      },
+      "encoders": {
+        "blit": 6.031,
+        "compute": 2.0,
+        "pass_boundaries": 16.590666666666667,
+        "render": 8.559666666666667
+      },
+      "resource_allocations": {
+        "buffers": {
+          "bytes": 0.0,
+          "count": 0.0
+        },
+        "textures": {
+          "bytes": 0.0,
+          "count": 0.0
+        }
+      }
+    },
+    "private_geometry_heap": {
+      "aggregation": "Heap telemetry is a process snapshot, never a per-window total. Cumulative totals use the last snapshot for process-lifetime proof and an explicitly named last-minus-first delta; current gauges use the last snapshot and maxima across selected snapshots.",
+      "configuration": {
+        "enabled": false,
+        "page_limit_per_device": 32,
+        "page_size_bytes": 16777216
+      },
+      "deltas_between_first_and_last_snapshot": {
+        "allocation_failures_total": 0,
+        "backing_allocations_total": 0,
+        "device_teardown_with_live_allocations_total": 0,
+        "fallback_allocations_total": 0,
+        "fallback_capacity_total": 0,
+        "fallback_disabled_total": 0,
+        "fallback_heap_allocate_total": 0,
+        "fallback_heap_create_total": 0,
+        "fallback_invalid_query_total": 0,
+        "fallback_oversize_total": 0,
+        "fallback_requested_bytes_total": 0,
+        "heap_allocations_total": 0,
+        "heap_query_bytes_total": 0,
+        "page_reuse_hits_total": 0,
+        "pages_created_total": 0,
+        "pages_retired_total": 0,
+        "requested_bytes_total": 0,
+        "requests_total": 0
+      },
+      "gauge_maxima_across_selected_windows": {
+        "fragmentation_probe_alignment": 256,
+        "heap_current_allocated_bytes": 0,
+        "heap_fragmentation_estimate_bytes": 0,
+        "heap_largest_available_bytes": 0,
+        "heap_size_bytes_current": 0,
+        "heap_used_bytes_current": 0,
+        "live_allocations": 0,
+        "live_query_bytes": 0,
+        "live_requested_bytes": 0,
+        "pages_current": 0,
+        "pages_peak": 0,
+        "pools_current": 0,
+        "retire_pending_pages": 0
+      },
+      "gauges_at_last_window": {
+        "fragmentation_probe_alignment": 256,
+        "heap_current_allocated_bytes": 0,
+        "heap_fragmentation_estimate_bytes": 0,
+        "heap_largest_available_bytes": 0,
+        "heap_size_bytes_current": 0,
+        "heap_used_bytes_current": 0,
+        "live_allocations": 0,
+        "live_query_bytes": 0,
+        "live_requested_bytes": 0,
+        "pages_current": 0,
+        "pages_peak": 0,
+        "pools_current": 0,
+        "retire_pending_pages": 0
+      },
+      "process_lifetime_totals_at_last_window": {
+        "allocation_failures_total": 0,
+        "backing_allocations_total": 0,
+        "device_teardown_with_live_allocations_total": 0,
+        "fallback_allocations_total": 0,
+        "fallback_capacity_total": 0,
+        "fallback_disabled_total": 0,
+        "fallback_heap_allocate_total": 0,
+        "fallback_heap_create_total": 0,
+        "fallback_invalid_query_total": 0,
+        "fallback_oversize_total": 0,
+        "fallback_requested_bytes_total": 0,
+        "heap_allocations_total": 0,
+        "heap_query_bytes_total": 0,
+        "page_reuse_hits_total": 0,
+        "pages_created_total": 0,
+        "pages_retired_total": 0,
+        "requested_bytes_total": 0,
+        "requests_total": 0
+      }
+    },
+    "selected_window_totals": [
+      {
+        "presented_frames": 300,
+        "source_line": 10,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4978,
+            "render": 2569
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 11,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2568
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 12,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1810,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2567
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 13,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2568
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 14,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2568
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 15,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1810,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2567
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 16,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2568
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 17,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1810,
+            "compute": 600,
+            "pass_boundaries": 4979,
+            "render": 2569
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 18,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4976,
+            "render": 2567
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      },
+      {
+        "presented_frames": 300,
+        "source_line": 19,
+        "workload": {
+          "command_buffers": 300,
+          "copy_bytes": {
+            "byte_count_unknown_commands": 0,
+            "cpu_to_shared": 1362000,
+            "cpu_to_shared_commands": 3600,
+            "direct_write_observed": true,
+            "gpu_internal": 0,
+            "gpu_internal_commands": 0,
+            "gpu_to_cpu": 0,
+            "gpu_to_cpu_commands": 0,
+            "shared_to_private": 22335600,
+            "shared_to_private_commands": 4800,
+            "unclassified": 0,
+            "unclassified_commands": 0
+          },
+          "encoders": {
+            "blit": 1809,
+            "compute": 600,
+            "pass_boundaries": 4977,
+            "render": 2568
+          },
+          "private_geometry_heap": {
+            "allocation_failures_total": 0,
+            "backing_allocations_total": 0,
+            "device_teardown_with_live_allocations_total": 0,
+            "enabled": false,
+            "fallback_allocations_total": 0,
+            "fallback_capacity_total": 0,
+            "fallback_disabled_total": 0,
+            "fallback_heap_allocate_total": 0,
+            "fallback_heap_create_total": 0,
+            "fallback_invalid_query_total": 0,
+            "fallback_oversize_total": 0,
+            "fallback_requested_bytes_total": 0,
+            "fragmentation_probe_alignment": 256,
+            "heap_allocations_total": 0,
+            "heap_current_allocated_bytes": 0,
+            "heap_fragmentation_estimate_bytes": 0,
+            "heap_largest_available_bytes": 0,
+            "heap_query_bytes_total": 0,
+            "heap_size_bytes_current": 0,
+            "heap_used_bytes_current": 0,
+            "live_allocations": 0,
+            "live_query_bytes": 0,
+            "live_requested_bytes": 0,
+            "page_limit_per_device": 32,
+            "page_reuse_hits_total": 0,
+            "page_size_bytes": 16777216,
+            "pages_created_total": 0,
+            "pages_current": 0,
+            "pages_peak": 0,
+            "pages_retired_total": 0,
+            "pools_current": 0,
+            "requested_bytes_total": 0,
+            "requests_total": 0,
+            "retire_pending_pages": 0
+          },
+          "resource_allocations": {
+            "buffers": {
+              "bytes": 0,
+              "count": 0
+            },
+            "textures": {
+              "bytes": 0,
+              "count": 0
+            }
+          },
+          "transient_memory": {
+            "cpu": {
+              "requested_high_water_bytes": 0,
+              "reserved_high_water_bytes": 0
+            },
+            "gpu_shared": {
+              "requested_high_water_bytes": 4420,
+              "reserved_high_water_bytes": 524288
+            }
+          }
+        }
+      }
+    ],
+    "transient_memory_high_water": {
+      "cpu": {
+        "requested_high_water_bytes": 0,
+        "reserved_high_water_bytes": 0
+      },
+      "gpu_shared": {
+        "requested_high_water_bytes": 4420,
+        "reserved_high_water_bytes": 524288
+      }
+    }
+  }
+}

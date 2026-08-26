@@ -1429,6 +1429,22 @@ tasks.register("giG2SemanticContractTest", Exec) {
 	commandLine "python3", "tools/gi_g2_contract.py", "--root", "."
 }
 
+tasks.register("giStageGateContractTest", Exec) {
+	group = "verification"
+	description = "Validates current G0 recovery, G1 revalidation and G2 completion evidence"
+	inputs.file("tools/gi_stage_gate_contract.py")
+	inputs.file("benchmark/gi/gi-stage-gates-2026-08-26-v1.json")
+	inputs.dir("benchmark/gi/evidence/gi-stage-gates-2026-08-26-v1")
+	inputs.files(fileTree("benchmark/routes") { include "gi-g0-*.json" })
+	inputs.file("benchmark/settings/native-hdr-fancy-v1.json")
+	inputs.files(
+		"benchmark/gi/g0-acceptance-v1.json",
+		"benchmark/gi/g1-field-evidence-v1.json",
+		"benchmark/gi/g2-semantic-evidence-v1.json"
+	)
+	commandLine "python3", "tools/gi_stage_gate_contract.py", "--root", "."
+}
+
 tasks.register("benchmarkFixtureContractTest", Exec) {
     group = "verification"
     description = "Runs immutable fixture/settings digest parser self-tests"
@@ -1452,6 +1468,7 @@ tasks.named("check") {
     dependsOn(tasks.named("giG0FixtureContractTest"))
     dependsOn(tasks.named("giG1FieldContractTest"))
     dependsOn(tasks.named("giG2SemanticContractTest"))
+	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
     dependsOn(tasks.named("benchmarkReportContractTest"))
 	dependsOn(tasks.named("hdrUnitTest"))
