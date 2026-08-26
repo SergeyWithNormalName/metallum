@@ -14,6 +14,13 @@ public final class GiDirectDirtyQueue {
     ) {
     }
 
+    /** Counters scoped to the active native epoch; lifetime telemetry above never resets. */
+    public record EpochTelemetry(
+            long queued, long completed, long discarded, int pending,
+            boolean fullVolumeEnqueued
+    ) {
+    }
+
     private static final class Pending {
         private boolean queued;
         private long enqueueTick;
@@ -32,6 +39,10 @@ public final class GiDirectDirtyQueue {
     private long discarded;
     private long starvationPromotions;
     private long fullVolumeRebuilds;
+    private long epochQueued;
+    private long epochCompleted;
+    private long epochDiscarded;
+    private boolean epochFullVolumeEnqueued;
 
     public GiDirectDirtyQueue() {
         for (int index = 0; index < this.pending.length; index++) {
@@ -56,6 +67,10 @@ public final class GiDirectDirtyQueue {
         }
         this.pendingCount = 0;
         this.epoch = next;
+        this.epochQueued = 0L;
+        this.epochCompleted = 0L;
+        this.epochDiscarded = 0L;
+        this.epochFullVolumeEnqueued = false;
     }
 
     public OfferResult enqueue(final GiDirectSourceEpoch expected, final int brickId, final long tick) {
@@ -77,6 +92,7 @@ public final class GiDirectDirtyQueue {
         entry.coalesced = 0;
         this.pendingCount++;
         this.queued++;
+        this.epochQueued++;
         return OfferResult.ENQUEUED;
     }
 
@@ -98,6 +114,7 @@ public final class GiDirectDirtyQueue {
     /** Enqueues at most the fixed 192 logical bricks; processing remains capped at eight. */
     public void enqueueAll(final GiDirectSourceEpoch expected, final long tick) {
         this.fullVolumeRebuilds = Math.incrementExact(this.fullVolumeRebuilds);
+        this.epochFullVolumeEnqueued = true;
         for (int brick = 0; brick < GiDirectSourceLayout.TOTAL_BRICKS; brick++) {
             enqueue(expected, brick, tick);
         }
@@ -141,6 +158,7 @@ public final class GiDirectDirtyQueue {
             throw new IllegalArgumentException("G3 completed batch does not match the active epoch");
         }
         this.completed = Math.addExact(this.completed, count);
+        this.epochCompleted = Math.addExact(this.epochCompleted, count);
     }
 
     /** Requeues a transiently rejected batch under the same epoch. */
@@ -178,6 +196,13 @@ public final class GiDirectDirtyQueue {
     public Telemetry telemetry() {
         return new Telemetry(this.queued, this.coalesced, this.completed, this.discarded,
                 this.pendingCount, this.starvationPromotions, this.fullVolumeRebuilds);
+    }
+
+    public EpochTelemetry epochTelemetry() {
+        return new EpochTelemetry(
+                this.epochQueued, this.epochCompleted, this.epochDiscarded,
+                this.pendingCount, this.epochFullVolumeEnqueued
+        );
     }
 
     private int selectNext(final long tick) {

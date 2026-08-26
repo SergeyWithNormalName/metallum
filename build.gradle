@@ -397,6 +397,7 @@ tasks.register("giTransportCpuUnitTest", JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass.set("com.metallum.client.gi.transport.GiTransportCpuTests")
 	jvmArgs "-ea"
+	environment "METALLUM_GI_G4_TRANSPORT", "1"
 }
 
 tasks.register("giSemanticTransportFieldUnitTest", JavaExec) {
@@ -1551,18 +1552,23 @@ tasks.register("giG4TransportContractTest", Exec) {
 	inputs.file("tools/gi_g4_contract.py")
 	inputs.file("benchmark/gi/g4-transport-evidence-v1.json")
 	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
 		"build.gradle",
 		"docs/GI_G4.md",
 		"scripts/run_metal_benchmark.sh",
 		"tools/gi_g3_contract.py",
 		"tools/gi_release_contract_guard.sh",
 		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g4_runner_contract.sh",
 		"tools/test_gi_release_contract_guard.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java",
 		"src/main/java/com/metallum/client/gi/semantic/GiSemanticController.java",
 		"src/main/java/com/metallum/client/gi/semantic/GiSemanticFieldAssembler.java",
 		"src/main/java/com/metallum/client/gi/semantic/GiSemanticRuntime.java",
 		"src/main/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldView.java",
 		"src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java",
+		"src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java",
 		"src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java",
 		"src/main/java/com/metallum/client/gi/source/GiEnvironmentSource.java",
 		"src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java",
@@ -1581,6 +1587,8 @@ tasks.register("giG4TransportContractTest", Exec) {
 		"src/main/metal/MetallumGiTransport.metal",
 		"src/main/native/MetallumNative.swift",
 		"src/test/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldViewTests.java",
+		"src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java",
+		"src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java",
 		"src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java",
 		"src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java",
 		"src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java",
@@ -1600,6 +1608,17 @@ tasks.register("giReleaseContractGuardTest", Exec) {
 		"scripts/run_metal_benchmark.sh"
 	)
 	commandLine "bash", "tools/test_gi_release_contract_guard.sh"
+}
+
+tasks.register("giG4RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the exact G4 route, clean preflight and transcript/admission wiring"
+	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
+		"scripts/run_metal_benchmark.sh",
+		"tools/test_gi_g4_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g4_runner_contract.sh"
 }
 
 tasks.register("giStageGateContractTest", Exec) {
@@ -1643,6 +1662,7 @@ tasks.named("check") {
 	dependsOn(tasks.named("giG2SemanticContractTest"))
 	dependsOn(tasks.named("giG3SourceContractTest"))
 	dependsOn(tasks.named("giG4TransportContractTest"))
+	dependsOn(tasks.named("giG4RunnerContractTest"))
 	dependsOn(tasks.named("giReleaseContractGuardTest"))
 	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))

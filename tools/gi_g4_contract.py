@@ -43,6 +43,13 @@ EXPECTED_CORRECTNESS_GATES = [
     "MISALIGNED_PACKET_REJECTED",
     "SUBMITTED_COMPLETION_STATE_FAIL_CLOSED",
     "POST_FREEZE_SOURCE_DRIFT_STALE",
+    "TELEMETRY_ATTACH_WRONG_THREAD_REJECTED",
+    "TELEMETRY_ATTACH_FORGED_G3_REJECTED",
+    "TELEMETRY_ATTACH_IDEMPOTENT_SAME_PAIR",
+    "TELEMETRY_ATTACH_SECOND_G4_REJECTED",
+    "TELEMETRY_ATTACH_RELEASED_G3_REJECTED",
+    "TELEMETRY_ATTACH_DIFFERENT_QUEUE_REJECTED",
+    "TELEMETRY_ATTACH_RETAINS_G3_UNTIL_G4_RELEASE",
     "SOURCE_LIBRARY_MODE_ASSERTED",
     "BUNDLED_LIBRARY_MODE_ASSERTED",
 ]
@@ -58,9 +65,11 @@ EXPECTED_MECHANICAL_KEYS = {
     "benchmark_report_contract_v2",
     "receipt_validator_self_test",
     "release_contract_gi_guard",
+    "benchmark_runner_contract",
 }
 
 REQUIRED_SOURCE_MANIFEST = frozenset({
+    "benchmark/routes/gi-g4-overworld-v1.json",
     "build.gradle",
     "docs/GI_G4.md",
     "scripts/run_metal_benchmark.sh",
@@ -68,12 +77,16 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
     "tools/gi_g4_contract.py",
     "tools/gi_release_contract_guard.sh",
     "tools/metal_benchmark_report.py",
+    "tools/test_gi_g4_runner_contract.sh",
     "tools/test_gi_release_contract_guard.sh",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+    "src/main/java/com/metallum/client/gi/field/GiFieldCandidateBudget.java",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticController.java",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticFieldAssembler.java",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticRuntime.java",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldView.java",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java",
+    "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java",
     "src/main/java/com/metallum/client/gi/source/GiEnvironmentSource.java",
     "src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java",
@@ -92,6 +105,8 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
     "src/main/metal/MetallumGiTransport.metal",
     "src/main/native/MetallumNative.swift",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldViewTests.java",
+    "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java",
     "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java",
     "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java",
     "src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java",
@@ -117,6 +132,15 @@ G4_EXACT_GI_COUNTERS = {
     "stale_cell_rejects": 0,
 }
 
+G4_NATIVE_ALLOCATED_BYTES = 4_020_576
+G4_NATIVE_RESIDENT_BYTES = 1_966_080
+G4_REPORT_FRAMES = 300
+G4_INJECT_ACTIVE_FRAMES = 24
+G4_ROUTE_SHA256 = "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d"
+G4_FIXTURE_SHA256 = "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5"
+G4_SETTINGS_SPEC_SHA256 = "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e"
+G4_SETTINGS_SHA256 = "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3"
+
 G4_PROFILE_METADATA = {
     "device_name": "Apple M1 Pro",
     "monitor": "Built-in Retina Display",
@@ -136,6 +160,17 @@ G4_PROFILE_METADATA = {
     "native_shader_library_mode": "PRECOMPILED",
     "native_shader_source_compile_count": 0,
     "native_pipeline_failure_count": 0,
+    "dirty_worktree": False,
+    "route": "gi-g4-overworld-v1",
+    "route_sha256": G4_ROUTE_SHA256,
+    "fixture": "hdrtest-static-v1",
+    "fixture_sha256": G4_FIXTURE_SHA256,
+    "settings_id": "native-hdr-fancy-v1",
+    "settings_spec_sha256": G4_SETTINGS_SPEC_SHA256,
+    "settings_sha256": G4_SETTINGS_SHA256,
+    "benchmark_dimension": "minecraft:overworld",
+    "benchmark_player_name": "MetallumBench",
+    "benchmark_player_uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9",
 }
 
 G4_PROFILE_GENERATION = {
@@ -152,19 +187,34 @@ G4_PROFILE_GENERATION = {
     "resolved_interpolation_mode": "off",
 }
 
-G4_CONSOLE_TOKENS = (
+G4_REQUEST_TOKEN = (
+    "GI_G4_TRANSPORT_REQUEST mode=g4_transport g2_capture=true g3_inject=true "
+    "frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false "
+    "image_binding=false diagnostic_only=true release=false status=REQUESTED"
+)
+G4_VALIDATED_TOKEN = (
+    "Benchmark validated: COMPLETE present, no FAIL/screenshots, dropped timing events = 0"
+)
+
+G4_TRANSCRIPT_TOKENS = (
     "Metallum benchmark preflight passed",
     "display: Built-in Retina Display, 3024x1964@120, exclusive fullscreen",
     "pacing: VSync off, maxFps=260",
     "scene: output=scene, source=sRGB, lighting=advanced (true/balanced)",
+    G4_REQUEST_TOKEN,
     "MetalFX: OFF (persistent config remains off)",
     "frames: 600 warmup + 600 measurement",
-    "GI_G4_TRANSPORT_ADMISSION mode=g4_transport g2_capture=true g3_inject=true "
-    "frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false "
-    "image_binding=false diagnostic_only=true release=false status=REQUESTED",
-    "METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=600 "
-    "framebuffer=3024x1964",
-    "Benchmark validated: COMPLETE present, no FAIL/screenshots, dropped timing events = 0",
+    G4_VALIDATED_TOKEN,
+)
+
+G4_ADMISSION_PATTERN = re.compile(
+    r"METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
+    r"requested=g4_transport resolved=g4_transport contract=3 state=READY "
+    r"phase=WARMUP presented_frame=[0-9]+ resources=11 passes=4 "
+    r"dirty=192/192/0/0 injection_dispatches=192 full_volume_rebuilds=1 "
+    r"transport_dispatches=1 field_epoch=1 stale=0 rejected=0 status=PASS "
+    r"field_only=true receiver=false image_binding=false(?=\r?$)",
+    re.MULTILINE,
 )
 
 
@@ -314,6 +364,41 @@ def finite_nonnegative(value: Any, label: str) -> float:
     return result
 
 
+def verify_runtime_identity(metadata: Any, label: str) -> dict[str, str]:
+    value = require_object(metadata, f"{label}.metadata")
+    for key, expected in {
+        "dirty_worktree": False,
+        "route": "gi-g4-overworld-v1",
+        "route_sha256": G4_ROUTE_SHA256,
+        "fixture": "hdrtest-static-v1",
+        "fixture_sha256": G4_FIXTURE_SHA256,
+        "settings_id": "native-hdr-fancy-v1",
+        "settings_spec_sha256": G4_SETTINGS_SPEC_SHA256,
+        "settings_sha256": G4_SETTINGS_SHA256,
+        "benchmark_dimension": "minecraft:overworld",
+        "benchmark_player_name": "MetallumBench",
+        "benchmark_player_uuid": "b07a402a-d8ea-354f-9398-aaf208a798b9",
+    }.items():
+        require_exact_scalar(value, key, expected, f"{label}.metadata")
+    identity: dict[str, str] = {}
+    for key, pattern in {
+        "commit": r"[0-9a-f]{12}",
+        "source_sha256": r"[0-9a-f]{64}",
+        "artifact_sha256": r"[0-9a-f]{64}",
+    }.items():
+        actual = value.get(key)
+        if not isinstance(actual, str) or re.fullmatch(pattern, actual) is None:
+            raise ContractError(f"{label}.metadata.{key} is invalid")
+        identity[key] = actual
+    identity.update({
+        "route_sha256": G4_ROUTE_SHA256,
+        "fixture_sha256": G4_FIXTURE_SHA256,
+        "settings_spec_sha256": G4_SETTINGS_SPEC_SHA256,
+        "settings_sha256": G4_SETTINGS_SHA256,
+    })
+    return identity
+
+
 def verify_profile(metadata: Any, generation: Any, label: str) -> None:
     metadata_object = require_object(metadata, f"{label}.metadata")
     generation_object = require_object(generation, f"{label}.renderer_generation")
@@ -328,24 +413,125 @@ def verify_profile(metadata: Any, generation: Any, label: str) -> None:
         raise ContractError(f"{label} did not prove active HDR headroom")
 
 
-def verify_gi_window(value: Any, label: str) -> dict[str, Any]:
+def verify_startup_profile(metadata: Any, generation: Any, label: str) -> None:
+    metadata_object = require_object(metadata, f"{label}.metadata")
+    generation_object = require_object(generation, f"{label}.renderer_generation")
+    for key, expected in {
+        "device_name": "Apple M1 Pro",
+        "monitor": "Built-in Retina Display",
+        "display_sync_enabled": False,
+        "scaler_active": False,
+        "persistent_metalfx_mode": "off",
+        "global_illumination_mode": "g4_transport",
+        "graphics_preset": "fancy",
+        "benchmark_simulation_frozen": True,
+        "native_shader_library_mode": "PRECOMPILED",
+        "native_shader_source_compile_count": 0,
+        "native_pipeline_failure_count": 0,
+    }.items():
+        require_exact_scalar(metadata_object, key, expected, f"{label}.metadata")
+    for key, expected in G4_PROFILE_GENERATION.items():
+        require_exact_scalar(
+            generation_object, key, expected, f"{label}.renderer_generation"
+        )
+
+
+def verify_zero_reason_counters(gi: dict[str, Any], label: str) -> None:
+    for reason_kind in ("reset_reasons", "fallback_reasons"):
+        reasons = require_object(
+            gi.get(reason_kind), f"{label}.global_illumination.{reason_kind}"
+        )
+        if not reasons or any(
+            isinstance(count, bool) or not isinstance(count, int) or count != 0
+            for count in reasons.values()
+        ):
+            raise ContractError(f"{label} contains a G4 {reason_kind[:-1]}")
+
+
+def verify_gi_shape(value: Any, label: str) -> dict[str, Any]:
     gi = require_object(value, f"{label}.global_illumination")
     require_exact_scalar(gi, "mode", "active", f"{label}.global_illumination")
+    for key, expected in {
+        "contract_version": 3,
+        "resource_count": 11,
+        "pass_count": 4,
+        "binding_count": 0,
+        "shader_symbol_count": 0,
+        "dirty_discarded_total": 0,
+        "stale_cell_rejects": 0,
+    }.items():
+        require_exact_scalar(gi, key, expected, f"{label}.global_illumination")
+    require_exact_scalar(
+        gi, "allocated_bytes", G4_NATIVE_ALLOCATED_BYTES,
+        f"{label}.global_illumination",
+    )
+    require_exact_scalar(
+        gi, "resident_bytes", G4_NATIVE_RESIDENT_BYTES,
+        f"{label}.global_illumination",
+    )
+    verify_zero_reason_counters(gi, label)
+    return gi
+
+
+def verify_startup_gi_window(value: Any, label: str) -> dict[str, Any]:
+    gi = verify_gi_shape(value, label)
+    queued = gi.get("dirty_queued_total")
+    completed = gi.get("dirty_completed_total")
+    pending = gi.get("dirty_pending")
+    injection = gi.get("injection_dispatches")
+    rebuilds = gi.get("full_volume_rebuilds")
+    if type(queued) is not int or queued not in (0, 192) \
+            or type(completed) is not int or not 0 <= completed <= queued \
+            or type(pending) is not int or pending != queued - completed \
+            or type(injection) is not int or injection != completed \
+            or type(rebuilds) is not int or rebuilds != (1 if queued else 0) \
+            or gi.get("transport_dispatches") != 0 \
+            or gi.get("field_epoch") != 0 \
+            or gi.get("valid_probes") != 0:
+        raise ContractError(f"{label} contains invalid G4 startup progression")
+    for key in ("source_epoch", "probe_epoch"):
+        epoch = gi.get(key)
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise ContractError(
+                f"{label}.global_illumination.{key} must be an integer >= 0"
+            )
+    if queued == 0 and (gi["source_epoch"] != 0 or gi["probe_epoch"] != 0):
+        raise ContractError(f"{label} published epochs before G3 population")
+    return gi
+
+
+def verify_gi_window(value: Any, label: str) -> dict[str, Any]:
+    gi = verify_gi_shape(value, label)
     for key, expected in G4_EXACT_GI_COUNTERS.items():
         require_exact_scalar(gi, key, expected, f"{label}.global_illumination")
     for key in ("source_epoch", "probe_epoch"):
         epoch = gi.get(key)
         if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch <= 0:
             raise ContractError(f"{label}.global_illumination.{key} must be positive")
-    fallbacks = require_object(
-        gi.get("fallback_reasons"), f"{label}.global_illumination.fallback_reasons"
-    )
-    if not fallbacks or any(
-        isinstance(count, bool) or not isinstance(count, int) or count != 0
-        for count in fallbacks.values()
-    ):
-        raise ContractError(f"{label} contains a G4 fallback reason")
+    valid = gi.get("valid_probes")
+    if type(valid) is not int or not 0 < valid <= 32 * 32 * 32:
+        raise ContractError(f"{label}.global_illumination contains no valid surface probes")
     return gi
+
+
+def verify_inject_stage(value: Any, label: str) -> int:
+    stage = require_object(value, label)
+    expected_keys = {
+        "frames", "average_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms",
+    }
+    frames = stage.get("frames")
+    if set(stage) != expected_keys or type(frames) is not int or frames <= 0:
+        raise ContractError(f"{label} has an invalid active-frame count")
+    metrics = {
+        key: finite_nonnegative(stage.get(key), f"{label}.{key}")
+        for key in ("average_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms")
+    }
+    if metrics["average_ms"] > metrics["maximum_ms"] or not (
+        metrics["p50_ms"] <= metrics["p95_ms"]
+        <= metrics["p99_ms"] <= metrics["maximum_ms"]
+    ):
+        raise ContractError(f"{label} timing distribution is not monotonic")
+    return frames
 
 
 def verify_transport_stage(value: Any, label: str) -> dict[str, float]:
@@ -371,42 +557,101 @@ def verify_transport_stage(value: Any, label: str) -> dict[str, float]:
 
 
 def derive_runtime_results(windows: list[dict[str, Any]]) -> tuple[dict[str, Any], int]:
+    startup: list[dict[str, Any]] = []
     warmup: list[dict[str, Any]] = []
     measured: list[dict[str, Any]] = []
     transport_timings: list[dict[str, float]] = []
+    injection_timed_frames = 0
     measured_gi: list[dict[str, Any]] = []
+    final_gi: list[dict[str, Any]] = []
+    previous_startup: dict[str, Any] | None = None
+    frozen_startup_epochs: tuple[int, int] | None = None
+    runtime_identity: dict[str, str] | None = None
+    previous_phase = -1
+    phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
 
     for index, window in enumerate(windows, 1):
         label = f"G4 raw window {index}"
         require_exact_scalar(window, "schema_version", 6, label)
         require_exact_scalar(window, "detail_enabled", True, label)
         require_exact_scalar(window, "dropped_timing_events", 0, label)
-        verify_profile(window.get("metadata"), window.get("renderer_generation"), label)
-        gi = verify_gi_window(window.get("global_illumination"), label)
         benchmark = require_object(window.get("benchmark"), f"{label}.benchmark")
         phase = benchmark.get("phase")
         if phase not in {"startup", "warmup", "measure"}:
             raise ContractError(f"{label}.benchmark.phase is not a recognized phase")
+        if phase_rank[phase] < previous_phase:
+            raise ContractError(f"{label}.benchmark phases are out of order")
+        previous_phase = phase_rank[phase]
         require_exact_scalar(benchmark, "enabled", True, f"{label}.benchmark")
-        require_exact_scalar(benchmark, "scaler_mode", "OFF", f"{label}.benchmark")
-        generation = benchmark.get("generation")
-        if isinstance(generation, bool) or not isinstance(generation, int) \
-                or generation < 0:
-            raise ContractError(f"{label}.benchmark.generation must be an integer >= 0")
+        require_exact_scalar(
+            benchmark, "scaler_mode", "UNKNOWN" if phase == "startup" else "OFF",
+            f"{label}.benchmark",
+        )
+        require_exact_scalar(
+            benchmark, "generation", {"startup": 0, "warmup": 1, "measure": 2}[phase],
+            f"{label}.benchmark",
+        )
         require_exact_scalar(
             benchmark, "segment_index", -1 if phase == "startup" else 0,
             f"{label}.benchmark",
         )
         stages = require_object(window.get("stages"), f"{label}.stages")
+        inject_stage = stages.get("GI_INJECT")
         transport_stage = stages.get("GI_TRANSPORT")
 
-        if phase in {"warmup", "measure"}:
+        if phase == "startup":
+            verify_startup_profile(
+                window.get("metadata"), window.get("renderer_generation"), label
+            )
+            gi = verify_startup_gi_window(window.get("global_illumination"), label)
+            startup.append(window)
+            if transport_stage is not None:
+                raise ContractError("GI_TRANSPORT timing must occur only during warmup")
+            if previous_startup is not None:
+                for key in (
+                    "dirty_queued_total", "dirty_completed_total",
+                    "injection_dispatches", "full_volume_rebuilds",
+                    "source_epoch", "probe_epoch",
+                ):
+                    if gi[key] < previous_startup[key]:
+                        raise ContractError(
+                            f"G4 startup progression regressed: {key}"
+                        )
+            previous_startup = gi
+            if gi["dirty_completed_total"] > 0 \
+                    or gi["source_epoch"] > 0 or gi["probe_epoch"] > 0:
+                epochs = (gi["source_epoch"], gi["probe_epoch"])
+                if min(epochs) <= 0:
+                    raise ContractError("G4 populated startup epochs are not positive")
+                if frozen_startup_epochs is None:
+                    frozen_startup_epochs = epochs
+                elif epochs != frozen_startup_epochs:
+                    raise ContractError("G4 startup source/probe epoch drifted")
+        else:
+            verify_profile(window.get("metadata"), window.get("renderer_generation"), label)
+            gi = verify_gi_window(window.get("global_illumination"), label)
+            if inject_stage is not None:
+                raise ContractError("GI_INJECT timing must occur only during G4 startup")
+            final_gi.append(gi)
             frames = window.get("presented_frames")
             if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
                 raise ContractError(f"{label}.presented_frames must be a positive integer")
             (warmup if phase == "warmup" else measured).append(window)
             if phase == "measure":
                 measured_gi.append(gi)
+
+        identity = verify_runtime_identity(window.get("metadata"), label)
+        if runtime_identity is None:
+            runtime_identity = identity
+        elif identity != runtime_identity:
+            raise ContractError("G4 source/route/settings identity drifted between windows")
+
+        if inject_stage is not None:
+            if phase != "startup":
+                raise ContractError("GI_INJECT timing must occur only during G4 startup")
+            injection_timed_frames += verify_inject_stage(
+                inject_stage, f"{label}.stages.GI_INJECT"
+            )
 
         if transport_stage is not None:
             if phase != "warmup":
@@ -415,14 +660,36 @@ def derive_runtime_results(windows: list[dict[str, Any]]) -> tuple[dict[str, Any
                 verify_transport_stage(transport_stage, f"{label}.stages.GI_TRANSPORT")
             )
 
-    if sum(window["presented_frames"] for window in warmup) != 600:
-        raise ContractError("G4 raw receipt must contain exactly 600 warmup frames")
-    if sum(window["presented_frames"] for window in measured) != 600:
-        raise ContractError("G4 raw receipt must contain exactly 600 measured frames")
+    if len(startup) < 2 \
+            or any(window.get("presented_frames") != G4_REPORT_FRAMES for window in startup) \
+            or sum(window["presented_frames"] for window in startup) < 600:
+        raise ContractError(
+            "G4 raw receipt must contain at least 600 startup frames in 300-frame windows"
+        )
+    if len(warmup) != 2 \
+            or any(window.get("presented_frames") != G4_REPORT_FRAMES for window in warmup):
+        raise ContractError("G4 raw receipt must contain exactly two 300-frame warmup windows")
+    if len(measured) != 2 \
+            or any(window.get("presented_frames") != G4_REPORT_FRAMES for window in measured):
+        raise ContractError("G4 raw receipt must contain exactly two 300-frame measure windows")
+    if injection_timed_frames != G4_INJECT_ACTIVE_FRAMES:
+        raise ContractError("G4 raw receipt must contain exactly 24 startup GI_INJECT active frames")
     if len(transport_timings) != 1:
         raise ContractError("G4 raw receipt must contain one warmup-only GI_TRANSPORT timing")
     if not measured_gi:
         raise ContractError("G4 raw receipt contains no measured GI telemetry")
+
+    for key in ("source_epoch", "probe_epoch"):
+        values = [gi[key] for gi in final_gi]
+        if min(values) != max(values):
+            raise ContractError(f"G4 final epoch drifted after warmup: {key}")
+    if frozen_startup_epochs is None:
+        raise ContractError("G4 raw receipt never exposed its frozen startup epochs")
+    if any(
+        (gi["source_epoch"], gi["probe_epoch"]) != frozen_startup_epochs
+        for gi in final_gi
+    ):
+        raise ContractError("G4 final epochs differ from frozen startup")
 
     stable_keys = (
         "dirty_queued_total", "dirty_completed_total", "dirty_discarded_total",
@@ -436,6 +703,8 @@ def derive_runtime_results(windows: list[dict[str, Any]]) -> tuple[dict[str, Any
             raise ContractError(f"G4 measured counter grew during measurement: {key}")
 
     timing = transport_timings[0]
+    if runtime_identity is None:
+        raise ContractError("G4 raw receipt contains no runtime identity")
     return {
         "builds": max(gi["full_volume_rebuilds"] for gi in measured_gi),
         "transport_dispatches": max(gi["transport_dispatches"] for gi in measured_gi),
@@ -447,6 +716,7 @@ def derive_runtime_results(windows: list[dict[str, Any]]) -> tuple[dict[str, Any
         "renderer_fallbacks": 0,
         "gi_transport_p95_ms": timing["p95_ms"],
         "gi_transport_maximum_ms": timing["maximum_ms"],
+        **runtime_identity,
     }, len(measured)
 
 
@@ -464,6 +734,9 @@ def verify_summary_receipt(
             or "phase=measure segment=0 scaler=OFF" not in selection:
         raise ContractError("G4 summary measurement selection differs")
     verify_profile(summary.get("metadata"), summary.get("renderer_generation"), label)
+    summary_identity = verify_runtime_identity(summary.get("metadata"), label)
+    for key, expected in summary_identity.items():
+        require_exact_scalar(results, key, expected, "G4 raw-derived results")
 
     gi = require_object(summary.get("global_illumination"), f"{label}.global_illumination")
     require_exact_scalar(gi, "mode", "active", f"{label}.global_illumination")
@@ -483,14 +756,35 @@ def verify_summary_receipt(
                 aggregate, aggregate_key, expected,
                 f"{label}.global_illumination.counters.{key}",
             )
+    for key, expected in {
+        "allocated_bytes": G4_NATIVE_ALLOCATED_BYTES,
+        "resident_bytes": G4_NATIVE_RESIDENT_BYTES,
+    }.items():
+        aggregate = require_object(
+            counters.get(key), f"{label}.global_illumination.counters.{key}"
+        )
+        for aggregate_key in ("window_minimum", "window_maximum", "last_window"):
+            require_exact_scalar(
+                aggregate, aggregate_key, expected,
+                f"{label}.global_illumination.counters.{key}",
+            )
+    valid_probes = require_object(
+        counters.get("valid_probes"),
+        f"{label}.global_illumination.counters.valid_probes",
+    )
+    if type(valid_probes.get("window_minimum")) is not int \
+            or valid_probes["window_minimum"] <= 0:
+        raise ContractError("G4 summary contains no valid surface probes")
     fallbacks = require_object(
         gi.get("fallback_reasons"), f"{label}.global_illumination.fallback_reasons"
     )
     if not fallbacks or any(type(count) is not int or count != 0 for count in fallbacks.values()):
         raise ContractError("G4 summary contains a renderer/GI fallback")
     stages = summary.get("stages", {})
-    if not isinstance(stages, dict) or stages.get("GI_TRANSPORT") is not None:
-        raise ContractError("G4 measured summary contains GI_TRANSPORT work")
+    if not isinstance(stages, dict) \
+            or stages.get("GI_INJECT") is not None \
+            or stages.get("GI_TRANSPORT") is not None:
+        raise ContractError("G4 measured summary contains GI injection/transport work")
     if results["measured_dispatch_growth"] != 0:
         raise ContractError("G4 measured dispatch growth is not zero")
 
@@ -498,18 +792,132 @@ def verify_summary_receipt(
 def verify_console_receipt(console_text: str) -> None:
     if not console_text.strip():
         raise ContractError("G4 console artifact is empty")
-    if "METALLUM_BENCHMARK EVENT=FAIL" in console_text:
-        raise ContractError("G4 console contains a benchmark FAIL event")
-    for token in G4_CONSOLE_TOKENS:
-        if token not in console_text:
-            raise ContractError(f"G4 console admission/profile token is missing: {token}")
+    for token in (
+        "METALLUM_BENCHMARK EVENT=FAIL",
+        "Metal command buffer failed",
+        "GPU timing sample invalid",
+        "BUILD FAILED",
+    ):
+        if token in console_text:
+            raise ContractError(f"G4 console contains a failure token: {token}")
+
+
+def verify_transcript_receipt(
+    transcript_text: str,
+    identity: dict[str, Any] | None = None,
+    stem: str | None = None,
+) -> None:
+    if not transcript_text.strip():
+        raise ContractError("G4 transcript artifact is empty")
+    for token in G4_TRANSCRIPT_TOKENS:
+        if token not in transcript_text:
+            raise ContractError(f"G4 transcript token is missing: {token}")
+    for token, label in (
+        (G4_REQUEST_TOKEN, "G4 request"),
+        (G4_VALIDATED_TOKEN, "validated COMPLETE"),
+    ):
+        if transcript_text.count(token) != 1:
+            raise ContractError(f"G4 transcript must contain one exact {label} marker")
+    if "GI_G4_TRANSPORT_ADMISSION" in transcript_text:
+        raise ContractError("G4 transcript contains the obsolete launcher request token")
+    if "METALLUM_BENCHMARK EVENT=FAIL" in transcript_text:
+        raise ContractError("G4 transcript contains a benchmark FAIL event")
+    positions = [transcript_text.index(token) for token in G4_TRANSCRIPT_TOKENS]
+    if positions != sorted(positions) or len(set(positions)) != len(positions):
+        raise ContractError("G4 transcript markers are out of order")
+    if identity is not None:
+        for token in (
+            f"settings: native-hdr-fancy-v1 ({identity['settings_sha256']}; "
+            f"spec {identity['settings_spec_sha256']})",
+            f"route: gi-g4-overworld-v1 ({identity['route_sha256']})",
+            f"fixture: hdrtest-static-v1 ({identity['fixture_sha256']}, read-only)",
+            f"commit: {identity['commit']} (clean worktree state)",
+            f"source: {identity['source_sha256']}",
+        ):
+            if transcript_text.count(token) != 1:
+                raise ContractError(f"G4 transcript identity token differs: {token}")
+    if stem is not None:
+        for suffix, label, expected_count in (
+            (".raw.jsonl", "raw report", 1),
+            (".summary.json", "summary", 1),
+            (".minecraft.log", "Minecraft log", 1),
+            (".console.log", "console log", 1),
+            (".transcript.log", "transcript", 2),
+        ):
+            pattern = re.compile(
+                rf"(?:^|\n)(?:  )?{re.escape(label)}: [^\r\n]*/"
+                rf"{re.escape(stem + suffix)}(?:\r?$)",
+                re.MULTILINE,
+            )
+            if len(pattern.findall(transcript_text)) != expected_count:
+                raise ContractError(
+                    f"G4 transcript does not bind the exact {label} artifact stem"
+                )
+
+
+def verify_minecraft_receipt(minecraft_text: str) -> None:
+    if not minecraft_text.strip():
+        raise ContractError("G4 Minecraft log artifact is empty")
+    if "METALLUM_BENCHMARK EVENT=FAIL" in minecraft_text:
+        raise ContractError("G4 Minecraft log contains a benchmark FAIL event")
     admission_pattern = re.compile(
         r"METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION "
         r"expected=advanced schema=5 defaults_used=false requested=advanced "
-        r"resolved=advanced l3=true l5=true l6=true status=PASS(?: [^\n]*)?"
+        r"resolved=advanced l3=true l5=true l6=true status=PASS "
+        r"generation=[1-9][0-9]* shader_epoch=[1-9][0-9]* reason=none(?=\r?$)",
+        re.MULTILINE,
     )
-    if len(admission_pattern.findall(console_text)) != 1:
-        raise ContractError("G4 console must contain one exact Advanced admission PASS")
+    if minecraft_text.count("METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION ") != 1 \
+            or len(admission_pattern.findall(minecraft_text)) != 1:
+        raise ContractError("G4 Minecraft log must contain one exact Advanced admission PASS")
+
+    admission_prefix = "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
+    if minecraft_text.count(admission_prefix) != 1 \
+            or len(G4_ADMISSION_PATTERN.findall(minecraft_text)) != 1:
+        raise ContractError("G4 Minecraft log must contain one exact G4 admission PASS")
+    prepare_pattern = re.compile(
+        r"METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
+        r"route=gi-g4-overworld-v1 stable_frames=[1-9][0-9]* "
+        r"candidates=0 status=PASS(?=\r?$)",
+        re.MULTILINE,
+    )
+    prepare_prefix = "METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
+    source_receipt = (
+        "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT "
+        "active_frames=24 drain_frames=300 status=PASS"
+    )
+    if minecraft_text.count(prepare_prefix) != 1 \
+            or len(prepare_pattern.findall(minecraft_text)) != 1 \
+            or minecraft_text.count(source_receipt) != 1:
+        raise ContractError("G4 Minecraft log does not prove frozen G3 startup admission")
+    segment = (
+        "METALLUM_BENCHMARK EVENT=SEGMENT_START index=1 total=1 mode=OFF "
+        "warmup=600 measure=600"
+    )
+    measure = (
+        "METALLUM_BENCHMARK EVENT=MEASURE_START index=1 mode=OFF "
+        "presented_frame=600"
+    )
+    complete = (
+        "METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=600 "
+        "framebuffer=3024x1964"
+    )
+    for token, label in (
+        (segment, "SEGMENT_START"),
+        (measure, "MEASURE_START"),
+        (complete, "COMPLETE"),
+    ):
+        if minecraft_text.count(token) != 1:
+            raise ContractError(f"G4 Minecraft log must contain one exact {label} marker")
+    if not (
+        minecraft_text.index(prepare_prefix)
+        < minecraft_text.index(source_receipt)
+        < minecraft_text.index(segment)
+        < minecraft_text.index(admission_prefix)
+        < minecraft_text.index(measure)
+        < minecraft_text.index(complete)
+    ):
+        raise ContractError("G4 admission marker is outside the warmup boundary")
 
 
 def recompute_summary(root: Path, raw_path: Path) -> dict[str, Any]:
@@ -537,7 +945,9 @@ def verify_runtime_receipt(
     root: Path,
     raw_path: Path,
     summary_path: Path,
+    minecraft_path: Path,
     console_path: Path,
+    transcript_path: Path,
     *,
     canonical_report_validation: bool = True,
 ) -> dict[str, Any]:
@@ -545,21 +955,27 @@ def verify_runtime_receipt(
         raise ContractError("G4 raw artifact must use the .raw.jsonl suffix")
     stem = raw_path.name[:-len(".raw.jsonl")]
     if summary_path != raw_path.with_name(stem + ".summary.json") \
-            or console_path != raw_path.with_name(stem + ".console.log"):
-        raise ContractError("G4 raw/summary/console artifacts must share one exact stem")
+            or minecraft_path != raw_path.with_name(stem + ".minecraft.log") \
+            or console_path != raw_path.with_name(stem + ".console.log") \
+            or transcript_path != raw_path.with_name(stem + ".transcript.log"):
+        raise ContractError("G4 runtime artifacts must share one exact stem")
 
     windows = strict_json_lines(raw_path)
     summary = strict_object(summary_path)
     results, measured_window_count = derive_runtime_results(windows)
     verify_summary_receipt(summary, results, measured_window_count)
+    verify_minecraft_receipt(minecraft_path.read_text(encoding="utf-8"))
     verify_console_receipt(console_path.read_text(encoding="utf-8"))
+    verify_transcript_receipt(
+        transcript_path.read_text(encoding="utf-8"), results, stem,
+    )
 
     if canonical_report_validation:
         recomputed = recompute_summary(root, raw_path)
         supplied_report = summary.get("report")
         recomputed_report = recomputed.get("report")
         if not isinstance(supplied_report, str) or not isinstance(recomputed_report, str) \
-                or Path(supplied_report).resolve() != raw_path.resolve() \
+                or Path(supplied_report).name != raw_path.name \
                 or Path(recomputed_report).resolve() != raw_path.resolve():
             raise ContractError("G4 summary does not identify the exact raw artifact")
         supplied = dict(summary)
@@ -789,12 +1205,23 @@ def verify_evidence(root: Path, evidence: dict[str, Any]) -> None:
             raise ContractError("pending G4 evidence must not claim runtime artifacts or results")
     else:
         artifacts = tier.get("artifacts")
-        if not isinstance(artifacts, dict) or set(artifacts) != {"raw", "summary", "console_log"}:
+        if not isinstance(artifacts, dict) or set(artifacts) != {
+            "raw", "summary", "minecraft_log", "console_log", "transcript_log",
+        }:
             raise ContractError("G4 runtime artifact set differs")
         raw_path = required_artifact(root, artifacts["raw"], "raw")
         summary_path = required_artifact(root, artifacts["summary"], "summary")
+        minecraft_path = required_artifact(
+            root, artifacts["minecraft_log"], "minecraft_log"
+        )
         console_path = required_artifact(root, artifacts["console_log"], "console_log")
-        derived = verify_runtime_receipt(root, raw_path, summary_path, console_path)
+        transcript_path = required_artifact(
+            root, artifacts["transcript_log"], "transcript_log"
+        )
+        derived = verify_runtime_receipt(
+            root, raw_path, summary_path, minecraft_path, console_path,
+            transcript_path,
+        )
         verify_declared_runtime_results(tier.get("results"), derived)
 
     limitations = evidence.get("limitations")
@@ -826,6 +1253,9 @@ def verify_source_contract(root: Path) -> None:
     frame_graph = source(root, "src/main/java/com/metallum/client/metal/render/framegraph/GiTransportFrameGraph.java")
     command_encoder = source(root, "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java")
     device = source(root, "src/main/java/com/metallum/client/metal/render/MetalDevice.java")
+    benchmark_controller = source(
+        root, "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java"
+    )
     timing = source(root, "src/main/java/com/metallum/client/metal/render/MetalGpuTimingStage.java")
     bridge = source(root, "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java")
     native = source(root, "src/main/native/MetallumNative.swift")
@@ -833,6 +1263,7 @@ def verify_source_contract(root: Path) -> None:
     gradle = source(root, "build.gradle")
     launcher = source(root, "scripts/run_metal_benchmark.sh")
     release_guard = source(root, "tools/gi_release_contract_guard.sh")
+    runner_test = source(root, "tools/test_gi_g4_runner_contract.sh")
     release_guard_test = source(root, "tools/test_gi_release_contract_guard.sh")
     reporter = source(root, "tools/metal_benchmark_report.py")
     gpu_validation = source(
@@ -886,9 +1317,14 @@ def verify_source_contract(root: Path) -> None:
         "public @Nullable TransportSource transportSource()",
         "public static final class TransportSource", "private TransportSource(",
         "TransportSourceIdentity",
-        "queue.completed() != GiDirectSourceLayout.TOTAL_BRICKS",
-        "queue.pending() != 0", "queue.discarded() != 0L",
+        "GiDirectDirtyQueue.EpochTelemetry epochQueue",
+        "isSettledTransportSource(epochQueue)",
+        "queue.completed() == GiDirectSourceLayout.TOTAL_BRICKS",
+        "queue.pending() == 0", "queue.discarded() == 0L",
         "!stats.ready()", "stats.buildInFlight()", "transportContextHandle()",
+        "public static final class TelemetrySource", "attachTransportTelemetry",
+        "metallum_gi_transport_attach_telemetry_v1",
+        "STATUS_FROZEN_INPUT_DRIFT", "FROZEN_INPUT_SETTLE_FRAMES",
     ), "G4 completed-G3 admission")
     require_tokens(direct_resources, (
         "public static final long JAVA_PERSISTENT_PACKET_BYTES = HEADER_BYTES",
@@ -897,6 +1333,13 @@ def verify_source_contract(root: Path) -> None:
     require_tokens(gpu_validation, (
         "GiDirectSourceGpuResources.JAVA_PERSISTENT_PACKET_BYTES",
         "== 70_216L", "GiTransportLayout.JAVA_PERSISTENT_PACKET_BYTES == 524_608L",
+        "validateAttachmentLifecycle", "g4-attach-wrong-thread",
+        "forged G3 telemetry capability was admitted",
+        "idempotent owner G4 telemetry attachment failed",
+        "second live G4 attachment was admitted",
+        "released G3 telemetry capability was admitted",
+        "G4 admitted a G3 owner from a different command queue",
+        "G4 pre-dispatch release attachment failed",
     ), "G3/G4 persistent Java packet census")
     require_tokens(environment_source, (
         "Allocation-free digest for observing whether a latched G4 source became stale",
@@ -929,7 +1372,19 @@ def verify_source_contract(root: Path) -> None:
         "GiTransportRuntime.isRequested()", "GiTransportFrameGraph.initialize()",
         "GiTransportGpuResources.validateNativeAbi()", "encodeGiTransport",
         "this.giTransportCoordinator = new GiTransportCoordinator(",
+        "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION ",
+        "requested=g4_transport resolved=g4_transport",
+        "status=PASS", "GiTransportRuntime.isBenchmarkWarmup()",
     ), "G4 MetalDevice structural admission")
+    require_tokens(benchmark_controller, (
+        "GiTransportRuntime.beginSourcePreparation()",
+        "GiTransportRuntime.beginBenchmarkWarmup()",
+        "GiTransportRuntime.beginBenchmarkMeasurement()",
+        "GiTransportRuntime.isResolvedReady()",
+        "G4_SOURCE_RECEIPT_FRAMES = 300",
+        "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT",
+        "G4 transport did not resolve READY before measurement",
+    ), "G4 benchmark phase admission")
 
     require_tokens(timing, ("GI_TRANSPORT(21)", "PROFILED_STAGE_COUNT = 22"),
                    "G4 Java timing ABI")
@@ -937,7 +1392,20 @@ def verify_source_contract(root: Path) -> None:
         "METALLUM_GI_G4_TRANSPORT", "RELEASE_PROFILE_CANDIDATE",
         "metallum_require_release_gi_off",
         'RELEASE_ARG=--release-contract',
+        "GI_G4_TRANSPORT_REQUEST", 'TRANSCRIPT_LOG="$OUTPUT_DIR/$stem.transcript.log"',
+        'pipeline_status=("${PIPESTATUS[@]}")', "g4_admission_prefix",
+        'require_value "$ROUTE_ID" "gi-g4-overworld-v1"',
+        G4_ROUTE_SHA256, G4_SETTINGS_SPEC_SHA256, G4_SETTINGS_SHA256,
+        "G4 Tier B evidence requires a clean worktree",
     ), "G4 benchmark launcher marker")
+    reject_tokens(launcher, (
+        "GI_G4_TRANSPORT_ADMISSION mode=g4_transport",
+    ), "G4 benchmark launcher request marker")
+    require_tokens(runner_test, (
+        "bash -n", "gi-g4-overworld-v1", "timeout_frames", "PIPESTATUS",
+        "segment_start_line", "g4_admission_line", "measure_start_line",
+        "G4 Tier B evidence requires a clean worktree",
+    ), "G4 benchmark launcher contract test")
     require_tokens(release_guard, (
         "metallum_require_release_gi_off", '"$release_candidate" -eq 1',
         '"$gi_g2" -ne 0', '"$gi_g3" -ne 0', '"$gi_g4" -ne 0',
@@ -946,7 +1414,10 @@ def verify_source_contract(root: Path) -> None:
         "expect_reject 1 1 0 0", "expect_reject 1 0 1 0",
         "expect_reject 1 0 0 1", "expect_accept 1 0 0 0",
     ), "G4 release-contract guard test")
-    require_tokens(reporter, ('GI_TRANSPORT_STAGE = "GI_TRANSPORT"',),
+    require_tokens(reporter, (
+        'GI_TRANSPORT_STAGE = "GI_TRANSPORT"', "_validate_g4_window_phase",
+        "_validate_g4_report", "G4_FINAL_COUNTERS", "G4_INJECT_ACTIVE_FRAMES",
+    ),
                    "G4 benchmark report marker")
     require_tokens(frame_graph_tests, (
         'init.accesses().equals(List.of(', 'transport.accesses().equals(List.of(',
@@ -956,18 +1427,21 @@ def verify_source_contract(root: Path) -> None:
     require_tokens(gradle, (
         'GiTransport: layout.projectDirectory.file("src/main/metal/MetallumGiTransport.metal")',
         'tasks.register("giG4TransportContractTest", Exec)',
+        'tasks.register("giG4RunnerContractTest", Exec)',
         'tasks.register("giSemanticTransportFieldUnitTest", JavaExec)',
         'tasks.register("giTransportCpuUnitTest", JavaExec)',
         'tasks.register("giTransportSourceChainUnitTest", JavaExec)',
         'tasks.register("giTransportGpuValidationSource", JavaExec)',
         'tasks.register("giTransportGpuValidationBundled", JavaExec)',
         'tasks.register("giReleaseContractGuardTest", Exec)',
+        'dependsOn(tasks.named("giG4RunnerContractTest"))',
         'mainClass.set("com.metallum.client.gi.source.GiTransportGpuValidation")',
     ), "G4 shader build input")
 
     for symbol in (
             "metallum_gi_transport_abi_version_v1", "metallum_gi_transport_layout_v1",
             "metallum_gi_transport_create_context_v1", "metallum_gi_transport_encode_frozen_v1",
+            "metallum_gi_transport_attach_telemetry_v1",
             "metallum_gi_transport_await_ready_v1", "metallum_gi_transport_get_stats_v1",
             "metallum_gi_transport_report_stale_v1",
             "metallum_gi_transport_capture_volume_once_v1",
@@ -1039,7 +1513,13 @@ def self_test_receipt_validator() -> None:
             "explicit", "device_reset",
         )
     }
-    metadata = {**G4_PROFILE_METADATA, "current_edr_headroom": 8.0}
+    metadata = {
+        **G4_PROFILE_METADATA,
+        "current_edr_headroom": 8.0,
+        "commit": "1" * 12,
+        "source_sha256": "2" * 64,
+        "artifact_sha256": "3" * 64,
+    }
     generation = dict(G4_PROFILE_GENERATION)
     gi = {
         "mode": "active",
@@ -1061,8 +1541,40 @@ def self_test_receipt_validator() -> None:
         "p99_ms": 0.35,
         "maximum_ms": 0.36,
     }
+    injection_timing = {
+        "frames": G4_INJECT_ACTIVE_FRAMES,
+        "average_ms": 0.08,
+        "p50_ms": 0.07,
+        "p95_ms": 0.11,
+        "p99_ms": 0.12,
+        "maximum_ms": 0.13,
+    }
 
-    def window(phase: str, stage: dict[str, Any] | None = None) -> dict[str, Any]:
+    def startup_gi(completed: int) -> dict[str, Any]:
+        value = copy.deepcopy(gi)
+        queued = 0 if completed == 0 else 192
+        value.update({
+            "source_epoch": 0 if queued == 0 else 17,
+            "probe_epoch": 0 if queued == 0 else 19,
+            "dirty_queued_total": queued,
+            "dirty_completed_total": completed,
+            "dirty_discarded_total": 0,
+            "dirty_pending": queued - completed,
+            "injection_dispatches": completed,
+            "full_volume_rebuilds": 0 if queued == 0 else 1,
+            "transport_dispatches": 0,
+            "field_epoch": 0,
+            "valid_probes": 0,
+            "unknown_probes": 0,
+        })
+        return value
+
+    def window(
+        phase: str,
+        stage: dict[str, Any] | None = None,
+        inject_stage: dict[str, Any] | None = None,
+        gi_value: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             "schema_version": 6,
             "detail_enabled": True,
@@ -1070,18 +1582,27 @@ def self_test_receipt_validator() -> None:
             "dropped_timing_events": 0,
             "benchmark": {
                 "enabled": True,
-                "generation": 1 if phase == "warmup" else 2,
+                "generation": {"startup": 0, "warmup": 1, "measure": 2}[phase],
                 "phase": phase,
-                "segment_index": 0,
-                "scaler_mode": "OFF",
+                "segment_index": -1 if phase == "startup" else 0,
+                "scaler_mode": "UNKNOWN" if phase == "startup" else "OFF",
             },
             "metadata": copy.deepcopy(metadata),
             "renderer_generation": copy.deepcopy(generation),
-            "global_illumination": copy.deepcopy(gi),
-            "stages": {"GI_TRANSPORT": copy.deepcopy(stage)},
+            "global_illumination": copy.deepcopy(gi_value or gi),
+            "stages": {
+                "GI_INJECT": copy.deepcopy(inject_stage),
+                "GI_TRANSPORT": copy.deepcopy(stage),
+            },
         }
 
     windows = [
+        window("startup", gi_value=startup_gi(0)),
+        window("startup", gi_value=startup_gi(0)),
+        window(
+            "startup", inject_stage=injection_timing,
+            gi_value=startup_gi(G4_EXACT_GI_COUNTERS["dirty_completed_total"]),
+        ),
         window("warmup", timing), window("warmup"),
         window("measure"), window("measure"),
     ]
@@ -1094,6 +1615,16 @@ def self_test_receipt_validator() -> None:
         for key, expected in G4_EXACT_GI_COUNTERS.items()
         if key != "contract_version"
     }
+    for key, expected in {
+        "allocated_bytes": G4_NATIVE_ALLOCATED_BYTES,
+        "resident_bytes": G4_NATIVE_RESIDENT_BYTES,
+        "valid_probes": gi["valid_probes"],
+    }.items():
+        counters[key] = {
+            "window_minimum": expected,
+            "window_maximum": expected,
+            "last_window": expected,
+        }
     summary = {
         "selection": "schema-v2+ phase=measure segment=0 scaler=OFF generation=2",
         "presented_frames": 600,
@@ -1112,10 +1643,49 @@ def self_test_receipt_validator() -> None:
         },
         "stages": {},
     }
-    console = "\n".join((*G4_CONSOLE_TOKENS,
+    console = "Gradle 9\nBUILD SUCCESSFUL in 1m\n"
+    transcript = "\n".join((
+        G4_TRANSCRIPT_TOKENS[0],
+        G4_TRANSCRIPT_TOKENS[1],
+        G4_TRANSCRIPT_TOKENS[2],
+        G4_TRANSCRIPT_TOKENS[3],
+        G4_REQUEST_TOKEN,
+        f"  settings: native-hdr-fancy-v1 ({G4_SETTINGS_SHA256}; "
+        f"spec {G4_SETTINGS_SPEC_SHA256})",
+        G4_TRANSCRIPT_TOKENS[5],
+        f"  route: gi-g4-overworld-v1 ({G4_ROUTE_SHA256})",
+        f"  fixture: hdrtest-static-v1 ({G4_FIXTURE_SHA256}, read-only)",
+        G4_TRANSCRIPT_TOKENS[6],
+        f"  commit: {metadata['commit']} (clean worktree state)",
+        f"  source: {metadata['source_sha256']}",
+        "  raw report: /tmp/g4.raw.jsonl",
+        "  transcript: /tmp/g4.transcript.log",
+        G4_VALIDATED_TOKEN,
+        "  raw: /tmp/g4.raw.jsonl",
+        "  summary: /tmp/g4.summary.json",
+        "  Minecraft log: /tmp/g4.minecraft.log",
+        "  console log: /tmp/g4.console.log",
+        "  transcript: /tmp/g4.transcript.log",
+    )) + "\n"
+    minecraft = "\n".join((
         "METALLUM_BENCHMARK EVENT=ADVANCED_ADMISSION expected=advanced schema=5 "
         "defaults_used=false requested=advanced resolved=advanced l3=true l5=true "
         "l6=true status=PASS generation=6 shader_epoch=5 reason=none",
+        "METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
+        "route=gi-g4-overworld-v1 stable_frames=120 candidates=0 status=PASS",
+        "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT "
+        "active_frames=24 drain_frames=300 status=PASS",
+        "METALLUM_BENCHMARK EVENT=SEGMENT_START index=1 total=1 mode=OFF "
+        "warmup=600 measure=600",
+        "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION requested=g4_transport "
+        "resolved=g4_transport contract=3 state=READY phase=WARMUP "
+        "presented_frame=81 resources=11 passes=4 dirty=192/192/0/0 "
+        "injection_dispatches=192 full_volume_rebuilds=1 transport_dispatches=1 "
+        "field_epoch=1 stale=0 rejected=0 status=PASS field_only=true "
+        "receiver=false image_binding=false",
+        "METALLUM_BENCHMARK EVENT=MEASURE_START index=1 mode=OFF presented_frame=600",
+        "METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=600 "
+        "framebuffer=3024x1964",
     )) + "\n"
 
     def expect_failure(callback: Any, expected: str) -> None:
@@ -1132,6 +1702,8 @@ def self_test_receipt_validator() -> None:
     derived, measured_count = derive_runtime_results(copy.deepcopy(windows))
     verify_summary_receipt(copy.deepcopy(summary), derived, measured_count)
     verify_console_receipt(console)
+    verify_transcript_receipt(transcript)
+    verify_minecraft_receipt(minecraft)
     verify_declared_runtime_results(copy.deepcopy(derived), derived)
 
     expect_failure(
@@ -1146,16 +1718,111 @@ def self_test_receipt_validator() -> None:
         )
 
     invalid_timing = copy.deepcopy(windows)
-    invalid_timing[0]["stages"]["GI_TRANSPORT"]["p95_ms"] = math.nan
+    invalid_timing[3]["stages"]["GI_TRANSPORT"]["p95_ms"] = math.nan
     expect_failure(lambda: derive_runtime_results(invalid_timing), "finite and >= 0")
 
     measured_stage = copy.deepcopy(windows)
-    measured_stage[2]["stages"]["GI_TRANSPORT"] = copy.deepcopy(timing)
+    measured_stage[5]["stages"]["GI_TRANSPORT"] = copy.deepcopy(timing)
     expect_failure(lambda: derive_runtime_results(measured_stage), "only during warmup")
 
+    startup_stage = copy.deepcopy(windows)
+    startup_stage[1]["stages"]["GI_TRANSPORT"] = copy.deepcopy(timing)
+    expect_failure(lambda: derive_runtime_results(startup_stage), "only during warmup")
+
+    startup_regression = copy.deepcopy(windows)
+    startup_regression[0]["global_illumination"] = startup_gi(96)
+    expect_failure(
+        lambda: derive_runtime_results(startup_regression),
+        "startup progression regressed",
+    )
+
+    partial_warmup = copy.deepcopy(windows)
+    partial_warmup[3]["global_illumination"].update({
+        "dirty_completed_total": 191,
+        "dirty_pending": 1,
+        "injection_dispatches": 191,
+    })
+    expect_failure(
+        lambda: derive_runtime_results(partial_warmup),
+        "dirty_completed_total differs",
+    )
+
+    warmup_inject = copy.deepcopy(windows)
+    warmup_inject[3]["stages"]["GI_INJECT"] = copy.deepcopy(timing)
+    expect_failure(
+        lambda: derive_runtime_results(warmup_inject),
+        "GI_INJECT timing must occur only during G4 startup",
+    )
+
+    measured_inject = copy.deepcopy(windows)
+    measured_inject[5]["stages"]["GI_INJECT"] = copy.deepcopy(timing)
+    expect_failure(
+        lambda: derive_runtime_results(measured_inject),
+        "GI_INJECT timing must occur only during G4 startup",
+    )
+
+    duplicate_timing = copy.deepcopy(windows)
+    duplicate_timing[4]["stages"]["GI_TRANSPORT"] = copy.deepcopy(timing)
+    expect_failure(
+        lambda: derive_runtime_results(duplicate_timing),
+        "one warmup-only GI_TRANSPORT timing",
+    )
+
     measured_growth = copy.deepcopy(windows)
-    measured_growth[3]["global_illumination"]["source_epoch"] += 1
-    expect_failure(lambda: derive_runtime_results(measured_growth), "grew during measurement")
+    measured_growth[5]["global_illumination"]["source_epoch"] += 1
+    expect_failure(lambda: derive_runtime_results(measured_growth), "final epoch drifted")
+
+    no_startup = copy.deepcopy(windows[3:])
+    expect_failure(
+        lambda: derive_runtime_results(no_startup),
+        "at least 600 startup frames",
+    )
+
+    short_windows = copy.deepcopy(windows)
+    for short_window in short_windows[3:]:
+        short_window["presented_frames"] = 100
+    expect_failure(
+        lambda: derive_runtime_results(short_windows),
+        "two 300-frame warmup windows",
+    )
+
+    missing_inject = copy.deepcopy(windows)
+    missing_inject[2]["stages"]["GI_INJECT"] = None
+    expect_failure(
+        lambda: derive_runtime_results(missing_inject),
+        "exactly 24 startup GI_INJECT active frames",
+    )
+
+    startup_epoch_drift = copy.deepcopy(windows)
+    for final_window in startup_epoch_drift[3:]:
+        final_window["global_illumination"]["source_epoch"] += 1
+    expect_failure(
+        lambda: derive_runtime_results(startup_epoch_drift),
+        "final epochs differ from frozen startup",
+    )
+
+    cross_source = copy.deepcopy(windows)
+    cross_source[3]["metadata"]["source_sha256"] = "4" * 64
+    expect_failure(
+        lambda: derive_runtime_results(cross_source),
+        "source/route/settings identity drifted",
+    )
+
+    empty_field = copy.deepcopy(windows)
+    empty_field[3]["global_illumination"]["valid_probes"] = 0
+    expect_failure(
+        lambda: derive_runtime_results(empty_field),
+        "no valid surface probes",
+    )
+
+    wrong_bytes = copy.deepcopy(windows)
+    wrong_bytes[0]["global_illumination"].update({
+        "allocated_bytes": 1, "resident_bytes": 1,
+    })
+    expect_failure(
+        lambda: derive_runtime_results(wrong_bytes),
+        "allocated_bytes differs",
+    )
 
     wrong_summary = copy.deepcopy(summary)
     wrong_summary["global_illumination"]["counters"]["resource_count"][
@@ -1165,6 +1832,12 @@ def self_test_receipt_validator() -> None:
         lambda: verify_summary_receipt(wrong_summary, derived, measured_count),
         "resource_count.last_window differs",
     )
+    summary_with_inject = copy.deepcopy(summary)
+    summary_with_inject["stages"]["GI_INJECT"] = copy.deepcopy(timing)
+    expect_failure(
+        lambda: verify_summary_receipt(summary_with_inject, derived, measured_count),
+        "GI injection/transport work",
+    )
 
     wrong_results = copy.deepcopy(derived)
     wrong_results["transport_dispatches"] = 2
@@ -1173,23 +1846,54 @@ def self_test_receipt_validator() -> None:
         "handwritten result differs",
     )
     expect_failure(
-        lambda: verify_console_receipt(console.replace("status=PASS", "status=FAIL")),
-        "Advanced admission PASS",
+        lambda: verify_minecraft_receipt(minecraft.replace(
+            "resolved=g4_transport contract=3",
+            "resolved=g3_inject contract=3",
+        )),
+        "one exact G4 admission PASS",
+    )
+    expect_failure(
+        lambda: verify_minecraft_receipt(minecraft.replace(
+            "METALLUM_BENCHMARK EVENT=SEGMENT_START",
+            "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION requested=g4_transport "
+            "resolved=g4_transport contract=3 state=READY phase=WARMUP "
+            "presented_frame=80 resources=11 passes=4 dirty=192/192/0/0 "
+            "injection_dispatches=192 full_volume_rebuilds=1 "
+            "transport_dispatches=1 field_epoch=1 stale=0 rejected=0 status=PASS "
+            "field_only=true receiver=false image_binding=false\n"
+            "METALLUM_BENCHMARK EVENT=SEGMENT_START",
+        )),
+        "one exact G4 admission PASS",
+    )
+    expect_failure(
+        lambda: verify_transcript_receipt(
+            transcript.replace("GI_G4_TRANSPORT_REQUEST", "GI_G4_TRANSPORT_ADMISSION")
+        ),
+        "transcript token is missing",
+    )
+    expect_failure(
+        lambda: verify_transcript_receipt(transcript + G4_REQUEST_TOKEN + "\n"),
+        "one exact G4 request marker",
     )
 
     with tempfile.TemporaryDirectory(prefix="metallum-g4-receipt-") as temporary:
         root = Path(temporary)
         raw_path = root / "g4.raw.jsonl"
         summary_path = root / "g4.summary.json"
+        minecraft_path = root / "g4.minecraft.log"
         console_path = root / "g4.console.log"
+        transcript_path = root / "g4.transcript.log"
         raw_path.write_text(
             "\n".join(json.dumps(value) for value in windows) + "\n",
             encoding="utf-8",
         )
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        minecraft_path.write_text(minecraft, encoding="utf-8")
         console_path.write_text(console, encoding="utf-8")
+        transcript_path.write_text(transcript, encoding="utf-8")
         actual = verify_runtime_receipt(
-            root, raw_path, summary_path, console_path,
+            root, raw_path, summary_path, minecraft_path, console_path,
+            transcript_path,
             canonical_report_validation=False,
         )
         if actual != derived:

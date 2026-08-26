@@ -224,6 +224,23 @@ GI_V1_KEYS = frozenset({
 GI_V2_KEYS = frozenset({
     "mode", "reset_reasons", "fallback_reasons", *GI_V2_INTEGER_KEYS,
 })
+G4_RESOURCE_COUNT = 11
+G4_PASS_COUNT = 4
+G4_BRICK_COUNT = 192
+G4_ALLOCATED_BYTES = 4_020_576
+G4_RESIDENT_BYTES = 1_966_080
+G4_INJECT_ACTIVE_FRAMES = 24
+G4_REPORT_FRAMES = 300
+G4_FINAL_COUNTERS = {
+    "dirty_queued_total": G4_BRICK_COUNT,
+    "dirty_completed_total": G4_BRICK_COUNT,
+    "dirty_discarded_total": 0,
+    "dirty_pending": 0,
+    "injection_dispatches": G4_BRICK_COUNT,
+    "full_volume_rebuilds": 1,
+    "transport_dispatches": 1,
+    "field_epoch": 1,
+}
 VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
     "performance": 0.15,
     "balanced": 0.40,
@@ -489,18 +506,21 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
         )
     if contract_version == 3:
         if mode != "active" \
-                or result["resource_count"] != 11 \
-                or result["pass_count"] != 4 \
+                or result["allocated_bytes"] != G4_ALLOCATED_BYTES \
+                or result["resident_bytes"] != G4_RESIDENT_BYTES \
+                or result["resource_count"] != G4_RESOURCE_COUNT \
+                or result["pass_count"] != G4_PASS_COUNT \
                 or result["binding_count"] != 0 \
                 or result["shader_symbol_count"] != 0 \
-                or result["dirty_queued_total"] != 192 \
-                or result["dirty_completed_total"] != 192 \
+                or result["dirty_queued_total"] not in (0, G4_BRICK_COUNT) \
                 or result["dirty_discarded_total"] != 0 \
-                or result["dirty_pending"] != 0 \
-                or result["injection_dispatches"] != 192 \
-                or result["full_volume_rebuilds"] != 1 \
+                or result["injection_dispatches"] != result["dirty_completed_total"] \
+                or result["full_volume_rebuilds"] not in (0, 1) \
                 or result["transport_dispatches"] not in (0, 1) \
-                or result["field_epoch"] != result["transport_dispatches"]:
+                or result["field_epoch"] != result["transport_dispatches"] \
+                or result["stale_cell_rejects"] != 0 \
+                or any(result["reset_reasons"].values()) \
+                or any(result["fallback_reasons"].values()):
             raise ReportError(
                 f"line {line}: G4 global_illumination v3 shape is invalid"
             )
@@ -522,6 +542,194 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
                 f"line {line}: GI_OFF contains nonzero telemetry: {', '.join(nonzero)}"
             )
     return result
+
+
+def _validate_g4_window_phase(window: TimingWindow) -> None:
+    gi = window.global_illumination
+    if gi is None or gi["contract_version"] != 3:
+        return
+    if window.phase == "startup":
+        if gi["transport_dispatches"] != 0 \
+                or gi["field_epoch"] != 0 \
+                or gi["valid_probes"] != 0 \
+                or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G4 startup must not contain transport work"
+            )
+        return
+    if window.phase not in ("warmup", "measure"):
+        raise ReportError(
+            f"line {window.line}: G4 contract v3 has an invalid benchmark phase"
+        )
+    for key, expected in G4_FINAL_COUNTERS.items():
+        if gi[key] != expected:
+            raise ReportError(
+                f"line {window.line}: G4 {window.phase} telemetry is not final"
+            )
+    if not 0 < gi["valid_probes"] <= 32 * 32 * 32:
+        raise ReportError(
+            f"line {window.line}: G4 final field contains no valid surface probes"
+        )
+    if window.gi_inject_stage is not None:
+        raise ReportError(
+            f"line {window.line}: GI_INJECT timing must occur only during G4 startup"
+        )
+    if window.phase == "measure" and window.gi_transport_stage is not None:
+        raise ReportError(
+            f"line {window.line}: GI_TRANSPORT timing must occur only during G4 warmup"
+        )
+
+
+def _validate_g4_report(windows: Sequence[TimingWindow]) -> None:
+    g4_windows = [
+        window for window in windows
+        if window.global_illumination is not None
+        and window.global_illumination["contract_version"] == 3
+    ]
+    if not g4_windows:
+        return
+    if len(g4_windows) != len(windows):
+        raise ReportError("G4 report mixes contract v3 with another GI contract")
+
+    phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
+    previous_phase = -1
+    previous_startup: dict[str, Any] | None = None
+    startup_windows: list[TimingWindow] = []
+    warmup_windows: list[TimingWindow] = []
+    measured_windows: list[TimingWindow] = []
+    final_source_epoch: int | None = None
+    final_probe_epoch: int | None = None
+    frozen_startup_epochs: tuple[int, int] | None = None
+    transport_timings: list[TimingWindow] = []
+    injection_timed_frames = 0
+    runtime_identity: tuple[Any, ...] | None = None
+    identity_keys = (
+        "commit", "source_sha256", "artifact_sha256", "route", "route_sha256",
+        "fixture", "fixture_sha256", "settings_id", "settings_spec_sha256",
+        "settings_sha256",
+    )
+    monotonic_keys = (
+        "dirty_queued_total", "dirty_completed_total", "dirty_pending",
+        "injection_dispatches", "full_volume_rebuilds", "source_epoch",
+        "probe_epoch",
+    )
+    for window in g4_windows:
+        rank = phase_rank.get(window.phase or "", -1)
+        if rank < previous_phase:
+            raise ReportError(
+                f"line {window.line}: G4 benchmark phases are out of order"
+            )
+        previous_phase = rank
+        gi = window.global_illumination
+        assert gi is not None
+        expected_generation = {"startup": 0, "warmup": 1, "measure": 2}[window.phase]
+        expected_segment = -1 if window.phase == "startup" else 0
+        expected_scaler = "UNKNOWN" if window.phase == "startup" else "OFF"
+        if window.generation != expected_generation \
+                or window.segment != expected_segment \
+                or window.scaler != expected_scaler:
+            raise ReportError(
+                f"line {window.line}: G4 benchmark phase identity is invalid"
+            )
+        identity = tuple(window.metadata.get(key) for key in identity_keys)
+        if runtime_identity is None:
+            runtime_identity = identity
+            commit, source, artifact, route, route_sha, fixture, fixture_sha, \
+                settings, settings_spec, settings_sha = identity
+            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{12}", commit) is None \
+                    or not isinstance(source, str) or re.fullmatch(r"[0-9a-f]{64}", source) is None \
+                    or not isinstance(artifact, str) or re.fullmatch(r"[0-9a-f]{64}", artifact) is None \
+                    or route != "gi-g4-overworld-v1" \
+                    or route_sha != "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+                    or fixture != "hdrtest-static-v1" \
+                    or fixture_sha != "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5" \
+                    or settings != "native-hdr-fancy-v1" \
+                    or settings_spec != "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+                    or settings_sha != "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+                    or window.metadata.get("dirty_worktree") is not False:
+                raise ReportError(
+                    f"line {window.line}: G4 source/route/settings identity is invalid"
+                )
+        elif identity != runtime_identity or window.metadata.get("dirty_worktree") is not False:
+            raise ReportError(
+                f"line {window.line}: G4 source/route/settings identity drifted"
+            )
+        if window.phase == "startup":
+            startup_windows.append(window)
+            if previous_startup is not None:
+                for key in monotonic_keys:
+                    if key == "dirty_pending":
+                        continue
+                    if gi[key] < previous_startup[key]:
+                        raise ReportError(
+                            f"line {window.line}: G4 startup progression regressed: {key}"
+                        )
+            previous_startup = gi
+            if gi["dirty_completed_total"] > 0 \
+                    or gi["source_epoch"] > 0 or gi["probe_epoch"] > 0:
+                epochs = (gi["source_epoch"], gi["probe_epoch"])
+                if min(epochs) <= 0:
+                    raise ReportError(
+                        f"line {window.line}: G4 populated startup epochs are not positive"
+                    )
+                if frozen_startup_epochs is None:
+                    frozen_startup_epochs = epochs
+                elif epochs != frozen_startup_epochs:
+                    raise ReportError(
+                        f"line {window.line}: G4 startup source/probe epoch drifted"
+                    )
+        else:
+            (warmup_windows if window.phase == "warmup" else measured_windows).append(window)
+            if final_source_epoch is None:
+                final_source_epoch = gi["source_epoch"]
+                final_probe_epoch = gi["probe_epoch"]
+                if final_source_epoch <= 0 or final_probe_epoch <= 0:
+                    raise ReportError(
+                        f"line {window.line}: G4 final epochs must be positive"
+                    )
+            elif gi["source_epoch"] != final_source_epoch \
+                    or gi["probe_epoch"] != final_probe_epoch:
+                    raise ReportError(
+                        f"line {window.line}: G4 source/probe epochs drifted after warmup"
+                    )
+            if frozen_startup_epochs is not None \
+                    and (gi["source_epoch"], gi["probe_epoch"]) != frozen_startup_epochs:
+                raise ReportError(
+                    f"line {window.line}: G4 final epochs differ from frozen startup"
+                )
+        if window.gi_inject_stage is not None:
+            if window.phase != "startup":
+                raise ReportError(
+                    f"line {window.line}: GI_INJECT timing must occur only during G4 startup"
+                )
+            injection_timed_frames += window.gi_inject_stage["frames"]
+        if window.gi_transport_stage is not None:
+            transport_timings.append(window)
+
+    if len(startup_windows) < 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in startup_windows) \
+            or sum(window.frames for window in startup_windows) < 600:
+        raise ReportError(
+            "G4 report must contain at least 600 startup frames in 300-frame windows"
+        )
+    if len(warmup_windows) != 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in warmup_windows):
+        raise ReportError("G4 report must contain exactly two 300-frame warmup windows")
+    if len(measured_windows) != 2 \
+            or any(window.frames != G4_REPORT_FRAMES for window in measured_windows):
+        raise ReportError("G4 report must contain exactly two 300-frame measure windows")
+    if injection_timed_frames != G4_INJECT_ACTIVE_FRAMES:
+        raise ReportError(
+            "G4 report must contain exactly 24 startup GI_INJECT active frames"
+        )
+    if len(transport_timings) != 1 \
+            or transport_timings[0].phase != "warmup" \
+            or transport_timings[0].gi_transport_stage is None \
+            or transport_timings[0].gi_transport_stage["frames"] != 1:
+        raise ReportError(
+            "G4 report must contain exactly one single-dispatch GI_TRANSPORT "
+            "timing during warmup"
+        )
 
 
 def _parse_timing_stage(
@@ -1265,6 +1473,7 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             raise ReportError(
                 f"line {line}: GI_TRANSPORT timing requires G4 contract v3"
             )
+        _validate_g4_window_phase(window)
     return window
 
 
@@ -1289,6 +1498,7 @@ def load_report(path: Path) -> list[TimingWindow]:
             raise ReportError(
                 f"line {current.line}: timestamp precedes line {previous.line}"
             )
+    _validate_g4_report(windows)
     return windows
 
 
@@ -5057,33 +5267,7 @@ def self_test() -> None:
             for value in gi_off_summary["global_illumination"]["counters"].values()
         )
 
-        schema6_gi_active_v3 = root / "schema6-gi-active-v3.raw.jsonl"
-        active_payload = g0_line(0, advanced=True, detail=True)
-        active_gi = active_payload["global_illumination"]
-        active_gi.update({
-            "contract_version": 3,
-            "mode": "active",
-            "allocated_bytes": 4_020_576,
-            "resident_bytes": 1_966_080,
-            "resource_count": 11,
-            "pass_count": 4,
-            "dirty_queued_total": 192,
-            "dirty_completed_total": 192,
-            "injection_dispatches": 192,
-            "transport_dispatches": 1,
-            "field_epoch": 1,
-            "full_volume_rebuilds": 1,
-        })
-        active_payload["metadata"]["global_illumination_mode"] = "g4_transport"
-        active_payload["stages"][GI_INJECT_STAGE] = {
-            "frames": 24,
-            "average_ms": 0.06,
-            "p50_ms": 0.05,
-            "p95_ms": 0.08,
-            "p99_ms": 0.09,
-            "maximum_ms": 0.10,
-        }
-        active_payload["stages"][GI_TRANSPORT_STAGE] = {
+        transport_timing = {
             "frames": 1,
             "average_ms": 0.31,
             "p50_ms": 0.31,
@@ -5091,27 +5275,243 @@ def self_test() -> None:
             "p99_ms": 0.35,
             "maximum_ms": 0.36,
         }
+        injection_timing = {
+            "frames": G4_INJECT_ACTIVE_FRAMES,
+            "average_ms": 0.08,
+            "p50_ms": 0.07,
+            "p95_ms": 0.11,
+            "p99_ms": 0.12,
+            "maximum_ms": 0.13,
+        }
+
+        def g4_line(
+            index: int, phase: str, completed: int,
+            *, timed_inject: bool = False, timed_transport: bool = False,
+        ) -> dict[str, Any]:
+            payload = g0_line(index, advanced=True, detail=True)
+            queued = 0 if completed == 0 else G4_BRICK_COUNT
+            final = phase in ("warmup", "measure")
+            payload["benchmark"].update({
+                "generation": {"startup": 0, "warmup": 1, "measure": 2}[phase],
+                "phase": phase,
+                "segment_index": -1 if phase == "startup" else 0,
+                "scaler_mode": "UNKNOWN" if phase == "startup" else "OFF",
+            })
+            payload["global_illumination"].update({
+                "contract_version": 3,
+                "mode": "active",
+                "allocated_bytes": 4_020_576,
+                "resident_bytes": 1_966_080,
+                "resource_count": G4_RESOURCE_COUNT,
+                "pass_count": G4_PASS_COUNT,
+                "valid_probes": 64 if final else 0,
+                "unknown_probes": 0,
+                "source_epoch": 17 if queued else 0,
+                "probe_epoch": 19 if queued else 0,
+                "dirty_queued_total": queued,
+                "dirty_completed_total": completed,
+                "dirty_discarded_total": 0,
+                "dirty_pending": queued - completed,
+                "injection_dispatches": completed,
+                "transport_dispatches": 1 if final else 0,
+                "field_epoch": 1 if final else 0,
+                "full_volume_rebuilds": 1 if queued else 0,
+            })
+            payload["metadata"].update({
+                "global_illumination_mode": "g4_transport",
+                "commit": "1" * 12,
+                "source_sha256": "2" * 64,
+                "artifact_sha256": "3" * 64,
+                "dirty_worktree": False,
+                "route": "gi-g4-overworld-v1",
+                "route_sha256": "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d",
+                "fixture": "hdrtest-static-v1",
+                "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+                "settings_id": "native-hdr-fancy-v1",
+                "settings_spec_sha256": "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e",
+                "settings_sha256": "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3",
+            })
+            payload["stages"][GI_INJECT_STAGE] = (
+                copy.deepcopy(injection_timing) if timed_inject else None
+            )
+            payload["stages"][GI_TRANSPORT_STAGE] = (
+                copy.deepcopy(transport_timing) if timed_transport else None
+            )
+            return payload
+
+        schema6_gi_active_v3 = root / "schema6-gi-active-v3.raw.jsonl"
+        active_payloads = [
+            g4_line(0, "startup", 0),
+            g4_line(1, "startup", 0),
+            g4_line(2, "startup", G4_BRICK_COUNT, timed_inject=True),
+            g4_line(3, "warmup", G4_BRICK_COUNT, timed_transport=True),
+            g4_line(4, "warmup", G4_BRICK_COUNT),
+            g4_line(5, "measure", G4_BRICK_COUNT),
+            g4_line(6, "measure", G4_BRICK_COUNT),
+        ]
         schema6_gi_active_v3.write_text(
-            json.dumps(active_payload) + "\n", encoding="utf-8"
+            "\n".join(json.dumps(payload) for payload in active_payloads) + "\n",
+            encoding="utf-8",
         )
-        active_window = load_report(schema6_gi_active_v3)[0]
+        active_windows = load_report(schema6_gi_active_v3)
+        active_window = active_windows[3]
         assert active_window.global_illumination["full_volume_rebuilds"] == 1
-        assert active_window.gi_inject_stage["p95_ms"] == 0.08
         assert active_window.gi_transport_stage["p95_ms"] == 0.34
-        active_summary = summarize(schema6_gi_active_v3, 300, 0, "OFF")
-        assert active_summary["stages"][GI_TRANSPORT_STAGE]["frames"] == 1
-        assert active_summary["stages"][GI_TRANSPORT_STAGE]["p95_ms"][
-            "window_maximum"
-        ] == 0.34
-        invalid_v3_shape = json.loads(json.dumps(active_payload))
-        invalid_v3_shape["global_illumination"]["resource_count"] = 6
-        invalid_v3_path = root / "schema6-gi-active-v3-invalid-shape.raw.jsonl"
-        invalid_v3_path.write_text(
-            json.dumps(invalid_v3_shape) + "\n", encoding="utf-8"
+        active_summary = summarize(schema6_gi_active_v3, 600, 0, "OFF")
+        assert active_summary.get("stages", {}).get(GI_TRANSPORT_STAGE) is None
+
+        def invalid_g4_report(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payloads = copy.deepcopy(active_payloads)
+            mutation(payloads)
+            path = root / f"{stem}.raw.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            expect_error(lambda: load_report(path), expected_error)
+
+        def remove_startup(payloads: list[dict[str, Any]]) -> None:
+            del payloads[:3]
+
+        def use_short_final_windows(payloads: list[dict[str, Any]]) -> None:
+            for payload in payloads[3:]:
+                payload["presented_frames"] = 100
+
+        invalid_g4_report(
+            "g4-no-startup", remove_startup,
+            "at least 600 startup frames",
         )
-        expect_error(
-            lambda: load_report(invalid_v3_path),
+        invalid_g4_report(
+            "g4-short-final-windows", use_short_final_windows,
+            "two 300-frame warmup windows",
+        )
+        invalid_g4_report(
+            "g4-missing-inject-timing",
+            lambda payloads: payloads[2]["stages"].update({GI_INJECT_STAGE: None}),
+            "exactly 24 startup GI_INJECT active frames",
+        )
+        invalid_g4_report(
+            "g4-startup-epoch-drift",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "source_epoch": 18,
+            }),
+            "final epochs differ from frozen startup",
+        )
+        invalid_g4_report(
+            "g4-cross-source-warmup",
+            lambda payloads: payloads[3]["metadata"].update({
+                "source_sha256": "4" * 64,
+            }),
+            "source/route/settings identity drifted",
+        )
+        invalid_g4_report(
+            "g4-invalid-allocation",
+            lambda payloads: payloads[0]["global_illumination"].update({
+                "allocated_bytes": 1, "resident_bytes": 1,
+            }),
             "G4 global_illumination v3 shape is invalid",
+        )
+        invalid_g4_report(
+            "g4-empty-final-field",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "valid_probes": 0,
+            }),
+            "contains no valid surface probes",
+        )
+
+        invalid_g4_report(
+            "g4-invalid-resources",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"resource_count": 6}
+            ),
+            "G4 global_illumination v3 shape is invalid",
+        )
+        invalid_g4_report(
+            "g4-startup-transport",
+            lambda payloads: payloads[1]["global_illumination"].update({
+                "transport_dispatches": 1, "field_epoch": 1,
+            }),
+            "G4 startup must not contain transport work",
+        )
+        invalid_g4_report(
+            "g4-startup-timing",
+            lambda payloads: payloads[1]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "G4 startup must not contain transport work",
+        )
+        invalid_g4_report(
+            "g4-startup-regression",
+            lambda payloads: payloads[0]["global_illumination"].update({
+                "dirty_queued_total": G4_BRICK_COUNT,
+                "dirty_completed_total": 96,
+                "dirty_pending": 96,
+                "injection_dispatches": 96,
+                "full_volume_rebuilds": 1,
+                "source_epoch": 17,
+                "probe_epoch": 19,
+            }),
+            "G4 startup progression regressed",
+        )
+        invalid_g4_report(
+            "g4-partial-warmup",
+            lambda payloads: payloads[3]["global_illumination"].update({
+                "dirty_completed_total": 191,
+                "dirty_pending": 1,
+                "injection_dispatches": 191,
+            }),
+            "G4 warmup telemetry is not final",
+        )
+        invalid_g4_report(
+            "g4-warmup-inject-timing",
+            lambda payloads: payloads[3]["stages"].update({
+                GI_INJECT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_INJECT timing must occur only during G4 startup",
+        )
+        invalid_g4_report(
+            "g4-measure-inject-timing",
+            lambda payloads: payloads[5]["stages"].update({
+                GI_INJECT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_INJECT timing must occur only during G4 startup",
+        )
+        invalid_g4_report(
+            "g4-measure-timing",
+            lambda payloads: payloads[5]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "GI_TRANSPORT timing must occur only during G4 warmup",
+        )
+        invalid_g4_report(
+            "g4-duplicate-timing",
+            lambda payloads: payloads[4]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "exactly one single-dispatch GI_TRANSPORT timing",
+        )
+        invalid_g4_report(
+            "g4-multi-dispatch-timing",
+            lambda payloads: payloads[3]["stages"][GI_TRANSPORT_STAGE].update(
+                {"frames": 2}
+            ),
+            "exactly one single-dispatch GI_TRANSPORT timing",
+        )
+        invalid_g4_report(
+            "g4-metadata-v2",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"contract_version": 2}
+            ),
+            "metadata mode g4_transport requires G4 contract v3",
+        )
+        invalid_g4_report(
+            "g4-v3-metadata-off",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": "off"}
+            ),
+            "G4 contract v3 requires metadata mode g4_transport",
         )
 
         def invalid_gi_payload(

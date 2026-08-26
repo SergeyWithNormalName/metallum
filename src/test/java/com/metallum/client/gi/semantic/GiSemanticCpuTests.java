@@ -25,11 +25,35 @@ public final class GiSemanticCpuTests {
         acceptedQuadOverridesSeedMediumAndMaterial();
         unknownQuadMaterialFailsClosed();
         controllerGatesReloadAndRetiresCandidateLeases();
+        activeFieldCacheTracksSoleWorldLifecycle();
         publicationOrderDoesNotChangeFieldTruth();
         cameraScrollPreservesNegativeCoordinateOverlap();
         tenThousandPublicationsRemainBounded();
         assemblerIsRenderThreadConfined();
         System.out.println("G2 semantic CPU contract tests passed");
+    }
+
+    private static void activeFieldCacheTracksSoleWorldLifecycle() {
+        GiSemanticController controller = new GiSemanticController();
+        Object first = new Object();
+        Object second = new Object();
+        controller.openWorld(first, DIMENSION);
+        controller.advanceMaterialAtlasEpoch(List.of());
+        require(controller.activeDirectField() != null
+                        && controller.activeTransportField() != null,
+                "sole active G2 field cache was not published");
+        controller.openWorld(second, DIMENSION);
+        require(controller.activeDirectField() == null
+                        && controller.activeTransportField() == null,
+                "multi-world G2 state exposed an ambiguous active field");
+        controller.closeWorld(second);
+        require(controller.activeDirectField() != null
+                        && controller.activeTransportField() != null,
+                "sole active G2 field cache was not restored after close");
+        controller.closeWorld(first);
+        require(controller.activeDirectField() == null
+                        && controller.activeTransportField() == null,
+                "closed G2 world remained in the active field cache");
     }
 
     private static void coordinatesAreFloorCorrect() {

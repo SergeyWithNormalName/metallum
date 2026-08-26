@@ -73,6 +73,26 @@ public final class GiTransportCpuTests {
                         && GiTransportRuntime.isEnabled("yes")
                         && GiTransportRuntime.isEnabled("on"),
                 "G4 diagnostic environment gate changed");
+        require(GiTransportRuntime.submissionAllowed(false, false, false, false)
+                        && GiTransportRuntime.submissionAllowed(true, true, false, false)
+                        && !GiTransportRuntime.submissionAllowed(true, false, false, false)
+                        && !GiTransportRuntime.submissionAllowed(true, true, true, false)
+                        && !GiTransportRuntime.submissionAllowed(false, false, false, true),
+                "G4 benchmark warmup submission gate changed");
+        require(GiTransportRuntime.sourcePreparationAllowed(false, false)
+                        && GiTransportRuntime.sourcePreparationAllowed(true, true)
+                        && !GiTransportRuntime.sourcePreparationAllowed(true, false),
+                "G4 fixture-quiescence preparation gate changed");
+        GiTransportRuntime.resetDeviceState();
+        GiTransportRuntime.reportResolvedReady();
+        if (GiTransportRuntime.isRequested()) {
+            require(GiTransportRuntime.isResolvedReady(), "G4 READY state was not published");
+            GiTransportRuntime.reportInvalid("test drift");
+            GiTransportRuntime.reportResolvedReady();
+            require(GiTransportRuntime.isInvalid() && !GiTransportRuntime.isResolvedReady(),
+                    "G4 terminal invalidation healed back to READY");
+        }
+        GiTransportRuntime.resetDeviceState();
     }
 
     private static void sourceStampIsDeterministicSensitiveAndNonZero() {

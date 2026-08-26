@@ -18,6 +18,10 @@ The first candidate builds exactly one near cascade:
   environment epochs;
 - G3 must have completed and retired all 192 initial dirty bricks before G4 is
   admitted;
+- benchmark preparation opens only after the route has been stable for 120
+  frames and G2 has zero active candidates. The complete G2/world/origin/static
+  source/environment tuple must then remain unchanged for 600 submitted frames;
+  once committed, any drift is terminal and cannot rotate or rebuild G3;
 - G3 must be `ready`, not in flight and have zero pending/discarded work;
 - G2 rho/faces/validity and G3 geometry/direct origins and epochs must match;
 - native acceptance first enters `SUBMITTED`; Java promotes it to `READY` only
@@ -26,6 +30,10 @@ The first candidate builds exactly one near cascade:
 - after `READY` the context never scrolls, rebuilds or admits a new epoch.
   Changes to G2/world/origin, the static-light registry or quantized sun/sky
   input are reported stale once and cannot replace the frozen field.
+- after the exact 192-brick G3 population becomes ready, the route remains in
+  startup for another 300 frames. This drains a complete timing window and
+  proves exactly 24 `GI_INJECT` active frames before G4's sole warmup dispatch;
+  measurement closes both G3 and G4 submission.
 
 The runtime flag is `METALLUM_GI_G4_TRANSPORT=1`. It is diagnostic-only and
 requires requested Advanced lighting, the G2 accepted-output capture path and
@@ -156,6 +164,11 @@ binding.
 - Java makes the raw G3 owner an unforgeable capability. Native live-context
   registries validate both G3 and G4 opaque handles before `Unmanaged` access,
   so forged or already released owners return a clean invalid status.
+- G4 attaches its telemetry owner to G3 at resource admission, before any
+  dispatch. The attachment is same-thread/device/queue checked, idempotent only
+  for the same pair, rejects a second live G4, and strongly retains G3 until
+  keyed detach. Thus every startup timing window truthfully reports contract v3
+  and the combined 11-resource/4-pass footprint.
 
 ## Correctness gates
 
@@ -173,6 +186,9 @@ Source and bundled Metal Validation must independently prove:
 - repeat contexts in the same shader mode produce the same raw hash;
 - stale epoch, wrong thread and release-while-in-flight are fail-closed;
 - a forged/stale native G3 capability is rejected without dereference;
+- telemetry attach rejects wrong-thread, forged, released and different-queue
+  G3 owners; same-pair attach is idempotent, a second G4 is rejected and an
+  attached G3 remains alive until G4 release;
 - source-fallback and bundled tasks assert the actual shader-library mode.
 
 The compute-only frame graph is `G2 cells + G3 direct/geometry -> bounce0 ->
@@ -190,6 +206,10 @@ Every attested raw timing window must already use schema 6, GI contract v3 and
 metadata mode `g4_transport`; a v2 window cannot hide pre-attachment G4 memory
 or work inside a completed receipt.
 
+- the tracked route/settings digests, clean source/artifact identity and exact
+  300-frame windows are immutable across startup, warmup and measurement;
+- startup contains at least 600 reported frames, the frozen epoch cannot drift
+  after population begins, and `GI_INJECT` totals exactly 24 active frames;
 - exactly one frozen near-cascade build during warmup;
 - exactly one `GI_TRANSPORT` dispatch and no measured-window counter growth;
 - `GI_TRANSPORT` p95 no greater than `4.0 ms` and maximum no greater than
@@ -198,6 +218,12 @@ or work inside a completed receipt.
 - combined memory remains within 24 MiB;
 - whole-frame/FPS values are descriptive Tier B data only and are not compared
   numerically with Tier C production baselines.
+
+A complete receipt hashes five same-stem artifacts: raw JSONL, recomputed
+summary, Minecraft log, Gradle console log and the whole-launch transcript. The
+transcript binds the exact clean commit/source, artifact, route, fixture and
+settings identities; the Minecraft log binds preparation, startup drain,
+Advanced admission, G4 admission and measurement order.
 
 A sealed-wall leak, non-repeatable hash, energy amplification, non-finite SH,
 memory excess, unbounded/repeated work or any production image binding rejects

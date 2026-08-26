@@ -35,10 +35,12 @@ public final class GiTransportCoordinator implements AutoCloseable {
     public GiTransportCoordinator(
             final MemorySegment device,
             final MemorySegment commandQueue,
+            final GiDirectSourceCoordinator.TelemetrySource telemetrySource,
             final Consumer<MemorySegment> deferredRelease
     ) {
         this.resources = GiTransportGpuResources.create(
-                device, commandQueue, Objects.requireNonNull(deferredRelease, "deferredRelease")
+                device, commandQueue, Objects.requireNonNull(telemetrySource, "telemetrySource"),
+                Objects.requireNonNull(deferredRelease, "deferredRelease")
         );
         if (this.resources == null) {
             throw new IllegalStateException("Failed to precreate G4 frozen transport resources");

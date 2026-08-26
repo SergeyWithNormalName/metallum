@@ -16383,7 +16383,52 @@ private struct MetallumGiDirectTransportSnapshotV1 {
     let originZ: Int32
 }
 
+/// Exact native proof that all 192 G3 bricks were completed from one immutable
+/// header tuple. Lifetime scheduler counters remain telemetry only: an older
+/// completed generation must never satisfy a newer G4 admission by arithmetic.
+private struct MetallumGiDirectPopulationEpochV1: Equatable {
+    let worldGeneration: UInt64
+    let clipmapGeneration: UInt64
+    let paletteGeneration: UInt64
+    let contentGeneration: UInt64
+    let staticSourceEpoch: UInt64
+    let environmentEpoch: UInt64
+    let origin0X: Int32
+    let origin0Y: Int32
+    let origin0Z: Int32
+    let origin1X: Int32
+    let origin1Y: Int32
+    let origin1Z: Int32
+    let origin2X: Int32
+    let origin2Y: Int32
+    let origin2Z: Int32
+
+    init(_ header: MetallumGiDirectSourceHeaderV1) {
+        worldGeneration = header.worldGeneration
+        clipmapGeneration = header.clipmapGeneration
+        paletteGeneration = header.paletteGeneration
+        contentGeneration = header.contentGeneration
+        staticSourceEpoch = header.staticSourceEpoch
+        environmentEpoch = header.environmentEpoch
+        origin0X = header.origin0X; origin0Y = header.origin0Y; origin0Z = header.origin0Z
+        origin1X = header.origin1X; origin1Y = header.origin1Y; origin1Z = header.origin1Z
+        origin2X = header.origin2X; origin2Y = header.origin2Y; origin2Z = header.origin2Z
+    }
+
+    func matches(
+        world: UInt64, clipmap: UInt64, palette: UInt64, content: UInt64,
+        staticSources: UInt64, environment: UInt64,
+        originX: Int32, originY: Int32, originZ: Int32
+    ) -> Bool {
+        worldGeneration == world && clipmapGeneration == clipmap
+            && paletteGeneration == palette && contentGeneration == content
+            && staticSourceEpoch == staticSources && environmentEpoch == environment
+            && origin0X == originX && origin0Y == originY && origin0Z == originZ
+    }
+}
+
 private struct MetallumGiTransportTelemetryAttachmentV1 {
+    let attachmentId: UInt64
     let sourceStamp: UInt64
     let allocatedBytes: UInt64
     let residentBytes: UInt64
@@ -16443,6 +16488,9 @@ private final class MetallumGiDirectSourceContextV1 {
     private var pendingDirty: UInt64 = 0
     private var fullVolumeRebuilds: UInt64 = 0
     private var schedulerOwned = false
+    private var populationEpoch: MetallumGiDirectPopulationEpochV1?
+    private var populationMasks = (UInt64(0), UInt64(0), UInt64(0))
+    private var populationCompleted = 0
     private var transportTelemetry: MetallumGiTransportTelemetryAttachmentV1?
 
     init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
@@ -16590,9 +16638,19 @@ private final class MetallumGiDirectSourceContextV1 {
         guard isOwnerThread() else { return nil }
         condition.lock()
         defer { condition.unlock() }
+        let requiredPopulation = UInt64(Self.cascadeCount * 4 * 4 * 4)
         guard ready, !buildInFlight, schedulerOwned,
-              dirtyCompleted == UInt64(Self.cascadeCount * 4 * 4 * 4),
-              dirtyDiscarded == 0, pendingDirty == 0,
+              pendingDirty == 0, dirtyCompleted >= requiredPopulation,
+              dirtyCompleted <= dirtyQueued,
+              dirtyDiscarded == dirtyQueued - dirtyCompleted,
+              populationCompleted == Int(requiredPopulation),
+              populationMasks.0 == UInt64.max,
+              populationMasks.1 == UInt64.max,
+              populationMasks.2 == UInt64.max,
+              populationEpoch?.matches(
+                world: world, clipmap: clipmap, palette: palette, content: content,
+                staticSources: staticSources, environment: environment,
+                originX: originX, originY: originY, originZ: originZ) == true,
               worldGeneration == world, clipmapGeneration == clipmap,
               paletteGeneration == palette, contentGeneration == content,
               staticSourceEpoch == staticSources, environmentEpoch == environment,
@@ -16606,16 +16664,36 @@ private final class MetallumGiDirectSourceContextV1 {
             originX: origins[0], originY: origins[1], originZ: origins[2])
     }
 
-    func attachTransportTelemetry(_ attachment: MetallumGiTransportTelemetryAttachmentV1) {
+    func isTransportAttachmentOwnerThread() -> Bool {
+        isOwnerThread()
+    }
+
+    func isTransportAttachmentCompatible(
+        device: MTLDevice, commandQueue: MTLCommandQueue
+    ) -> Bool {
+        objectAddress(self.device) == objectAddress(device)
+            && objectAddress(self.commandQueue) == objectAddress(commandQueue)
+    }
+
+    @discardableResult
+    func attachTransportTelemetry(_ attachment: MetallumGiTransportTelemetryAttachmentV1) -> Bool {
+        guard attachment.attachmentId != 0 else { return false }
         condition.lock()
+        if let current = transportTelemetry,
+           current.attachmentId != attachment.attachmentId {
+            condition.unlock()
+            return false
+        }
         transportTelemetry = attachment
         publishTelemetryLocked()
         condition.unlock()
+        return true
     }
 
-    func detachTransportTelemetry(sourceStamp: UInt64) {
+    func detachTransportTelemetry(attachmentId: UInt64) {
+        guard attachmentId != 0 else { return }
         condition.lock()
-        if transportTelemetry?.sourceStamp == sourceStamp {
+        if transportTelemetry?.attachmentId == attachmentId {
             transportTelemetry = nil
             publishTelemetryLocked()
         }
@@ -16678,6 +16756,21 @@ private final class MetallumGiDirectSourceContextV1 {
                   brick.sourceCount <= header.sourceCount - brick.sourceOffset
             else { return metallumGiDirectSourceStatusInvalid }
         }
+        let admittedPopulationEpoch = MetallumGiDirectPopulationEpochV1(header)
+        var admittedPopulationMasks = (UInt64(0), UInt64(0), UInt64(0))
+        for index in 0..<Int(header.dirtyBrickCount) {
+            let brick = rawBricks.advanced(by: index * metallumGiDirectSourceBrickBytesV1)
+                .load(as: MetallumGiDirectSourceBrickV1.self)
+            let bit = Int(brick.brickX) + 4 * (Int(brick.brickY) + 4 * Int(brick.brickZ))
+            switch Int(brick.cascade) {
+            case 0: admittedPopulationMasks.0 |= UInt64(1) << bit
+            case 1: admittedPopulationMasks.1 |= UInt64(1) << bit
+            default: admittedPopulationMasks.2 |= UInt64(1) << bit
+            }
+        }
+        let admittedPopulationMask0 = admittedPopulationMasks.0
+        let admittedPopulationMask1 = admittedPopulationMasks.1
+        let admittedPopulationMask2 = admittedPopulationMasks.2
         for index in 0..<(Int(header.dirtyBrickCount) * Self.cellsPerBrick) {
             let state = rawCells.advanced(by: index * metallumGiDirectSourceCellBytesV1 + 8).load(as: UInt8.self)
             guard state <= 3 else { return metallumGiDirectSourceStatusInvalid }
@@ -16700,6 +16793,11 @@ private final class MetallumGiDirectSourceContextV1 {
             let result = rejectLocked(metallumGiDirectSourceStatusBusy)
             condition.unlock()
             return result
+        }
+        if populationEpoch != admittedPopulationEpoch {
+            populationEpoch = admittedPopulationEpoch
+            populationMasks = (0, 0, 0)
+            populationCompleted = 0
         }
         slot.busy = true
         buildInFlight = true
@@ -16784,6 +16882,16 @@ private final class MetallumGiDirectSourceContextV1 {
                 geometryApplyDispatches &+= UInt64(header.dirtyBrickCount)
                 directInjectDispatches &+= UInt64(header.dirtyBrickCount)
                 if header.sourceCount == 0 { zeroSourceBatches &+= 1 }
+                if populationEpoch == admittedPopulationEpoch {
+                    let new0 = admittedPopulationMask0 & ~populationMasks.0
+                    let new1 = admittedPopulationMask1 & ~populationMasks.1
+                    let new2 = admittedPopulationMask2 & ~populationMasks.2
+                    populationMasks.0 |= admittedPopulationMask0
+                    populationMasks.1 |= admittedPopulationMask1
+                    populationMasks.2 |= admittedPopulationMask2
+                    populationCompleted += new0.nonzeroBitCount
+                        + new1.nonzeroBitCount + new2.nonzeroBitCount
+                }
             } else {
                 rejectedCount &+= 1
                 if !schedulerOwned { dirtyDiscarded &+= UInt64(header.dirtyBrickCount) }
@@ -16825,6 +16933,9 @@ private final class MetallumGiDirectSourceContextV1 {
         worldGeneration = world; clipmapGeneration = clipmap; paletteGeneration = palette
         contentGeneration = content; staticSourceEpoch = staticSources; environmentEpoch = environment
         origins = Array(repeating: 0, count: Self.cascadeCount * 3)
+        populationEpoch = nil
+        populationMasks = (0, 0, 0)
+        populationCompleted = 0
         ready = false; captureConsumed = false
         publishTelemetryLocked()
         return metallumGiDirectSourceStatusOK
@@ -17139,6 +17250,25 @@ public struct MetallumGiTransportStatsV1 {
     public var padding1: UInt64
 }
 
+private final class MetallumGiTransportAttachmentIdSourceV1: @unchecked Sendable {
+    static let shared = MetallumGiTransportAttachmentIdSourceV1()
+
+    private let lock = NSLock()
+    private var nextId: UInt64 = 1
+
+    func allocate() -> UInt64? {
+        lock.lock()
+        guard nextId != 0 else {
+            lock.unlock()
+            return nil
+        }
+        let result = nextId
+        nextId &+= 1
+        lock.unlock()
+        return result
+    }
+}
+
 private final class MetallumGiTransportContextV1 {
     fileprivate static let edge = 32
     fileprivate static let cellCount = edge * edge * edge
@@ -17163,6 +17293,7 @@ private final class MetallumGiTransportContextV1 {
     private let captureReadback: MTLBuffer
     private let shaderLibraryMode: Int32
     private let ownerThread: UInt64
+    private let attachmentId: UInt64
     private let condition = NSCondition()
 
     private var directContext: MetallumGiDirectSourceContextV1?
@@ -17188,13 +17319,16 @@ private final class MetallumGiTransportContextV1 {
     private var rejectedCount: UInt64 = 0
 
     init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
-        guard worldGeneration > 0, objectAddress(commandQueue.device) == objectAddress(device) else {
+        guard worldGeneration > 0, objectAddress(commandQueue.device) == objectAddress(device),
+              let attachmentId = MetallumGiTransportAttachmentIdSourceV1.shared.allocate()
+        else {
             return nil
         }
         self.device = device
         self.commandQueue = commandQueue
         self.worldGeneration = worldGeneration
         self.ownerThread = UInt64(pthread_mach_thread_np(pthread_self()))
+        self.attachmentId = attachmentId
 
         func makeTexture(_ format: MTLPixelFormat, _ label: String) -> MTLTexture? {
             let descriptor = MTLTextureDescriptor()
@@ -17278,9 +17412,7 @@ private final class MetallumGiTransportContextV1 {
     }
 
     deinit {
-        if sourceStamp != 0 {
-            directContext?.detachTransportTelemetry(sourceStamp: sourceStamp)
-        }
+        directContext?.detachTransportTelemetry(attachmentId: attachmentId)
     }
 
     private func isOwnerThread() -> Bool {
@@ -17302,7 +17434,8 @@ private final class MetallumGiTransportContextV1 {
 
     private func attachmentLocked() -> MetallumGiTransportTelemetryAttachmentV1 {
         MetallumGiTransportTelemetryAttachmentV1(
-            sourceStamp: sourceStamp, allocatedBytes: accountedBytes(),
+            attachmentId: attachmentId, sourceStamp: sourceStamp,
+            allocatedBytes: accountedBytes(),
             residentBytes: persistentBytes(), transportDispatches: transportDispatches,
             validSurfaceCount: validSurfaceCount, unknownCellCount: unknownCellCount,
             fullVolumeBuilds: fullVolumeBuilds, staleRejects: staleRejects,
@@ -17329,6 +17462,41 @@ private final class MetallumGiTransportContextV1 {
             && header.sourceStamp == sourceStamp
     }
 
+    func attachTelemetry(to direct: MetallumGiDirectSourceContextV1) -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        guard direct.isTransportAttachmentOwnerThread() else {
+            return metallumGiTransportStatusWrongThread
+        }
+        guard direct.isTransportAttachmentCompatible(device: device, commandQueue: commandQueue) else {
+            return metallumGiTransportStatusInvalid
+        }
+
+        condition.lock()
+        let newlyBound: Bool
+        if let current = directContext {
+            guard current === direct else {
+                condition.unlock()
+                return metallumGiTransportStatusInvalid
+            }
+            newlyBound = false
+        } else {
+            directContext = direct
+            newlyBound = true
+        }
+        let attachment = attachmentLocked()
+        condition.unlock()
+
+        guard direct.attachTransportTelemetry(attachment) else {
+            if newlyBound {
+                condition.lock()
+                if directContext === direct { directContext = nil }
+                condition.unlock()
+            }
+            return metallumGiTransportStatusBusy
+        }
+        return metallumGiTransportStatusOK
+    }
+
     func encodeFrozen(
         direct: MetallumGiDirectSourceContextV1,
         commandBuffer: MTLCommandBuffer, fence: MTLFence?,
@@ -17344,6 +17512,12 @@ private final class MetallumGiTransportContextV1 {
               Int(bitPattern: rawHeader) % MemoryLayout<MetallumGiTransportHeaderV1>.alignment == 0,
               Int(bitPattern: rawCells) % MemoryLayout<UInt16>.alignment == 0
         else { return metallumGiTransportStatusInvalid }
+        condition.lock()
+        let attachedDirect = directContext
+        condition.unlock()
+        guard let attachedDirect, attachedDirect === direct else {
+            return metallumGiTransportStatusInvalid
+        }
         let header = rawHeader.loadUnaligned(
             fromByteOffset: 0, as: MetallumGiTransportHeaderV1.self)
         guard header.abiVersion == UInt32(metallumGiTransportAbiVersionV1),
@@ -17684,6 +17858,20 @@ public func metallum_gi_transport_create_context_v1(
                 device: device, commandQueue: queue, worldGeneration: worldGeneration)
         else { return nil }
         return MetallumGiTransportContextRegistryV1.register(context)
+    }
+}
+
+@_cdecl("metallum_gi_transport_attach_telemetry_v1")
+public func metallum_gi_transport_attach_telemetry_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ rawDirectContext: UnsafeMutableRawPointer?
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rawDirectContext,
+              let context = MetallumGiTransportContextRegistryV1.resolve(rawContext),
+              let direct = MetallumGiDirectSourceContextRegistryV1.resolve(rawDirectContext)
+        else { return metallumGiTransportStatusInvalid }
+        return context.attachTelemetry(to: direct)
     }
 }
 

@@ -7,8 +7,10 @@ import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.gi.semantic.GiSemanticController;
 import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
+import com.metallum.client.gi.source.GiDirectDirtyQueue;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
 import com.metallum.client.gi.source.GiDirectSourceGpuResources;
+import com.metallum.client.gi.source.GiDirectSourceLayout;
 import com.metallum.client.gi.source.GiDirectSourceRuntime;
 import com.metallum.client.gi.transport.GiTransportCoordinator;
 import com.metallum.client.gi.transport.GiTransportGpuResources;
@@ -342,6 +344,7 @@ public final class MetalDevice implements GpuDeviceBackend {
     private GiTransportCoordinator giTransportCoordinator;
     private boolean giTransportFailureLogged;
     private boolean giTransportDisabled;
+    private boolean giTransportAdmissionLogged;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
@@ -489,6 +492,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
+        GiTransportRuntime.resetDeviceState();
         boolean giFieldRequested = GiDirectSourceRuntime.isRequested()
                 || GiTransportRuntime.isRequested();
         if (giFieldRequested && !AdvancedLightingRuntime.isRequested()) {
@@ -504,6 +508,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.giDirectSourceCoordinator = new GiDirectSourceCoordinator(
                         this.metalDeviceHandle,
                         this.commandQueue.nativeHandle(),
+                        GiTransportRuntime.isRequested(),
                         handle -> this.commandEncoder.queueForDestroy(
                                 () -> MetalNativeBridge.metallum_gi_direct_source_release_context_v1(handle)
                         )
@@ -517,6 +522,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         if (GiTransportRuntime.isRequested()) {
             if (this.giDirectSourceCoordinator == null) {
+                GiTransportRuntime.reportInvalid("G3 source admission failed");
                 Metallum.LOGGER.warn(
                         "G4 transport requested but its private G3 source failed admission; "
                                 + "keeping G4 structurally inactive"
@@ -528,11 +534,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                     this.giTransportCoordinator = new GiTransportCoordinator(
                             this.metalDeviceHandle,
                             this.commandQueue.nativeHandle(),
+                            this.giDirectSourceCoordinator.telemetrySource(),
                             handle -> this.commandEncoder.queueForDestroy(
                                     () -> MetalNativeBridge.metallum_gi_transport_release_context_v1(handle)
                             )
                     );
                 } catch (RuntimeException exception) {
+                    GiTransportRuntime.reportInvalid("G4 native resource admission failed");
                     Metallum.LOGGER.warn(
                             "G4 frozen-transport ABI preflight failed; keeping G4 structurally inactive",
                             exception
@@ -822,6 +830,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.giDirectSourceCoordinator.close();
             this.giDirectSourceCoordinator = null;
         }
+        GiTransportRuntime.resetDeviceState();
         this.commandEncoder.close();
         this.entityVelocityPackets.close();
         this.frameStatePackets.close();
@@ -2064,7 +2073,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     this.giDirectSourceCoordinator == null
                                             ? null
                                             : this.giDirectSourceCoordinator.transportSource();
-                            if (transportField != null && transportSource != null) {
+                            GiTransportRuntime.reportSourceReady(transportSource != null);
+                            if (transportField != null && transportSource != null
+                                    && GiTransportRuntime.isSubmissionAllowed()) {
                                 transportStatus = this.commandEncoder.encodeGiTransport(
                                         this.giTransportCoordinator,
                                         transportField,
@@ -2075,7 +2086,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 transportStatus = GiTransportCoordinator.STATUS_INPUT_NOT_READY;
                             }
                         }
-                        if (transportStatus == GiTransportGpuResources.STATUS_STALE && accepted) {
+                        if (transportStatus == GiTransportGpuResources.STATUS_STALE) {
+                            this.giTransportDisabled = true;
+                            GiTransportRuntime.reportInvalid(
+                                    accepted
+                                            ? "frozen G3/G2 source drifted"
+                                            : "G3/G2 handoff raced before G4 admission"
+                            );
                             if (!this.giTransportFailureLogged) {
                                 this.giTransportFailureLogged = true;
                                 Metallum.LOGGER.warn(
@@ -2085,11 +2102,13 @@ public final class MetalDevice implements GpuDeviceBackend {
                         } else if (transportStatus == GiTransportGpuResources.STATUS_OK
                                 || transportStatus == GiTransportCoordinator.STATUS_NO_WORK
                                 || transportStatus == GiTransportCoordinator.STATUS_INPUT_NOT_READY
-                                || transportStatus == GiTransportGpuResources.STATUS_BUSY
-                                || transportStatus == GiTransportGpuResources.STATUS_STALE) {
+                                || transportStatus == GiTransportGpuResources.STATUS_BUSY) {
                             this.giTransportFailureLogged = false;
                         } else {
                             this.giTransportDisabled = true;
+                            GiTransportRuntime.reportInvalid(
+                                    "native transport status " + transportStatus
+                            );
                             if (!this.giTransportFailureLogged) {
                                 this.giTransportFailureLogged = true;
                                 Metallum.LOGGER.warn(
@@ -2098,8 +2117,74 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 );
                             }
                         }
+                        if (this.giTransportCoordinator.isFrozen()
+                                && !this.giTransportAdmissionLogged) {
+                            GiTransportGpuResources.Stats transportStats =
+                                    this.giTransportCoordinator.nativeStats();
+                            GiDirectSourceGpuResources.Stats sourceStats =
+                                    this.giDirectSourceCoordinator.nativeStats();
+                            GiDirectDirtyQueue.Telemetry queue =
+                                    this.giDirectSourceCoordinator.queueTelemetry();
+                            if (transportStats == null || sourceStats == null) {
+                                GiTransportRuntime.reportInvalid(
+                                        "READY transport telemetry disappeared"
+                                );
+                            } else {
+                                boolean cleanBenchmarkPopulation =
+                                        !GiTransportRuntime.isBenchmarkActive()
+                                                || (queue.queued()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && queue.completed()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && queue.discarded() == 0L
+                                                && queue.pending() == 0
+                                                && sourceStats.directInjectDispatches()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && sourceStats.geometryApplyDispatches()
+                                                == GiDirectSourceLayout.TOTAL_BRICKS
+                                                && sourceStats.fullVolumeRebuilds() == 1L
+                                                && sourceStats.staleRejects() == 0L
+                                                && sourceStats.rejectedCount() == 0L
+                                                && transportStats.transportDispatches() == 1L
+                                                && transportStats.fullVolumeBuilds() == 1L
+                                                && transportStats.validSurfaceCount() > 0L
+                                                && transportStats.staleRejects() == 0L
+                                                && transportStats.rejectedCount() == 0L);
+                                if (!cleanBenchmarkPopulation) {
+                                    GiTransportRuntime.reportInvalid(
+                                            "G4 READY telemetry is not a clean single population"
+                                    );
+                                } else {
+                                    GiTransportRuntime.reportResolvedReady();
+                                }
+                                if (GiTransportRuntime.isResolvedReady()) {
+                                    this.giTransportAdmissionLogged = true;
+                                    Metallum.LOGGER.info(
+                                            "METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
+                                                    + "requested=g4_transport resolved=g4_transport "
+                                                    + "contract=3 state=READY phase={} presented_frame={} "
+                                                    + "resources=11 passes=4 dirty={}/{}/{}/{} "
+                                                    + "injection_dispatches={} full_volume_rebuilds={} "
+                                                    + "transport_dispatches={} field_epoch=1 "
+                                                    + "stale={} rejected={} status=PASS "
+                                                    + "field_only=true receiver=false image_binding=false",
+                                            GiTransportRuntime.isBenchmarkWarmup()
+                                                    ? "WARMUP" : "DIAGNOSTIC",
+                                            submitIndex,
+                                            queue.queued(), queue.completed(),
+                                            queue.discarded(), queue.pending(),
+                                            sourceStats.directInjectDispatches(),
+                                            sourceStats.fullVolumeRebuilds(),
+                                            transportStats.transportDispatches(),
+                                            transportStats.staleRejects(),
+                                            transportStats.rejectedCount()
+                                    );
+                                }
+                            }
+                        }
                     } catch (RuntimeException exception) {
                         this.giTransportDisabled = true;
+                        GiTransportRuntime.reportInvalid("G4 runtime exception");
                         if (!this.giTransportFailureLogged) {
                             this.giTransportFailureLogged = true;
                             Metallum.LOGGER.warn(
@@ -2115,8 +2200,11 @@ public final class MetalDevice implements GpuDeviceBackend {
                         && (this.giTransportCoordinator == null
                         || !this.giTransportCoordinator.hasAcceptedEpoch())) {
                     try {
-                        GiSemanticDirectFieldView directField =
-                                GiSemanticController.global().activeDirectField();
+                        boolean preparationAllowed = !GiTransportRuntime.isRequested()
+                                || (GiTransportRuntime.isSourcePreparationAllowed()
+                                && !GiTransportRuntime.isInvalid());
+                        GiSemanticDirectFieldView directField = preparationAllowed
+                                ? GiSemanticController.global().activeDirectField() : null;
                         if (directField != null) {
                             int directStatus = this.commandEncoder.encodeGiDirectSource(
                                     this.giDirectSourceCoordinator,
@@ -2124,20 +2212,35 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     capture.giEnvironment(),
                                     submitIndex
                             );
-                            if (directStatus == GiDirectSourceGpuResources.STATUS_OK
+                            if (directStatus
+                                    == GiDirectSourceCoordinator.STATUS_FROZEN_INPUT_DRIFT) {
+                                GiTransportRuntime.reportInvalid(
+                                        "frozen G3 preparation tuple drifted"
+                                );
+                            } else if (directStatus == GiDirectSourceGpuResources.STATUS_OK
                                     || directStatus == GiDirectSourceCoordinator.STATUS_NO_WORK
                                     || directStatus == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY
                                     || directStatus == GiDirectSourceGpuResources.STATUS_BUSY) {
                                 this.giDirectSourceFailureLogged = false;
-                            } else if (!this.giDirectSourceFailureLogged) {
-                                this.giDirectSourceFailureLogged = true;
-                                Metallum.LOGGER.warn(
-                                        "G3 direct-source batch was rejected with status {}; retaining its private prior field",
-                                        directStatus
-                                );
+                            } else {
+                                if (GiTransportRuntime.isRequested()) {
+                                    GiTransportRuntime.reportInvalid(
+                                            "G3 native status " + directStatus
+                                    );
+                                }
+                                if (!this.giDirectSourceFailureLogged) {
+                                    this.giDirectSourceFailureLogged = true;
+                                    Metallum.LOGGER.warn(
+                                            "G3 direct-source batch was rejected with status {}; retaining its private prior field",
+                                            directStatus
+                                    );
+                                }
                             }
                         }
                     } catch (RuntimeException exception) {
+                        if (GiTransportRuntime.isRequested()) {
+                            GiTransportRuntime.reportInvalid("G3 runtime exception");
+                        }
                         if (!this.giDirectSourceFailureLogged) {
                             this.giDirectSourceFailureLogged = true;
                             Metallum.LOGGER.warn(

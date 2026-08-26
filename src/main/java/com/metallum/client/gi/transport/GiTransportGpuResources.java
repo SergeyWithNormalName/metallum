@@ -228,8 +228,10 @@ public final class GiTransportGpuResources implements AutoCloseable {
     public static @Nullable GiTransportGpuResources create(
             final MemorySegment device,
             final MemorySegment commandQueue,
+            final GiDirectSourceCoordinator.TelemetrySource telemetrySource,
             final Consumer<MemorySegment> deferredRelease
     ) {
+        Objects.requireNonNull(telemetrySource, "telemetrySource");
         Objects.requireNonNull(deferredRelease, "deferredRelease");
         if (MetalNativeBridge.isNullHandle(device) || MetalNativeBridge.isNullHandle(commandQueue)) {
             return null;
@@ -242,6 +244,13 @@ public final class GiTransportGpuResources implements AutoCloseable {
         );
         if (MetalNativeBridge.isNullHandle(context)) {
             return null;
+        }
+        int attachStatus = telemetrySource.attachTransportTelemetry(context);
+        if (attachStatus != STATUS_OK) {
+            MetalNativeBridge.metallum_gi_transport_release_context_v1(context);
+            throw new IllegalStateException(
+                    "Failed to attach G4 telemetry to its G3 owner: " + attachStatus
+            );
         }
         Arena arena = Arena.ofConfined();
         try {

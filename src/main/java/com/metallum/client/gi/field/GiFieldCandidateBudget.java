@@ -83,4 +83,9 @@ public final class GiFieldCandidateBudget {
                 this.rejected
         );
     }
+
+    /** Allocation-free render-thread readiness check for frozen benchmark admission. */
+    public synchronized boolean hasActiveCandidates() {
+        return this.activeCandidates != 0;
+    }
 }

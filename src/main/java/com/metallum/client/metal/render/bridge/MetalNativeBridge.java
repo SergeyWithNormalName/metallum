@@ -558,6 +558,11 @@ public final class MetalNativeBridge {
                     "metallum_gi_transport_create_context_v1",
                     FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
             );
+            giTransportAttachTelemetryV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_attach_telemetry_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
             giTransportEncodeFrozenV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_transport_encode_frozen_v1",
@@ -1194,6 +1199,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle giTransportAbiVersionV1;
     private static final MethodHandle giTransportLayoutV1;
     private static final MethodHandle giTransportCreateContextV1;
+    private static final MethodHandle giTransportAttachTelemetryV1;
     private static final MethodHandle giTransportEncodeFrozenV1;
     private static final MethodHandle giTransportAwaitReadyV1;
     private static final MethodHandle giTransportGetStatsV1;
@@ -2277,6 +2283,19 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_transport_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_attach_telemetry_v1(
+            final MemorySegment context,
+            final MemorySegment directContext
+    ) {
+        try {
+            return (int) giTransportAttachTelemetryV1.invokeExact(
+                    segment(context), segment(directContext)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_attach_telemetry_v1", throwable);
         }
     }
 

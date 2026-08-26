@@ -23,6 +23,7 @@ public final class GiSemanticController {
 
     private final IdentityHashMap<Object, WorldState> worlds = new IdentityHashMap<>();
     private final GiFieldCandidateBudget candidateBudget;
+    @Nullable private WorldState soleWorldState;
     private long nextWorldGeneration;
     private long nextResourceEpoch;
     private long nextOwnerToken;
@@ -62,6 +63,7 @@ public final class GiSemanticController {
         List<GiSemanticPalette.Seed> seeds = this.atlasSeeds == null ? List.of() : this.atlasSeeds;
         GiSemanticPalette palette = GiSemanticPalette.build(1L, token.resourceEpoch(), token.materialEpoch(), seeds);
         this.worlds.put(world, new WorldState(token, palette, this.atlasSeeds != null));
+        refreshSoleWorldState();
         return token;
     }
 
@@ -94,6 +96,7 @@ public final class GiSemanticController {
             this.worlds.put(world, new WorldState(
                     token, blockedPalette, false, cameraX, cameraY, cameraZ
             ));
+            refreshSoleWorldState();
         } else {
             old.token = token;
             old.palette = blockedPalette;
@@ -107,7 +110,10 @@ public final class GiSemanticController {
     }
 
     public synchronized void closeWorld(final Object world) {
-        if (this.worlds.remove(world) != null) this.resets++;
+        if (this.worlds.remove(world) != null) {
+            refreshSoleWorldState();
+            this.resets++;
+        }
     }
 
     /** Compatibility invalidation used before a full atlas palette is available; no task is admitted. */
@@ -332,10 +338,8 @@ public final class GiSemanticController {
     /** Returns the sole active render-thread field without cloning its 3x32^3 payload. */
     @Nullable
     public synchronized GiSemanticDirectFieldView activeDirectField() {
-        if (this.worlds.size() != 1) {
-            return null;
-        }
-        WorldState state = this.worlds.values().iterator().next();
+        WorldState state = this.soleWorldState;
+        if (state == null) return null;
         return state.paletteReady ? state.directField : null;
     }
 
@@ -348,10 +352,8 @@ public final class GiSemanticController {
     /** Returns the sole active frozen-near-cascade transport view without cloning G2 truth. */
     @Nullable
     public synchronized GiSemanticTransportFieldView activeTransportField() {
-        if (this.worlds.size() != 1) {
-            return null;
-        }
-        WorldState state = this.worlds.values().iterator().next();
+        WorldState state = this.soleWorldState;
+        if (state == null) return null;
         return state.paletteReady ? state.transportField : null;
     }
 
@@ -372,6 +374,19 @@ public final class GiSemanticController {
     }
 
     public GiFieldCandidateBudget.Snapshot budgetSnapshot() { return this.candidateBudget.snapshot(); }
+
+    public boolean hasActiveCandidates() { return this.candidateBudget.hasActiveCandidates(); }
+
+    /** Rare world-lifecycle refresh; hot active-field access remains allocation-free. */
+    private void refreshSoleWorldState() {
+        this.soleWorldState = null;
+        if (this.worlds.size() == 1) {
+            for (WorldState state : this.worlds.values()) {
+                this.soleWorldState = state;
+                break;
+            }
+        }
+    }
 
     @Nullable
     private WorldState currentState(final GiSemanticSectionTask task) {

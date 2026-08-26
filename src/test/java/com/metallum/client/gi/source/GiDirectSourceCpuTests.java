@@ -19,6 +19,7 @@ public final class GiDirectSourceCpuTests {
         environmentQuantization();
         staleEpochIsRejected();
         queueBoundsCoalescingAndStarvation();
+        rotatedLifetimeCountersCanProveASettledCurrentField();
     }
 
     private static void negativeCoordinateMath() {
@@ -91,6 +92,34 @@ public final class GiDirectSourceCpuTests {
         check(queue.telemetry().starvationPromotions() == drained, "starvation promotion");
         check(queue.telemetry().fullVolumeRebuilds() == 1L,
                 "initial full-field invalidation was not counted exactly once");
+    }
+
+    private static void rotatedLifetimeCountersCanProveASettledCurrentField() {
+        GiDirectSourceEpoch first = epoch(1L, 1L);
+        GiDirectSourceEpoch second = epoch(2L, 2L);
+        GiDirectDirtyQueue queue = new GiDirectDirtyQueue();
+        queue.rotateEpoch(first);
+        queue.enqueueAll(first, 0L);
+        int[] batch = new int[GiDirectSourceLayout.MAX_DRAIN_PER_FRAME];
+        for (int iteration = 0; iteration < 4; iteration++) {
+            int count = queue.drainTo(first, iteration, batch);
+            queue.completeBatch(first, batch, count);
+        }
+        queue.rotateEpoch(second);
+        queue.enqueueAll(second, 4L);
+        for (int iteration = 0; iteration < 24; iteration++) {
+            int count = queue.drainTo(second, 4L + iteration, batch);
+            queue.completeBatch(second, batch, count);
+        }
+        GiDirectDirtyQueue.Telemetry telemetry = queue.telemetry();
+        check(telemetry.queued() == 384L && telemetry.completed() == 224L
+                        && telemetry.discarded() == 160L && telemetry.pending() == 0,
+                "rotated G3 lifetime counters changed");
+        check(GiDirectSourceCoordinator.isSettledTransportSource(queue.epochTelemetry()),
+                "settled current G3 epoch was confused with lifetime discard history");
+        queue.enqueue(second, 0, 40L);
+        check(!GiDirectSourceCoordinator.isSettledTransportSource(queue.epochTelemetry()),
+                "pending current G3 work was admitted to G4");
     }
 
     private static AdvancedLight block(final long stableId, final int priority, final double x, final double y, final double z) {

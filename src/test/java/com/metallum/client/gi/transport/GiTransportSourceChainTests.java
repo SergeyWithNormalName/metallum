@@ -65,7 +65,8 @@ public final class GiTransportSourceChainTests {
         require(resources.contains("try (Arena captureArena = Arena.ofConfined())")
                         && occurrences(resources, "captureArena.allocate(") == 5,
                 "G4 capture does not isolate exactly five temporary compact destinations");
-        require(resources.contains("metallum_gi_transport_encode_frozen_v1")
+        require(resources.contains("telemetrySource.attachTransportTelemetry(context)")
+                        && resources.contains("metallum_gi_transport_encode_frozen_v1")
                         && resources.contains("metallum_gi_transport_capture_volume_once_v1")
                         && resources.contains("this.deferredRelease.accept(stale)"),
                 "G4 native encode/capture/deferred-retirement chain is incomplete");
@@ -78,10 +79,16 @@ public final class GiTransportSourceChainTests {
         ));
         require(directCoordinator.contains("public static final class TransportSource")
                         && directCoordinator.contains("private TransportSource(")
+                        && directCoordinator.contains("private TelemetrySource(")
+                        && directCoordinator.contains("public TelemetrySource telemetrySource()")
+                        && directCoordinator.contains("attachTransportTelemetry")
+                        && directCoordinator.contains(
+                        "metallum_gi_transport_attach_telemetry_v1")
+                        && occurrences(directCoordinator,
+                        "public MemorySegment directContext()") == 1
                         && directCoordinator.contains("record TransportSourceIdentity")
-                        && directCoordinator.contains("queue.completed() != GiDirectSourceLayout.TOTAL_BRICKS")
-                        && directCoordinator.contains("queue.pending() != 0")
-                        && directCoordinator.contains("queue.discarded() != 0L")
+                        && directCoordinator.contains("isSettledTransportSource")
+                        && directCoordinator.contains("queue.fullVolumeEnqueued()")
                         && directCoordinator.contains("!stats.ready() || stats.buildInFlight()")
                         && directCoordinator.contains("transportSourceIdentityStillCurrent")
                         && directResources.contains("transportContextHandle()"),

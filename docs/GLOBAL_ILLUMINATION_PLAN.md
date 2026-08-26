@@ -392,7 +392,9 @@ Live Tier B на frozen 600+600 fixture выполнил ровно одну ini
 оба измерительных окна имели нулевую работу и неизменный full-field counter. Два
 предыдущих прогона с dynamic-epoch и startup-publication churn сохранены как
 rejected evidence. Текущий статус — `G3_COMPLETE_FIELD_ONLY`; G4 разрешён
-только новым отдельным запросом и не начат. Полный контракт: `docs/GI_G3.md`.
+отдельным запросом пользователя и теперь реализован как field-only candidate;
+его собственный Tier B stop-gate ещё не завершён. Полный контракт G3:
+`docs/GI_G3.md`.
 
 ### G4 — детерминированный one-bounce diffuse transport
 
@@ -438,6 +440,12 @@ Stop-gate:
 
 - Light leaks через sealed wall, race-dependent hash, amplification без emissive
   source или unbounded convergence закрывают гипотезу до receiver.
+
+Статус реализации от 2026-08-27: frozen near-cascade candidate завершён в
+Java/Swift/Metal и остаётся default-off. Source/bundled Metal Validation, exact
+ABI/resource census и field-only source-chain прошли. Live G4 receipt пока
+`PENDING_TIER_B_STOP_GATE`; до его принятия G4 не считается завершённым, а G5
+остаётся заблокирован. Канонический контракт: `docs/GI_G4.md`.
 
 ### G5 — receiver feasibility
 

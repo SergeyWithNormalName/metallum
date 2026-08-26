@@ -59,6 +59,9 @@ FI_MINIMUM_GENERATED_FRAMES=0
 FI_RENDERER_IMPROVED_LIGHTING=unchanged
 FI_RENDERER_LIGHTING_PRESET=unchanged
 EXPECTED_VSYNC=false
+TRANSCRIPT_ACTIVE=0
+TRANSCRIPT_TEE_PID=""
+TRANSCRIPT_PIPE=""
 
 usage() {
     cat <<'EOF'
@@ -120,6 +123,37 @@ EOF
 die() {
     echo "ERROR: $*" >&2
     exit 2
+}
+
+finish_transcript() {
+    local transcript_status=0
+    if [ "${TRANSCRIPT_ACTIVE:-0}" -eq 1 ]; then
+        TRANSCRIPT_ACTIVE=0
+        exec 1>&3 2>&4
+        exec 3>&- 4>&-
+        if wait "$TRANSCRIPT_TEE_PID"; then
+            :
+        else
+            transcript_status=$?
+        fi
+        if [ -n "${TRANSCRIPT_PIPE:-}" ]; then
+            rm -f "$TRANSCRIPT_PIPE" || transcript_status=1
+        fi
+        TRANSCRIPT_TEE_PID=""
+        TRANSCRIPT_PIPE=""
+    fi
+    return "$transcript_status"
+}
+
+transcript_only_cleanup() {
+    local original_status=$1
+    trap - EXIT HUP INT TERM
+    set +e
+    finish_transcript
+    if [ "$?" -ne 0 ] && [ "$original_status" -eq 0 ]; then
+        original_status=2
+    fi
+    exit "$original_status"
 }
 
 [ -f "$GI_RELEASE_GUARD" ] || die "GI release-contract guard is missing: $GI_RELEASE_GUARD"
@@ -255,6 +289,7 @@ case "$METAL_VALIDATION" in 0|1) ;; *) die "METALLUM_L2_METAL_VALIDATION must be
 command -v python3 >/dev/null 2>&1 || die "python3 is required for report validation"
 command -v pgrep >/dev/null 2>&1 || die "pgrep is required for process isolation"
 command -v mktemp >/dev/null 2>&1 || die "mktemp is required for isolated benchmark worlds"
+command -v mkfifo >/dev/null 2>&1 || die "mkfifo is required for benchmark transcripts"
 command -v uuidgen >/dev/null 2>&1 || die "uuidgen is required for isolated benchmark worlds"
 if [ "$FI_VALIDATION" -eq 1 ]; then
     command -v cmp >/dev/null 2>&1 \
@@ -357,6 +392,9 @@ early_cleanup() {
     fi
     if [ "$original_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
         original_status=$cleanup_status
+    fi
+    if ! finish_transcript && [ "$original_status" -eq 0 ]; then
+        original_status=2
     fi
     exit "$original_status"
 }
@@ -758,6 +796,31 @@ if [ "$GI_G4_TRANSPORT_ENV" -eq 1 ]; then
     GI_G2_CAPTURE_ENV=1
     GI_G3_INJECT_ENV=1
     RUNTIME_GI_MODE=g4_transport
+    require_value "$ROUTE_ID" "gi-g4-overworld-v1" "G4 benchmark route"
+    require_value "$ROUTE_SHA256" \
+        "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+        "G4 benchmark route digest"
+    require_value "$SETTINGS_ID" "native-hdr-fancy-v1" "G4 settings profile"
+    require_value "$SETTINGS_SPEC_SHA256" \
+        "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+        "G4 settings specification digest"
+    require_value "$SETTINGS_SHA256" \
+        "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+        "G4 resolved settings digest"
+    require_value "$WIDTH" "3024" "G4 render width"
+    require_value "$HEIGHT" "1964" "G4 render height"
+    require_value "$REFRESH_HZ" "120" "G4 refresh rate"
+    require_value "$GRAPHICS_PRESET" "fancy" "G4 graphics preset"
+    require_value "$HDR_MODE" "scene" "G4 HDR output mode"
+    require_value "$WARMUP_FRAMES" "600" "G4 warmup frames"
+    require_value "$MEASURE_FRAMES" "600" "G4 measurement frames"
+    require_value "$TIMING_DETAIL" "1" "G4 timing detail"
+    require_value "$METAL_VALIDATION" "0" "G4 Metal Validation mode"
+    require_value "$METALFX_MODE" "OFF" "G4 MetalFX mode"
+    require_value "$CAPTURE_REFERENCE" "0" "G4 reference capture mode"
+    require_value "$FI_VALIDATION" "0" "G4 frame interpolation validation mode"
+    require_value "$VERTEX_REFLECTION_EXPERIMENT" "0" \
+        "G4 vertex-reflection experiment mode"
 elif [ "$GI_G3_INJECT_ENV" -eq 1 ]; then
     GI_G2_CAPTURE_ENV=1
     RUNTIME_GI_MODE=g3_inject
@@ -805,6 +868,9 @@ if [ -n "$benchmark_status" ]; then
     worktree_state="dirty"
     dirty_flag=1
 fi
+if [ "$RUNTIME_GI_MODE" = "g4_transport" ] && [ "$dirty_flag" -ne 0 ]; then
+    die "G4 Tier B evidence requires a clean worktree"
+fi
 safe_label=$(printf '%s' "$LABEL" | tr -cs '[:alnum:]._' '-' | sed 's/^-*//; s/-*$//')
 [ -n "$safe_label" ] || safe_label="run"
 mode_label=$(printf '%s' "$METALFX_MODE" | tr '[:upper:]' '[:lower:]')
@@ -819,8 +885,28 @@ done
 RAW_REPORT="$OUTPUT_DIR/$stem.raw.jsonl"
 MINECRAFT_LOG="$OUTPUT_DIR/$stem.minecraft.log"
 CONSOLE_LOG="$OUTPUT_DIR/$stem.console.log"
+TRANSCRIPT_LOG="$OUTPUT_DIR/$stem.transcript.log"
 SUMMARY_JSON="$OUTPUT_DIR/$stem.summary.json"
 ACCEPTED_JSON="$OUTPUT_DIR/$stem.accepted.json"
+
+: > "$TRANSCRIPT_LOG" || die "failed to create benchmark transcript: $TRANSCRIPT_LOG"
+exec 3>&1 4>&2
+TRANSCRIPT_PIPE="$OUTPUT_DIR/.$stem.transcript.pipe"
+[ ! -e "$TRANSCRIPT_PIPE" ] \
+    || die "benchmark transcript pipe already exists: $TRANSCRIPT_PIPE"
+mkfifo "$TRANSCRIPT_PIPE" \
+    || die "failed to create benchmark transcript pipe: $TRANSCRIPT_PIPE"
+tee -a "$TRANSCRIPT_LOG" < "$TRANSCRIPT_PIPE" >&3 &
+TRANSCRIPT_TEE_PID=$!
+exec > "$TRANSCRIPT_PIPE" 2>&1
+rm -f "$TRANSCRIPT_PIPE"
+TRANSCRIPT_ACTIVE=1
+if [ "$FI_VALIDATION" -eq 0 ]; then
+    trap 'transcript_only_cleanup $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+fi
 
 echo "Metallum benchmark preflight passed"
 echo "  display: $MONITOR_NAME, ${WIDTH}x${HEIGHT}@${REFRESH_HZ}, exclusive fullscreen"
@@ -831,7 +917,7 @@ else
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
 if [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
-    echo "GI_G4_TRANSPORT_ADMISSION mode=g4_transport g2_capture=true g3_inject=true frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false image_binding=false diagnostic_only=true release=false status=REQUESTED"
+    echo "GI_G4_TRANSPORT_REQUEST mode=g4_transport g2_capture=true g3_inject=true frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false image_binding=false diagnostic_only=true release=false status=REQUESTED"
 elif [ "$RUNTIME_GI_MODE" = "g3_inject" ]; then
     echo "GI_G3_ADMISSION mode=g3_inject field_only=true bounce=false image_binding=false status=REQUESTED"
 else
@@ -867,6 +953,7 @@ echo "  frames: $WARMUP_FRAMES warmup + $MEASURE_FRAMES measurement"
 echo "  commit: $commit ($worktree_state worktree state)"
 echo "  source: $SOURCE_SHA256"
 echo "  raw report: $RAW_REPORT"
+echo "  transcript: $TRANSCRIPT_LOG"
 if [ "$CAPTURE_REFERENCE" -eq 1 ]; then
     echo "  reference capture: enabled (performance result will not be attested)"
 fi
@@ -1061,6 +1148,9 @@ cleanup() {
         fi
     fi
     [ -z "${OPTIONS_FILE_BACKUP:-}" ] || rm -f "$OPTIONS_FILE_BACKUP"
+    if ! finish_transcript && [ "$original_status" -eq 0 ]; then
+        original_status=2
+    fi
     exit "$original_status"
 }
 
@@ -1226,8 +1316,10 @@ METALLUM_GPU_TIMING_DETAIL="$TIMING_DETAIL" \
 METALLUM_GPU_TIMING_REPORT="$RAW_REPORT" \
     ./gradlew --no-daemon runClient --console=plain \
         "--args=--username $PLAYER_NAME --uuid $PLAYER_UUID --quickPlaySingleplayer $RUN_WORLD_NAME" \
-        > "$CONSOLE_LOG" 2>&1
-gradle_status=$?
+        2>&1 | tee "$CONSOLE_LOG"
+pipeline_status=("${PIPESTATUS[@]}")
+gradle_status=${pipeline_status[0]}
+console_tee_status=${pipeline_status[1]}
 set -e
 
 LATEST_LOG="$RUN_DIR/logs/latest.log"
@@ -1236,6 +1328,8 @@ if [ -f "$LATEST_LOG" ]; then
     cp "$LATEST_LOG" "$MINECRAFT_LOG"
 fi
 [ "$gradle_status" -eq 0 ] || die "runClient exited with status $gradle_status (console: $CONSOLE_LOG)"
+[ "$console_tee_status" -eq 0 ] \
+    || die "failed to preserve Gradle output in console/transcript artifacts"
 [ -s "$MINECRAFT_LOG" ] || die "Minecraft did not produce a fresh log"
 [ "$latest_mtime" -ge "$start_epoch" ] || die "Minecraft log predates this benchmark run"
 
@@ -1269,6 +1363,7 @@ server_frozen="METALLUM_BENCHMARK EVENT=SERVER_TICKS_FROZEN"
 route_ready="METALLUM_BENCHMARK EVENT=ROUTE_READY route=$ROUTE_ID stable_frames=$ROUTE_STABLE_FRAMES "
 route_measure_start="METALLUM_BENCHMARK EVENT=ROUTE_CHECK event=MEASURE_START route=$ROUTE_ID status=ready"
 route_measure_end="METALLUM_BENCHMARK EVENT=ROUTE_CHECK event=MEASURE_END route=$ROUTE_ID status=ready"
+segment_start="METALLUM_BENCHMARK EVENT=SEGMENT_START index=1 total=1 mode=$METALFX_MODE warmup=$WARMUP_FRAMES measure=$MEASURE_FRAMES"
 measure_start="METALLUM_BENCHMARK EVENT=MEASURE_START index=1 mode=$METALFX_MODE presented_frame=$WARMUP_FRAMES"
 final_presented=$((WARMUP_FRAMES + MEASURE_FRAMES))
 measure_end="METALLUM_BENCHMARK EVENT=MEASURE_END index=1 mode=$METALFX_MODE presented_frame=$final_presented"
@@ -1278,6 +1373,7 @@ server_frozen_count=$(grep -Fc "$server_frozen" "$MINECRAFT_LOG" || true)
 route_ready_count=$(grep -Fc "$route_ready" "$MINECRAFT_LOG" || true)
 route_measure_start_count=$(grep -Fc "$route_measure_start" "$MINECRAFT_LOG" || true)
 route_measure_end_count=$(grep -Fc "$route_measure_end" "$MINECRAFT_LOG" || true)
+segment_start_count=$(grep -Fc "$segment_start" "$MINECRAFT_LOG" || true)
 measure_start_count=$(grep -Fc "$measure_start" "$MINECRAFT_LOG" || true)
 measure_end_count=$(grep -Fc "$measure_end" "$MINECRAFT_LOG" || true)
 [ "$route_apply_count" -eq 1 ] \
@@ -1290,6 +1386,8 @@ measure_end_count=$(grep -Fc "$measure_end" "$MINECRAFT_LOG" || true)
     || die "expected exactly one ready ROUTE_CHECK for MEASURE_START (found $route_measure_start_count)"
 [ "$route_measure_end_count" -eq 1 ] \
     || die "expected exactly one ready ROUTE_CHECK for MEASURE_END (found $route_measure_end_count)"
+[ "$segment_start_count" -eq 1 ] \
+    || die "expected exactly one matching SEGMENT_START marker (found $segment_start_count)"
 [ "$measure_start_count" -eq 1 ] \
     || die "expected exactly one matching MEASURE_START marker (found $measure_start_count)"
 [ "$measure_end_count" -eq 1 ] \
@@ -1300,15 +1398,35 @@ server_frozen_line=$(grep -nF "$server_frozen" "$MINECRAFT_LOG" | cut -d: -f1)
 route_ready_line=$(grep -nF "$route_ready" "$MINECRAFT_LOG" | cut -d: -f1)
 route_measure_start_line=$(grep -nF "$route_measure_start" "$MINECRAFT_LOG" | cut -d: -f1)
 route_measure_end_line=$(grep -nF "$route_measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
+segment_start_line=$(grep -nF "$segment_start" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_start_line=$(grep -nF "$measure_start" "$MINECRAFT_LOG" | cut -d: -f1)
 measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
 [ "$route_apply_line" -lt "$server_frozen_line" ] \
     && [ "$server_frozen_line" -lt "$route_ready_line" ] \
+    && [ "$route_ready_line" -lt "$segment_start_line" ] \
     && [ "$route_ready_line" -lt "$route_measure_start_line" ] \
     && [ "$route_measure_start_line" -lt "$measure_start_line" ] \
     && [ "$measure_start_line" -lt "$measure_end_line" ] \
     && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
     || die "deterministic route markers are out of order"
+
+if [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
+    g4_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
+    g4_admission_count=$(grep -Fc "$g4_admission_prefix" "$MINECRAFT_LOG" || true)
+    [ "$g4_admission_count" -eq 1 ] \
+        || die "expected exactly one G4 admission marker (found $g4_admission_count)"
+    g4_admission=$(grep -E \
+        'METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION requested=g4_transport resolved=g4_transport contract=3 state=READY phase=WARMUP presented_frame=[0-9]+ resources=11 passes=4 dirty=192/192/0/0 injection_dispatches=192 full_volume_rebuilds=1 transport_dispatches=1 field_epoch=1 stale=0 rejected=0 status=PASS field_only=true receiver=false image_binding=false$' \
+        "$MINECRAFT_LOG" || true)
+    g4_admission_exact_count=$(printf '%s\n' "$g4_admission" \
+        | grep -Fc "$g4_admission_prefix" || true)
+    [ "$g4_admission_exact_count" -eq 1 ] \
+        || die "G4 admission did not prove the exact resolved READY contract"
+    g4_admission_line=$(grep -nF "$g4_admission_prefix" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$segment_start_line" -lt "$g4_admission_line" ] \
+        && [ "$g4_admission_line" -lt "$measure_start_line" ] \
+        || die "G4 admission marker is outside the warmup boundary"
+fi
 
 
 if [ "$ROUTE_KIND" = "TORCH_EPOCH" ] || [ "$ROUTE_KIND" = "TORCH_TOGGLE" ]; then
@@ -1507,6 +1625,7 @@ if [ "$FI_VALIDATION" -eq 1 ]; then
     echo "FI validation passed: $fi_generated_delta generated frames reached the display"
     echo "  evidence: exact CAMetalDrawable presented-handler counter in $MINECRAFT_LOG"
     echo "  console log: $CONSOLE_LOG"
+    echo "  transcript: $TRANSCRIPT_LOG"
     ATTEST_PENDING=0
     exit 0
 fi
@@ -1591,6 +1710,7 @@ echo "  raw: $RAW_REPORT"
 echo "  summary: $SUMMARY_JSON"
 echo "  Minecraft log: $MINECRAFT_LOG"
 echo "  console log: $CONSOLE_LOG"
+echo "  transcript: $TRANSCRIPT_LOG"
 if [ -n "$RELEASE_ARG" ]; then
     ATTEST_PENDING=1
 else

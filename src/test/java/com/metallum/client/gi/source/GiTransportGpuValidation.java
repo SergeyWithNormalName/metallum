@@ -71,6 +71,7 @@ public final class GiTransportGpuValidation {
             queue = MTLCommandQueue.create(device, layer);
             GiTransportGpuResources.validateNativeAbi();
             validatePhysicalField(device, queue, expectedLibraryMode);
+            validateAttachmentLifecycle(device, layer, queue);
             validateWrongThread(device, queue, expectedLibraryMode);
             validateReleaseWhileInFlight(device, queue);
             System.out.println("G4 frozen one-bounce Metal validation passed ("
@@ -82,6 +83,102 @@ public final class GiTransportGpuValidation {
             }
             MetalNativeBridge.metallum_release_device_caches(device);
             MetalNativeBridge.metallum_release_object(device);
+        }
+    }
+
+    private static void validateAttachmentLifecycle(
+            final MemorySegment device,
+            final MemorySegment layer,
+            final MTLCommandQueue queue
+    ) throws InterruptedException {
+        try (DirectField direct = DirectField.create(device, queue, 451L, Scene.OPEN)) {
+            MemorySegment owner = MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                    device, queue.nativeHandle(), direct.world());
+            MemorySegment competitor = MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                    device, queue.nativeHandle(), direct.world());
+            require(!MetalNativeBridge.isNullHandle(owner)
+                            && !MetalNativeBridge.isNullHandle(competitor),
+                    "G4 attachment lifecycle context creation failed");
+            try {
+                AtomicInteger wrongThread = new AtomicInteger();
+                MemorySegment directHandle = direct.context();
+                Thread thread = new Thread(() -> wrongThread.set(
+                        MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                owner, directHandle)
+                ), "g4-attach-wrong-thread");
+                thread.start();
+                thread.join();
+                require(wrongThread.get() == GiTransportGpuResources.STATUS_WRONG_THREAD,
+                        "wrong-thread G4 telemetry attachment was admitted");
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                owner, MemorySegment.ofAddress(1L))
+                                == GiTransportGpuResources.STATUS_INVALID,
+                        "forged G3 telemetry capability was admitted");
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                owner, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                        "owner G4 telemetry attachment failed");
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                owner, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                        "idempotent owner G4 telemetry attachment failed");
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                competitor, direct.context())
+                                == GiTransportGpuResources.STATUS_BUSY,
+                        "second live G4 attachment was admitted");
+            } finally {
+                MetalNativeBridge.metallum_gi_transport_release_context_v1(competitor);
+                MetalNativeBridge.metallum_gi_transport_release_context_v1(owner);
+            }
+        }
+
+        DirectField retired = DirectField.create(device, queue, 452L, Scene.OPEN);
+        MemorySegment retiredHandle = retired.context();
+        retired.close();
+        MemorySegment staleOwner = MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                device, queue.nativeHandle(), 452L);
+        require(!MetalNativeBridge.isNullHandle(staleOwner),
+                "G4 released-source validation context creation failed");
+        try {
+            require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                            staleOwner, retiredHandle) == GiTransportGpuResources.STATUS_INVALID,
+                    "released G3 telemetry capability was admitted");
+        } finally {
+            MetalNativeBridge.metallum_gi_transport_release_context_v1(staleOwner);
+        }
+
+        DirectField held = DirectField.create(device, queue, 453L, Scene.OPEN);
+        MemorySegment heldOwner = MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                device, queue.nativeHandle(), held.world());
+        require(!MetalNativeBridge.isNullHandle(heldOwner),
+                "G4 pre-dispatch release context creation failed");
+        require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                        heldOwner, held.context()) == GiTransportGpuResources.STATUS_OK,
+                "G4 pre-dispatch release attachment failed");
+        held.close();
+        MetalNativeBridge.metallum_gi_transport_release_context_v1(heldOwner);
+
+        MTLCommandQueue otherQueue = MTLCommandQueue.create(device, layer);
+        try {
+            try (DirectField otherQueueSource = DirectField.create(
+                    device, otherQueue, 455L, Scene.OPEN)) {
+                MemorySegment primaryQueueOwner =
+                        MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                                device, queue.nativeHandle(), otherQueueSource.world()
+                        );
+                require(!MetalNativeBridge.isNullHandle(primaryQueueOwner),
+                        "G4 queue-mismatch context creation failed");
+                try {
+                    require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                    primaryQueueOwner, otherQueueSource.context())
+                                    == GiTransportGpuResources.STATUS_INVALID,
+                            "G4 admitted a G3 owner from a different command queue");
+                } finally {
+                    MetalNativeBridge.metallum_gi_transport_release_context_v1(
+                            primaryQueueOwner
+                    );
+                }
+            }
+        } finally {
+            otherQueue.close();
         }
     }
 
@@ -179,6 +276,9 @@ public final class GiTransportGpuValidation {
                     device, queue.nativeHandle(), direct.world());
             require(!MetalNativeBridge.isNullHandle(context),
                     "G4 wrong-thread context creation failed");
+            require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                            context, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                    "G4 wrong-thread fixture telemetry attachment failed");
             assertLibraryMode(context, arena, expectedLibraryMode);
             MTLCommandBuffer commandBuffer = queue.makeCommandBuffer("G4 wrong-thread validation");
             MemorySegment directContext = direct.context();
@@ -208,6 +308,9 @@ public final class GiTransportGpuValidation {
                     device, queue.nativeHandle(), direct.world());
             require(!MetalNativeBridge.isNullHandle(context),
                     "G4 in-flight context creation failed");
+            require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                            context, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                    "G4 in-flight fixture telemetry attachment failed");
             MTLCommandBuffer commandBuffer = queue.makeCommandBuffer("G4 release validation");
             require(MetalNativeBridge.metallum_gi_transport_encode_frozen_v1(
                             context, direct.context(), commandBuffer.handle(), MemorySegment.NULL,
@@ -243,6 +346,12 @@ public final class GiTransportGpuValidation {
                     device, queue.nativeHandle(), direct.world());
             require(!MetalNativeBridge.isNullHandle(context), "G4 context creation failed");
             try {
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                context, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                        "G4 telemetry attachment failed");
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                context, direct.context()) == GiTransportGpuResources.STATUS_OK,
+                        "idempotent G4 telemetry attachment failed");
                 assertLibraryMode(context, arena, expectedLibraryMode);
                 MTLCommandBuffer forgedSource = queue.makeCommandBuffer(
                         "G4 forged G3 capability validation"

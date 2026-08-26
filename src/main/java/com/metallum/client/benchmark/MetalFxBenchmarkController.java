@@ -7,6 +7,8 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.gi.semantic.GiSemanticController;
+import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
@@ -71,6 +73,8 @@ import java.nio.charset.StandardCharsets;
  */
 public final class MetalFxBenchmarkController {
     private static final int WINDOW_TRANSITION_TIMEOUT_FRAMES = 240;
+    private static final int G4_ADMISSION_TIMEOUT_FRAMES = 240;
+    private static final int G4_SOURCE_RECEIPT_FRAMES = 300;
     private static final int ROUTE_SERVER_CHECK_INTERVAL_FRAMES = 30;
     private static final int WINDOWED_WIDTH = 1280;
     private static final int WINDOWED_HEIGHT = 720;
@@ -436,6 +440,7 @@ public final class MetalFxBenchmarkController {
     private volatile boolean routeServerTicksFrozen;
     private int routeServerCheckCountdown;
     private int routeStableFrames;
+    private int g4SourceReceiptFrames;
     private final AtomicBoolean torchEpochServerTaskPending = new AtomicBoolean();
     private boolean torchEpochRequested;
     private boolean torchEpochAppliedLogged;
@@ -693,13 +698,34 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "benchmark framebuffer changed during measurement");
             return;
         }
+        if (GiTransportRuntime.isRequested() && GiTransportRuntime.isInvalid()) {
+            fail(minecraft, "G4 transport became invalid: " + GiTransportRuntime.invalidReason());
+            return;
+        }
+        if (GiTransportRuntime.isRequested()
+                && this.segmentPhase != SegmentPhase.WARMUP
+                && !GiTransportRuntime.isResolvedReady()) {
+            fail(minecraft, "G4 transport is not READY outside benchmark warmup");
+            return;
+        }
 
         switch (this.segmentPhase) {
             case WARMUP -> {
                 driveL6DynamicShadow(minecraft);
                 driveNetherLavaStress(minecraft);
                 this.segmentFrame++;
+                if (GiTransportRuntime.isRequested()
+                        && this.segmentFrame >= G4_ADMISSION_TIMEOUT_FRAMES
+                        && !GiTransportRuntime.isResolvedReady()) {
+                    fail(minecraft, "G4 transport did not resolve READY within 240 warmup frames");
+                    return;
+                }
                 if (this.segmentFrame >= this.warmupFrames) {
+                    if (GiTransportRuntime.isRequested()
+                            && !GiTransportRuntime.isResolvedReady()) {
+                        fail(minecraft, "G4 transport did not resolve READY before measurement");
+                        return;
+                    }
                     beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_START);
                 }
             }
@@ -1660,6 +1686,11 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "deterministic route configuration is unavailable");
             return;
         }
+        if (GiTransportRuntime.isRequested() && GiTransportRuntime.isInvalid()) {
+            fail(minecraft, "G4 transport admission failed: "
+                    + GiTransportRuntime.invalidReason());
+            return;
+        }
         String identityMismatch = clientIdentityMismatch(minecraft);
         if (identityMismatch != null) {
             fail(minecraft, identityMismatch);
@@ -1727,7 +1758,38 @@ public final class MetalFxBenchmarkController {
         } else {
             this.routeStableFrames = 0;
         }
+        boolean rawG4SourceReady = GiTransportRuntime.isBenchmarkSourceReady();
+        if (GiTransportRuntime.isRequested()) {
+            if (!rawG4SourceReady) {
+                this.g4SourceReceiptFrames = 0;
+            } else if (this.g4SourceReceiptFrames < G4_SOURCE_RECEIPT_FRAMES) {
+                this.g4SourceReceiptFrames++;
+                if (this.g4SourceReceiptFrames == G4_SOURCE_RECEIPT_FRAMES) {
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=GI_G3_STARTUP_RECEIPT "
+                                    + "active_frames=24 drain_frames={} status=PASS",
+                            G4_SOURCE_RECEIPT_FRAMES
+                    );
+                }
+            }
+        }
+        boolean g4SourceReady = !GiTransportRuntime.isRequested()
+                || this.g4SourceReceiptFrames >= G4_SOURCE_RECEIPT_FRAMES;
+        if (GiTransportRuntime.isRequested()
+                && !GiTransportRuntime.hasSourcePreparationStarted()
+                && this.routeStableFrames >= this.route.stableFrames()
+                && !GiSemanticController.global().hasActiveCandidates()
+                && !this.routeServerTaskPending.get()) {
+            GiTransportRuntime.beginSourcePreparation();
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G3_PREPARE_BEGIN "
+                            + "route={} stable_frames={} candidates=0 status=PASS",
+                    this.route.routeId(),
+                    this.routeStableFrames
+            );
+        }
         if (this.routeStableFrames >= this.route.stableFrames()
+                && g4SourceReady
                 && !this.routeServerTaskPending.get()) {
             String lightingAdmissionFailure = verifyLightingAdmission();
             if (lightingAdmissionFailure != null) {
@@ -1754,6 +1816,9 @@ public final class MetalFxBenchmarkController {
         }
         if (this.stageFrames >= this.route.timeoutFrames()) {
             String reason = clientMismatch != null ? clientMismatch : this.routeServerMismatch;
+            if (reason == null && !g4SourceReady) {
+                reason = "G4 frozen G3 source did not settle before route timeout";
+            }
             fail(
                     minecraft,
                     "deterministic route did not stabilize before timeout"
@@ -1865,6 +1930,7 @@ public final class MetalFxBenchmarkController {
                     && !beginFiGeneratedValidation(minecraft)) {
                 return;
             }
+            GiTransportRuntime.beginBenchmarkMeasurement();
             MetalGpuTiming.beginBenchmarkMeasurement(
                     this.segmentIndex,
                     this.sequence.get(this.segmentIndex).name()
@@ -2563,6 +2629,7 @@ public final class MetalFxBenchmarkController {
         this.torchEpochAppliedMeasuredFrame = -1;
         this.torchEpochRemovedMeasuredFrame = -1;
         mode.apply();
+        GiTransportRuntime.beginBenchmarkWarmup();
         MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode.name());
         this.segmentFrame = 0;
         this.measuredFrames = 0;
@@ -3511,6 +3578,9 @@ public final class MetalFxBenchmarkController {
     private void transition(final Stage next) {
         this.stage = next;
         this.stageFrames = 0;
+        if (next == Stage.WAIT_ROUTE) {
+            this.g4SourceReceiptFrames = 0;
+        }
     }
 
     private static int positiveInt(final String name, final int defaultValue) {
