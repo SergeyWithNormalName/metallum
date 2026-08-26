@@ -305,15 +305,17 @@ public final class RealWorldVertexReflectionTests {
                         && PlanarReflectionRenderer.targetClearAlpha(
                             PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY) == 0.0f
                         && PlanarReflectionRenderer.targetClearAlpha(
-                            PlanarReflectionConfig.CaptureMode.FULL_PLANAR) == 1.0f,
-                "cloud-only capture must remain transparent outside clouds and exclude reflected world draws");
+                            PlanarReflectionConfig.CaptureMode.FULL_PLANAR) == 1.0f
+                        && PlanarReflectionRenderer.targetClearDepth() == 0.0,
+                "reflection targets must preserve transparent cloud clear and reverse-Z depth clear");
         require(!PlanarReflectionRenderer.mayReuseCachedCapture(
                             PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY, true, 0, 2)
                         && PlanarReflectionRenderer.mayReuseCachedCapture(
                             PlanarReflectionConfig.CaptureMode.FULL_PLANAR, true, 0, 2),
                 "cloud-only capture must refresh every frame while full planar may retain its bounded cache");
-        require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F,
-                "coarse world reflection roughness must stay in the reviewed 0.28-0.35 range");
+        require(Math.abs(RealWorldReflectionField.get().roughness() - 0.28F) < 1.0e-6F
+                        && Math.abs(RealWorldReflectionField.get().strength() - 0.75F) < 1.0e-6F,
+                "coarse world reflection must retain reviewed roughness and confidence");
     }
 
     private static float schlickEnvironment(

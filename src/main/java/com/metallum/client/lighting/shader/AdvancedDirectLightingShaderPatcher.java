@@ -3230,11 +3230,18 @@ public final class AdvancedDirectLightingShaderPatcher {
                 float capturedCloudEnergy = max(max(
                         capturedCloudColor.r, capturedCloudColor.g), capturedCloudColor.b);
                 float capturedCloudValidity = smoothstep(0.001, 0.020, capturedCloudEnergy);
+                // Preserve Minecraft's transparent fog boundary while making the middle of the
+                // real captured silhouette survive the water Fresnel/composite. This changes
+                // coverage only; it cannot tint uncovered water or create procedural cloud color.
+                float capturedCloudCoverage = mix(
+                        capturedCloud.a,
+                        smoothstep(0.035, 0.70, capturedCloud.a),
+                        0.55);
                 float reflectionStrength = clamp(
                         metallumEnvironment.cloudColorAndReflectionStrength.w, 0.0, 1.0);
                 return vec4(
                         max(capturedCloudColor, vec3(0.0)),
-                        clamp(capturedCloud.a
+                        clamp(capturedCloudCoverage
                                 * capturedCloudValidity
                                 * smoothstep(0.0, 0.020, edgeDistance)
                                 * reflectionStrength, 0.0, 1.0));

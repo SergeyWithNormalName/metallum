@@ -306,7 +306,7 @@ public final class PlanarReflectionRenderer {
                         target.getColorTexture(),
                         new Vector4f(0.0f, 0.0f, 0.0f, clearAlpha),
                         target.getDepthTexture(),
-                        1.0
+                        targetClearDepth()
                 );
 
                 // Set both halves of the default terrain uniform set.  Merely publishing the
@@ -489,6 +489,11 @@ public final class PlanarReflectionRenderer {
 
     static float targetClearAlpha(final PlanarReflectionConfig.CaptureMode captureMode) {
         return captureMode == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY ? 0.0f : 1.0f;
+    }
+
+    /** Minecraft 26.2 uses reverse-Z with GREATER_THAN_OR_EQUAL depth testing. */
+    static double targetClearDepth() {
+        return 0.0;
     }
 
     static boolean mayReuseCachedCapture(
