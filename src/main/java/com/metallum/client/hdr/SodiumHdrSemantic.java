@@ -37,6 +37,8 @@ public final class SodiumHdrSemantic {
     private static final int REFLECTION_FACE_MASK = 0x3f << REFLECTION_FACE_SHIFT;
     private static final int REFLECTION_LIGHT_NIBBLE_MASK = 0x0f;
     private static final int MAX_PACKED_BLOCK_LIGHT = 0xf0;
+    private static final int OPAQUE_VERTEX_ALPHA = 0xff;
+    private static final int REFLECTION_ALPHA_SENTINEL = 0xf8;
 
     /** Version-locked unused base values in Sodium 0.9.1's current block shaders. */
     private static final int MATERIAL_BASE_METAL = 2;
@@ -312,27 +314,30 @@ public final class SodiumHdrSemantic {
                 }
             }
         }
-        boolean reflectionCarrier = reflectionFaceBit != 0 && reflectionFaceCarrierEnabled();
-        if (reflectionCarrier) {
+        int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
+        boolean materialSurface = semantic == 0 && surfaceClass != SURFACE_CLASS_NONE;
+        boolean reflectionCarrier = materialSurface
+                && reflectionFaceBit != 0
+                && reflectionFaceCarrierEnabled();
+        boolean colorAlphaCarrier = reflectionCarrier && hasOpaqueVertexAlpha(vertices);
+        boolean lightCarrier = reflectionCarrier && !colorAlphaCarrier;
+        if (lightCarrier) {
             for (ChunkVertexEncoder.Vertex vertex : vertices) {
                 if (((vertex.light & 0xff) & REFLECTION_LIGHT_NIBBLE_MASK) != 0) {
                     // A foreign low-nibble light encoding is ambiguous with the face carrier.
-                    // Preserve that modded light and fail this quad back to legacy material data.
-                    reflectionCarrier = false;
-                    reflectionFaceBit = 0;
-                    surfaceClass = SURFACE_CLASS_NONE;
+                    // Preserve that modded light and only disable the voxel direction. The
+                    // material class is independent and must retain its analytic L8 response.
+                    lightCarrier = false;
                     if (REFLECTION_LIGHT_CONFLICT_LOGGED.compareAndSet(false, true)) {
                         Metallum.LOGGER.warn(
-                                "Non-canonical Sodium block-light bits conflict with the voxel-reflection face carrier; affected quads use legacy material semantics"
+                                "Non-canonical Sodium block-light bits conflict with the voxel-reflection face carrier; affected quads retain analytic material optics without a voxel direction"
                         );
                     }
                     break;
                 }
             }
         }
-        int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
         int packedBase = materialBits;
-        boolean materialSurface = semantic == 0 && surfaceClass != SURFACE_CLASS_NONE;
         if (materialSurface) {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT;
             packedBase = materialBaseForSurfaceClass(materialBits, surfaceClass);
@@ -342,11 +347,18 @@ public final class SodiumHdrSemantic {
             int depth = Math.clamp(submergedDepth, 1, 63);
             packed |= PACKED_MATERIAL_SUBMERGED_BIT | (depth << PACKED_MATERIAL_DEPTH_SHIFT);
         }
-        if (materialSurface && reflectionCarrier) {
+        if (colorAlphaCarrier) {
+            for (ChunkVertexEncoder.Vertex vertex : vertices) {
+                // Compact Sodium keeps vertex alpha unchanged while multiplying RGB by AO.
+                // Standard terrain therefore gives us one stable face carrier which survives
+                // light-only relights. The reflection vertex flavor restores alpha to 1.0
+                // before any material/tint use.
+                vertex.color = packReflectionFaceIntoColorAlpha(vertex.color, reflectionFaceBit);
+            }
+        } else if (lightCarrier) {
             for (ChunkVertexEncoder.Vertex vertex : vertices) {
                 // Minecraft's block-light byte is aligned to 16. Encode the face inside the same
-                // lightmap texel; the max-light cell uses the lower half so Sodium's 248 clamp
-                // cannot erase the code. The reflection vertex flavor restores the exact center.
+                // lightmap texel as a compatibility fallback for non-opaque vertex colors.
                 vertex.light = packReflectionFaceIntoLight(vertex.light, reflectionFaceBit);
             }
         }
@@ -366,6 +378,23 @@ public final class SodiumHdrSemantic {
         int encodedBlockLight = blockLight == MAX_PACKED_BLOCK_LIGHT
                 ? blockLight - faceCode : blockLight + faceCode;
         return (packedLight & ~0xff) | encodedBlockLight;
+    }
+
+    public static int packReflectionFaceIntoColorAlpha(final int packedColor, final int faceBit) {
+        if (((packedColor >>> 24) & 0xff) != OPAQUE_VERTEX_ALPHA) {
+            return packedColor;
+        }
+        int encodedAlpha = REFLECTION_ALPHA_SENTINEL - reflectionFaceCode(faceBit);
+        return (packedColor & 0x00ffffff) | (encodedAlpha << 24);
+    }
+
+    private static boolean hasOpaqueVertexAlpha(final ChunkVertexEncoder.Vertex[] vertices) {
+        for (ChunkVertexEncoder.Vertex vertex : vertices) {
+            if (((vertex.color >>> 24) & 0xff) != OPAQUE_VERTEX_ALPHA) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean reflectionFaceCarrierEnabled() {

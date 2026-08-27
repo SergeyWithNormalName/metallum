@@ -623,6 +623,13 @@ solid/cutout/translucent terrain. Generated MSL подтверждает оди�
 vertex sample site и ноль fragment `texture3d`. Dry A/B, Tier C и live scenes ещё
 не выполнены; это не production acceptance и не G5 diffuse receiver.
 
+Уточнение от 28 августа 2026: основной six-face carrier перенесён из block-light
+low bits в восстанавливаемый opaque vertex-alpha sentinel. Поэтому metal/smooth/
+wet receiver сохраняет направление после light-only relight и не теряет L8
+material class при конфликте с modded light; non-opaque alpha оставляет прежний
+fail-closed light fallback. Это contract fix, а не расширение 128-block field и
+не закрытие visual/Tier C gate.
+
 #### R3 — water-specific planar option
 
 Текущий uncommitted planar WIP можно доводить независимо как water-only quality

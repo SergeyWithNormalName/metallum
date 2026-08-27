@@ -226,14 +226,41 @@ public final class SurfaceMaterialPolicyTests {
         try {
             VertexReflectionExperiment.setOverride(true);
             System.setProperty(runtimeKey, "true");
-            ChunkVertexEncoder.Vertex[] glossyQuad = new ChunkVertexEncoder.Vertex[4];
-            for (int index = 0; index < glossyQuad.length; index++) {
-                TestVertex vertex = new TestVertex();
-                vertex.light = 0x00F000A0;
-                glossyQuad[index] = vertex;
+            int[] faces = {
+                    VoxelReflectionFace.NEG_X, VoxelReflectionFace.POS_X,
+                    VoxelReflectionFace.NEG_Y, VoxelReflectionFace.POS_Y,
+                    VoxelReflectionFace.NEG_Z, VoxelReflectionFace.POS_Z
+            };
+            for (int face : faces) {
+                ChunkVertexEncoder.Vertex[] glossyQuad = testQuad(0xff80a0c0, 0x00f000a3);
+                SodiumHdrSemantic.tagQuad(
+                        glossyQuad,
+                        0,
+                        false,
+                        SodiumHdrSemantic.SURFACE_CLASS_METAL,
+                        false,
+                        0,
+                        face
+                );
+                int packedMaterial = SodiumHdrSemantic.packMaterialBits(0, glossyQuad);
+                require((packedMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2
+                                && ((packedMaterial >> 7) & 1) == 1,
+                        "iron quad lost its compact metal material tag");
+                int expectedAlpha = 0xf8 - SodiumHdrSemantic.reflectionFaceCode(face);
+                for (ChunkVertexEncoder.Vertex vertex : glossyQuad) {
+                    require((vertex.color >>> 24) == expectedAlpha,
+                            "opaque glossy receiver lost its relight-stable face carrier");
+                    require((vertex.light & 0xff) == 0xa3,
+                            "opaque glossy receiver modified a conflicting block-light nibble");
+                    vertex.light = (vertex.light & ~0xff) | 0x7d;
+                    require((vertex.color >>> 24) == expectedAlpha,
+                            "light-only relight erased the glossy receiver face carrier");
+                }
             }
+
+            ChunkVertexEncoder.Vertex[] translucentConflict = testQuad(0x8080a0c0, 0x00f000a3);
             SodiumHdrSemantic.tagQuad(
-                    glossyQuad,
+                    translucentConflict,
                     0,
                     false,
                     SodiumHdrSemantic.SURFACE_CLASS_METAL,
@@ -241,12 +268,13 @@ public final class SurfaceMaterialPolicyTests {
                     0,
                     VoxelReflectionFace.POS_Z
             );
-            int packedMaterial = SodiumHdrSemantic.packMaterialBits(0, glossyQuad);
-            require((packedMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2,
-                    "iron quad lost its compact metal material base");
-            for (ChunkVertexEncoder.Vertex vertex : glossyQuad) {
-                require((vertex.light & 0xff) == 0xa6,
-                        "promoting a glossy material semantic suppressed its reflection face carrier");
+            int conflictMaterial = SodiumHdrSemantic.packMaterialBits(0, translucentConflict);
+            require((conflictMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2
+                            && ((conflictMaterial >> 7) & 1) == 1,
+                    "face-carrier conflict incorrectly downgraded glossy material to ordinary terrain");
+            for (ChunkVertexEncoder.Vertex vertex : translucentConflict) {
+                require(vertex.color == 0x8080a0c0 && (vertex.light & 0xff) == 0xa3,
+                        "non-opaque carrier conflict changed color alpha or modded light data");
             }
         } finally {
             VertexReflectionExperiment.setOverride(null);
@@ -256,6 +284,17 @@ public final class SurfaceMaterialPolicyTests {
                 System.setProperty(runtimeKey, previousRuntime);
             }
         }
+    }
+
+    private static ChunkVertexEncoder.Vertex[] testQuad(final int color, final int light) {
+        ChunkVertexEncoder.Vertex[] vertices = new ChunkVertexEncoder.Vertex[4];
+        for (int index = 0; index < vertices.length; index++) {
+            TestVertex vertex = new TestVertex();
+            vertex.color = color;
+            vertex.light = light;
+            vertices[index] = vertex;
+        }
+        return vertices;
     }
 
     private static final class TestVertex extends ChunkVertexEncoder.Vertex

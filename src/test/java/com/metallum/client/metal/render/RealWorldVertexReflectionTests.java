@@ -484,12 +484,21 @@ public final class RealWorldVertexReflectionTests {
         require(receiverGate >= 0 && firstReflectionSample > receiverGate,
                 "non-receiver terrain vertices must branch around all reflection texture reads");
         require(onGlslVertex.contains("metallumReflectionFaceCode")
+                        && onGlslVertex.contains("metallumReflectionAlphaCarrier")
+                        && onGlslVertex.contains("248u - metallumReflectionAlphaByte")
+                        && onGlslVertex.contains("_vert_color.a = 1.0")
+                        && onGlslVertex.contains("metallumReflectionLightCarrier")
                         && onGlslVertex.contains("metallumReflectionMaxLightCode")
                         && onGlslVertex.contains("metallumReflectionRestoredLightByte")
                         && onGlslVertex.contains("metallumReflectionFaceNormal")
                         && onGlslVertex.contains(
                         "metallumViewRay, metallumReflectionFaceNormal"),
-                "vertex carrier must decode the G2 six-face semantic and restore the lightmap coordinate");
+                "vertex carrier must prefer relight-stable alpha faces and restore compatibility data");
+        require(onGlslVertex.indexOf("metallumVertexCarrierMaterial")
+                        < onGlslVertex.indexOf("metallumReflectionLightCarrier")
+                        && onGlslVertex.indexOf("metallumReflectionLightCarrier")
+                        < onGlslVertex.indexOf("_vert_tex_light_coord.x ="),
+                "light compatibility decoding must stay material-gated and avoid unrelated quads");
         require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
                         && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
                 "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");

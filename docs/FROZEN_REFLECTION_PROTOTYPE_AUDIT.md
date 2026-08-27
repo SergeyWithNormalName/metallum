@@ -69,19 +69,26 @@ texture read. The single source of receiver truth is
   outside the accepted prefiltered roughness band.
 
 The six signed-axis face order is the existing G2 `GiSemanticPacking` order.
-During a reflection-enabled remesh, its 1--6 face code occupies an otherwise
-unused intra-texel block-light offset (with a clamp-safe encoding for light 15);
-the reflection vertex flavor restores the exact texel center before lookup.
-This preserves the compact vertex stride and gives metal,
-smooth and wet non-horizontal faces a world-space trace normal. Invalid or
-missing face data fails closed before any volume sample.
+During a reflection-enabled remesh, ordinary opaque-alpha terrain stores its
+1--6 face code in a reserved `242..247` vertex-alpha sentinel. The reflection
+vertex flavor decodes that value and restores alpha to `1.0` before material or
+tint evaluation. Unlike the former light-only carrier, this survives compact
+light relights and does not depend on block-light nibbles. Non-opaque vertex
+colors retain the clamp-safe intra-texel block-light fallback; a conflicting
+modded light value now loses only the voxel direction while preserving the L8
+material class and analytic optics. This preserves the compact vertex stride and
+gives metal, smooth and wet non-horizontal faces a world-space trace normal.
+Invalid or missing face data fails closed before any volume sample.
 
 The first material-receiver implementation accidentally tested the pre-packing
 semantic value again after promoting a valid non-emissive material to the compact
 exact marker. That made the face-carrier write unreachable and caused glossy
-iron to show only ordinary L8/GGX lighting instead of the voxel term. The packer
-now retains one explicit `materialSurface` decision through both operations, with
-a full-quad regression covering the final compact material and light bytes.
+iron to show only ordinary L8/GGX lighting instead of the voxel term. A later
+fallback also cleared the whole material class when one low light nibble could
+not carry a face. The packer now retains one explicit `materialSurface` decision,
+prefers the relight-stable alpha carrier, and keeps analytic material optics even
+when the compatibility light carrier fails. Six-face, conflict, and light-only
+relight regressions cover the final compact material/color/light values.
 
 The current topology is a bounded 40-step vertex cone trace over one
 native-owned radiance texture. Generated MSL contains one syntactic 3D sample
