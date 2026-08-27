@@ -343,6 +343,16 @@ public final class RealWorldVertexReflectionTests {
                         && !PlanarReflectionConfig.runtimeEnabled(true, true)
                         && PlanarReflectionConfig.runtimeEnabled(true, false),
                 "voxel reflection mode must select only the cloud capture, never reflected terrain");
+        require(PlanarReflectionConfig.captureMode(false, true, false)
+                        == PlanarReflectionConfig.CaptureMode.DISABLED
+                        && PlanarReflectionConfig.captureMode(true, false, false)
+                        == PlanarReflectionConfig.CaptureMode.FULL_PLANAR,
+                "cloud toggle must remove voxel cloud-only capture without disabling planar terrain");
+        require(!PlanarReflectionRenderer.rendersReflectedClouds(
+                        PlanarReflectionConfig.CaptureMode.FULL_PLANAR, false)
+                        && PlanarReflectionRenderer.rendersReflectedClouds(
+                        PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY, true),
+                "cloud toggle does not control reflected cloud draws independently");
         require(!PlanarReflectionRenderer.rendersReflectedWorld(
                             PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY)
                         && PlanarReflectionRenderer.rendersReflectedWorld(

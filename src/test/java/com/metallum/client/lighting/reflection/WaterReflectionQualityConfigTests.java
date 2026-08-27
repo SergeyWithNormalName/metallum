@@ -1,5 +1,7 @@
 package com.metallum.client.lighting.reflection;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 
 /** Dependency-free persistence contract for water-reflection quality settings. */
@@ -12,6 +14,7 @@ public final class WaterReflectionQualityConfigTests {
         testEachRefinementCanBeDisabledIndependently();
         testMalformedValuesFailTowardQuality();
         testLaunchOverridesAreIndependent();
+        testCloudReflectionPersistenceDefaultsOn();
         System.out.println("WaterReflectionQualityConfigTests passed successfully.");
     }
 
@@ -73,6 +76,23 @@ public final class WaterReflectionQualityConfigTests {
             } else {
                 System.setProperty(key, previous);
             }
+        }
+    }
+
+    private static void testCloudReflectionPersistenceDefaultsOn() {
+        try {
+            Path directory = Files.createTempDirectory("metallum-cloud-reflection-config-");
+            Path path = directory.resolve("clouds.properties");
+            require(CloudReflectionConfig.load(path),
+                    "missing cloud-reflection config must preserve the existing enabled default");
+            Files.writeString(path, "enabled=false\n");
+            require(!CloudReflectionConfig.load(path),
+                    "explicit false cloud-reflection config was ignored");
+            Files.writeString(path, "enabled=invalid\n");
+            require(CloudReflectionConfig.load(path),
+                    "malformed cloud-reflection values must fail toward the existing visual path");
+        } catch (java.io.IOException exception) {
+            throw new AssertionError("cloud-reflection persistence fixture failed", exception);
         }
     }
 

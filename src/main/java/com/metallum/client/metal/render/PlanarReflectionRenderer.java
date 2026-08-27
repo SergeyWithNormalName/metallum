@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.lighting.reflection.CloudReflectionConfig;
 import com.metallum.client.lighting.water.WaterCausticsPolicy;
 import com.metallum.client.renderer.MetallumRenderContext;
 import com.metallum.client.renderer.temporal.FrameState;
@@ -62,6 +63,7 @@ public final class PlanarReflectionRenderer {
     private static boolean failureLogged;
     private static boolean voxelConflictLogged;
     private static boolean activeCloudDraw;
+    private static boolean lastCloudReflectionsEnabled = true;
 
     private PlanarReflectionRenderer() {
     }
@@ -72,7 +74,14 @@ public final class PlanarReflectionRenderer {
             final LevelRenderState levelRenderState,
             final GpuBufferSlice terrainFog
     ) {
+        boolean cloudReflectionsEnabled = CloudReflectionConfig.isEnabled();
         PlanarReflectionConfig.CaptureMode captureMode = PlanarReflectionConfig.captureMode();
+        if (cloudReflectionsEnabled != lastCloudReflectionsEnabled) {
+            // Do not reuse a target containing the composition selected before the live toggle.
+            activePassRendered = false;
+            framesSinceReflectionUpdate = Integer.MAX_VALUE;
+            lastCloudReflectionsEnabled = cloudReflectionsEnabled;
+        }
         if (captureMode == PlanarReflectionConfig.CaptureMode.DISABLED) {
             activePassRendered = false;
             return null;
@@ -349,7 +358,12 @@ public final class PlanarReflectionRenderer {
                             ProjectionType.PERSPECTIVE
                     );
                     RenderSystem.setShaderFog(terrainFog);
-                    renderClouds(minecraft, levelRenderState, camera, waterSurfaceY);
+                    if (rendersReflectedClouds(
+                            captureMode,
+                            CloudReflectionConfig.isEnabled()
+                    )) {
+                        renderClouds(minecraft, levelRenderState, camera, waterSurfaceY);
+                    }
                     activePassRendered = true;
                     lastRenderedTarget = target;
                     lastRenderedMode = captureMode;
@@ -485,6 +499,14 @@ public final class PlanarReflectionRenderer {
 
     static boolean rendersReflectedWorld(final PlanarReflectionConfig.CaptureMode captureMode) {
         return captureMode == PlanarReflectionConfig.CaptureMode.FULL_PLANAR;
+    }
+
+    static boolean rendersReflectedClouds(
+            final PlanarReflectionConfig.CaptureMode captureMode,
+            final boolean cloudReflectionsEnabled
+    ) {
+        return captureMode != PlanarReflectionConfig.CaptureMode.DISABLED
+                && cloudReflectionsEnabled;
     }
 
     static float targetClearAlpha(final PlanarReflectionConfig.CaptureMode captureMode) {
@@ -639,6 +661,7 @@ public final class PlanarReflectionRenderer {
         framesSinceReflectionUpdate = Integer.MAX_VALUE;
         lastRenderedTarget = null;
         lastRenderedMode = PlanarReflectionConfig.CaptureMode.DISABLED;
+        lastCloudReflectionsEnabled = true;
         activationLogged = false;
         failureLogged = false;
     }

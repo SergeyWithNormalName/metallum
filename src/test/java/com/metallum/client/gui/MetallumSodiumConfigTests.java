@@ -118,6 +118,27 @@ public final class MetallumSodiumConfigTests {
         require(findOption(page, idField, "voxel_preview_slice") instanceof IntegerOption,
                 "Metallum L5 preview slice is missing or has the wrong type");
 
+        ConfigBuilderImpl reflectionBuilder = new ConfigBuilderImpl(
+                ignored -> new ConfigManager.ModMetadata("Metallum", "test"),
+                "metallum"
+        );
+        new MetallumReflectionSodiumConfig().registerConfigLate(reflectionBuilder);
+        Collection<ModOptions> reflectionBuilt = reflectionBuilder.build();
+        require(reflectionBuilt.size() == 1,
+                "Metallum reflections registered an unexpected Sodium config count");
+        ModOptions reflectionOptions = reflectionBuilt.iterator().next();
+        require(reflectionOptions.configId().equals("metallum_reflections")
+                        && reflectionOptions.pages().size() == 1,
+                "cloud reflections were not registered on the dedicated Sodium page");
+        OptionPage reflectionPage = (OptionPage) reflectionOptions.pages().getFirst();
+        Option cloudReflections = findOption(reflectionPage, idField, "cloud_reflections");
+        require(cloudReflections instanceof BooleanOption,
+                "cloud-reflection Sodium option is missing or has the wrong type");
+        require(cloudReflections.getFlags() == null
+                        || !cloudReflections.getFlags().contains(
+                        OptionFlag.REQUIRES_GAME_RESTART.getId()),
+                "cloud-reflection toggle must apply without a game restart");
+
         System.out.println("Metallum Sodium config registration tests passed");
     }
 

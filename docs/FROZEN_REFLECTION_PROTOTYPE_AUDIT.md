@@ -76,12 +76,25 @@ This preserves the compact vertex stride and gives metal,
 smooth and wet non-horizontal faces a world-space trace normal. Invalid or
 missing face data fails closed before any volume sample.
 
+The first material-receiver implementation accidentally tested the pre-packing
+semantic value again after promoting a valid non-emissive material to the compact
+exact marker. That made the face-carrier write unreachable and caused glossy
+iron to show only ordinary L8/GGX lighting instead of the voxel term. The packer
+now retains one explicit `materialSurface` decision through both operations, with
+a full-quad regression covering the final compact material and light bytes.
+
 The current topology is a bounded 40-step vertex cone trace over one
 native-owned radiance texture. Generated MSL contains one syntactic 3D sample
 instruction inside that loop, so it may execute up to 40 samples per affected
 receiver vertex. Wet-only vertices also read the existing L8 environment packet
 at vertex buffer slot 26 solely to branch around the trace while dry. There is
 no Cartesian moment texture in the current implementation.
+
+Minecraft cloud geometry in water reflections has an independent live Sodium
+toggle. Disabling it removes the voxel mode's cloud-only reflected capture; in
+full planar mode it keeps reflected sky/terrain but skips the cloud draw. The
+bound fragment fallback remains transparent, so disabling the capture cannot
+leave a stale reflected cloud sample.
 
 The refined carrier exports two `float4` varyings:
 

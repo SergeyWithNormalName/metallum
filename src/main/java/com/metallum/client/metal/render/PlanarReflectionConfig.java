@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.lighting.reflection.CloudReflectionConfig;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.renderer.PlanarReflectionLayout;
 import net.fabricmc.loader.api.FabricLoader;
@@ -67,12 +68,24 @@ public final class PlanarReflectionConfig {
      * planar target and binding without mixing the two world-reflection architectures.</p>
      */
     public static CaptureMode captureMode() {
-        return captureMode(isEnabled(), VertexReflectionExperiment.isRuntimeEnabled());
+        return captureMode(
+                isEnabled(),
+                VertexReflectionExperiment.isRuntimeEnabled(),
+                CloudReflectionConfig.isEnabled()
+        );
     }
 
     static CaptureMode captureMode(final boolean planarEnabled, final boolean voxelEnabled) {
+        return captureMode(planarEnabled, voxelEnabled, true);
+    }
+
+    static CaptureMode captureMode(
+            final boolean planarEnabled,
+            final boolean voxelEnabled,
+            final boolean cloudReflectionsEnabled
+    ) {
         if (voxelEnabled) {
-            return CaptureMode.CLOUDS_ONLY;
+            return cloudReflectionsEnabled ? CaptureMode.CLOUDS_ONLY : CaptureMode.DISABLED;
         }
         return planarEnabled ? CaptureMode.FULL_PLANAR : CaptureMode.DISABLED;
     }

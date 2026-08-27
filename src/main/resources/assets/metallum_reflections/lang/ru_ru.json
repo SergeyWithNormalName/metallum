@@ -1,0 +1,6 @@
+{
+  "metallum.options.reflections.page": "Отражения",
+  "metallum.options.group.reflection_composition": "Состав отражений",
+  "metallum.options.cloud_reflections.name": "Отражения облаков",
+  "metallum.options.cloud_reflections.tooltip": "Добавляет облака Minecraft в отражения воды. Отключение также убирает отдельный cloud-only проход, используемый воксельными отражениями. Применяется сразу."
+}
