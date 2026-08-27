@@ -29,6 +29,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import org.joml.Matrix4f;
+import org.joml.Vector3f;
 import org.joml.Vector4f;
 import org.jspecify.annotations.Nullable;
 import org.lwjgl.PointerBuffer;
@@ -70,6 +71,7 @@ public final class RealWorldVertexReflectionTests {
         testCameraFractionAndBlockShiftInvariance();
         testConeTraceFrontToBackMath();
         testCloudReflectionTransformOwnership();
+        testCloudReflectionWorldMotion();
         testReceiverFresnelCompositionMath();
         testMslGeneratedShaderContractProof();
         testGiOffGeneratedMslContractProof();
@@ -259,6 +261,36 @@ public final class RealWorldVertexReflectionTests {
         terrainModelView.transform(terrainResult);
         require(terrainResult.distance(actual) > 1.0F,
                 "cloud draw must not inherit terrain's second water-plane translation");
+    }
+
+    private static void testCloudReflectionWorldMotion() {
+        Vector3f cameraA = new Vector3f(0.0F, 80.0F, 0.0F);
+        Vector3f cameraB = new Vector3f(0.0F, 80.0F, 10.0F);
+        Vector3f waterA = new Vector3f(0.0F, 64.0F, 50.0F);
+        Vector3f waterB = new Vector3f(0.0F, 64.0F, 60.0F);
+        Vector3f normal = new Vector3f(0.0F, 1.0F, 0.0F);
+        Vector3f cloudA = reflectedCloudPlaneHit(cameraA, waterA, normal, 192.0F);
+        Vector3f cloudB = reflectedCloudPlaneHit(cameraB, waterB, normal, 192.0F);
+
+        require(Math.abs(cloudB.z - cloudA.z - 10.0F) < 1.0e-4F,
+                "moving the camera and receiver ten world blocks must advance the reflected cloud lookup ten blocks");
+        float gridSize = 256.0F * 12.0F;
+        float uvA = (cloudA.z + 3.96F) / gridSize;
+        float uvB = (cloudB.z + 3.96F) / gridSize;
+        require(Math.abs((uvB - uvA) - 10.0F / gridSize) < 1.0e-6F,
+                "reflected cloud UV must follow world motion instead of remaining screen-locked");
+    }
+
+    private static Vector3f reflectedCloudPlaneHit(
+            final Vector3f camera,
+            final Vector3f water,
+            final Vector3f normal,
+            final float cloudHeight
+    ) {
+        Vector3f cameraToWater = new Vector3f(water).sub(camera).normalize();
+        Vector3f reflected = cameraToWater.reflect(new Vector3f(normal).normalize());
+        float t = (cloudHeight - water.y) / reflected.y;
+        return new Vector3f(water).fma(t, reflected);
     }
 
     private static void testReceiverFresnelCompositionMath() {
@@ -473,9 +505,10 @@ public final class RealWorldVertexReflectionTests {
         String voxelEnvironmentHelper = onGlslFragment.substring(
                 voxelEnvironmentStart,
                 voxelEnvironmentEnd + "return result * material.specularScale;".length());
-        require(voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV8(normal)")
+        require(voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV9(")
+                        && voxelEnvironmentHelper.contains("viewPosition, normal)")
                         && !voxelEnvironmentHelper.contains("planarWeight"),
-                "voxel receiver must sample only the cloud-only target before coarse world composition");
+                "voxel receiver must evaluate world-space clouds before coarse world composition");
         int cloudHelperStart = onGlslFragment.indexOf(
                 "vec3 metallumWaterSkyReflectionV2(");
         int cloudHelperEnd = onGlslFragment.indexOf(
@@ -484,28 +517,33 @@ public final class RealWorldVertexReflectionTests {
         String cloudHelper = onGlslFragment.substring(cloudHelperStart, cloudHelperEnd);
         require(countOccurrences(cloudHelper, "texture(") == 1
                         && cloudHelper.contains("metallumPlanarReflection")
-                        && cloudHelper.contains("vec4 metallumWaterCloudReflectionV8(vec3 waterNormal)")
-                        && cloudHelper.contains("gl_FragCoord.xy")
-                        && cloudHelper.contains("waveScreenOffset")
+                        && cloudHelper.contains("vec4 metallumWaterCloudReflectionV9(")
+                        && cloudHelper.contains("vec3 viewPosition")
+                        && cloudHelper.contains("worldWaterPosition")
+                        && cloudHelper.contains("worldReflectedDirection")
+                        && cloudHelper.contains("cloudWorldPosition")
+                        && cloudHelper.contains("reflectedCameraRelative")
+                        && cloudHelper.contains("metallumLighting.viewRotation")
+                        && cloudHelper.contains("metallumLighting.projection")
                         && cloudHelper.contains("capturedCloud.a")
                         && cloudHelper.contains("capturedCloud.rgb / capturedCloud.a")
                         && cloudHelper.contains("capturedCloudValidity")
-                        && cloudHelper.contains("smoothstep(0.001, 0.020, capturedCloudEnergy)")
+                        && !cloudHelper.contains("gl_FragCoord")
+                        && !cloudHelper.contains("waveScreenOffset")
                         && !cloudHelper.contains("inverseRasterProjection")
-                        && !cloudHelper.contains("cameraWorldPosition")
-                        && !cloudHelper.contains("cloudWorldPosition")
-                        && !cloudHelper.contains("rayElevation")
+                        && cloudHelper.contains("cameraWorldPosition")
+                        && cloudHelper.contains("rayElevation")
                         && !cloudHelper.contains("cloudContract.w & 4u"),
-                "cloud reflection must use one cloud-only screen capture sample and no analytic ray reconstruction");
+                "cloud reflection must reproject one world-space cloud hit into the captured target");
         require(onGlslFragment.contains("metallumEnvironment.cloudContract.w & 4u"),
                 "direct cloud shadows must retain their daylight eligibility gate");
         require(voxelEnvironmentHelper.contains("metallumWaterSkyReflectionV2(")
-                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV8(")
+                        && voxelEnvironmentHelper.contains("metallumWaterCloudReflectionV9(")
                         && voxelEnvironmentHelper.contains(
                         "reflectedEnvironment, cloudReflection.rgb, cloudReflection.a"),
                 "the exact sky and matching clouds must compose into one water environment lobe");
         int cloudComposite = voxelEnvironmentHelper.indexOf(
-                "metallumWaterCloudReflectionV8(");
+                "metallumWaterCloudReflectionV9(");
         int coarseWeight = voxelEnvironmentHelper.indexOf(
                 "float coarseWeight =", cloudComposite);
         require(cloudComposite >= 0 && coarseWeight > cloudComposite,

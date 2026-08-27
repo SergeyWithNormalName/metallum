@@ -3189,7 +3189,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                         horizonBand * sunriseFacing * horizonStrength);
             }
 
-            vec4 metallumWaterCloudReflectionV8(vec3 waterNormal) {
+            vec4 metallumWaterCloudReflectionV9(
+                    vec3 viewPosition,
+                    vec3 waterNormal) {
                 if (metallumEnvironment.cloudContract.x != 3u
                         || (metallumEnvironment.cloudContract.w & 1u) == 0u
                         || metallumEnvironment.cloudContract.y == 0u
@@ -3197,18 +3199,50 @@ public final class AdvancedDirectLightingShaderPatcher {
                     return vec4(0.0);
                 }
 
-                // The cloud-only reflected target contains Minecraft's actual cloud draw, with
-                // transparent clear outside cloud geometry. It is rendered every frame before
-                // the main pass and deliberately excludes sky, terrain and voxel-world color.
-                // Sampling the completed image avoids trying to reconstruct CloudRenderer's mesh,
-                // projection and camera motion independently in every water fragment.
-                vec2 screenUv = gl_FragCoord.xy / max(
-                        vec2(metallumLighting.extentAndClusterCap.xy), vec2(1.0));
                 mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
-                vec3 flatWaterNormal = metallumSafeNormalV1(
-                        transpose(worldFromView) * vec3(0.0, 1.0, 0.0));
-                vec2 waveScreenOffset = (waterNormal.xy - flatWaterNormal.xy) * 0.040;
-                vec2 reflectionUv = screenUv + waveScreenOffset;
+                vec3 worldWaterNormal = metallumSafeNormalV1(
+                        worldFromView * waterNormal);
+                vec3 cameraWorldPosition =
+                        vec3(metallumVoxelShadow.cameraBlockAndFlags.xyz)
+                        + metallumVoxelShadow.cameraFractionAndMinTrans.xyz;
+                vec3 worldWaterPosition = cameraWorldPosition
+                        + worldFromView * viewPosition;
+                vec3 cameraToWater = metallumSafeNormalV1(
+                        worldWaterPosition - cameraWorldPosition);
+                vec3 worldReflectedDirection = metallumSafeNormalV1(
+                        reflect(cameraToWater, worldWaterNormal));
+                float rayElevation = worldReflectedDirection.y;
+                float cloudHeight = metallumEnvironment.cloudParams.x;
+                if (rayElevation <= 0.02 || worldWaterPosition.y >= cloudHeight) {
+                    return vec4(0.0);
+                }
+
+                float t = (cloudHeight - worldWaterPosition.y) / rayElevation;
+                if (t <= 0.0 || isnan(t) || isinf(t)) {
+                    return vec4(0.0);
+                }
+                vec3 cloudWorldPosition = worldWaterPosition
+                        + worldReflectedDirection * t;
+
+                // Project the world-space cloud hit back through the same mirrored camera that
+                // produced the cloud-only target. The water point itself is the local reflection
+                // plane; this remains correct while flying high above ordinary sea-level water,
+                // where the separate camera-medium probe does not retain the surface height.
+                vec3 reflectedCameraRelative = cloudWorldPosition - cameraWorldPosition;
+                reflectedCameraRelative.y -= 2.0
+                        * (worldWaterPosition.y - cameraWorldPosition.y);
+                reflectedCameraRelative.y = -reflectedCameraRelative.y;
+                vec3 capturedViewPosition = mat3(metallumLighting.viewRotation)
+                        * reflectedCameraRelative;
+                vec4 capturedClipPosition = metallumLighting.projection
+                        * vec4(capturedViewPosition, 1.0);
+                if (capturedClipPosition.w <= 1.0e-5
+                        || any(isnan(capturedClipPosition))
+                        || any(isinf(capturedClipPosition))) {
+                    return vec4(0.0);
+                }
+                vec2 reflectionUv = capturedClipPosition.xy
+                        / capturedClipPosition.w * 0.5 + 0.5;
                 float edgeDistance = min(
                         min(reflectionUv.x, reflectionUv.y),
                         min(1.0 - reflectionUv.x, 1.0 - reflectionUv.y));
@@ -3220,19 +3254,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                         clamp(reflectionUv, vec2(0.001), vec2(0.999)));
                 // RenderPipelines.CLOUDS uses TRANSLUCENT blending, so RGB in a transparent
                 // target is premultiplied even though the source shader writes straight color.
-                // Convert back before the caller performs its energy-aware mix exactly once.
                 vec3 capturedCloudColor = capturedCloud.a > 1.0e-4
                         ? capturedCloud.rgb / capturedCloud.a
                         : vec3(0.0);
-                // A malformed/fully clipped capture must be a no-op. In particular, alpha without
-                // useful cloud radiance must never replace the analytic sky with black and make
-                // the independent voxel-world reflection appear to disappear.
                 float capturedCloudEnergy = max(max(
                         capturedCloudColor.r, capturedCloudColor.g), capturedCloudColor.b);
-                float capturedCloudValidity = smoothstep(0.001, 0.020, capturedCloudEnergy);
-                // Preserve Minecraft's transparent fog boundary while making the middle of the
-                // real captured silhouette survive the water Fresnel/composite. This changes
-                // coverage only; it cannot tint uncovered water or create procedural cloud color.
+                float capturedCloudValidity = smoothstep(
+                        0.001, 0.020, capturedCloudEnergy);
                 float capturedCloudCoverage = mix(
                         capturedCloud.a,
                         smoothstep(0.035, 0.70, capturedCloud.a),
@@ -3282,7 +3310,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                             worldFromView * reflectedDirection);
                     reflectedEnvironment = metallumWaterSkyReflectionV2(
                             worldReflectedDirection, reflectedEnvironment);
-                    vec4 cloudReflection = metallumWaterCloudReflectionV8(normal);
+                    vec4 cloudReflection = metallumWaterCloudReflectionV9(
+                            viewPosition, normal);
                     reflectedEnvironment = mix(
                             reflectedEnvironment, cloudReflection.rgb, cloudReflection.a);
 
