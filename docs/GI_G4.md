@@ -45,6 +45,14 @@ G4 remains structurally OFF: zero G4 resources, passes, symbols, bindings and
 dispatches. The Sodium option defaults to OFF and is suppressed during benchmark
 runs so it cannot contaminate a tracked receipt.
 
+The restart-gated Sodium option is also consumed by the early mixin config
+plugin. This is required because G2 observes Sodium meshing and upload classes
+before `GiTransportRuntime` is initialized. The setting therefore enables the
+same exact-version-locked set of twelve G2 capture mixins as the environment
+request; runtime-only enablement would leave G3 permanently without an accepted
+semantic field. The HUD reports G2 and G3 readiness separately so a missing
+Sodium capture can no longer look like ordinary G3 settling.
+
 ## Accepted G2 transport cell
 
 G4 uses a dedicated immutable render-thread view; it does not reinterpret G3

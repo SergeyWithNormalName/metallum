@@ -27,10 +27,10 @@ public final class GiTransportDebugSettingsTests {
                             GiTransportRuntime.AdmissionState.WAITING)).size() == 1,
                     "G4 pre-restart HUD must remain a single explicit status line");
             require(GiTransportDebugHud.lines(snapshot(true, true,
-                            GiTransportRuntime.AdmissionState.READY)).size() == 6,
+                            GiTransportRuntime.AdmissionState.READY)).size() == 7,
                     "G4 READY HUD lost immutable population diagnostics");
             require(GiTransportDebugHud.lines(snapshot(true, false,
-                            GiTransportRuntime.AdmissionState.INVALID)).size() == 3,
+                            GiTransportRuntime.AdmissionState.INVALID)).size() == 4,
                     "G4 INVALID HUD lost its fail-closed reason");
 
             short[] red = new short[32 * 32 * 32 * 4];
@@ -54,7 +54,8 @@ public final class GiTransportDebugSettingsTests {
             final GiTransportRuntime.AdmissionState state
     ) {
         return new GiTransportRuntime.DebugSnapshot(
-                requested, sourceReady, state, "test reason", true, state == GiTransportRuntime.AdmissionState.READY,
+                requested, sourceReady, sourceReady, state, "test reason", true,
+                state == GiTransportRuntime.AdmissionState.READY,
                 1L, 12L, 3L, 2_916_480L, -32, -64, -96
         );
     }

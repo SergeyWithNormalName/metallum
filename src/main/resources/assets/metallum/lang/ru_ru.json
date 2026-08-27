@@ -21,6 +21,8 @@
   "metallum.debug.gi_g4.state.waiting": "ОЖИДАНИЕ",
   "metallum.debug.gi_g4.state.ready": "ГОТОВО",
   "metallum.debug.gi_g4.state.invalid": "ОШИБКА",
+  "metallum.debug.gi_g4.semantic_source": "Источник G2: %s",
+  "metallum.debug.gi_g4.semantic_source.missing": "ОЖИДАНИЕ SODIUM CAPTURE",
   "metallum.debug.gi_g4.source": "Источник G3: %s",
   "metallum.debug.gi_g4.source.ready": "ГОТОВ",
   "metallum.debug.gi_g4.source.preparing": "ПОДГОТОВКА — не двигайте камеру около 10 с",

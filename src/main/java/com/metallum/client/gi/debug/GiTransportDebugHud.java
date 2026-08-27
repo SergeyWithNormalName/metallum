@@ -53,7 +53,7 @@ public final class GiTransportDebugHud {
     }
 
     static List<Component> lines(final GiTransportRuntime.DebugSnapshot snapshot) {
-        List<Component> lines = new ArrayList<>(5);
+        List<Component> lines = new ArrayList<>(7);
         if (!snapshot.requested()) {
             lines.add(Component.translatable("metallum.debug.gi_g4.restart_required"));
             return List.copyOf(lines);
@@ -66,6 +66,10 @@ public final class GiTransportDebugHud {
         };
         lines.add(Component.translatable("metallum.debug.gi_g4.title",
                 Component.translatable("metallum.debug.gi_g4.state." + stateKey)));
+        lines.add(Component.translatable("metallum.debug.gi_g4.semantic_source",
+                snapshot.semanticSourceReady()
+                        ? Component.translatable("metallum.debug.gi_g4.source.ready")
+                        : Component.translatable("metallum.debug.gi_g4.semantic_source.missing")));
         lines.add(Component.translatable("metallum.debug.gi_g4.source",
                 snapshot.sourceReady()
                         ? Component.translatable("metallum.debug.gi_g4.source.ready")

@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.sodium.SodiumShadowCompatibility;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
@@ -113,7 +114,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 && exactRelightVersions;
         this.giG2CaptureEnabled = (isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
                 || isEnabled(System.getenv(GI_G3_INJECT_ENV))
-                || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV)))
+                || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV))
+                || GiTransportDebugSettings.isEnabled())
                 && exactRelightVersions;
     }
 

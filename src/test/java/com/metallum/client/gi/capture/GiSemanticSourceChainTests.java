@@ -52,6 +52,8 @@ public final class GiSemanticSourceChainTests {
                 "G2 exact third-party version lock changed");
         require(plugin.contains("GI_G2_CAPTURE_MIXINS.contains(mixinClassName)"),
                 "G2 mixins are not controlled as one structural set");
+        require(plugin.contains("GiTransportDebugSettings.isEnabled()"),
+                "Sodium G4 debug does not structurally enable its required G2 mixins");
         String blockHdr = source("src/main/java/com/metallum/mixin/sodium/BlockRendererHdrMixin.java");
         String fluidHdr = source("src/main/java/com/metallum/mixin/sodium/DefaultFluidRendererHdrMixin.java");
         require(!blockHdr.contains("GiSemantic") && !fluidHdr.contains("GiSemantic"),

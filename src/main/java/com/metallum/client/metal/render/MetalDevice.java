@@ -2049,6 +2049,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
                 GiSemanticTransportFieldView transportField = this.giTransportCoordinator == null
                         ? null : GiSemanticController.global().activeTransportField();
+                GiTransportRuntime.reportSemanticSourceReady(transportField != null);
                 if (this.giTransportCoordinator != null && !this.giTransportDisabled) {
                     try {
                         boolean accepted = this.giTransportCoordinator.hasAcceptedEpoch();

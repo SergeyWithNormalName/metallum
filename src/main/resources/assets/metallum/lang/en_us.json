@@ -21,6 +21,8 @@
   "metallum.debug.gi_g4.state.waiting": "WAITING",
   "metallum.debug.gi_g4.state.ready": "READY",
   "metallum.debug.gi_g4.state.invalid": "INVALID",
+  "metallum.debug.gi_g4.semantic_source": "G2 source: %s",
+  "metallum.debug.gi_g4.semantic_source.missing": "WAITING FOR SODIUM CAPTURE",
   "metallum.debug.gi_g4.source": "G3 source: %s",
   "metallum.debug.gi_g4.source.ready": "READY",
   "metallum.debug.gi_g4.source.preparing": "PREPARING — keep the camera still for ~10 s",

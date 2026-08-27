@@ -18,6 +18,7 @@ public final class GiTransportRuntime {
     );
 
     private static volatile boolean sourceReady;
+    private static volatile boolean semanticSourceReady;
     private static volatile boolean sourcePreparationStarted;
     private static volatile boolean benchmarkWarmupStarted;
     private static volatile boolean benchmarkMeasurementStarted;
@@ -39,6 +40,7 @@ public final class GiTransportRuntime {
     /** Resets the per-device diagnostic handshake before any G3/G4 owner is admitted. */
     public static void resetDeviceState() {
         sourceReady = false;
+        semanticSourceReady = false;
         sourcePreparationStarted = false;
         benchmarkWarmupStarted = false;
         benchmarkMeasurementStarted = false;
@@ -56,6 +58,15 @@ public final class GiTransportRuntime {
         boolean updated = isRequested() && ready;
         if (sourceReady != updated) {
             sourceReady = updated;
+            publishDebugSnapshot();
+        }
+    }
+
+    /** Publishes whether the accepted-output G2 field exists for the active client world. */
+    public static void reportSemanticSourceReady(final boolean ready) {
+        boolean updated = isRequested() && ready;
+        if (semanticSourceReady != updated) {
+            semanticSourceReady = updated;
             publishDebugSnapshot();
         }
     }
@@ -203,7 +214,7 @@ public final class GiTransportRuntime {
     private static DebugSnapshot buildDebugSnapshot() {
         NativeStats stats = nativeStats;
         return new DebugSnapshot(
-                REQUESTED, sourceReady, admissionState, invalidReason,
+                REQUESTED, semanticSourceReady, sourceReady, admissionState, invalidReason,
                 stats.available(), debugCapture != null,
                 stats.transportDispatches(), stats.validSurfaceCount(),
                 stats.unknownCellCount(), stats.accountedBytes(), stats.nearOriginX(),
@@ -227,6 +238,7 @@ public final class GiTransportRuntime {
 
     public record DebugSnapshot(
             boolean requested,
+            boolean semanticSourceReady,
             boolean sourceReady,
             AdmissionState admissionState,
             String invalidReason,
