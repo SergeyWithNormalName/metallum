@@ -16,6 +16,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 /** Source/bundled end-to-end Metal validation for the frozen G3 -> G4 private field. */
 public final class GiTransportGpuValidation {
@@ -597,10 +598,22 @@ public final class GiTransportGpuValidation {
         MemorySegment shBlue = arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES);
         MemorySegment confidence = arena.allocate(
                 GiTransportLayout.CAPTURE_CONFIDENCE_BYTES, Byte.BYTES);
-        require(MetalNativeBridge.metallum_gi_transport_capture_volume_once_v1(
-                        context, bounce, shRed, shGreen, shBlue, confidence)
+        require(MetalNativeBridge.metallum_gi_transport_begin_debug_capture_v1(context)
                         == GiTransportGpuResources.STATUS_OK,
-                "G4 full-volume diagnostic capture failed");
+                "G4 asynchronous diagnostic capture did not start");
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        int status;
+        do {
+            status = MetalNativeBridge.metallum_gi_transport_poll_debug_capture_v1(
+                    context, bounce, shRed, shGreen, shBlue, confidence
+            );
+            if (status == GiTransportGpuResources.STATUS_BUSY) {
+                LockSupport.parkNanos(100_000L);
+            }
+        } while (status == GiTransportGpuResources.STATUS_BUSY
+                && System.nanoTime() < deadline);
+        require(status == GiTransportGpuResources.STATUS_OK,
+                "G4 asynchronous full-volume diagnostic capture failed: " + status);
         return new GiTransportGpuResources.Capture(
                 readShorts(bounce), readShorts(shRed), readShorts(shGreen), readShorts(shBlue),
                 confidence.toArray(ValueLayout.JAVA_BYTE), validity(cells)

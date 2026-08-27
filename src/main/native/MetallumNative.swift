@@ -17300,6 +17300,10 @@ private final class MetallumGiTransportContextV1 {
     private var ready = false
     private var buildInFlight = false
     private var captureConsumed = false
+    private var debugCaptureInFlight = false
+    private var debugCaptureReady = false
+    private var debugCaptureStamp: UInt64 = 0
+    private var debugCaptureFailure: Int32 = 0
     private var worldGeneration: UInt64
     private var clipmapGeneration: UInt64 = 0
     private var paletteGeneration: UInt64 = 0
@@ -17784,6 +17788,118 @@ private final class MetallumGiTransportContextV1 {
         }
         return metallumGiTransportStatusOK
     }
+
+    /// Starts the optional UI debug capture without waiting for GPU completion.
+    func beginDebugCapture() -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        condition.lock()
+        guard ready, !buildInFlight else {
+            condition.unlock()
+            return metallumGiTransportStatusBusy
+        }
+        guard !captureConsumed, !debugCaptureInFlight, !debugCaptureReady else {
+            let result = debugCaptureInFlight || debugCaptureReady
+                ? metallumGiTransportStatusBusy : metallumGiTransportStatusCaptureConsumed
+            condition.unlock()
+            return result
+        }
+        debugCaptureInFlight = true
+        debugCaptureStamp = sourceStamp
+        debugCaptureFailure = 0
+        condition.unlock()
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            condition.lock()
+            debugCaptureInFlight = false
+            condition.unlock()
+            return metallumGiTransportStatusRejected
+        }
+        let rgbaBytes = metallumGiTransportCaptureRgbaBytesV1
+        for (index, texture) in [bounce, shRed, shGreen, shBlue].enumerated() {
+            blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: Self.edge, height: Self.edge, depth: Self.edge),
+                      to: captureReadback, destinationOffset: index * rgbaBytes,
+                      destinationBytesPerRow: 256, destinationBytesPerImage: 8_192)
+        }
+        let confidenceOffset = 4 * rgbaBytes
+        blit.copy(from: confidence, sourceSlice: 0, sourceLevel: 0,
+                  sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: Self.edge, height: Self.edge, depth: Self.edge),
+                  to: captureReadback, destinationOffset: confidenceOffset,
+                  destinationBytesPerRow: 256, destinationBytesPerImage: 8_192)
+        blit.endEncoding()
+        commandBuffer.addCompletedHandler { [weak self] completed in
+            guard let self else { return }
+            self.condition.lock()
+            self.debugCaptureInFlight = false
+            self.debugCaptureReady = completed.status == .completed
+                && self.ready && self.sourceStamp == self.debugCaptureStamp
+            if !self.debugCaptureReady {
+                self.debugCaptureFailure = self.sourceStamp == self.debugCaptureStamp
+                    ? metallumGiTransportStatusRejected : metallumGiTransportStatusStale
+            }
+            self.condition.broadcast()
+            self.condition.unlock()
+        }
+        commandBuffer.commit()
+        return metallumGiTransportStatusOK
+    }
+
+    /// Copies a completed debug capture only after the asynchronous blit has retired.
+    func pollDebugCapture(
+        outBounce: UnsafeMutableRawPointer, bounceBytes: UInt64,
+        outShRed: UnsafeMutableRawPointer, shRedBytes: UInt64,
+        outShGreen: UnsafeMutableRawPointer, shGreenBytes: UInt64,
+        outShBlue: UnsafeMutableRawPointer, shBlueBytes: UInt64,
+        outConfidence: UnsafeMutableRawPointer, confidenceBytes: UInt64
+    ) -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        guard bounceBytes == UInt64(metallumGiTransportCaptureRgbaBytesV1),
+              shRedBytes == UInt64(metallumGiTransportCaptureRgbaBytesV1),
+              shGreenBytes == UInt64(metallumGiTransportCaptureRgbaBytesV1),
+              shBlueBytes == UInt64(metallumGiTransportCaptureRgbaBytesV1),
+              confidenceBytes == UInt64(metallumGiTransportCaptureConfidenceBytesV1)
+        else { return metallumGiTransportStatusInvalid }
+        condition.lock()
+        guard !captureConsumed else {
+            condition.unlock()
+            return metallumGiTransportStatusCaptureConsumed
+        }
+        if debugCaptureFailure != 0 {
+            let result = debugCaptureFailure
+            condition.unlock()
+            return result
+        }
+        guard debugCaptureReady, !debugCaptureInFlight else {
+            condition.unlock()
+            return metallumGiTransportStatusBusy
+        }
+        guard ready, sourceStamp == debugCaptureStamp else {
+            condition.unlock()
+            return metallumGiTransportStatusStale
+        }
+        captureConsumed = true
+        debugCaptureReady = false
+        condition.unlock()
+
+        let rgbaBytes = metallumGiTransportCaptureRgbaBytesV1
+        memcpy(outBounce, captureReadback.contents(), rgbaBytes)
+        memcpy(outShRed, captureReadback.contents().advanced(by: rgbaBytes), rgbaBytes)
+        memcpy(outShGreen, captureReadback.contents().advanced(by: 2 * rgbaBytes), rgbaBytes)
+        memcpy(outShBlue, captureReadback.contents().advanced(by: 3 * rgbaBytes), rgbaBytes)
+        let confidenceOffset = 4 * rgbaBytes
+        for z in 0..<Self.edge {
+            for y in 0..<Self.edge {
+                let sourceOffset = confidenceOffset + z * 8_192 + y * 256
+                let destinationOffset = (z * Self.edge + y) * Self.edge
+                memcpy(outConfidence.advanced(by: destinationOffset),
+                       captureReadback.contents().advanced(by: sourceOffset), Self.edge)
+            }
+        }
+        return metallumGiTransportStatusOK
+    }
 }
 
 /// Validates G4 owners before Unmanaged access and holds them strongly across each call.
@@ -17947,6 +18063,37 @@ public func metallum_gi_transport_capture_volume_once_v1(
           let context = MetallumGiTransportContextRegistryV1.resolve(rawContext)
     else { return metallumGiTransportStatusInvalid }
     return context.captureVolumeOnce(
+            outBounce: outBounce, bounceBytes: bounceBytes,
+            outShRed: outShRed, shRedBytes: shRedBytes,
+            outShGreen: outShGreen, shGreenBytes: shGreenBytes,
+            outShBlue: outShBlue, shBlueBytes: shBlueBytes,
+            outConfidence: outConfidence, confidenceBytes: confidenceBytes)
+}
+
+@_cdecl("metallum_gi_transport_begin_debug_capture_v1")
+public func metallum_gi_transport_begin_debug_capture_v1(
+    _ rawContext: UnsafeMutableRawPointer?
+) -> Int32 {
+    guard let rawContext,
+          let context = MetallumGiTransportContextRegistryV1.resolve(rawContext)
+    else { return metallumGiTransportStatusInvalid }
+    return context.beginDebugCapture()
+}
+
+@_cdecl("metallum_gi_transport_poll_debug_capture_v1")
+public func metallum_gi_transport_poll_debug_capture_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ outBounce: UnsafeMutableRawPointer?, _ bounceBytes: UInt64,
+    _ outShRed: UnsafeMutableRawPointer?, _ shRedBytes: UInt64,
+    _ outShGreen: UnsafeMutableRawPointer?, _ shGreenBytes: UInt64,
+    _ outShBlue: UnsafeMutableRawPointer?, _ shBlueBytes: UInt64,
+    _ outConfidence: UnsafeMutableRawPointer?, _ confidenceBytes: UInt64
+) -> Int32 {
+    guard let rawContext, let outBounce, let outShRed, let outShGreen, let outShBlue,
+          let outConfidence,
+          let context = MetallumGiTransportContextRegistryV1.resolve(rawContext)
+    else { return metallumGiTransportStatusInvalid }
+    return context.pollDebugCapture(
             outBounce: outBounce, bounceBytes: bounceBytes,
             outShRed: outShRed, shRedBytes: shRedBytes,
             outShGreen: outShGreen, shGreenBytes: shGreenBytes,

@@ -6,6 +6,7 @@ import com.metallum.client.gi.semantic.GiSemanticWorldToken;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
 import com.metallum.client.gi.source.GiDirectSourceEpoch;
 import com.metallum.client.lighting.LightWorldToken;
+import com.metallum.client.lighting.EnvironmentDescriptor;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -20,6 +21,7 @@ public final class GiTransportCpuTests {
     public static void main(final String[] arguments) throws InterruptedException {
         layoutAndNormalizationAreFixed();
         runtimeFlagIsExplicit();
+        interactiveDebugEnvironmentIsFrozenPerDimension();
         sourceStampIsDeterministicSensitiveAndNonZero();
         epochRequiresExactSemanticAndDirectSourceIdentity();
         oneBounceEnergyIsBoundedAndChannelPreserving();
@@ -125,6 +127,24 @@ public final class GiTransportCpuTests {
         expectIllegalArgument(() -> new GiDirectSourceCoordinator.TransportSourceIdentity(
                 base, first ^ 1L, -32, -64, -96
         ), "forged G3 opaque source stamp was accepted");
+    }
+
+    private static void interactiveDebugEnvironmentIsFrozenPerDimension() {
+        GiTransportRuntime.resetDeviceState();
+        EnvironmentDescriptor first = EnvironmentDescriptor.NONE;
+        EnvironmentDescriptor later = EnvironmentDescriptor.ambientOnly(
+                EnvironmentDescriptor.Profile.AMBIENT_ONLY,
+                EnvironmentDescriptor.Medium.AIR,
+                0.2f, 0.3f, 0.4f
+        );
+        require(GiTransportRuntime.stabilizeDebugEnvironment(true, 11L, first) == first
+                        && GiTransportRuntime.stabilizeDebugEnvironment(true, 11L, later) == first,
+                "interactive G4 debug allowed the day-cycle environment to reset settling");
+        require(GiTransportRuntime.stabilizeDebugEnvironment(true, 12L, later) == later,
+                "interactive G4 debug retained an environment across dimensions");
+        require(GiTransportRuntime.stabilizeDebugEnvironment(false, 12L, first) == first,
+                "non-debug G3 environment was frozen");
+        GiTransportRuntime.resetDeviceState();
     }
 
     private static void epochRequiresExactSemanticAndDirectSourceIdentity() {

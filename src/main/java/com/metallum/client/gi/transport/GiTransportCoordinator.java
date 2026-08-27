@@ -196,6 +196,12 @@ public final class GiTransportCoordinator implements AutoCloseable {
         return this.resources == null ? null : this.resources.captureVolumeOnce();
     }
 
+    public GiTransportGpuResources.@Nullable Capture pollDebugCapture() {
+        assertOwnerThread();
+        return this.resources == null || this.buildState != BuildState.READY
+                ? null : this.resources.pollDebugCapture();
+    }
+
     @Override
     public void close() {
         assertOwnerThread();

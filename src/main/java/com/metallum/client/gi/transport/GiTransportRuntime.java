@@ -1,6 +1,7 @@
 package com.metallum.client.gi.transport;
 
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
+import com.metallum.client.lighting.EnvironmentDescriptor;
 
 import java.util.Locale;
 
@@ -24,6 +25,9 @@ public final class GiTransportRuntime {
     private static volatile String invalidReason = "none";
     private static volatile NativeStats nativeStats = NativeStats.empty();
     private static volatile DebugSnapshot publishedDebugSnapshot = buildDebugSnapshot();
+    private static volatile GiTransportGpuResources.Capture debugCapture;
+    private static volatile long debugEnvironmentDimension = Long.MIN_VALUE;
+    private static volatile EnvironmentDescriptor debugEnvironment;
 
     private GiTransportRuntime() {
     }
@@ -41,6 +45,9 @@ public final class GiTransportRuntime {
         admissionState = AdmissionState.WAITING;
         invalidReason = "none";
         nativeStats = NativeStats.empty();
+        debugCapture = null;
+        debugEnvironmentDimension = Long.MIN_VALUE;
+        debugEnvironment = null;
         publishDebugSnapshot();
     }
 
@@ -149,6 +156,46 @@ public final class GiTransportRuntime {
         return publishedDebugSnapshot;
     }
 
+    public static GiTransportGpuResources.Capture debugCapture() {
+        return debugCapture;
+    }
+
+    public static void reportDebugCapture(final GiTransportGpuResources.Capture capture) {
+        if (isDebugPreviewRequested() && capture != null && debugCapture == null) {
+            debugCapture = capture;
+            publishDebugSnapshot();
+        }
+    }
+
+    public static boolean isDebugPreviewRequested() {
+        return GiTransportDebugSettings.isEnabled() && !BENCHMARK_ACTIVE;
+    }
+
+    /** Freezes sun/sky input for the immutable interactive debug fixture. */
+    public static EnvironmentDescriptor stabilizeDebugEnvironment(
+            final long dimensionIdentity,
+            final EnvironmentDescriptor current
+    ) {
+        return stabilizeDebugEnvironment(
+                isDebugPreviewRequested(), dimensionIdentity, current
+        );
+    }
+
+    static EnvironmentDescriptor stabilizeDebugEnvironment(
+            final boolean enabled,
+            final long dimensionIdentity,
+            final EnvironmentDescriptor current
+    ) {
+        if (!enabled) {
+            return current;
+        }
+        if (debugEnvironment == null || debugEnvironmentDimension != dimensionIdentity) {
+            debugEnvironmentDimension = dimensionIdentity;
+            debugEnvironment = current;
+        }
+        return debugEnvironment;
+    }
+
     private static void publishDebugSnapshot() {
         publishedDebugSnapshot = buildDebugSnapshot();
     }
@@ -157,7 +204,8 @@ public final class GiTransportRuntime {
         NativeStats stats = nativeStats;
         return new DebugSnapshot(
                 REQUESTED, sourceReady, admissionState, invalidReason,
-                stats.available(), stats.transportDispatches(), stats.validSurfaceCount(),
+                stats.available(), debugCapture != null,
+                stats.transportDispatches(), stats.validSurfaceCount(),
                 stats.unknownCellCount(), stats.accountedBytes(), stats.nearOriginX(),
                 stats.nearOriginY(), stats.nearOriginZ()
         );
@@ -183,6 +231,7 @@ public final class GiTransportRuntime {
             AdmissionState admissionState,
             String invalidReason,
             boolean statsAvailable,
+            boolean captureReady,
             long transportDispatches,
             long validSurfaceCount,
             long unknownCellCount,

@@ -1,5 +1,6 @@
 package com.metallum.client.gi.transport;
 
+import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.semantic.GiSemanticValidity;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
@@ -156,8 +157,15 @@ public final class GiTransportGpuResources implements AutoCloseable {
     private final MemorySegment header;
     private final MemorySegment cells;
     private final MemorySegment stats;
+    private final MemorySegment debugBounce;
+    private final MemorySegment debugShRed;
+    private final MemorySegment debugShGreen;
+    private final MemorySegment debugShBlue;
+    private final MemorySegment debugConfidence;
     private MemorySegment context;
     @Nullable private GiTransportEpoch preparedEpoch;
+    private boolean debugCaptureStarted;
+    private boolean debugCaptureDelivered;
 
     private GiTransportGpuResources(
             final MemorySegment context,
@@ -171,6 +179,23 @@ public final class GiTransportGpuResources implements AutoCloseable {
         this.header = arena.allocate(GiTransportLayout.HEADER_BYTES, Long.BYTES);
         this.cells = arena.allocate(GiTransportLayout.CELLS_BYTES, Long.BYTES);
         this.stats = arena.allocate(GiTransportLayout.STATS_BYTES, Long.BYTES);
+        boolean debugCapture = GiTransportDebugSettings.isEnabled()
+                && !GiTransportRuntime.isBenchmarkActive();
+        this.debugBounce = debugCapture
+                ? arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
+        this.debugShRed = debugCapture
+                ? arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
+        this.debugShGreen = debugCapture
+                ? arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
+        this.debugShBlue = debugCapture
+                ? arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES)
+                : MemorySegment.NULL;
+        this.debugConfidence = debugCapture
+                ? arena.allocate(GiTransportLayout.CAPTURE_CONFIDENCE_BYTES, Byte.BYTES)
+                : MemorySegment.NULL;
     }
 
     public static void validateNativeAbi() {
@@ -413,6 +438,43 @@ public final class GiTransportGpuResources implements AutoCloseable {
                     readBytes(confidence), readValidity(this.cells)
             );
         }
+    }
+
+    /** Polls a one-shot asynchronous debug readback; it never waits for GPU completion. */
+    public @Nullable Capture pollDebugCapture() {
+        assertUsable();
+        if (debugCaptureDelivered || debugBounce.equals(MemorySegment.NULL)) {
+            return null;
+        }
+        if (!debugCaptureStarted) {
+            int status = MetalNativeBridge.metallum_gi_transport_begin_debug_capture_v1(
+                    this.context
+            );
+            if (status == STATUS_BUSY) {
+                return null;
+            }
+            if (status != STATUS_OK) {
+                throw new IllegalStateException("Failed to start G4 debug capture: " + status);
+            }
+            debugCaptureStarted = true;
+            return null;
+        }
+        int status = MetalNativeBridge.metallum_gi_transport_poll_debug_capture_v1(
+                this.context, this.debugBounce, this.debugShRed, this.debugShGreen,
+                this.debugShBlue, this.debugConfidence
+        );
+        if (status == STATUS_BUSY) {
+            return null;
+        }
+        if (status != STATUS_OK) {
+            throw new IllegalStateException("Failed to finish G4 debug capture: " + status);
+        }
+        debugCaptureDelivered = true;
+        return new Capture(
+                readShorts(this.debugBounce), readShorts(this.debugShRed),
+                readShorts(this.debugShGreen), readShorts(this.debugShBlue),
+                readBytes(this.debugConfidence), readValidity(this.cells)
+        );
     }
 
     @Override

@@ -68,6 +68,8 @@ public final class GiTransportSourceChainTests {
         require(resources.contains("telemetrySource.attachTransportTelemetry(context)")
                         && resources.contains("metallum_gi_transport_encode_frozen_v1")
                         && resources.contains("metallum_gi_transport_capture_volume_once_v1")
+                        && resources.contains("metallum_gi_transport_begin_debug_capture_v1")
+                        && resources.contains("metallum_gi_transport_poll_debug_capture_v1")
                         && resources.contains("this.deferredRelease.accept(stale)"),
                 "G4 native encode/capture/deferred-retirement chain is incomplete");
 
@@ -112,6 +114,17 @@ public final class GiTransportSourceChainTests {
                         && !debugHud.contains("MemorySegment")
                         && !debugHud.contains("GiTransportGpuResources"),
                 "G4 HUD attempts to read or bind the private transport field");
+        require(debugHud.contains("buildIndirectDcSlice")
+                        && debugHud.contains("Float.float16ToFloat"),
+                "G4 HUD does not visualize the captured indirect SH DC field");
+
+        String nativeSource = Files.readString(Path.of("src/main/native/MetallumNative.swift"));
+        int asyncStart = nativeSource.indexOf("func beginDebugCapture()");
+        int asyncEnd = nativeSource.indexOf("func pollDebugCapture(", asyncStart);
+        require(asyncStart >= 0 && asyncEnd > asyncStart
+                        && !nativeSource.substring(asyncStart, asyncEnd)
+                        .contains("waitUntilCompleted"),
+                "G4 interactive debug capture blocks the render thread on GPU completion");
 
         System.out.println("G4 Java source-chain contract tests passed");
     }

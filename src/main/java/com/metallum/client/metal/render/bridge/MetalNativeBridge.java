@@ -601,6 +601,23 @@ public final class MetalNativeBridge {
                             ValueLayout.ADDRESS, LONG
                     )
             );
+            giTransportBeginDebugCaptureV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_begin_debug_capture_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS)
+            );
+            giTransportPollDebugCaptureV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_transport_poll_debug_capture_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
             giTransportReleaseContextV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_transport_release_context_v1",
@@ -1205,6 +1222,8 @@ public final class MetalNativeBridge {
     private static final MethodHandle giTransportGetStatsV1;
     private static final MethodHandle giTransportReportStaleV1;
     private static final MethodHandle giTransportCaptureVolumeOnceV1;
+    private static final MethodHandle giTransportBeginDebugCaptureV1;
+    private static final MethodHandle giTransportPollDebugCaptureV1;
     private static final MethodHandle giTransportReleaseContextV1;
     private static final MethodHandle radianceContextCreate;
     private static final MethodHandle radianceContextUploadSourceFrozen;
@@ -2371,6 +2390,38 @@ public final class MetalNativeBridge {
             );
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_transport_capture_volume_once_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_begin_debug_capture_v1(
+            final MemorySegment context
+    ) {
+        try {
+            return (int) giTransportBeginDebugCaptureV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_begin_debug_capture_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_transport_poll_debug_capture_v1(
+            final MemorySegment context,
+            final MemorySegment bounce,
+            final MemorySegment shR,
+            final MemorySegment shG,
+            final MemorySegment shB,
+            final MemorySegment confidence
+    ) {
+        try {
+            return (int) giTransportPollDebugCaptureV1.invokeExact(
+                    segment(context),
+                    segment(bounce), bounce.byteSize(),
+                    segment(shR), shR.byteSize(),
+                    segment(shG), shG.byteSize(),
+                    segment(shB), shB.byteSize(),
+                    segment(confidence), confidence.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_transport_poll_debug_capture_v1", throwable);
         }
     }
 

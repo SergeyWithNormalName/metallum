@@ -146,12 +146,16 @@ separately; the G4 one-shot capture returns bounce, all three SH lobes,
 confidence and the separately retained accepted-cell validity without an image
 binding.
 
-The live Sodium HUD deliberately does not call that capture. It publishes only
-the already available immutable admission statistics: G3 source readiness, G4
-WAITING/READY/INVALID state, one-shot dispatch and valid/unknown cell counts,
-frozen near origin, accounted native bytes and a fail-closed invalid reason.
-It performs no GPU-to-CPU texture readback and does not make the private G4
-textures visible to a terrain, fragment, UI or present pass.
+The live Sodium HUD deliberately does not call the blocking validation capture.
+It publishes the already available immutable admission statistics while G3 settles. For an
+interactive debug request, the sun/sky descriptor is latched once so the normal
+day cycle cannot reset the 600-frame immutable-input gate forever. After READY,
+native schedules one asynchronous blit into its preallocated shared buffer;
+Java polls without waiting and publishes a middle-Z CPU preview of the captured
+indirect SH DC field. This adds no terrain, fragment or present binding and no
+GPU wait in the frame loop. The debug-only Java destinations add `1,081,344`
+bytes, bringing the diagnostic end-to-end total to `23,719,272` bytes, still
+below the 24 MiB gate; benchmark mode allocates none of these destinations.
 
 ## Fixed numerical and resource gates
 

@@ -2182,6 +2182,15 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 }
                             }
                         }
+                        if (GiTransportRuntime.isResolvedReady()
+                                && GiTransportRuntime.isDebugPreviewRequested()
+                                && GiTransportRuntime.debugCapture() == null) {
+                            GiTransportGpuResources.Capture debugCapture =
+                                    this.giTransportCoordinator.pollDebugCapture();
+                            if (debugCapture != null) {
+                                GiTransportRuntime.reportDebugCapture(debugCapture);
+                            }
+                        }
                     } catch (RuntimeException exception) {
                         this.giTransportDisabled = true;
                         GiTransportRuntime.reportInvalid("G4 runtime exception");

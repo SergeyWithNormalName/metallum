@@ -250,7 +250,10 @@ abstract class GameRendererMetalFxMixin {
             EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
             EnvironmentDescriptor giEnvironment = (GiDirectSourceRuntime.isRequested()
                     || GiTransportRuntime.isRequested())
-                    ? metallum$environmentDescriptor(camera, deltaTracker, true)
+                    ? GiTransportRuntime.stabilizeDebugEnvironment(
+                            this.metallum$dimensionIdentity,
+                            metallum$environmentDescriptor(camera, deltaTracker, true)
+                    )
                     : EnvironmentDescriptor.NONE;
             com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =
                     metallum$cloudShadowFrameState(environment, deltaTracker, device);
