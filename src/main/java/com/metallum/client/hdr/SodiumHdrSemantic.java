@@ -2,6 +2,8 @@ package com.metallum.client.hdr;
 
 import com.metallum.Metallum;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -30,6 +32,11 @@ public final class SodiumHdrSemantic {
     public static final int PACKED_MATERIAL_SUBMERGED_BIT = 1 << 8;
     public static final int PACKED_MATERIAL_DEPTH_SHIFT = 9;
     public static final int PACKED_MATERIAL_DEPTH_MASK = 0x3f;
+    /** Internal-only dominant material face bits retained until the compact vertex is encoded. */
+    private static final int REFLECTION_FACE_SHIFT = 16;
+    private static final int REFLECTION_FACE_MASK = 0x3f << REFLECTION_FACE_SHIFT;
+    private static final int REFLECTION_LIGHT_NIBBLE_MASK = 0x0f;
+    private static final int MAX_PACKED_BLOCK_LIGHT = 0xf0;
 
     /** Version-locked unused base values in Sodium 0.9.1's current block shaders. */
     private static final int MATERIAL_BASE_METAL = 2;
@@ -42,6 +49,8 @@ public final class SodiumHdrSemantic {
     private static final int MATERIAL_BASE_DIELECTRIC = 0;
     private static final AtomicBoolean ACTIVE_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean MATERIAL_CONFLICT_LOGGED = new AtomicBoolean();
+    private static final AtomicBoolean REFLECTION_LIGHT_CONFLICT_LOGGED = new AtomicBoolean();
+    private static volatile Boolean reflectionFaceCarrierEnabled;
     private static final int AMETHYST_GROWTH_SURFACE_EMISSION = 2;
     /**
      * Gamma 2.5 remap of Minecraft's 0..15 light-source levels. Keeping it
@@ -146,12 +155,10 @@ public final class SodiumHdrSemantic {
             return SURFACE_CLASS_NONE;
         }
         return switch (kind) {
-            // Preserve intrinsic optics on vertical faces. Upward sheltered faces are left on
-            // the legacy path because the compact byte has no independent precipitation bit.
-            case METAL -> !upwardFace || rainExposed
-                    ? SURFACE_CLASS_METAL : SURFACE_CLASS_NONE;
-            case SMOOTH_DIELECTRIC -> !upwardFace || rainExposed
-                    ? SURFACE_CLASS_SMOOTH_DIELECTRIC : SURFACE_CLASS_NONE;
+            // Intrinsic optics are material properties and therefore survive on every face.
+            // Rain exposure is needed only for otherwise dry material families.
+            case METAL -> SURFACE_CLASS_METAL;
+            case SMOOTH_DIELECTRIC -> SURFACE_CLASS_SMOOTH_DIELECTRIC;
             case WATER -> SURFACE_CLASS_WATER;
             case GLASS -> SURFACE_CLASS_GLASS;
             case STONE -> rainExposed ? SURFACE_CLASS_STONE : SURFACE_CLASS_NONE;
@@ -173,7 +180,7 @@ public final class SodiumHdrSemantic {
             final int lightEmission,
             final boolean exact
     ) {
-        tagQuad(vertices, lightEmission, exact, SURFACE_CLASS_NONE, false, 0);
+        tagQuad(vertices, lightEmission, exact, SURFACE_CLASS_NONE, false, 0, 0);
     }
 
     public static void tagQuad(
@@ -182,7 +189,7 @@ public final class SodiumHdrSemantic {
             final boolean exact,
             final int surfaceClass
     ) {
-        tagQuad(vertices, lightEmission, exact, surfaceClass, false, 0);
+        tagQuad(vertices, lightEmission, exact, surfaceClass, false, 0, 0);
     }
 
     /**
@@ -198,12 +205,28 @@ public final class SodiumHdrSemantic {
             final boolean submerged,
             final int submergedDepth
     ) {
+        tagQuad(vertices, lightEmission, exact, surfaceClass, submerged, submergedDepth, 0);
+    }
+
+    public static void tagQuad(
+            final ChunkVertexEncoder.Vertex[] vertices,
+            final int lightEmission,
+            final boolean exact,
+            final int surfaceClass,
+            final boolean submerged,
+            final int submergedDepth,
+            final int reflectionFaceBit
+    ) {
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(lightEmission, exact);
         int boundedSurfaceClass = Math.clamp(
                 surfaceClass, SURFACE_CLASS_NONE, SURFACE_CLASS_DIELECTRIC);
         if (semantic == 0 && boundedSurfaceClass != SURFACE_CLASS_NONE) {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT
                     | (boundedSurfaceClass << SURFACE_CLASS_SHIFT);
+            if (reflectionFaceBit != 0) {
+                VoxelReflectionFace.index(reflectionFaceBit);
+                semantic |= reflectionFaceBit << REFLECTION_FACE_SHIFT;
+            }
         }
         // A water interface transmits/refracts the caustic; it is never its receiver. Encoding
         // a depth on it makes the receiver shader modulate the visible surface itself, producing
@@ -254,6 +277,7 @@ public final class SodiumHdrSemantic {
         int surfaceClass = SURFACE_CLASS_NONE;
         boolean submerged = false;
         int submergedDepth = 0;
+        int reflectionFaceBit = 0;
         for (ChunkVertexEncoder.Vertex vertex : vertices) {
             int vertexSemantic = (vertex instanceof HdrEmissionVertex hdrVertex)
                     ? hdrVertex.metallum$getHdrSemantic()
@@ -278,6 +302,33 @@ public final class SodiumHdrSemantic {
                 int vDepth = (vertexSemantic >> SUBMERGED_DEPTH_SHIFT) & SUBMERGED_DEPTH_MASK;
                 submergedDepth = Math.max(submergedDepth, vDepth);
             }
+            int vertexReflectionFace = (vertexSemantic & REFLECTION_FACE_MASK)
+                    >>> REFLECTION_FACE_SHIFT;
+            if (vertexReflectionFace != 0) {
+                if (reflectionFaceBit == 0) {
+                    reflectionFaceBit = vertexReflectionFace;
+                } else if (reflectionFaceBit != vertexReflectionFace) {
+                    reflectionFaceBit = 0;
+                }
+            }
+        }
+        boolean reflectionCarrier = reflectionFaceBit != 0 && reflectionFaceCarrierEnabled();
+        if (reflectionCarrier) {
+            for (ChunkVertexEncoder.Vertex vertex : vertices) {
+                if (((vertex.light & 0xff) & REFLECTION_LIGHT_NIBBLE_MASK) != 0) {
+                    // A foreign low-nibble light encoding is ambiguous with the face carrier.
+                    // Preserve that modded light and fail this quad back to legacy material data.
+                    reflectionCarrier = false;
+                    reflectionFaceBit = 0;
+                    surfaceClass = SURFACE_CLASS_NONE;
+                    if (REFLECTION_LIGHT_CONFLICT_LOGGED.compareAndSet(false, true)) {
+                        Metallum.LOGGER.warn(
+                                "Non-canonical Sodium block-light bits conflict with the voxel-reflection face carrier; affected quads use legacy material semantics"
+                        );
+                    }
+                    break;
+                }
+            }
         }
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
         int packedBase = materialBits;
@@ -290,7 +341,45 @@ public final class SodiumHdrSemantic {
             int depth = Math.clamp(submergedDepth, 1, 63);
             packed |= PACKED_MATERIAL_SUBMERGED_BIT | (depth << PACKED_MATERIAL_DEPTH_SHIFT);
         }
+        if (semantic == 0 && surfaceClass != SURFACE_CLASS_NONE && reflectionCarrier) {
+            for (ChunkVertexEncoder.Vertex vertex : vertices) {
+                // Minecraft's block-light byte is aligned to 16. Encode the face inside the same
+                // lightmap texel; the max-light cell uses the lower half so Sodium's 248 clamp
+                // cannot erase the code. The reflection vertex flavor restores the exact center.
+                vertex.light = packReflectionFaceIntoLight(vertex.light, reflectionFaceBit);
+            }
+        }
         return packed;
+    }
+
+    public static int reflectionFaceCode(final int faceBit) {
+        return VoxelReflectionFace.index(faceBit) + 1;
+    }
+
+    public static int packReflectionFaceIntoLight(final int packedLight, final int faceBit) {
+        int blockLight = packedLight & 0xff;
+        if ((blockLight & REFLECTION_LIGHT_NIBBLE_MASK) != 0) {
+            return packedLight;
+        }
+        int faceCode = reflectionFaceCode(faceBit);
+        int encodedBlockLight = blockLight == MAX_PACKED_BLOCK_LIGHT
+                ? blockLight - faceCode : blockLight + faceCode;
+        return (packedLight & ~0xff) | encodedBlockLight;
+    }
+
+    private static boolean reflectionFaceCarrierEnabled() {
+        Boolean current = reflectionFaceCarrierEnabled;
+        if (current != null) {
+            return current;
+        }
+        synchronized (SodiumHdrSemantic.class) {
+            if (reflectionFaceCarrierEnabled == null) {
+                // The option is explicitly restart-gated. Cache it once so the terrain quad hot
+                // path never performs repeated property, environment, or config-file lookups.
+                reflectionFaceCarrierEnabled = VertexReflectionExperiment.isRuntimeEnabled();
+            }
+            return reflectionFaceCarrierEnabled;
+        }
     }
 
     /** Final version-locked Sodium base used by one non-emissive L8 surface class. */

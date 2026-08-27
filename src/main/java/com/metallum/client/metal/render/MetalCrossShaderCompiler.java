@@ -405,7 +405,7 @@ final class MetalCrossShaderCompiler {
             @Nullable final List<MetalCompiledRenderPipeline.ResourceBinding> canonicalResources
     ) throws ShaderCompileException {
         boolean vertexReflection = VertexReflectionExperiment.isRuntimeEnabled()
-                && isSodiumTranslucentTerrainPipeline(pipeline)
+                && isSodiumReflectionTerrainPipeline(pipeline)
                 && isAdvancedFlavor(flavor);
         ShaderDefines vertexDefines = vertexReflection
                 ? withVertexReflectionDefine(pipeline.getShaderDefines())
@@ -676,21 +676,23 @@ final class MetalCrossShaderCompiler {
         return builder.build();
     }
 
-    static boolean isSodiumTranslucentTerrainPipeline(
+    static boolean isSodiumReflectionTerrainPipeline(
             final Identifier location,
             final Identifier vertex,
             final Identifier fragment
     ) {
         return "sodium".equals(location.getNamespace())
-                && "pipeline/translucent_terrain".equals(location.getPath())
+                && ("pipeline/solid_terrain".equals(location.getPath())
+                || "pipeline/cutout_terrain".equals(location.getPath())
+                || "pipeline/translucent_terrain".equals(location.getPath()))
                 && "sodium".equals(vertex.getNamespace())
                 && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(vertex.getPath())
                 && "sodium".equals(fragment.getNamespace())
                 && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH.equals(fragment.getPath());
     }
 
-    static boolean isSodiumTranslucentTerrainPipeline(final RenderPipeline pipeline) {
-        return isSodiumTranslucentTerrainPipeline(
+    static boolean isSodiumReflectionTerrainPipeline(final RenderPipeline pipeline) {
+        return isSodiumReflectionTerrainPipeline(
                 pipeline.getLocation(), pipeline.getVertexShader(), pipeline.getFragmentShader()
         );
     }
@@ -778,7 +780,7 @@ final class MetalCrossShaderCompiler {
             String marker = "[[buffer(" + slot + ")]]";
             boolean reflectionOwnsVertexSlot = slot == VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT
                     && VertexReflectionExperiment.isRuntimeEnabled()
-                    && isSodiumTranslucentTerrainPipeline(pipeline);
+                    && isSodiumReflectionTerrainPipeline(pipeline);
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
                     || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexSlot)) {
                 throw new IllegalStateException(
@@ -792,7 +794,7 @@ final class MetalCrossShaderCompiler {
                 variant.vertexMsl(),
                 variant.fragmentMsl(),
                 VertexReflectionExperiment.isRuntimeEnabled()
-                        && isSodiumTranslucentTerrainPipeline(pipeline)
+                        && isSodiumReflectionTerrainPipeline(pipeline)
         );
         String visibilityCacheMarker = "[[buffer("
                 + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
@@ -809,7 +811,7 @@ final class MetalCrossShaderCompiler {
             String marker = "[[buffer(" + slot + ")]]";
             boolean reflectionOwnsVertexVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
                     && VertexReflectionExperiment.isRuntimeEnabled()
-                    && isSodiumTranslucentTerrainPipeline(pipeline);
+                    && isSodiumReflectionTerrainPipeline(pipeline);
             boolean diagnosticProxyRemoved = slot == VoxelShadowBindingAbi.PROXY_BUFFER_SLOT
                     && com.metallum.client.benchmark.DiagnosticAblationMode
                     .getSystemCurrent().l6NoProxy() == 1;
@@ -851,10 +853,13 @@ final class MetalCrossShaderCompiler {
         }
         String environmentMarker = "[[buffer("
                 + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]";
+        boolean reflectionOwnsVertexEnvironment = VertexReflectionExperiment.isRuntimeEnabled()
+                && isSodiumReflectionTerrainPipeline(pipeline);
         if (countOccurrences(variant.fragmentMsl(), environmentMarker) != 1
-                || variant.vertexMsl().contains(environmentMarker)) {
+                || countOccurrences(variant.vertexMsl(), environmentMarker)
+                != (reflectionOwnsVertexEnvironment ? 1 : 0)) {
             throw new IllegalStateException(
-                    "L4 environment buffer is missing, repeated, or visible to the vertex stage for "
+                    "L4 environment buffer is missing, repeated, or has the wrong stage visibility for "
                         + pipeline.getLocation()
             );
         }

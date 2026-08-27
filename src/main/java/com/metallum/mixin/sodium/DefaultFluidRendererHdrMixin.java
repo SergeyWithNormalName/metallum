@@ -1,6 +1,7 @@
 package com.metallum.mixin.sodium;
 
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import net.caffeinemc.mods.sodium.client.model.color.ColorProvider;
 import net.caffeinemc.mods.sodium.client.model.quad.ModelQuadView;
 import net.caffeinemc.mods.sodium.client.model.quad.properties.ModelQuadFacing;
@@ -83,8 +84,20 @@ abstract class DefaultFluidRendererHdrMixin {
                 this.metallum$fluidLightEmission > 0,
                 water
                         ? SodiumHdrSemantic.SURFACE_CLASS_WATER
-                        : SodiumHdrSemantic.SURFACE_CLASS_NONE
+                        : SodiumHdrSemantic.SURFACE_CLASS_NONE,
+                false,
+                0,
+                reflectionFace(facing)
         );
+    }
+
+    @Unique
+    private static int reflectionFace(final ModelQuadFacing facing) {
+        if (facing == null || !facing.isAligned()) {
+            return 0;
+        }
+        var normal = facing.getAlignedNormal();
+        return VoxelReflectionFace.forNormal(normal.x(), normal.y(), normal.z());
     }
 
     @Unique

@@ -1,7 +1,10 @@
 package com.metallum.client.lighting;
 
+import com.metallum.client.gi.semantic.GiSemanticMaterial;
+import com.metallum.client.gi.semantic.GiSemanticPacking;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
 import net.minecraft.server.Bootstrap;
@@ -18,6 +21,8 @@ public final class SurfaceMaterialPolicyTests {
         Bootstrap.bootStrap();
         testVanillaDefaults();
         testCompactSemanticCoexistence();
+        testGiSharedVoxelReflectionPolicy();
+        testReflectionFaceCarrier();
         testWaterSurfaceDoesNotBecomeACausticReceiver();
         testFresnelAndGgx();
         testRainExposureSnapshot();
@@ -141,6 +146,78 @@ public final class SurfaceMaterialPolicyTests {
                 5, SodiumHdrShaderPatcher.encodeVertexSemantic(15, true));
         require(exactEmission == 253 && ((exactEmission >> 3) & 15) == 15,
                 "L8 compact material policy changed exact HDR emission");
+    }
+
+    private static void testGiSharedVoxelReflectionPolicy() {
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.WATER)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.METAL)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.SMOOTH_DIELECTRIC)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.INTRINSIC,
+                "intrinsic glossy receiver families are incomplete");
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.STONE)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.WOOD)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.DIELECTRIC)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.WET_ONLY,
+                "wet-only receiver families are incomplete");
+        require(SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.GLASS)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.NONE
+                        && SurfaceMaterialPolicy.voxelReflectionMode(SurfaceMaterialPolicy.POROUS)
+                        == SurfaceMaterialPolicy.VoxelReflectionMode.NONE,
+                "unsupported transparent or high-roughness receiver entered R2");
+        for (SurfaceMaterialPolicy.Descriptor descriptor : new SurfaceMaterialPolicy.Descriptor[]{
+                SurfaceMaterialPolicy.DIELECTRIC, SurfaceMaterialPolicy.STONE,
+                SurfaceMaterialPolicy.WOOD, SurfaceMaterialPolicy.POROUS,
+                SurfaceMaterialPolicy.SMOOTH_DIELECTRIC, SurfaceMaterialPolicy.METAL,
+                SurfaceMaterialPolicy.GLASS, SurfaceMaterialPolicy.WATER
+        }) {
+            require(GiSemanticMaterial.from(descriptor).voxelReflectionMode()
+                            == SurfaceMaterialPolicy.voxelReflectionMode(descriptor),
+                    "G2 material semantics diverged from the L8 reflection receiver policy");
+        }
+        require(SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.METAL, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_METAL
+                        && SodiumHdrSemantic.terrainSurfaceClass(
+                        SurfaceMaterialPolicy.Kind.SMOOTH_DIELECTRIC, true, false)
+                        == SodiumHdrSemantic.SURFACE_CLASS_SMOOTH_DIELECTRIC,
+                "sheltered glossy top faces lost their intrinsic material semantic");
+    }
+
+    private static void testReflectionFaceCarrier() {
+        require(VoxelReflectionFace.NEG_X == GiSemanticPacking.FACE_NEG_X
+                        && VoxelReflectionFace.POS_X == GiSemanticPacking.FACE_POS_X
+                        && VoxelReflectionFace.NEG_Y == GiSemanticPacking.FACE_NEG_Y
+                        && VoxelReflectionFace.POS_Y == GiSemanticPacking.FACE_POS_Y
+                        && VoxelReflectionFace.NEG_Z == GiSemanticPacking.FACE_NEG_Z
+                        && VoxelReflectionFace.POS_Z == GiSemanticPacking.FACE_POS_Z,
+                "reflection receiver face order must remain identical to the G2 semantic ABI");
+        require(VoxelReflectionFace.forNormal(-0.8F, 0.2F, 0.1F)
+                        == GiSemanticPacking.faceForNormal(-0.8F, 0.2F, 0.1F)
+                        && VoxelReflectionFace.forNormal(0.1F, 0.2F, 0.8F)
+                        == GiSemanticPacking.faceForNormal(0.1F, 0.2F, 0.8F),
+                "reflection receiver dominant-face selection must match G2 semantics");
+        int light = 0x00F000A0;
+        int encoded = SodiumHdrSemantic.packReflectionFaceIntoLight(
+                light, GiSemanticPacking.FACE_NEG_Z);
+        require((encoded & 0xff) == 0xa5 && (encoded & ~0xff) == (light & ~0xff),
+                "G2 -Z face did not enter the ordinary block-light texel");
+        int maxLight = SodiumHdrSemantic.packReflectionFaceIntoLight(
+                0x00F000F0, GiSemanticPacking.FACE_NEG_Z);
+        require((maxLight & 0xff) == 0xeb,
+                "max block light did not use the clamp-safe lower-half face encoding");
+        require(SodiumHdrSemantic.packReflectionFaceIntoLight(
+                        light | 3, GiSemanticPacking.FACE_NEG_Z) == (light | 3),
+                "non-canonical modded block-light bits were overwritten by the face carrier");
+        require(SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_X) == 1
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_X) == 2
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_Y) == 3
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Y) == 4
+                        && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Z) == 6,
+                "G2 face order diverged from the compact reflection carrier");
     }
 
     private static void testWaterSurfaceDoesNotBecomeACausticReceiver() {

@@ -5,6 +5,7 @@ import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.SunShadowCache;
 import com.metallum.client.lighting.SunShadowFrame;
 import com.metallum.client.lighting.SunShadowStabilizer;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
@@ -505,7 +506,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 this.paramsRing.nativeHandle(),
                 paramsOffset,
                 EnvironmentShadowBindingAbi.PARAMS_SLOT,
-                MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                materialEnvironmentStageMask(VertexReflectionExperiment.isRuntimeEnabled())
         );
         int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
         for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {
@@ -520,6 +521,11 @@ final class SunShadowGpuResources implements AutoCloseable {
                     MetalCompiledRenderPipeline.STAGE_FRAGMENT
             );
         }
+    }
+
+    static int materialEnvironmentStageMask(final boolean vertexReflectionRuntimeEnabled) {
+        return MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                | (vertexReflectionRuntimeEnabled ? MetalCompiledRenderPipeline.STAGE_VERTEX : 0);
     }
 
     MetalGpuSampler godRayComparisonSampler() {

@@ -3,7 +3,7 @@
 ## Scope and safety boundary
 
 This prototype is an opt-in, **snapshot-built** world-space reflection field for
-the translucent water receiver. It is not planar reflection, a dynamic cubemap,
+the material-gated terrain receiver. It is not planar reflection, a dynamic cubemap,
 a screen-space reflection system, or a replacement for L3/L5/L6 lighting. It has
 no per-frame capture/update path. The active field is immutable while READY, but
 the controller can build and atomically publish a replacement after the camera
@@ -56,12 +56,32 @@ or reflection resource creation.
 
 ## Shader contract
 
-The feature is present only in the translucent Advanced pipeline. Only marked
-water surfaces consume it. The current topology is a bounded 40-step vertex
-cone trace over one native-owned radiance texture. Generated MSL contains one
-syntactic 3D sample instruction inside that loop, so it may execute up to 40
-samples per affected water vertex. There is no Cartesian moment texture in the
-current implementation.
+The reflection flavor is present in Sodium solid, cutout, and translucent
+Advanced terrain pipelines. The trace is still material-gated before its first
+texture read. The single source of receiver truth is
+`SurfaceMaterialPolicy.voxelReflectionMode`, also exposed by the G2
+`GiSemanticMaterial` family:
+
+- water, metal and explicitly smooth dielectric are intrinsic receivers;
+- rain-exposed dielectric, stone and wood are receivers only while the smoothed
+  L8 wetness value is non-zero;
+- glass keeps its separate transparent composition, and porous materials remain
+  outside the accepted prefiltered roughness band.
+
+The six signed-axis face order is the existing G2 `GiSemanticPacking` order.
+During a reflection-enabled remesh, its 1--6 face code occupies an otherwise
+unused intra-texel block-light offset (with a clamp-safe encoding for light 15);
+the reflection vertex flavor restores the exact texel center before lookup.
+This preserves the compact vertex stride and gives metal,
+smooth and wet non-horizontal faces a world-space trace normal. Invalid or
+missing face data fails closed before any volume sample.
+
+The current topology is a bounded 40-step vertex cone trace over one
+native-owned radiance texture. Generated MSL contains one syntactic 3D sample
+instruction inside that loop, so it may execute up to 40 samples per affected
+receiver vertex. Wet-only vertices also read the existing L8 environment packet
+at vertex buffer slot 26 solely to branch around the trace while dry. There is
+no Cartesian moment texture in the current implementation.
 
 The refined carrier exports two `float4` varyings:
 
@@ -69,12 +89,14 @@ The refined carrier exports two `float4` varyings:
 - the flat vertex trace direction plus roughness.
 
 The fragment performs zero 3D reads. It reflects the per-fragment view vector
-about the existing procedural water normal, evaluates bounded alignment against
-the interpolated trace direction, and applies confidence, roughness and the same
-water Fresnel used by the analytic environment. Coarse world RGB replaces the
+about the existing material normal (including procedural water waves), evaluates
+bounded alignment against the interpolated trace direction, and applies
+confidence, roughness and material Fresnel. Coarse world RGB replaces the
 analytic environment only by that bounded weight; it is not added as diffuse
-illumination. The transmitted/body term and alpha receive the complementary
-Fresnel energy. Sun and local-light GGX remain separate.
+illumination. Field radiance retains local visibility in covered/cave scenes,
+while the analytic sky fallback keeps its old skylight gate. Only water's
+transmitted/body term and alpha receive complementary Fresnel energy. Sun and
+local-light GGX remain separate.
 
 Diagnostic contribution-only output is opaque and contains only
 `coarseRGB * confidence * directionalResponse`; it is not final water color.
@@ -83,7 +105,8 @@ Receiver isolation remains:
 
 - the general environment/diffuse term never consumes coarse world RGB;
 - the analytic environment remains the zero-confidence fallback;
-- non-water translucent materials are untouched.
+- unsupported glass/porous materials and dry ordinary terrain branch around all
+  reflection texture reads.
 
 The field deliberately reports zero confidence where it has no valid support,
 so it cannot be mistaken for an irradiance cache or provide fabricated
@@ -113,9 +136,12 @@ Metal run, waits for the one-shot build, and binds the resources through a real
 render encoder.  It validates the repaired native boundary, not the visual
 appearance.
 
-The receiver refinement has generated-MSL, deterministic fixture, motion-route,
-and Tier C timing receipts recorded in `OptimizationHistory.md`. Human visual
-acceptance is still required before changing the default-OFF state. A Metal GPU
+The original water receiver refinement has generated-MSL, deterministic fixture,
+motion-route, and Tier C timing receipts recorded in `OptimizationHistory.md`.
+Those timings do not admit the expanded solid/cutout material scope. The R2
+integration currently has source, CPU policy, generated-MSL and stage-binding
+proof only; it still requires the dry A/B gate plus lake/wet-ground/metal/cave/
+rain visual scenes before changing the default-OFF state. A Metal GPU
 capture/counter-capable target would still be needed to turn the varying change
 into a measured register/occupancy claim; source length and varying counts alone
 do not prove occupancy.

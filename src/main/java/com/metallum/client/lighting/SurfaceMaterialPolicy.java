@@ -41,6 +41,13 @@ public final class SurfaceMaterialPolicy {
         WATER
     }
 
+    /** Shared GI/L8 policy for the bounded voxel-reflection receiver. */
+    public enum VoxelReflectionMode {
+        NONE,
+        WET_ONLY,
+        INTRINSIC
+    }
+
     public record Descriptor(
             Kind kind,
             float roughness,
@@ -174,6 +181,24 @@ public final class SurfaceMaterialPolicy {
         }
         Descriptor explicit = forBlock(state);
         return explicit == DIELECTRIC && translucentRenderPass ? GLASS : explicit;
+    }
+
+    /**
+     * Canonical receiver classification. Glass keeps its separate transparent composition, while
+     * porous materials stay outside the 0.25--0.35 prefiltered reflection carrier roughness band.
+     */
+    public static VoxelReflectionMode voxelReflectionMode(final Kind kind) {
+        Objects.requireNonNull(kind, "kind");
+        return switch (kind) {
+            case WATER, METAL, SMOOTH_DIELECTRIC -> VoxelReflectionMode.INTRINSIC;
+            case DIELECTRIC, STONE, WOOD -> VoxelReflectionMode.WET_ONLY;
+            case POROUS, GLASS -> VoxelReflectionMode.NONE;
+        };
+    }
+
+    public static VoxelReflectionMode voxelReflectionMode(final Descriptor descriptor) {
+        Objects.requireNonNull(descriptor, "descriptor");
+        return voxelReflectionMode(descriptor.kind());
     }
 
     public static float wetRoughness(

@@ -23,6 +23,20 @@ public enum GiSemanticMaterial {
         return this.abiId;
     }
 
+    /** G2 exposes the source L8 decision instead of maintaining a second receiver list. */
+    public SurfaceMaterialPolicy.VoxelReflectionMode voxelReflectionMode() {
+        return SurfaceMaterialPolicy.voxelReflectionMode(switch (this) {
+            case DIELECTRIC -> SurfaceMaterialPolicy.Kind.DIELECTRIC;
+            case STONE -> SurfaceMaterialPolicy.Kind.STONE;
+            case WOOD -> SurfaceMaterialPolicy.Kind.WOOD;
+            case POROUS -> SurfaceMaterialPolicy.Kind.POROUS;
+            case SMOOTH_DIELECTRIC -> SurfaceMaterialPolicy.Kind.SMOOTH_DIELECTRIC;
+            case METAL -> SurfaceMaterialPolicy.Kind.METAL;
+            case GLASS -> SurfaceMaterialPolicy.Kind.GLASS;
+            case WATER -> SurfaceMaterialPolicy.Kind.WATER;
+        });
+    }
+
     public static GiSemanticMaterial from(final SurfaceMaterialPolicy.Descriptor descriptor) {
         return switch (descriptor.kind()) {
             case DIELECTRIC -> DIELECTRIC;

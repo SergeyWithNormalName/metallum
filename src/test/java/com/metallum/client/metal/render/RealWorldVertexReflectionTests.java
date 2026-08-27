@@ -54,13 +54,15 @@ import java.util.Map;
  * 2. Strict distinction between occupied, emissive, empty, and out-of-bounds cells.
  * 3. Finite domain world-space mapping with 4-block snapping and out-of-bounds zero confidence.
  * 4. Camera fractional motion and integer block shift invariance.
- * 5. MSL generation proof: one water-gated vertex cone-trace sampler, buffer 27 parameter binding,
+ * 5. MSL generation proof: one material-gated vertex cone-trace sampler, reflection/environment
+ *    parameter bindings,
  *    two bounded reflection varyings, exact zero fragment 3D texture samples, and full
- *    Solid/Cutout isolation.</p>
+ *    Solid/Cutout/Translucent material-receiver coverage.</p>
  */
 public final class RealWorldVertexReflectionTests {
 
     public static void main(final String[] args) throws Exception {
+        testMaterialEnvironmentStageMask();
         System.out.println("Running RealWorldVertexReflectionTests...");
         net.minecraft.SharedConstants.tryDetectVersion();
         net.minecraft.server.Bootstrap.bootStrap();
@@ -77,6 +79,16 @@ public final class RealWorldVertexReflectionTests {
         testGiOffGeneratedMslContractProof();
 
         System.out.println("RealWorldVertexReflectionTests passed successfully!");
+    }
+
+    private static void testMaterialEnvironmentStageMask() {
+        require(SunShadowGpuResources.materialEnvironmentStageMask(false)
+                        == MetalCompiledRenderPipeline.STAGE_FRAGMENT,
+                "ordinary material environment params must remain fragment-only");
+        require(SunShadowGpuResources.materialEnvironmentStageMask(true)
+                        == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                        | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                "wet reflection gating must see the smoothed material weather packet in vertex");
     }
 
     private static void testExposedFaceIrradianceSemantics() {
@@ -377,6 +389,20 @@ public final class RealWorldVertexReflectionTests {
     }
 
     private static void testMslGeneratedShaderContractProof() throws Exception {
+        Identifier shader = Identifier.fromNamespaceAndPath(
+                "sodium", AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH);
+        for (String path : new String[]{
+                "pipeline/solid_terrain", "pipeline/cutout_terrain",
+                "pipeline/translucent_terrain"
+        }) {
+            require(MetalCrossShaderCompiler.isSodiumReflectionTerrainPipeline(
+                            Identifier.fromNamespaceAndPath("sodium", path), shader, shader),
+                    "voxel reflection variant does not cover Sodium terrain pipeline " + path);
+        }
+        require(!MetalCrossShaderCompiler.isSodiumReflectionTerrainPipeline(
+                        Identifier.fromNamespaceAndPath("minecraft", "pipeline/entity"), shader, shader),
+                "non-terrain pipeline entered the voxel reflection shader flavor");
+
         String sodiumVertex = preprocess("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX);
         String sodiumFragment = preprocess("sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT);
 
@@ -421,6 +447,8 @@ public final class RealWorldVertexReflectionTests {
         require(onMslVertex.contains("texture3d<float> metallumReflectionRadiance [[texture(10)]]"), "Vertex must have texture(10)");
         require(onMslVertex.contains("sampler metallumReflectionRadianceSmplr [[sampler(10)]]"), "Vertex must have sampler(10)");
         require(onMslVertex.contains("buffer(27)"), "Vertex must bind dedicated reflection params buffer at slot 27");
+        require(onMslVertex.contains("buffer(26)"),
+                "Vertex wet receiver gate must bind the shared L8/G2 material environment at slot 26");
         require(onMslVertex.contains("metallumCoarseReflection"), "Vertex must output metallumCoarseReflection");
         require(onMslVertex.contains("metallumCoarseReflectionDirection"),
                 "Vertex must output the flat trace direction and receiver roughness");
@@ -437,12 +465,21 @@ public final class RealWorldVertexReflectionTests {
         require(onGlslVertex.contains("metallumTraceStep < 40")
                         && onGlslVertex.contains("metallumTraceDistance += 1.75"),
                 "vertex carrier must stay statically bounded without stepping over a two-block source cell");
-        require(onGlslVertex.contains("bool metallumVertexReflectionWater = metallumVertexSurfaceEmission == 0u"),
-                "vertex carrier must identify water before sampling the reflection field");
-        int waterGate = onGlslVertex.indexOf("if (metallumVertexReflectionWater");
+        require(onGlslVertex.contains("bool metallumVertexReflectionReceiver = metallumVertexTaggedSurface")
+                        && onGlslVertex.contains("metallumVertexIntrinsicReflection")
+                        && onGlslVertex.contains("metallumVertexWetReflection"),
+                "vertex carrier must use the shared intrinsic/wet material receiver policy");
+        int receiverGate = onGlslVertex.indexOf("if (metallumVertexReflectionReceiver");
         int firstReflectionSample = onGlslVertex.indexOf("textureLod(metallumReflection");
-        require(waterGate >= 0 && firstReflectionSample > waterGate,
-                "non-water translucent vertices must branch around all reflection texture reads");
+        require(receiverGate >= 0 && firstReflectionSample > receiverGate,
+                "non-receiver terrain vertices must branch around all reflection texture reads");
+        require(onGlslVertex.contains("metallumReflectionFaceCode")
+                        && onGlslVertex.contains("metallumReflectionMaxLightCode")
+                        && onGlslVertex.contains("metallumReflectionRestoredLightByte")
+                        && onGlslVertex.contains("metallumReflectionFaceNormal")
+                        && onGlslVertex.contains(
+                        "metallumViewRay, metallumReflectionFaceNormal"),
+                "vertex carrier must decode the G2 six-face semantic and restore the lightmap coordinate");
         require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
                         && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
                 "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");
@@ -496,8 +533,10 @@ public final class RealWorldVertexReflectionTests {
                 "Fragment must read the interpolated trace direction");
         require(countOccurrences(onGlslFragment, "textureLod(metallumReflection") == 0,
                 "fragment must issue exactly zero 3D reads");
-        require(onGlslFragment.contains("metallumFrozenReflectionWater"),
-                "reflection blend must remain explicitly water-only");
+        require(onGlslFragment.contains("metallumVoxelReflectionReceiver")
+                        && onGlslFragment.contains("metallumVoxelReflectionIntrinsic")
+                        && onGlslFragment.contains("metallumVoxelReflectionWet"),
+                "reflection blend must share the material-driven R2 receiver policy");
         int voxelEnvironmentStart = onGlslFragment.indexOf(
                 "vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(");
         int voxelEnvironmentEnd = onGlslFragment.indexOf(
@@ -567,8 +606,10 @@ public final class RealWorldVertexReflectionTests {
                         && onGlslFragment.contains("vec3(1.0 - clamp(roughness, 0.0, 1.0))"),
                 "rough environment Fresnel must not become a perfect grazing mirror");
         require(onGlslFragment.contains("metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1")
-                        && onGlslFragment.contains("reflectedEnvironment = mix("),
-                "coarse world radiance must replace analytic reflected environment inside one lobe");
+                        && onGlslFragment.contains("reflectedEnvironment = mix(")
+                        && onGlslFragment.contains(
+                        "environmentVisibility = mix(environmentVisibility, 1.0, coarseWeight)"),
+                "coarse world radiance must replace analytic environment and retain covered local hits");
         int coarseMix = onGlslFragment.indexOf("reflectedEnvironment = mix(");
         int sunGgx = onGlslFragment.indexOf("result += metallumEvaluateGgxV1(", coarseMix);
         int localGgx = onGlslFragment.indexOf("metallumEvaluateClusteredMaterialSpecularV1(");

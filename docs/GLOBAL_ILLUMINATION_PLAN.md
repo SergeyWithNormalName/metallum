@@ -616,6 +616,13 @@ R1 закрывается.
 Dry gate не мягче G5. После него — отдельные lake/wet-ground/metal/cave/rain live
 scenes и Tier C matrix.
 
+Статус от 27 августа 2026: source-level R2 integration реализована default-off.
+`SurfaceMaterialPolicy` служит одним receiver authority для L8 и G2;
+six-face normal берётся из G2 semantic order, а vertex carrier включён для
+solid/cutout/translucent terrain. Generated MSL подтверждает один bounded
+vertex sample site и ноль fragment `texture3d`. Dry A/B, Tier C и live scenes ещё
+не выполнены; это не production acceptance и не G5 diffuse receiver.
+
 #### R3 — water-specific planar option
 
 Текущий uncommitted planar WIP можно доводить независимо как water-only quality

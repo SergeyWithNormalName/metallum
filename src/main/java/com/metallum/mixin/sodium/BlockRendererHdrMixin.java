@@ -5,6 +5,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
+import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
 import com.metallum.client.sodium.SodiumRainExposureSnapshotAccess;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildBuffers;
@@ -280,7 +281,20 @@ abstract class BlockRendererHdrMixin {
                 }
             }
         }
-        SodiumHdrSemantic.tagQuad(this.vertices, emission, exact, surfaceClass, submerged, submergedDepth);
+        int reflectionFace = metallum$reflectionFace(quad);
+        SodiumHdrSemantic.tagQuad(
+                this.vertices, emission, exact, surfaceClass, submerged, submergedDepth,
+                reflectionFace
+        );
+    }
+
+    @Unique
+    private static int metallum$reflectionFace(final MutableQuadViewImpl quad) {
+        var normal = quad.faceNormal();
+        float x = normal.x();
+        float y = normal.y();
+        float z = normal.z();
+        return VoxelReflectionFace.forNormal(x, y, z);
     }
 
     @Unique

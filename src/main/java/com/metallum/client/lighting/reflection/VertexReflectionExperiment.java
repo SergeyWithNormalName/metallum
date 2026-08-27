@@ -4,7 +4,7 @@ package com.metallum.client.lighting.reflection;
  * Feasibility experiment configuration and constants for vertex-stage rough reflection sampling.
  *
  * <p>This test evaluates whether sampling frozen world-space reflection textures in the
- * terrain vertex stage is viable and cost-effective on Apple Silicon / Metal.</p>
+ * material-gated terrain vertex stage is viable and cost-effective on Apple Silicon / Metal.</p>
  */
 public final class VertexReflectionExperiment {
     public static final String ACTIVE_PROPERTY = "metallum.vertex.reflection.experiment";

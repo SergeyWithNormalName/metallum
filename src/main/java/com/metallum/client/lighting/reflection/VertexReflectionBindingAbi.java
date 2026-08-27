@@ -64,6 +64,8 @@ public final class VertexReflectionBindingAbi {
                 || countOccurrences(vertexMsl, "[[buffer(" + PARAMS_BUFFER_SLOT + ")]]") != 1
                 || countOccurrences(vertexMsl,
                 "[[buffer(" + VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT + ")]]") != 1
+                || countOccurrences(vertexMsl,
+                "[[buffer(" + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]") != 1
                 || !vertexMsl.contains("metallumCoarseReflection")
                 || !vertexMsl.contains("metallumCoarseReflectionDirection")
                 || fragmentContainsExperiment
