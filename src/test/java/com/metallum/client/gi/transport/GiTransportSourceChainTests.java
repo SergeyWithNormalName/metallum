@@ -97,6 +97,22 @@ public final class GiTransportSourceChainTests {
                         && !directResources.contains("com.metallum.client.gi.transport"),
                 "G3 source implementation depends on G4 instead of an opaque handoff");
 
+        String debugSettings = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/gi/debug/GiTransportDebugSettings.java"
+        ));
+        String debugHud = Files.readString(Path.of(
+                "src/main/java/com/metallum/client/gi/debug/GiTransportDebugHud.java"
+        ));
+        require(debugSettings.contains("metallum-gi-g4-debug.properties")
+                        && debugHud.contains("GiTransportRuntime.debugSnapshot()")
+                        && debugHud.contains("GiTransportRuntime.isBenchmarkActive()"),
+                "G4 Sodium diagnostic is not persisted or isolated from benchmark receipts");
+        require(!debugHud.contains("captureVolumeOnce")
+                        && !debugHud.contains("MetalNativeBridge")
+                        && !debugHud.contains("MemorySegment")
+                        && !debugHud.contains("GiTransportGpuResources"),
+                "G4 HUD attempts to read or bind the private transport field");
+
         System.out.println("G4 Java source-chain contract tests passed");
     }
 

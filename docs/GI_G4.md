@@ -37,11 +37,13 @@ The first candidate builds exactly one near cascade:
   proves exactly 24 `GI_INJECT` active frames before G4's sole warmup dispatch;
   measurement closes both G3 and G4 submission.
 
-The runtime flag is `METALLUM_GI_G4_TRANSPORT=1`. It is diagnostic-only and
-requires requested Advanced lighting, the G2 accepted-output capture path and
-G3 source injection. Absence
-of the flag preserves structural G4 OFF: zero G4 resources, passes, symbols,
-bindings and dispatches.
+The runtime can be requested either by `METALLUM_GI_G4_TRANSPORT=1` or by the
+restart-gated `G4 Transport Debug HUD` option on Metallum's Sodium page. Both
+paths are diagnostic-only and require requested Advanced lighting, the G2
+accepted-output capture path and G3 source injection. With neither request,
+G4 remains structurally OFF: zero G4 resources, passes, symbols, bindings and
+dispatches. The Sodium option defaults to OFF and is suppressed during benchmark
+runs so it cannot contaminate a tracked receipt.
 
 ## Accepted G2 transport cell
 
@@ -143,6 +145,13 @@ out-of-coverage paths contribute neither. Debug paths expose the G3 source
 separately; the G4 one-shot capture returns bounce, all three SH lobes,
 confidence and the separately retained accepted-cell validity without an image
 binding.
+
+The live Sodium HUD deliberately does not call that capture. It publishes only
+the already available immutable admission statistics: G3 source readiness, G4
+WAITING/READY/INVALID state, one-shot dispatch and valid/unknown cell counts,
+frozen near origin, accounted native bytes and a fail-closed invalid reason.
+It performs no GPU-to-CPU texture readback and does not make the private G4
+textures visible to a terrain, fragment, UI or present pass.
 
 ## Fixed numerical and resource gates
 

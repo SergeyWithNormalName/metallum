@@ -2155,7 +2155,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                                             "G4 READY telemetry is not a clean single population"
                                     );
                                 } else {
-                                    GiTransportRuntime.reportResolvedReady();
+                                    GiTransportRuntime.reportResolvedReady(transportStats);
                                 }
                                 if (GiTransportRuntime.isResolvedReady()) {
                                     this.giTransportAdmissionLogged = true;

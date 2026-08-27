@@ -83,12 +83,25 @@ public final class GiTransportCpuTests {
                         && GiTransportRuntime.sourcePreparationAllowed(true, true)
                         && !GiTransportRuntime.sourcePreparationAllowed(true, false),
                 "G4 fixture-quiescence preparation gate changed");
+        require(!GiTransportRuntime.requested(false, false)
+                        && GiTransportRuntime.requested(true, false)
+                        && GiTransportRuntime.requested(false, true),
+                "G4 environment/Sodium request union changed");
         GiTransportRuntime.resetDeviceState();
-        GiTransportRuntime.reportResolvedReady();
         if (GiTransportRuntime.isRequested()) {
+            Fixture fixture = fixture();
+            GiTransportEpoch epoch = GiTransportEpoch.from(fixture.field, fixture.source);
+            GiTransportGpuResources.Stats readyStats = stats(
+                    epoch, true, false, 0L, 1L, 1L
+            );
+            GiTransportRuntime.reportResolvedReady(readyStats);
             require(GiTransportRuntime.isResolvedReady(), "G4 READY state was not published");
+            GiTransportRuntime.DebugSnapshot snapshot = GiTransportRuntime.debugSnapshot();
+            require(snapshot.statsAvailable() && snapshot.transportDispatches() == 1L
+                            && snapshot.nearOriginX() == epoch.nearOriginX(),
+                    "G4 debug snapshot lost immutable native admission counters");
             GiTransportRuntime.reportInvalid("test drift");
-            GiTransportRuntime.reportResolvedReady();
+            GiTransportRuntime.reportResolvedReady(readyStats);
             require(GiTransportRuntime.isInvalid() && !GiTransportRuntime.isResolvedReady(),
                     "G4 terminal invalidation healed back to READY");
         }

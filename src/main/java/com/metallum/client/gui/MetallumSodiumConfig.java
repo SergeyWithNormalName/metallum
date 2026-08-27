@@ -1,5 +1,6 @@
 package com.metallum.client.gui;
 
+import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.hdr.HdrConfig;
 import com.metallum.client.hdr.HdrMode;
 import com.metallum.client.hdr.HdrOutputMode;
@@ -101,6 +102,26 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setBinding(
                                     MetallumSodiumConfig::setLightingPreset,
                                     () -> RendererConfig.load().lightingPreset()
+                            )
+                    )
+                )
+                .addOptionGroup(builder.createOptionGroup()
+                    .setName(Component.translatable("metallum.options.group.gi_debug"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "gi_g4_debug_hud"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.gi_g4_debug_hud.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.gi_g4_debug_hud.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    GiTransportDebugSettings::setEnabled,
+                                    GiTransportDebugSettings::isEnabled
                             )
                     )
                 )

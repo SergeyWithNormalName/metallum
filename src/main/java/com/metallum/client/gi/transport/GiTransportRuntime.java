@@ -1,8 +1,10 @@
 package com.metallum.client.gi.transport;
 
+import com.metallum.client.gi.debug.GiTransportDebugSettings;
+
 import java.util.Locale;
 
-/** Explicit diagnostic-only G4 admission; absence of the environment flag is structural off. */
+/** Diagnostic-only G4 admission from an explicit environment or restart-gated Sodium request. */
 public final class GiTransportRuntime {
     public static final String TRANSPORT_ENV = "METALLUM_GI_G4_TRANSPORT";
     public enum AdmissionState { WAITING, READY, INVALID }
@@ -10,7 +12,9 @@ public final class GiTransportRuntime {
     private static final boolean BENCHMARK_ACTIVE = isEnabled(
             System.getenv("METALLUM_BENCHMARK")
     );
-    private static final boolean REQUESTED = isEnabled(System.getenv(TRANSPORT_ENV));
+    private static final boolean REQUESTED = requested(
+            isEnabled(System.getenv(TRANSPORT_ENV)), GiTransportDebugSettings.isEnabled()
+    );
 
     private static volatile boolean sourceReady;
     private static volatile boolean sourcePreparationStarted;
@@ -18,6 +22,8 @@ public final class GiTransportRuntime {
     private static volatile boolean benchmarkMeasurementStarted;
     private static volatile AdmissionState admissionState = AdmissionState.WAITING;
     private static volatile String invalidReason = "none";
+    private static volatile NativeStats nativeStats = NativeStats.empty();
+    private static volatile DebugSnapshot publishedDebugSnapshot = buildDebugSnapshot();
 
     private GiTransportRuntime() {
     }
@@ -34,11 +40,17 @@ public final class GiTransportRuntime {
         benchmarkMeasurementStarted = false;
         admissionState = AdmissionState.WAITING;
         invalidReason = "none";
+        nativeStats = NativeStats.empty();
+        publishDebugSnapshot();
     }
 
     /** Publishes the exact G3 capability state without exposing its native owner. */
     public static void reportSourceReady(final boolean ready) {
-        sourceReady = isRequested() && ready;
+        boolean updated = isRequested() && ready;
+        if (sourceReady != updated) {
+            sourceReady = updated;
+            publishDebugSnapshot();
+        }
     }
 
     public static boolean isBenchmarkSourceReady() {
@@ -104,9 +116,11 @@ public final class GiTransportRuntime {
         return !invalid && (!benchmarkActive || (warmupStarted && !measurementStarted));
     }
 
-    public static void reportResolvedReady() {
+    public static void reportResolvedReady(final GiTransportGpuResources.Stats stats) {
         if (isRequested() && admissionState == AdmissionState.WAITING) {
+            nativeStats = NativeStats.from(stats);
             admissionState = AdmissionState.READY;
+            publishDebugSnapshot();
         }
     }
 
@@ -119,6 +133,7 @@ public final class GiTransportRuntime {
         if (isRequested()) {
             invalidReason = reason == null || reason.isBlank() ? "unspecified" : reason;
             admissionState = AdmissionState.INVALID;
+            publishDebugSnapshot();
         }
     }
 
@@ -130,6 +145,28 @@ public final class GiTransportRuntime {
         return invalidReason;
     }
 
+    public static DebugSnapshot debugSnapshot() {
+        return publishedDebugSnapshot;
+    }
+
+    private static void publishDebugSnapshot() {
+        publishedDebugSnapshot = buildDebugSnapshot();
+    }
+
+    private static DebugSnapshot buildDebugSnapshot() {
+        NativeStats stats = nativeStats;
+        return new DebugSnapshot(
+                REQUESTED, sourceReady, admissionState, invalidReason,
+                stats.available(), stats.transportDispatches(), stats.validSurfaceCount(),
+                stats.unknownCellCount(), stats.accountedBytes(), stats.nearOriginX(),
+                stats.nearOriginY(), stats.nearOriginZ()
+        );
+    }
+
+    static boolean requested(final boolean environmentRequested, final boolean debugEnabled) {
+        return environmentRequested || debugEnabled;
+    }
+
     static boolean isEnabled(final String value) {
         if (value == null) {
             return false;
@@ -138,5 +175,44 @@ public final class GiTransportRuntime {
             case "1", "true", "yes", "on" -> true;
             default -> false;
         };
+    }
+
+    public record DebugSnapshot(
+            boolean requested,
+            boolean sourceReady,
+            AdmissionState admissionState,
+            String invalidReason,
+            boolean statsAvailable,
+            long transportDispatches,
+            long validSurfaceCount,
+            long unknownCellCount,
+            long accountedBytes,
+            int nearOriginX,
+            int nearOriginY,
+            int nearOriginZ
+    ) {
+    }
+
+    private record NativeStats(
+            boolean available,
+            long transportDispatches,
+            long validSurfaceCount,
+            long unknownCellCount,
+            long accountedBytes,
+            int nearOriginX,
+            int nearOriginY,
+            int nearOriginZ
+    ) {
+        private static NativeStats empty() {
+            return new NativeStats(false, 0L, 0L, 0L, 0L, 0, 0, 0);
+        }
+
+        private static NativeStats from(final GiTransportGpuResources.Stats stats) {
+            return new NativeStats(
+                    true, stats.transportDispatches(), stats.validSurfaceCount(),
+                    stats.unknownCellCount(), stats.accountedBytes(), stats.nearOriginX(),
+                    stats.nearOriginY(), stats.nearOriginZ()
+            );
+        }
     }
 }

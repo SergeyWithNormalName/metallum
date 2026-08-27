@@ -64,6 +64,11 @@ public final class MetallumSodiumConfigTests {
         require(lightingPreset.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum lighting-preset option must require a full game restart");
 
+        requireRestartBoolean(
+                findOption(page, idField, "gi_g4_debug_hud"),
+                "G4 transport debug HUD"
+        );
+
         Option metalfxUpscaling = findOption(page, idField, "metalfx_upscaling");
         require(metalfxUpscaling instanceof EnumOption,
                 "Metallum metalfx_upscaling Sodium option is missing or has the wrong type");

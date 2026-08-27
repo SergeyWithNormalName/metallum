@@ -400,6 +400,15 @@ tasks.register("giTransportCpuUnitTest", JavaExec) {
 	environment "METALLUM_GI_G4_TRANSPORT", "1"
 }
 
+tasks.register("giTransportDebugSettingsUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the restart-gated G4 Sodium debug setting and HUD states"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.debug.GiTransportDebugSettingsTests")
+	jvmArgs "-ea"
+}
+
 tasks.register("giSemanticTransportFieldUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates the dedicated accepted-G2 near-cascade cell ABI consumed by G4"
@@ -1669,6 +1678,7 @@ tasks.named("check") {
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
 	dependsOn(tasks.named("benchmarkReportContractTest"))
 	dependsOn(tasks.named("giTransportCpuUnitTest"))
+	dependsOn(tasks.named("giTransportDebugSettingsUnitTest"))
 	dependsOn(tasks.named("giSemanticTransportFieldUnitTest"))
 	dependsOn(tasks.named("giTransportSourceChainUnitTest"))
 	dependsOn(tasks.named("giTransportGpuValidationSource"))
