@@ -54,6 +54,12 @@ public final class GiSemanticSourceChainTests {
                 "G2 mixins are not controlled as one structural set");
         require(plugin.contains("GiTransportDebugSettings.isEnabled()"),
                 "Sodium G4 debug does not structurally enable its required G2 mixins");
+        int giVersions = plugin.indexOf("private static boolean hasExactGiCaptureVersions()");
+        int nextMethod = plugin.indexOf("private static boolean hasExactVersion(", giVersions);
+        require(giVersions >= 0 && nextMethod > giVersions
+                        && !plugin.substring(giVersions, nextMethod)
+                        .contains("FABRIC_RENDERER_API_MOD_ID"),
+                "G2 is incorrectly locked to an unrelated Fabric Renderer API build");
         String blockHdr = source("src/main/java/com/metallum/mixin/sodium/BlockRendererHdrMixin.java");
         String fluidHdr = source("src/main/java/com/metallum/mixin/sodium/DefaultFluidRendererHdrMixin.java");
         require(!blockHdr.contains("GiSemantic") && !fluidHdr.contains("GiSemantic"),

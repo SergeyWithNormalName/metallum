@@ -1,5 +1,6 @@
 package com.metallum.mixin;
 
+import com.metallum.Metallum;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.sodium.SodiumShadowCompatibility;
 import net.fabricmc.loader.api.FabricLoader;
@@ -103,6 +104,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
         this.sodiumShadowCompatible = SodiumShadowCompatibility.supportsInstalledRenderer();
         boolean exactRelightVersions = hasExactRelightOracleVersions();
+        boolean exactGiCaptureVersions = hasExactGiCaptureVersions();
         boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
         this.sodiumRelightFastPathEnabled = !relightOracleRequested
                 && "1".equals(System.getenv(SODIUM_RELIGHT_FAST_PATH_ENV))
@@ -112,11 +114,15 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.sodiumRelightOracleEnabled = (relightOracleRequested
                 || this.sodiumRelightFastPathEnabled)
                 && exactRelightVersions;
-        this.giG2CaptureEnabled = (isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
+        boolean giG2CaptureRequested = isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
                 || isEnabled(System.getenv(GI_G3_INJECT_ENV))
                 || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV))
-                || GiTransportDebugSettings.isEnabled())
-                && exactRelightVersions;
+                || GiTransportDebugSettings.isEnabled();
+        this.giG2CaptureEnabled = giG2CaptureRequested && exactGiCaptureVersions;
+        Metallum.LOGGER.info(
+                "[GI_G2] mixin gate requested={} exact_versions={} enabled={}",
+                giG2CaptureRequested, exactGiCaptureVersions, this.giG2CaptureEnabled
+        );
     }
 
     @Override
@@ -219,6 +225,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                         FABRIC_RENDERER_API_MOD_ID,
                         FABRIC_RENDERER_API_EXACT_VERSION
                 )
+                && hasExactVersion(loader, MIXIN_EXTRAS_MOD_ID, MIXIN_EXTRAS_EXACT_VERSION);
+    }
+
+    /** G2 targets Minecraft, Sodium and MixinExtras; Fabric Renderer API is not in its chain. */
+    private static boolean hasExactGiCaptureVersions() {
+        FabricLoader loader = FabricLoader.getInstance();
+        return hasExactVersion(loader, MINECRAFT_MOD_ID, MINECRAFT_EXACT_VERSION)
+                && hasExactVersion(loader, SODIUM_MOD_ID, SODIUM_EXACT_VERSION)
                 && hasExactVersion(loader, MIXIN_EXTRAS_MOD_ID, MIXIN_EXTRAS_EXACT_VERSION);
     }
 

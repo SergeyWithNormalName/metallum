@@ -53,6 +53,13 @@ request; runtime-only enablement would leave G3 permanently without an accepted
 semantic field. The HUD reports G2 and G3 readiness separately so a missing
 Sodium capture can no longer look like ordinary G3 settling.
 
+The G2 mixin lock covers only the bytecode it actually targets: Minecraft
+`26.2`, Sodium `0.9.1+mc26.2` and MixinExtras `0.5.4`. The independent relight
+oracle retains its stricter Fabric Renderer API lock. Coupling G2 to that
+unrelated module previously disabled all semantic capture on the supported
+Fabric API `0.154.2+26.2` distribution (`fabric-renderer-api-v1 14.1.2`) even
+though every inspected G2 Sodium target descriptor was unchanged.
+
 ## Accepted G2 transport cell
 
 G4 uses a dedicated immutable render-thread view; it does not reinterpret G3

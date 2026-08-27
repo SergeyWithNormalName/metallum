@@ -13,7 +13,7 @@
     "source_files_sha256": {
       "benchmark/routes/gi-g4-overworld-v1.json": "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d",
       "build.gradle": "fc8c46b9a682050adaa1006ef36886a3017b37a880e4324bdd18cef844fa12c0",
-      "docs/GI_G4.md": "2f2410cd9284221886f2919b011a28cd12b4f32913524814afa69b6d400ced53",
+      "docs/GI_G4.md": "22dbc3fea799d81f985147a87247f7d1a7de93d685cd84c46f65404306f8a729",
       "scripts/run_metal_benchmark.sh": "e43819daf044dfa31933d91de9332ba177c635a171fe6f0ff0a1bfcf1d8457b7",
       "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "9248a26839a2cb2141c680a9bb860b50febd23b1ae07ee9f39def84cf4c80306",
       "src/main/java/com/metallum/client/gi/debug/GiTransportDebugHud.java": "aa4c86fdcdb9b9757374b3fbd5db6ad9709f04a0b992cf51db686d0b150df221",
@@ -39,7 +39,7 @@
       "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "5b1880547d8d64db94dd6a5423e8a590a95510684ed7913ebb5a212c9b8938ba",
       "src/main/java/com/metallum/client/metal/render/framegraph/GiTransportFrameGraph.java": "22d20958fc1a636d0d7510dd2fde1308bf7f99dfdd1388484b07392bb1a23a37",
       "src/main/java/com/metallum/client/lighting/AdvancedLightRegistry.java": "3f81d9bfa80fecbf4a36ff357fb02d0c11bf9d7800097c9e3c4ed9357b0879c6",
-      "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "2d51719765137b0f3aa72a0af72b88ed4050be7c1a83730f87a46934c482b3de",
+      "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "9301d0a83b9e2bc130028a5e63eb177ab0f05560f2b49f01960a898e6f224e8f",
       "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "ec882ee95a018bb59db633828c66c072600df915dd1fb9c03eb110abae82eb4c",
       "src/main/java/com/metallum/mixin/render/GuiVoxelPreviewMixin.java": "6bdf9b5aeed25507109d14648f8cea091d266379aefb9b916fcefedfb36592a3",
       "src/main/metal/MetallumGiTransport.metal": "24d5ca51cb39b9e8e52fe77415179220b049231ace8616032ebdd0bbbafd543f",
