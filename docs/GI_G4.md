@@ -164,7 +164,15 @@ binding.
 The live Sodium HUD deliberately does not call the blocking validation capture.
 It publishes the already available immutable admission statistics while G3 settles. For an
 interactive debug request, the sun/sky descriptor is latched once so the normal
-day cycle cannot reset the 600-frame immutable-input gate forever. After READY,
+day cycle cannot reset the immutable-input gate forever. Interactive preparation
+requires ten real seconds of stable camera/world/origin state. Idempotent Sodium
+publications do not rotate G2/G3 physical epochs. A real late content or static-source
+update before G4 admission retries only the bounded G3 population without charging
+another camera-stability interval or terminally invalidating the HUD. After interactive
+G4 admission the immutable diagnostic snapshot remains observable while the live world
+continues updating. The benchmark path retains its exact 600-frame fail-closed tuple
+gate and post-admission drift checks.
+After READY,
 native schedules one asynchronous blit into its preallocated shared buffer;
 Java polls without waiting and publishes a middle-Z CPU preview of the captured
 indirect SH DC field. This adds no terrain, fragment or present binding and no

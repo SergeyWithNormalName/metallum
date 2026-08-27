@@ -275,7 +275,6 @@ public final class AdvancedLightRegistry {
         if (current == null) {
             if (nextBase.isEmpty()) {
                 world.epoch++;
-                world.staticEpoch++;
                 this.acceptedPublications++;
                 return true;
             }
@@ -287,6 +286,8 @@ public final class AdvancedLightRegistry {
             current = new SectionState();
             world.sections.put(task.sectionKey(), current);
         }
+        boolean staticContentChanged = !current.overrides.isEmpty()
+                || !sameStaticBase(current.base, nextBase);
         current.base = nextBase;
         current.baseEpoch = task.baseEpoch();
         current.ownerToken = task.ownerToken();
@@ -296,9 +297,48 @@ public final class AdvancedLightRegistry {
             world.sections.remove(task.sectionKey());
         }
         world.epoch++;
-        world.staticEpoch++;
+        if (staticContentChanged) {
+            world.staticEpoch++;
+        }
         this.acceptedPublications++;
         return true;
+    }
+
+    /** Generation is lifecycle metadata; G3 changes only when physical light inputs change. */
+    private static boolean sameStaticBase(
+            final Map<Integer, AdvancedLight> first,
+            final Map<Integer, AdvancedLight> second
+    ) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        for (Map.Entry<Integer, AdvancedLight> entry : first.entrySet()) {
+            AdvancedLight other = second.get(entry.getKey());
+            if (other == null || !sameStaticLight(entry.getValue(), other)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameStaticLight(
+            final AdvancedLight first,
+            final AdvancedLight second
+    ) {
+        return first.stableId() == second.stableId()
+                && first.kind() == second.kind()
+                && Double.doubleToRawLongBits(first.x()) == Double.doubleToRawLongBits(second.x())
+                && Double.doubleToRawLongBits(first.y()) == Double.doubleToRawLongBits(second.y())
+                && Double.doubleToRawLongBits(first.z()) == Double.doubleToRawLongBits(second.z())
+                && Float.floatToRawIntBits(first.radius()) == Float.floatToRawIntBits(second.radius())
+                && Float.floatToRawIntBits(first.red()) == Float.floatToRawIntBits(second.red())
+                && Float.floatToRawIntBits(first.green()) == Float.floatToRawIntBits(second.green())
+                && Float.floatToRawIntBits(first.blue()) == Float.floatToRawIntBits(second.blue())
+                && Float.floatToRawIntBits(first.intensity()) == Float.floatToRawIntBits(second.intensity())
+                && first.priority() == second.priority()
+                && first.denseCellEligible() == second.denseCellEligible()
+                && first.shadowEmitterFootprint().equals(second.shadowEmitterFootprint())
+                && first.shadowSourceClass() == second.shadowSourceClass();
     }
 
     public synchronized boolean discardCandidate(final LightSectionCandidate candidate) {

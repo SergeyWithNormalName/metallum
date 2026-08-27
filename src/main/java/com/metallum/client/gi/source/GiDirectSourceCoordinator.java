@@ -19,8 +19,10 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     public static final int STATUS_INPUT_NOT_READY = -7;
     public static final int STATUS_CREATE_FAILED = -8;
     public static final int STATUS_FROZEN_INPUT_DRIFT = -9;
+    public static final int STATUS_FROZEN_PREPARATION_RESTARTED = -10;
     static final long STATIC_SOURCE_SETTLE_TICKS = 16L;
     static final long FROZEN_INPUT_SETTLE_FRAMES = 600L;
+    static final long INTERACTIVE_FROZEN_INPUT_SETTLE_NANOS = 10_000_000_000L;
 
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
@@ -95,6 +97,7 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
 
     private final Thread ownerThread = Thread.currentThread();
     private final boolean frozenTransportRequested;
+    private final boolean interactiveFrozenPreparationRetry;
     private final int[] drainedBricks = new int[GiDirectSourceLayout.MAX_DRAIN_PER_FRAME];
     private final AdvancedLight[] sourceScratch =
             new AdvancedLight[GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK];
@@ -114,7 +117,11 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     private long observedFrozenPaletteGeneration;
     private long observedFrozenContentGeneration;
     private long observedFrozenEnvironmentDigest;
+    private long observedFrozenSinceNanos;
+    private long frozenTupleChangeCount;
     private boolean frozenPreparationCommitted;
+    private String frozenTupleChangeReason = "unobserved";
+    private String frozenPreparationRestartReason = "none";
     private long logicalStaticSourceEpoch = 1L;
     private long logicalEnvironmentEpoch = 1L;
     private int activeNearOriginX;
@@ -126,9 +133,11 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
             final MemorySegment device,
             final MemorySegment commandQueue,
             final boolean frozenTransportRequested,
+            final boolean interactiveFrozenPreparationRetry,
             final Consumer<MemorySegment> deferredRelease
     ) {
         this.frozenTransportRequested = frozenTransportRequested;
+        this.interactiveFrozenPreparationRetry = interactiveFrozenPreparationRetry;
         this.resources = GiDirectSourceGpuResources.create(
                 device, commandQueue, 1L,
                 Objects.requireNonNull(deferredRelease, "deferredRelease")
@@ -153,17 +162,20 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         Objects.requireNonNull(registry, "registry");
 
         GiSemanticWorldToken world = field.world();
+        long frozenNowNanos = this.interactiveFrozenPreparationRetry
+                ? System.nanoTime() : 0L;
+        boolean preparationRestarted = false;
         if (this.activeEpoch != null
                 && this.activeEpoch.g2WorldGeneration() != world.worldGeneration()) {
             if (this.frozenTransportRequested && this.frozenPreparationCommitted) {
-                return STATUS_FROZEN_INPUT_DRIFT;
+                if (!this.interactiveFrozenPreparationRetry) {
+                    return STATUS_FROZEN_INPUT_DRIFT;
+                }
+                restartFrozenPreparation("world_generation");
+                preparationRestarted = true;
+            } else {
+                resetActiveSource();
             }
-            this.activeEpoch = null;
-            this.environment = null;
-            this.staticState = null;
-            this.observedStaticState = null;
-            resetFrozenObservation();
-            this.cachedTransportSource = null;
         }
         GiStaticSourceState nextStatic = this.observedStaticState != null
                 && this.observedStaticState.world().dimensionId().equals(world.dimensionId())
@@ -171,6 +183,7 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                 this.observedStaticState.world(), this.observedStaticState.registryEpoch()
         ) ? this.observedStaticState : registry.staticSourceStateForGi(world.dimensionId());
         if (nextStatic == null) {
+            this.frozenTupleChangeReason = "static_sources_unavailable";
             return STATUS_INPUT_NOT_READY;
         }
         long desiredEnvironmentDigest = GiEnvironmentSource.quantizedDigest(
@@ -181,15 +194,38 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                     field, world, nextStatic, desiredEnvironmentDigest
             );
             if (!tupleMatches) {
+                String driftReason = this.observedFrozenWorld == null
+                        ? "initial" : frozenTupleDriftReason(
+                                field, world, nextStatic, desiredEnvironmentDigest
+                        );
                 if (this.frozenPreparationCommitted) {
-                    return STATUS_FROZEN_INPUT_DRIFT;
+                    if (!this.interactiveFrozenPreparationRetry) {
+                        return STATUS_FROZEN_INPUT_DRIFT;
+                    }
+                    restartCommittedPreparation(driftReason);
+                    preparationRestarted = true;
                 }
                 captureFrozenTuple(
-                        field, world, nextStatic, desiredEnvironmentDigest, tick
+                        field, world, nextStatic, desiredEnvironmentDigest,
+                        tick, frozenNowNanos, driftReason,
+                        this.observedFrozenWorld == null || isStructuralDrift(driftReason)
                 );
+                if (preparationRestarted && !isStructuralDrift(driftReason)) {
+                    // Ordinary Sodium can finish late section uploads while origins stay fixed.
+                    // Retry the short bounded G3 population immediately; do not charge another
+                    // ten-second origin-stability interval for content-only convergence.
+                    this.frozenPreparationCommitted = true;
+                }
+            }
+            if (preparationRestarted) {
+                return STATUS_FROZEN_PREPARATION_RESTARTED;
             }
             if (!this.frozenPreparationCommitted) {
-                if (tick - this.observedStaticSinceTick < FROZEN_INPUT_SETTLE_FRAMES) {
+                if (!frozenInputSettled(
+                        this.interactiveFrozenPreparationRetry,
+                        this.observedStaticSinceTick, tick,
+                        this.observedFrozenSinceNanos, frozenNowNanos
+                )) {
                     return STATUS_INPUT_NOT_READY;
                 }
                 this.frozenPreparationCommitted = true;
@@ -313,6 +349,40 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     public GiDirectDirtyQueue.Telemetry queueTelemetry() {
         assertOwnerThread();
         return this.dirtyQueue.telemetry();
+    }
+
+    public String frozenPreparationRestartReason() {
+        assertOwnerThread();
+        return this.frozenPreparationRestartReason;
+    }
+
+    /** Low-frequency diagnostic snapshot; callers must not request it in every render frame. */
+    public FrozenPreparationDebugState frozenPreparationDebugState(final long nowNanos) {
+        assertOwnerThread();
+        long settledMillis = this.observedFrozenSinceNanos == 0L
+                ? 0L : Math.max(0L, nowNanos - this.observedFrozenSinceNanos) / 1_000_000L;
+        return new FrozenPreparationDebugState(
+                this.observedFrozenWorld != null,
+                this.frozenPreparationCommitted,
+                this.frozenTupleChangeReason,
+                this.frozenTupleChangeCount,
+                settledMillis,
+                this.observedFrozenClipmapGeneration,
+                this.observedFrozenPaletteGeneration,
+                this.observedFrozenContentGeneration
+        );
+    }
+
+    public record FrozenPreparationDebugState(
+            boolean tupleObserved,
+            boolean committed,
+            String changeReason,
+            long changeCount,
+            long settledMillis,
+            long clipmapGeneration,
+            long paletteGeneration,
+            long contentGeneration
+    ) {
     }
 
     public GiDirectSourceGpuResources.@Nullable Stats nativeStats() {
@@ -515,12 +585,41 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         return true;
     }
 
+    private String frozenTupleDriftReason(
+            final GiSemanticDirectFieldView field,
+            final GiSemanticWorldToken world,
+            final GiStaticSourceState staticSources,
+            final long environmentDigest
+    ) {
+        if (!world.equals(this.observedFrozenWorld)) return "world";
+        if (!staticSources.equals(this.observedStaticState)) return "static_sources";
+        if (field.clipmapGeneration() != this.observedFrozenClipmapGeneration) {
+            return "clipmap";
+        }
+        if (field.paletteGeneration() != this.observedFrozenPaletteGeneration) {
+            return "palette";
+        }
+        if (field.contentGeneration() != this.observedFrozenContentGeneration) {
+            return "content";
+        }
+        if (environmentDigest != this.observedFrozenEnvironmentDigest) return "environment";
+        for (int index = 0; index < this.observedFrozenOrigins.length; index++) {
+            if (field.originComponent(index) != this.observedFrozenOrigins[index]) {
+                return "origin";
+            }
+        }
+        return "unknown";
+    }
+
     private void captureFrozenTuple(
             final GiSemanticDirectFieldView field,
             final GiSemanticWorldToken world,
             final GiStaticSourceState staticSources,
             final long environmentDigest,
-            final long tick
+            final long tick,
+            final long nowNanos,
+            final String changeReason,
+            final boolean resetSettleClock
     ) {
         this.observedFrozenWorld = world;
         this.observedStaticState = staticSources;
@@ -532,6 +631,52 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
             this.observedFrozenOrigins[index] = field.originComponent(index);
         }
         this.observedStaticSinceTick = tick;
+        if (resetSettleClock) {
+            this.observedFrozenSinceNanos = nowNanos;
+        }
+        this.frozenTupleChangeReason = changeReason;
+        this.frozenTupleChangeCount = Math.incrementExact(this.frozenTupleChangeCount);
+    }
+
+    private void restartFrozenPreparation(final String reason) {
+        resetActiveSource();
+        this.frozenPreparationRestartReason = reason;
+    }
+
+    private void restartCommittedPreparation(final String reason) {
+        this.activeEpoch = null;
+        this.environment = null;
+        this.staticState = null;
+        this.cachedTransportSource = null;
+        this.frozenPreparationCommitted = false;
+        this.frozenPreparationRestartReason = reason;
+    }
+
+    static boolean isStructuralDrift(final String reason) {
+        return reason.equals("world") || reason.equals("world_generation")
+                || reason.equals("clipmap") || reason.equals("palette")
+                || reason.equals("origin");
+    }
+
+    private void resetActiveSource() {
+        this.activeEpoch = null;
+        this.environment = null;
+        this.staticState = null;
+        this.observedStaticState = null;
+        this.cachedTransportSource = null;
+        resetFrozenObservation();
+    }
+
+    static boolean frozenInputSettled(
+            final boolean interactive,
+            final long observedFrame,
+            final long currentFrame,
+            final long observedNanos,
+            final long currentNanos
+    ) {
+        return interactive
+                ? currentNanos - observedNanos >= INTERACTIVE_FROZEN_INPUT_SETTLE_NANOS
+                : currentFrame - observedFrame >= FROZEN_INPUT_SETTLE_FRAMES;
     }
 
     private void resetFrozenObservation() {
@@ -540,6 +685,7 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
         this.observedFrozenPaletteGeneration = 0L;
         this.observedFrozenContentGeneration = 0L;
         this.observedFrozenEnvironmentDigest = 0L;
+        this.observedFrozenSinceNanos = 0L;
         this.frozenPreparationCommitted = false;
         Arrays.fill(this.observedFrozenOrigins, 0);
     }

@@ -25,7 +25,7 @@
   "metallum.debug.gi_g4.semantic_source.missing": "WAITING FOR SODIUM CAPTURE",
   "metallum.debug.gi_g4.source": "G3 source: %s",
   "metallum.debug.gi_g4.source.ready": "READY",
-  "metallum.debug.gi_g4.source.preparing": "PREPARING — keep the camera still for ~10 s",
+  "metallum.debug.gi_g4.source.preparing": "PREPARING — keep the camera still for about 10 s",
   "metallum.debug.gi_g4.reason": "Reason: %s",
   "metallum.debug.gi_g4.population": "Dispatches: %s | valid: %s | unknown: %s",
   "metallum.debug.gi_g4.origin": "Near origin: %s, %s, %s",

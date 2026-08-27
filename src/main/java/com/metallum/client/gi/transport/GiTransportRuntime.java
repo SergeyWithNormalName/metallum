@@ -1,5 +1,6 @@
 package com.metallum.client.gi.transport;
 
+import com.metallum.Metallum;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 
@@ -175,6 +176,10 @@ public final class GiTransportRuntime {
         if (isDebugPreviewRequested() && capture != null && debugCapture == null) {
             debugCapture = capture;
             publishDebugSnapshot();
+            Metallum.LOGGER.info(
+                    "[GI_G4] interactive debug preview captured: cells={} middle_z=16",
+                    capture.validity().length
+            );
         }
     }
 

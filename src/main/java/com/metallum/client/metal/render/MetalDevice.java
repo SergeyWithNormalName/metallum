@@ -340,6 +340,9 @@ public final class MetalDevice implements GpuDeviceBackend {
     @Nullable
     private GiDirectSourceCoordinator giDirectSourceCoordinator;
     private boolean giDirectSourceFailureLogged;
+    private long giDirectSourceDebugLogNanos;
+    private long giDirectSourceRestartLogNanos;
+    private long giDirectSourceRestartCount;
     @Nullable
     private GiTransportCoordinator giTransportCoordinator;
     private boolean giTransportFailureLogged;
@@ -509,6 +512,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         this.metalDeviceHandle,
                         this.commandQueue.nativeHandle(),
                         GiTransportRuntime.isRequested(),
+                        GiTransportRuntime.isDebugPreviewRequested(),
                         handle -> this.commandEncoder.queueForDestroy(
                                 () -> MetalNativeBridge.metallum_gi_direct_source_release_context_v1(handle)
                         )
@@ -2055,20 +2059,25 @@ public final class MetalDevice implements GpuDeviceBackend {
                         boolean accepted = this.giTransportCoordinator.hasAcceptedEpoch();
                         int transportStatus;
                         if (accepted) {
-                            GiDirectSourceCoordinator.TransportSourceIdentity observedSource =
-                                    this.giTransportCoordinator.submittedSourceIdentity();
-                            if (observedSource != null
-                                    && !this.giDirectSourceCoordinator
-                                    .transportSourceIdentityStillCurrent(
-                                            observedSource,
-                                            capture.giEnvironment(),
-                                            AdvancedLightRegistry.global()
-                                    )) {
-                                observedSource = null;
+                            if (GiTransportRuntime.isDebugPreviewRequested()) {
+                                transportStatus = this.giTransportCoordinator
+                                        .pollFrozenFrame(submitIndex);
+                            } else {
+                                GiDirectSourceCoordinator.TransportSourceIdentity observedSource =
+                                        this.giTransportCoordinator.submittedSourceIdentity();
+                                if (observedSource != null
+                                        && !this.giDirectSourceCoordinator
+                                        .transportSourceIdentityStillCurrent(
+                                                observedSource,
+                                                capture.giEnvironment(),
+                                                AdvancedLightRegistry.global()
+                                        )) {
+                                    observedSource = null;
+                                }
+                                transportStatus = this.giTransportCoordinator.observeFrame(
+                                        transportField, observedSource, submitIndex
+                                );
                             }
-                            transportStatus = this.giTransportCoordinator.observeFrame(
-                                    transportField, observedSource, submitIndex
-                            );
                         } else {
                             GiDirectSourceCoordinator.TransportSource transportSource =
                                     this.giDirectSourceCoordinator == null
@@ -2088,17 +2097,21 @@ public final class MetalDevice implements GpuDeviceBackend {
                             }
                         }
                         if (transportStatus == GiTransportGpuResources.STATUS_STALE) {
-                            this.giTransportDisabled = true;
-                            GiTransportRuntime.reportInvalid(
-                                    accepted
-                                            ? "frozen G3/G2 source drifted"
-                                            : "G3/G2 handoff raced before G4 admission"
-                            );
-                            if (!this.giTransportFailureLogged) {
-                                this.giTransportFailureLogged = true;
-                                Metallum.LOGGER.warn(
-                                        "G4 frozen transport input became stale; retaining the private field without rebuilding"
+                            if (!accepted && GiTransportRuntime.isDebugPreviewRequested()) {
+                                this.giTransportFailureLogged = false;
+                            } else {
+                                this.giTransportDisabled = true;
+                                GiTransportRuntime.reportInvalid(
+                                        accepted
+                                                ? "frozen G3/G2 source drifted"
+                                                : "G3/G2 handoff raced before G4 admission"
                                 );
+                                if (!this.giTransportFailureLogged) {
+                                    this.giTransportFailureLogged = true;
+                                    Metallum.LOGGER.warn(
+                                            "G4 frozen transport input became stale; retaining the private field without rebuilding"
+                                    );
+                                }
                             }
                         } else if (transportStatus == GiTransportGpuResources.STATUS_OK
                                 || transportStatus == GiTransportCoordinator.STATUS_NO_WORK
@@ -2227,6 +2240,21 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 GiTransportRuntime.reportInvalid(
                                         "frozen G3 preparation tuple drifted"
                                 );
+                            } else if (directStatus
+                                    == GiDirectSourceCoordinator.STATUS_FROZEN_PREPARATION_RESTARTED) {
+                                this.giDirectSourceRestartCount++;
+                                long nowNanos = System.nanoTime();
+                                if (nowNanos - this.giDirectSourceRestartLogNanos
+                                        >= 2_000_000_000L) {
+                                    this.giDirectSourceRestartLogNanos = nowNanos;
+                                    Metallum.LOGGER.info(
+                                            "[GI_G3] interactive preparation retry #{} after {} drift",
+                                            this.giDirectSourceRestartCount,
+                                            this.giDirectSourceCoordinator
+                                                    .frozenPreparationRestartReason()
+                                    );
+                                }
+                                this.giDirectSourceFailureLogged = false;
                             } else if (directStatus == GiDirectSourceGpuResources.STATUS_OK
                                     || directStatus == GiDirectSourceCoordinator.STATUS_NO_WORK
                                     || directStatus == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY
@@ -2243,6 +2271,27 @@ public final class MetalDevice implements GpuDeviceBackend {
                                     Metallum.LOGGER.warn(
                                             "G3 direct-source batch was rejected with status {}; retaining its private prior field",
                                             directStatus
+                                    );
+                                }
+                            }
+                            if (GiTransportRuntime.isDebugPreviewRequested()
+                                    && directStatus
+                                    == GiDirectSourceCoordinator.STATUS_INPUT_NOT_READY) {
+                                long nowNanos = System.nanoTime();
+                                if (nowNanos - this.giDirectSourceDebugLogNanos
+                                        >= 5_000_000_000L) {
+                                    this.giDirectSourceDebugLogNanos = nowNanos;
+                                    GiDirectSourceCoordinator.FrozenPreparationDebugState debug =
+                                            this.giDirectSourceCoordinator
+                                                    .frozenPreparationDebugState(nowNanos);
+                                    Metallum.LOGGER.info(
+                                            "[GI_G3] interactive preparation waiting: "
+                                                    + "observed={} committed={} reason={} changes={} "
+                                                    + "settled_ms={} clipmap={} palette={} content={}",
+                                            debug.tupleObserved(), debug.committed(),
+                                            debug.changeReason(), debug.changeCount(),
+                                            debug.settledMillis(), debug.clipmapGeneration(),
+                                            debug.paletteGeneration(), debug.contentGeneration()
                                     );
                                 }
                             }

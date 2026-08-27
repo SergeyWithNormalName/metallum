@@ -131,6 +131,28 @@ public final class GiTransportCoordinator implements AutoCloseable {
         return STATUS_NO_WORK;
     }
 
+    /** Interactive debug keeps the admitted immutable snapshot while live world inputs move on. */
+    public int pollFrozenFrame(final long frameIndex) {
+        assertOwnerThread();
+        if (this.buildState == BuildState.IDLE) {
+            return STATUS_INPUT_NOT_READY;
+        }
+        if (this.buildState == BuildState.FAILED || this.resources == null
+                || this.submittedEpoch == null) {
+            return STATUS_BUILD_FAILED;
+        }
+        if (this.buildState == BuildState.SUBMITTED) {
+            this.buildState = resolveSubmittedState(
+                    this.resources.stats(), this.submittedEpoch,
+                    frameIndex - this.submittedFrame
+            );
+            if (this.buildState == BuildState.FAILED) {
+                return STATUS_BUILD_FAILED;
+            }
+        }
+        return STATUS_NO_WORK;
+    }
+
     static BuildState resolveSubmittedState(
             final GiTransportGpuResources.Stats stats,
             final GiTransportEpoch epoch,

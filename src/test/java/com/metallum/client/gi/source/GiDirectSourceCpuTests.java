@@ -3,7 +3,11 @@ package com.metallum.client.gi.source;
 import com.metallum.client.lighting.AdvancedLight;
 import com.metallum.client.lighting.AdvancedLightRegistry;
 import com.metallum.client.lighting.LightSourceKind;
+import com.metallum.client.lighting.LightSectionCandidate;
+import com.metallum.client.lighting.LightSectionTask;
+import com.metallum.client.lighting.LightTemplate;
 import com.metallum.client.lighting.LightWorldToken;
+import com.metallum.client.lighting.StaticLightSectionScanner;
 
 import java.util.List;
 
@@ -16,7 +20,9 @@ public final class GiDirectSourceCpuTests {
         negativeCoordinateMath();
         staticOrderingAndExclusion();
         dynamicFramesDoNotRotateStaticEpoch();
+        idempotentStaticPublicationsDoNotRotateStaticEpoch();
         frozenTransportUsesActualStaticRegistryIdentity();
+        interactiveFrozenPreparationUsesWallTime();
         environmentQuantization();
         staleEpochIsRejected();
         queueBoundsCoalescingAndStarvation();
@@ -69,6 +75,49 @@ public final class GiDirectSourceCpuTests {
                 "dynamic L3 frame rotated the camera-independent G3 source epoch");
     }
 
+    private static void idempotentStaticPublicationsDoNotRotateStaticEpoch() {
+        AdvancedLightRegistry registry = new AdvancedLightRegistry();
+        Object worldIdentity = new Object();
+        LightWorldToken world = registry.openWorld(worldIdentity, "minecraft:overworld");
+        GiStaticSourceState initial = registry.staticSourceStateForGi(world.dimensionId());
+        LightSectionTask empty = registry.beginSectionTask(
+                worldIdentity, world.dimensionId(), 17L
+        );
+        check(registry.publishAccepted(scan(empty, null)), "empty static section was rejected");
+        GiStaticSourceState afterEmpty = registry.staticSourceStateForGi(world.dimensionId());
+        check(initial != null && initial.equals(afterEmpty),
+                "empty static publication rotated the physical G3 source epoch");
+
+        LightTemplate emitter = new LightTemplate(
+                LightSourceKind.BLOCK, 1.5, 2.5, 3.5,
+                8.0F, 1.0F, 0.5F, 0.25F, 1.0F, 15
+        );
+        LightSectionTask first = registry.beginSectionTask(
+                worldIdentity, world.dimensionId(), 17L
+        );
+        check(registry.publishAccepted(scan(first, emitter)),
+                "initial static emitter section was rejected");
+        GiStaticSourceState afterFirst = registry.staticSourceStateForGi(world.dimensionId());
+        LightSectionTask duplicate = registry.beginSectionTask(
+                worldIdentity, world.dimensionId(), 17L
+        );
+        check(registry.publishAccepted(scan(duplicate, emitter)),
+                "idempotent static emitter section was rejected");
+        check(afterFirst != null && afterFirst.equals(
+                        registry.staticSourceStateForGi(world.dimensionId())),
+                "idempotent static publication rotated the physical G3 source epoch");
+    }
+
+    private static LightSectionCandidate scan(
+            final LightSectionTask task,
+            final LightTemplate emitter
+    ) {
+        return StaticLightSectionScanner.scan(
+                task, 0, 0, 0, AdvancedLightRegistry.MAX_LIGHTS_PER_SECTION,
+                (localIndex, x, y, z) -> localIndex == 0 ? emitter : null
+        );
+    }
+
     private static void frozenTransportUsesActualStaticRegistryIdentity() {
         AdvancedLightRegistry registry = new AdvancedLightRegistry();
         Object worldIdentity = new Object();
@@ -94,6 +143,28 @@ public final class GiDirectSourceCpuTests {
         check(!GiDirectSourceCoordinator.frozenStaticSourceIdentityStillCurrent(
                         logical, frozen, registry),
                 "real post-freeze registry drift was not rejected");
+    }
+
+    private static void interactiveFrozenPreparationUsesWallTime() {
+        long tenSeconds = GiDirectSourceCoordinator.INTERACTIVE_FROZEN_INPUT_SETTLE_NANOS;
+        check(!GiDirectSourceCoordinator.frozenInputSettled(
+                        true, 0L, 10_000L, 7L, 7L + tenSeconds - 1L),
+                "interactive G3 froze before ten real seconds elapsed");
+        check(GiDirectSourceCoordinator.frozenInputSettled(
+                        true, 0L, 10_000L, 7L, 7L + tenSeconds),
+                "interactive G3 did not freeze after ten real seconds");
+        check(!GiDirectSourceCoordinator.frozenInputSettled(
+                        false, 10L, 609L, 0L, Long.MAX_VALUE),
+                "benchmark G3 ignored the exact 600-frame settle gate");
+        check(GiDirectSourceCoordinator.frozenInputSettled(
+                        false, 10L, 610L, 0L, 0L),
+                "benchmark G3 did not retain the exact 600-frame settle gate");
+        check(!GiDirectSourceCoordinator.isStructuralDrift("content")
+                        && !GiDirectSourceCoordinator.isStructuralDrift("static_sources"),
+                "late Sodium content incorrectly restarted the camera-stability timer");
+        check(GiDirectSourceCoordinator.isStructuralDrift("origin")
+                        && GiDirectSourceCoordinator.isStructuralDrift("clipmap"),
+                "camera/clipmap drift did not restart the camera-stability timer");
     }
 
     private static void staleEpochIsRejected() {

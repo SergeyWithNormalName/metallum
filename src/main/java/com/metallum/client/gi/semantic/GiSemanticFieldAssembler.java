@@ -139,8 +139,16 @@ public final class GiSemanticFieldAssembler {
         if (prior == null && this.residentTags.size() >= MAX_RESIDENT_SECTION_TAGS) {
             return ApplyResult.CAPACITY;
         }
+        if (prior != null && prior.snapshotDigest().equals(snapshot.digest())) {
+            this.residentTags.put(task.sectionKey(), new ResidentTag(
+                    task.ownerToken(), snapshot.digest()
+            ));
+            return ApplyResult.ACCEPTED;
+        }
         deposit(task.sectionKey(), task.revision(), snapshot);
-        this.residentTags.put(task.sectionKey(), new ResidentTag(task.ownerToken(), task.revision()));
+        this.residentTags.put(task.sectionKey(), new ResidentTag(
+                task.ownerToken(), snapshot.digest()
+        ));
         this.contentGeneration = Math.incrementExact(this.contentGeneration);
         return ApplyResult.ACCEPTED;
     }
@@ -524,6 +532,6 @@ public final class GiSemanticFieldAssembler {
         }
     }
 
-    private record ResidentTag(long ownerToken, long contentGeneration) {
+    private record ResidentTag(long ownerToken, String snapshotDigest) {
     }
 }

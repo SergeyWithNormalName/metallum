@@ -320,8 +320,8 @@ public final class GiSemanticCpuTests {
                         && telemetry.candidateBudget().peakBytes() == GiSemanticSectionSnapshot.PAYLOAD_BYTES,
                 "10k publications leaked candidate leases or exceeded one-candidate steady state");
         require(requireNonNull(controller.fieldSnapshot(world), "final field missing").contentGeneration()
-                        == initialGeneration + 10_000L,
-                "accepted publications did not advance the global content serial exactly once");
+                        == initialGeneration + 1L,
+                "idempotent accepted publications changed semantic field content");
     }
 
     private static void assemblerIsRenderThreadConfined() throws InterruptedException {
