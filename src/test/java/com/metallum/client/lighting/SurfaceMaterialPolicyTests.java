@@ -2,8 +2,10 @@ package com.metallum.client.lighting;
 
 import com.metallum.client.gi.semantic.GiSemanticMaterial;
 import com.metallum.client.gi.semantic.GiSemanticPacking;
+import com.metallum.client.hdr.HdrEmissionVertex;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
@@ -218,6 +220,57 @@ public final class SurfaceMaterialPolicyTests {
                         && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Y) == 4
                         && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_Z) == 6,
                 "G2 face order diverged from the compact reflection carrier");
+
+        String runtimeKey = VertexReflectionExperiment.RUNTIME_PROPERTY;
+        String previousRuntime = System.getProperty(runtimeKey);
+        try {
+            VertexReflectionExperiment.setOverride(true);
+            System.setProperty(runtimeKey, "true");
+            ChunkVertexEncoder.Vertex[] glossyQuad = new ChunkVertexEncoder.Vertex[4];
+            for (int index = 0; index < glossyQuad.length; index++) {
+                TestVertex vertex = new TestVertex();
+                vertex.light = 0x00F000A0;
+                glossyQuad[index] = vertex;
+            }
+            SodiumHdrSemantic.tagQuad(
+                    glossyQuad,
+                    0,
+                    false,
+                    SodiumHdrSemantic.SURFACE_CLASS_METAL,
+                    false,
+                    0,
+                    VoxelReflectionFace.POS_Z
+            );
+            int packedMaterial = SodiumHdrSemantic.packMaterialBits(0, glossyQuad);
+            require((packedMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2,
+                    "iron quad lost its compact metal material base");
+            for (ChunkVertexEncoder.Vertex vertex : glossyQuad) {
+                require((vertex.light & 0xff) == 0xa6,
+                        "promoting a glossy material semantic suppressed its reflection face carrier");
+            }
+        } finally {
+            VertexReflectionExperiment.setOverride(null);
+            if (previousRuntime == null) {
+                System.clearProperty(runtimeKey);
+            } else {
+                System.setProperty(runtimeKey, previousRuntime);
+            }
+        }
+    }
+
+    private static final class TestVertex extends ChunkVertexEncoder.Vertex
+            implements HdrEmissionVertex {
+        private int hdrSemantic;
+
+        @Override
+        public int metallum$getHdrSemantic() {
+            return this.hdrSemantic;
+        }
+
+        @Override
+        public void metallum$setHdrSemantic(final int semantic) {
+            this.hdrSemantic = semantic;
+        }
     }
 
     private static void testWaterSurfaceDoesNotBecomeACausticReceiver() {

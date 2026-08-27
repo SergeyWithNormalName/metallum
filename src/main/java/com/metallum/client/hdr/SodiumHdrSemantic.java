@@ -332,7 +332,8 @@ public final class SodiumHdrSemantic {
         }
         int semantic = SodiumHdrShaderPatcher.encodeVertexSemantic(emission, exact);
         int packedBase = materialBits;
-        if (semantic == 0 && surfaceClass != SURFACE_CLASS_NONE) {
+        boolean materialSurface = semantic == 0 && surfaceClass != SURFACE_CLASS_NONE;
+        if (materialSurface) {
             semantic = SodiumHdrShaderPatcher.HDR_VERTEX_EXACT_BIT;
             packedBase = materialBaseForSurfaceClass(materialBits, surfaceClass);
         }
@@ -341,7 +342,7 @@ public final class SodiumHdrSemantic {
             int depth = Math.clamp(submergedDepth, 1, 63);
             packed |= PACKED_MATERIAL_SUBMERGED_BIT | (depth << PACKED_MATERIAL_DEPTH_SHIFT);
         }
-        if (semantic == 0 && surfaceClass != SURFACE_CLASS_NONE && reflectionCarrier) {
+        if (materialSurface && reflectionCarrier) {
             for (ChunkVertexEncoder.Vertex vertex : vertices) {
                 // Minecraft's block-light byte is aligned to 16. Encode the face inside the same
                 // lightmap texel; the max-light cell uses the lower half so Sodium's 248 clamp
