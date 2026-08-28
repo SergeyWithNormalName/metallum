@@ -66,9 +66,11 @@ public final class SodiumIndexedIndirectBatcher {
             if (access.metallum$commandAddress() == MemoryUtil.NULL || byteLength > Integer.MAX_VALUE) {
                 continue;
             }
+            long drawnG5CarrierSlices = access.metallum$getDrawnG5CarrierSlices();
             access.metallum$setPreparedSnapshot(
                     submitIndex,
                     renderInvocationEpoch,
+                    drawnG5CarrierSlices,
                     encoder.snapshotSodiumIndexedIndirectCommands(
                             access.metallum$commandAddress(),
                             Math.toIntExact(byteLength)
@@ -96,6 +98,10 @@ public final class SodiumIndexedIndirectBatcher {
         );
         long submitIndex = device.currentSubmitIndex();
         long renderInvocationEpoch = activeRenderInvocationEpoch;
+        long drawnG5CarrierSlices = access.metallum$getPreparedDrawnG5CarrierSlices(
+                submitIndex,
+                renderInvocationEpoch
+        );
         GpuBufferSlice snapshot = access.metallum$takePreparedSnapshot(
                 submitIndex,
                 renderInvocationEpoch
@@ -107,10 +113,10 @@ public final class SodiumIndexedIndirectBatcher {
                 renderInvocationEpoch,
                 snapshot.length(),
                 requiredBytes
-        )) {
+        ) || drawnG5CarrierSlices < 0L) {
             return false;
         }
-        metalContext.drawPreparedIndexedIndirect(snapshot, batch.size);
+        metalContext.drawPreparedIndexedIndirect(snapshot, batch.size, drawnG5CarrierSlices);
         return true;
     }
 

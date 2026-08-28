@@ -1295,6 +1295,12 @@ VERTEX_REFLECTION_JAVA_TOOL_OPTIONS=${JAVA_TOOL_OPTIONS:-}
 if [ "$VERTEX_REFLECTION_EXPERIMENT" -eq 1 ]; then
     VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.vertex.reflection.runtime=true -Dmetallum.waterReflection.faceAwareAppearance=${WATER_REFLECTION_FACE_AWARE} -Dmetallum.waterReflection.firstSurfaceBiasedIntegration=${WATER_REFLECTION_FIRST_SURFACE} -Dmetallum.waterReflection.representationConfidence=${WATER_REFLECTION_CONFIDENCE}"
 fi
+if [ "$GI_G5_RECEIVER_ENV" -eq 1 ]; then
+    # Reflected terrain is outside the single-raster G5 cost contract.  The JVM property
+    # overrides any persisted live option, while runtime captureMode also keeps later UI
+    # toggles dormant for the rest of this diagnostic process.
+    VERTEX_REFLECTION_JAVA_TOOL_OPTIONS="${VERTEX_REFLECTION_JAVA_TOOL_OPTIONS} -Dmetallum.planar_reflections=false"
+fi
 set +e
 METALLUM_GI_G2_CAPTURE="$GI_G2_CAPTURE_ENV" \
 METALLUM_GI_G3_INJECT="$GI_G3_INJECT_ENV" \
@@ -1499,9 +1505,27 @@ if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
         || die "expected exactly one G5 admission marker (found $g5_admission_count)"
     g5_admission_contract="$g5_admission_prefix"\
 "requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "\
-"state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND"
-    grep -Fq "$g5_admission_contract" "$MINECRAFT_LOG" \
-        || die "G5 admission did not prove the resolved arm/resource contract"
+"state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND "\
+"phase=WARMUP presented_frame=[0-9]+ resources=5 bindings=5 "\
+"allocated_bytes=[0-9]+ g4_accounted_bytes=22637928 "\
+"combined_accounted_bytes=[0-9]+ cap_bytes=25165824 shared_texture_bytes=0 "\
+"carrier_skips=0 g5_carrier_writes=[1-9][0-9]* "\
+"drawn_g5_carrier_slices=[1-9][0-9]* status=PASS vertex_only=true "\
+"fragment_texture3d=0 sidecar_bytes=0$"
+    g5_admission=$(grep -E "$g5_admission_contract" "$MINECRAFT_LOG" || true)
+    g5_admission_exact_count=$(printf '%s\n' "$g5_admission" \
+        | grep -Fc "$g5_admission_prefix" || true)
+    [ "$g5_admission_exact_count" -eq 1 ] \
+        || die "G5 admission did not prove the exact resolved READY/PASS contract"
+    g5_allocated_bytes=$(printf '%s\n' "$g5_admission" \
+        | sed -E 's/.* allocated_bytes=([0-9]+) .*/\1/')
+    g5_combined_reported_bytes=$(printf '%s\n' "$g5_admission" \
+        | sed -E 's/.* combined_accounted_bytes=([0-9]+) .*/\1/')
+    g5_combined_accounted_bytes=$((22637928 + g5_allocated_bytes))
+    [ "$g5_combined_reported_bytes" -eq "$g5_combined_accounted_bytes" ] \
+        || die "G5 admission memory census does not equal G4 plus G5 allocation"
+    [ "$g5_combined_accounted_bytes" -le 25165824 ] \
+        || die "G5 admission memory census exceeds the diffuse-GI cap"
     g5_admission_line=$(grep -nF "$g5_admission_prefix" "$MINECRAFT_LOG" | cut -d: -f1)
     [ "$segment_start_line" -lt "$g5_admission_line" ] \
         && [ "$g5_admission_line" -lt "$measure_start_line" ] \
@@ -1511,6 +1535,13 @@ if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
                 "$MINECRAFT_LOG"; then
         die "G5 control/candidate must not claim standalone G4 READY admission"
     fi
+    g5_final="METALLUM_BENCHMARK EVENT=GI_G5_FINAL state=READY carrier_skips=0 g5_carrier_writes=[1-9][0-9]* drawn_g5_carrier_slices=[1-9][0-9]* status=PASS arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND contract=4"
+    g5_final_count=$(grep -Ec "${g5_final}$" "$MINECRAFT_LOG" || true)
+    [ "$g5_final_count" -eq 1 ] \
+        || die "expected exactly one final zero-skip G5 carrier census (found $g5_final_count)"
+    g5_final_line=$(grep -nE "${g5_final}$" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$measure_end_line" -lt "$g5_final_line" ] \
+        || die "G5 final carrier census must follow MEASURE_END"
 elif [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
     g4_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
     g4_admission_count=$(grep -Fc "$g4_admission_prefix" "$MINECRAFT_LOG" || true)
@@ -1659,6 +1690,11 @@ esac
 complete="METALLUM_BENCHMARK EVENT=COMPLETE segments=1 measured_frames=$MEASURE_FRAMES framebuffer=${WIDTH}x${HEIGHT}"
 complete_count=$(grep -Fc "$complete" "$MINECRAFT_LOG" || true)
 [ "$complete_count" -eq 1 ] || die "expected exactly one matching COMPLETE marker (found $complete_count)"
+if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
+    complete_line=$(grep -nF "$complete" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$g5_final_line" -lt "$complete_line" ] \
+        || die "G5 final carrier census must precede COMPLETE"
+fi
 if [ "$EXPECTED_LIGHTING_MODEL" = "advanced" ]; then
     admission_health=true
 else

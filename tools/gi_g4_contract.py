@@ -24,6 +24,10 @@ PENDING_STATUS = "G4_IMPLEMENTED_FIELD_ONLY_PENDING_TIER_B"
 COMPLETE_STATUS = "G4_COMPLETE_FIELD_ONLY"
 PENDING_DECISION = "PENDING_TIER_B_STOP_GATE"
 COMPLETE_DECISION = "PASS_FIELD_ONLY_ONE_BOUNCE"
+# The immutable manifest was assembled after the final G4 debug/admission fixes. Its
+# implementation.base_commit records the stage lineage base (G3), not the commit whose tree
+# supplied source_files_sha256. Keep that distinction explicit for successor verification.
+G4_SOURCE_ATTESTATION_COMMIT = "c7a9a8adc6fb133641b2821c0cea12687dc6d792"
 
 EXPECTED_CORRECTNESS_GATES = [
     "ZERO_SOURCE_EXACT_ZERO",
@@ -124,6 +128,32 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
     "src/test/java/com/metallum/client/metal/render/MetalRuntimeTests.java",
     "src/test/java/com/metallum/client/metal/render/framegraph/FrameGraphTests.java",
 })
+
+# A completed stage keeps its immutable receipt. The immediately following G5 stage may
+# change only these exact, review-pinned successor file contents. Combined with each historical
+# digest in the immutable G4 evidence this identifies the complete allowed diff, rather than
+# granting a whole-file pathname exemption. Values are pinned after the G5 tree is final.
+G5_SUCCESSOR_FILE_SHA256 = {
+    "build.gradle": "ff3a026bcc18de84ba1fa579e7b5ca4751530c6273398ec58f628dda1d3d9a41",
+    "scripts/run_metal_benchmark.sh": "e1872b2e2fd08a5908757228fd325fb07ca842f6d3d378ff7f2f1f410589b0a4",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "5ed694ac9f4d7e4f7f9b39f19037d3510e79825986d4f7ec86dd8deb608a7f8f",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java": "3e4f421efb614a9e99fd19faa9bd2e7c123f890981d34cfc65a582649a377051",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java": "86eeb42f9250787620599d2135145809df177579628b807838c0221472fe66da",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java": "6b58d80f377c74681664c4e27f01880fa646e930f5ba899ef8a3f453913d8b17",
+    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "770781f4642c401768b412e2c7980b61d88e09a1adbceb8f52275a54664aab8b",
+    "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "ce4308a165e9b2a23477c5b2e1ba1e59262c567079d7697b0e8eb57dd6a85d87",
+    "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "72a8be9401a1dae68b55f27d6b010d290546d510873def395a086b4795f71161",
+    "src/main/native/MetallumNative.swift": "43c94f4e081232df61744d43adc15c5ecdb88b23cc9bd6cfb623fa53861e5332",
+    "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java": "526deabdfe205fd4aa1d525b74edba5dc4270727b71baed101d6c2762746f777",
+    "src/test/java/com/metallum/client/metal/render/MetalRuntimeTests.java": "61eedb5395de72903a51647d5786c9a27ac397e7b1c9609a8430a640d0a86b1a",
+    "tools/gi_release_contract_guard.sh": "c8e924de80c1ada8df1bb17a08fa0607f930c9842806b6e1ce2f7a0317377ba9",
+    "tools/metal_benchmark_report.py": "b65f8eb92cc5d6b616c0316d068a77409def1a6d7a3b315e78530af9a74c9736",
+    "tools/test_gi_release_contract_guard.sh": "cb3c3888a6ab9e7ab5f4c4d90722873b2f0a729de26fa0de6693af1bdb73a941",
+}
+G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
+# The value-bearing line is normalized before hashing, avoiding a circular digest while still
+# making every other byte of this verifier part of the exact successor seam.
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "15a1abed10f63cf58dc71549e903ce50830a86b4e1dc22eeaee3ddb15591bc28"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,
@@ -279,6 +309,19 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def normalized_contract_self_sha256(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8")
+    pattern = re.compile(
+        r'(?m)^G4_CONTRACT_SELF_NORMALIZED_SHA256 = (?:"[0-9a-f]{64}"|"0" \* 64)$'
+    )
+    normalized, replacements = pattern.subn(
+        'G4_CONTRACT_SELF_NORMALIZED_SHA256 = "<NORMALIZED>"', raw
+    )
+    if replacements != 1:
+        raise ContractError("G4 verifier self-digest sentinel differs")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def source(root: Path, relative: str) -> str:
     return (root / relative).read_text(encoding="utf-8")
 
@@ -316,6 +359,7 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
         raise ContractError(
             f"G4 exact source digest manifest differs; missing={missing}, extra={extra}"
         )
+    drifted: list[tuple[str, str, str]] = []
     for relative, expected in manifests.items():
         if not isinstance(relative, str) or relative.startswith(("/", "../")) \
                 or "/../" in relative or "\\" in relative:
@@ -325,8 +369,82 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
         path = root / relative
         if not path.is_file():
             raise ContractError(f"required G4 source is missing: {relative}")
-        if sha256(path) != expected:
-            raise ContractError(f"G4 source digest differs: {relative}")
+        actual = sha256(path)
+        if actual != expected:
+            drifted.append((relative, expected, actual))
+    if not drifted:
+        return
+
+    drifted_paths = {relative for relative, _, _ in drifted}
+    exact_successor_paths = set(G5_SUCCESSOR_FILE_SHA256) | {G4_CONTRACT_SELF_PATH}
+    missing = sorted(exact_successor_paths - drifted_paths)
+    unsupported = sorted(drifted_paths - exact_successor_paths)
+    if missing or unsupported:
+        raise ContractError(
+            "G4 exact G5 successor diff path set differs; "
+            f"missing={missing}, unsupported={unsupported}"
+        )
+    base_commit = implementation.get("base_commit")
+    if not isinstance(base_commit, str) \
+            or re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+        raise ContractError("G4 base commit is invalid for successor provenance")
+    for ancestor, descendant, label in (
+            (base_commit, G4_SOURCE_ATTESTATION_COMMIT, "G4 lineage base"),
+            (G4_SOURCE_ATTESTATION_COMMIT, "HEAD", "G4 source attestation"),
+    ):
+        relation = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "merge-base", "--is-ancestor",
+             ancestor, descendant],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if relation.returncode != 0:
+            raise ContractError(f"{label} is not an ancestor of {descendant}")
+    for relative, expected, actual in drifted:
+        historical = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false", "show",
+             f"{G4_SOURCE_ATTESTATION_COMMIT}:{relative}"],
+            cwd=root,
+            check=False,
+            capture_output=True,
+        )
+        if historical.returncode != 0 \
+                or hashlib.sha256(historical.stdout).hexdigest() != expected:
+            raise ContractError(
+                "G4 historical source provenance differs at "
+                f"{G4_SOURCE_ATTESTATION_COMMIT}: {relative}"
+            )
+        if relative == G4_CONTRACT_SELF_PATH:
+            self_digest = normalized_contract_self_sha256(root / relative)
+            if self_digest != G4_CONTRACT_SELF_NORMALIZED_SHA256:
+                raise ContractError(
+                    "G4 verifier differs outside its exact reviewed successor seam"
+                )
+        elif actual != G5_SUCCESSOR_FILE_SHA256[relative]:
+            raise ContractError(
+                "G4 source differs from its exact reviewed G5 successor seam: "
+                f"{relative}"
+            )
+
+    # Structural G5 verification is supplemental. It cannot authorize any source drift: every
+    # drifted G4-manifest file has already matched the exact content digest above.
+    g5_contract = root / "tools/gi_g5_contract.py"
+    g5_document = root / "docs/GI_G5.md"
+    if not g5_contract.is_file() or not g5_document.is_file() \
+            or "IMPLEMENTED_PENDING_TIER_B" not in g5_document.read_text(encoding="utf-8"):
+        raise ContractError("G4 source drift is not owned by a declared G5 successor")
+    successor = subprocess.run(
+        [sys.executable, str(g5_contract), "--root", str(root)],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if successor.returncode != 0:
+        detail = successor.stderr.strip() or successor.stdout.strip() or "unknown failure"
+        raise ContractError(f"G5 successor contract failed: {detail}")
 
 
 def required_artifact(root: Path, descriptor: Any, label: str) -> Path:
@@ -967,9 +1085,19 @@ def verify_minecraft_receipt(minecraft_text: str) -> None:
 
 
 def recompute_summary(root: Path, raw_path: Path) -> dict[str, Any]:
+    historical_reporter = subprocess.run(
+        ["git", "-c", "core.fsmonitor=false", "show",
+         f"{G4_SOURCE_ATTESTATION_COMMIT}:tools/metal_benchmark_report.py"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if historical_reporter.returncode != 0:
+        raise ContractError("G4 attested canonical reporter source is unavailable")
     command = [
         sys.executable,
-        str(root / "tools/metal_benchmark_report.py"),
+        "-",
         "summarize",
         str(raw_path),
         "--measure-frames", "600",
@@ -977,7 +1105,14 @@ def recompute_summary(root: Path, raw_path: Path) -> dict[str, Any]:
         "--scaler-mode", "OFF",
         "--json",
     ]
-    result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        command,
+        cwd=root,
+        input=historical_reporter.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ContractError(f"G4 raw report fails the canonical parser: {detail}")
@@ -1277,6 +1412,84 @@ def verify_evidence(root: Path, evidence: dict[str, Any]) -> None:
         raise ContractError("G4 evidence limitations hide the field-only/Tier-B boundary")
 
 
+def verify_g4_stale_receiver_transition(native: str, gpu_validation: str) -> None:
+    try:
+        transport = native[
+            native.index("private final class MetallumGiTransportContextV1") :
+            native.index("// MARK: - G5 vertex-only irradiance receiver")
+        ]
+        snapshot = transport[
+            transport.index("fileprivate func receiverFieldSnapshot()") :
+            transport.index("private func persistentBytes()")
+        ]
+        report_stale = transport[
+            transport.index("func reportStale() -> Int32") :
+            transport.index("func captureVolumeOnce(")
+        ]
+    except ValueError as error:
+        raise ContractError("G4 stale receiver native declarations are missing") from error
+
+    if transport.count("private var stale = false") != 1:
+        raise ContractError("G4 native stale latch declaration differs")
+    if snapshot.count("ready: ready && !stale)") != 1:
+        raise ContractError("G4 receiver snapshot does not fail closed after stale")
+    if report_stale.count("stale = true") != 1 \
+            or report_stale.index("stale = true") > report_stale.index("rejectLocked("):
+        raise ContractError("G4 reportStale does not latch stale before publication")
+
+    try:
+        validation = gpu_validation[
+            gpu_validation.index("private static void validateReceiverReadyThenStale(") :
+            gpu_validation.index("private static TransportInput transportInput(")
+        ]
+    except ValueError as error:
+        raise ContractError("G4 READY-to-stale receiver validation is missing") from error
+    require_tokens(validation, (
+        '"G5 FIELD did not bind the READY G4 snapshot"',
+        "metallum_gi_transport_report_stale_v1(",
+        '"G4 explicit stale transition was not published"',
+        '"G5 FIELD remained READY after its G4 owner became stale"',
+        "GiReceiverLayout.STATUS_OK",
+        "GiReceiverLayout.STATUS_ZERO_READY",
+    ), "G4 READY-to-stale receiver validation")
+    if validation.count("metallum_gi_receiver_bind_vertex_v1(") != 2:
+        raise ContractError("G4 READY-to-stale validation must perform exactly two FIELD binds")
+    if not (
+        validation.index('"G5 FIELD did not bind the READY G4 snapshot"')
+        < validation.index("metallum_gi_transport_report_stale_v1(")
+        < validation.index('"G5 FIELD remained READY after its G4 owner became stale"')
+    ):
+        raise ContractError("G4 READY-to-stale validation order differs")
+
+
+def self_test_g4_stale_receiver_guard(root: Path) -> None:
+    native = source(root, "src/main/native/MetallumNative.swift")
+    gpu_validation = source(
+        root, "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java"
+    )
+    verify_g4_stale_receiver_transition(native, gpu_validation)
+    mutations = (
+        (
+            native.replace("ready: ready && !stale)", "ready: ready)", 1),
+            "G4 receiver snapshot does not fail closed after stale",
+        ),
+        (
+            native.replace("        stale = true\n", "", 1),
+            "G4 reportStale does not latch stale before publication",
+        ),
+    )
+    for mutated_native, expected in mutations:
+        try:
+            verify_g4_stale_receiver_transition(mutated_native, gpu_validation)
+        except ContractError as error:
+            if expected not in str(error):
+                raise AssertionError(
+                    f"G4 stale mutation failed for the wrong reason: {error}"
+                ) from error
+        else:
+            raise AssertionError(f"G4 stale mutation was admitted: {expected}")
+
+
 def verify_source_contract(root: Path) -> None:
     layout = source(root, "src/main/java/com/metallum/client/gi/transport/GiTransportLayout.java")
     runtime = source(root, "src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java")
@@ -1321,6 +1534,7 @@ def verify_source_contract(root: Path) -> None:
     frame_graph_tests = source(
         root, "src/test/java/com/metallum/client/metal/render/framegraph/FrameGraphTests.java"
     )
+    verify_g4_stale_receiver_transition(native, gpu_validation)
 
     require_tokens(layout, (
         "ABI_VERSION = 1", "LAYOUT_BYTES = 160", "HEADER_BYTES = 128",
@@ -2021,6 +2235,7 @@ def self_test_receipt_validator() -> None:
 
 def verify(root: Path) -> None:
     self_test_receipt_validator()
+    self_test_g4_stale_receiver_guard(root)
     evidence = strict_object(root / "benchmark/gi/g4-transport-evidence-v1.json")
     verify_evidence(root, evidence)
     verify_source_contract(root)

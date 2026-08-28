@@ -4,6 +4,9 @@ import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
+import com.metallum.client.gi.receiver.GiReceiverLayout;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.lighting.reflection.VertexReflectionBindingAbi;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
@@ -404,7 +407,7 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             @Nullable final List<MetalCompiledRenderPipeline.ResourceBinding> canonicalResources
     ) throws ShaderCompileException {
-        boolean vertexReflection = VertexReflectionExperiment.isRuntimeEnabled()
+        boolean vertexReflection = VertexReflectionExperiment.isLayoutEnabled()
                 && isSodiumReflectionTerrainPipeline(pipeline)
                 && isAdvancedFlavor(flavor);
         ShaderDefines vertexDefines = vertexReflection
@@ -650,6 +653,7 @@ final class MetalCrossShaderCompiler {
         }
         var filtered = module.samplers().stream()
                 .filter(sampler -> !VertexReflectionExperiment.isExperimentSampler(sampler.name()))
+                .filter(sampler -> !GiReceiverBindingAbi.isExternalSampler(sampler.name()))
                 .toList();
         if (filtered.size() == module.samplers().size()) {
             return module;
@@ -754,6 +758,8 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             final MetalCompiledRenderPipeline.ShaderVariantSource variant
     ) {
+        boolean g5Receiver = GiReceiverRuntime.isRequested()
+                && isSodiumReflectionTerrainPipeline(pipeline);
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
                     && (AdvancedLightingBindingAbi.ownsFragmentSlot(binding.bindingIndex())
@@ -779,7 +785,7 @@ final class MetalCrossShaderCompiler {
         for (int slot : AdvancedLightingBindingAbi.fragmentSlots()) {
             String marker = "[[buffer(" + slot + ")]]";
             boolean reflectionOwnsVertexSlot = slot == VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT
-                    && VertexReflectionExperiment.isRuntimeEnabled()
+                    && VertexReflectionExperiment.isLayoutEnabled()
                     && isSodiumReflectionTerrainPipeline(pipeline);
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
                     || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexSlot)) {
@@ -793,8 +799,13 @@ final class MetalCrossShaderCompiler {
         VertexReflectionBindingAbi.validateMsl(
                 variant.vertexMsl(),
                 variant.fragmentMsl(),
-                VertexReflectionExperiment.isRuntimeEnabled()
+                VertexReflectionExperiment.isLayoutEnabled()
                         && isSodiumReflectionTerrainPipeline(pipeline)
+        );
+        GiReceiverBindingAbi.validateMsl(
+                variant.vertexMsl(),
+                variant.fragmentMsl(),
+                g5Receiver
         );
         String visibilityCacheMarker = "[[buffer("
                 + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
@@ -809,9 +820,9 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
-            boolean reflectionOwnsVertexVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
-                    && VertexReflectionExperiment.isRuntimeEnabled()
-                    && isSodiumReflectionTerrainPipeline(pipeline);
+            boolean vertexFieldOwnsVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
+                    && ((VertexReflectionExperiment.isLayoutEnabled()
+                    && isSodiumReflectionTerrainPipeline(pipeline)) || g5Receiver);
             boolean diagnosticProxyRemoved = slot == VoxelShadowBindingAbi.PROXY_BUFFER_SLOT
                     && com.metallum.client.benchmark.DiagnosticAblationMode
                     .getSystemCurrent().l6NoProxy() == 1;
@@ -821,7 +832,7 @@ final class MetalCrossShaderCompiler {
                 continue;
             }
             if (countOccurrences(variant.fragmentMsl(), marker) != 1
-                    || (variant.vertexMsl().contains(marker) && !reflectionOwnsVertexVoxelParams)) {
+                    || (variant.vertexMsl().contains(marker) && !vertexFieldOwnsVoxelParams)) {
                 throw new IllegalStateException(
                         "L6 active local-shadow fragment buffer slot " + slot
                                 + " is missing, repeated, or visible to the vertex stage for pipeline "
@@ -833,8 +844,12 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
+            boolean g5OwnsVertexParams = g5Receiver
+                    && slot == GiReceiverLayout.PARAMS_BUFFER_SLOT;
             if (variant.fragmentMsl().contains(marker)
-                    || variant.vertexMsl().contains(marker)) {
+                    || (variant.vertexMsl().contains(marker) && !g5OwnsVertexParams)
+                    || (g5OwnsVertexParams
+                    && countOccurrences(variant.vertexMsl(), marker) != 1)) {
                 throw new IllegalStateException(
                         "L6 unreachable exact-DDA buffer slot " + slot
                                 + " survived production compilation for pipeline "
@@ -853,7 +868,7 @@ final class MetalCrossShaderCompiler {
         }
         String environmentMarker = "[[buffer("
                 + EnvironmentShadowBindingAbi.PARAMS_SLOT + ")]]";
-        boolean reflectionOwnsVertexEnvironment = VertexReflectionExperiment.isRuntimeEnabled()
+        boolean reflectionOwnsVertexEnvironment = VertexReflectionExperiment.isLayoutEnabled()
                 && isSodiumReflectionTerrainPipeline(pipeline);
         if (countOccurrences(variant.fragmentMsl(), environmentMarker) != 1
                 || countOccurrences(variant.vertexMsl(), environmentMarker)

@@ -57,10 +57,14 @@ public final class MetalDrawContext extends VKIndirectContext {
         this.metalPass.setUniform("push_constants", pushConstantsBufferSlice);
     }
 
-    public void drawPreparedIndexedIndirect(final GpuBufferSlice commands, final int drawCount) {
+    public void drawPreparedIndexedIndirect(
+            final GpuBufferSlice commands,
+            final int drawCount,
+            final long drawnG5CarrierSlices
+    ) {
         if (this.metalPass == null) {
             throw new IllegalStateException("Sodium indirect draw has no active Metal render pass");
         }
-        this.metalPass.drawIndexedIndirectOwned(commands, drawCount);
+        this.metalPass.drawIndexedIndirectOwned(commands, drawCount, drawnG5CarrierSlices);
     }
 }

@@ -1,6 +1,7 @@
 package com.metallum.client.gi.transport;
 
 import com.metallum.Metallum;
+import com.metallum.client.gi.GiRuntimeStages;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 
@@ -14,9 +15,13 @@ public final class GiTransportRuntime {
     private static final boolean BENCHMARK_ACTIVE = isEnabled(
             System.getenv("METALLUM_BENCHMARK")
     );
-    private static final boolean REQUESTED = requested(
+    private static final boolean EXPLICITLY_REQUESTED = requested(
             isEnabled(System.getenv(TRANSPORT_ENV)), GiTransportDebugSettings.isEnabled()
     );
+    private static final boolean REQUESTED = EXPLICITLY_REQUESTED
+            || GiRuntimeStages.requiresG4Resources();
+    private static final boolean POPULATION_REQUESTED = EXPLICITLY_REQUESTED
+            || GiRuntimeStages.requiresG4Population();
 
     private static volatile boolean sourceReady;
     private static volatile boolean semanticSourceReady;
@@ -36,6 +41,11 @@ public final class GiTransportRuntime {
 
     public static boolean isRequested() {
         return REQUESTED;
+    }
+
+    /** True when the immutable textures must be populated rather than kept zero-ready. */
+    public static boolean isPopulationRequested() {
+        return POPULATION_REQUESTED;
     }
 
     /** Resets the per-device diagnostic handshake before any G3/G4 owner is admitted. */

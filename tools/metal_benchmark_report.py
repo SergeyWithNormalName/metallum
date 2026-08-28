@@ -232,6 +232,12 @@ G4_ALLOCATED_BYTES = 4_020_576
 G4_RESIDENT_BYTES = 1_966_080
 G4_INJECT_ACTIVE_FRAMES = 24
 G4_REPORT_FRAMES = 300
+G4_METADATA_MODE = "g4_transport"
+G5_RECEIVER_METADATA_MODE = "g5_vertex_receiver"
+GI_V3_METADATA_MODES = frozenset({
+    G4_METADATA_MODE,
+    G5_RECEIVER_METADATA_MODE,
+})
 G4_FINAL_COUNTERS = {
     "dirty_queued_total": G4_BRICK_COUNT,
     "dirty_completed_total": G4_BRICK_COUNT,
@@ -241,6 +247,21 @@ G4_FINAL_COUNTERS = {
     "full_volume_rebuilds": 1,
     "transport_dispatches": 1,
     "field_epoch": 1,
+}
+G5_ZERO_FIELD_COUNTERS = {
+    "valid_probes": 0,
+    "unknown_probes": 0,
+    "dirty_queued_total": 0,
+    "dirty_completed_total": 0,
+    "dirty_discarded_total": 0,
+    "dirty_pending": 0,
+    "injection_dispatches": 0,
+    "transport_dispatches": 0,
+    "source_epoch": 0,
+    "probe_epoch": 0,
+    "field_epoch": 0,
+    "stale_cell_rejects": 0,
+    "full_volume_rebuilds": 0,
 }
 VOXEL_UPLOAD_UPDATE_P95_BUDGET_MS = {
     "performance": 0.15,
@@ -546,9 +567,25 @@ def _parse_global_illumination(value: Any, line: int) -> dict[str, Any]:
     return result
 
 
+def _is_g5_zero_field(gi: dict[str, Any]) -> bool:
+    return all(gi.get(key) == expected for key, expected in G5_ZERO_FIELD_COUNTERS.items())
+
+
 def _validate_g4_window_phase(window: TimingWindow) -> None:
     gi = window.global_illumination
     if gi is None or gi["contract_version"] != 3:
+        return
+    if window.metadata.get("global_illumination_mode") == G5_RECEIVER_METADATA_MODE \
+            and _is_g5_zero_field(gi):
+        if window.phase not in ("startup", "warmup", "measure"):
+            raise ReportError(
+                f"line {window.line}: G5 receiver contract v3 has an invalid "
+                "benchmark phase"
+            )
+        if window.gi_inject_stage is not None or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G5 zero-ready field contains G4 dispatch timing"
+            )
         return
     if window.phase == "startup":
         if gi["transport_dispatches"] != 0 \
@@ -582,6 +619,82 @@ def _validate_g4_window_phase(window: TimingWindow) -> None:
         )
 
 
+def _validate_g5_zero_receiver_report(windows: Sequence[TimingWindow]) -> None:
+    phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
+    phase_windows: dict[str, list[TimingWindow]] = {
+        "startup": [], "warmup": [], "measure": [],
+    }
+    previous_phase = -1
+    runtime_identity: tuple[Any, ...] | None = None
+    identity_keys = (
+        "commit", "source_sha256", "artifact_sha256", "route", "route_sha256",
+        "fixture", "fixture_sha256", "settings_id", "settings_spec_sha256",
+        "settings_sha256",
+    )
+    for window in windows:
+        rank = phase_rank.get(window.phase or "", -1)
+        if rank < previous_phase:
+            raise ReportError(
+                f"line {window.line}: G5 receiver benchmark phases are out of order"
+            )
+        previous_phase = rank
+        expected_generation = {"startup": 0, "warmup": 1, "measure": 2}[window.phase]
+        expected_segment = -1 if window.phase == "startup" else 0
+        expected_scaler = "UNKNOWN" if window.phase == "startup" else "OFF"
+        if window.generation != expected_generation \
+                or window.segment != expected_segment \
+                or window.scaler != expected_scaler:
+            raise ReportError(
+                f"line {window.line}: G5 receiver benchmark phase identity is invalid"
+            )
+        if window.frames != G4_REPORT_FRAMES:
+            raise ReportError(
+                f"line {window.line}: G5 receiver timing window is not 300 frames"
+            )
+        gi = window.global_illumination
+        assert gi is not None
+        if not _is_g5_zero_field(gi) \
+                or window.gi_inject_stage is not None \
+                or window.gi_transport_stage is not None:
+            raise ReportError(
+                f"line {window.line}: G5 zero-ready field contains transport state"
+            )
+        identity = tuple(window.metadata.get(key) for key in identity_keys)
+        if runtime_identity is None:
+            runtime_identity = identity
+            commit, source, artifact, route, route_sha, fixture, fixture_sha, \
+                settings, settings_spec, settings_sha = identity
+            if not isinstance(commit, str) \
+                    or re.fullmatch(r"[0-9a-f]{12}", commit) is None \
+                    or not isinstance(source, str) \
+                    or re.fullmatch(r"[0-9a-f]{64}", source) is None \
+                    or not isinstance(artifact, str) \
+                    or re.fullmatch(r"[0-9a-f]{64}", artifact) is None \
+                    or route != "gi-g4-overworld-v1" \
+                    or route_sha != "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+                    or fixture != "hdrtest-static-v1" \
+                    or fixture_sha != "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5" \
+                    or settings != "native-hdr-fancy-v1" \
+                    or settings_spec != "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+                    or settings_sha != "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+                    or window.metadata.get("dirty_worktree") is not False:
+                raise ReportError(
+                    f"line {window.line}: G5 source/route/settings identity is invalid"
+                )
+        elif identity != runtime_identity \
+                or window.metadata.get("dirty_worktree") is not False:
+            raise ReportError(
+                f"line {window.line}: G5 source/route/settings identity drifted"
+            )
+        phase_windows[window.phase].append(window)
+
+    for phase in ("warmup", "measure"):
+        if len(phase_windows[phase]) != 2:
+            raise ReportError(
+                f"G5 receiver report must contain exactly two 300-frame {phase} windows"
+            )
+
+
 def _validate_g4_report(windows: Sequence[TimingWindow]) -> None:
     g4_windows = [
         window for window in windows
@@ -592,6 +705,19 @@ def _validate_g4_report(windows: Sequence[TimingWindow]) -> None:
         return
     if len(g4_windows) != len(windows):
         raise ReportError("G4 report mixes contract v3 with another GI contract")
+    metadata_modes = {
+        window.metadata.get("global_illumination_mode") for window in g4_windows
+    }
+    if len(metadata_modes) != 1:
+        raise ReportError("GI contract v3 report mixes G4 and G5 metadata modes")
+    if metadata_modes == {G5_RECEIVER_METADATA_MODE} \
+            and all(
+                window.global_illumination is not None
+                and _is_g5_zero_field(window.global_illumination)
+                for window in g4_windows
+            ):
+        _validate_g5_zero_receiver_report(g4_windows)
+        return
 
     phase_rank = {"startup": 0, "warmup": 1, "measure": 2}
     previous_phase = -1
@@ -1467,13 +1593,14 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
     if schema >= 6 and window.global_illumination is not None:
         contract_version = window.global_illumination["contract_version"]
         metadata_gi_mode = window.metadata.get("global_illumination_mode")
-        if contract_version == 3 and metadata_gi_mode != "g4_transport":
+        if contract_version == 3 and metadata_gi_mode not in GI_V3_METADATA_MODES:
             raise ReportError(
-                f"line {line}: G4 contract v3 requires metadata mode g4_transport"
+                f"line {line}: GI contract v3 requires metadata mode "
+                "g4_transport or g5_vertex_receiver"
             )
-        if metadata_gi_mode == "g4_transport" and contract_version != 3:
+        if metadata_gi_mode in GI_V3_METADATA_MODES and contract_version != 3:
             raise ReportError(
-                f"line {line}: metadata mode g4_transport requires G4 contract v3"
+                f"line {line}: metadata mode {metadata_gi_mode} requires GI contract v3"
             )
         if window.gi_transport_stage is not None and contract_version != 3:
             raise ReportError(
@@ -5476,6 +5603,93 @@ def self_test() -> None:
         active_summary = summarize(schema6_gi_active_v3, 600, 0, "OFF")
         assert active_summary.get("stages", {}).get(GI_TRANSPORT_STAGE) is None
 
+        # G5 reuses the G4 contract-v3 textures and telemetry instead of defining
+        # a second field schema. FIELD therefore retains the populated G4 shape,
+        # while CONTROL/CANDIDATE retain the same allocation with an exact
+        # zero-ready field and no injection/transport dispatch timing.
+        g5_field_payloads = copy.deepcopy(active_payloads)
+        for payload in g5_field_payloads:
+            payload["metadata"]["global_illumination_mode"] = G5_RECEIVER_METADATA_MODE
+        schema6_g5_field_v3 = root / "schema6-g5-field-v3.raw.jsonl"
+        schema6_g5_field_v3.write_text(
+            "\n".join(json.dumps(payload) for payload in g5_field_payloads) + "\n",
+            encoding="utf-8",
+        )
+        g5_field_summary = summarize(schema6_g5_field_v3, 600, 0, "OFF")
+        assert g5_field_summary["metadata"]["global_illumination_mode"] \
+            == G5_RECEIVER_METADATA_MODE
+        assert g5_field_summary["global_illumination"]["contract_version"] == 3
+        assert g5_field_summary["global_illumination"]["counters"]["valid_probes"][
+            "window_minimum"
+        ] > 0
+
+        g5_zero_payloads = copy.deepcopy(g5_field_payloads)
+        for payload in g5_zero_payloads:
+            payload["global_illumination"].update(G5_ZERO_FIELD_COUNTERS)
+            payload["stages"][GI_INJECT_STAGE] = None
+            payload["stages"][GI_TRANSPORT_STAGE] = None
+        schema6_g5_zero_v3 = root / "schema6-g5-zero-v3.raw.jsonl"
+        schema6_g5_zero_v3.write_text(
+            "\n".join(json.dumps(payload) for payload in g5_zero_payloads) + "\n",
+            encoding="utf-8",
+        )
+        g5_zero_summary = summarize(schema6_g5_zero_v3, 600, 0, "OFF")
+        assert g5_zero_summary["metadata"]["global_illumination_mode"] \
+            == G5_RECEIVER_METADATA_MODE
+        assert g5_zero_summary["global_illumination"]["contract_version"] == 3
+        assert all(
+            g5_zero_summary["global_illumination"]["counters"][key][
+                "window_maximum"
+            ] == expected
+            for key, expected in G5_ZERO_FIELD_COUNTERS.items()
+        )
+
+        def invalid_g5_report(
+            stem: str, mutation: Any, expected_error: str,
+        ) -> None:
+            payloads = copy.deepcopy(g5_zero_payloads)
+            mutation(payloads)
+            path = root / f"{stem}.raw.jsonl"
+            path.write_text(
+                "\n".join(json.dumps(payload) for payload in payloads) + "\n",
+                encoding="utf-8",
+            )
+            expect_error(lambda: load_report(path), expected_error)
+
+        invalid_g5_report(
+            "g5-obsolete-contract",
+            lambda payloads: payloads[0]["global_illumination"].update(
+                {"contract_version": 2}
+            ),
+            "metadata mode g5_vertex_receiver requires GI contract v3",
+        )
+        invalid_g5_report(
+            "g5-unknown-metadata-mode",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": "g5_receiver_typo"}
+            ),
+            "GI contract v3 requires metadata mode g4_transport or g5_vertex_receiver",
+        )
+        invalid_g5_report(
+            "g5-mixed-v3-modes",
+            lambda payloads: payloads[0]["metadata"].update(
+                {"global_illumination_mode": G4_METADATA_MODE}
+            ),
+            "GI contract v3 report mixes G4 and G5 metadata modes",
+        )
+        invalid_g5_report(
+            "g5-zero-dispatch-timing",
+            lambda payloads: payloads[3]["stages"].update({
+                GI_TRANSPORT_STAGE: copy.deepcopy(transport_timing),
+            }),
+            "G5 zero-ready field contains G4 dispatch timing",
+        )
+        invalid_g5_report(
+            "g5-short-warmup",
+            lambda payloads: payloads.pop(3),
+            "exactly two 300-frame warmup windows",
+        )
+
         def invalid_g4_report(
             stem: str, mutation: Any, expected_error: str,
         ) -> None:
@@ -5620,14 +5834,14 @@ def self_test() -> None:
             lambda payloads: payloads[0]["global_illumination"].update(
                 {"contract_version": 2}
             ),
-            "metadata mode g4_transport requires G4 contract v3",
+            "metadata mode g4_transport requires GI contract v3",
         )
         invalid_g4_report(
             "g4-v3-metadata-off",
             lambda payloads: payloads[0]["metadata"].update(
                 {"global_illumination_mode": "off"}
             ),
-            "G4 contract v3 requires metadata mode g4_transport",
+            "GI contract v3 requires metadata mode g4_transport or g5_vertex_receiver",
         )
 
         def invalid_gi_payload(

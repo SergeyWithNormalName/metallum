@@ -2,6 +2,8 @@ package com.metallum.mixin;
 
 import com.metallum.Metallum;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.sodium.SodiumShadowCompatibility;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
@@ -25,6 +27,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private static final String GI_G2_CAPTURE_ENV = "METALLUM_GI_G2_CAPTURE";
     private static final String GI_G3_INJECT_ENV = "METALLUM_GI_G3_INJECT";
     private static final String GI_G4_TRANSPORT_ENV = "METALLUM_GI_G4_TRANSPORT";
+    private static final String GI_G5_RECEIVER_ENV = "METALLUM_GI_G5_RECEIVER";
     private static final String MINECRAFT_MOD_ID = "minecraft";
     private static final String MINECRAFT_EXACT_VERSION = "26.2";
     private static final String SODIUM_MOD_ID = "sodium";
@@ -83,6 +86,15 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             "com.metallum.mixin.gi.GiSemanticTaskMixin",
             "com.metallum.mixin.gi.GiSemanticUploadMixin"
     );
+    private static final Set<String> COMPACT_POSITION_CARRIER_MIXINS = Set.of(
+            "com.metallum.mixin.sodium.BSPWorkspaceG5CarrierMixin",
+            "com.metallum.mixin.sodium.BuiltSectionInfoBuilderG5CarrierMixin",
+            "com.metallum.mixin.sodium.BuiltSectionInfoG5CarrierMixin",
+            "com.metallum.mixin.sodium.ChunkBuildBuffersG5CarrierMixin",
+            "com.metallum.mixin.sodium.InnerPartitionBSPNodeSemanticMixin",
+            "com.metallum.mixin.sodium.RenderRegionManagerG5CarrierMixin",
+            "com.metallum.mixin.sodium.UpdatedQuadsListG5CarrierMixin"
+    );
     private static final String PREFERRED_GRAPHICS_BACKEND_OPTION = "preferredGraphicsBackend";
     private static final String DEFAULT_GRAPHICS_BACKEND = "\"default\"";
 
@@ -94,6 +106,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean sodiumRelightFastPathEnabled;
     private boolean sodiumShadowCompatible;
     private boolean giG2CaptureEnabled;
+    private boolean compactPositionCarrierCompatible;
 
     @Override
     public void onLoad(String mixinPackage) {
@@ -105,6 +118,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.sodiumShadowCompatible = SodiumShadowCompatibility.supportsInstalledRenderer();
         boolean exactRelightVersions = hasExactRelightOracleVersions();
         boolean exactGiCaptureVersions = hasExactGiCaptureVersions();
+        this.compactPositionCarrierCompatible = exactGiCaptureVersions
+                && (isEnabled(System.getenv(GI_G5_RECEIVER_ENV))
+                || VertexReflectionExperiment.isLayoutEnabled());
         boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
         this.sodiumRelightFastPathEnabled = !relightOracleRequested
                 && "1".equals(System.getenv(SODIUM_RELIGHT_FAST_PATH_ENV))
@@ -117,6 +133,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         boolean giG2CaptureRequested = isEnabled(System.getenv(GI_G2_CAPTURE_ENV))
                 || isEnabled(System.getenv(GI_G3_INJECT_ENV))
                 || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV))
+                || isEnabled(System.getenv(GI_G5_RECEIVER_ENV))
                 || GiTransportDebugSettings.isEnabled();
         this.giG2CaptureEnabled = giG2CaptureRequested && exactGiCaptureVersions;
         Metallum.LOGGER.info(
@@ -159,6 +176,9 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         }
         if (SODIUM_SHADOW_MIXINS.contains(mixinClassName)) {
             return this.sodiumShadowCompatible && FabricLoader.getInstance().isModLoaded("sodium");
+        }
+        if (COMPACT_POSITION_CARRIER_MIXINS.contains(mixinClassName)) {
+            return this.compactPositionCarrierCompatible && this.isDefaultGraphicsApi;
         }
         if (mixinClassName.contains(".mixin.sodium.")) {
             return FabricLoader.getInstance().isModLoaded("sodium");
@@ -230,10 +250,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
 
     /** G2 targets Minecraft, Sodium and MixinExtras; Fabric Renderer API is not in its chain. */
     private static boolean hasExactGiCaptureVersions() {
-        FabricLoader loader = FabricLoader.getInstance();
-        return hasExactVersion(loader, MINECRAFT_MOD_ID, MINECRAFT_EXACT_VERSION)
-                && hasExactVersion(loader, SODIUM_MOD_ID, SODIUM_EXACT_VERSION)
-                && hasExactVersion(loader, MIXIN_EXTRAS_MOD_ID, MIXIN_EXTRAS_EXACT_VERSION);
+        return GiReceiverCompatibility.supportsInstalledCompactPositionCarrier();
     }
 
     private static boolean hasExactVersion(

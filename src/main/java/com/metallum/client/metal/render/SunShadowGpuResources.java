@@ -507,7 +507,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 this.paramsRing.nativeHandle(),
                 paramsOffset,
                 EnvironmentShadowBindingAbi.PARAMS_SLOT,
-                materialEnvironmentStageMask(VertexReflectionExperiment.isRuntimeEnabled())
+                materialEnvironmentStageMask(VertexReflectionExperiment.isLayoutEnabled())
         );
         int[] slots = EnvironmentShadowBindingAbi.shadowTextureSlots();
         for (int cascade = 0; cascade < SunShadowLayout.MAX_CASCADES; cascade++) {

@@ -1,6 +1,7 @@
 package com.metallum.client.metal.render;
 
 import com.metallum.Metallum;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.lighting.reflection.CloudReflectionConfig;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.renderer.PlanarReflectionLayout;
@@ -53,7 +54,7 @@ public final class PlanarReflectionConfig {
 
     /** Planar capture and the voxel receiver are mutually exclusive water architectures. */
     public static boolean isRuntimeEnabled() {
-        return runtimeEnabled(isEnabled(), VertexReflectionExperiment.isRuntimeEnabled());
+        return captureMode() == CaptureMode.FULL_PLANAR;
     }
 
     static boolean runtimeEnabled(final boolean planarEnabled, final boolean voxelEnabled) {
@@ -70,8 +71,9 @@ public final class PlanarReflectionConfig {
     public static CaptureMode captureMode() {
         return captureMode(
                 isEnabled(),
-                VertexReflectionExperiment.isRuntimeEnabled(),
-                CloudReflectionConfig.isEnabled()
+                VertexReflectionExperiment.isLayoutEnabled(),
+                CloudReflectionConfig.isEnabled(),
+                GiReceiverRuntime.isRequested()
         );
     }
 
@@ -84,8 +86,23 @@ public final class PlanarReflectionConfig {
             final boolean voxelEnabled,
             final boolean cloudReflectionsEnabled
     ) {
+        return captureMode(planarEnabled, voxelEnabled, cloudReflectionsEnabled, false);
+    }
+
+    static CaptureMode captureMode(
+            final boolean planarEnabled,
+            final boolean voxelEnabled,
+            final boolean cloudReflectionsEnabled,
+            final boolean giReceiverRequested
+    ) {
         if (voxelEnabled) {
             return cloudReflectionsEnabled ? CaptureMode.CLOUDS_ONLY : CaptureMode.DISABLED;
+        }
+        // G5's cost and shader contract cover one main-view terrain raster only.  Keep a
+        // live-toggled planar option dormant for the lifetime of a G5 process so reflected
+        // terrain can never add an unmeasured second set of vertex field reads.
+        if (giReceiverRequested) {
+            return CaptureMode.DISABLED;
         }
         return planarEnabled ? CaptureMode.FULL_PLANAR : CaptureMode.DISABLED;
     }

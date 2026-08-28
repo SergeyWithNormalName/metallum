@@ -2,16 +2,21 @@ package com.metallum.client.lighting;
 
 import com.metallum.client.gi.semantic.GiSemanticMaterial;
 import com.metallum.client.gi.semantic.GiSemanticPacking;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
 import com.metallum.client.hdr.HdrEmissionVertex;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
+import net.caffeinemc.mods.sodium.api.memory.MemoryIntrinsics;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkVertexEncoder;
+import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.SharedConstants;
 import net.minecraft.world.level.block.Blocks;
+import org.lwjgl.system.MemoryUtil;
 
 /** Deterministic numerical and compact-ABI checks for the L8 surface material policy. */
 public final class SurfaceMaterialPolicyTests {
@@ -202,18 +207,15 @@ public final class SurfaceMaterialPolicyTests {
                         && VoxelReflectionFace.forNormal(0.1F, 0.2F, 0.8F)
                         == GiSemanticPacking.faceForNormal(0.1F, 0.2F, 0.8F),
                 "reflection receiver dominant-face selection must match G2 semantics");
-        int light = 0x00F000A0;
-        int encoded = SodiumHdrSemantic.packReflectionFaceIntoLight(
-                light, GiSemanticPacking.FACE_NEG_Z);
-        require((encoded & 0xff) == 0xa5 && (encoded & ~0xff) == (light & ~0xff),
-                "G2 -Z face did not enter the ordinary block-light texel");
-        int maxLight = SodiumHdrSemantic.packReflectionFaceIntoLight(
-                0x00F000F0, GiSemanticPacking.FACE_NEG_Z);
-        require((maxLight & 0xff) == 0xeb,
-                "max block light did not use the clamp-safe lower-half face encoding");
-        require(SodiumHdrSemantic.packReflectionFaceIntoLight(
-                        light | 3, GiSemanticPacking.FACE_NEG_Z) == (light | 3),
-                "non-canonical modded block-light bits were overwritten by the face carrier");
+        require(VoxelReflectionFace.forAxisAlignedUnitNormal(-1.0F, 0.0F, 0.0F)
+                        == VoxelReflectionFace.NEG_X
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.0F, 1.0F, 0.0F)
+                        == VoxelReflectionFace.POS_Y
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.0F, 0.0F, 1.0F)
+                        == VoxelReflectionFace.POS_Z
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.8F, 0.0F, 0.0F) == 0
+                        && VoxelReflectionFace.forAxisAlignedUnitNormal(0.7071F, 0.7071F, 0.0F) == 0,
+                "G5 accepted a diagonal/crossed-plant or non-unit normal as an exact axis face");
         require(SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_X) == 1
                         && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_POS_X) == 2
                         && SodiumHdrSemantic.reflectionFaceCode(GiSemanticPacking.FACE_NEG_Y) == 3
@@ -224,6 +226,8 @@ public final class SurfaceMaterialPolicyTests {
         String runtimeKey = VertexReflectionExperiment.RUNTIME_PROPERTY;
         String previousRuntime = System.getProperty(runtimeKey);
         try {
+            GiReceiverCompatibility.setTestOverride(true);
+            CompactPositionCarrierSafety.resetForTests();
             VertexReflectionExperiment.setOverride(true);
             System.setProperty(runtimeKey, "true");
             int[] faces = {
@@ -232,7 +236,9 @@ public final class SurfaceMaterialPolicyTests {
                     VoxelReflectionFace.NEG_Z, VoxelReflectionFace.POS_Z
             };
             for (int face : faces) {
-                ChunkVertexEncoder.Vertex[] glossyQuad = testQuad(0xff80a0c0, 0x00f000a3);
+                int authoredColor = 0x9180a0c0;
+                int authoredLight = 0x00e500a1;
+                ChunkVertexEncoder.Vertex[] glossyQuad = testQuad(authoredColor, authoredLight);
                 SodiumHdrSemantic.tagQuad(
                         glossyQuad,
                         0,
@@ -240,43 +246,70 @@ public final class SurfaceMaterialPolicyTests {
                         SodiumHdrSemantic.SURFACE_CLASS_METAL,
                         false,
                         0,
+                        face,
                         face
                 );
                 int packedMaterial = SodiumHdrSemantic.packMaterialBits(0, glossyQuad);
                 require((packedMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2
                                 && ((packedMaterial >> 7) & 1) == 1,
                         "iron quad lost its compact metal material tag");
-                int expectedAlpha = 0xf8 - SodiumHdrSemantic.reflectionFaceCode(face);
+                int faceCode = SodiumHdrSemantic.reflectionFaceCode(face);
+                require(SodiumHdrSemantic.compactPositionCarrierCode(glossyQuad) == faceCode,
+                        "L8 face did not enter the compact position sideband");
                 for (ChunkVertexEncoder.Vertex vertex : glossyQuad) {
-                    require((vertex.color >>> 24) == expectedAlpha,
-                            "opaque glossy receiver lost its relight-stable face carrier");
-                    require((vertex.light & 0xff) == 0xa3,
-                            "opaque glossy receiver modified a conflicting block-light nibble");
-                    vertex.light = (vertex.light & ~0xff) | 0x7d;
-                    require((vertex.color >>> 24) == expectedAlpha,
-                            "light-only relight erased the glossy receiver face carrier");
+                    require(vertex.color == authoredColor && vertex.light == authoredLight,
+                            "position carrier changed authored color or foreign light bytes");
                 }
             }
 
-            ChunkVertexEncoder.Vertex[] translucentConflict = testQuad(0x8080a0c0, 0x00f000a3);
+            ChunkVertexEncoder.Vertex[] diagonalReflection = testQuad(
+                    0x7f80a0c0, 0x00ff00ff
+            );
             SodiumHdrSemantic.tagQuad(
-                    translucentConflict,
+                    diagonalReflection,
                     0,
                     false,
                     SodiumHdrSemantic.SURFACE_CLASS_METAL,
                     false,
                     0,
-                    VoxelReflectionFace.POS_Z
+                    VoxelReflectionFace.POS_X,
+                    0
             );
-            int conflictMaterial = SodiumHdrSemantic.packMaterialBits(0, translucentConflict);
-            require((conflictMaterial & SodiumHdrShaderPatcher.SODIUM_MATERIAL_BASE_MASK) == 2
-                            && ((conflictMaterial >> 7) & 1) == 1,
-                    "face-carrier conflict incorrectly downgraded glossy material to ordinary terrain");
-            for (ChunkVertexEncoder.Vertex vertex : translucentConflict) {
-                require(vertex.color == 0x8080a0c0 && (vertex.light & 0xff) == 0xa3,
-                        "non-opaque carrier conflict changed color alpha or modded light data");
+            SodiumHdrSemantic.packMaterialBits(0, diagonalReflection);
+            require(SodiumHdrSemantic.compactPositionCarrierCode(diagonalReflection)
+                            == SodiumHdrSemantic.reflectionFaceCode(VoxelReflectionFace.POS_X),
+                    "dominant-only L8 face lost its non-G5 sideband class");
+            for (ChunkVertexEncoder.Vertex vertex : diagonalReflection) {
+                require(vertex.color == 0x7f80a0c0 && vertex.light == 0x00ff00ff,
+                        "dominant-only position carrier changed authored vertex attributes");
+            }
+
+            ChunkVertexEncoder.Vertex[] untagged = testQuad(0xff80a0c0, 0x00f000a0);
+            int untaggedMaterial = SodiumHdrSemantic.packMaterialBits(0, untagged);
+            long pointer = MemoryUtil.nmemCalloc(
+                    1,
+                    SodiumHdrSemantic.COMPACT_VERTEX_STRIDE
+                            * SodiumHdrSemantic.COMPACT_QUAD_VERTEX_COUNT
+            );
+            try {
+                long end = new CompactChunkVertex().getEncoder().write(
+                        pointer, untaggedMaterial, untagged, 0
+                );
+                MemoryIntrinsics.putInt(
+                        pointer,
+                        MemoryIntrinsics.getInt(pointer) | 0x4000_0000
+                );
+                require(!SodiumHdrSemantic.writeCompactPositionCarrier(pointer, end, 0)
+                                && !CompactPositionCarrierSafety.isSafe()
+                                && VertexReflectionExperiment.isLayoutEnabled()
+                                && !VertexReflectionExperiment.isRuntimeEnabled(),
+                        "L8-only pre-owned code 1 changed layout or remained contributive");
+            } finally {
+                MemoryUtil.nmemFree(pointer);
             }
         } finally {
+            CompactPositionCarrierSafety.resetForTests();
+            GiReceiverCompatibility.setTestOverride(null);
             VertexReflectionExperiment.setOverride(null);
             if (previousRuntime == null) {
                 System.clearProperty(runtimeKey);

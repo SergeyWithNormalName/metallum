@@ -124,13 +124,13 @@ public final class MetalRuntimeTests {
     }
 
     private static void testReflectionVertexParamsBindingMask() {
-        require(LocalVoxelShadowGpuResources.reflectionParamsStageMask(false)
+        require(LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(false)
                         == MetalCompiledRenderPipeline.STAGE_FRAGMENT,
                 "ordinary L6 params must remain fragment-only");
-        require(LocalVoxelShadowGpuResources.reflectionParamsStageMask(true)
+        require(LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(true)
                         == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
                         | MetalCompiledRenderPipeline.STAGE_VERTEX),
-                "voxel reflection must bind current camera params to both fragment and vertex stages");
+                "vertex field consumers must bind current camera params to both stages");
     }
 
     private static void testLocalShadowResidentAtlasContracts() {

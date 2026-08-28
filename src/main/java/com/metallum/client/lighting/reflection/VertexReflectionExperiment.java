@@ -1,5 +1,8 @@
 package com.metallum.client.lighting.reflection;
 
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+
 /**
  * Feasibility experiment configuration and constants for vertex-stage rough reflection sampling.
  *
@@ -22,6 +25,7 @@ public final class VertexReflectionExperiment {
     public static final int PARAMS_BINDING_SLOT = VertexReflectionBindingAbi.PARAMS_BUFFER_SLOT;
 
     private static volatile Boolean activeOverride = null;
+    private static volatile Boolean layoutEnabled;
 
     private VertexReflectionExperiment() {
     }
@@ -41,12 +45,35 @@ public final class VertexReflectionExperiment {
         return VertexReflectionExperimentConfig.isEnabled();
     }
 
+    /**
+     * Restart-stable shader/resource layout gate. A worker-observed carrier conflict must never
+     * remove declared Metal bindings from an already selected pipeline.
+     */
+    public static boolean isLayoutEnabled() {
+        Boolean current = layoutEnabled;
+        if (current != null) {
+            return current;
+        }
+        synchronized (VertexReflectionExperiment.class) {
+            if (layoutEnabled == null) {
+                layoutEnabled = GiReceiverCompatibility.supportsInstalledCompactPositionCarrier()
+                        && isActive()
+                        && (Boolean.getBoolean(RUNTIME_PROPERTY)
+                        || VertexReflectionExperimentConfig.isEnabled());
+            }
+            return layoutEnabled;
+        }
+    }
+
+    /** Dynamic contribution gate; false keeps the ON layout bound to zero-ready parameters. */
     public static boolean isRuntimeEnabled() {
-        return isActive() && (Boolean.getBoolean(RUNTIME_PROPERTY) || VertexReflectionExperimentConfig.isEnabled());
+        return isLayoutEnabled() && CompactPositionCarrierSafety.isSafe();
     }
 
     public static void setOverride(final Boolean active) {
         activeOverride = active;
+        // Unit tests run without a renderer-generation restart. Production never calls this hook.
+        layoutEnabled = null;
     }
 
     public static boolean isExperimentSampler(final String name) {

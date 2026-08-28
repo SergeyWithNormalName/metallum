@@ -7,6 +7,12 @@ import com.metallum.client.benchmark.L6DynamicShadowBenchmarkTelemetry;
 import com.metallum.client.gi.semantic.GiSemanticController;
 import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.GiReceiverGpuResources;
+import com.metallum.client.gi.receiver.GiReceiverLayout;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.gi.receiver.GiReceiverShaderPatcher;
 import com.metallum.client.gi.source.GiDirectDirtyQueue;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
 import com.metallum.client.gi.source.GiDirectSourceGpuResources;
@@ -28,6 +34,7 @@ import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.hdr.MetallumMaterialState;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.hdr.SceneLinearShaderPatcher;
+import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.hdr.SodiumHdrShaderPatcher;
 import com.metallum.client.hdr.VanillaHdrShaderPatcher;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
@@ -134,6 +141,8 @@ public final class MetalDevice implements GpuDeviceBackend {
      * reactive ring on the render thread at every resolution transition.
      */
     private static final int TEMPORAL_DIAGNOSTIC_CACHE_CAPACITY = 2;
+    private static final long GI_G4_ACCOUNTED_BYTES = 22_637_928L;
+    private static final long GI_TOTAL_BUDGET_BYTES = 25_165_824L;
 
     private record RendererGenerationKey(
             int renderWidth,
@@ -348,6 +357,13 @@ public final class MetalDevice implements GpuDeviceBackend {
     private boolean giTransportFailureLogged;
     private boolean giTransportDisabled;
     private boolean giTransportAdmissionLogged;
+    @Nullable
+    private GiReceiverGpuResources giReceiverResources;
+    private boolean giReceiverAdmissionLogged;
+    private long giReceiverBindingProofSubmitIndex = Long.MIN_VALUE;
+    private long giReceiverBindingProofEncoderAddress;
+    private int giReceiverBindingProofStatus = GiReceiverLayout.STATUS_INVALID;
+    private boolean giReceiverBindingProofCarrierSafe;
     private boolean advancedLightingFrameReady;
     private long advancedLightingFrameSubmitIndex = Long.MIN_VALUE;
     private boolean advancedLightingTransientFallbackLogged;
@@ -495,6 +511,25 @@ public final class MetalDevice implements GpuDeviceBackend {
             }
         }
         this.commandEncoder = new MetalCommandEncoder(this);
+        GiReceiverRuntime.resetDeviceState();
+        GiReceiverRuntime.admission().beginCarrierWriteCensus(
+                SodiumHdrSemantic.g5CarrierWriteCount()
+        );
+        if (GiReceiverRuntime.isConfigurationInvalid()) {
+            Metallum.LOGGER.warn(
+                    "G5 receiver request is invalid: {}",
+                    GiReceiverRuntime.admission().invalidReason()
+            );
+        } else if (GiReceiverRuntime.isRequested()) {
+            if (!GiReceiverRuntime.admitCompactPositionCarrier(
+                    GiReceiverCompatibility.supportsInstalledCompactPositionCarrier()
+            )) {
+                throw new IllegalStateException(
+                        "G5 receiver rejected the installed Sodium compact-position layout: "
+                                + GiReceiverRuntime.admission().invalidReason()
+                );
+            }
+        }
         GiTransportRuntime.resetDeviceState();
         boolean giFieldRequested = GiDirectSourceRuntime.isRequested()
                 || GiTransportRuntime.isRequested();
@@ -550,6 +585,45 @@ public final class MetalDevice implements GpuDeviceBackend {
                             exception
                     );
                 }
+            }
+        }
+        if (GiReceiverRuntime.isRequested()) {
+            if (!AdvancedLightingRuntime.isRequested()) {
+                GiReceiverRuntime.admission().reportInvalid(
+                        "G5 requires the Advanced lighting contract"
+                );
+                throw new IllegalStateException(
+                        "G5 receiver requested without the Advanced lighting contract"
+                );
+            }
+            if (this.giTransportCoordinator == null) {
+                GiReceiverRuntime.admission().reportInvalid(
+                        "G4 resource owner failed admission"
+                );
+                throw new IllegalStateException(
+                        "G5 receiver requested but its private G4 resource owner is unavailable"
+                );
+            }
+            try {
+                GiReceiverGpuResources.validateNativeAbi();
+                this.giReceiverResources = GiReceiverGpuResources.create(
+                        this.giTransportCoordinator.readToken(),
+                        handle -> this.commandEncoder.queueForDestroy(
+                                () -> MetalNativeBridge.metallum_gi_receiver_release_context_v1(handle)
+                        )
+                );
+                if (this.giReceiverResources == null) {
+                    throw new IllegalStateException("native G5 context creation returned null");
+                }
+                GiReceiverRuntime.admission().reportNativeReady();
+            } catch (RuntimeException exception) {
+                GiReceiverRuntime.admission().reportInvalid(
+                        "G5 native resource admission failed"
+                );
+                throw new IllegalStateException(
+                        "G5 receiver ABI/resource admission failed",
+                        exception
+                );
             }
         }
         this.cloudShadowResources = new CloudShadowGpuResources(this);
@@ -826,6 +900,10 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.localVoxelShadowResources.close();
             this.localVoxelShadowResources = null;
         }
+        if (this.giReceiverResources != null) {
+            this.giReceiverResources.close();
+            this.giReceiverResources = null;
+        }
         if (this.giTransportCoordinator != null) {
             this.giTransportCoordinator.close();
             this.giTransportCoordinator = null;
@@ -834,6 +912,7 @@ public final class MetalDevice implements GpuDeviceBackend {
             this.giDirectSourceCoordinator.close();
             this.giDirectSourceCoordinator = null;
         }
+        GiReceiverRuntime.resetDeviceState();
         GiTransportRuntime.resetDeviceState();
         this.commandEncoder.close();
         this.entityVelocityPackets.close();
@@ -2052,9 +2131,11 @@ public final class MetalDevice implements GpuDeviceBackend {
                     }
                 }
                 GiSemanticTransportFieldView transportField = this.giTransportCoordinator == null
+                        || !GiTransportRuntime.isPopulationRequested()
                         ? null : GiSemanticController.global().activeTransportField();
                 GiTransportRuntime.reportSemanticSourceReady(transportField != null);
-                if (this.giTransportCoordinator != null && !this.giTransportDisabled) {
+                if (GiTransportRuntime.isPopulationRequested()
+                        && this.giTransportCoordinator != null && !this.giTransportDisabled) {
                     try {
                         boolean accepted = this.giTransportCoordinator.hasAcceptedEpoch();
                         int transportStatus;
@@ -2219,7 +2300,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 }
                 // Give a completed G3 generation to G4 before admitting a new environment
                 // epoch. Once native accepts G4, G3 is latched for the fixture lifetime.
-                if (this.giDirectSourceCoordinator != null
+                if (GiTransportRuntime.isPopulationRequested()
+                        && this.giDirectSourceCoordinator != null
                         && (this.giTransportCoordinator == null
                         || !this.giTransportCoordinator.hasAcceptedEpoch())) {
                     try {
@@ -2964,7 +3046,10 @@ public final class MetalDevice implements GpuDeviceBackend {
         return new SemanticAttachment(pair.write().nativeHandle(), clear);
     }
 
-    void bindAdvancedLighting(final MTLRenderCommandEncoder encoder) {
+    long bindAdvancedLighting(
+            final MTLRenderCommandEncoder encoder,
+            final boolean g5TerrainPipeline
+    ) {
         if (!this.isAdvancedLightingWorldPassActive() || this.advancedLightingResources == null) {
             throw new IllegalStateException("Advanced lighting bindings are not ready for this frame");
         }
@@ -3020,8 +3105,179 @@ public final class MetalDevice implements GpuDeviceBackend {
                 inFlightSlot,
                 this.commandEncoder.currentSubmitIndex()
         );
+        this.bindGiReceiver(encoder, g5TerrainPipeline);
         this.bindFrozenReflectionIfReady(encoder);
         PlanarReflectionRenderer.bind(encoder);
+        return CompactPositionCarrierSafety.revision();
+    }
+
+    /**
+     * Rebinds only the two compact-position consumers after the terminal shared safety revision
+     * changes. The caller holds {@link CompactPositionCarrierSafety}'s draw-side gate, so this
+     * revision remains valid through the immediately following native draw.
+     */
+    long refreshCompactPositionCarrierBindings(
+            final MTLRenderCommandEncoder encoder,
+            final boolean g5TerrainPipeline
+    ) {
+        this.bindGiReceiver(encoder, g5TerrainPipeline);
+        this.bindFrozenReflectionIfReady(encoder);
+        return CompactPositionCarrierSafety.revision();
+    }
+
+    /**
+     * Binds the vertex-only G5 view of G4. CONTROL and CANDIDATE deliberately use the
+     * same textures, sampler and params allocation; only the immutable params select whether
+     * the four vertex reads execute. No allocation or CPU readback occurs on this draw path.
+     */
+    private void bindGiReceiver(
+            final MTLRenderCommandEncoder encoder,
+            final boolean verifyTerrainBinding
+    ) {
+        if (!GiReceiverRuntime.isRequested()) {
+            return;
+        }
+        GiReceiverGpuResources resources = this.giReceiverResources;
+        if (resources == null) {
+            GiReceiverRuntime.admission().reportInvalid("G5 resources disappeared");
+            throw new IllegalStateException("G5 vertex bindings are unavailable");
+        }
+        boolean carrierSafe = CompactPositionCarrierSafety.isSafe()
+                && GiReceiverRuntime.admission().carrierSafe();
+        int status = resources.bindVertex(encoder.handle(), GiReceiverRuntime.arm(), carrierSafe);
+        if (status != GiReceiverLayout.STATUS_OK
+                && status != GiReceiverLayout.STATUS_ZERO_READY) {
+            GiReceiverRuntime.admission().reportInvalid(
+                    "native G5 bind status " + status
+            );
+            throw new IllegalStateException("Native G5 vertex binding failed with status " + status);
+        }
+        if (verifyTerrainBinding && !this.giReceiverAdmissionLogged) {
+            this.giReceiverBindingProofSubmitIndex = this.commandEncoder.currentSubmitIndex();
+            this.giReceiverBindingProofEncoderAddress = encoder.handle().address();
+            this.giReceiverBindingProofStatus = status;
+            this.giReceiverBindingProofCarrierSafe = carrierSafe;
+        }
+    }
+
+    /**
+     * Qualifies G5 only after the pinned Sodium private indirect draw was actually encoded with
+     * the same encoder and submit for which native installed all five receiver bindings.
+     */
+    void reportG5TerrainDraw(
+            final MTLRenderCommandEncoder encoder,
+            final long drawnG5CarrierSlices
+    ) {
+        if (!GiReceiverRuntime.isRequested()) {
+            return;
+        }
+        GiReceiverRuntime.Admission admission = GiReceiverRuntime.admission();
+        if (admission.state() == GiReceiverRuntime.AdmissionState.INVALID) {
+            return;
+        }
+        if (drawnG5CarrierSlices <= 0L) {
+            return;
+        }
+        admission.reportTerrainDrawEncoded(drawnG5CarrierSlices);
+        if (this.giReceiverAdmissionLogged) {
+            return;
+        }
+        long submitIndex = this.commandEncoder.currentSubmitIndex();
+        boolean proofMatches = this.giReceiverBindingProofSubmitIndex == submitIndex
+                && this.giReceiverBindingProofEncoderAddress == encoder.handle().address();
+        if (!proofMatches) {
+            // FIELD may legitimately draw the bound zero packet while the frozen G4 owner is
+            // still becoming ready. Such a draw cannot qualify admission; a later encoder must
+            // provide the exact ready binding proof before the warmup receipt can be emitted.
+            return;
+        }
+        boolean receiptWindow = !GiTransportRuntime.isBenchmarkActive()
+                || GiTransportRuntime.isBenchmarkWarmup();
+        if (!receiptWindow) {
+            return;
+        }
+        boolean fieldArm = GiReceiverRuntime.arm()
+                == com.metallum.client.gi.GiRuntimeStages.ReceiverArm.FIELD;
+        boolean admissionReady = admission.bindingAllowed()
+                && this.giReceiverBindingProofCarrierSafe
+                && CompactPositionCarrierSafety.isSafe()
+                && (!fieldArm
+                || this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK);
+        if (!admissionReady) {
+            return;
+        }
+        long g5CarrierWrites = admission.successfulCarrierWrites(
+                SodiumHdrSemantic.g5CarrierWriteCount()
+        );
+        if (g5CarrierWrites <= 0L) {
+            return;
+        }
+        GiReceiverGpuResources resources = this.giReceiverResources;
+        GiReceiverGpuResources.Stats stats = resources == null ? null : resources.stats();
+        if (stats == null) {
+            admission.reportInvalid("G5 admission telemetry disappeared");
+            throw new IllegalStateException("G5 admission telemetry is unavailable");
+        }
+        int expectedArm = GiReceiverLayout.nativeArm(GiReceiverRuntime.arm());
+        boolean expectedCounter = this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK
+                ? stats.fieldBindings() > 0L
+                : stats.zeroBindings() > 0L;
+        if (stats.lastArm() != expectedArm
+                || stats.carrierSafe() != this.giReceiverBindingProofCarrierSafe
+                || stats.bindCount() == 0L
+                || !expectedCounter
+                || (this.giReceiverBindingProofStatus == GiReceiverLayout.STATUS_OK
+                && !stats.ready())) {
+            admission.reportInvalid("native G5 arm/carrier telemetry differs");
+            throw new IllegalStateException(
+                    "G5 native admission differs: arm=" + stats.lastArm()
+                            + ", carrier=" + stats.carrierSafe()
+                            + ", binds=" + stats.bindCount()
+                            + ", zero=" + stats.zeroBindings()
+                            + ", field=" + stats.fieldBindings()
+            );
+        }
+        long combinedBytes;
+        try {
+            combinedBytes = Math.addExact(GI_G4_ACCOUNTED_BYTES, stats.allocatedBytes());
+        } catch (ArithmeticException overflow) {
+            combinedBytes = Long.MAX_VALUE;
+        }
+        if (stats.sharedTextureBytes() != 0L || combinedBytes > GI_TOTAL_BUDGET_BYTES) {
+            admission.reportInvalid("G5 memory accounting exceeds the GI cap");
+            throw new IllegalStateException(
+                    "G5 memory census failed: shared=" + stats.sharedTextureBytes()
+                            + ", combined=" + combinedBytes
+            );
+        }
+        this.giReceiverAdmissionLogged = true;
+        admission.reportBenchmarkReceiptEmitted();
+        long totalDrawnG5CarrierSlices = admission.drawnG5CarrierSlices();
+        String arm = GiReceiverRuntime.arm().name().toLowerCase(Locale.ROOT);
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G5_ADMISSION "
+                        + "requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "
+                        + "state=READY arm={} field={} phase={} presented_frame={} "
+                        + "resources={} bindings={} allocated_bytes={} g4_accounted_bytes={} "
+                        + "combined_accounted_bytes={} cap_bytes={} shared_texture_bytes={} "
+                        + "carrier_skips={} g5_carrier_writes={} drawn_g5_carrier_slices={} "
+                        + "status=PASS vertex_only=true "
+                        + "fragment_texture3d=0 sidecar_bytes=0",
+                arm,
+                fieldArm ? "g4" : "zero",
+                GiTransportRuntime.isBenchmarkWarmup() ? "WARMUP" : "DIAGNOSTIC",
+                submitIndex,
+                stats.resourceCount(),
+                stats.bindingCount(),
+                stats.allocatedBytes(),
+                GI_G4_ACCOUNTED_BYTES,
+                combinedBytes,
+                GI_TOTAL_BUDGET_BYTES,
+                stats.sharedTextureBytes(),
+                admission.carrierSkipCount(),
+                g5CarrierWrites,
+                totalDrawnG5CarrierSlices
+        );
     }
 
     /**
@@ -3030,9 +3286,10 @@ public final class MetalDevice implements GpuDeviceBackend {
      * publishes readiness from its command-buffer completion handler.
      */
     private void bindFrozenReflectionIfReady(final MTLRenderCommandEncoder encoder) {
-        if (!VertexReflectionExperiment.isRuntimeEnabled()) {
+        if (!VertexReflectionExperiment.isLayoutEnabled()) {
             return;
         }
+        boolean contributionAllowed = VertexReflectionExperiment.isRuntimeEnabled();
         RealWorldReflectionField field = RealWorldReflectionField.get();
         // The reflection define changes the vertex function's Metal resource layout immediately,
         // while a Sodium snapshot arrives later on a worker thread.  Materialize a native context
@@ -3049,7 +3306,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 throw new IllegalStateException("Vertex reflection fallback resources are unavailable");
             }
         }
-        FrozenReflectionFieldController.SourceSnapshot snapshot = this.pendingFrozenReflectionResources == null
+        FrozenReflectionFieldController.SourceSnapshot snapshot = contributionAllowed
+                && this.pendingFrozenReflectionResources == null
                 ? field.claimReadySnapshotForGpuUpload()
                 : null;
         if (snapshot != null) {
@@ -3074,7 +3332,8 @@ public final class MetalDevice implements GpuDeviceBackend {
                 this.pendingFrozenReflectionFieldGeneration = snapshot.fieldGeneration();
             }
         }
-        RadianceGpuResources pending = this.pendingFrozenReflectionResources;
+        RadianceGpuResources pending = contributionAllowed
+                ? this.pendingFrozenReflectionResources : null;
         if (pending != null) {
             switch (pending.buildStatus()) {
                 case READY -> {
@@ -3099,7 +3358,7 @@ public final class MetalDevice implements GpuDeviceBackend {
         }
         RadianceGpuResources resources = this.frozenReflectionResources;
         if (resources != null) {
-            resources.bindVertexResources(encoder.handle());
+            resources.bindVertexResources(encoder.handle(), contributionAllowed);
         }
     }
 
@@ -3879,7 +4138,7 @@ public final class MetalDevice implements GpuDeviceBackend {
      * an OFF pipeline can be reused as ON (or vice versa).
      */
     private void invalidatePipelinesForVertexReflectionToggle() {
-        boolean enabled = VertexReflectionExperiment.isRuntimeEnabled();
+        boolean enabled = VertexReflectionExperiment.isLayoutEnabled();
         if (!this.vertexReflectionPipelineStateInitialized) {
             this.vertexReflectionPipelineStateInitialized = true;
             this.vertexReflectionPipelineState = enabled;
@@ -3960,6 +4219,9 @@ public final class MetalDevice implements GpuDeviceBackend {
                 );
             }
             if (key.flavor() == HdrShaderFlavor.METALLUM) {
+                // The compact G5/L8 carrier lives only in position bits ignored by Sodium's
+                // standard deinterleave path. Base Metallum therefore needs no decode/restore
+                // shim and remains byte-for-byte on its established shader path.
                 return material.source();
             }
             TerrainEnvironmentSpecialization specialization =
@@ -3987,9 +4249,28 @@ public final class MetalDevice implements GpuDeviceBackend {
                                 + advanced.failureReason()
                 );
             }
+            String advancedSource = advanced.source();
+            if (GiReceiverRuntime.isRequested()
+                    && "sodium".equals(key.id().getNamespace())
+                    && AdvancedDirectLightingShaderPatcher.SODIUM_TERRAIN_PATH
+                    .equals(key.id().getPath())) {
+                GiReceiverShaderPatcher.Result receiver = GiReceiverShaderPatcher.patch(
+                        key.type() == ShaderType.VERTEX
+                                ? GiReceiverShaderPatcher.Stage.VERTEX
+                                : GiReceiverShaderPatcher.Stage.FRAGMENT,
+                        advancedSource
+                );
+                if (!receiver.success()) {
+                    throw new IllegalStateException(
+                            "Failed to prepare G5 vertex receiver shader " + key.id() + ": "
+                                    + receiver.failureReason()
+                    );
+                }
+                advancedSource = receiver.source();
+            }
             if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED
                     || key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY) {
-                return advanced.source();
+                return advancedSource;
             }
             if (key.flavor() == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL) {
                 L6TemporalShaderPatcher.Result temporal = L6TemporalShaderPatcher.patch(
@@ -3998,7 +4279,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                         key.type() == ShaderType.VERTEX
                                 ? MetallumMaterialShaderPatcher.Stage.VERTEX
                                 : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
-                        advanced.source()
+                        advancedSource
                 );
                 if (!temporal.success()) {
                     throw new IllegalStateException(
@@ -4014,7 +4295,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                     key.type() == ShaderType.VERTEX
                             ? MetallumMaterialShaderPatcher.Stage.VERTEX
                             : MetallumMaterialShaderPatcher.Stage.FRAGMENT,
-                    advanced.source()
+                    advancedSource
             );
             if (!reactive.success()) {
                 throw new IllegalStateException(

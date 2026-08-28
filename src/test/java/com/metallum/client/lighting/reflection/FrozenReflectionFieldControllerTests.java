@@ -1,5 +1,6 @@
 package com.metallum.client.lighting.reflection;
 
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
 import com.metallum.client.radiance.CompactSectionPayload;
 import com.metallum.client.radiance.Float16Compressor;
 import net.minecraft.core.SectionPos;
@@ -9,6 +10,7 @@ public final class FrozenReflectionFieldControllerTests {
     public static void main(final String[] args) {
         String oldRuntime = System.getProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
         try {
+            GiReceiverCompatibility.setTestOverride(true);
             VertexReflectionExperiment.setOverride(true);
             System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, "true");
             testKnownEmptyIsPublishedValidity();
@@ -17,6 +19,7 @@ public final class FrozenReflectionFieldControllerTests {
             System.out.println("FrozenReflectionFieldControllerTests passed successfully.");
         } finally {
             VertexReflectionExperiment.setOverride(null);
+            GiReceiverCompatibility.setTestOverride(null);
             if (oldRuntime == null) {
                 System.clearProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
             } else {

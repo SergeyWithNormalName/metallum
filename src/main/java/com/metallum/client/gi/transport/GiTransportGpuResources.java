@@ -24,6 +24,19 @@ public final class GiTransportGpuResources implements AutoCloseable {
     public static final int STATUS_WRONG_THREAD = -5;
     public static final int STATUS_REJECTED = -6;
 
+    /** Unforgeable Java capability for a read-only native consumer of this field. */
+    public static final class ReadToken {
+        private final GiTransportGpuResources owner;
+
+        private ReadToken(final GiTransportGpuResources owner) {
+            this.owner = owner;
+        }
+
+        public MemorySegment nativeContext() {
+            return this.owner.nativeContextFor(this);
+        }
+    }
+
     private static final ValueLayout.OfShort LE_SHORT_UNALIGNED =
             ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
     private static final ValueLayout.OfInt LE_INT =
@@ -162,6 +175,7 @@ public final class GiTransportGpuResources implements AutoCloseable {
     private final MemorySegment debugShGreen;
     private final MemorySegment debugShBlue;
     private final MemorySegment debugConfidence;
+    private final ReadToken readToken;
     private MemorySegment context;
     @Nullable private GiTransportEpoch preparedEpoch;
     private boolean debugCaptureStarted;
@@ -174,6 +188,7 @@ public final class GiTransportGpuResources implements AutoCloseable {
     ) {
         this.ownerThread = Thread.currentThread();
         this.context = context;
+        this.readToken = new ReadToken(this);
         this.deferredRelease = deferredRelease;
         this.arena = arena;
         this.header = arena.allocate(GiTransportLayout.HEADER_BYTES, Long.BYTES);
@@ -196,6 +211,17 @@ public final class GiTransportGpuResources implements AutoCloseable {
         this.debugConfidence = debugCapture
                 ? arena.allocate(GiTransportLayout.CAPTURE_CONFIDENCE_BYTES, Byte.BYTES)
                 : MemorySegment.NULL;
+    }
+
+    ReadToken readToken() {
+        assertUsable();
+        return this.readToken;
+    }
+
+    private MemorySegment nativeContextFor(final ReadToken token) {
+        assertOwnerThread();
+        return token == this.readToken && !MetalNativeBridge.isNullHandle(this.context)
+                ? this.context : MemorySegment.NULL;
     }
 
     public static void validateNativeAbi() {

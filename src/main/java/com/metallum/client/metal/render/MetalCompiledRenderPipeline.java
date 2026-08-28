@@ -1,9 +1,11 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.hdr.HdrPipelinePolicy;
 import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialPreflightGate;
 import com.metallum.client.hdr.SceneLinearPreflightGate;
+import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedLightingPreflightGate;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.*;
@@ -597,6 +599,7 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             throw new IllegalStateException("Pipeline has been closed: " + this.info.getLocation());
         }
         HdrShaderFlavor flavor = selectFlavor(colorFormat, materialSceneAttachment);
+        validateG5TerrainDraw(flavor, materialSceneAttachment);
         ShaderFunctions functions = this.shaderFunctions.get(flavor);
         if (functions == null || !functions.isValid()) {
             throw new IllegalStateException(
@@ -623,6 +626,81 @@ final class MetalCompiledRenderPipeline implements CompiledRenderPipeline, AutoC
             );
         }
         return pipeline;
+    }
+
+    /**
+     * G5 installs a version-locked compact-position carrier before pipeline selection. The main
+     * material terrain draw must select an Advanced receiver flavor; SUN_SHADOW ignores the spare
+     * bits safely, while fallback/foreign color flavors and reflected replays are rejected.
+     */
+    private void validateG5TerrainDraw(
+            final HdrShaderFlavor flavor,
+            final boolean materialSceneAttachment
+    ) {
+        if (!GiReceiverRuntime.isRequested()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)) {
+            return;
+        }
+        // The depth-only L4 caster consumes neither compact light nor authored alpha and has
+        // no color fallback to restore.  It must remain available while the same shared Sodium
+        // geometry is replayed into cascades.
+        if (flavor == HdrShaderFlavor.SUN_SHADOW) {
+            return;
+        }
+        GiReceiverRuntime.Admission admission = GiReceiverRuntime.admission();
+        if (PlanarReflectionRenderer.isRendering()) {
+            admission.reportInvalid("G5 reflected terrain draw is outside the receiver workload");
+            throw new IllegalStateException("G5 rejected a reflected terrain draw");
+        }
+        boolean mainMaterialTerrain = materialSceneAttachment
+                && this.device.isMaterialWorldPassActive();
+        if (mainMaterialTerrain && !isG5CompatibleFlavor(flavor)) {
+            admission.reportInvalid("G5 terrain selected an incompatible shader flavor " + flavor);
+            return;
+        }
+    }
+
+    static boolean isG5CompatibleFlavor(final HdrShaderFlavor flavor) {
+        return flavor == HdrShaderFlavor.METALLUM_ADVANCED
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_AMBIENT_ONLY
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE
+                || flavor == HdrShaderFlavor.METALLUM_ADVANCED_REACTIVE_AMBIENT_ONLY;
+    }
+
+    boolean selectsG5TerrainReceiver(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        if (!GiReceiverRuntime.isRequested()
+                || !materialSceneAttachment
+                || !this.device.isMaterialWorldPassActive()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)
+                || SunShadowRenderer.isRendering()
+                || PlanarReflectionRenderer.isRendering()) {
+            return false;
+        }
+        return isG5CompatibleFlavor(selectFlavor(colorFormat, true));
+    }
+
+    /**
+     * Identifies the pinned main-terrain draw whose vertex function may consume either shared
+     * compact-position carrier. This is a stable layout predicate: a terminal runtime safety
+     * transition disables parameters but must not change the selected shader or resource ABI.
+     */
+    boolean selectsCompactPositionCarrierConsumer(
+            final MTLPixelFormat colorFormat,
+            final boolean materialSceneAttachment
+    ) {
+        if ((!GiReceiverRuntime.isRequested() && !VertexReflectionExperiment.isLayoutEnabled())
+                || !materialSceneAttachment
+                || !this.device.isMaterialWorldPassActive()
+                || !SodiumLightSidecarMslPatcher.isTarget(this.info)
+                || SunShadowRenderer.isRendering()
+                || PlanarReflectionRenderer.isRendering()) {
+            return false;
+        }
+        return isG5CompatibleFlavor(selectFlavor(colorFormat, true));
     }
 
     private HdrShaderFlavor selectFlavor(

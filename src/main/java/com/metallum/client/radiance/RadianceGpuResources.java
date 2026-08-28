@@ -148,10 +148,15 @@ public final class RadianceGpuResources implements AutoCloseable {
     }
 
     /** Returns true only once the native completion handler has made the field bindable. */
-    public synchronized boolean bindVertexResources(final MemorySegment encoder) {
+    public synchronized boolean bindVertexResources(
+            final MemorySegment encoder,
+            final boolean contributionAllowed
+    ) {
         return !this.closed
                 && this.nativeHandle != null
-                && MetalNativeBridge.metallum_radiance_context_bind_vertex_resources(this.nativeHandle, encoder);
+                && MetalNativeBridge.metallum_radiance_context_bind_vertex_resources(
+                        this.nativeHandle, encoder, contributionAllowed
+                );
     }
 
     /** Allocation-free native completion state for render-thread admission and double buffering. */

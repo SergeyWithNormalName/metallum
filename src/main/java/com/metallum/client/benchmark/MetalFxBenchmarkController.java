@@ -9,6 +9,9 @@ import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
 import com.metallum.client.gi.semantic.GiSemanticController;
 import com.metallum.client.gi.transport.GiTransportRuntime;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.hdr.SodiumHdrSemantic;
 import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
@@ -574,7 +577,7 @@ public final class MetalFxBenchmarkController {
                 error = "invalid METALLUM_BENCHMARK_SEQUENCE";
             }
         }
-        if (error == null && GiTransportRuntime.isRequested()
+        if (error == null && GiTransportRuntime.isPopulationRequested()
                 && !isFrozenG4Sequence(parsed)) {
             error = "G4 requires exactly one frozen OFF benchmark segment";
         }
@@ -703,11 +706,21 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "benchmark framebuffer changed during measurement");
             return;
         }
-        if (GiTransportRuntime.isRequested() && GiTransportRuntime.isInvalid()) {
+        if (GiTransportRuntime.isPopulationRequested() && GiTransportRuntime.isInvalid()) {
             fail(minecraft, "G4 transport became invalid: " + GiTransportRuntime.invalidReason());
             return;
         }
-        if (GiTransportRuntime.isRequested()
+        if (GiReceiverRuntime.isRequested()
+                && (GiReceiverRuntime.admission().state()
+                == GiReceiverRuntime.AdmissionState.INVALID
+                || GiReceiverRuntime.admission().carrierSkipCount() != 0L)) {
+            fail(minecraft, "G5 receiver became invalid: "
+                    + (GiReceiverRuntime.admission().carrierSkipCount() != 0L
+                    ? GiReceiverRuntime.admission().lastCarrierSkipReason()
+                    : GiReceiverRuntime.admission().invalidReason()));
+            return;
+        }
+        if (GiTransportRuntime.isPopulationRequested()
                 && this.segmentPhase != SegmentPhase.WARMUP
                 && !GiTransportRuntime.isResolvedReady()) {
             fail(minecraft, "G4 transport is not READY outside benchmark warmup");
@@ -719,14 +732,14 @@ public final class MetalFxBenchmarkController {
                 driveL6DynamicShadow(minecraft);
                 driveNetherLavaStress(minecraft);
                 this.segmentFrame++;
-                if (GiTransportRuntime.isRequested()
+                if (GiTransportRuntime.isPopulationRequested()
                         && this.segmentFrame >= G4_ADMISSION_TIMEOUT_FRAMES
                         && !GiTransportRuntime.isResolvedReady()) {
                     fail(minecraft, "G4 transport did not resolve READY within 240 warmup frames");
                     return;
                 }
                 if (this.segmentFrame >= this.warmupFrames) {
-                    if (GiTransportRuntime.isRequested()
+                    if (GiTransportRuntime.isPopulationRequested()
                             && !GiTransportRuntime.isResolvedReady()) {
                         fail(minecraft, "G4 transport did not resolve READY before measurement");
                         return;
@@ -1691,9 +1704,19 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "deterministic route configuration is unavailable");
             return;
         }
-        if (GiTransportRuntime.isRequested() && GiTransportRuntime.isInvalid()) {
+        if (GiTransportRuntime.isPopulationRequested() && GiTransportRuntime.isInvalid()) {
             fail(minecraft, "G4 transport admission failed: "
                     + GiTransportRuntime.invalidReason());
+            return;
+        }
+        if (GiReceiverRuntime.isRequested()
+                && (GiReceiverRuntime.admission().state()
+                == GiReceiverRuntime.AdmissionState.INVALID
+                || GiReceiverRuntime.admission().carrierSkipCount() != 0L)) {
+            fail(minecraft, "G5 receiver admission failed: "
+                    + (GiReceiverRuntime.admission().carrierSkipCount() != 0L
+                    ? GiReceiverRuntime.admission().lastCarrierSkipReason()
+                    : GiReceiverRuntime.admission().invalidReason()));
             return;
         }
         String identityMismatch = clientIdentityMismatch(minecraft);
@@ -1764,7 +1787,7 @@ public final class MetalFxBenchmarkController {
             this.routeStableFrames = 0;
         }
         boolean rawG4SourceReady = GiTransportRuntime.isBenchmarkSourceReady();
-        if (GiTransportRuntime.isRequested()) {
+        if (GiTransportRuntime.isPopulationRequested()) {
             if (!rawG4SourceReady) {
                 this.g4SourceReceiptFrames = 0;
             } else if (this.g4SourceReceiptFrames < G4_SOURCE_RECEIPT_FRAMES) {
@@ -1778,9 +1801,9 @@ public final class MetalFxBenchmarkController {
                 }
             }
         }
-        boolean g4SourceReady = !GiTransportRuntime.isRequested()
+        boolean g4SourceReady = !GiTransportRuntime.isPopulationRequested()
                 || this.g4SourceReceiptFrames >= G4_SOURCE_RECEIPT_FRAMES;
-        if (GiTransportRuntime.isRequested()
+        if (GiTransportRuntime.isPopulationRequested()
                 && !this.g4ModePreapplied
                 && this.routeStableFrames >= this.route.stableFrames()
                 && !GiSemanticController.global().hasActiveCandidates()
@@ -1794,7 +1817,7 @@ public final class MetalFxBenchmarkController {
             );
             return;
         }
-        if (GiTransportRuntime.isRequested()
+        if (GiTransportRuntime.isPopulationRequested()
                 && this.g4ModePreapplied
                 && !GiTransportRuntime.hasSourcePreparationStarted()
                 && this.routeStableFrames >= this.route.stableFrames()
@@ -1975,13 +1998,78 @@ public final class MetalFxBenchmarkController {
 
         this.segmentIndex++;
         if (this.segmentIndex >= this.sequence.size()) {
-            Metallum.LOGGER.info(
-                    "METALLUM_BENCHMARK EVENT=COMPLETE segments={} measured_frames={} framebuffer={}x{}",
-                    this.sequence.size(),
-                    this.sequence.size() * this.measureFrames,
-                    this.expectedFramebufferWidth,
-                    this.expectedFramebufferHeight
-            );
+            String g5FinalFailure = null;
+            boolean completeLogged = false;
+            if (GiReceiverRuntime.isRequested()) {
+                CompactPositionCarrierSafety.beginCarrierAwareDraw();
+                try {
+                    GiReceiverRuntime.FinalSnapshot snapshot = GiReceiverRuntime.admission()
+                            .finalSnapshot(SodiumHdrSemantic.g5CarrierWriteCount());
+                    boolean carrierSafe = CompactPositionCarrierSafety.isSafe();
+                    if (snapshot.state() != GiReceiverRuntime.AdmissionState.READY
+                            || snapshot.carrierSkipCount() != 0L
+                            || !carrierSafe
+                            || snapshot.successfulCarrierWrites() <= 0L
+                            || snapshot.drawnG5CarrierSlices() <= 0L
+                            || !snapshot.terrainDrawEncoded()
+                            || (GiTransportRuntime.isBenchmarkActive()
+                            && !snapshot.benchmarkReceiptEmitted())) {
+                        g5FinalFailure = snapshot.carrierSkipCount() != 0L
+                                ? snapshot.lastCarrierSkipReason()
+                                : !carrierSafe
+                                ? CompactPositionCarrierSafety.conflictReason()
+                                : snapshot.successfulCarrierWrites() <= 0L
+                                ? "no exact G5 position carrier was written"
+                                : snapshot.drawnG5CarrierSlices() <= 0L
+                                ? "no resident G5 carrier slice reached the pinned Sodium batch"
+                                : !snapshot.terrainDrawEncoded()
+                                ? "no pinned Sodium terrain draw was encoded"
+                                : !snapshot.benchmarkReceiptEmitted()
+                                ? "warmup binding receipt was not emitted"
+                                : snapshot.invalidReason();
+                    } else {
+                        String arm = GiReceiverRuntime.arm().name().toLowerCase(Locale.ROOT);
+                        String field = GiReceiverRuntime.arm()
+                                == com.metallum.client.gi.GiRuntimeStages.ReceiverArm.FIELD
+                                ? "g4" : "zero";
+                        Metallum.LOGGER.info(
+                                "METALLUM_BENCHMARK EVENT=GI_G5_FINAL "
+                                        + "state=READY carrier_skips=0 g5_carrier_writes={} "
+                                        + "drawn_g5_carrier_slices={} status=PASS "
+                                        + "arm={} field={} contract=4",
+                                snapshot.successfulCarrierWrites(),
+                                snapshot.drawnG5CarrierSlices(),
+                                arm,
+                                field
+                        );
+                        Metallum.LOGGER.info(
+                                "METALLUM_BENCHMARK EVENT=COMPLETE segments={} measured_frames={} "
+                                        + "framebuffer={}x{}",
+                                this.sequence.size(),
+                                this.sequence.size() * this.measureFrames,
+                                this.expectedFramebufferWidth,
+                                this.expectedFramebufferHeight
+                        );
+                        completeLogged = true;
+                    }
+                } finally {
+                    CompactPositionCarrierSafety.endCarrierAwareDraw();
+                }
+            }
+            if (g5FinalFailure != null) {
+                fail(minecraft, "G5 final carrier census failed: " + g5FinalFailure);
+                return;
+            }
+            if (!completeLogged) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=COMPLETE segments={} measured_frames={} "
+                                + "framebuffer={}x{}",
+                        this.sequence.size(),
+                        this.sequence.size() * this.measureFrames,
+                        this.expectedFramebufferWidth,
+                        this.expectedFramebufferHeight
+                );
+            }
             finish(minecraft);
             return;
         }

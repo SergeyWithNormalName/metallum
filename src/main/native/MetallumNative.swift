@@ -17321,6 +17321,7 @@ private final class MetallumGiTransportContextV1 {
     private var staleRejects: UInt64 = 0
     private var busyRejects: UInt64 = 0
     private var rejectedCount: UInt64 = 0
+    private var stale = false
 
     init?(device: MTLDevice, commandQueue: MTLCommandQueue, worldGeneration: UInt64) {
         guard worldGeneration > 0, objectAddress(commandQueue.device) == objectAddress(device),
@@ -17421,6 +17422,26 @@ private final class MetallumGiTransportContextV1 {
 
     private func isOwnerThread() -> Bool {
         UInt64(pthread_mach_thread_np(pthread_self())) == ownerThread
+    }
+
+    fileprivate func receiverOwnerThreadMatches() -> Bool {
+        isOwnerThread()
+    }
+
+    fileprivate func receiverFieldSnapshot() -> MetallumGiReceiverFieldSnapshotV1? {
+        guard isOwnerThread() else { return nil }
+        condition.lock()
+        defer { condition.unlock() }
+        return MetallumGiReceiverFieldSnapshotV1(
+            device: device,
+            shRed: shRed,
+            shGreen: shGreen,
+            shBlue: shBlue,
+            confidence: confidence,
+            originX: originX,
+            originY: originY,
+            originZ: originZ,
+            ready: ready && !stale)
     }
 
     private func persistentBytes() -> UInt64 {
@@ -17711,6 +17732,7 @@ private final class MetallumGiTransportContextV1 {
             condition.unlock()
             return metallumGiTransportStatusInvalid
         }
+        stale = true
         let result = rejectLocked(metallumGiTransportStatusStale)
         let attachment = attachmentLocked()
         let direct = directContext
@@ -18107,6 +18129,354 @@ public func metallum_gi_transport_release_context_v1(_ rawContext: UnsafeMutable
     _ = MetallumGiTransportContextRegistryV1.unregister(rawContext)
 }
 
+// MARK: - G5 vertex-only irradiance receiver
+
+private let metallumGiReceiverAbiVersionV1: Int32 = 1
+private let metallumGiReceiverLayoutBytesV1 = 128
+private let metallumGiReceiverParamsBytesV1 = 64
+private let metallumGiReceiverStatsBytesV1 = 80
+private let metallumGiReceiverStatusZeroReadyV1: Int32 = 0
+private let metallumGiReceiverTextureRedV1 = 6
+private let metallumGiReceiverTextureGreenV1 = 7
+private let metallumGiReceiverTextureBlueV1 = 8
+private let metallumGiReceiverTextureConfidenceV1 = 9
+private let metallumGiReceiverParamsBufferV1 = 25
+// Conservative cross-language census for the opaque sampler, Swift context/registry entry,
+// Java owner/capability and allocator metadata whose individual sizes are not queryable.
+private let metallumGiReceiverLifetimeOverheadBytesV1: UInt64 = 65_536
+
+private struct MetallumGiReceiverFieldSnapshotV1 {
+    let device: MTLDevice
+    let shRed: MTLTexture
+    let shGreen: MTLTexture
+    let shBlue: MTLTexture
+    let confidence: MTLTexture
+    let originX: Int32
+    let originY: Int32
+    let originZ: Int32
+    let ready: Bool
+}
+
+public struct MetallumGiReceiverStatsV1 {
+    public var ready: Int32
+    public var lastArm: Int32
+    public var bindCount: UInt64
+    public var zeroBindings: UInt64
+    public var fieldBindings: UInt64
+    public var allocatedBytes: UInt64
+    public var originX: Int32
+    public var originY: Int32
+    public var originZ: Int32
+    public var carrierSafe: Int32
+    public var resourceCount: Int32
+    public var bindingCount: Int32
+    public var sharedTextureBytes: UInt64
+    public var reserved: UInt64
+}
+
+private final class MetallumGiReceiverContextV1 {
+    private let transport: MetallumGiTransportContextV1
+    private let device: MTLDevice
+    private let shRed: MTLTexture
+    private let shGreen: MTLTexture
+    private let shBlue: MTLTexture
+    private let confidence: MTLTexture
+    private let sampler: MTLSamplerState
+    private let disabledParams: MTLBuffer
+    private let controlParams: MTLBuffer
+    private let dryParams: MTLBuffer
+    private let fieldParams: MTLBuffer
+    private let ownerThread: UInt64
+
+    private var fieldParamsReady = false
+    private var fieldOrigin: (Int32, Int32, Int32) = (0, 0, 0)
+    private var lastArm: Int32 = 0
+    private var lastCarrierSafe: Int32 = 1
+    private var bindCount: UInt64 = 0
+    private var zeroBindings: UInt64 = 0
+    private var fieldBindings: UInt64 = 0
+
+    init?(transport: MetallumGiTransportContextV1) {
+        guard transport.receiverOwnerThreadMatches(),
+              let snapshot = transport.receiverFieldSnapshot()
+        else { return nil }
+        self.transport = transport
+        self.device = snapshot.device
+        self.shRed = snapshot.shRed
+        self.shGreen = snapshot.shGreen
+        self.shBlue = snapshot.shBlue
+        self.confidence = snapshot.confidence
+        self.ownerThread = UInt64(pthread_mach_thread_np(pthread_self()))
+
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        samplerDescriptor.mipFilter = .notMipmapped
+        samplerDescriptor.sAddressMode = .clampToZero
+        samplerDescriptor.tAddressMode = .clampToZero
+        samplerDescriptor.rAddressMode = .clampToZero
+        samplerDescriptor.normalizedCoordinates = true
+        samplerDescriptor.label = "Metallum G5 shared SH sampler"
+        guard let sampler = snapshot.device.makeSamplerState(descriptor: samplerDescriptor),
+              let disabled = snapshot.device.makeBuffer(
+                length: metallumGiReceiverParamsBytesV1, options: .storageModeShared),
+              let control = snapshot.device.makeBuffer(
+                length: metallumGiReceiverParamsBytesV1, options: .storageModeShared),
+              let dry = snapshot.device.makeBuffer(
+                length: metallumGiReceiverParamsBytesV1, options: .storageModeShared),
+              let field = snapshot.device.makeBuffer(
+                length: metallumGiReceiverParamsBytesV1, options: .storageModeShared)
+        else { return nil }
+        self.sampler = sampler
+        self.disabledParams = disabled
+        self.controlParams = control
+        self.dryParams = dry
+        self.fieldParams = field
+        disabled.label = "Metallum G5 disabled params"
+        control.label = "Metallum G5 control params"
+        dry.label = "Metallum G5 frozen-zero candidate params"
+        field.label = "Metallum G5 immutable field params"
+        writeParams(disabled, originX: 0, originY: 0, originZ: 0,
+                    arm: 0, carrierSafe: false, fieldReady: false)
+        writeParams(control, originX: 0, originY: 0, originZ: 0,
+                    arm: 0, carrierSafe: true, fieldReady: false)
+        writeParams(dry, originX: 0, originY: 0, originZ: 0,
+                    arm: 1, carrierSafe: true, fieldReady: true)
+        writeParams(field, originX: 0, originY: 0, originZ: 0,
+                    arm: 2, carrierSafe: true, fieldReady: false)
+    }
+
+    private func isOwnerThread() -> Bool {
+        UInt64(pthread_mach_thread_np(pthread_self())) == ownerThread
+    }
+
+    private func writeParams(
+        _ buffer: MTLBuffer,
+        originX: Int32, originY: Int32, originZ: Int32,
+        arm: UInt32, carrierSafe: Bool, fieldReady: Bool
+    ) {
+        let raw = buffer.contents()
+        raw.storeBytes(of: originX, toByteOffset: 0, as: Int32.self)
+        raw.storeBytes(of: originY, toByteOffset: 4, as: Int32.self)
+        raw.storeBytes(of: originZ, toByteOffset: 8, as: Int32.self)
+        raw.storeBytes(of: Int32(MetallumGiTransportContextV1.edge),
+                       toByteOffset: 12, as: Int32.self)
+        let inverseSpan = Float(1.0 / Float(MetallumGiTransportContextV1.edge * 2))
+        raw.storeBytes(of: inverseSpan, toByteOffset: 16, as: Float.self)
+        raw.storeBytes(of: inverseSpan, toByteOffset: 20, as: Float.self)
+        raw.storeBytes(of: inverseSpan, toByteOffset: 24, as: Float.self)
+        raw.storeBytes(of: fieldReady ? Float(1) : Float(0),
+                       toByteOffset: 28, as: Float.self)
+        raw.storeBytes(of: arm, toByteOffset: 32, as: UInt32.self)
+        raw.storeBytes(of: carrierSafe ? UInt32(1) : UInt32(0),
+                       toByteOffset: 36, as: UInt32.self)
+        raw.storeBytes(of: UInt32(2), toByteOffset: 40, as: UInt32.self)
+        raw.storeBytes(of: UInt32(metallumGiReceiverAbiVersionV1),
+                       toByteOffset: 44, as: UInt32.self)
+        raw.storeBytes(of: UInt64(0), toByteOffset: 48, as: UInt64.self)
+        raw.storeBytes(of: UInt64(0), toByteOffset: 56, as: UInt64.self)
+    }
+
+    func bindVertex(
+        encoder: MTLRenderCommandEncoder, arm: Int32, carrierSafe: Int32
+    ) -> Int32 {
+        guard isOwnerThread(), transport.receiverOwnerThreadMatches()
+        else { return metallumGiTransportStatusWrongThread }
+        guard arm >= 0 && arm <= 2, carrierSafe == 0 || carrierSafe == 1,
+              objectAddress(encoder.device) == objectAddress(device)
+        else { return metallumGiTransportStatusInvalid }
+
+        encoder.setVertexTexture(shRed, index: metallumGiReceiverTextureRedV1)
+        encoder.setVertexTexture(shGreen, index: metallumGiReceiverTextureGreenV1)
+        encoder.setVertexTexture(shBlue, index: metallumGiReceiverTextureBlueV1)
+        encoder.setVertexTexture(confidence, index: metallumGiReceiverTextureConfidenceV1)
+        encoder.setVertexSamplerState(sampler, index: metallumGiReceiverTextureRedV1)
+        encoder.setVertexSamplerState(sampler, index: metallumGiReceiverTextureGreenV1)
+        encoder.setVertexSamplerState(sampler, index: metallumGiReceiverTextureBlueV1)
+        encoder.setVertexSamplerState(sampler, index: metallumGiReceiverTextureConfidenceV1)
+
+        let snapshot = transport.receiverFieldSnapshot()
+        let selected: MTLBuffer
+        let result: Int32
+        if carrierSafe == 0 {
+            selected = disabledParams
+            result = metallumGiReceiverStatusZeroReadyV1
+        } else if arm == 0 {
+            selected = controlParams
+            result = metallumGiReceiverStatusZeroReadyV1
+        } else if arm == 1 {
+            selected = dryParams
+            result = metallumGiReceiverStatusZeroReadyV1
+        } else if let snapshot, snapshot.ready {
+            if !fieldParamsReady {
+                writeParams(fieldParams,
+                            originX: snapshot.originX,
+                            originY: snapshot.originY,
+                            originZ: snapshot.originZ,
+                            arm: 2, carrierSafe: true, fieldReady: true)
+                fieldOrigin = (snapshot.originX, snapshot.originY, snapshot.originZ)
+                fieldParamsReady = true
+            }
+            selected = fieldParams
+            result = metallumGiTransportStatusOK
+        } else {
+            selected = controlParams
+            result = metallumGiReceiverStatusZeroReadyV1
+        }
+        encoder.setVertexBuffer(selected, offset: 0, index: metallumGiReceiverParamsBufferV1)
+        lastArm = arm
+        lastCarrierSafe = carrierSafe
+        bindCount &+= 1
+        if result == metallumGiTransportStatusOK {
+            fieldBindings &+= 1
+        } else {
+            zeroBindings &+= 1
+        }
+        return result
+    }
+
+    func stats() -> MetallumGiReceiverStatsV1? {
+        guard isOwnerThread() else { return nil }
+        let allocated = UInt64(disabledParams.allocatedSize + controlParams.allocatedSize
+            + dryParams.allocatedSize + fieldParams.allocatedSize)
+            + metallumGiReceiverLifetimeOverheadBytesV1
+        return MetallumGiReceiverStatsV1(
+            ready: fieldParamsReady ? 1 : 0,
+            lastArm: lastArm,
+            bindCount: bindCount,
+            zeroBindings: zeroBindings,
+            fieldBindings: fieldBindings,
+            allocatedBytes: allocated,
+            originX: fieldOrigin.0,
+            originY: fieldOrigin.1,
+            originZ: fieldOrigin.2,
+            carrierSafe: lastCarrierSafe,
+            resourceCount: 5,
+            bindingCount: 5,
+            sharedTextureBytes: 0,
+            reserved: 0)
+    }
+}
+
+private enum MetallumGiReceiverContextRegistryV1 {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var contexts: [UInt: MetallumGiReceiverContextV1] = [:]
+
+    static func register(_ context: MetallumGiReceiverContextV1) -> UnsafeMutableRawPointer {
+        let raw = Unmanaged.passRetained(context).toOpaque()
+        lock.lock()
+        contexts[UInt(bitPattern: raw)] = context
+        lock.unlock()
+        return raw
+    }
+
+    static func resolve(_ raw: UnsafeMutableRawPointer) -> MetallumGiReceiverContextV1? {
+        lock.lock()
+        let context = contexts[UInt(bitPattern: raw)]
+        lock.unlock()
+        return context
+    }
+
+    static func unregister(_ raw: UnsafeMutableRawPointer) -> MetallumGiReceiverContextV1? {
+        lock.lock()
+        let context = contexts.removeValue(forKey: UInt(bitPattern: raw))
+        lock.unlock()
+        guard context != nil else { return nil }
+        _ = Unmanaged<MetallumGiReceiverContextV1>.fromOpaque(raw).takeRetainedValue()
+        return context
+    }
+}
+
+@_cdecl("metallum_gi_receiver_abi_version_v1")
+public func metallum_gi_receiver_abi_version_v1() -> Int32 {
+    metallumGiReceiverAbiVersionV1
+}
+
+@_cdecl("metallum_gi_receiver_layout_v1")
+public func metallum_gi_receiver_layout_v1(
+    _ destination: UnsafeMutableRawPointer?, _ destinationBytes: UInt64
+) -> Int32 {
+    guard MemoryLayout<MetallumGiReceiverStatsV1>.size == metallumGiReceiverStatsBytesV1,
+          let destination, destinationBytes >= UInt64(metallumGiReceiverLayoutBytesV1)
+    else { return metallumGiTransportStatusInvalid }
+    let words: [Int32] = [
+        metallumGiReceiverAbiVersionV1,
+        Int32(metallumGiReceiverLayoutBytesV1),
+        Int32(metallumGiReceiverParamsBytesV1),
+        Int32(metallumGiReceiverStatsBytesV1),
+        Int32(metallumGiReceiverTextureRedV1),
+        Int32(metallumGiReceiverTextureGreenV1),
+        Int32(metallumGiReceiverTextureBlueV1),
+        Int32(metallumGiReceiverTextureConfidenceV1),
+        Int32(metallumGiReceiverParamsBufferV1),
+        metallumGiTransportStatusOK,
+        metallumGiReceiverStatusZeroReadyV1,
+        metallumGiTransportStatusInvalid,
+        metallumGiTransportStatusStale,
+        metallumGiTransportStatusWrongThread,
+        5, 5,
+        Int32(metallumGiReceiverLifetimeOverheadBytesV1),
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]
+    words.withUnsafeBytes {
+        destination.copyMemory(from: $0.baseAddress!, byteCount: metallumGiReceiverLayoutBytesV1)
+    }
+    return metallumGiTransportStatusOK
+}
+
+@_cdecl("metallum_gi_receiver_create_context_v1")
+public func metallum_gi_receiver_create_context_v1(
+    _ rawTransport: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let rawTransport,
+              let transport = MetallumGiTransportContextRegistryV1.resolve(rawTransport),
+              let context = MetallumGiReceiverContextV1(transport: transport)
+        else { return nil }
+        return MetallumGiReceiverContextRegistryV1.register(context)
+    }
+}
+
+@_cdecl("metallum_gi_receiver_bind_vertex_v1")
+public func metallum_gi_receiver_bind_vertex_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ rawEncoder: UnsafeMutableRawPointer?,
+    _ arm: Int32,
+    _ carrierSafe: Int32
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rawEncoder,
+              let context = MetallumGiReceiverContextRegistryV1.resolve(rawContext),
+              let encoder = Unmanaged<AnyObject>.fromOpaque(rawEncoder)
+                .takeUnretainedValue() as? MTLRenderCommandEncoder
+        else { return metallumGiTransportStatusInvalid }
+        return context.bindVertex(encoder: encoder, arm: arm, carrierSafe: carrierSafe)
+    }
+}
+
+@_cdecl("metallum_gi_receiver_get_stats_v1")
+public func metallum_gi_receiver_get_stats_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ destination: UnsafeMutableRawPointer?,
+    _ destinationBytes: UInt64
+) -> Int32 {
+    guard let rawContext, let destination,
+          destinationBytes >= UInt64(metallumGiReceiverStatsBytesV1),
+          let context = MetallumGiReceiverContextRegistryV1.resolve(rawContext),
+          var stats = context.stats()
+    else { return metallumGiTransportStatusInvalid }
+    destination.copyMemory(from: &stats, byteCount: metallumGiReceiverStatsBytesV1)
+    return metallumGiTransportStatusOK
+}
+
+@_cdecl("metallum_gi_receiver_release_context_v1")
+public func metallum_gi_receiver_release_context_v1(
+    _ rawContext: UnsafeMutableRawPointer?
+) {
+    guard let rawContext else { return }
+    _ = MetallumGiReceiverContextRegistryV1.unregister(rawContext)
+}
+
 // MARK: - Frozen real-world reflection prototype
 
 private let frozenReflectionSourceEdge = 64
@@ -18148,6 +18518,7 @@ private final class MetallumFrozenReflectionContext {
     private let sourceValidityMips: [MTLTexture]
     private let vertexSampler: MTLSamplerState
     private let parameters: MTLBuffer
+    private let disabledParameters: MTLBuffer
     private let sourceMipPipeline: MTLComputePipelineState
     private let lock = NSLock()
 
@@ -18183,13 +18554,17 @@ private final class MetallumFrozenReflectionContext {
         let sourceValidityDescriptor = textureDescriptor(.r8Unorm, edge: frozenReflectionSourceEdge)
         guard let sourceRadiance = device.makeTexture(descriptor: sourceRadianceDescriptor),
               let sourceValidity = device.makeTexture(descriptor: sourceValidityDescriptor),
-              let parameterBuffer = device.makeBuffer(length: 64, options: .storageModeShared)
+              let parameterBuffer = device.makeBuffer(length: 64, options: .storageModeShared),
+              let disabledParameterBuffer = device.makeBuffer(
+                    length: 64, options: .storageModeShared)
         else {
             return nil
         }
         sourceRadiance.label = "Metallum frozen reflection source radiance"
         sourceValidity.label = "Metallum frozen reflection source validity"
         parameterBuffer.label = "Metallum frozen reflection vertex parameters"
+        disabledParameterBuffer.label = "Metallum frozen reflection disabled vertex parameters"
+        memset(disabledParameterBuffer.contents(), 0, disabledParameterBuffer.length)
 
         var radianceMips: [MTLTexture] = []
         var validityMips: [MTLTexture] = []
@@ -18233,6 +18608,7 @@ private final class MetallumFrozenReflectionContext {
         self.sourceValidityMips = validityMips
         self.vertexSampler = sampler
         self.parameters = parameterBuffer
+        self.disabledParameters = disabledParameterBuffer
         // The shader layout is enabled before Sodium has produced the first immutable field.
         // Keep every declared vertex resource bound in that interval and make the shader's
         // ready flag explicitly false, so the dynamic branch cannot sample the unpopulated
@@ -18364,7 +18740,10 @@ private final class MetallumFrozenReflectionContext {
         return true
     }
 
-    func bindVertexResources(_ encoder: MTLRenderCommandEncoder) -> Bool {
+    func bindVertexResources(
+        _ encoder: MTLRenderCommandEncoder,
+        contributionAllowed: Bool
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         // This is intentionally valid before the asynchronous frozen build completes.  The
@@ -18373,8 +18752,11 @@ private final class MetallumFrozenReflectionContext {
         // vertex function.
         encoder.setVertexTexture(sourceRadiance, index: 10)
         encoder.setVertexSamplerState(vertexSampler, index: 10)
-        encoder.setVertexBuffer(parameters, offset: 0, index: 27)
-        return traceReady
+        let contributionReady = contributionAllowed && traceReady
+        encoder.setVertexBuffer(
+                contributionReady ? parameters : disabledParameters,
+                offset: 0, index: 27)
+        return contributionReady
     }
 
     /** 0 = pending/not built, 1 = exact build completed, -1 = asynchronous build failed. */
@@ -18391,7 +18773,9 @@ private final class MetallumFrozenReflectionContext {
         return MetallumFrozenReflectionStats(
                 ready: ready ? 1 : 0,
                 worldGeneration: worldGeneration,
-                persistentBytes: UInt64(sourceRadiance.allocatedSize + sourceValidity.allocatedSize),
+            persistentBytes: UInt64(
+                    sourceRadiance.allocatedSize + sourceValidity.allocatedSize
+                            + parameters.allocatedSize + disabledParameters.allocatedSize),
                 uploadCount: uploadCount,
                 sourceMipBuildCount: sourceMipBuildCount,
                 originX: origin.0, originY: origin.1, originZ: origin.2,
@@ -18463,14 +18847,16 @@ public func metallum_radiance_context_upload_source_frozen(
 
 @_cdecl("metallum_radiance_context_bind_vertex_resources")
 public func metallum_radiance_context_bind_vertex_resources(
-    _ rawContext: UnsafeMutableRawPointer?, _ rawEncoder: UnsafeMutableRawPointer?
+    _ rawContext: UnsafeMutableRawPointer?, _ rawEncoder: UnsafeMutableRawPointer?,
+    _ contributionAllowed: Int32
 ) -> Int32 {
     autoreleasepool {
         guard let rawContext, let rawEncoder,
               let encoder = Unmanaged<AnyObject>.fromOpaque(rawEncoder).takeUnretainedValue() as? MTLRenderCommandEncoder
         else { return 0 }
         let context = Unmanaged<MetallumFrozenReflectionContext>.fromOpaque(rawContext).takeUnretainedValue()
-        return context.bindVertexResources(encoder) ? 1 : 0
+        return context.bindVertexResources(
+                encoder, contributionAllowed: contributionAllowed != 0) ? 1 : 0
     }
 }
 

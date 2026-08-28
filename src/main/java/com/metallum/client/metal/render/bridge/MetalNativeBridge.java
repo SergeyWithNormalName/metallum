@@ -623,6 +623,38 @@ public final class MetalNativeBridge {
                     "metallum_gi_transport_release_context_v1",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
+            giReceiverAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giReceiverLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giReceiverCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_create_context_v1",
+                    FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+            );
+            giReceiverBindVertexV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_bind_vertex_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, INT
+                    )
+            );
+            giReceiverGetStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_get_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giReceiverReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_receiver_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
 
             radianceContextCreate = downcall(
                     lookup,
@@ -649,7 +681,9 @@ public final class MetalNativeBridge {
             radianceContextBindVertexResources = downcall(
                     lookup,
                     "metallum_radiance_context_bind_vertex_resources",
-                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS)
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT
+                    )
             );
             radianceContextGetStats = downcall(
                     lookup,
@@ -1225,6 +1259,12 @@ public final class MetalNativeBridge {
     private static final MethodHandle giTransportBeginDebugCaptureV1;
     private static final MethodHandle giTransportPollDebugCaptureV1;
     private static final MethodHandle giTransportReleaseContextV1;
+    private static final MethodHandle giReceiverAbiVersionV1;
+    private static final MethodHandle giReceiverLayoutV1;
+    private static final MethodHandle giReceiverCreateContextV1;
+    private static final MethodHandle giReceiverBindVertexV1;
+    private static final MethodHandle giReceiverGetStatsV1;
+    private static final MethodHandle giReceiverReleaseContextV1;
     private static final MethodHandle radianceContextCreate;
     private static final MethodHandle radianceContextUploadSourceFrozen;
     private static final MethodHandle radianceContextBindVertexResources;
@@ -2433,6 +2473,78 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static int metallum_gi_receiver_abi_version_v1() {
+        try {
+            return (int) giReceiverAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_receiver_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giReceiverLayoutV1.invokeExact(
+                    segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_gi_receiver_create_context_v1(
+            final MemorySegment transportContext
+    ) {
+        try {
+            return (MemorySegment) giReceiverCreateContextV1.invokeExact(
+                    segment(transportContext)
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_receiver_bind_vertex_v1(
+            final MemorySegment context,
+            final MemorySegment encoder,
+            final int arm,
+            final int carrierSafe
+    ) {
+        try {
+            return (int) giReceiverBindVertexV1.invokeExact(
+                    segment(context), segment(encoder), arm, carrierSafe
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_bind_vertex_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_receiver_get_stats_v1(
+            final MemorySegment context,
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        try {
+            return (int) giReceiverGetStatsV1.invokeExact(
+                    segment(context), segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_get_stats_v1", throwable);
+        }
+    }
+
+    public static void metallum_gi_receiver_release_context_v1(
+            final MemorySegment context
+    ) {
+        try {
+            giReceiverReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_receiver_release_context_v1", throwable);
+        }
+    }
+
     public static MemorySegment metallum_radiance_context_create(
             final MemorySegment device,
             final MemorySegment queue,
@@ -2474,10 +2586,13 @@ public final class MetalNativeBridge {
      */
     public static boolean metallum_radiance_context_bind_vertex_resources(
             final MemorySegment context,
-            final MemorySegment encoder
+            final MemorySegment encoder,
+            final boolean contributionAllowed
     ) {
         try {
-            int result = (int) radianceContextBindVertexResources.invokeExact(segment(context), segment(encoder));
+            int result = (int) radianceContextBindVertexResources.invokeExact(
+                    segment(context), segment(encoder), contributionAllowed ? 1 : 0
+            );
             return result == 1;
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_radiance_context_bind_vertex_resources", throwable);

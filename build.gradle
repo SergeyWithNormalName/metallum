@@ -426,6 +426,35 @@ tasks.register("giTransportSourceChainUnitTest", JavaExec) {
 	mainClass.set("com.metallum.client.gi.transport.GiTransportSourceChainTests")
 }
 
+tasks.register("giReceiverCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G5 arm admission, SH reconstruction, mapping and exact fallback composition"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giReceiverSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G5 vertex-only shader placement, carrier coexistence and emitted-MSL guards"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverSourceChainTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giReceiverCarrierCoexistenceUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the exact Sodium compact-position sideband shared by L8 and G5"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.receiver.GiReceiverCarrierCoexistenceTests")
+	environment "METALLUM_GI_G5_RECEIVER", "1"
+	environment "METALLUM_GI_G5_RECEIVER_ARM", "candidate"
+	jvmArgs "-ea"
+}
+
 tasks.register("giTransportGpuValidationSource", JavaExec) {
 	group = "verification"
 	description = "Validates complete G3 input and frozen G4 bounce/SH using actual MSL source"
@@ -1631,6 +1660,69 @@ tasks.register("giG4RunnerContractTest", Exec) {
 	commandLine "bash", "tools/test_gi_g4_runner_contract.sh"
 }
 
+tasks.register("giG5ReceiverContractTest", Exec) {
+	group = "verification"
+	description = "Validates the default-off G5 vertex receiver implementation and optional Tier B receipt"
+	dependsOn(
+		tasks.named("giReceiverCpuUnitTest"),
+		tasks.named("giReceiverSourceChainUnitTest"),
+		tasks.named("giReceiverCarrierCoexistenceUnitTest"),
+		tasks.named("realWorldVertexReflectionUnitTest")
+	)
+	inputs.file("tools/gi_g5_contract.py")
+	inputs.file("docs/GI_G5.md")
+	inputs.file("benchmark/gi/g4-transport-evidence-v1.json")
+	inputs.dir("benchmark/gi/evidence/gi-g4-transport-2026-08-27-v1")
+	inputs.dir("src/main/java/com/metallum/client/gi/receiver")
+	inputs.files(
+		"build.gradle",
+		"scripts/run_metal_benchmark.sh",
+		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g5_runner_contract.sh",
+		"src/main/java/com/metallum/client/gi/GiRuntimeStages.java",
+		"src/main/java/com/metallum/client/metal/render/MetalCrossShaderCompiler.java",
+		"src/main/java/com/metallum/client/metal/render/MetalCompiledRenderPipeline.java",
+		"src/main/java/com/metallum/client/metal/render/MetalDevice.java",
+		"src/main/java/com/metallum/client/metal/render/MetalDrawContext.java",
+		"src/main/java/com/metallum/client/metal/render/MetalRenderPass.java",
+		"src/main/java/com/metallum/client/metal/render/SodiumIndexedIndirectBatcher.java",
+		"src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java",
+		"src/main/java/com/metallum/client/hdr/SodiumHdrSemantic.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierBuilderAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierInfoAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierInfoBuilderAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierMetadata.java",
+		"src/main/java/com/metallum/client/sodium/SodiumG5CarrierUpdatedQuadsAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumIndexedIndirectBatchAccess.java",
+		"src/main/java/com/metallum/client/sodium/SodiumRelightFastPath.java",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java",
+		"src/main/java/com/metallum/mixin/sodium/BSPWorkspaceG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/BuiltSectionInfoBuilderG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/BuiltSectionInfoG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/ChunkBuildBuffersG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/ChunkMeshBufferBuilderHdrMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/DefaultChunkRendererShadowMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/RenderRegionManagerG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/UpdatedQuadsListG5CarrierMixin.java",
+		"src/main/java/com/metallum/mixin/sodium/VKIndirectDrawBatchMixin.java",
+		"src/main/resources/metallum.mixins.json",
+		"src/main/native/MetallumNative.swift"
+	)
+	commandLine "python3", "tools/gi_g5_contract.py", "--root", "."
+}
+
+tasks.register("giG5RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates the exact G5 ABBA arms, route, clean preflight and admission wiring"
+	inputs.files(
+		"benchmark/routes/gi-g4-overworld-v1.json",
+		"scripts/run_metal_benchmark.sh",
+		"tools/test_gi_g5_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g5_runner_contract.sh"
+}
+
 tasks.register("giStageGateContractTest", Exec) {
 	group = "verification"
 	description = "Validates current G0 recovery, G1 revalidation and G2 completion evidence"
@@ -1673,6 +1765,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("giG3SourceContractTest"))
 	dependsOn(tasks.named("giG4TransportContractTest"))
 	dependsOn(tasks.named("giG4RunnerContractTest"))
+	dependsOn(tasks.named("giG5ReceiverContractTest"))
+	dependsOn(tasks.named("giG5RunnerContractTest"))
 	dependsOn(tasks.named("giReleaseContractGuardTest"))
 	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
@@ -1681,6 +1775,9 @@ tasks.named("check") {
 	dependsOn(tasks.named("giTransportDebugSettingsUnitTest"))
 	dependsOn(tasks.named("giSemanticTransportFieldUnitTest"))
 	dependsOn(tasks.named("giTransportSourceChainUnitTest"))
+	dependsOn(tasks.named("giReceiverCpuUnitTest"))
+	dependsOn(tasks.named("giReceiverSourceChainUnitTest"))
+	dependsOn(tasks.named("giReceiverCarrierCoexistenceUnitTest"))
 	dependsOn(tasks.named("giTransportGpuValidationSource"))
 	dependsOn(tasks.named("giTransportGpuValidationBundled"))
 	dependsOn(tasks.named("hdrUnitTest"))

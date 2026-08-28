@@ -13,6 +13,8 @@ fail() {
 
 bash -n "$RUNNER" || fail "benchmark runner has invalid shell syntax"
 [ -f "$ROUTE" ] || fail "tracked frozen-field route is missing"
+python3 "$ROOT/tools/gi_g5_contract.py" --self-test \
+    || fail "G5 evidence negative self-test failed"
 
 route_values=$(python3 "$ROOT/tools/metal_benchmark_fixture.py" route-values "$ROUTE") \
     || fail "frozen-field route does not satisfy the canonical route parser"
@@ -41,15 +43,29 @@ for token in \
     'G5 receiver arms reject explicit G2/G3/G4 diagnostic flags' \
     'METALLUM_GI_G5_RECEIVER="$GI_G5_RECEIVER_ENV"' \
     'METALLUM_GI_G5_RECEIVER_ARM="$GI_G5_RECEIVER_ARM"' \
+    '-Dmetallum.planar_reflections=false' \
     '"$GI_G5_RECEIVER_ENV" \' \
     'G2/G3/G4/G5 diagnostics cannot run under the release-contract profile' \
     'G5 Tier B evidence requires a clean worktree' \
     'g5_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G5_ADMISSION "' \
     'requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 ' \
     'state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND' \
+    'phase=WARMUP presented_frame=[0-9]+ resources=5 bindings=5 ' \
+    'carrier_skips=0 g5_carrier_writes=[1-9][0-9]* ' \
+    'drawn_g5_carrier_slices=[1-9][0-9]* status=PASS vertex_only=true ' \
+    'g5_combined_accounted_bytes=$((22637928 + g5_allocated_bytes))' \
+    'METALLUM_BENCHMARK EVENT=GI_G5_FINAL state=READY carrier_skips=0 g5_carrier_writes=[1-9][0-9]* drawn_g5_carrier_slices=[1-9][0-9]* status=PASS' \
+    'grep -Ec "${g5_final}$"' \
+    'grep -nE "${g5_final}$"' \
+    'expected exactly one final zero-skip G5 carrier census' \
     'G5 control/candidate must not claim standalone G4 READY admission'; do
-    grep -Fq "$token" "$RUNNER" || fail "runner wiring token is missing: $token"
+    grep -Fq -- "$token" "$RUNNER" || fail "runner wiring token is missing: $token"
 done
+
+if grep -Fq 'grep -Fxc "$g5_final"' "$RUNNER" \
+        || grep -Fq 'grep -nFx "$g5_final"' "$RUNNER"; then
+    fail "runner still requires an impossible unprefixed whole Minecraft log line"
+fi
 
 request_token='shared_g4_resources=true explicit_g4_request=false'
 [ "$(grep -Fc "$request_token" "$RUNNER")" -eq 1 ] \

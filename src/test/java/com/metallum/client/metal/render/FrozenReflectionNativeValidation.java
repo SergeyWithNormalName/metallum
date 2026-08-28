@@ -45,7 +45,7 @@ public final class FrozenReflectionNativeValidation {
                         "new frozen reflection context must start in the safe disabled state");
                 require(resources.buildStatus() == RadianceGpuResources.BuildStatus.PENDING,
                         "new native context must report pending rather than a false READY");
-                validateDedicatedVertexBinding(device, queue, resources, false);
+                validateDedicatedVertexBinding(device, queue, resources, true, false);
                 require(resources.queueFrozenBuild(71L, -64, 0, 128, rgba, validity, 0.35F, 0.30F, false),
                         "frozen private-texture upload and compute build was not queued");
                 long deadline = System.nanoTime() + 2_000_000_000L;
@@ -73,7 +73,8 @@ public final class FrozenReflectionNativeValidation {
                                 && stats.auxiliaryBuildCount() == 0L
                                 && stats.auxiliaryMipBuildCount() == 0L,
                         "native stats did not prove one bounded source-only cone field build: " + stats);
-                validateDedicatedVertexBinding(device, queue, resources, true);
+                validateDedicatedVertexBinding(device, queue, resources, true, true);
+                validateDedicatedVertexBinding(device, queue, resources, false, false);
             }
             System.out.println("Frozen reflection Java/FFM/Swift/Metal validation passed");
         } finally {
@@ -92,6 +93,7 @@ public final class FrozenReflectionNativeValidation {
             final MemorySegment device,
             final MTLCommandQueue queue,
             final RadianceGpuResources resources,
+            final boolean contributionAllowed,
             final boolean expectedReady
     ) {
         MemorySegment target = MetalNativeBridge.metallum_create_texture_2d(
@@ -113,8 +115,10 @@ public final class FrozenReflectionNativeValidation {
                     0, 0, 1.0, 0
             );
             try {
-                require(resources.bindVertexResources(encoder.handle()) == expectedReady,
-                        "binding readiness must match the exact native completion state");
+                require(resources.bindVertexResources(
+                                encoder.handle(), contributionAllowed
+                        ) == expectedReady,
+                        "binding readiness must match native completion and carrier safety");
             } finally {
                 encoder.endEncoding();
             }

@@ -1,11 +1,17 @@
 package com.metallum.client.gi.source;
 
+import com.metallum.client.gi.receiver.GiReceiverGpuResources;
+import com.metallum.client.gi.receiver.GiReceiverLayout;
 import com.metallum.client.gi.transport.GiTransportGpuResources;
 import com.metallum.client.gi.transport.GiTransportLayout;
 import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandBuffer;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
+import com.metallum.client.metal.render.mtl.MTLPixelFormat;
+import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
+import com.metallum.client.metal.render.mtl.MTLStorageMode;
+import com.metallum.client.metal.render.mtl.MTLTextureUsage;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -71,8 +77,10 @@ public final class GiTransportGpuValidation {
             require(!MetalNativeBridge.isNullHandle(layer), "Metal layer creation failed");
             queue = MTLCommandQueue.create(device, layer);
             GiTransportGpuResources.validateNativeAbi();
+            GiReceiverGpuResources.validateNativeAbi();
             validatePhysicalField(device, queue, expectedLibraryMode);
             validateAttachmentLifecycle(device, layer, queue);
+            validateReceiverAttachmentLifecycle(device, queue);
             validateWrongThread(device, queue, expectedLibraryMode);
             validateReleaseWhileInFlight(device, queue);
             System.out.println("G4 frozen one-bounce Metal validation passed ("
@@ -84,6 +92,150 @@ public final class GiTransportGpuValidation {
             }
             MetalNativeBridge.metallum_release_device_caches(device);
             MetalNativeBridge.metallum_release_object(device);
+        }
+    }
+
+    private static void validateReceiverAttachmentLifecycle(
+            final MemorySegment device,
+            final MTLCommandQueue queue
+    ) throws InterruptedException {
+        try (DirectField direct = DirectField.create(device, queue, 456L, Scene.OPEN);
+             Arena arena = Arena.ofShared()) {
+            MemorySegment transport = MetalNativeBridge.metallum_gi_transport_create_context_v1(
+                    device, queue.nativeHandle(), direct.world()
+            );
+            require(!MetalNativeBridge.isNullHandle(transport),
+                    "G5 lifecycle fixture could not create its G4 owner");
+            MemorySegment receiver = MemorySegment.NULL;
+            try {
+                require(MetalNativeBridge.metallum_gi_transport_attach_telemetry_v1(
+                                transport, direct.context())
+                                == GiTransportGpuResources.STATUS_OK,
+                        "G5 lifecycle fixture could not attach G4 telemetry");
+                require(MetalNativeBridge.isNullHandle(
+                                MetalNativeBridge.metallum_gi_receiver_create_context_v1(
+                                        MemorySegment.ofAddress(1L))),
+                        "G5 admitted a forged G4 owner capability");
+                receiver = MetalNativeBridge.metallum_gi_receiver_create_context_v1(transport);
+                require(!MetalNativeBridge.isNullHandle(receiver),
+                        "G5 native receiver context creation failed");
+
+                MemorySegment stats = arena.allocate(GiReceiverLayout.STATS_BYTES, Long.BYTES);
+                require(MetalNativeBridge.metallum_gi_receiver_get_stats_v1(
+                                receiver, stats, stats.byteSize())
+                                == GiReceiverLayout.STATUS_OK
+                                && stats.get(LE_LONG,
+                                GiReceiverLayout.STATS_ALLOCATED_BYTES_OFFSET)
+                                >= GiReceiverLayout.LIFETIME_OVERHEAD_BYTES
+                                && stats.get(LE_INT,
+                                GiReceiverLayout.STATS_RESOURCE_COUNT_OFFSET)
+                                == GiReceiverLayout.RESOURCE_COUNT
+                                && stats.get(LE_INT,
+                                GiReceiverLayout.STATS_BINDING_COUNT_OFFSET)
+                                == GiReceiverLayout.BINDING_COUNT
+                                && stats.get(LE_LONG,
+                                GiReceiverLayout.STATS_SHARED_TEXTURE_BYTES_OFFSET) == 0L,
+                        "G5 native lifetime/resource census differs");
+
+                AtomicInteger wrongThread = new AtomicInteger();
+                MemorySegment receiverHandle = receiver;
+                Thread thread = new Thread(() -> wrongThread.set(
+                        MetalNativeBridge.metallum_gi_receiver_get_stats_v1(
+                                receiverHandle, stats, stats.byteSize())
+                ), "g5-stats-wrong-thread");
+                thread.start();
+                thread.join();
+                require(wrongThread.get() == GiReceiverLayout.STATUS_INVALID,
+                        "wrong-thread G5 receiver access was admitted");
+
+                MemorySegment target = MetalNativeBridge.metallum_create_texture_2d(
+                        device,
+                        MTLPixelFormat.BGRA8Unorm,
+                        1L, 1L, 1L, 1L, 0L,
+                        MTLTextureUsage.RenderTarget.value,
+                        MTLStorageMode.Private,
+                        true,
+                        "G5 receiver native validation target"
+                );
+                require(!MetalNativeBridge.isNullHandle(target),
+                        "G5 binding fixture render target creation failed");
+                MTLCommandBuffer commandBuffer = queue.makeCommandBuffer(
+                        "G5 receiver bind-before-ready/release validation"
+                );
+                try {
+                    MTLRenderCommandEncoder encoder = commandBuffer.makeRenderCommandEncoder(
+                            target, MemorySegment.NULL, MemorySegment.NULL,
+                            1.0, 1.0, 2,
+                            0.0F, 0.0F, 0.0F, 1.0F,
+                            0, 0, 1.0, 0
+                    );
+                    try {
+                        for (int arm = GiReceiverLayout.ARM_CONTROL;
+                             arm <= GiReceiverLayout.ARM_FIELD;
+                             arm++) {
+                            require(MetalNativeBridge.metallum_gi_receiver_bind_vertex_v1(
+                                            receiver, encoder.handle(), arm, 1)
+                                            == GiReceiverLayout.STATUS_ZERO_READY,
+                                    "G5 arm " + arm
+                                            + " did not bind exact-zero resources before G4 READY");
+                        }
+                        require(MetalNativeBridge.metallum_gi_receiver_bind_vertex_v1(
+                                        receiver, encoder.handle(), 99, 1)
+                                        == GiReceiverLayout.STATUS_INVALID,
+                                "G5 admitted an invalid receiver arm");
+                        AtomicInteger wrongThreadBind = new AtomicInteger();
+                        MemorySegment encoderHandle = encoder.handle();
+                        Thread bindThread = new Thread(() -> wrongThreadBind.set(
+                                MetalNativeBridge.metallum_gi_receiver_bind_vertex_v1(
+                                        receiverHandle, encoderHandle,
+                                        GiReceiverLayout.ARM_CANDIDATE, 1)
+                        ), "g5-bind-wrong-thread");
+                        bindThread.start();
+                        bindThread.join();
+                        require(wrongThreadBind.get() == GiReceiverLayout.STATUS_WRONG_THREAD,
+                                "wrong-thread G5 vertex binding was admitted");
+                    } finally {
+                        encoder.endEncoding();
+                    }
+
+                    // The native registry releases both owners before this command buffer
+                    // commits. Metal's encoder retains every bound texture/buffer until GPU
+                    // retirement; completion under Validation proves the deferred lifetime.
+                    MetalNativeBridge.metallum_gi_transport_release_context_v1(transport);
+                    transport = MemorySegment.NULL;
+                    stats.fill((byte) 0);
+                    require(MetalNativeBridge.metallum_gi_receiver_get_stats_v1(
+                                    receiver, stats, stats.byteSize())
+                                    == GiReceiverLayout.STATUS_OK
+                                    && stats.get(LE_LONG,
+                                    GiReceiverLayout.STATS_BIND_COUNT_OFFSET) == 3L
+                                    && stats.get(LE_LONG,
+                                    GiReceiverLayout.STATS_ZERO_BINDINGS_OFFSET) == 3L,
+                            "G5 did not retain its G4 owner or exact-zero binding census");
+
+                    MemorySegment staleReceiver = receiver;
+                    MetalNativeBridge.metallum_gi_receiver_release_context_v1(staleReceiver);
+                    receiver = MemorySegment.NULL;
+                    require(MetalNativeBridge.metallum_gi_receiver_get_stats_v1(
+                                    staleReceiver, stats, stats.byteSize())
+                                    == GiReceiverLayout.STATUS_INVALID,
+                            "released G5 native capability remained usable");
+
+                    commandBuffer.commit();
+                    require(commandBuffer.waitUntilCompleted(5_000L),
+                            "released in-flight G5 vertex resources did not complete safely");
+                } finally {
+                    commandBuffer.close();
+                    MetalNativeBridge.metallum_release_object(target);
+                }
+            } finally {
+                if (!MetalNativeBridge.isNullHandle(receiver)) {
+                    MetalNativeBridge.metallum_gi_receiver_release_context_v1(receiver);
+                }
+                if (!MetalNativeBridge.isNullHandle(transport)) {
+                    MetalNativeBridge.metallum_gi_transport_release_context_v1(transport);
+                }
+            }
         }
     }
 
@@ -437,6 +589,7 @@ public final class GiTransportGpuValidation {
                         stale.close();
                     }
                     input.header().set(LE_LONG, 32L, originalContent);
+                    validateReceiverReadyThenStale(device, queue, context);
                 }
 
                 Stats stats = stats(context, arena);
@@ -458,7 +611,8 @@ public final class GiTransportGpuValidation {
                                 <= GI_BUDGET_BYTES,
                         "G4 lifecycle, bounded-work or allocatedSize budget differs");
                 if (validateStale) {
-                    require(stats.staleRejects() == 1L, "G4 stale reject was not counted");
+                    require(stats.staleRejects() == 2L,
+                            "G4 source-drift and explicit stale rejects were not counted");
                 }
                 GiTransportGpuResources.Capture capture = capture(
                         context, arena, input.cells()
@@ -467,6 +621,72 @@ public final class GiTransportGpuValidation {
             } finally {
                 MetalNativeBridge.metallum_gi_transport_release_context_v1(context);
             }
+        }
+    }
+
+    /** Proves that G5 cannot keep sampling a G4 field after the latched owner goes stale. */
+    private static void validateReceiverReadyThenStale(
+            final MemorySegment device,
+            final MTLCommandQueue queue,
+            final MemorySegment transport
+    ) {
+        MemorySegment receiver = MetalNativeBridge.metallum_gi_receiver_create_context_v1(
+                transport
+        );
+        require(!MetalNativeBridge.isNullHandle(receiver),
+                "G5 stale fixture could not retain its READY G4 owner");
+        MemorySegment target = MemorySegment.NULL;
+        try {
+            target = MetalNativeBridge.metallum_create_texture_2d(
+                    device,
+                    MTLPixelFormat.BGRA8Unorm,
+                    1L, 1L, 1L, 1L, 0L,
+                    MTLTextureUsage.RenderTarget.value,
+                    MTLStorageMode.Private,
+                    true,
+                    "G5 ready-to-stale receiver target"
+            );
+            require(!MetalNativeBridge.isNullHandle(target),
+                    "G5 ready-to-stale receiver target creation failed");
+            MTLCommandBuffer commandBuffer = queue.makeCommandBuffer(
+                    "G5 READY field to stale zero-ready validation"
+            );
+            try {
+                MTLRenderCommandEncoder encoder = commandBuffer.makeRenderCommandEncoder(
+                        target, MemorySegment.NULL, MemorySegment.NULL,
+                        1.0, 1.0, 2,
+                        0.0F, 0.0F, 0.0F, 1.0F,
+                        0, 0, 1.0, 0
+                );
+                try {
+                    require(MetalNativeBridge.metallum_gi_receiver_bind_vertex_v1(
+                                    receiver, encoder.handle(),
+                                    GiReceiverLayout.ARM_FIELD, 1)
+                                    == GiReceiverLayout.STATUS_OK,
+                            "G5 FIELD did not bind the READY G4 snapshot");
+                    require(MetalNativeBridge.metallum_gi_transport_report_stale_v1(
+                                    transport)
+                                    == GiTransportGpuResources.STATUS_STALE,
+                            "G4 explicit stale transition was not published");
+                    require(MetalNativeBridge.metallum_gi_receiver_bind_vertex_v1(
+                                    receiver, encoder.handle(),
+                                    GiReceiverLayout.ARM_FIELD, 1)
+                                    == GiReceiverLayout.STATUS_ZERO_READY,
+                            "G5 FIELD remained READY after its G4 owner became stale");
+                } finally {
+                    encoder.endEncoding();
+                }
+                commandBuffer.commit();
+                require(commandBuffer.waitUntilCompleted(5_000L),
+                        "G5 ready-to-stale binding command buffer did not complete");
+            } finally {
+                commandBuffer.close();
+            }
+        } finally {
+            if (!MetalNativeBridge.isNullHandle(target)) {
+                MetalNativeBridge.metallum_release_object(target);
+            }
+            MetalNativeBridge.metallum_gi_receiver_release_context_v1(receiver);
         }
     }
 

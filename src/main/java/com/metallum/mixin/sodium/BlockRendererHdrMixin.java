@@ -4,6 +4,7 @@ import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.metallum.client.hdr.EmissiveTextureRegistry;
 import com.metallum.client.hdr.SodiumHdrSemantic;
+import com.metallum.client.gi.receiver.GiReceiverRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.client.lighting.reflection.VoxelReflectionFace;
 import com.metallum.client.sodium.SodiumRainExposureSnapshot;
@@ -282,9 +283,10 @@ abstract class BlockRendererHdrMixin {
             }
         }
         int reflectionFace = metallum$reflectionFace(quad);
+        int giAxisFace = GiReceiverRuntime.isRequested() ? metallum$giAxisFace(quad) : 0;
         SodiumHdrSemantic.tagQuad(
                 this.vertices, emission, exact, surfaceClass, submerged, submergedDepth,
-                reflectionFace
+                reflectionFace, giAxisFace
         );
     }
 
@@ -295,6 +297,14 @@ abstract class BlockRendererHdrMixin {
         float y = normal.y();
         float z = normal.z();
         return VoxelReflectionFace.forNormal(x, y, z);
+    }
+
+    @Unique
+    private static int metallum$giAxisFace(final MutableQuadViewImpl quad) {
+        var normal = quad.faceNormal();
+        return VoxelReflectionFace.forAxisAlignedUnitNormal(
+                normal.x(), normal.y(), normal.z()
+        );
     }
 
     @Unique

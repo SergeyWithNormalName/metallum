@@ -1,12 +1,17 @@
 # Global illumination: архитектура, этапы и критерии приёмки
 
-Статус: архитектурный план, обновлён 27 августа 2026 года. Исторический результат
+Статус: архитектурный план, обновлён 28 августа 2026 года. Исторический результат
 G0 `REJECTED_BASELINE_FLOOR` сохранён; отдельный текущий recovery gate имеет
 `PASS_RECOVERED_BASELINE`, а G1 — `PASS_ABSOLUTE_FLOOR_REVALIDATED`. Эти новые
 receipts не переписывают исходный G0 no-win. G2 остаётся diagnostic material
-truth, а G3 и G4 завершены только как private field-only этапы. Production GI
-ещё не влияет на изображение: receiver G5 заблокирован до отдельного запроса и
-stop-gate. Исходный аудит voxel/radiance-наработок находится в
+truth, а G3 и G4 завершены только как private field-only этапы. Default-off G5
+receiver реализован по отдельному запросу, но остаётся
+`IMPLEMENTED_PENDING_TIER_B`: dry ABBA stop-gate и визуальная приёмка ещё не
+выполнены. P1 carrier-аудит отклонил прежнее владение через light/color;
+текущий G5-контракт использует только collision-free 4-bit sideband в свободных
+position bits точного Sodium 0.9.1 layout и требует заново пройти mechanical
+receipts. Поэтому production GI по-прежнему не заявлен. Исходный аудит
+voxel/radiance-наработок находится в
 [GI_VOXEL_AUDIT.md](GI_VOXEL_AUDIT.md).
 
 ## 1. Решение в одном абзаце
@@ -451,8 +456,8 @@ Java/Swift/Metal и остаётся default-off. Source/bundled Metal Validatio
 ABI/resource census, field-only source-chain и чистый live Tier B receipt
 прошли: один warmup transport dispatch дал `0.923291 ms` p95/max, а measured
 dispatch growth остался нулевым. Это не Tier C, не визуальная приёмка и не
-production FPS claim. G5 остаётся заблокирован. Канонический контракт:
-`docs/GI_G4.md`.
+production FPS claim. На момент G4 G5 оставался заблокирован; отдельный запрос
+на G5 получен 28 августа. Канонический контракт G4: `docs/GI_G4.md`.
 
 ### G5 — receiver feasibility
 
@@ -482,11 +487,42 @@ Dry performance gate до визуальной настройки:
   плечах A/B.
 - Tier B target: `WORLD_OPAQUE` p95 delta не более 0.30 ms и repeatable
   whole-frame delta не более 2%. Это screening/stop-gate, не Tier C claim.
-- Generated MSL должен подтверждать фактический vertex path и отсутствие старых
-  fragment receivers.
+- Exact encoder tests на pinned Sodium 0.9.1 должны подтверждать четыре
+  sideband bits без изменения нижних 30 position bits и всех light/alpha bytes,
+  а generated MSL — фактический vertex path, точный decode ownership bit,
+  естественное игнорирование sideband в base/`SUN_SHADOW` и отсутствие fragment
+  receivers.
+- Admission и final receipts обязаны содержать `carrier_skips=0`, строго
+  положительный диагностический `g5_carrier_writes=[1-9][0-9]*` и точный
+  `drawn_g5_carrier_slices=[1-9][0-9]*`. Последний переносится от принятого
+  resident face-slice через фактически заполненный private indirect batch;
+  ноль или отсутствие любого счётчика не принимается.
 
 Если оба bounded receiver carrier не проходят, GI остаётся field/debug feature;
 качество не спасается возвратом к screen-space.
+
+Статус реализации от 28 августа 2026: первый vertex-stage кандидат установлен
+default-off для Sodium solid/cutout/translucent. Он использует четыре
+vertex-only read G4 SH/confidence (`texture 6..9`) и `buffer 25`, передаёт
+готовое normal-aware irradiance во fragment, заменяет только approximate
+ambient при positive confidence и сохраняет точный fallback при нуле.
+
+После P1 carrier-аудита единственный допустимый axis-normal carrier
+version-locked к `CompactChunkVertex` из Sodium `mc26.2-0.9.1-fabric`. Четыре
+свободных бита — bits `30..31` двух `RG32_UINT a_Position` words — образуют
+`code`: bits `0..2` содержат exact face `1..6`, bit `3` означает exact G5;
+L8-only оставляет bit `3` равным нулю. Коды `7`, `8`, `15`, занятый high bit,
+несовпадение quad face или layout/version являются конфликтом и fail closed.
+Нижние 30 position bits и все light/color/alpha bytes остаются точными; base
+Metallum и `SUN_SHADOW` уже игнорируют high bits при обычном 10-bit unpack, а
+light-only relight не отключается и не меняет position sideband. Прежняя
+light/color схема отвергнута и не является evidence.
+
+`FULL_PLANAR` terrain capture по-прежнему подавлен как второй неизмеренный
+raster. Exact encoder и generated-MSL контракты обязательны, но не являются dry
+Tier B receipt: до настоящего ABBA этап имеет статус
+`IMPLEMENTED_PENDING_TIER_B`, а G6 остаётся закрыт. Канонический контракт:
+`docs/GI_G5.md`.
 
 ### G6 — live updates, scroll и динамические источники
 
@@ -623,12 +659,12 @@ solid/cutout/translucent terrain. Generated MSL подтверждает оди�
 vertex sample site и ноль fragment `texture3d`. Dry A/B, Tier C и live scenes ещё
 не выполнены; это не production acceptance и не G5 diffuse receiver.
 
-Уточнение от 28 августа 2026: основной six-face carrier перенесён из block-light
-low bits в восстанавливаемый opaque vertex-alpha sentinel. Поэтому metal/smooth/
-wet receiver сохраняет направление после light-only relight и не теряет L8
-material class при конфликте с modded light; non-opaque alpha оставляет прежний
-fail-closed light fallback. Это contract fix, а не расширение 128-block field и
-не закрытие visual/Tier C gate.
+Уточнение от 28 августа 2026: прежние block-light и opaque-alpha
+carrier отклонены после доказанных коллизий с authored данными. Активный
+six-face carrier использует четыре версионно закреплённых свободных бита
+`CompactChunkVertex` position words. Он переживает light-only relight, не изменяя
+light, alpha, material или квантованную позицию. Это contract fix, а не
+расширение 128-block field и не закрытие visual/Tier C gate.
 
 #### R3 — water-specific planar option
 

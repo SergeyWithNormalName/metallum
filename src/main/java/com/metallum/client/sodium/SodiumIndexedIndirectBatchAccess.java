@@ -7,7 +7,20 @@ import org.jspecify.annotations.Nullable;
 public interface SodiumIndexedIndirectBatchAccess {
     long metallum$commandAddress();
 
-    void metallum$setPreparedSnapshot(long submitIndex, long renderInvocationEpoch, GpuBufferSlice snapshot);
+    void metallum$resetDrawnG5CarrierSlices();
+
+    void metallum$addDrawnG5CarrierSlices(int drawnSlices);
+
+    long metallum$getDrawnG5CarrierSlices();
+
+    void metallum$setPreparedSnapshot(
+            long submitIndex,
+            long renderInvocationEpoch,
+            long drawnG5CarrierSlices,
+            GpuBufferSlice snapshot
+    );
+
+    long metallum$getPreparedDrawnG5CarrierSlices(long submitIndex, long renderInvocationEpoch);
 
     @Nullable GpuBufferSlice metallum$takePreparedSnapshot(long submitIndex, long renderInvocationEpoch);
 }

@@ -224,6 +224,15 @@ public final class GiTransportCoordinator implements AutoCloseable {
                 ? null : this.resources.pollDebugCapture();
     }
 
+    /** Returns the stable opaque capability without exposing any Metal texture handle. */
+    public GiTransportGpuResources.ReadToken readToken() {
+        assertOwnerThread();
+        if (this.resources == null) {
+            throw new IllegalStateException("G4 transport resources are unavailable");
+        }
+        return this.resources.readToken();
+    }
+
     @Override
     public void close() {
         assertOwnerThread();

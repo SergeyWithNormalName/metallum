@@ -1,11 +1,17 @@
 package com.metallum.client.metal.render;
 
+import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
+import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.receiver.GiReceiverShaderPatcher;
+import com.metallum.client.hdr.HdrShaderFlavor;
 import com.metallum.client.hdr.MetallumMaterialShaderPatcher;
 import com.metallum.client.lighting.TerrainEnvironmentSpecialization;
 import com.metallum.client.lighting.reflection.RealWorldReflectionField;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.reflection.WaterReflectionQualityConfig;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
+import com.metallum.client.lighting.shader.SunShadowShaderPatcher;
 import com.metallum.client.radiance.CompactSectionPayload;
 import com.metallum.client.radiance.Float16Compressor;
 import com.metallum.client.radiance.RadianceAppearanceModel;
@@ -76,12 +82,19 @@ public final class RealWorldVertexReflectionTests {
         testCloudReflectionWorldMotion();
         testReceiverFresnelCompositionMath();
         testMslGeneratedShaderContractProof();
+        testGiG5GeneratedMslContractProof();
         testGiOffGeneratedMslContractProof();
 
         System.out.println("RealWorldVertexReflectionTests passed successfully!");
     }
 
     private static void testMaterialEnvironmentStageMask() {
+        require(!MetalCompiledRenderPipeline.isG5CompatibleFlavor(HdrShaderFlavor.METALLUM)
+                        && MetalCompiledRenderPipeline.isG5CompatibleFlavor(
+                        HdrShaderFlavor.METALLUM_ADVANCED)
+                        && MetalCompiledRenderPipeline.isG5CompatibleFlavor(
+                        HdrShaderFlavor.METALLUM_ADVANCED_L6_TEMPORAL),
+                "G5 main terrain admission accepted a base Metallum fallback");
         require(SunShadowGpuResources.materialEnvironmentStageMask(false)
                         == MetalCompiledRenderPipeline.STAGE_FRAGMENT,
                 "ordinary material environment params must remain fragment-only");
@@ -89,6 +102,42 @@ public final class RealWorldVertexReflectionTests {
                         == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
                         | MetalCompiledRenderPipeline.STAGE_VERTEX),
                 "wet reflection gating must see the smoothed material weather packet in vertex");
+        require(LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(true)
+                        == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                        | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                "reflection world reconstruction must keep voxel params bound in vertex");
+
+        String previousRuntime = System.getProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
+        GiReceiverCompatibility.setTestOverride(true);
+        CompactPositionCarrierSafety.resetForTests();
+        VertexReflectionExperiment.setOverride(true);
+        System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, "true");
+        try {
+            require(VertexReflectionExperiment.isLayoutEnabled()
+                            && VertexReflectionExperiment.isRuntimeEnabled(),
+                    "reflection test did not start with an admitted ON layout");
+            CompactPositionCarrierSafety.reportConflict("test pre-owned position code");
+            require(VertexReflectionExperiment.isLayoutEnabled()
+                            && !VertexReflectionExperiment.isRuntimeEnabled()
+                            && SunShadowGpuResources.materialEnvironmentStageMask(
+                            VertexReflectionExperiment.isLayoutEnabled())
+                            == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                            | MetalCompiledRenderPipeline.STAGE_VERTEX)
+                            && LocalVoxelShadowGpuResources.vertexFieldParamsStageMask(
+                            VertexReflectionExperiment.isLayoutEnabled())
+                            == (MetalCompiledRenderPipeline.STAGE_FRAGMENT
+                            | MetalCompiledRenderPipeline.STAGE_VERTEX),
+                    "carrier conflict changed an already selected reflection resource layout");
+        } finally {
+            CompactPositionCarrierSafety.resetForTests();
+            GiReceiverCompatibility.setTestOverride(null);
+            VertexReflectionExperiment.setOverride(null);
+            if (previousRuntime == null) {
+                System.clearProperty(VertexReflectionExperiment.RUNTIME_PROPERTY);
+            } else {
+                System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, previousRuntime);
+            }
+        }
     }
 
     private static void testExposedFaceIrradianceSemantics() {
@@ -348,6 +397,11 @@ public final class RealWorldVertexReflectionTests {
                         && PlanarReflectionConfig.captureMode(true, false, false)
                         == PlanarReflectionConfig.CaptureMode.FULL_PLANAR,
                 "cloud toggle must remove voxel cloud-only capture without disabling planar terrain");
+        require(PlanarReflectionConfig.captureMode(true, false, true, true)
+                        == PlanarReflectionConfig.CaptureMode.DISABLED
+                        && PlanarReflectionConfig.captureMode(true, true, true, true)
+                        == PlanarReflectionConfig.CaptureMode.CLOUDS_ONLY,
+                "G5 must suppress live FULL_PLANAR terrain without disabling voxel cloud capture");
         require(!PlanarReflectionRenderer.rendersReflectedClouds(
                         PlanarReflectionConfig.CaptureMode.FULL_PLANAR, false)
                         && PlanarReflectionRenderer.rendersReflectedClouds(
@@ -457,6 +511,10 @@ public final class RealWorldVertexReflectionTests {
         require(onMslVertex.contains("texture3d<float> metallumReflectionRadiance [[texture(10)]]"), "Vertex must have texture(10)");
         require(onMslVertex.contains("sampler metallumReflectionRadianceSmplr [[sampler(10)]]"), "Vertex must have sampler(10)");
         require(onMslVertex.contains("buffer(27)"), "Vertex must bind dedicated reflection params buffer at slot 27");
+        require(!onMslVertex.contains("buffer(14)"),
+                "Vertex reflection must not revive the retired slot-14 environment buffer");
+        require(onMslVertex.contains("buffer(16)"),
+                "Vertex reflection must keep the camera/voxel packet at slot 16");
         require(onMslVertex.contains("buffer(26)"),
                 "Vertex wet receiver gate must bind the shared L8/G2 material environment at slot 26");
         require(onMslVertex.contains("metallumCoarseReflection"), "Vertex must output metallumCoarseReflection");
@@ -483,22 +541,30 @@ public final class RealWorldVertexReflectionTests {
         int firstReflectionSample = onGlslVertex.indexOf("textureLod(metallumReflection");
         require(receiverGate >= 0 && firstReflectionSample > receiverGate,
                 "non-receiver terrain vertices must branch around all reflection texture reads");
-        require(onGlslVertex.contains("metallumReflectionFaceCode")
-                        && onGlslVertex.contains("metallumReflectionAlphaCarrier")
-                        && onGlslVertex.contains("248u - metallumReflectionAlphaByte")
-                        && onGlslVertex.contains("_vert_color.a = 1.0")
-                        && onGlslVertex.contains("metallumReflectionLightCarrier")
-                        && onGlslVertex.contains("metallumReflectionMaxLightCode")
-                        && onGlslVertex.contains("metallumReflectionRestoredLightByte")
+        require(onGlslVertex.contains("metallumReflectionPositionCarrier")
+                        && onGlslVertex.contains("((a_Position.x >> 30u) & 3u)")
+                        && onGlslVertex.contains("(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && onGlslVertex.contains(
+                        "metallumReflectionPositionCarrier & 7u")
+                        && onGlslVertex.contains(
+                        "(metallumReflectionPositionCarrier & 8u) != 0u")
+                        && onGlslVertex.contains("metallumReflectionFaceCode >= 1u")
+                        && onGlslVertex.contains("metallumReflectionFaceCode <= 6u")
                         && onGlslVertex.contains("metallumReflectionFaceNormal")
                         && onGlslVertex.contains(
-                        "metallumViewRay, metallumReflectionFaceNormal"),
-                "vertex carrier must prefer relight-stable alpha faces and restore compatibility data");
-        require(onGlslVertex.indexOf("metallumVertexCarrierMaterial")
-                        < onGlslVertex.indexOf("metallumReflectionLightCarrier")
-                        && onGlslVertex.indexOf("metallumReflectionLightCarrier")
-                        < onGlslVertex.indexOf("_vert_tex_light_coord.x ="),
-                "light compatibility decoding must stay material-gated and avoid unrelated quads");
+                        "metallumViewRay, metallumReflectionFaceNormal")
+                        && !onGlslVertex.contains("metallumReflectionAlphaCarrier")
+                        && !onGlslVertex.contains("metallumReflectionLightCarrier")
+                        && !onGlslVertex.contains("metallumReflectionLightSignature")
+                        && !onGlslVertex.contains("_vert_color.a =")
+                        && !onGlslVertex.contains("_vert_tex_light_coord.x =")
+                        && !onGlslVertex.contains("_vert_tex_light_coord.y ="),
+                "vertex reflection must decode the position carrier without mutating color or light");
+        int positionCarrierDecode = onGlslVertex.indexOf("metallumReflectionPositionCarrier");
+        int faceNormalDecode = onGlslVertex.indexOf("metallumReflectionFaceNormal");
+        require(positionCarrierDecode >= 0 && faceNormalDecode > positionCarrierDecode
+                        && firstReflectionSample > faceNormalDecode,
+                "position carrier face decode must precede the bounded reflection trace");
         require(onGlslVertex.contains("metallumSampleWorld = metallumWorldPos + metallumReflDir * metallumTraceDistance")
                         && onGlslVertex.contains("metallumTraceLod = clamp(log2(metallumConeDiameter * 0.5)"),
                 "vertex carrier must traverse the reflected world-space ray with roughness-aware mip LOD");
@@ -803,6 +869,205 @@ public final class RealWorldVertexReflectionTests {
         }
     }
 
+    /** Real Sodium GLSL -> SPIR-V -> SPIRV-Cross MSL proof for all three G5 terrain flavors. */
+    private static void testGiG5GeneratedMslContractProof() throws Exception {
+        String sodiumVertex = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX
+        );
+        String sodiumFragment = preprocess(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT
+        );
+        String materialVertex = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                sodiumVertex
+        ).source();
+        String materialFragment = MetallumMaterialShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                sodiumFragment
+        ).source();
+        String advancedVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        String advancedFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, false
+        ).source();
+        GiReceiverShaderPatcher.Result g5Vertex = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.VERTEX, advancedVertex
+        );
+        GiReceiverShaderPatcher.Result g5Fragment = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.FRAGMENT, advancedFragment
+        );
+        require(g5Vertex.success() && g5Fragment.success(),
+                "G5 rejected the actual preprocessed Sodium Advanced sources: vertex="
+                        + g5Vertex.failureReason() + ", fragment=" + g5Fragment.failureReason());
+        require(g5Vertex.source().contains("((a_Position.x >> 30u) & 3u)")
+                        && g5Vertex.source().contains(
+                        "(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && g5Vertex.source().contains(
+                        "metallumGiPositionFaceCode = metallumGiPositionCarrier & 7u")
+                        && g5Vertex.source().contains(
+                        "(metallumGiPositionCarrier & 8u) != 0u")
+                        && g5Vertex.source().contains("metallumGiSamplesFinite")
+                        && countOccurrences(g5Vertex.source(), "isnan(") == 4
+                        && countOccurrences(g5Vertex.source(), "isinf(") == 4
+                        && !g5Vertex.source().contains("metallumGiLightSignature")
+                        && !g5Vertex.source().contains("metallumGiAlphaCarrier")
+                        && !g5Vertex.source().contains("_vert_color.a =")
+                        && !g5Vertex.source().contains("_vert_tex_light_coord.y ="),
+                "G5 real Sodium source lost its position carrier decode or mutates compatibility data");
+        require(!materialVertex.contains(GiReceiverShaderPatcher.MARKER)
+                        && !materialFragment.contains(GiReceiverShaderPatcher.MARKER)
+                        && !materialVertex.contains("metallumGi")
+                        && !materialFragment.contains("metallumGi"),
+                "base Metallum source unexpectedly contains G5 shader work");
+
+        Map<String, ShaderDefines> variants = Map.of(
+                "solid", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG").build(),
+                "cutout", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG")
+                        .define("ALPHA_CUTOUT", 0.5f).build(),
+                "translucent", ShaderDefines.builder()
+                        .define("USE_VERTEX_COMPRESSION").define("USE_FOG")
+                        .define("ALPHA_CUTOUT", 0.01f).build()
+        );
+        for (Map.Entry<String, ShaderDefines> variant : variants.entrySet()) {
+            String baseVertexMsl = compileToMsl(
+                    materialVertex, ShaderType.VERTEX, variant.getValue()
+            );
+            String baseFragmentMsl = compileToMsl(
+                    materialFragment, ShaderType.FRAGMENT, variant.getValue()
+            );
+            GiReceiverBindingAbi.validateMsl(
+                    baseVertexMsl, baseFragmentMsl, false
+            );
+            require(!baseVertexMsl.contains("texture3d<float> metallumGi")
+                            && !baseVertexMsl.contains("metallumGiReceiver")
+                            && !baseVertexMsl.contains(GiReceiverBindingAbi.VARYING)
+                            && !baseFragmentMsl.contains("metallumGi")
+                            && usesStockCompressedPositionMask(baseVertexMsl),
+                    "G5 " + variant.getKey()
+                            + " base Metallum retained receiver work or changed position unpack");
+            String vertexMsl = compileToMsl(
+                    g5Vertex.source(), ShaderType.VERTEX, variant.getValue()
+            );
+            String fragmentMsl = compileToMsl(
+                    g5Fragment.source(), ShaderType.FRAGMENT, variant.getValue()
+            );
+            GiReceiverBindingAbi.validateMsl(vertexMsl, fragmentMsl, true);
+            require(usesStockCompressedPositionMask(vertexMsl),
+                    "G5 " + variant.getKey()
+                            + " receiver changed Sodium's lower-30-bit position unpack");
+            for (String sampler : GiReceiverBindingAbi.samplerNames()) {
+                require(countOccurrences(vertexMsl, sampler + ".sample(") == 1,
+                        "G5 " + variant.getKey() + " MSL lost one bounded vertex read for " + sampler);
+                require(!fragmentMsl.contains("texture3d<float> " + sampler)
+                                && !fragmentMsl.contains("sampler " + sampler + "Smplr")
+                                && !fragmentMsl.contains(sampler + ".sample("),
+                        "G5 " + variant.getKey() + " fragment retained sampler " + sampler);
+            }
+            System.out.println("GI_G5_GENERATED_MSL variant=" + variant.getKey()
+                    + " vertex_sha256=" + sha256(vertexMsl)
+                    + " fragment_sha256=" + sha256(fragmentMsl));
+        }
+
+        SunShadowShaderPatcher.Result shadowVertex = SunShadowShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque",
+                MetallumMaterialShaderPatcher.Stage.VERTEX, sodiumVertex
+        );
+        SunShadowShaderPatcher.Result shadowFragment = SunShadowShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque",
+                MetallumMaterialShaderPatcher.Stage.FRAGMENT, sodiumFragment
+        );
+        require(shadowVertex.success() && shadowFragment.success(),
+                "SUN_SHADOW rejected the actual preprocessed Sodium terrain sources: vertex="
+                        + shadowVertex.failureReason() + ", fragment="
+                        + shadowFragment.failureReason());
+        require(shadowVertex.source().contains("uvec3 _deinterleave_u20x3(uvec2 data)")
+                        && countOccurrences(shadowVertex.source(), "& 0x3FFu") == 2
+                        && shadowVertex.source().contains(
+                        "_vert_position = (_deinterleave_u20x3(a_Position)")
+                        && !shadowVertex.source().contains("a_Position.x >> 30u")
+                        && !shadowVertex.source().contains("a_Position.y >> 30u")
+                        && !shadowVertex.source().contains("metallumReflectionPositionCarrier")
+                        && !shadowVertex.source().contains("metallumGiPositionCarrier")
+                        && !shadowVertex.source().contains(GiReceiverShaderPatcher.MARKER),
+                "SUN_SHADOW source no longer ignores carrier bits through the stock 10-bit unpack");
+        String shadowVertexMsl = compileToMsl(
+                shadowVertex.source(), ShaderType.VERTEX, variants.get("solid")
+        );
+        String shadowFragmentMsl = compileToMsl(
+                shadowFragment.source(), ShaderType.FRAGMENT, variants.get("solid")
+        );
+        GiReceiverBindingAbi.validateMsl(shadowVertexMsl, shadowFragmentMsl, false);
+        String shadowVertexMslLower = shadowVertexMsl.toLowerCase(java.util.Locale.ROOT);
+        require(shadowVertexMsl.contains("_deinterleave_u20x3")
+                        && (countOccurrences(shadowVertexMsl, "1023u") >= 2
+                        || countOccurrences(shadowVertexMslLower, "0x3ffu") >= 2)
+                        && !shadowVertexMsl.contains("metallumReflectionPositionCarrier")
+                        && !shadowVertexMsl.contains("metallumGiPositionCarrier")
+                        && !shadowVertexMsl.contains("metallumGiReceiver")
+                        && !shadowVertexMsl.contains(GiReceiverBindingAbi.VARYING)
+                        && !shadowFragmentMsl.contains("metallumGi"),
+                "SUN_SHADOW generated MSL decodes the sideband or retained G5 resources");
+        System.out.println("GI_G5_SUN_SHADOW_GENERATED_MSL vertex_sha256="
+                + sha256(shadowVertexMsl) + " fragment_sha256="
+                + sha256(shadowFragmentMsl));
+
+        ShaderDefines offDefines = variants.get("solid");
+        String offVertexMsl = compileToMsl(advancedVertex, ShaderType.VERTEX, offDefines);
+        String offFragmentMsl = compileToMsl(advancedFragment, ShaderType.FRAGMENT, offDefines);
+        GiReceiverBindingAbi.validateMsl(offVertexMsl, offFragmentMsl, false);
+
+        String reflectionVertex = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.VERTEX,
+                LightingModel.ADVANCED, materialVertex, TerrainEnvironmentSpecialization.FULL, true
+        ).source();
+        String reflectionFragment = AdvancedDirectLightingShaderPatcher.patch(
+                "sodium", "blocks/block_layer_opaque", MetallumMaterialShaderPatcher.Stage.FRAGMENT,
+                LightingModel.ADVANCED, materialFragment, TerrainEnvironmentSpecialization.FULL, true
+        ).source();
+        require(reflectionVertex.contains("metallumReflectionPositionCarrier")
+                        && reflectionVertex.contains("((a_Position.x >> 30u) & 3u)")
+                        && reflectionVertex.contains(
+                        "(((a_Position.y >> 30u) & 3u) << 2u)")
+                        && reflectionVertex.contains(
+                        "metallumReflectionPositionCarrier & 7u")
+                        && reflectionVertex.contains(
+                        "(metallumReflectionPositionCarrier & 8u) != 0u")
+                        && reflectionVertex.contains("metallumReflectionGiAxisEligible")
+                        && !reflectionVertex.contains("metallumReflectionAlphaCarrier")
+                        && !reflectionVertex.contains("metallumReflectionLightCarrier")
+                        && !reflectionVertex.contains("_vert_color.a =")
+                        && !reflectionVertex.contains("_vert_tex_light_coord.y ="),
+                "L8/G5 coexistence does not share the position carrier safely");
+        GiReceiverShaderPatcher.Result reflectionG5Vertex = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.VERTEX, reflectionVertex
+        );
+        GiReceiverShaderPatcher.Result reflectionG5Fragment = GiReceiverShaderPatcher.patch(
+                GiReceiverShaderPatcher.Stage.FRAGMENT, reflectionFragment
+        );
+        require(reflectionG5Vertex.success() && reflectionG5Fragment.success(),
+                "G5 rejected the actual L8 vertex-reflection Sodium flavor");
+        require(reflectionG5Vertex.source().contains(
+                        "metallumReflectionGiAxisEligible ? metallumReflectionFaceCode : 0u"),
+                "G5 did not consume the reflected flavor's strict-axis position carrier");
+        String reflectionG5VertexMsl = compileToMsl(
+                reflectionG5Vertex.source(), ShaderType.VERTEX, offDefines
+        );
+        String reflectionG5FragmentMsl = compileToMsl(
+                reflectionG5Fragment.source(), ShaderType.FRAGMENT, offDefines
+        );
+        GiReceiverBindingAbi.validateMsl(
+                reflectionG5VertexMsl, reflectionG5FragmentMsl, true
+        );
+        System.out.println("GI_G5_REFLECTION_COEXISTENCE_GENERATED_MSL vertex_sha256="
+                + sha256(reflectionG5VertexMsl) + " fragment_sha256="
+                + sha256(reflectionG5FragmentMsl));
+    }
+
     private static String compileToMsl(final String glslSource, final ShaderType stage, final ShaderDefines defines) throws ShaderCompileException {
         String prepared = GlslPreprocessor.injectDefines(glslSource, defines);
         try (GlslCompiler glslCompiler = new GlslCompiler();
@@ -831,6 +1096,12 @@ public final class RealWorldVertexReflectionTests {
                 Spvc.spvc_context_destroy(context);
             }
         }
+    }
+
+    private static boolean usesStockCompressedPositionMask(final String msl) {
+        String lower = msl.toLowerCase(java.util.Locale.ROOT);
+        return countOccurrences(msl, "1023u") >= 2
+                || countOccurrences(lower, "0x3ffu") >= 2;
     }
 
     private static void checkSpvc(final int result, final String stage) throws ShaderCompileException {
