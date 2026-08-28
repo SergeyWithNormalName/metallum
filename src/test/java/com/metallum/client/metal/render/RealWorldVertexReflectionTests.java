@@ -629,6 +629,22 @@ public final class RealWorldVertexReflectionTests {
                         && onGlslFragment.contains(
                         "environmentVisibility = mix(environmentVisibility, 1.0, coarseWeight)"),
                 "coarse world radiance must replace analytic environment and retain covered local hits");
+        require(onGlslFragment.contains("metallumCoarseReflectionWeightV1")
+                        && onGlslFragment.contains(
+                        "materialKind == METALLUM_SURFACE_WATER_V1 ? 1.20 : 1.0")
+                        && onGlslFragment.contains("metallumWaterWorldReflectionFresnelV1")
+                        && onGlslFragment.contains(
+                        "0.055 + 0.575 * grazing * grazing, 0.055, 0.63")
+                        && onGlslFragment.contains(
+                        "max(physicalFresnel, vec3(artisticFresnel))"),
+                "water voxel reflection must retain its bounded receiver-only strength boost");
+        int coarseFresnelBoost = onGlslFragment.indexOf(
+                "metallumCoarseEnvironmentFresnel =\n"
+                        + "                        metallumWaterWorldReflectionFresnelV1(");
+        int bodyEnergy = onGlslFragment.indexOf(
+                "metallumReflectionBodyEnergy = 1.0", coarseFresnelBoost);
+        require(coarseFresnelBoost >= 0 && bodyEnergy > coarseFresnelBoost,
+                "water body transmission must consume the same boosted Fresnel energy");
         int coarseMix = onGlslFragment.indexOf("reflectedEnvironment = mix(");
         int sunGgx = onGlslFragment.indexOf("result += metallumEvaluateGgxV1(", coarseMix);
         int localGgx = onGlslFragment.indexOf("metallumEvaluateClusteredMaterialSpecularV1(");

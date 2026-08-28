@@ -3149,6 +3149,41 @@ public final class AdvancedDirectLightingShaderPatcher {
                 return f0 + (grazingLimit - f0) * grazing5;
             }
 
+            float metallumCoarseReflectionWeightV1(
+                    vec4 coarseReflection,
+                    float directionalResponse,
+                    uint materialKind) {
+                bool contributionOnly = coarseReflection.a < -0.5;
+                float confidence = contributionOnly
+                        ? clamp(-coarseReflection.a - 1.0, 0.0, 1.0)
+                        : clamp(coarseReflection.a, 0.0, 1.0);
+                // Water is viewed through a moving fragment normal while the bounded world trace
+                // is carried per vertex. Give its valid coarse lobe a little more authority so
+                // shorelines survive interpolation without changing metal or wet-terrain energy.
+                float receiverGain = materialKind == METALLUM_SURFACE_WATER_V1 ? 1.20 : 1.0;
+                return clamp(confidence * directionalResponse * receiverGain, 0.0, 1.0);
+            }
+
+            vec3 metallumWaterWorldReflectionFresnelV1(
+                    vec3 physicalFresnel,
+                    float nDotV,
+                    float coarseWeight,
+                    uint materialKind) {
+                if (materialKind != METALLUM_SURFACE_WATER_V1 || coarseWeight <= 0.0) {
+                    return physicalFresnel;
+                }
+                // The two-percent dielectric F0 is too subdued against Minecraft's opaque biome
+                // water. Match the existing planar receiver's bounded artistic response, but only
+                // where the voxel field has a confident directional hit.
+                float grazing = 1.0 - clamp(nDotV, 0.0, 1.0);
+                float artisticFresnel = clamp(
+                        0.055 + 0.575 * grazing * grazing, 0.055, 0.63);
+                return mix(
+                        physicalFresnel,
+                        max(physicalFresnel, vec3(artisticFresnel)),
+                        coarseWeight);
+            }
+
             vec3 metallumWaterSkyReflectionV2(
                     vec3 worldReflectedDirection,
                     vec3 fallbackEnvironment) {
@@ -3322,12 +3357,8 @@ public final class AdvancedDirectLightingShaderPatcher {
                 }
                 // The coarse world term is shared by every accepted L8/G2 receiver family.
                 // It replaces the analytic environment rather than adding a second specular lobe.
-                bool contributionOnly = coarseReflection.a < -0.5;
-                float confidence = contributionOnly
-                        ? clamp(-coarseReflection.a - 1.0, 0.0, 1.0)
-                        : clamp(coarseReflection.a, 0.0, 1.0);
-                float coarseWeight = clamp(
-                        confidence * coarseDirectionalResponse, 0.0, 1.0);
+                float coarseWeight = metallumCoarseReflectionWeightV1(
+                        coarseReflection, coarseDirectionalResponse, material.kind);
                 reflectedEnvironment = mix(
                         reflectedEnvironment,
                         max(coarseReflection.rgb, vec3(0.0)),
@@ -3782,6 +3813,16 @@ public final class AdvancedDirectLightingShaderPatcher {
                             + "                        metallumCoarseReflectionDirectionalResponseV1(\n"
                             + "                        metallumViewDirection, metallumDirectNormal,\n"
                             + "                        metallumCoarseReflectionDirection);\n"
+                            + "                float metallumCoarseWeight =\n"
+                            + "                        metallumCoarseReflectionWeightV1(\n"
+                            + "                        metallumCoarseReflection,\n"
+                            + "                        metallumCoarseDirectionalResponse,\n"
+                            + "                        metallumSurfaceMaterial.kind);\n"
+                            + "                metallumCoarseEnvironmentFresnel =\n"
+                            + "                        metallumWaterWorldReflectionFresnelV1(\n"
+                            + "                        metallumCoarseEnvironmentFresnel,\n"
+                            + "                        metallumCoarseNoV, metallumCoarseWeight,\n"
+                            + "                        metallumSurfaceMaterial.kind);\n"
                             + "                if (metallumSurfaceMaterial.kind\n"
                             + "                        == METALLUM_SURFACE_WATER_V1\n"
                             + "                        && metallumCoarseReflectionDirection.w > 0.0) {\n"
