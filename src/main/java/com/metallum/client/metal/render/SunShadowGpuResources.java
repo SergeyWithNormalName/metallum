@@ -10,6 +10,7 @@ import com.metallum.client.lighting.shader.EnvironmentShadowBindingAbi;
 import com.metallum.client.metal.render.mtl.MTLRenderCommandEncoder;
 import com.metallum.client.metal.render.mtl.MTLCompareFunction;
 import com.metallum.client.renderer.SunShadowLayout;
+import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.renderer.temporal.FrameState;
 import com.metallum.client.voxel.VoxelUploadBatch;
 import com.mojang.blaze3d.GpuFormat;
@@ -276,7 +277,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
                 environment.medium().ordinal(),
-                0);
+                VisualStyleRuntime.activeWater().shaderPolicyId());
         return encode(environment, frameState, com.metallum.client.lighting.cloud.CloudShadowFrameState.disabled());
     }
 
@@ -366,7 +367,7 @@ final class SunShadowGpuResources implements AutoCloseable {
                 EnvironmentShadowBindingAbi.MATERIAL_CONTRACT_VERSION,
                 environment.profile().ordinal(),
                 environment.medium().ordinal(),
-                0);
+                VisualStyleRuntime.activeWater().shaderPolicyId());
         putVec4(packet, EnvironmentShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET,
                 cloudShadow.cloudOffsetX(), cloudShadow.cloudOffsetZ(),
                 cloudShadow.gridWidth(), cloudShadow.gridHeight());

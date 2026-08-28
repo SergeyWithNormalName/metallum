@@ -69,8 +69,15 @@ public final class VisualStyleTests {
             require(profile != null, "Profile for " + style + " must not be null");
             require(profile.celestialLighting() != null, "CelestialLightingProfile for " + style + " must not be null");
             require(profile.atmosphere() != null, "AtmosphereProfile for " + style + " must not be null");
+            require(profile.water() != null, "WaterStyleProfile for " + style + " must not be null");
         }
         require(VisualStyleProfiles.profile(null) != null, "Null style must resolve to safe fallback profile");
+        require(VisualStyleProfiles.profile(VisualStyle.VANILLA).water().shaderPolicyId() == 0,
+                "Vanilla water shader policy id changed");
+        require(VisualStyleProfiles.profile(VisualStyle.NATURAL).water().shaderPolicyId() == 1,
+                "Natural water shader policy id changed");
+        require(VisualStyleProfiles.profile(VisualStyle.REALISM).water().shaderPolicyId() == 2,
+                "Realism water shader policy id changed");
     }
 
     private static void testConfiguredStyleProfiles() {
@@ -81,6 +88,9 @@ public final class VisualStyleTests {
         AtmosphereProfile vanillaAtmo = VisualStyleProfiles.profile(VisualStyle.VANILLA).atmosphere();
         AtmosphereProfile naturalAtmo = VisualStyleProfiles.profile(VisualStyle.NATURAL).atmosphere();
         AtmosphereProfile realismAtmo = VisualStyleProfiles.profile(VisualStyle.REALISM).atmosphere();
+        WaterStyleProfile vanillaWater = VisualStyleProfiles.profile(VisualStyle.VANILLA).water();
+        WaterStyleProfile naturalWater = VisualStyleProfiles.profile(VisualStyle.NATURAL).water();
+        WaterStyleProfile realismWater = VisualStyleProfiles.profile(VisualStyle.REALISM).water();
 
         // 1. VANILLA exact reference values
         require(vanilla.normalSunColor().equals(new LinearColor(1.00f, 0.93f, 0.78f)), "Vanilla sun mismatch");
@@ -100,6 +110,16 @@ public final class VisualStyleTests {
         require(vanillaAtmo.rainDistanceScale() == 0.0f, "Vanilla rain distance scale must be 0");
         require(vanillaAtmo.thunderDistanceScale() == 0.0f, "Vanilla thunder distance scale must be 0");
         require(vanillaAtmo.weatherDarkeningScale() == 0.0f, "Vanilla weather darkening must be 0");
+        require(vanillaWater.isVanillaIdentity(), "Vanilla water must bypass all L8 water effects");
+        require(vanillaWater.waveStrength() == 0.0f
+                        && vanillaWater.reflectionStrength() == 0.0f
+                        && vanillaWater.refractionStrength() == 0.0f
+                        && vanillaWater.reflectionBodyStrength() == 0.0f
+                        && vanillaWater.causticStrength() == 0.0f
+                        && vanillaWater.transmission() == 0.0f
+                        && vanillaWater.opticalDepth() == 0.0f
+                        && vanillaWater.absorption().equals(LinearColor.BLACK),
+                "Vanilla water is not an exact L8 optical identity");
 
         // 2. NATURAL target values
         require(natural.normalSunColor().equals(new LinearColor(1.00f, 0.98f, 0.92f)), "Natural sun mismatch");
@@ -119,6 +139,18 @@ public final class VisualStyleTests {
         require(Math.abs(naturalAtmo.rainDistanceScale() - 0.15f) < EPSILON, "Natural rain distance scale mismatch");
         require(Math.abs(naturalAtmo.thunderDistanceScale() - 0.15f) < EPSILON, "Natural thunder distance scale mismatch");
         require(Math.abs(naturalAtmo.weatherDarkeningScale() - 0.10f) < EPSILON, "Natural weather darkening mismatch");
+        require(!naturalWater.isVanillaIdentity(), "Natural water must retain light enhancements");
+        require(naturalWater.waveStrength() > 0.0f && naturalWater.waveStrength() < 0.3f,
+                "Natural water waves must remain subtle");
+        require(naturalWater.reflectionStrength() > 0.0f && naturalWater.reflectionStrength() < 0.25f,
+                "Natural water reflection must remain subtle");
+        require(naturalWater.refractionStrength() == 0.0f
+                        && naturalWater.reflectionBodyStrength() == 0.0f
+                        && naturalWater.causticStrength() == 0.0f
+                        && naturalWater.transmission() == 0.0f
+                        && naturalWater.opticalDepth() == 0.0f
+                        && naturalWater.absorption().equals(LinearColor.BLACK),
+                "Natural water must preserve the vanilla biome-color optical body");
 
         // 3. REALISM target values
         require(realism.normalSunColor().equals(new LinearColor(1.00f, 0.995f, 0.97f)), "Realism sun mismatch");
@@ -138,6 +170,16 @@ public final class VisualStyleTests {
         require(Math.abs(realismAtmo.rainDistanceScale() - 0.25f) < EPSILON, "Realism rain distance scale mismatch");
         require(Math.abs(realismAtmo.thunderDistanceScale() - 0.20f) < EPSILON, "Realism thunder distance scale mismatch");
         require(Math.abs(realismAtmo.weatherDarkeningScale() - 0.20f) < EPSILON, "Realism weather darkening mismatch");
+        require(realismWater.waveStrength() > naturalWater.waveStrength()
+                        && realismWater.reflectionStrength() > naturalWater.reflectionStrength(),
+                "Realism water must be visibly stronger than Natural water");
+        require(realismWater.refractionStrength() > 0.0f
+                        && realismWater.reflectionBodyStrength() > 0.0f
+                        && realismWater.causticStrength() > 0.0f
+                        && realismWater.transmission() > 0.0f
+                        && realismWater.opticalDepth() > 0.0f
+                        && !realismWater.absorption().equals(LinearColor.BLACK),
+                "Realism water must enable the complete L8 optical model");
     }
 
     private static void testProfileValidation() {
@@ -225,8 +267,33 @@ public final class VisualStyleTests {
 
         // VisualStyleProfile validation
         CelestialLightingProfile cel = VisualStyleProfiles.profile(VisualStyle.VANILLA).celestialLighting();
-        expectNullPointer(() -> new VisualStyleProfile(null, atmo));
-        expectNullPointer(() -> new VisualStyleProfile(cel, null));
+        WaterStyleProfile water = VisualStyleProfiles.profile(VisualStyle.VANILLA).water();
+        expectNullPointer(() -> new VisualStyleProfile(null, atmo, water));
+        expectNullPointer(() -> new VisualStyleProfile(cel, null, water));
+        expectNullPointer(() -> new VisualStyleProfile(cel, atmo, null));
+
+        // WaterStyleProfile validation
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                -1, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                3, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, Float.NaN, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, 0.0f, 1.1f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, -0.1f, LinearColor.BLACK));
+        expectNullPointer(() -> new WaterStyleProfile(
+                1, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, null));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                1, false, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
     }
 
     private static void testRendererConfigDefaults() {
@@ -279,6 +346,8 @@ public final class VisualStyleTests {
         require(VisualStyleRuntime.activeStyle() == VisualStyle.NATURAL, "Active style must be NATURAL");
         require(VisualStyleRuntime.activeProfile().equals(VisualStyleProfiles.profile(VisualStyle.NATURAL)),
                 "Active profile must be NATURAL profile");
+        require(VisualStyleRuntime.activeWater().shaderPolicyId() == 1,
+                "Live Natural water profile was not selected");
         Set<FrameState.HistoryResetReason> resets = TemporalResetEvents.consume();
         require(resets.equals(Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)),
                 "Style change must emit VISUAL_STYLE_CHANGE");
@@ -295,6 +364,8 @@ public final class VisualStyleTests {
         require(VisualStyleRuntime.activeStyle() == VisualStyle.REALISM, "Active style must be REALISM");
         require(VisualStyleRuntime.activeProfile().equals(VisualStyleProfiles.profile(VisualStyle.REALISM)),
                 "Active profile must be REALISM profile");
+        require(VisualStyleRuntime.activeWater().shaderPolicyId() == 2,
+                "Live Realism water profile was not selected");
         require(TemporalResetEvents.consume().equals(Set.of(FrameState.HistoryResetReason.VISUAL_STYLE_CHANGE)),
                 "Switch to REALISM must emit VISUAL_STYLE_CHANGE");
         require(TemporalResetEvents.consume().isEmpty(), "Reset event must be consumed");

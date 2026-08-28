@@ -29,7 +29,8 @@ public final class EnvironmentShadowBindingAbi {
     /** Reserved L4 tail promoted to the versioned, allocation-free L8 material environment. */
     public static final int MATERIAL_WEATHER_AND_TIME_OFFSET = 352;
     public static final int MATERIAL_CONTRACT_OFFSET = 368;
-    public static final int MATERIAL_CONTRACT_VERSION = 1;
+    /** Version 2 assigns materialContract.w to the stable Visual Style water policy id. */
+    public static final int MATERIAL_CONTRACT_VERSION = 2;
 
     /** CLOUD-1: Vanilla-synchronized cloud shadow parameters appended to environment packet. */
     public static final int CLOUD_OFFSET_AND_GRID_SIZE_OFFSET = CloudShadowBindingAbi.CLOUD_OFFSET_AND_GRID_SIZE_OFFSET; // 384

@@ -79,6 +79,11 @@ public final class VisualStyleRuntime {
         return ACTIVE_PROFILE.celestialLighting();
     }
 
+    /** Returns the active immutable L8 water appearance policy. */
+    public static WaterStyleProfile activeWater() {
+        return ACTIVE_PROFILE.water();
+    }
+
     /**
      * Test isolation helper resetting runtime state to default without emitting reset events.
      */

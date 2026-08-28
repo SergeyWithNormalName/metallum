@@ -45,15 +45,15 @@ struct MetallumWaterWaveStateV1 {
 1. **Macro Noise & Domain Warping**:
    $$\text{macro}_1 = \text{ValueNoise}(XZ \cdot 0.0625 + (t \cdot 0.08, -t \cdot 0.06))$$
    $$\text{macro}_2 = \text{ValueNoise}(ZX \cdot 0.0625 + (-t \cdot 0.07, t \cdot 0.09) + (17.3, 31.7))$$
-   $$\vec{P}_{\text{warp}} = XZ + 3.2 \cdot (\text{macro}_1 - 0.5, \text{macro}_2 - 0.5)$$
+   $$\vec{P}_{\text{warp}} = XZ + 2.2 \cdot (\text{macro}_1 - 0.5, \text{macro}_2 - 0.5)$$
 
 2. **Analytical Directional Wave Harmonics**:
-   $$\text{phase}_1 = (\vec{P}_{\text{warp}} \cdot (0.7071, 0.7071)) \cdot 0.28 + t \cdot 1.25$$
-   $$\text{phase}_2 = (\vec{P}_{\text{warp}} \cdot (-0.5000, 0.8660)) \cdot 0.42 - t \cdot 1.05$$
-   $$\text{phase}_3 = (\vec{P}_{\text{warp}} \cdot (0.9239, -0.3827)) \cdot 0.65 + t \cdot 1.60$$
+   $$\text{phase}_1 = (\vec{P}_{\text{warp}} \cdot (0.7071, 0.7071)) \cdot 0.36 + t \cdot 1.20$$
+   $$\text{phase}_2 = (\vec{P}_{\text{warp}} \cdot (-0.5000, 0.8660)) \cdot 0.58 - t \cdot 1.45$$
+   $$\text{phase}_3 = (\vec{P}_{\text{warp}} \cdot (0.9239, -0.3827)) \cdot 0.90 + t \cdot 1.85$$
 
 3. **Medium-Frequency Modulation**:
-   $$\text{medCentered} = \text{ValueNoise}(\vec{P}_{\text{warp}} \cdot 0.25 + (-t \cdot 0.20, t \cdot 0.15)) - 0.5$$
+   $$\text{medCentered} = \text{ValueNoise}(\vec{P}_{\text{warp}} \cdot 0.32 + (-t \cdot 0.22, t \cdot 0.17)) - 0.5$$
    $$\text{wave}_1 = \sin(\text{phase}_1 + 1.8 \cdot \text{medCentered})$$
    $$\text{wave}_2 = \cos(\text{phase}_2 - 1.4 \cdot \text{medCentered})$$
    $$\text{wave}_3 = \sin(\text{phase}_3 + 1.2 \cdot \text{medCentered})$$
@@ -61,9 +61,11 @@ struct MetallumWaterWaveStateV1 {
 4. **Slopes, Crests & Amplitude**:
    $$\text{slope}_x = \text{wave}_1 \cdot 0.7071 - \text{wave}_2 \cdot 0.5000 + \text{wave}_3 \cdot 0.9239$$
    $$\text{slope}_z = \text{wave}_1 \cdot 0.7071 + \text{wave}_2 \cdot 0.8660 - \text{wave}_3 \cdot 0.3827$$
-   $$\text{microSlope} = 0.65 \cdot (\text{micro}_1 - 0.5, \text{micro}_2 - 0.5)$$
-   $$\text{amplitude} = \text{mix}(0.055, 0.095, \text{macro}_1)$$
-   $$\vec{S}_{\text{total}} = (0.60 \cdot (\text{slope}_x, \text{slope}_z) + \text{microSlope}) \cdot \text{amplitude}$$
+   $$\text{micro}_1 = \text{ValueNoise}(\vec{P}_{\text{warp}} \cdot 1.35 + (t \cdot 0.55, t \cdot 0.43))$$
+   $$\text{micro}_2 = \text{ValueNoise}(\vec{P}_{\text{warp}}^{zx} \cdot 1.65 + (-t \cdot 0.48, t \cdot 0.62) + (43.1, 19.4))$$
+   $$\text{microSlope} = 0.42 \cdot (\text{micro}_1 - 0.5, \text{micro}_2 - 0.5)$$
+   $$\text{amplitude} = \text{mix}(0.038, 0.068, \text{macro}_1)$$
+   $$\vec{S}_{\text{total}} = (0.44 \cdot (\text{slope}_x, \text{slope}_z) + \text{microSlope}) \cdot \text{amplitude}$$
    $$\text{crest} = \text{clamp}((\text{wave}_1 \cdot 0.35 + \text{wave}_2 \cdot 0.30 + \text{wave}_3 \cdot 0.30 + \text{medCentered} \cdot 0.40 - 0.28) \cdot 3.2, 0.0, 1.0)$$
 
 ---
@@ -92,13 +94,17 @@ Thus $R_y$ is strictly positive for all valid celestial light directions, comple
 Caustics arise when curved water wave surfaces focus parallel rays of celestial light onto underwater surfaces. In the analytical wave formulation, optical focal ridges correspond to constructive interference maxima among wave harmonics:
 
 1. **Interference Ridges**:
-   $$\text{ridge}_1 = 1.0 - |\text{wave}_1 + 0.60 \cdot \text{wave}_2|$$
-   $$\text{ridge}_2 = 1.0 - |\text{wave}_2 + 0.60 \cdot \text{wave}_3|$$
-   $$\text{ridge}_3 = 1.0 - |\text{wave}_3 + 0.60 \cdot \text{wave}_1|$$
+   $$\text{ridge}_1 = 1.0 - |\text{wave}_1 + 0.65 \cdot \text{wave}_2|$$
+   $$\text{ridge}_2 = 1.0 - |\text{wave}_2 + 0.65 \cdot \text{wave}_3|$$
+   $$\text{ridge}_3 = 1.0 - |\text{wave}_3 + 0.65 \cdot \text{wave}_1|$$
 
 2. **Weighted Non-Linear Focusing**:
-   $$\text{focus}_{\text{raw}} = 0.45 \cdot \max(\text{ridge}_1, 0) + 0.35 \cdot \max(\text{ridge}_2, 0) + 0.20 \cdot \max(\text{ridge}_3, 0)$$
-   $$\text{causticFocusing} = \text{focus}_{\text{raw}}^2 \cdot (1.8 + 6.0 \cdot \text{amplitude}) + 0.35 \cdot \text{crest}$$
+   $$\text{focus}_{\text{raw}} = 0.45 \cdot \max(\text{ridge}_1, 0)^2 + 0.35 \cdot \max(\text{ridge}_2, 0)^2 + 0.20 \cdot \max(\text{ridge}_3, 0)^2$$
+   $$\text{causticFocusing} = \text{focus}_{\text{raw}} \cdot (2.2 + 10.0 \cdot \text{amplitude}) + 0.45 \cdot \text{crest}$$
+
+The final surface-normal slope and crest displacement are multiplied by the active water style's
+wave strength. Caustic gain is mixed back toward `1.0` by its caustic strength: `VANILLA` and
+`NATURAL` are neutral, while `REALISM` consumes the full synchronized field.
 
 This formulation guarantees that sharp, bright caustic patterns correspond exactly to wave crests and convergence points of the surface waves above.
 
@@ -263,4 +269,4 @@ if (!receiverSubmerged && !cameraUnderwater) {
 | `waterCausticsUnitTest` | Pure Unit | Synchronous wave evaluation, Snell refraction, depth monotonicity, camera motion invariance, energy conservation mean, above-water & submerged receiver matrix | **PASS** |
 | `waterCausticsLightingUnitTest` | Lighting Integration | Tests T1 through T12 (ambient/sky/local isolation, water-aware shadow gating, cloud compatibility, above-water active & dry neutral) | **PASS** |
 | `advancedDirectLightingShaderUnitTest` | Shader Verification | Actual SPIR-V compilation and MSL translation with exact SHA256 golden checks for all 8 targets | **PASS** |
-| `./gradlew check` | Full Suite | 86/86 tasks including ABI native checks, Metal GPU execution, and temporal scaling | **PASS** |
+| `./gradlew clean check` | Full Suite | 124 tasks (123 executed, 1 up-to-date) including ABI native checks, Metal GPU execution, generated shader compilation, and temporal scaling | **PASS** |

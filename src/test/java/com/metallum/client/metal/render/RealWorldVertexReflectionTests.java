@@ -645,6 +645,12 @@ public final class RealWorldVertexReflectionTests {
                 "metallumReflectionBodyEnergy = 1.0", coarseFresnelBoost);
         require(coarseFresnelBoost >= 0 && bodyEnergy > coarseFresnelBoost,
                 "water body transmission must consume the same boosted Fresnel energy");
+        require(onGlslFragment.contains("metallumCoarseWeight > 0.0")
+                        && onGlslFragment.contains("* metallumCoarseWeight\n")
+                        && onGlslFragment.contains(
+                        "metallumWaterStyleProfileV1()\n"
+                                + "                                    .reflectionBodyStrength"),
+                "water body energy must follow actual coarse-reflection confidence and style strength");
         int coarseMix = onGlslFragment.indexOf("reflectedEnvironment = mix(");
         int sunGgx = onGlslFragment.indexOf("result += metallumEvaluateGgxV1(", coarseMix);
         int localGgx = onGlslFragment.indexOf("metallumEvaluateClusteredMaterialSpecularV1(");

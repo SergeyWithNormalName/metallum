@@ -4334,3 +4334,24 @@ artifact, route, fixture, settings и launch/final artifact blocks. Вывод �
 стоимость одного bounded field build поддержана Tier B, steady-state work в
 measurement отсутствует. Влияние на изображение и production performance этим
 этапом намеренно не проверялись.
+
+## 2026-08-28 — L8 water profiles by Visual Style — AUTOMATED PASS, HUMAN PENDING
+
+Water appearance is now an explicit `WaterStyleProfile` under the existing three
+`VisualStyle` presets. `VANILLA` bypasses L8 water waves/optics; `NATURAL` keeps the
+vanilla texture and biome tint with only weak waves and environment highlights;
+`REALISM` enables the complete reflection/refraction/transmission/absorption/caustic
+response with a finer, less viscous multi-scale wave field.
+
+The stable policy id uses the previously unused `materialContract.w`; the 480-byte
+environment packet layout is unchanged and its material contract version is now 2.
+There are no new resources, passes, PSO variants, readbacks, or render-loop allocations.
+Default-off planar and voxel reflection experiments remain orthogonal and are not
+enabled by style selection. Coarse-reflection body attenuation now follows the actual
+reflection weight/confidence, preventing low-confidence shoreline darkening.
+
+Visual-style, ABI/material, generated GLSL -> SPIR-V/MSL, caustic, reflection, shadow,
+and runtime target suites pass. Three-style live image review is still required before
+claiming visual acceptance.
+
+---
