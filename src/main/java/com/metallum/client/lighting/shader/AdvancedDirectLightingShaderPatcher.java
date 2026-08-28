@@ -3224,6 +3224,13 @@ public final class AdvancedDirectLightingShaderPatcher {
                         horizonBand * sunriseFacing * horizonStrength);
             }
 
+            #ifdef METALLUM_REFLECTION_AMBIENT_ONLY
+            vec4 metallumWaterCloudReflectionV9(
+                    vec3 viewPosition,
+                    vec3 waterNormal) {
+                return vec4(0.0);
+            }
+            #else
             vec4 metallumWaterCloudReflectionV9(
                     vec3 viewPosition,
                     vec3 waterNormal) {
@@ -3309,6 +3316,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                                 * smoothstep(0.0, 0.020, edgeDistance)
                                 * reflectionStrength, 0.0, 1.0));
             }
+            #endif
 
             vec3 metallumEvaluateMaterialEnvironmentWithCoarseReflectionV1(
                     vec3 viewPosition,
@@ -3332,12 +3340,18 @@ public final class AdvancedDirectLightingShaderPatcher {
                         : metallumSchlickFresnelV1(f0, nDotV);
                 vec3 reflectedDirection = reflect(-viewDirection, normal);
                 vec3 toLight = metallumEnvironment.directionAndFlags.xyz;
+                #ifdef METALLUM_REFLECTION_AMBIENT_ONLY
+                float waterCelestialShape = 1.0;
+                vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
+                        reflectedDirection, normal, material.roughness);
+                #else
                 bool waterCelestialLit = material.kind == METALLUM_SURFACE_WATER_V1;
                 float waterCelestialShape = waterCelestialLit
                         ? metallumWaterSquareCelestialMaskV1(reflectedDirection, toLight)
                         : 1.0;
                 vec3 reflectedEnvironment = metallumEnvironmentLookupV1(
                         reflectedDirection, normal, material.roughness, waterCelestialShape);
+                #endif
                 float environmentVisibility = mix(0.46, 1.0, skyOcclusion);
                 if (material.kind == METALLUM_SURFACE_WATER_V1) {
                     mat3 worldFromView = mat3(metallumVoxelShadow.worldFromView);
@@ -3371,6 +3385,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                 vec3 result = reflectedEnvironment * environmentFresnel
                         * environmentVisibility * (1.0 - material.roughness * 0.48)
                         * environmentStyleWeight;
+                #ifndef METALLUM_REFLECTION_AMBIENT_ONLY
                 float directionalWeight = skyOcclusion * max(dot(normal, toLight), 0.0);
                 if (directionalWeight > 0.0) {
                     float sunVisibility = material.kind == METALLUM_SURFACE_WATER_V1
@@ -3388,6 +3403,7 @@ public final class AdvancedDirectLightingShaderPatcher {
                             f0,
                             material.roughness);
                 }
+                #endif
                 return result * material.specularScale;
             }
             """;
@@ -4350,6 +4366,9 @@ public final class AdvancedDirectLightingShaderPatcher {
                 : FRAGMENT_ABI_AND_HELPERS;
         helpers = fragmentHelpersForCurrentDiagnostic(helpers);
         if (vertexReflection) {
+            if (specialization == TerrainEnvironmentSpecialization.AMBIENT_ONLY) {
+                helpers += "\n#define METALLUM_REFLECTION_AMBIENT_ONLY\n";
+            }
             helpers += sodiumReflectionFragmentHelpers();
         }
         return replaceExactlyOnce(

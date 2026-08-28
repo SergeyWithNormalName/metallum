@@ -661,6 +661,25 @@ public final class RealWorldVertexReflectionTests {
                 "disabling representation confidence must strip the grazing voxel confidence gate");
         require(confidenceOffFragment.contains("metallumSchlickEnvironmentFresnelV1"),
                 "the energy-correct rough environment Fresnel is a core water composition fix");
+
+        String ambientGlslFragment = patchQualityFragment(
+                matFragment,
+                true,
+                TerrainEnvironmentSpecialization.AMBIENT_ONLY
+        );
+        require(ambientGlslFragment.contains("#define METALLUM_REFLECTION_AMBIENT_ONLY")
+                        && ambientGlslFragment.contains("return vec4(0.0);")
+                        && !ambientGlslFragment.contains("uniform sampler2D metallumPlanarReflection"),
+                "ambient-only voxel receiver must replace the unavailable cloud capture with a zero stub");
+        String ambientMslFragment = compileToMsl(
+                ambientGlslFragment,
+                ShaderType.FRAGMENT,
+                onDefines
+        );
+        require(!ambientMslFragment.contains("metallumPlanarReflection")
+                        && !ambientMslFragment.contains("[[texture(11)]]")
+                        && ambientMslFragment.contains("metallumCoarseReflection"),
+                "ambient-only MSL must compile the voxel world receiver without planar/cloud resources");
     }
 
     private static String patchQualityVertex(
@@ -691,6 +710,18 @@ public final class RealWorldVertexReflectionTests {
             final String materialFragment,
             final boolean representationConfidence
     ) {
+        return patchQualityFragment(
+                materialFragment,
+                representationConfidence,
+                TerrainEnvironmentSpecialization.FULL
+        );
+    }
+
+    private static String patchQualityFragment(
+            final String materialFragment,
+            final boolean representationConfidence,
+            final TerrainEnvironmentSpecialization specialization
+    ) {
         String confidenceKey = WaterReflectionQualityConfig.REPRESENTATION_CONFIDENCE_PROPERTY;
         String oldConfidence = System.getProperty(confidenceKey);
         try {
@@ -699,7 +730,7 @@ public final class RealWorldVertexReflectionTests {
                     "sodium", "blocks/block_layer_opaque",
                     MetallumMaterialShaderPatcher.Stage.FRAGMENT,
                     LightingModel.ADVANCED, materialFragment,
-                    TerrainEnvironmentSpecialization.FULL, true
+                    specialization, true
             ).source();
         } finally {
             restoreProperty(confidenceKey, oldConfidence);
