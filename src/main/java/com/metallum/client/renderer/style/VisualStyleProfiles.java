@@ -73,6 +73,7 @@ public final class VisualStyleProfiles {
     private static final WaterStyleProfile VANILLA_WATER = new WaterStyleProfile(
             0,
             false,
+            false,
             0.0f,
             0.0f,
             0.0f,
@@ -87,20 +88,22 @@ public final class VisualStyleProfiles {
     private static final WaterStyleProfile NATURAL_WATER = new WaterStyleProfile(
             1,
             true,
-            0.22f,
-            0.18f,
+            true,
+            1.0f,
+            1.0f,
+            0.28f,
             0.0f,
-            0.0f,
-            0.0f,
-            0.12f,
-            0.0f,
-            0.0f,
-            LinearColor.BLACK
+            1.0f,
+            0.055f,
+            0.30f,
+            0.85f,
+            new LinearColor(0.15f, 0.040f, 0.015f)
     );
 
     private static final WaterStyleProfile REALISM_WATER = new WaterStyleProfile(
             2,
             true,
+            false,
             1.0f,
             1.0f,
             0.55f,

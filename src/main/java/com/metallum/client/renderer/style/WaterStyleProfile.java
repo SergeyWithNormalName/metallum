@@ -12,6 +12,7 @@ import java.util.Objects;
 public record WaterStyleProfile(
         int shaderPolicyId,
         boolean enhanced,
+        boolean preservesPreReflectionAppearance,
         float waveStrength,
         float reflectionStrength,
         float refractionStrength,
@@ -35,7 +36,8 @@ public record WaterStyleProfile(
         requireUnit(transmission, "transmission");
         requireNonNegative(opticalDepth, "opticalDepth");
         Objects.requireNonNull(absorption, "absorption");
-        if (!enhanced && (waveStrength != 0.0f
+        if (!enhanced && (preservesPreReflectionAppearance
+                || waveStrength != 0.0f
                 || reflectionStrength != 0.0f
                 || refractionStrength != 0.0f
                 || reflectionBodyStrength != 0.0f

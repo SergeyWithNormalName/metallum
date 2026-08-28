@@ -81,13 +81,13 @@ public final class AdvancedDirectLightingShaderTests {
 
     private static final Map<String, String> EXPECTED_SOURCE_GOLDENS = Map.of(
             "sodium-solid-vsh", "31f8f71f2f960dfe65c3fba6841cc70fe7d2e67cf21003f70a92305dcb6c7ec0",
-            "sodium-solid-fsh", "20fd895b6cdefd231bd8d3dab0f6fda52b27a037d5ee4a6b1177bca91410de27",
+            "sodium-solid-fsh", "1ec723577a2a1a7cdc940dd79f72d91bec840e84dda93a8dddd1b7704002a377",
             "sodium-cutout-vsh", "351359cf6eb94f1d87c281cbdd047b96856955edc387a8a2ba77c1d8491423b1",
-            "sodium-cutout-fsh", "849932acbe52c7922efcdedb46ee388d173571b91f3a208b48fda9a5c715aa8e",
+            "sodium-cutout-fsh", "038d1bb2fa40c7a4f4866a7528464731b1934f4852c1fc6f6a1b75191c3421a0",
             "minecraft-entity-vsh", "66efb68cce816ffbe3238fbca265f0fd78d0b9fe5c2eb162d642803220305d82",
-            "minecraft-entity-fsh", "76fac9a2f5d72c122e09a9a1d29ad589cc7a33581074ea86a394fb01536a2618",
+            "minecraft-entity-fsh", "286494584bd1de9df2d07c667ab15cfc2a0cfc726c3de86dfae910c10c7a520f",
             "minecraft-end-portal-vsh", "2f029354d062b9ec1049397802ee7230ae2123a7706f50c25c8757abfea18428",
-            "minecraft-end-portal-fsh", "d90bb4650566b95da652112f63470d10c1fa7af2dfffd2e28d6f83170508ff2a"
+            "minecraft-end-portal-fsh", "5993b0de20f892f53e246635e65d5b5d21e39d66b3720191948462127cda06ea"
     );
 
     public static void main(final String[] args) throws IOException {
@@ -1152,8 +1152,13 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("metallumEnvironment.materialContract.w : 0u")
                         && sodiumFragment.contains("if (policyId == 1u)")
                         && sodiumFragment.contains("else if (policyId == 2u)")
-                        && sodiumFragment.contains("profile.waveStrength = 0.22")
-                        && sodiumFragment.contains("profile.reflectionStrength = 0.18")
+                        && sodiumFragment.contains("float preservesPreReflectionAppearance;")
+                        && sodiumFragment.contains("profile.preservesPreReflectionAppearance = 1.0")
+                        && sodiumFragment.contains("profile.waveStrength = 1.0")
+                        && sodiumFragment.contains("profile.refractionStrength = 0.28")
+                        && sodiumFragment.contains("profile.transmission = 0.3")
+                        && sodiumFragment.contains("profile.opticalDepth = 0.85")
+                        && sodiumFragment.contains("profile.absorption = vec3(0.15, 0.04, 0.015)")
                         && sodiumFragment.contains("profile.transmission = 0.38")
                         && sodiumFragment.contains("profile.opticalDepth = 1.15")
                         && sodiumFragment.contains("profile.absorption = vec3(0.18, 0.055, 0.022)")
@@ -1201,7 +1206,8 @@ public final class AdvancedDirectLightingShaderTests {
                         "float waterCelestialReflection = waterMoonlit ? 0.18 : 1.0;")
                         && environment.contains(
                         "environmentVisibility = waterOpenSky * waterCelestialReflection;")
-                        && environment.contains("float environmentStyleWeight = 1.0;"),
+                        && environment.contains("? mix(1.0, 0.92,")
+                        && environment.contains("metallumWaterStyleProfileV1().preservesPreReflectionAppearance"),
                 "analytic water environment is not gated by existing skylight and moon state");
         require(sodiumFragment.contains("float metallumWaterSquareCelestialMaskV1(")
                         && sodiumFragment.contains("vec3 squareRight = cross(")
@@ -1219,6 +1225,10 @@ public final class AdvancedDirectLightingShaderTests {
                         && sodiumFragment.contains("float metallumUnderwaterCausticGainV1(")
                         && sodiumFragment.contains("waterCausticStrength")
                         && sodiumFragment.contains("metallumWaterStyleProfileV1().causticStrength")
+                        && sodiumFragment.contains("if (metallumWaterStyleProfileV1().preservesPreReflectionAppearance > 0.5)")
+                        && sodiumFragment.contains("* 3.2;")
+                        && sodiumFragment.contains("* 0.28 + time * 1.25;")
+                        && sodiumFragment.contains("mix(0.055, 0.095, macroNoise1)")
                         && environment.contains("float causticGain = metallumUnderwaterCausticGainV1(")
                         && environment.contains("directionalWeight * sunVisibility * cloudTransmittance * causticGain"),
                 "water wave field extraction or synchronized underwater caustic gain is missing");

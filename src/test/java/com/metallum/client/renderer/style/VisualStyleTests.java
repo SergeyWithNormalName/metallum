@@ -140,17 +140,18 @@ public final class VisualStyleTests {
         require(Math.abs(naturalAtmo.thunderDistanceScale() - 0.15f) < EPSILON, "Natural thunder distance scale mismatch");
         require(Math.abs(naturalAtmo.weatherDarkeningScale() - 0.10f) < EPSILON, "Natural weather darkening mismatch");
         require(!naturalWater.isVanillaIdentity(), "Natural water must retain light enhancements");
-        require(naturalWater.waveStrength() > 0.0f && naturalWater.waveStrength() < 0.3f,
-                "Natural water waves must remain subtle");
-        require(naturalWater.reflectionStrength() > 0.0f && naturalWater.reflectionStrength() < 0.25f,
-                "Natural water reflection must remain subtle");
-        require(naturalWater.refractionStrength() == 0.0f
+        require(naturalWater.preservesPreReflectionAppearance(),
+                "Natural water must preserve the pre-reflection appearance");
+        require(naturalWater.waveStrength() == 1.0f
+                        && naturalWater.reflectionStrength() == 1.0f
+                        && naturalWater.refractionStrength() == 0.28f
                         && naturalWater.reflectionBodyStrength() == 0.0f
-                        && naturalWater.causticStrength() == 0.0f
-                        && naturalWater.transmission() == 0.0f
-                        && naturalWater.opticalDepth() == 0.0f
-                        && naturalWater.absorption().equals(LinearColor.BLACK),
-                "Natural water must preserve the vanilla biome-color optical body");
+                        && naturalWater.causticStrength() == 1.0f
+                        && naturalWater.roughness() == 0.055f
+                        && naturalWater.transmission() == 0.30f
+                        && naturalWater.opticalDepth() == 0.85f
+                        && naturalWater.absorption().equals(new LinearColor(0.15f, 0.040f, 0.015f)),
+                "Natural water must match the pre-reflection L8 optical baseline");
 
         // 3. REALISM target values
         require(realism.normalSunColor().equals(new LinearColor(1.00f, 0.995f, 0.97f)), "Realism sun mismatch");
@@ -170,9 +171,11 @@ public final class VisualStyleTests {
         require(Math.abs(realismAtmo.rainDistanceScale() - 0.25f) < EPSILON, "Realism rain distance scale mismatch");
         require(Math.abs(realismAtmo.thunderDistanceScale() - 0.20f) < EPSILON, "Realism thunder distance scale mismatch");
         require(Math.abs(realismAtmo.weatherDarkeningScale() - 0.20f) < EPSILON, "Realism weather darkening mismatch");
-        require(realismWater.waveStrength() > naturalWater.waveStrength()
-                        && realismWater.reflectionStrength() > naturalWater.reflectionStrength(),
-                "Realism water must be visibly stronger than Natural water");
+        require(realismWater.waveStrength() == naturalWater.waveStrength()
+                        && realismWater.reflectionStrength() == naturalWater.reflectionStrength(),
+                "Natural and Realism must retain the full historical L8 wave/reflection strength");
+        require(!realismWater.preservesPreReflectionAppearance(),
+                "Realism must not opt into the pre-reflection baseline");
         require(realismWater.refractionStrength() > 0.0f
                         && realismWater.reflectionBodyStrength() > 0.0f
                         && realismWater.causticStrength() > 0.0f
@@ -274,25 +277,28 @@ public final class VisualStyleTests {
 
         // WaterStyleProfile validation
         expectIllegalArgument(() -> new WaterStyleProfile(
-                -1, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                -1, false, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, LinearColor.BLACK));
         expectIllegalArgument(() -> new WaterStyleProfile(
-                3, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                3, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, LinearColor.BLACK));
         expectIllegalArgument(() -> new WaterStyleProfile(
-                1, true, Float.NaN, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                1, true, false, Float.NaN, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, LinearColor.BLACK));
         expectIllegalArgument(() -> new WaterStyleProfile(
-                1, true, 0.0f, 1.1f, 0.0f, 0.0f, 0.0f, 0.075f,
+                1, true, false, 0.0f, 1.1f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, LinearColor.BLACK));
         expectIllegalArgument(() -> new WaterStyleProfile(
-                1, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                1, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, -0.1f, LinearColor.BLACK));
         expectNullPointer(() -> new WaterStyleProfile(
-                1, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                1, true, false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, null));
         expectIllegalArgument(() -> new WaterStyleProfile(
-                1, false, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                1, false, false, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
+                0.0f, 0.0f, LinearColor.BLACK));
+        expectIllegalArgument(() -> new WaterStyleProfile(
+                0, false, true, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.075f,
                 0.0f, 0.0f, LinearColor.BLACK));
     }
 

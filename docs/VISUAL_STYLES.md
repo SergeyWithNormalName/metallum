@@ -20,8 +20,9 @@ Metallum defines exactly three built-in visual styles:
 2. **`NATURAL`**
    - Natural sunlight, moonlight, and smooth golden-hour atmospheric transitions while remaining recognizably Minecraft.
    - Visibly warm golden-orange low sun; less-blue moonlight; stronger lunar phase response.
-   - Water keeps the vanilla texture and biome tint as its optical body, adding only subtle
-     procedural surface breakup and a restrained environment highlight.
+   - Water is the exact pre-water-reflection/GI L8 baseline: its original procedural waves,
+     Fresnel/environment response, bounded refraction and absorption, and synchronized caustics.
+     Later planar, cloud, voxel, and GI reflection paths are visually neutral in this style.
 3. **`REALISM`**
    - Physically motivated lighting curves intended for future integration with GI, PBR materials, volumetrics, and realistic celestial optics.
    - Near-neutral daylight sun; deep golden/orange horizon sun with broad atmospheric transition; subtly cool moon; zero directional moonlight at new moon without darkening ambient night.
@@ -135,21 +136,22 @@ Switching visual styles does **not** reconstruct GPU pipelines or renderer gener
 | :--- | ---: | ---: | ---: |
 | Shader policy id | `0` | `1` | `2` |
 | L8 water enabled | No | Yes | Yes |
-| Wave strength | `0.00` | `0.22` | `1.00` |
-| Reflection strength | `0.00` | `0.18` | `1.00` |
-| Refraction strength | `0.00` | `0.00` | `0.55` |
+| Wave strength | `0.00` | `1.00` | `1.00` |
+| Reflection strength | `0.00` | `1.00` | `1.00` |
+| Refraction strength | `0.00` | `0.28` | `0.55` |
 | Reflection body coupling | `0.00` | `0.00` | `0.85` |
-| Caustic strength | `0.00` | `0.00` | `1.00` |
-| Roughness | `0.075` | `0.120` | `0.065` |
-| Transmission | `0.00` | `0.00` | `0.38` |
-| Optical depth | `0.00` | `0.00` | `1.15` |
-| Absorption RGB | `(0, 0, 0)` | `(0, 0, 0)` | `(0.18, 0.055, 0.022)` |
+| Caustic strength | `0.00` | `1.00` | `1.00` |
+| Roughness | `0.075` | `0.055` | `0.065` |
+| Transmission | `0.00` | `0.30` | `0.38` |
+| Optical depth | `0.00` | `0.85` | `1.15` |
+| Absorption RGB | `(0, 0, 0)` | `(0.15, 0.040, 0.015)` | `(0.18, 0.055, 0.022)` |
 
-`NATURAL` deliberately has zero transmission/absorption/refraction so Metallum does not replace
-the vanilla biome water color. `REALISM` uses the same existing reflection sources when they are
-admitted; selecting a style does not enable the default-off planar or voxel-reflection experiments.
-When a coarse reflection has little confidence, its water-body energy subtraction is weighted by
-that actual confidence instead of producing a dark shoreline halo.
+`NATURAL` is a compatibility baseline: it preserves the water optics from immediately before
+water-reflection and GI work began, and excludes those later reflection sources. `REALISM` uses
+the same existing reflection sources when they are admitted; selecting a style does not enable the
+default-off planar or voxel-reflection experiments. When a coarse reflection has little confidence,
+its water-body energy subtraction is weighted by that actual confidence instead of producing a dark
+shoreline halo.
 
 ---
 
