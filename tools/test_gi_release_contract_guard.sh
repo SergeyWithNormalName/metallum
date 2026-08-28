@@ -17,18 +17,20 @@ expect_reject() {
     fi
 }
 
-expect_accept 0 0 0 0
-expect_accept 0 1 0 0
-expect_accept 0 0 1 0
-expect_accept 0 0 0 1
-expect_accept 1 0 0 0
+expect_accept 0 0 0 0 0
+expect_accept 0 1 0 0 0
+expect_accept 0 0 1 0 0
+expect_accept 0 0 0 1 0
+expect_accept 0 0 0 0 1
+expect_accept 1 0 0 0 0
 
-expect_reject 1 1 0 0
-expect_reject 1 0 1 0
-expect_reject 1 0 0 1
-expect_reject 1 1 1 1
-expect_reject 2 0 0 0
-expect_reject 1 true 0 0
-expect_reject 1 0 0
+expect_reject 1 1 0 0 0
+expect_reject 1 0 1 0 0
+expect_reject 1 0 0 1 0
+expect_reject 1 0 0 0 1
+expect_reject 1 1 1 1 1
+expect_reject 2 0 0 0 0
+expect_reject 1 true 0 0 0
+expect_reject 1 0 0 0
 
 echo "GI release-contract environment guard passed"

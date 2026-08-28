@@ -161,6 +161,7 @@ WORKLOAD_CONTRACTS = frozenset({
 L3_FRAME_GRAPH_VERSION = 4
 L4_FRAME_GRAPH_VERSION = 5
 L6_FRAME_GRAPH_VERSION = 6
+WORLD_OPAQUE_STAGE = "world opaque"
 LIGHT_CLUSTER_STAGE = "light upload + cluster build"
 SUN_SHADOW_STAGE = "sun shadow"
 VOXEL_UPLOAD_UPDATE_STAGE = "voxel upload + update"
@@ -313,6 +314,7 @@ class TimingWindow:
     clustered_lighting: dict[str, Any] | None
     voxel_clipmaps: dict[str, Any] | None
     global_illumination: dict[str, Any] | None
+    world_opaque_stage: dict[str, Any] | None
     light_cluster_stage: dict[str, Any] | None
     sun_shadow_stage: dict[str, Any] | None
     voxel_upload_update_stage: dict[str, Any] | None
@@ -1413,6 +1415,10 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             _parse_global_illumination(payload.get("global_illumination"), line)
             if schema >= 6 else None
         ),
+        world_opaque_stage=(
+            _parse_timing_stage(payload.get("stages"), WORLD_OPAQUE_STAGE, line)
+            if schema >= 4 else None
+        ),
         light_cluster_stage=(
             _parse_light_cluster_stage(payload.get("stages"), line)
             if schema >= 4 else None
@@ -2003,6 +2009,14 @@ def _aggregate_light_cluster_stage(
 ) -> dict[str, Any] | None:
     return _aggregate_timing_stage(
         windows, "light_cluster_stage", LIGHT_CLUSTER_STAGE
+    )
+
+
+def _aggregate_world_opaque_stage(
+    windows: Sequence[TimingWindow],
+) -> dict[str, Any] | None:
+    return _aggregate_timing_stage(
+        windows, "world_opaque_stage", WORLD_OPAQUE_STAGE
     )
 
 
@@ -2664,6 +2678,9 @@ def summarize(
     global_illumination = _aggregate_global_illumination(selected)
     if global_illumination is not None:
         result["global_illumination"] = global_illumination
+    world_opaque_stage = _aggregate_world_opaque_stage(selected)
+    if world_opaque_stage is not None:
+        result.setdefault("stages", {})[WORLD_OPAQUE_STAGE] = world_opaque_stage
     cluster_stage = _aggregate_light_cluster_stage(selected)
     if cluster_stage is not None:
         result.setdefault("stages", {})[LIGHT_CLUSTER_STAGE] = cluster_stage
@@ -2862,6 +2879,41 @@ def compare(
     candidate_p95 = metric(candidate, "p95")
     delta = candidate_p95 - base_p95
     regressions: list[dict[str, Any]] = []
+
+    def stage_p95(summary: dict[str, Any], label: str) -> float | None:
+        stages = summary.get("stages")
+        if not isinstance(stages, dict) or WORLD_OPAQUE_STAGE not in stages:
+            return None
+        try:
+            value = stages[WORLD_OPAQUE_STAGE]["p95_ms"][
+                "window_frame_weighted_mean"
+            ]
+        except (KeyError, TypeError) as error:
+            raise ReportError(
+                f"{label} has invalid {WORLD_OPAQUE_STAGE} p95 summary"
+            ) from error
+        if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                or not math.isfinite(float(value)):
+            raise ReportError(
+                f"{label} has invalid {WORLD_OPAQUE_STAGE} p95 summary"
+            )
+        return float(value)
+
+    baseline_world_opaque_p95 = stage_p95(baseline, "baseline")
+    candidate_world_opaque_p95 = stage_p95(candidate, "candidate")
+    if (baseline_world_opaque_p95 is None) \
+            != (candidate_world_opaque_p95 is None):
+        raise ReportError(
+            f"compare inputs mix {WORLD_OPAQUE_STAGE} p95 timing presence"
+        )
+    stage_p95_metrics: dict[str, dict[str, float]] = {}
+    if baseline_world_opaque_p95 is not None \
+            and candidate_world_opaque_p95 is not None:
+        stage_p95_metrics[WORLD_OPAQUE_STAGE] = {
+            "baseline": baseline_world_opaque_p95,
+            "candidate": candidate_world_opaque_p95,
+            "delta": candidate_world_opaque_p95 - baseline_world_opaque_p95,
+        }
 
     def absolute_upper_gate(
         name: str,
@@ -3107,6 +3159,7 @@ def compare(
             }
             for key in ("p50", "p95", "p99")
         },
+        "stage_p95_ms": stage_p95_metrics,
         "cpu_metrics": cpu_metrics,
         "generation_resource_bytes": resource_metrics,
         "transient_memory_bytes": transient_metrics,
@@ -4107,6 +4160,11 @@ def _print_comparison(result: dict[str, Any]) -> None:
             f"  {key}: {values['baseline']:.4f} -> {values['candidate']:.4f} ms "
             f"({values['delta']:+.4f})"
         )
+    for name, values in result["stage_p95_ms"].items():
+        print(
+            f"  stage {name} p95: {values['baseline']:.4f} -> "
+            f"{values['candidate']:.4f} ms ({values['delta']:+.4f})"
+        )
     for key, values in result["cpu_metrics"].items():
         print(
             f"  CPU {key}: {values['baseline']:.4f} -> "
@@ -4734,6 +4792,64 @@ def self_test() -> None:
         assert l3_advanced_summary["stages"][LIGHT_CLUSTER_STAGE]["p95_ms"][
             "window_maximum"
         ] == 0.12
+
+        world_opaque_control = root / "world-opaque-control.jsonl"
+        world_opaque_control_payloads = [
+            l3_line(i, advanced=True, detail=True) for i in range(10)
+        ]
+        for index, payload in enumerate(world_opaque_control_payloads):
+            offset = index * 0.01
+            payload["stages"][WORLD_OPAQUE_STAGE] = {
+                "frames": 300,
+                "average_ms": 4.0 + offset,
+                "p50_ms": 4.1 + offset,
+                "p95_ms": 4.2 + offset,
+                "p99_ms": 4.3 + offset,
+                "maximum_ms": 4.4 + offset,
+            }
+        world_opaque_control.write_text(
+            "\n".join(json.dumps(payload) for payload in world_opaque_control_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        world_opaque_control_summary = summarize(
+            world_opaque_control, 3000, 0, "OFF"
+        )
+        control_world_opaque_p95 = world_opaque_control_summary["stages"][
+            WORLD_OPAQUE_STAGE
+        ]["p95_ms"]
+        assert math.isclose(
+            control_world_opaque_p95["window_frame_weighted_mean"], 4.245
+        )
+        assert math.isclose(control_world_opaque_p95["window_maximum"], 4.29)
+
+        world_opaque_candidate = root / "world-opaque-candidate.jsonl"
+        world_opaque_candidate_payloads = copy.deepcopy(
+            world_opaque_control_payloads
+        )
+        for payload in world_opaque_candidate_payloads:
+            stage = payload["stages"][WORLD_OPAQUE_STAGE]
+            for key in ("average_ms", "p50_ms", "p95_ms", "p99_ms", "maximum_ms"):
+                stage[key] += 0.2
+        world_opaque_candidate.write_text(
+            "\n".join(json.dumps(payload) for payload in world_opaque_candidate_payloads)
+            + "\n",
+            encoding="utf-8",
+        )
+        world_opaque_candidate_summary = summarize(
+            world_opaque_candidate, 3000, 0, "OFF"
+        )
+        world_opaque_comparison = compare(
+            world_opaque_control_summary,
+            world_opaque_candidate_summary,
+            require_stability=False,
+        )
+        world_opaque_p95_comparison = world_opaque_comparison["stage_p95_ms"][
+            WORLD_OPAQUE_STAGE
+        ]
+        assert math.isclose(world_opaque_p95_comparison["baseline"], 4.245)
+        assert math.isclose(world_opaque_p95_comparison["candidate"], 4.445)
+        assert math.isclose(world_opaque_p95_comparison["delta"], 0.2)
 
         l4_advanced_detail = root / "l4-advanced-detail.jsonl"
         l4_advanced_detail.write_text(

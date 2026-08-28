@@ -39,6 +39,9 @@ SETTINGS_SPEC_EXPLICIT=0
 METALFX_MODE_EXPLICIT=0
 VERTEX_REFLECTION_EXPERIMENT=0
 WATER_REFLECTION_QUALITY=refined
+GI_G5_RECEIVER_ARM=control
+GI_G5_FIELD_KIND=zero
+GI_G5_RECEIVER_ACTIVE=false
 
 RUN_WORLD_PATH=""
 RUN_WORLD_NAME=""
@@ -114,6 +117,11 @@ L2 diagnostic environment:
   METALLUM_GI_G4_TRANSPORT=1
       request frozen near-cascade G4 diagnostics; this forces the G2/G3
       prerequisites and can never produce a release attestation
+  METALLUM_GI_G5_RECEIVER=1
+      request the G5 vertex receiver diagnostic; requires an explicit
+      METALLUM_GI_G5_RECEIVER_ARM=control|candidate|field, inherits private
+      G2/G3/G4 resources without making a standalone G4 request, and can never
+      produce a release attestation
 
 Compare completed reports with:
   python3 tools/metal_benchmark_report.py compare BASELINE.jsonl CANDIDATE.jsonl
@@ -770,6 +778,7 @@ require_value "$RENDERER_GI_MODE" "off" "renderer globalIllumination"
 GI_G2_CAPTURE_ENV=0
 GI_G3_INJECT_ENV=0
 GI_G4_TRANSPORT_ENV=0
+GI_G5_RECEIVER_ENV=0
 case "${METALLUM_GI_G2_CAPTURE:-}" in
     '') ;;
     0|false|FALSE|no|NO|off|OFF) ;;
@@ -788,8 +797,73 @@ case "${METALLUM_GI_G4_TRANSPORT:-}" in
     1|true|TRUE|yes|YES|on|ON) GI_G4_TRANSPORT_ENV=1 ;;
     *) die "METALLUM_GI_G4_TRANSPORT must be a boolean diagnostic flag" ;;
 esac
+case "${METALLUM_GI_G5_RECEIVER:-}" in
+    '') ;;
+    0|false|FALSE|no|NO|off|OFF) ;;
+    1|true|TRUE|yes|YES|on|ON) GI_G5_RECEIVER_ENV=1 ;;
+    *) die "METALLUM_GI_G5_RECEIVER must be a boolean diagnostic flag" ;;
+esac
+if [ "$GI_G5_RECEIVER_ENV" -eq 1 ]; then
+    case "${METALLUM_GI_G5_RECEIVER_ARM:-}" in
+        control)
+            GI_G5_RECEIVER_ARM=control
+            GI_G5_FIELD_KIND=zero
+            GI_G5_RECEIVER_ACTIVE=false
+            ;;
+        candidate)
+            GI_G5_RECEIVER_ARM=candidate
+            GI_G5_FIELD_KIND=zero
+            GI_G5_RECEIVER_ACTIVE=true
+            ;;
+        field)
+            GI_G5_RECEIVER_ARM=field
+            GI_G5_FIELD_KIND=g4
+            GI_G5_RECEIVER_ACTIVE=true
+            ;;
+        *)
+            die "METALLUM_GI_G5_RECEIVER_ARM must be control, candidate, or field when G5 is requested"
+            ;;
+    esac
+elif [ -n "${METALLUM_GI_G5_RECEIVER_ARM:-}" ]; then
+    die "METALLUM_GI_G5_RECEIVER_ARM requires METALLUM_GI_G5_RECEIVER=1"
+fi
 RUNTIME_GI_MODE="$RENDERER_GI_MODE"
-if [ "$GI_G4_TRANSPORT_ENV" -eq 1 ]; then
+if [ "$GI_G5_RECEIVER_ENV" -eq 1 ]; then
+    # G5 owns the upstream private-resource lifecycle through GiRuntimeStages.
+    # Keeping the standalone diagnostic flags OFF is essential: control and
+    # candidate need create-time-zero G4 textures, not a populated G4 field or
+    # a misleading standalone G4 READY admission.
+    [ "$GI_G2_CAPTURE_ENV" -eq 0 ] \
+        && [ "$GI_G3_INJECT_ENV" -eq 0 ] \
+        && [ "$GI_G4_TRANSPORT_ENV" -eq 0 ] \
+        || die "G5 receiver arms reject explicit G2/G3/G4 diagnostic flags"
+    RUNTIME_GI_MODE=g5_vertex_receiver
+    require_value "$ROUTE_ID" "gi-g4-overworld-v1" "G5 benchmark route"
+    require_value "$ROUTE_SHA256" \
+        "d321131b314bb22cee354e3cf48606712d414d44a84e6ed00230e70d9c65839d" \
+        "G5 benchmark route digest"
+    require_value "$SETTINGS_ID" "native-hdr-fancy-v1" "G5 settings profile"
+    require_value "$SETTINGS_SPEC_SHA256" \
+        "92f083512f14472312e0f0dbc13a7a033c26af907ccc6318fa2216758a9c0d7e" \
+        "G5 settings specification digest"
+    require_value "$SETTINGS_SHA256" \
+        "fcf752aebd45a576e13cc19b446b954014b66e46a78c79e435289314d3b4ebb3" \
+        "G5 resolved settings digest"
+    require_value "$WIDTH" "3024" "G5 render width"
+    require_value "$HEIGHT" "1964" "G5 render height"
+    require_value "$REFRESH_HZ" "120" "G5 refresh rate"
+    require_value "$GRAPHICS_PRESET" "fancy" "G5 graphics preset"
+    require_value "$HDR_MODE" "scene" "G5 HDR output mode"
+    require_value "$WARMUP_FRAMES" "600" "G5 warmup frames"
+    require_value "$MEASURE_FRAMES" "600" "G5 measurement frames"
+    require_value "$TIMING_DETAIL" "1" "G5 timing detail"
+    require_value "$METAL_VALIDATION" "0" "G5 Metal Validation mode"
+    require_value "$METALFX_MODE" "OFF" "G5 MetalFX mode"
+    require_value "$CAPTURE_REFERENCE" "0" "G5 reference capture mode"
+    require_value "$FI_VALIDATION" "0" "G5 frame interpolation validation mode"
+    require_value "$VERTEX_REFLECTION_EXPERIMENT" "0" \
+        "G5 vertex-reflection experiment mode"
+elif [ "$GI_G4_TRANSPORT_ENV" -eq 1 ]; then
     # G4 consumes accepted G2 cells and the completed G3 field. Make both
     # prerequisites explicit in the launched process instead of relying on a
     # caller to discover and set transitive diagnostic flags.
@@ -837,7 +911,8 @@ fi
 metallum_require_release_gi_off \
     "$RELEASE_PROFILE_CANDIDATE" \
     "$GI_G2_CAPTURE_ENV" "$GI_G3_INJECT_ENV" "$GI_G4_TRANSPORT_ENV" \
-    || die "G2/G3/G4 diagnostics cannot run under the release-contract profile"
+    "$GI_G5_RECEIVER_ENV" \
+    || die "G2/G3/G4/G5 diagnostics cannot run under the release-contract profile"
 if [ "$settings_field_count" -eq 34 ]; then
     require_value "$RENDERER_LIGHTING" "$BENCHMARK_RENDERER_IMPROVED_LIGHTING" \
         "tracked renderer improvedLighting"
@@ -870,6 +945,9 @@ if [ -n "$benchmark_status" ]; then
 fi
 if [ "$RUNTIME_GI_MODE" = "g4_transport" ] && [ "$dirty_flag" -ne 0 ]; then
     die "G4 Tier B evidence requires a clean worktree"
+fi
+if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ] && [ "$dirty_flag" -ne 0 ]; then
+    die "G5 Tier B evidence requires a clean worktree"
 fi
 safe_label=$(printf '%s' "$LABEL" | tr -cs '[:alnum:]._' '-' | sed 's/^-*//; s/-*$//')
 [ -n "$safe_label" ] || safe_label="run"
@@ -916,7 +994,9 @@ else
     echo "  pacing: VSync off, maxFps=$MAX_FPS"
 fi
 echo "  scene: output=$HDR_MODE, source=sRGB, lighting=$EXPECTED_LIGHTING_MODEL ($RENDERER_LIGHTING/$LIGHTING_PRESET), renderer-schema=$RENDERER_SCHEMA, bloom=$HDR_BLOOM_STRENGTH, strength=$HDR_STRENGTH"
-if [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
+if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
+    echo "GI_G5_RECEIVER_REQUEST mode=g5_vertex_receiver arm=$GI_G5_RECEIVER_ARM receiver=$GI_G5_RECEIVER_ACTIVE field=$GI_G5_FIELD_KIND g2_resources=true g3_resources=true shared_g4_resources=true explicit_g4_request=false vertex_stage=true fragment_receiver=false diagnostic_only=true release=false status=REQUESTED"
+elif [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
     echo "GI_G4_TRANSPORT_REQUEST mode=g4_transport g2_capture=true g3_inject=true frozen_near_cascade=true jacobi_iterations=1 field_only=true receiver=false image_binding=false diagnostic_only=true release=false status=REQUESTED"
 elif [ "$RUNTIME_GI_MODE" = "g3_inject" ]; then
     echo "GI_G3_ADMISSION mode=g3_inject field_only=true bounce=false image_binding=false status=REQUESTED"
@@ -1219,6 +1299,8 @@ set +e
 METALLUM_GI_G2_CAPTURE="$GI_G2_CAPTURE_ENV" \
 METALLUM_GI_G3_INJECT="$GI_G3_INJECT_ENV" \
 METALLUM_GI_G4_TRANSPORT="$GI_G4_TRANSPORT_ENV" \
+METALLUM_GI_G5_RECEIVER="$GI_G5_RECEIVER_ENV" \
+METALLUM_GI_G5_RECEIVER_ARM="$GI_G5_RECEIVER_ARM" \
 METALLUM_BENCHMARK_FI_REQUIRED="$FI_REQUIRED_ENV" \
 METALLUM_BENCHMARK_FI_OVERLAY="$FI_OVERLAY_ENV" \
 METALLUM_BENCHMARK_FI_MIN_GENERATED="$FI_MINIMUM_GENERATED_FRAMES" \
@@ -1410,7 +1492,26 @@ measure_end_line=$(grep -nF "$measure_end" "$MINECRAFT_LOG" | cut -d: -f1)
     && [ "$measure_end_line" -lt "$route_measure_end_line" ] \
     || die "deterministic route markers are out of order"
 
-if [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
+if [ "$RUNTIME_GI_MODE" = "g5_vertex_receiver" ]; then
+    g5_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G5_ADMISSION "
+    g5_admission_count=$(grep -Fc "$g5_admission_prefix" "$MINECRAFT_LOG" || true)
+    [ "$g5_admission_count" -eq 1 ] \
+        || die "expected exactly one G5 admission marker (found $g5_admission_count)"
+    g5_admission_contract="$g5_admission_prefix"\
+"requested=g5_vertex_receiver resolved=g5_vertex_receiver contract=4 "\
+"state=READY arm=$GI_G5_RECEIVER_ARM field=$GI_G5_FIELD_KIND"
+    grep -Fq "$g5_admission_contract" "$MINECRAFT_LOG" \
+        || die "G5 admission did not prove the resolved arm/resource contract"
+    g5_admission_line=$(grep -nF "$g5_admission_prefix" "$MINECRAFT_LOG" | cut -d: -f1)
+    [ "$segment_start_line" -lt "$g5_admission_line" ] \
+        && [ "$g5_admission_line" -lt "$measure_start_line" ] \
+        || die "G5 admission marker is outside the warmup boundary"
+    if [ "$GI_G5_RECEIVER_ARM" != "field" ] \
+            && grep -Eq 'METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION .*state=READY' \
+                "$MINECRAFT_LOG"; then
+        die "G5 control/candidate must not claim standalone G4 READY admission"
+    fi
+elif [ "$RUNTIME_GI_MODE" = "g4_transport" ]; then
     g4_admission_prefix="METALLUM_BENCHMARK EVENT=GI_G4_ADMISSION "
     g4_admission_count=$(grep -Fc "$g4_admission_prefix" "$MINECRAFT_LOG" || true)
     [ "$g4_admission_count" -eq 1 ] \
