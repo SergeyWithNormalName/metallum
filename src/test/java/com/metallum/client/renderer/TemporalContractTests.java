@@ -14,6 +14,8 @@ import org.joml.Matrix4f;
 import org.joml.Vector4f;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Set;
 
 /** Dependency-free L1 temporal contract and one-shot reset validation. */
@@ -23,6 +25,8 @@ public final class TemporalContractTests {
 
     public static void main(final String[] args) {
         testOneShotResetsAndPreviousPublication();
+        testContinuousProjectionRetainsHistory();
+        testMixinDoesNotEmitFovProjectionReset();
         testDeterministicDisabledJitter();
         testPresetJitterPhaseCounts();
         testPresetTextureMipBias();
@@ -87,6 +91,42 @@ public final class TemporalContractTests {
         require(tracker.publish(state(13L, 2L, 3L, 1600, 900, Matrix4.identity()), Set.of())
                         .historyResetReasons().isEmpty(),
                 "visual style reset leaked into the next frame");
+    }
+
+    private static void testContinuousProjectionRetainsHistory() {
+        FrameStateTracker tracker = new FrameStateTracker();
+        Matrix4 firstProjection = Matrix4.ofJoml(new Matrix4f().setPerspective(
+                (float) Math.toRadians(70.0), 16.0f / 9.0f, 0.05f, 1024.0f, true
+        ));
+        Matrix4 sprintProjection = Matrix4.ofJoml(new Matrix4f().setPerspective(
+                (float) Math.toRadians(73.0), 16.0f / 9.0f, 0.05f, 1024.0f, true
+        ));
+        FrameState first = tracker.publish(state(20L, 7L, 9L, 1600, 900, firstProjection), Set.of());
+        FrameState fovAnimating = tracker.publish(
+                state(21L, 7L, 9L, 1600, 900, sprintProjection),
+                Set.of()
+        );
+        require(fovAnimating.historyResetReasons().isEmpty(),
+                "continuous FOV/projection change reset temporal history");
+        require(fovAnimating.historyGeneration() == first.historyGeneration(),
+                "continuous FOV/projection change advanced history generation");
+        require(fovAnimating.previousTransforms().equals(first.currentTransforms()),
+                "continuous FOV/projection change discarded the previous transform");
+    }
+
+    private static void testMixinDoesNotEmitFovProjectionReset() {
+        try {
+            String source = Files.readString(Path.of(
+                    "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java"
+            ));
+            require(!source.contains("FOV_PROJECTION_CHANGE"),
+                    "continuous projection comparison can still signal a global history reset");
+            require(!source.contains("metallum$previousBaseProjection")
+                            && !source.contains("metallum$hasPreviousBaseProjection"),
+                    "obsolete per-frame base-projection reset state remains in the mixin");
+        } catch (java.io.IOException exception) {
+            throw new AssertionError("could not read GameRenderer temporal source", exception);
+        }
     }
 
     private static void testDeterministicDisabledJitter() {

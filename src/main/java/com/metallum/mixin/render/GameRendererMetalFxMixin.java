@@ -54,11 +54,9 @@ abstract class GameRendererMetalFxMixin {
     @Shadow @Final
     private GameRenderState gameRenderState;
 
-    private final Matrix4f metallum$previousBaseProjection = new Matrix4f();
     private final Matrix4f metallum$cameraInverse = new Matrix4f();
     private final Matrix4f metallum$jitteredProjection = new Matrix4f();
     private final Matrix4f metallum$postProjectionTransform = new Matrix4f();
-    private boolean metallum$hasPreviousBaseProjection;
     private Entity metallum$previousCameraEntity;
     private Object metallum$dimensionKey;
     private long metallum$dimensionIdentity;
@@ -181,13 +179,6 @@ abstract class GameRendererMetalFxMixin {
             int displayWidth = MetalFxUpscaling.configuredDisplayWidth(this.mainRenderTarget.width);
             int displayHeight = MetalFxUpscaling.configuredDisplayHeight(this.mainRenderTarget.height);
             device.publishRendererGenerationState(displayWidth, displayHeight);
-            if (this.metallum$hasPreviousBaseProjection
-                    && !this.metallum$previousBaseProjection.equals(camera.projectionMatrix)) {
-                TemporalResetEvents.signal(FrameState.HistoryResetReason.FOV_PROJECTION_CHANGE);
-            }
-            this.metallum$previousBaseProjection.set(camera.projectionMatrix);
-            this.metallum$hasPreviousBaseProjection = true;
-
             Entity cameraEntity = this.minecraft.getCameraEntity();
             if (this.metallum$previousCameraEntity != null
                     && cameraEntity != this.metallum$previousCameraEntity) {
