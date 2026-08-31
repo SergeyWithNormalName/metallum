@@ -26,6 +26,7 @@ public final class GiDynamicSourceCollectorTests {
         expiryUsesWorldTicksRatherThanFrames();
         frozenExtractionTicksObserveMoveRemovalAndExpiry();
         frozenPlayerTeleportUsesAuthoritativeCurrentPose();
+        renderInterpolationWithinOneGiCellDoesNotRotateEpoch();
         sourceEpochIsSeparateAndContentDriven();
         heldSourceIsWorldAnchoredAndYawInvariant();
         worldResetDropsOldSourcesImmediately();
@@ -149,7 +150,9 @@ public final class GiDynamicSourceCollectorTests {
         collector.offer(moved);
         GiDynamicSourceSnapshot movedSnapshot = collector.finishTick();
         check(movedSnapshot != first && movedSnapshot.sourceHash() != first.sourceHash()
-                        && movedSnapshot.sources().equals(List.of(moved))
+                        && movedSnapshot.sources().equals(List.of(
+                                GiDynamicSourceCollector.stabilizeForField(moved)
+                        ))
                         && movedSnapshot.publishedAtWorldTick() == 2L,
                 "content-changing frozen observation lost its authoritative collector tick");
 
@@ -196,12 +199,19 @@ public final class GiDynamicSourceCollectorTests {
             }
         }
 
+    }
+
+    private static void renderInterpolationWithinOneGiCellDoesNotRotateEpoch() {
+        LightWorldToken world = new LightWorldToken(4L, OVERWORLD);
+        UUID player = uuid(8_182);
         float runningEarly = MinecraftLightPolicy.worldSpaceEntityPartialTick(true, 0.25F);
         float runningLate = MinecraftLightPolicy.worldSpaceEntityPartialTick(true, 0.75F);
+        double oldX = 100.10;
+        double currentX = 101.10;
         check(runningEarly == 0.25F && runningLate == 0.75F
                         && lerp(oldX, currentX, runningEarly)
                         != lerp(oldX, currentX, runningLate),
-                "normally running player extraction lost render interpolation");
+                "normally running entity extraction lost render interpolation");
         GiDynamicSourceCollector running = new GiDynamicSourceCollector(4, 2L);
         running.beginTick(world, running.nextObservationTick(world));
         running.offer(GiDynamicSourceCollector.entityAtWorldPosition(
@@ -215,9 +225,18 @@ public final class GiDynamicSourceCollectorTests {
                 12.75F, 1.0F, 0.26F, 0.035F, 3.15F, 240
         ));
         GiDynamicSourceSnapshot late = running.finishTick();
-        check(late.epoch().sourceEpoch() == early.epoch().sourceEpoch() + 1L
-                        && late.sourceHash() != early.sourceHash(),
-                "normally running player motion did not rotate dynamic GI identity/hash");
+        check(late == early && late.sourceHash() == early.sourceHash(),
+                "sub-cell render interpolation rotated dynamic GI identity/hash");
+
+        running.beginTick(world, running.nextObservationTick(world));
+        running.offer(GiDynamicSourceCollector.entityAtWorldPosition(
+                world, player, 102.10, 106.0, -95.5,
+                12.75F, 1.0F, 0.26F, 0.035F, 3.15F, 240
+        ));
+        GiDynamicSourceSnapshot crossed = running.finishTick();
+        check(crossed.epoch().sourceEpoch() == early.epoch().sourceEpoch() + 1L
+                        && crossed.sourceHash() != early.sourceHash(),
+                "crossing a near-field GI cell did not rotate dynamic source truth");
     }
 
     private static void sourceEpochIsSeparateAndContentDriven() {
@@ -234,14 +253,21 @@ public final class GiDynamicSourceCollectorTests {
         check(unchanged == first,
                 "identical source tick allocated or rotated the independent source epoch");
 
-        AdvancedLight moved = entity(world, 9, 3, 4.25, 5.0, 6.0);
+        AdvancedLight movedInsideCell = entity(world, 9, 3, 4.25, 5.0, 6.0);
         collector.beginTick(world, 3L);
-        collector.offer(moved);
+        collector.offer(movedInsideCell);
+        GiDynamicSourceSnapshot stable = collector.finishTick();
+        check(stable == first && stable.sourceHash() == first.sourceHash(),
+                "sub-cell world-space motion rotated the dynamic source epoch");
+
+        AdvancedLight movedAcrossCell = entity(world, 9, 3, 6.0, 5.0, 6.0);
+        collector.beginTick(world, 4L);
+        collector.offer(movedAcrossCell);
         GiDynamicSourceSnapshot changed = collector.finishTick();
         check(changed.epoch().sourceEpoch() == first.epoch().sourceEpoch() + 1L
                         && changed.epoch().world().equals(world)
                         && changed.sourceHash() != first.sourceHash(),
-                "world-space source change did not rotate only the dynamic source epoch");
+                "GI-cell source change did not rotate only the dynamic source epoch");
         check(changed.epoch().isNewerThan(first.epoch()),
                 "dynamic source epoch did not report monotonic progress");
     }
@@ -296,7 +322,9 @@ public final class GiDynamicSourceCollectorTests {
                 "stable entity ID did not include the dimension identity");
         collector.offer(newSource);
         GiDynamicSourceSnapshot after = collector.finishTick();
-        check(after.sources().equals(List.of(newSource)),
+        check(after.sources().equals(List.of(
+                        GiDynamicSourceCollector.stabilizeForField(newSource)
+                )),
                 "new-world source was not admitted after the immediate reset");
     }
 

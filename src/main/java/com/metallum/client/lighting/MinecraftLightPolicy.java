@@ -30,8 +30,7 @@ public final class MinecraftLightPolicy {
         if (emission <= 0) {
             return null;
         }
-        Identifier id = BuiltInRegistries.BLOCK.getKey(cell.colorState().getBlock());
-        float[] color = linearColorForIdentifier(id);
+        float[] color = linearEmissionColor(cell.colorState());
         float normalized = emission / 15.0F;
         float radius = 1.5F + 0.75F * emission;
         float intensity = 0.15F + 3.0F * normalized * (float) Math.sqrt(normalized);
@@ -294,6 +293,15 @@ public final class MinecraftLightPolicy {
         return new float[]{1.0F, 0.26F, 0.035F};
     }
 
+    /** Shared scene-linear chromaticity for analytic lights and GI palette fallbacks. */
+    public static float[] linearEmissionColor(final BlockState state) {
+        if (state == null) {
+            throw new NullPointerException("state");
+        }
+        Identifier id = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+        return linearColorForIdentifier(id);
+    }
+
     private static EntityProfile entityProfile(final String path, final boolean onFire) {
         if (path.contains("lightning_bolt")) {
             return new EntityProfile(16.0F, 0.63F, 0.78F, 1.0F, 4.0F, 512);
@@ -367,8 +375,7 @@ public final class MinecraftLightPolicy {
         if (emission <= 0) {
             return null;
         }
-        Identifier id = BuiltInRegistries.BLOCK.getKey(blockItem.getBlock());
-        float[] color = linearColorForIdentifier(id);
+        float[] color = linearEmissionColor(state);
         float normalized = emission / 15.0F;
         return new EntityProfile(
                 1.5F + 0.75F * emission,

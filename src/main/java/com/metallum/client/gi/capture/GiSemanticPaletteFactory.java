@@ -4,6 +4,7 @@ import com.metallum.client.gi.semantic.GiSemanticMaterial;
 import com.metallum.client.gi.semantic.GiSemanticMedium;
 import com.metallum.client.gi.semantic.GiSemanticPalette;
 import com.metallum.client.gi.semantic.GiSemanticProvenance;
+import com.metallum.client.lighting.MinecraftLightPolicy;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.block.Block;
@@ -62,14 +63,24 @@ public final class GiSemanticPaletteFactory {
                 GiSemanticMedium.TRANSLUCENT,
                 GiSemanticMedium.WATER
         }) {
-            String key = canonicalKey(state, descriptor, medium);
-            int emission = Math.clamp(state.getLightEmission(), 0, 15);
-            seeds.add(new GiSemanticPalette.Seed(
-                    key, GiSemanticMaterial.from(descriptor), medium,
-                    0.5F, 0.5F, 0.5F,
-                    1.0F, 1.0F, 1.0F, emission / 15.0F,
-                    GiSemanticProvenance.RESOURCE_DERIVED | GiSemanticProvenance.MATERIAL_DERIVED
-            ));
+            seeds.add(seed(state, descriptor, medium));
         }
+    }
+
+    /** Seed-only cells retain the same vanilla source chromaticity as analytic L3 lights. */
+    static GiSemanticPalette.Seed seed(
+            final BlockState state,
+            final SurfaceMaterialPolicy.Descriptor descriptor,
+            final GiSemanticMedium medium
+    ) {
+        String key = canonicalKey(state, descriptor, medium);
+        int emission = Math.clamp(state.getLightEmission(), 0, 15);
+        float[] color = MinecraftLightPolicy.linearEmissionColor(state);
+        return new GiSemanticPalette.Seed(
+                key, GiSemanticMaterial.from(descriptor), medium,
+                0.5F, 0.5F, 0.5F,
+                color[0], color[1], color[2], emission / 15.0F,
+                GiSemanticProvenance.RESOURCE_DERIVED | GiSemanticProvenance.MATERIAL_DERIVED
+        );
     }
 }

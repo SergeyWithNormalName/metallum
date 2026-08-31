@@ -1,9 +1,16 @@
 package com.metallum.client.gi.capture;
 
 import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.client.gi.semantic.GiSemanticMedium;
+import com.metallum.client.gi.semantic.GiSemanticPalette;
+import com.metallum.client.lighting.SurfaceMaterialPolicy;
 import com.metallum.mixin.MetallumMixinConfigPlugin;
 import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.SharedConstants;
+import net.minecraft.server.Bootstrap;
 import net.minecraft.util.ARGB;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -21,6 +28,7 @@ public final class GiSemanticSourceChainTests {
         validateResourceReloadLifecycle();
         validateNoPrelitInputs();
         validateAtlasColorCopy();
+        validateEmissiveSeedChromaticity();
         System.out.println("G2 Sodium accepted-output source-chain tests passed");
     }
 
@@ -198,6 +206,30 @@ public final class GiSemanticSourceChainTests {
         GiSemanticSpriteColorAtlas.LinearRgb fallback = GiSemanticSpriteColorAtlas.average(closed);
         require(fallback.red() == 0.0F && fallback.green() == 0.0F && fallback.blue() == 0.0F,
                 "Malformed/closed atlas image did not fail closed");
+    }
+
+    private static void validateEmissiveSeedChromaticity() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        BlockState torchState = Blocks.TORCH.defaultBlockState();
+        GiSemanticPalette.Seed torch = GiSemanticPaletteFactory.seed(
+                torchState, SurfaceMaterialPolicy.forTerrain(torchState, false),
+                GiSemanticMedium.OPAQUE
+        );
+        require(torch.emissionRed() > torch.emissionGreen() * 3.0F
+                        && torch.emissionGreen() > torch.emissionBlue() * 3.0F
+                        && torch.emissionIntensity() > 0.0F,
+                "seed-only torch emission became neutral instead of warm scene-linear RGB");
+
+        BlockState lavaState = Blocks.LAVA.defaultBlockState();
+        GiSemanticPalette.Seed lava = GiSemanticPaletteFactory.seed(
+                lavaState, SurfaceMaterialPolicy.forTerrain(lavaState, true),
+                GiSemanticMedium.WATER
+        );
+        require(lava.emissionRed() > lava.emissionGreen() * 8.0F
+                        && lava.emissionGreen() > lava.emissionBlue() * 8.0F
+                        && lava.emissionIntensity() == 1.0F,
+                "seed-only lava emission lost its orange-red source chromaticity");
     }
 
     private static String source(final String relative) throws Exception {

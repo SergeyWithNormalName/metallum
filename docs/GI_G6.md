@@ -107,7 +107,9 @@ run fail.
 The deterministic functional matrix is:
 
 ```bash
-scripts/run_metal_benchmark.sh --gi-g6-matrix --label gi-g6-matrix-final-v18
+scripts/run_metal_benchmark.sh --gi-live \
+  --route benchmark/routes/hdrtest-gi-g6-matrix-v1.json \
+  --label gi-g6-matrix-final-v18
 ```
 
 It uses the same quality profile for 1800 warm-up plus 3600 measured frames and

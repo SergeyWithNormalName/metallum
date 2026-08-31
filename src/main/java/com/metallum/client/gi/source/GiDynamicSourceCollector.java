@@ -24,6 +24,8 @@ import java.util.UUID;
  */
 public final class GiDynamicSourceCollector {
     public static final int MAX_CAPACITY = 512;
+    /** Dynamic GI cannot represent source motion finer than its two-block near field. */
+    static final int POSITION_QUANTUM_BLOCKS = GiDirectSourceLayout.cellSizeBlocks(0);
 
     public enum OfferResult {
         ACCEPTED,
@@ -135,53 +137,81 @@ public final class GiDynamicSourceCollector {
     public OfferResult offer(final AdvancedLight source) {
         assertOwnerThread();
         requireOpenTick();
+        AdvancedLight stableSource = stabilizeForField(source);
         GiDynamicSourceSnapshot.requireLiveSource(
                 Objects.requireNonNull(this.activeWorld, "activeWorld"),
-                source
+                stableSource
         );
         this.offered = Math.incrementExact(this.offered);
 
         int residentIndex = indexOfStableId(
-                this.residentSources, this.residentCount, source.stableId()
+                this.residentSources, this.residentCount, stableSource.stableId()
         );
         if (residentIndex >= 0) {
             AdvancedLight previous = this.residentUpdates[residentIndex];
             if (previous == null) {
-                this.residentUpdates[residentIndex] = source;
+                this.residentUpdates[residentIndex] = stableSource;
                 return OfferResult.ACCEPTED;
             }
             this.coalesced = Math.incrementExact(this.coalesced);
-            if (SOURCE_ORDER.compare(source, previous) < 0) {
-                this.residentUpdates[residentIndex] = source;
+            if (SOURCE_ORDER.compare(stableSource, previous) < 0) {
+                this.residentUpdates[residentIndex] = stableSource;
             }
             return OfferResult.COALESCED;
         }
 
         int candidateIndex = indexOfStableId(
-                this.newCandidates, this.newCandidateCount, source.stableId()
+                this.newCandidates, this.newCandidateCount, stableSource.stableId()
         );
         if (candidateIndex >= 0) {
             AdvancedLight previous = this.newCandidates[candidateIndex];
             this.coalesced = Math.incrementExact(this.coalesced);
-            if (SOURCE_ORDER.compare(source, previous) < 0) {
-                this.newCandidates[candidateIndex] = source;
+            if (SOURCE_ORDER.compare(stableSource, previous) < 0) {
+                this.newCandidates[candidateIndex] = stableSource;
             }
             return OfferResult.COALESCED;
         }
 
         if (this.newCandidateCount < this.capacity) {
-            this.newCandidates[this.newCandidateCount++] = source;
+            this.newCandidates[this.newCandidateCount++] = stableSource;
             return OfferResult.ACCEPTED;
         }
         int worstIndex = worstIndex(this.newCandidates, this.newCandidateCount);
         AdvancedLight worst = this.newCandidates[worstIndex];
-        if (SOURCE_ORDER.compare(source, worst) < 0) {
-            this.newCandidates[worstIndex] = source;
+        if (SOURCE_ORDER.compare(stableSource, worst) < 0) {
+            this.newCandidates[worstIndex] = stableSource;
             this.capacityRejected = Math.incrementExact(this.capacityRejected);
             return OfferResult.ACCEPTED;
         }
         this.capacityRejected = Math.incrementExact(this.capacityRejected);
         return OfferResult.CAPACITY_REJECTED;
+    }
+
+    /**
+     * Snaps only the private G6 source truth to the finest field cell. Direct L3 lighting keeps
+     * its independently interpolated position, while sub-cell render residuals cannot rotate a
+     * transport epoch or alternate the visible result between exact GI and ambient fallback.
+     */
+    static AdvancedLight stabilizeForField(final AdvancedLight source) {
+        Objects.requireNonNull(source, "source");
+        double x = quantizedCellCenter(source.x());
+        double y = quantizedCellCenter(source.y());
+        double z = quantizedCellCenter(source.z());
+        if (x == source.x() && y == source.y() && z == source.z()) {
+            return source;
+        }
+        return new AdvancedLight(
+                source.stableId(), source.generation(), source.kind(),
+                x, y, z, source.radius(),
+                source.red(), source.green(), source.blue(), source.intensity(),
+                source.priority(), source.denseCellEligible(),
+                source.shadowEmitterFootprint(), source.shadowSourceClass()
+        );
+    }
+
+    private static double quantizedCellCenter(final double position) {
+        return Math.floor(position / POSITION_QUANTUM_BLOCKS) * POSITION_QUANTUM_BLOCKS
+                + POSITION_QUANTUM_BLOCKS * 0.5;
     }
 
     /** Finishes the tick and returns the last immutable publication, reusing it when unchanged. */
