@@ -18,6 +18,8 @@ import java.util.function.Consumer;
 /** Bounded, source-tick-gated G6 incremental transport and exact-valid publication owner. */
 public final class GiLiveCoordinator implements AutoCloseable {
     public static final int STATUS_NO_WORK = 0;
+    /** A compatible successor is deferred; the last proven receiver history remains usable. */
+    public static final int STATUS_RETAINED_HISTORY = 2;
     public static final int STATUS_INPUT_NOT_READY = -7;
     public static final int STATUS_ASYNC_COMPLETION_FAILED = -11;
     public static final long G2_G3_ACCOUNTED_BYTES = 19_196_840L;
@@ -202,9 +204,13 @@ public final class GiLiveCoordinator implements AutoCloseable {
                         field, dynamic, staticEpoch, staticHealthy, environmentDigest
                 );
                 publishFinalTelemetry(stats);
-                // The current atlas predates an observed source/content identity. Keep the GPU
-                // asynchronous, but fail this terrain submit closed instead of binding stale GI.
-                return STATUS_INPUT_NOT_READY;
+                // The current atlas predates this compatible incremental/scroll successor, but
+                // still contains a spatially valid, last-proven field. Keep it visible until the
+                // accepted writer retires; beginObservedUpdate will then publish per-brick
+                // history masks for the successor. Structural resets remain globally fail-closed.
+                return canRetainDeferredHistory(
+                        this.deferredUpdateClass, field
+                ) ? STATUS_RETAINED_HISTORY : STATUS_INPUT_NOT_READY;
             }
             beginObservedUpdate(
                     field, dynamic, staticEpoch, staticHealthy, environmentDigest, submitIndex
@@ -1763,6 +1769,22 @@ public final class GiLiveCoordinator implements AutoCloseable {
     }
     static boolean sourceEnvironmentIdentityReady(final long digest) {
         return digest != 0L;
+    }
+    private boolean canRetainDeferredHistory(
+            final GiLiveUpdateClass updateClass,
+            final GiSemanticTransportFieldView field
+    ) {
+        return deferredHistoryCanBind(
+                updateClass, this.observed, sameObservedStructuralRoot(field)
+        );
+    }
+    static boolean deferredHistoryCanBind(
+            final GiLiveUpdateClass updateClass,
+            final boolean observed,
+            final boolean sameStructuralRoot
+    ) {
+        return observed && sameStructuralRoot && updateClass != null
+                && updateClass != GiLiveUpdateClass.FULL_RESET;
     }
     static boolean retryWouldRepeatNonIdempotentScroll(
             final boolean preparedCascade, final boolean scrollCascade

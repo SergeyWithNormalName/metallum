@@ -108,8 +108,8 @@ public final class GiLiveReceiverSourceChainTests {
                 "G6 patch marker is missing or repeated");
         require(count(vertex.source(), "textureLod(") == 12,
                 "G6 did not retain exactly four bounded vertex reads per cascade");
-        require(count(vertex.source(), "uvec2 exactBrickMasks[3];") == 1
-                        && !fragment.source().contains("exactBrickMasks"),
+        require(count(vertex.source(), "uvec2 sampleableBrickMasks[3];") == 1
+                        && !fragment.source().contains("sampleableBrickMasks"),
                 "G6 exact-visible brick masks are missing or escaped into fragment source");
         for (String sampler : GiReceiverBindingAbi.samplerNames()) {
             require(count(vertex.source(), "uniform sampler3D " + sampler + ";") == 1
@@ -134,11 +134,11 @@ public final class GiLiveReceiverSourceChainTests {
             String minBrick = "metallumGiFootprintMinBrick" + cascade;
             String maxBrick = "metallumGiFootprintMaxBrick" + cascade;
             String brick = "metallumGiFootprintBrickId" + cascade;
-            String mask = "metallumGiExactMask" + cascade;
-            String word = "metallumGiFootprintExactWord" + cascade;
-            String exact = "metallumGiFootprintExact" + cascade;
+            String mask = "metallumGiSampleableMask" + cascade;
+            String word = "metallumGiFootprintSampleableWord" + cascade;
+            String sampleable = "metallumGiFootprintSampleable" + cascade;
             int footprintStart = cascadeBlock.indexOf("vec3 " + sampleCell + " =");
-            int exactGate = cascadeBlock.indexOf("if (" + exact + ") {");
+            int exactGate = cascadeBlock.indexOf("if (" + sampleable + ") {");
             int exactOpenBrace = exactGate < 0 ? -1 : cascadeBlock.indexOf('{', exactGate);
             int exactCloseBrace = matchingBrace(cascadeBlock, exactOpenBrace);
             require(compact.contains("vec3 " + sampleCell + " = clamp( "
@@ -162,19 +162,19 @@ public final class GiLiveReceiverSourceChainTests {
                             + " = " + minBrick + ".x;")
                             && compact.contains("uvec2 " + mask + " = "
                             + GiReceiverBindingAbi.PARAMS_BLOCK
-                            + ".exactBrickMasks[" + cascade + "];")
+                            + ".sampleableBrickMasks[" + cascade + "];")
                             && compact.contains("uint " + brick + " =")
                             && compact.contains("uint " + word + " = " + brick
                             + " < 32u ? " + mask + ".x : " + mask + ".y;")
-                            && compact.contains("bool " + exact + " = true;")
-                            && compact.contains(exact + " = " + exact + " && (" + word
+                            && compact.contains("bool " + sampleable + " = true;")
+                            && compact.contains(sampleable + " = " + sampleable + " && (" + word
                             + " & (1u << (" + brick + " & 31u))) != 0u;")
                             && footprintStart >= 0 && exactGate > footprintStart
                             && exactCloseBrace > exactOpenBrace
                             && count(cascadeBlock.substring(
                             exactOpenBrace, exactCloseBrace), "textureLod(") == 4,
                     "G6 cascade " + cascade
-                            + " does not exact-gate its four reads by every trilinear-footprint brick");
+                            + " does not sampleable-gate its four reads by every trilinear-footprint brick");
             require(count(vertex.source(),
                             "receiverState.x & (1u << " + cascade + ")") == 1
                             && count(vertex.source(),
@@ -219,28 +219,28 @@ public final class GiLiveReceiverSourceChainTests {
                 "G6 patch is not byte-idempotent");
 
         String missingExactGate = vertex.source().replace(
-                "if (metallumGiFootprintExact1)",
-                "if (true /* exact gate removed */)"
+                "if (metallumGiFootprintSampleable1)",
+                "if (true /* sampleable gate removed */)"
         );
         GiLiveReceiverShaderPatcher.Result corrupted = GiLiveReceiverShaderPatcher.patch(
                 GiLiveReceiverShaderPatcher.Stage.VERTEX, missingExactGate
         );
         require(!corrupted.success()
                         && corrupted.source().equals(missingExactGate)
-                        && corrupted.failureReason().contains("exact-footprint gate"),
-                "G6 idempotent validation did not fail closed after an exact-brick gate was lost");
+                        && corrupted.failureReason().contains("sampleable-footprint gate"),
+                "G6 idempotent validation did not fail closed after a sampleable gate was lost");
 
         String missingFootprintBit = vertex.source().replace(
-                "&& (metallumGiFootprintExactWord1",
-                "&& (metallumGiExactMask1.x /* exact footprint bit removed */"
+                "&& (metallumGiFootprintSampleableWord1",
+                "&& (metallumGiSampleableMask1.x /* sampleable footprint bit removed */"
         );
         GiLiveReceiverShaderPatcher.Result bitCorrupted = GiLiveReceiverShaderPatcher.patch(
                 GiLiveReceiverShaderPatcher.Stage.VERTEX, missingFootprintBit
         );
         require(!bitCorrupted.success()
                         && bitCorrupted.source().equals(missingFootprintBit)
-                        && bitCorrupted.failureReason().contains("exact-footprint gate"),
-                "G6 idempotent validation admitted a footprint loop without exact-bit proof");
+                        && bitCorrupted.failureReason().contains("sampleable-footprint gate"),
+                "G6 idempotent validation admitted a footprint loop without sampleable-bit proof");
     }
 
     private static void testCarrierFailureAndReflectionCoexistence() {
@@ -453,7 +453,8 @@ public final class GiLiveReceiverSourceChainTests {
         int observedUpdate = observationRotation.indexOf("beginObservedUpdate(");
         require(acceptedWriteGate >= 0 && observedUpdate > acceptedWriteGate
                         && observationRotation.indexOf(
-                        "return STATUS_INPUT_NOT_READY;", acceptedWriteGate) > acceptedWriteGate
+                        "return canRetainDeferredHistory(", acceptedWriteGate) > acceptedWriteGate
+                        && observationRotation.contains("STATUS_RETAINED_HISTORY")
                         && observationRotation.indexOf(
                         "recordDeferredSourceMasks(", acceptedWriteGate) > acceptedWriteGate
                         && liveCoordinator.contains("EpochTransition.RETAINED_PROVISIONAL")
@@ -594,9 +595,21 @@ public final class GiLiveReceiverSourceChainTests {
                         && completionPublication.contains(
                         "pending, this.exactMasks[0], (stats.readyMask() & 1) != 0")
                         && nativeWriteParams.contains(
-                        "let exact = carrierSafe ? exactBrickMasks[cascade] : 0")
+                        "let sampleable = carrierSafe ? receiverBrickMasks[cascade] : 0")
                         && nativeWriteParams.contains(
-                        "if exact != 0 { visibleMask |= UInt32(1) << UInt32(cascade) }")
+                        "if sampleable != 0 { visibleMask |= UInt32(1) << UInt32(cascade) }")
+                        && nativeLiveEncode.contains(
+                        "receiverBrickMasks[cascade] = preserving ? retainedReceiver : 0")
+                        && nativeLiveEncode.contains(
+                        "if preparing && !preserving && !scrolling")
+                        && nativeSource.contains(
+                        "retainedReceiverBrickMasks[cascade] = receiverBrickMasks[cascade]")
+                        && nativeSource.contains(
+                        "previousReceiverMask: retainedReceiverBrickMasks[cascade]")
+                        && workspaceSource("src/main/metal/MetallumGiTransport.metal").contains(
+                        "params.previousReceiverMask & (1ul << sourceBrick)")
+                        && !workspaceSource("src/main/metal/MetallumGiTransport.metal").contains(
+                        "params.requiredMask & (1ul << destinationBrick)")
                         && nativeLiveEncode.contains(
                         "let remapOnly = preparing && preserving && scrolling")
                         && nativeLiveEncode.contains(
@@ -617,10 +630,11 @@ public final class GiLiveReceiverSourceChainTests {
         String metalDevice = workspaceSource(
                 "src/main/java/com/metallum/client/metal/render/MetalDevice.java"
         );
-        require(metalDevice.contains(
+        require(metalDevice.contains("GiLiveCoordinator.STATUS_RETAINED_HISTORY")
+                        && metalDevice.contains(
                         "this.giLiveFrameCompatible = liveStatus\n"
                                 + "                                        != GiLiveCoordinator.STATUS_INPUT_NOT_READY;"),
-                "G6 INPUT_NOT_READY must bind exact zero instead of authorizing an older atlas");
+                "G6 did not distinguish retained history from structurally unsafe input");
         String g6Admission = slice(
                 metalDevice,
                 "private void reportG6TerrainDraw(",
@@ -987,8 +1001,8 @@ public final class GiLiveReceiverSourceChainTests {
                         "[[buffer(" + GiReceiverLayout.PARAMS_BUFFER_SLOT + ")]]")
                         && vertexMsl.contains(GiReceiverBindingAbi.VARYING)
                         && fragmentMsl.contains("in." + GiReceiverBindingAbi.VARYING)
-                        && count(vertexMsl, "exactBrickMasks") >= 4
-                        && !fragmentMsl.contains("exactBrickMasks"),
+                        && count(vertexMsl, "sampleableBrickMasks") >= 4
+                        && !fragmentMsl.contains("sampleableBrickMasks"),
                 flavor + " generated MSL is not vertex-only");
     }
 

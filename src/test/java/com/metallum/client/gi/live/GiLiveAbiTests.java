@@ -169,6 +169,12 @@ public final class GiLiveAbiTests {
                         && source.contains("admittedScrollRemapMask |= cascadeBit")
                         && source.contains(
                         "retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]")
+                        && source.contains(
+                        "retainedReceiverBrickMasks[cascade] = receiverBrickMasks[cascade]")
+                        && source.contains(
+                        "receiverBrickMasks[cascade] = preserving ? retainedReceiver : 0")
+                        && source.contains(
+                        "let sampleable = carrierSafe ? receiverBrickMasks[cascade] : 0")
                         && !source.contains("exactBrickMasks.contains(where:"),
                 "native G6 handoff/in-flight guard is not an explicit retained snapshot");
     }

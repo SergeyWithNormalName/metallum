@@ -424,6 +424,20 @@ public final class GiLiveCpuTests {
         require(GiLiveCoordinator.retainedExactForTransition(
                         retainedExact, 0L, false) == 0L,
                 "ordinary invalidation did not capture a zero exact mask per cascade");
+        require(GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.BLOCK, true, true)
+                        && GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.STATIC_SOURCE, true, true)
+                        && GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.SCROLL, true, true),
+                "compatible deferred update discarded last-proven receiver history");
+        require(!GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.FULL_RESET, true, true)
+                        && !GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.BLOCK, false, true)
+                        && !GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.BLOCK, true, false),
+                "structural/unproven deferred update exposed receiver history");
     }
 
     private static void sourceEnvironmentIdentityUsesTheAdmittedG3Digest() {

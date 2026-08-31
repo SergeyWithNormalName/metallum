@@ -2570,6 +2570,7 @@ public final class MetalDevice implements GpuDeviceBackend {
                             );
                             if (liveStatus == GiLiveLayout.STATUS_OK
                                     || liveStatus == GiLiveCoordinator.STATUS_NO_WORK
+                                    || liveStatus == GiLiveCoordinator.STATUS_RETAINED_HISTORY
                                     || liveStatus == GiLiveCoordinator.STATUS_INPUT_NOT_READY
                                     || liveStatus == GiLiveLayout.STATUS_BUSY) {
                                 this.giLiveFailureLogged = false;

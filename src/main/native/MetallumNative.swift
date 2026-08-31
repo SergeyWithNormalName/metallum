@@ -18417,7 +18417,7 @@ private struct MetallumGiLiveRemapParamsV1 {
     var deltaX: Int32
     var deltaY: Int32
     var deltaZ: Int32
-    var previousExactMask: UInt64
+    var previousReceiverMask: UInt64
     var requiredMask: UInt64
 }
 
@@ -18493,7 +18493,14 @@ private final class MetallumGiLiveContextV1 {
     private var admittedScrollRemapMask: UInt32 = 0
     private var readyMask: UInt32 = 0
     private var exactBrickMasks = [UInt64](repeating: 0, count: metallumGiLiveCascadeCountV1)
+    // Receiver-visible coverage is intentionally separate from exact publication. During a
+    // compatible incremental transition it may keep the last proven exact texels sampleable
+    // until their replacement completes. Exact masks remain strict for readiness/SLA receipts.
+    private var receiverBrickMasks = [UInt64](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
     private var retainedExactBrickMasks = [UInt64](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedReceiverBrickMasks = [UInt64](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
     private var requiredBrickMasks = [UInt64](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
@@ -18714,8 +18721,10 @@ private final class MetallumGiLiveContextV1 {
         if preserving && !scrolling {
             exactBrickMasks[cascade] = retainedExactBrickMasks[cascade]
                 & ~header.reserved1
+            receiverBrickMasks[cascade] = retainedReceiverBrickMasks[cascade]
         } else {
             exactBrickMasks[cascade] = 0
+            receiverBrickMasks[cascade] = 0
         }
         if exactBrickMasks[cascade] == UInt64.max {
             readyMask |= bit
@@ -18770,6 +18779,7 @@ private final class MetallumGiLiveContextV1 {
                 retainedHeader = current
                 for cascade in 0..<metallumGiLiveCascadeCountV1 {
                     retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]
+                    retainedReceiverBrickMasks[cascade] = receiverBrickMasks[cascade]
                 }
             }
             // A compatible provisional/source handoff intentionally keeps the
@@ -18778,6 +18788,7 @@ private final class MetallumGiLiveContextV1 {
             retainedHeader = nil
             for cascade in 0..<metallumGiLiveCascadeCountV1 {
                 retainedExactBrickMasks[cascade] = 0
+                retainedReceiverBrickMasks[cascade] = 0
             }
         }
         if !retainCapturedBasis {
@@ -18788,6 +18799,7 @@ private final class MetallumGiLiveContextV1 {
         readyMask = 0
         for cascade in 0..<metallumGiLiveCascadeCountV1 {
             exactBrickMasks[cascade] = 0
+            receiverBrickMasks[cascade] = 0
             requiredBrickMasks[cascade] = 0
         }
         preparedMask = 0
@@ -18840,6 +18852,7 @@ private final class MetallumGiLiveContextV1 {
         if prepared {
             preparedMask &= ~cascadeBit
             exactBrickMasks[cascade] = 0
+            receiverBrickMasks[cascade] = 0
             requiredBrickMasks[cascade] = 0
             readyMask &= ~cascadeBit
         }
@@ -18930,7 +18943,8 @@ private final class MetallumGiLiveContextV1 {
         }
         if preparing {
             requiredBrickMasks[cascade] = header.reserved1
-            var retained: UInt64 = 0
+            var retainedExact: UInt64 = 0
+            var retainedReceiver: UInt64 = 0
             if preserving, let previous = retainedHeader {
                 let previousOrigin = cascadeOrigin(previous, cascade: cascade)
                 let cellSize = Int32(1 << (cascade + 1))
@@ -18950,22 +18964,31 @@ private final class MetallumGiLiveContextV1 {
                         rejectedCount &+= 1; condition.unlock()
                         return metallumGiTransportStatusRejected
                     }
-                    retained = scrollRetainedMask(
+                    retainedExact = scrollRetainedMask(
                         previousMask: retainedExactBrickMasks[cascade],
+                        deltaX: dx, deltaY: dy, deltaZ: dz)
+                    retainedReceiver = scrollRetainedMask(
+                        previousMask: retainedReceiverBrickMasks[cascade],
                         deltaX: dx, deltaY: dy, deltaZ: dz)
                     remapParams = MetallumGiLiveRemapParamsV1(
                         cascadeIndex: UInt32(cascade), deltaX: dx, deltaY: dy, deltaZ: dz,
-                        previousExactMask: retainedExactBrickMasks[cascade],
+                        previousReceiverMask: retainedReceiverBrickMasks[cascade],
                         requiredMask: header.reserved1)
                 } else {
                     guard dxBlocks == 0, dyBlocks == 0, dzBlocks == 0 else {
                         rejectedCount &+= 1; condition.unlock()
                         return metallumGiTransportStatusRejected
                     }
-                    retained = retainedExactBrickMasks[cascade]
+                    retainedExact = retainedExactBrickMasks[cascade]
+                    retainedReceiver = retainedReceiverBrickMasks[cascade]
                 }
             }
-            exactBrickMasks[cascade] = retained & ~header.reserved1
+            exactBrickMasks[cascade] = retainedExact & ~header.reserved1
+            // The remap encoder precedes every terrain draw in this command buffer. For a
+            // same-origin update the retained texels are already resident; for scroll they
+            // become valid at the new origin before the draw. Never carry history through a
+            // non-preserving world/teleport/device reset.
+            receiverBrickMasks[cascade] = preserving ? retainedReceiver : 0
             preparedMask |= cascadeBit
             readyMask &= ~cascadeBit
         }
@@ -19055,7 +19078,7 @@ private final class MetallumGiLiveContextV1 {
             encoder.memoryBarrier(scope: .textures)
         }
         var cascadeWord = UInt32(cascade)
-        if preparing && !scrolling && header.reserved1 != 0 {
+        if preparing && !preserving && !scrolling && header.reserved1 != 0 {
             encoder.setComputePipelineState(clearBricksPipeline)
             encoder.setBuffer(sharedStaging.transportHeader, offset: 0, index: 0)
             encoder.setBytes(&cascadeWord, length: MemoryLayout<UInt32>.size, index: 1)
@@ -19107,6 +19130,7 @@ private final class MetallumGiLiveContextV1 {
                    current.sourceTick == admittedSourceTick,
                    sameEpoch(current, header) {
                     exactBrickMasks[cascade] |= admittedBatchMask
+                    receiverBrickMasks[cascade] |= admittedBatchMask
                     if exactBrickMasks[cascade] == UInt64.max {
                         readyMask |= cascadeBit
                     }
@@ -19115,6 +19139,7 @@ private final class MetallumGiLiveContextV1 {
                 if preparing {
                     preparedMask &= ~cascadeBit
                     exactBrickMasks[cascade] = 0
+                    receiverBrickMasks[cascade] = 0
                     requiredBrickMasks[cascade] = 0
                 }
                 readyMask &= ~cascadeBit
@@ -19149,9 +19174,9 @@ private final class MetallumGiLiveContextV1 {
             raw.storeBytes(of: inverseSpan, toByteOffset: scaleBase + 4, as: Float.self)
             raw.storeBytes(of: inverseSpan, toByteOffset: scaleBase + 8, as: Float.self)
             raw.storeBytes(of: Float(cellSize), toByteOffset: scaleBase + 12, as: Float.self)
-            let exact = carrierSafe ? exactBrickMasks[cascade] : 0
-            raw.storeBytes(of: exact, toByteOffset: 128 + cascade * 8, as: UInt64.self)
-            if exact != 0 { visibleMask |= UInt32(1) << UInt32(cascade) }
+            let sampleable = carrierSafe ? receiverBrickMasks[cascade] : 0
+            raw.storeBytes(of: sampleable, toByteOffset: 128 + cascade * 8, as: UInt64.self)
+            if sampleable != 0 { visibleMask |= UInt32(1) << UInt32(cascade) }
         }
         raw.storeBytes(of: visibleMask, toByteOffset: 96, as: UInt32.self)
         raw.storeBytes(of: carrierSafe ? UInt32(1) : UInt32(0),

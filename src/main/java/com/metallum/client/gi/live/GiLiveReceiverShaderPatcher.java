@@ -131,7 +131,7 @@ public final class GiLiveReceiverShaderPatcher {
                     vec4 cascadeScaleAndCellSize[3];
                     uvec4 receiverState;
                     uvec4 atlasState;
-                    uvec2 exactBrickMasks[3];
+                    uvec2 sampleableBrickMasks[3];
                     uvec2 reserved;
                 } %s;
                 %s// %s
@@ -244,9 +244,9 @@ public final class GiLiveReceiverShaderPatcher {
                                     metallumGiFootprintMinCell%2$d >> uvec3(3u);
                             uvec3 metallumGiFootprintMaxBrick%2$d =
                                     metallumGiFootprintMaxCell%2$d >> uvec3(3u);
-                            uvec2 metallumGiExactMask%2$d =
-                                    %1$s.exactBrickMasks[%2$d];
-                            bool metallumGiFootprintExact%2$d = true;
+                            uvec2 metallumGiSampleableMask%2$d =
+                                    %1$s.sampleableBrickMasks[%2$d];
+                            bool metallumGiFootprintSampleable%2$d = true;
                             for (uint metallumGiBrickZ%2$d =
                                     metallumGiFootprintMinBrick%2$d.z;
                                     metallumGiBrickZ%2$d <= metallumGiFootprintMaxBrick%2$d.z;
@@ -263,19 +263,19 @@ public final class GiLiveReceiverShaderPatcher {
                                                 (metallumGiBrickZ%2$d * 4u
                                                 + metallumGiBrickY%2$d) * 4u
                                                 + metallumGiBrickX%2$d;
-                                        uint metallumGiFootprintExactWord%2$d =
+                                        uint metallumGiFootprintSampleableWord%2$d =
                                                 metallumGiFootprintBrickId%2$d < 32u
-                                                ? metallumGiExactMask%2$d.x
-                                                : metallumGiExactMask%2$d.y;
-                                        metallumGiFootprintExact%2$d =
-                                                metallumGiFootprintExact%2$d
-                                                && (metallumGiFootprintExactWord%2$d
+                                                ? metallumGiSampleableMask%2$d.x
+                                                : metallumGiSampleableMask%2$d.y;
+                                        metallumGiFootprintSampleable%2$d =
+                                                metallumGiFootprintSampleable%2$d
+                                                && (metallumGiFootprintSampleableWord%2$d
                                                 & (1u << (metallumGiFootprintBrickId%2$d
                                                 & 31u))) != 0u;
                                     }
                                 }
                             }
-                            if (metallumGiFootprintExact%2$d) {
+                            if (metallumGiFootprintSampleable%2$d) {
                             float metallumGiAtlasZ%2$d = (float(%2$d * 32)
                                     + metallumGiSampleCell%2$d.z)
                                     / float(%1$s.atlasState.x);
@@ -346,15 +346,15 @@ public final class GiLiveReceiverShaderPatcher {
                 }
             }
             for (int cascade = 0; cascade < 3; cascade++) {
-                if (!hasExactFootprintGate(source, cascade)) {
+                if (!hasSampleableFootprintGate(source, cascade)) {
                     return new Result(source, false,
-                            "G6 vertex receiver exact-footprint gate is incomplete");
+                            "G6 vertex receiver sampleable-footprint gate is incomplete");
                 }
             }
             if (countOccurrences(source, "out vec4 " + GiReceiverBindingAbi.VARYING + ";") != 1
                     || !source.contains("cascadeOrigins[3]")
                     || !source.contains("cascadeScaleAndCellSize[3]")
-                    || !source.contains("exactBrickMasks[3]")
+                    || !source.contains("sampleableBrickMasks[3]")
                     || !source.contains("receiverState.x & (1u << 2)")
                     || !source.contains("mix(metallumGiBlended, metallumGiCascadeValue0")
                     || !source.contains("((a_Position.x >> 30u) & 3u)")) {
@@ -369,7 +369,7 @@ public final class GiLiveReceiverShaderPatcher {
         return new Result(source, true, "none");
     }
 
-    private static boolean hasExactFootprintGate(final String source, final int cascade) {
+    private static boolean hasSampleableFootprintGate(final String source, final int cascade) {
         String suffix = Integer.toString(cascade);
         return source.contains("vec3 metallumGiSampleCell" + suffix + " = clamp(")
                 && source.contains("uvec3 metallumGiFootprintMinCell" + suffix
@@ -380,9 +380,9 @@ public final class GiLiveReceiverShaderPatcher {
                 && source.contains("for (uint metallumGiBrickY" + suffix + " =")
                 && source.contains("for (uint metallumGiBrickX" + suffix + " =")
                 && source.contains("uint metallumGiFootprintBrickId" + suffix + " =")
-                && source.contains("uint metallumGiFootprintExactWord" + suffix + " =")
-                && source.contains("&& (metallumGiFootprintExactWord" + suffix)
-                && source.contains("if (metallumGiFootprintExact" + suffix + ")");
+                && source.contains("uint metallumGiFootprintSampleableWord" + suffix + " =")
+                && source.contains("&& (metallumGiFootprintSampleableWord" + suffix)
+                && source.contains("if (metallumGiFootprintSampleable" + suffix + ")");
     }
 
     /** CPU mirror of the exact brick footprint consumed by one trilinear receiver lookup. */

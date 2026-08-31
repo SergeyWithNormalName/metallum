@@ -149,12 +149,12 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "src/main/java/com/metallum/client/gui/MetallumSodiumConfig.java": "ed61d924826362e3e58b65eb87ba0592ea5cfd31a2d062985c49f8f40e6dcc09",
     "src/main/java/com/metallum/client/lighting/AdvancedLightRegistry.java": "420e0dd8369dcd90a6cc91f8b8daa7d21d49db88c4837782e94726e31a6568a4",
     "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java": "7c8b317744a4674115d078c13198abe03cb5ed35cfc86953d32afa122d881973",
-    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "78796d55269c17feacaea7afb7fcbfda9ce865d149ac1e2e4ccf93402cf2025e",
+    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "1fb8fdcd6085db7a907059660ded6ea00ef30ab44ad0daf93c61c822d97bc52f",
     "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "7a849905f1607986e86449fc182d3fda5a344928310d8b987a71a3d58718d8b3",
     "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "0d647c058734a18f8a57e3ce47483c5b0d45097e7abe4fe26c2b4506f3ca8d27",
     "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "228d1bac4fb08f4581c38c803e550aade53c5daddc8dbd8d2013638c62199611",
-    "src/main/metal/MetallumGiTransport.metal": "1c3b40cd1feb0a6a84b03cd07950076dafa60400ea6c4954fd36dfe0d13e7fe8",
-    "src/main/native/MetallumNative.swift": "9b39c2315027c3fce42f0d1bf21c439b3f92fa5c8f4a2ffddab816acdf1d3039",
+    "src/main/metal/MetallumGiTransport.metal": "e5f4fe468bf7f450b860e9ae5c9844f04eb7ef4d2b3169fdeab2a4e316151806",
+    "src/main/native/MetallumNative.swift": "018acbd2763f4be97536c6958a6ac00f20ec303a36d1d6ea8b707ed39cbe67a3",
     "src/main/resources/assets/metallum/lang/en_us.json": "bc2d4f73d1ba4ec07fbd559253caa00bc89fc62d6ca7f8afd6c33a29e9257a51",
     "src/main/resources/assets/metallum/lang/ru_ru.json": "cd0b83dc13ab750febe475f973bc4e70b39b1df40f098e8431c73d2e28d3d032",
     "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "aad4b4e9d459aaed52d7a848022c7cb75f7e8935b9f8d57fe11ac29d74e1246e",
@@ -172,7 +172,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "bd89e8b01e58ee262c17cd8d503b413f81db27975816994b399cd55918eeeb6b"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "100ad26686d08b3a3445754abcc626fdeb05f18a21fb34c26ec0c6c834329382"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,

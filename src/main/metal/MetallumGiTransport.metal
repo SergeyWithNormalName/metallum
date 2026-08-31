@@ -334,7 +334,7 @@ struct MetallumGiLiveRemapParamsV1 {
     int deltaX;
     int deltaY;
     int deltaZ;
-    ulong previousExactMask;
+    ulong previousReceiverMask;
     ulong requiredMask;
 };
 
@@ -405,8 +405,6 @@ kernel void metallum_gi_live_remap_v1(
 ) {
     if (params.cascadeIndex >= 3u
             || any(destination >= uint3(metallumGiTransportEdge))) return;
-    uint destinationBrick = ((destination.z >> 3u) << 4u)
-        | ((destination.y >> 3u) << 2u) | (destination.x >> 3u);
     int3 source = int3(destination)
         + int3(params.deltaX, params.deltaY, params.deltaZ);
     bool sourceInside = metallum_gi_transport_inside(source);
@@ -414,9 +412,10 @@ kernel void metallum_gi_live_remap_v1(
         ? ((uint(source.z) >> 3u) << 4u) | ((uint(source.y) >> 3u) << 2u)
             | (uint(source.x) >> 3u)
         : 64u;
+    // Visual history remains sampleable while exact/SLA publication is rebuilt separately.
+    // Copy every last-proven receiver texel in the spatial overlap, including dirty successors.
     bool retain = sourceInside
-        && (params.requiredMask & (1ul << destinationBrick)) == 0ul
-        && (params.previousExactMask & (1ul << sourceBrick)) != 0ul;
+        && (params.previousReceiverMask & (1ul << sourceBrick)) != 0ul;
     if (!retain) {
         scratchRed.write(half4(0.0h), destination);
         scratchGreen.write(half4(0.0h), destination);
