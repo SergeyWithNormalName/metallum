@@ -9,6 +9,7 @@ import com.metallum.client.lighting.reflection.FrozenReflectionEmptyTaskSlot;
 import com.metallum.client.lighting.reflection.FrozenReflectionFieldController;
 import com.metallum.client.lighting.reflection.FrozenReflectionSectionTask;
 import com.metallum.client.lighting.reflection.FrozenReflectionTaskSlot;
+import com.metallum.client.lighting.reflection.FrozenReflectionVerticalBounds;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.voxel.VoxelClipmapController;
 import com.metallum.client.voxel.VoxelEmptyTaskSlot;
@@ -299,6 +300,12 @@ abstract class RenderSectionManagerAdvancedLightMixin {
 
     /** Mirrors Sodium's onSectionAdded air fast path; no geometry task exists for these sections. */
     private boolean metallum$isAuthoritativeEmptySection(final int sectionX, final int sectionY, final int sectionZ) {
+        // A camera near the dimension floor/ceiling can center the finite reflection cube partly
+        // outside build height. Those cells are real empty space, but Sodium's LevelChunk section
+        // array has no slots for them; never forward such coordinates to its array-based fast path.
+        if (FrozenReflectionVerticalBounds.isOutsideBuildHeight(this.level, sectionY)) {
+            return true;
+        }
         return this.level.getChunk(sectionX, sectionZ)
                 .getSections()[this.level.getSectionIndexFromSectionY(sectionY)]
                 .hasOnlyAir();

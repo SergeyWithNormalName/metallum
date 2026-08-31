@@ -4,6 +4,7 @@ import com.metallum.client.gi.receiver.GiReceiverCompatibility;
 import com.metallum.client.radiance.CompactSectionPayload;
 import com.metallum.client.radiance.Float16Compressor;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.LevelHeightAccessor;
 
 /** Dependency-free ownership and provenance checks for the one-shot frozen reflection domain. */
 public final class FrozenReflectionFieldControllerTests {
@@ -13,6 +14,7 @@ public final class FrozenReflectionFieldControllerTests {
             GiReceiverCompatibility.setTestOverride(true);
             VertexReflectionExperiment.setOverride(true);
             System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, "true");
+            testPreloadVerticalStorageBounds();
             testKnownEmptyIsPublishedValidity();
             testSupersededOutputDoesNotInvalidateTheLatestTask();
             testStaleOrUnavailableSectionInvalidatesTheField();
@@ -26,6 +28,27 @@ public final class FrozenReflectionFieldControllerTests {
                 System.setProperty(VertexReflectionExperiment.RUNTIME_PROPERTY, oldRuntime);
             }
         }
+    }
+
+    private static void testPreloadVerticalStorageBounds() {
+        LevelHeightAccessor overworld = LevelHeightAccessor.create(-64, 384);
+        require(FrozenReflectionVerticalBounds.isOutsideBuildHeight(overworld, -5),
+                "the section below Overworld storage must be authoritative empty, not index -1");
+        require(!FrozenReflectionVerticalBounds.isOutsideBuildHeight(overworld, -4),
+                "the first stored Overworld section must remain addressable");
+        require(!FrozenReflectionVerticalBounds.isOutsideBuildHeight(overworld, 19),
+                "the last stored Overworld section must remain addressable");
+        require(FrozenReflectionVerticalBounds.isOutsideBuildHeight(overworld, 20),
+                "the section above Overworld storage must be authoritative empty");
+
+        int crashCameraSection = SectionPos.blockToSectionCoord(-17);
+        int crashDomainOriginSection = SectionPos.blockToSectionCoord(
+                ((int) Math.floor((-17.0 - FrozenReflectionFieldController.SPAN_BLOCKS * 0.5 + 8.0) / 16.0)) << 4
+        );
+        require(crashCameraSection == -2 && crashDomainOriginSection == -5,
+                "the reported y=-17 camera must reproduce the below-storage preload row");
+        require(FrozenReflectionVerticalBounds.isOutsideBuildHeight(overworld, crashDomainOriginSection),
+                "the exact reported preload row must be rejected before Sodium array access");
     }
 
     private static void testKnownEmptyIsPublishedValidity() {
