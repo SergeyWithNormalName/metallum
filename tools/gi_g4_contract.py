@@ -136,12 +136,12 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
 G6_SUCCESSOR_FILE_SHA256 = {
     "build.gradle": "64e337af33bf847f9b6116be0c599245a64b38723b7a5e9cfbcac9544e5b722c",
     "scripts/run_metal_benchmark.sh": "137b54ecd65317a600fa66e05edc6ba7eaf7c56d00fe7e1fb20035c934ee01db",
-    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "c6fe171e3c737123cc4bd3333d639adcd4fd6f0ee37ad3c4f3329d0a3c697ecb",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "a1b0af6ac08e5575ea7b6e6cdcec07e5a90435ef30a18e15c480ced16f740577",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticController.java": "edd29d56bb05769f03404e4257a05ab95ccd6a3aa07f8905575560d8ef20de4f",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticFieldAssembler.java": "fe28e6efe6a850fc5a4c44c2e9587833dd5e25cf4d05199ab828233d1f43d6f6",
     "src/main/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldView.java": "506c1da34fc439109db6fc1d95078a29615ae4cb4c19d07917d06e89abc241cb",
     "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java": "424d1cabeca507e14efdac5d30f9c4cbf1e1f973de39d3e9f451f77c0c24cee5",
-    "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "922c7aa8d996b8c20d3b3f9a137373b6efd9e64f16a3cc8f1904a99b3f23786a",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "aeb15c06492056f0611f6b64177f95e230dad7c1b41a4e477e737bea801daa3d",
     "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "b99f284cea03d8273d312ca57522557245f57937a42efeba8d3722ab10024912",
     "src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java": "3e4f421efb614a9e99fd19faa9bd2e7c123f890981d34cfc65a582649a377051",
     "src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java": "6c33f400f7471ba7e4b71d78cbd4c708ed1321af434a0a961252c4b4796701a1",
@@ -159,7 +159,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "src/main/resources/assets/metallum/lang/ru_ru.json": "cd0b83dc13ab750febe475f973bc4e70b39b1df40f098e8431c73d2e28d3d032",
     "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "aad4b4e9d459aaed52d7a848022c7cb75f7e8935b9f8d57fe11ac29d74e1246e",
     "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "1a063a55698324b690fee52286c91910088387e038f66f9b100e18ad1342ced9",
-    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "06308c52b9e0a24cc36050842e15dd0b6413d23cdb0641eefd5e89421572957f",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "d26c00be19a226aa6c0760997c7141c947e6e6150b268b9747362724bd77360f",
     "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java": "9311c50ed1bc6fa3881678f0b615af7ab8d1e14c323217268ab244ad9b727225",
     "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java": "6f047f0de8dcf0d648747e7561fc955148e5bbace2209a2e66487154d46affb1",
     "src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java": "2ec4f0a64f8f6225fb25ce3392947a6eba4a04cbab3cd50a05e434c5239f9029",
@@ -172,7 +172,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "100ad26686d08b3a3445754abcc626fdeb05f18a21fb34c26ec0c6c834329382"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "26064fcd5ad6369d4a06cbfc5f4ccd3c680f8044a788939a6ea171c4dc449997"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,

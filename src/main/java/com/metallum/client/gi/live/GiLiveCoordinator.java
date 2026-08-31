@@ -209,7 +209,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
                 // accepted writer retires; beginObservedUpdate will then publish per-brick
                 // history masks for the successor. Structural resets remain globally fail-closed.
                 return canRetainDeferredHistory(
-                        this.deferredUpdateClass, field
+                        this.deferredUpdateClass, field, environmentDigest
                 ) ? STATUS_RETAINED_HISTORY : STATUS_INPUT_NOT_READY;
             }
             beginObservedUpdate(
@@ -461,13 +461,17 @@ public final class GiLiveCoordinator implements AutoCloseable {
         observedUpdateClass = GiLiveUpdateClass.merge(
                 this.deferredUpdateClass, observedUpdateClass
         );
+        boolean compatibleEnvironmentSuccessor = compatibleEnvironmentSuccessor(
+                field, environmentDigest
+        );
         boolean retainedFullResetRoot = shouldRetainOpenFullResetChild(
                 this.fullResetRootOpen,
                 sameObservedStructuralRoot(field), sameObservedOrigins(field),
                 this.exactMasks[0] == GiLiveLayout.ALL_BRICKS_MASK,
                 observedUpdateClass
         );
-        if (observedUpdateClass == GiLiveUpdateClass.FULL_RESET) {
+        if (observedUpdateClass == GiLiveUpdateClass.FULL_RESET
+                && !compatibleEnvironmentSuccessor) {
             this.fullResetRootOpen = true;
         }
         long affectedSubmitIndex = this.deferredFirstAffectedSubmitIndex >= 0L
@@ -490,7 +494,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
             return;
         }
         this.activeUpdateClass = observedUpdateClass;
-        this.preserveExact = this.activeUpdateClass != GiLiveUpdateClass.FULL_RESET;
+        this.preserveExact = this.activeUpdateClass != GiLiveUpdateClass.FULL_RESET
+                || compatibleEnvironmentSuccessor;
         computeProvisionalMasks(field);
         boolean exactAffectedMasks = copyCombinedAffectedMasks(
                 field, dynamic, staticEpoch, staticHealthy, environmentDigest
@@ -1628,7 +1633,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
         return GiLiveUpdateClass.BLOCK;
     }
 
-    /** Environment irradiance changes every direct-field brick and is not a local source delta. */
+    /** Environment irradiance changes every direct-field brick and keeps the global SLA class. */
     static GiLiveUpdateClass classifyIncrementalObservation(
             final boolean contentChanged,
             final boolean sourceChanged,
@@ -1772,19 +1777,44 @@ public final class GiLiveCoordinator implements AutoCloseable {
     }
     private boolean canRetainDeferredHistory(
             final GiLiveUpdateClass updateClass,
-            final GiSemanticTransportFieldView field
+            final GiSemanticTransportFieldView field,
+            final long environmentDigest
     ) {
         return deferredHistoryCanBind(
-                updateClass, this.observed, sameObservedStructuralRoot(field)
+                updateClass, this.observed, sameObservedStructuralRoot(field),
+                compatibleEnvironmentSuccessor(field, environmentDigest)
         );
     }
     static boolean deferredHistoryCanBind(
             final GiLiveUpdateClass updateClass,
             final boolean observed,
-            final boolean sameStructuralRoot
+            final boolean sameStructuralRoot,
+            final boolean compatibleEnvironmentSuccessor
     ) {
         return observed && sameStructuralRoot && updateClass != null
-                && updateClass != GiLiveUpdateClass.FULL_RESET;
+                && (updateClass != GiLiveUpdateClass.FULL_RESET
+                || compatibleEnvironmentSuccessor);
+    }
+    private boolean compatibleEnvironmentSuccessor(
+            final GiSemanticTransportFieldView field,
+            final long environmentDigest
+    ) {
+        return compatibleEnvironmentSuccessor(
+                this.fullResetRootOpen, this.observed,
+                sameObservedStructuralRoot(field), sameObservedOrigins(field),
+                this.observedEnvironmentDigest, environmentDigest
+        );
+    }
+    static boolean compatibleEnvironmentSuccessor(
+            final boolean fullResetRootOpen,
+            final boolean observed,
+            final boolean sameStructuralRoot,
+            final boolean sameOrigins,
+            final long previousEnvironmentDigest,
+            final long nextEnvironmentDigest
+    ) {
+        return !fullResetRootOpen && observed && sameStructuralRoot && sameOrigins
+                && previousEnvironmentDigest != nextEnvironmentDigest;
     }
     static boolean retryWouldRepeatNonIdempotentScroll(
             final boolean preparedCascade, final boolean scrollCascade

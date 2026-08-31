@@ -425,19 +425,32 @@ public final class GiLiveCpuTests {
                         retainedExact, 0L, false) == 0L,
                 "ordinary invalidation did not capture a zero exact mask per cascade");
         require(GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.BLOCK, true, true)
+                        GiLiveUpdateClass.BLOCK, true, true, false)
                         && GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.STATIC_SOURCE, true, true)
+                        GiLiveUpdateClass.STATIC_SOURCE, true, true, false)
                         && GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.SCROLL, true, true),
+                        GiLiveUpdateClass.SCROLL, true, true, false)
+                        && GiLiveCoordinator.deferredHistoryCanBind(
+                        GiLiveUpdateClass.FULL_RESET, true, true, true),
                 "compatible deferred update discarded last-proven receiver history");
         require(!GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.FULL_RESET, true, true)
+                        GiLiveUpdateClass.FULL_RESET, true, true, false)
                         && !GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.BLOCK, false, true)
+                        GiLiveUpdateClass.BLOCK, false, true, false)
                         && !GiLiveCoordinator.deferredHistoryCanBind(
-                        GiLiveUpdateClass.BLOCK, true, false),
+                        GiLiveUpdateClass.BLOCK, true, false, false),
                 "structural/unproven deferred update exposed receiver history");
+        require(GiLiveCoordinator.compatibleEnvironmentSuccessor(
+                        false, true, true, true, 41L, 43L)
+                        && !GiLiveCoordinator.compatibleEnvironmentSuccessor(
+                        true, true, true, true, 41L, 43L)
+                        && !GiLiveCoordinator.compatibleEnvironmentSuccessor(
+                        false, true, false, true, 41L, 43L)
+                        && !GiLiveCoordinator.compatibleEnvironmentSuccessor(
+                        false, true, true, false, 41L, 43L)
+                        && !GiLiveCoordinator.compatibleEnvironmentSuccessor(
+                        false, true, true, true, 41L, 41L),
+                "environment history compatibility crossed a structural/origin/reset boundary");
     }
 
     private static void sourceEnvironmentIdentityUsesTheAdmittedG3Digest() {
@@ -871,8 +884,10 @@ public final class GiLiveCpuTests {
                         && GiLiveCoordinator.classifyIncrementalObservation(true, true, false)
                         == GiLiveUpdateClass.STATIC_SOURCE
                         && GiLiveCoordinator.classifyIncrementalObservation(false, true, true)
+                        == GiLiveUpdateClass.FULL_RESET
+                        && GiLiveCoordinator.classifyIncrementalObservation(true, true, true)
                         == GiLiveUpdateClass.FULL_RESET,
-                "global environment invalidation was confused with a local source update");
+                "global environment rebuild lost its honest full-volume latency class");
         require(!GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, false, true)
                         && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, true, false)
                         && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(false, true, true)

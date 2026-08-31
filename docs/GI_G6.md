@@ -45,9 +45,12 @@ The fixed release SLA is:
   coverage p95 at most 32, p99 at most 64.
 
 Time-of-day and weather rotate the global environment input used by every
-direct-field brick, so they use the full-reset class. Bounded registry, held,
-entity and block-emitter deltas remain local static-source updates under the
-8/16-submit SLA.
+direct-field brick, so all 64 bricks are rebuilt and retain the full-reset latency
+class. Inside the same world/resource/palette/origin root, however, the last proven
+receiver field remains spatially compatible and visible until its replacement is
+ready. World, resource, material, palette, teleport and device resets remain
+structurally fail-closed. Bounded registry, held, entity and block-emitter deltas
+remain local static-source updates under the 8/16-submit SLA.
 
 For block/static-source changes, recovery means the affected near cascade is
 fully exact again; unrelated retained bricks cannot close the interval. For
@@ -157,9 +160,11 @@ and artifact digest
 The torch-toggle run completed 1800 warm-up plus 3000 measured frames with exact final
 `ready_mask=7`, no in-flight build, zero stale/rejected publications, a current
 terrain/carrier binding, and 178 accepted block-update samples. Recovery was
-p95 1 and p99 1 renderer submits, inside the fixed 8/16 SLA. The matrix passed
-all 22 events/20 recoveries; static p95/p99 was 1/2, scroll 12/12 and full reset
-20/20 submits. Combined accounted
+p95 1 and p99 1 renderer submits, inside the fixed 8/16 SLA. The historical matrix
+passed all 22 events/20 recoveries; static p95/p99 was 1/2, scroll 12/12 and full
+reset 20/20 submits. The later flicker repair keeps that latency attribution but
+retains compatible visible history during same-root environment rebuilds; fresh
+runtime evidence is required for that successor contract. Combined accounted
 memory was 24,637,728 bytes against the 25,165,824-byte cap.
 
 The separately captured 3024x1964 torch-on PNG passed a direct static

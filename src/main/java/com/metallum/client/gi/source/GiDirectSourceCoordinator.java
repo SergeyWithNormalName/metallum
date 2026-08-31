@@ -711,7 +711,11 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
                 Arrays.fill(this.unacknowledgedAffectedBrickMasks, -1L);
                 Arrays.fill(this.untransferredAffectedBrickMasks, -1L);
             } else {
-                enqueueRotatedBricks(nextEpoch, tick);
+                boolean originOnlyRelocation = originOnlyFieldRelocation(
+                        previousEpoch, nextEpoch, originsChanged,
+                        staticSourceChanged, dynamicSourceChanged, environmentChanged
+                );
+                enqueueRotatedBricks(nextEpoch, tick, !originOnlyRelocation);
             }
             this.metadataRelabelPending = metadataOnlyRollover
                     && this.dirtyQueue.pendingCount() == 0;
@@ -1598,15 +1602,44 @@ public final class GiDirectSourceCoordinator implements AutoCloseable {
     /** Carries only byte-identical direct inputs across a logical G3 epoch rotation. */
     private void enqueueRotatedBricks(
             final GiDirectSourceEpoch epoch,
-            final long tick
+            final long tick,
+            final boolean markPhysicalChanges
     ) {
         for (int brick = 0; brick < GiDirectSourceLayout.TOTAL_BRICKS; brick++) {
             if (this.desiredBrickStamps[brick] != this.submittedBrickStamps[brick]
                     || this.desiredSourceKeys[brick] != this.submittedSourceKeys[brick]) {
                 this.dirtyQueue.enqueue(epoch, brick, tick);
-                markAffected(brick);
+                if (markPhysicalChanges) markAffected(brick);
             }
         }
+    }
+
+    /**
+     * A bounded G2 scroll rewrites every slot-relative G3 brick even though overlapping
+     * world-space lighting did not change. G3 must still repopulate its slot-addressed private
+     * textures, but that relocation work is not physical source dirt for G6: the downstream
+     * stage owns the exact exposed-slab plus transport-halo mask and remaps compatible output.
+     *
+     * <p>Any coalesced semantic mutation advances content beyond the number of clipmap moves;
+     * any source/environment mutation has its own identity flag. Those cases stay conservative
+     * and continue marking every actually queued G3 brick.</p>
+     */
+    static boolean originOnlyFieldRelocation(
+            final @Nullable GiDirectSourceEpoch previous,
+            final GiDirectSourceEpoch next,
+            final boolean originsChanged,
+            final boolean staticSourceChanged,
+            final boolean dynamicSourceChanged,
+            final boolean environmentChanged
+    ) {
+        Objects.requireNonNull(next, "next");
+        if (previous == null || !originsChanged || staticSourceChanged
+                || dynamicSourceChanged || environmentChanged) {
+            return false;
+        }
+        long clipmapDelta = next.g2ClipmapGeneration() - previous.g2ClipmapGeneration();
+        long contentDelta = next.g2ContentGeneration() - previous.g2ContentGeneration();
+        return clipmapDelta > 0L && contentDelta == clipmapDelta;
     }
 
     private void captureDesiredBrickInputs(

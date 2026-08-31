@@ -3744,8 +3744,8 @@ public final class MetalFxBenchmarkController {
             // predeclare that exact attribution instead of waiting on a BLOCK sample that cannot
             // honestly describe this mutation.
             case LAVA_APPLY, LAVA_REMOVE -> G6_MATRIX_LATENCY_STATIC_SOURCE;
-            // Time/weather rotates the global environment input for every G3/G6 brick. It is a
-            // full-volume field reset, unlike a bounded registry/dynamic source delta.
+            // Time/weather rotates the global environment input for every G3/G6 brick. It keeps
+            // the full-volume recovery class even though compatible visible history is retained.
             case DAY, NIGHT, RAIN, CLEAR -> G6_MATRIX_LATENCY_FULL_RESET;
             case STREAM -> G6_MATRIX_LATENCY_SCROLL;
             case TELEPORT, TELEPORT_RETURN, NETHER_ENTER, NETHER_RETURN ->

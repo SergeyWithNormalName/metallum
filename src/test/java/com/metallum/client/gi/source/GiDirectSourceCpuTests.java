@@ -35,6 +35,7 @@ public final class GiDirectSourceCpuTests {
         staleEpochIsRejected();
         productionRootRelationOnlyAuthorizesMonotonicLifecycleAdvance();
         worldRootRotationAllowsChildEpochResetOnly();
+        originOnlyScrollDoesNotBecomePhysicalSourceDirt();
         metadataOnlyRolloverRequiresByteIdenticalInputs();
         queueBoundsCoalescingAndStarvation();
         acceptedFailureRetriesAndStaleCompletionCannotPublish();
@@ -547,6 +548,39 @@ public final class GiDirectSourceCpuTests {
                         origins, origins, 41L, 41L,
                         submittedStamps, desiredStamps, submittedSources, desiredSources),
                 "regressed content identity was admitted as metadata-only");
+    }
+
+    private static void originOnlyScrollDoesNotBecomePhysicalSourceDirt() {
+        LightWorldToken world = new LightWorldToken(3L, "minecraft:overworld");
+        GiDirectSourceEpoch previous = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 13L, 17L, 19L, world, 23L, 29L
+        );
+        GiDirectSourceEpoch oneScroll = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 14L, 17L, 20L, world, 23L, 29L
+        );
+        GiDirectSourceEpoch twoCoalescedScrolls = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 15L, 17L, 21L, world, 23L, 29L
+        );
+        check(GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, oneScroll, true, false, false, false)
+                        && GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, twoCoalescedScrolls, true, false, false, false),
+                "pure clipmap relocation was reported as physical G3 source dirt");
+
+        GiDirectSourceEpoch scrollPlusBlock = new GiDirectSourceEpoch(
+                5L, 7L, 11L, 14L, 17L, 21L, world, 23L, 29L
+        );
+        check(!GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, scrollPlusBlock, true, false, false, false)
+                        && !GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, oneScroll, true, true, false, false)
+                        && !GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, oneScroll, true, false, true, false)
+                        && !GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, oneScroll, true, false, false, true)
+                        && !GiDirectSourceCoordinator.originOnlyFieldRelocation(
+                        previous, oneScroll, false, false, false, false),
+                "scroll suppressed coalesced semantic/source/environment dirt");
     }
 
     private static void queueBoundsCoalescingAndStarvation() {
