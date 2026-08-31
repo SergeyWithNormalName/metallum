@@ -18490,6 +18490,7 @@ private final class MetallumGiLiveContextV1 {
     private var currentHeader: MetallumGiLiveHeaderV1?
     private var retainedHeader: MetallumGiLiveHeaderV1?
     private var capturedBasisWorkAdmitted = false
+    private var capturedBasisNonRemapWorkAdmitted = false
     private var admittedScrollRemapMask: UInt32 = 0
     private var readyMask: UInt32 = 0
     private var exactBrickMasks = [UInt64](repeating: 0, count: metallumGiLiveCascadeCountV1)
@@ -18498,9 +18499,30 @@ private final class MetallumGiLiveContextV1 {
     // until their replacement completes. Exact masks remain strict for readiness/SLA receipts.
     private var receiverBrickMasks = [UInt64](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
+    // Receiver coverage may intentionally remain on the preceding world grid until that
+    // cascade's remap is encoded. Keeping its sampling origin separate prevents a visible
+    // zero interval while near-to-far authoritative work catches up with player movement.
+    private var receiverOriginX = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var receiverOriginY = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var receiverOriginZ = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
     private var retainedExactBrickMasks = [UInt64](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedExactOriginX = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedExactOriginY = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedExactOriginZ = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
     private var retainedReceiverBrickMasks = [UInt64](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedReceiverOriginX = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedReceiverOriginY = [Int32](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedReceiverOriginZ = [Int32](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
     private var requiredBrickMasks = [UInt64](
         repeating: 0, count: metallumGiLiveCascadeCountV1)
@@ -18711,6 +18733,40 @@ private final class MetallumGiLiveContextV1 {
         }
     }
 
+    private func retainedReceiverOrigin(cascade: Int) -> (Int32, Int32, Int32) {
+        (retainedReceiverOriginX[cascade], retainedReceiverOriginY[cascade],
+         retainedReceiverOriginZ[cascade])
+    }
+
+    private func retainedExactOrigin(cascade: Int) -> (Int32, Int32, Int32) {
+        (retainedExactOriginX[cascade], retainedExactOriginY[cascade],
+         retainedExactOriginZ[cascade])
+    }
+
+    private func setRetainedExactOrigin(
+        _ origin: (Int32, Int32, Int32), cascade: Int
+    ) {
+        retainedExactOriginX[cascade] = origin.0
+        retainedExactOriginY[cascade] = origin.1
+        retainedExactOriginZ[cascade] = origin.2
+    }
+
+    private func setRetainedReceiverOrigin(
+        _ origin: (Int32, Int32, Int32), cascade: Int
+    ) {
+        retainedReceiverOriginX[cascade] = origin.0
+        retainedReceiverOriginY[cascade] = origin.1
+        retainedReceiverOriginZ[cascade] = origin.2
+    }
+
+    private func setReceiverOrigin(
+        _ origin: (Int32, Int32, Int32), cascade: Int
+    ) {
+        receiverOriginX[cascade] = origin.0
+        receiverOriginY[cascade] = origin.1
+        receiverOriginZ[cascade] = origin.2
+    }
+
     /** Applies one cascade-local invalidation plan without admitting rebuilt work. */
     private func applyCascadePlan(_ header: MetallumGiLiveHeaderV1) {
         let cascade = Int(header.cascadeIndex)
@@ -18721,10 +18777,15 @@ private final class MetallumGiLiveContextV1 {
         if preserving && !scrolling {
             exactBrickMasks[cascade] = retainedExactBrickMasks[cascade]
                 & ~header.reserved1
-            receiverBrickMasks[cascade] = retainedReceiverBrickMasks[cascade]
         } else {
             exactBrickMasks[cascade] = 0
+        }
+        if preserving {
+            receiverBrickMasks[cascade] = retainedReceiverBrickMasks[cascade]
+            setReceiverOrigin(retainedReceiverOrigin(cascade: cascade), cascade: cascade)
+        } else {
             receiverBrickMasks[cascade] = 0
+            setReceiverOrigin(cascadeOrigin(header, cascade: cascade), cascade: cascade)
         }
         if exactBrickMasks[cascade] == UInt64.max {
             readyMask |= bit
@@ -18751,7 +18812,14 @@ private final class MetallumGiLiveContextV1 {
         }
         let retainCapturedBasis =
             (header.flags & metallumGiLiveFlagRetainCapturedBasisV1) != 0
-        if retainCapturedBasis && (retainedHeader == nil || capturedBasisWorkAdmitted) {
+        // A completed provisional scroll remap is the one safe admitted mutation that can
+        // advance part of the captured basis: its exact and receiver masks are already on the
+        // new per-cascade grid. Refresh only those cascades, leaving pending outer cascades on
+        // their original origins. Arbitrary provisional transport work remains ineligible.
+        if retainCapturedBasis && (retainedHeader == nil
+                || (capturedBasisWorkAdmitted
+                    && (capturedBasisNonRemapWorkAdmitted
+                        || admittedScrollRemapMask == 0))) {
             rejectedCount &+= 1
             return metallumGiTransportStatusRejected
         }
@@ -18779,7 +18847,25 @@ private final class MetallumGiLiveContextV1 {
                 retainedHeader = current
                 for cascade in 0..<metallumGiLiveCascadeCountV1 {
                     retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]
+                    setRetainedExactOrigin(
+                        (receiverOriginX[cascade], receiverOriginY[cascade],
+                         receiverOriginZ[cascade]), cascade: cascade)
                     retainedReceiverBrickMasks[cascade] = receiverBrickMasks[cascade]
+                    setRetainedReceiverOrigin(
+                        (receiverOriginX[cascade], receiverOriginY[cascade],
+                         receiverOriginZ[cascade]), cascade: cascade)
+                }
+            } else if admittedScrollRemapMask != 0 {
+                for cascade in 0..<metallumGiLiveCascadeCountV1 {
+                    let bit = UInt32(1) << UInt32(cascade)
+                    if admittedScrollRemapMask & bit == 0 { continue }
+                    let remappedOrigin = cascadeOrigin(current, cascade: cascade)
+                    retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]
+                    setRetainedExactOrigin(remappedOrigin, cascade: cascade)
+                    retainedReceiverBrickMasks[cascade] = receiverBrickMasks[cascade]
+                    setRetainedReceiverOrigin(
+                        (receiverOriginX[cascade], receiverOriginY[cascade],
+                         receiverOriginZ[cascade]), cascade: cascade)
                 }
             }
             // A compatible provisional/source handoff intentionally keeps the
@@ -18788,11 +18874,18 @@ private final class MetallumGiLiveContextV1 {
             retainedHeader = nil
             for cascade in 0..<metallumGiLiveCascadeCountV1 {
                 retainedExactBrickMasks[cascade] = 0
+                retainedExactOriginX[cascade] = 0
+                retainedExactOriginY[cascade] = 0
+                retainedExactOriginZ[cascade] = 0
                 retainedReceiverBrickMasks[cascade] = 0
+                retainedReceiverOriginX[cascade] = 0
+                retainedReceiverOriginY[cascade] = 0
+                retainedReceiverOriginZ[cascade] = 0
             }
         }
         if !retainCapturedBasis {
             capturedBasisWorkAdmitted = false
+            capturedBasisNonRemapWorkAdmitted = false
             admittedScrollRemapMask = 0
         }
         currentHeader = header
@@ -18933,6 +19026,10 @@ private final class MetallumGiLiveContextV1 {
         guard preparing != alreadyPrepared,
               preparing || header.reserved1 == 0,
               !preparing || !scrolling || admittedScrollRemapMask & cascadeBit == 0 else {
+            NSLog("[metallum] G6 live reject preparation topology: cascade=\(cascade) "
+                + "preparing=\(preparing) alreadyPrepared=\(alreadyPrepared) "
+                + "scrolling=\(scrolling) admittedScrollMask=\(admittedScrollRemapMask) "
+                + "required=\(header.reserved1)")
             rejectedCount &+= 1; condition.unlock()
             return metallumGiTransportStatusRejected
         }
@@ -18945,22 +19042,44 @@ private final class MetallumGiLiveContextV1 {
             requiredBrickMasks[cascade] = header.reserved1
             var retainedExact: UInt64 = 0
             var retainedReceiver: UInt64 = 0
-            if preserving, let previous = retainedHeader {
-                let previousOrigin = cascadeOrigin(previous, cascade: cascade)
+            if preserving, retainedHeader != nil {
+                let previousOrigin = retainedExactOrigin(cascade: cascade)
+                let previousReceiverOrigin = retainedReceiverOrigin(cascade: cascade)
                 let cellSize = Int32(1 << (cascade + 1))
                 let dxBlocks = origin.0 - previousOrigin.0
                 let dyBlocks = origin.1 - previousOrigin.1
                 let dzBlocks = origin.2 - previousOrigin.2
+                let receiverDxBlocks = origin.0 - previousReceiverOrigin.0
+                let receiverDyBlocks = origin.1 - previousReceiverOrigin.1
+                let receiverDzBlocks = origin.2 - previousReceiverOrigin.2
                 if scrolling {
                     guard dxBlocks % cellSize == 0, dyBlocks % cellSize == 0,
-                          dzBlocks % cellSize == 0 else {
+                          dzBlocks % cellSize == 0,
+                          receiverDxBlocks % cellSize == 0,
+                          receiverDyBlocks % cellSize == 0,
+                          receiverDzBlocks % cellSize == 0 else {
+                        NSLog("[metallum] G6 live reject scroll alignment: cascade=\(cascade) "
+                            + "cell=\(cellSize) exactDelta=[\(dxBlocks),\(dyBlocks),\(dzBlocks)] "
+                            + "receiverDelta=[\(receiverDxBlocks),\(receiverDyBlocks),"
+                            + "\(receiverDzBlocks)] current=[\(origin.0),\(origin.1),\(origin.2)] "
+                            + "exactPrevious=[\(previousOrigin.0),\(previousOrigin.1),"
+                            + "\(previousOrigin.2)] receiverPrevious=[\(previousReceiverOrigin.0),"
+                            + "\(previousReceiverOrigin.1),\(previousReceiverOrigin.2)]")
                         rejectedCount &+= 1; condition.unlock()
                         return metallumGiTransportStatusRejected
                     }
                     let dx = dxBlocks / cellSize
                     let dy = dyBlocks / cellSize
                     let dz = dzBlocks / cellSize
-                    guard abs(dx) < 32, abs(dy) < 32, abs(dz) < 32 else {
+                    let receiverDx = receiverDxBlocks / cellSize
+                    let receiverDy = receiverDyBlocks / cellSize
+                    let receiverDz = receiverDzBlocks / cellSize
+                    guard abs(dx) < 32, abs(dy) < 32, abs(dz) < 32,
+                          abs(receiverDx) < 32, abs(receiverDy) < 32,
+                          abs(receiverDz) < 32 else {
+                        NSLog("[metallum] G6 live reject scroll range: cascade=\(cascade) "
+                            + "exactDelta=[\(dx),\(dy),\(dz)] "
+                            + "receiverDelta=[\(receiverDx),\(receiverDy),\(receiverDz)]")
                         rejectedCount &+= 1; condition.unlock()
                         return metallumGiTransportStatusRejected
                     }
@@ -18969,13 +19088,22 @@ private final class MetallumGiLiveContextV1 {
                         deltaX: dx, deltaY: dy, deltaZ: dz)
                     retainedReceiver = scrollRetainedMask(
                         previousMask: retainedReceiverBrickMasks[cascade],
-                        deltaX: dx, deltaY: dy, deltaZ: dz)
+                        deltaX: receiverDx, deltaY: receiverDy, deltaZ: receiverDz)
                     remapParams = MetallumGiLiveRemapParamsV1(
-                        cascadeIndex: UInt32(cascade), deltaX: dx, deltaY: dy, deltaZ: dz,
+                        cascadeIndex: UInt32(cascade), deltaX: receiverDx,
+                        deltaY: receiverDy, deltaZ: receiverDz,
                         previousReceiverMask: retainedReceiverBrickMasks[cascade],
                         requiredMask: header.reserved1)
                 } else {
-                    guard dxBlocks == 0, dyBlocks == 0, dzBlocks == 0 else {
+                    guard dxBlocks == 0, dyBlocks == 0, dzBlocks == 0,
+                          retainedReceiverBrickMasks[cascade] == 0
+                            || (receiverDxBlocks == 0 && receiverDyBlocks == 0
+                                && receiverDzBlocks == 0) else {
+                        NSLog("[metallum] G6 live reject retained origin mismatch: "
+                            + "cascade=\(cascade) exactDelta=[\(dxBlocks),\(dyBlocks),"
+                            + "\(dzBlocks)] receiverDelta=[\(receiverDxBlocks),"
+                            + "\(receiverDyBlocks),\(receiverDzBlocks)] "
+                            + "receiverMask=\(retainedReceiverBrickMasks[cascade])")
                         rejectedCount &+= 1; condition.unlock()
                         return metallumGiTransportStatusRejected
                     }
@@ -18989,6 +19117,7 @@ private final class MetallumGiLiveContextV1 {
             // become valid at the new origin before the draw. Never carry history through a
             // non-preserving world/teleport/device reset.
             receiverBrickMasks[cascade] = preserving ? retainedReceiver : 0
+            setReceiverOrigin(origin, cascade: cascade)
             preparedMask |= cascadeBit
             readyMask &= ~cascadeBit
         }
@@ -19112,6 +19241,7 @@ private final class MetallumGiLiveContextV1 {
 
         condition.lock()
         capturedBasisWorkAdmitted = true
+        if !remapOnly { capturedBasisNonRemapWorkAdmitted = true }
         if preparing && scrolling {
             admittedScrollRemapMask |= cascadeBit
         }
@@ -19161,7 +19291,8 @@ private final class MetallumGiLiveContextV1 {
         guard let header = currentHeader else { return 0 }
         var visibleMask: UInt32 = 0
         for cascade in 0..<metallumGiLiveCascadeCountV1 {
-            let origin = cascadeOrigin(header, cascade: cascade)
+            let origin = (receiverOriginX[cascade], receiverOriginY[cascade],
+                          receiverOriginZ[cascade])
             let base = cascade * 16
             raw.storeBytes(of: origin.0, toByteOffset: base, as: Int32.self)
             raw.storeBytes(of: origin.1, toByteOffset: base + 4, as: Int32.self)

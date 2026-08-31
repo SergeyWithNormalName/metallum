@@ -164,9 +164,14 @@ public final class GiLiveAbiTests {
                         && source.indexOf("if inFlightMask != 0 {")
                         < source.indexOf("if let current = currentHeader {")
                         && source.contains(
-                        "retainedHeader == nil || capturedBasisWorkAdmitted")
+                        "capturedBasisNonRemapWorkAdmitted")
                         && source.contains("capturedBasisWorkAdmitted = true")
+                        && source.contains(
+                        "if !remapOnly { capturedBasisNonRemapWorkAdmitted = true }")
                         && source.contains("admittedScrollRemapMask |= cascadeBit")
+                        && source.contains("retainedExactOrigin(cascade: cascade)")
+                        && source.contains("setRetainedExactOrigin(remappedOrigin")
+                        && source.contains("setRetainedReceiverOrigin(")
                         && source.contains(
                         "retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]")
                         && source.contains(

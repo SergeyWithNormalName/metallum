@@ -498,7 +498,7 @@ public final class GiLiveReceiverSourceChainTests {
                         && provisionalMasks.contains(
                         "this.observedContent != field.contentGeneration()")
                         && provisionalMasks.contains(
-                        "computeChangedBlockMasks(field, this.requiredMasks);")
+                        "mergeChangedBlockMasks(field, this.requiredMasks);")
                         && liveCoordinator.contains(
                         "this.firstAffectedSubmitIndex = "
                                 + "this.latency.pendingFirstAffectedSubmitIndex();"),
@@ -567,8 +567,17 @@ public final class GiLiveReceiverSourceChainTests {
         );
         require(immediateRemap >= 0 && immediateRemap < firstSourceQuery
                         && liveObserve.contains("shouldEncodeProvisionalNearScrollRemap(")
-                        && count(liveObserve, "provisionalExactCoverageCanBind(") == 2
+                        && count(liveObserve, "provisionalReceiverHistoryCanBind(") == 2
                         && liveObserve.contains("this.completion.admit(\n                    0, 0, true, 0L")
+                        && liveObserve.contains("advanceReceiverOrigin(epoch, 0);")
+                        && liveCoordinator.contains("field.originComponent(offset)"
+                        + " - this.receiverOrigins[offset]")
+                        && liveCoordinator.contains("private final int[] receiverOrigins")
+                        && liveCoordinator.contains("computePhysicalScrollPlan(field);")
+                        && liveCoordinator.contains(
+                        "field.originComponent(offset) - this.receiverOrigins[offset]")
+                        && liveCoordinator.contains(
+                        "if (prepare) advanceReceiverOrigin(epoch, cascade);")
                         && liveCoordinator.contains("EpochTransition.AUTHORITATIVE_REBASE")
                         && liveCoordinator.contains(
                         "this.handoffRetainedMasks[cascade] = this.exactMasks[cascade];")

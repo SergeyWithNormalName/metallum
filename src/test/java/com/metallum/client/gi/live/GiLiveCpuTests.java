@@ -488,23 +488,31 @@ public final class GiLiveCpuTests {
                 ),
                 "scroll/reset G6 recovery no longer matches receiver-visible exact near coverage");
         require(GiLiveCoordinator.shouldEncodeProvisionalNearScrollRemap(
-                        false, GiLiveUpdateClass.SCROLL, true, false,
-                        GiLiveLayout.ALL_BRICKS_MASK, 1L
+                        false, GiLiveUpdateClass.SCROLL, true, false
                 ) && !GiLiveCoordinator.shouldEncodeProvisionalNearScrollRemap(
-                        true, GiLiveUpdateClass.SCROLL, true, false,
-                        GiLiveLayout.ALL_BRICKS_MASK, 1L
+                        true, GiLiveUpdateClass.SCROLL, true, false
                 ) && !GiLiveCoordinator.shouldEncodeProvisionalNearScrollRemap(
-                        false, GiLiveUpdateClass.SCROLL, true, false,
-                        1L, GiLiveLayout.ALL_BRICKS_MASK
+                        false, GiLiveUpdateClass.SCROLL, true, true
                 ) && !GiLiveCoordinator.shouldEncodeProvisionalNearScrollRemap(
-                        false, GiLiveUpdateClass.BLOCK, true, false,
-                        GiLiveLayout.ALL_BRICKS_MASK, 1L
+                        false, GiLiveUpdateClass.BLOCK, true, false
                 ),
-                "G6 immediate scroll remap escaped its compatible provisional near boundary");
-        require(GiLiveCoordinator.provisionalExactCoverageCanBind(false, 1L)
-                        && !GiLiveCoordinator.provisionalExactCoverageCanBind(false, 0L)
-                        && !GiLiveCoordinator.provisionalExactCoverageCanBind(true, 1L),
-                "G6 completed provisional remap was hidden or escaped authoritative admission");
+                "G6 immediate scroll remap escaped its provisional near boundary");
+        require(!GiLiveCoordinator.scrollRemapPendingAfterProvisionalRebase(true, true)
+                        && GiLiveCoordinator.scrollRemapPendingAfterProvisionalRebase(true, false)
+                        && !GiLiveCoordinator.scrollRemapPendingAfterProvisionalRebase(false, false),
+                "G6 provisional near remap consumed or invented an outer scroll remap");
+        require(GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        false, true, GiLiveUpdateClass.BLOCK, false
+                ) && GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        false, true, GiLiveUpdateClass.SCROLL, true
+                ) && !GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        false, true, GiLiveUpdateClass.SCROLL, false
+                ) && !GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        false, false, GiLiveUpdateClass.FULL_RESET, true
+                ) && !GiLiveCoordinator.provisionalReceiverHistoryCanBind(
+                        true, true, GiLiveUpdateClass.BLOCK, true
+                ),
+                "G6 compatible receiver history was hidden or crossed an unsafe boundary");
     }
 
     private static void latencyPercentilesEnforceEveryDeclaredSla() {
@@ -888,11 +896,29 @@ public final class GiLiveCpuTests {
                         && GiLiveCoordinator.classifyIncrementalObservation(true, true, true)
                         == GiLiveUpdateClass.FULL_RESET,
                 "global environment rebuild lost its honest full-volume latency class");
-        require(!GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, false, true)
-                        && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, true, false)
-                        && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(false, true, true)
-                        && GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, true, true),
+        int stable = GiLiveCoordinator.FULL_RESET_STABLE_PUBLICATION_SUBMITS;
+        require(!GiLiveCoordinator.shouldCloseOpenFullResetRoot(true, false, true, stable)
+                        && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(
+                        true, true, false, stable)
+                        && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(
+                        false, true, true, stable)
+                        && !GiLiveCoordinator.shouldCloseOpenFullResetRoot(
+                        true, true, true, stable - 1)
+                        && GiLiveCoordinator.shouldCloseOpenFullResetRoot(
+                        true, true, true, stable),
                 "full-reset root closed before latest authoritative all-cascade readiness");
+        require(GiLiveCoordinator.shouldHoldCompletedFullResetPublication(
+                        true, true, true, true, true, GiLiveUpdateClass.BLOCK)
+                        && GiLiveCoordinator.shouldHoldCompletedFullResetPublication(
+                        true, true, true, true, true, GiLiveUpdateClass.STATIC_SOURCE)
+                        && !GiLiveCoordinator.shouldHoldCompletedFullResetPublication(
+                        true, true, true, true, true, GiLiveUpdateClass.SCROLL)
+                        && !GiLiveCoordinator.shouldHoldCompletedFullResetPublication(
+                        true, true, true, false, true, GiLiveUpdateClass.BLOCK),
+                "G6 stable publication hold admitted an incompatible successor");
+        expectIllegalArgument(() -> GiLiveCoordinator.shouldCloseOpenFullResetRoot(
+                        true, true, true, -1),
+                "negative full-reset publication stability was accepted");
         require(GiLiveCoordinator.shouldContinueAuthoritativePlanning(0, 1)
                         && !GiLiveCoordinator.shouldContinueAuthoritativePlanning(1, 1)
                         && !GiLiveCoordinator.shouldContinueAuthoritativePlanning(
@@ -915,7 +941,7 @@ public final class GiLiveCpuTests {
             ));
             require(planned == GiLiveLayout.CASCADE_COUNT
                             && GiLiveCoordinator.shouldCloseOpenFullResetRoot(
-                            true, true, planned == GiLiveLayout.CASCADE_COUNT
+                            true, true, planned == GiLiveLayout.CASCADE_COUNT, stable
                     ),
                     "zero-required child starved an outer cascade or left its root open");
         }

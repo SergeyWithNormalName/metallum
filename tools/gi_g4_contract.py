@@ -154,7 +154,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
     "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "0d647c058734a18f8a57e3ce47483c5b0d45097e7abe4fe26c2b4506f3ca8d27",
     "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "228d1bac4fb08f4581c38c803e550aade53c5daddc8dbd8d2013638c62199611",
     "src/main/metal/MetallumGiTransport.metal": "e5f4fe468bf7f450b860e9ae5c9844f04eb7ef4d2b3169fdeab2a4e316151806",
-    "src/main/native/MetallumNative.swift": "018acbd2763f4be97536c6958a6ac00f20ec303a36d1d6ea8b707ed39cbe67a3",
+    "src/main/native/MetallumNative.swift": "c7eccc46a8079a665b953b13ad4f3bb5affad68fcc7f041b602a7531d5059054",
     "src/main/resources/assets/metallum/lang/en_us.json": "bc2d4f73d1ba4ec07fbd559253caa00bc89fc62d6ca7f8afd6c33a29e9257a51",
     "src/main/resources/assets/metallum/lang/ru_ru.json": "cd0b83dc13ab750febe475f973bc4e70b39b1df40f098e8431c73d2e28d3d032",
     "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "aad4b4e9d459aaed52d7a848022c7cb75f7e8935b9f8d57fe11ac29d74e1246e",
@@ -172,7 +172,7 @@ G6_SUCCESSOR_FILE_SHA256 = {
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "26064fcd5ad6369d4a06cbfc5f4ccd3c680f8044a788939a6ea171c4dc449997"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "42ed9abb6327439c9f3987ecaede674321288dbbde76738a26243baadff69d08"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,

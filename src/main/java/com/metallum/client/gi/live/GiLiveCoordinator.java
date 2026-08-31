@@ -22,6 +22,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
     public static final int STATUS_RETAINED_HISTORY = 2;
     public static final int STATUS_INPUT_NOT_READY = -7;
     public static final int STATUS_ASYNC_COMPLETION_FAILED = -11;
+    static final int FULL_RESET_STABLE_PUBLICATION_SUBMITS = 10;
     public static final long G2_G3_ACCOUNTED_BYTES = 19_196_840L;
     public static final long TOTAL_BUDGET_BYTES = 25_165_824L;
 
@@ -66,6 +67,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
     private final long[] authoritativeBaseExactMasks = new long[GiLiveLayout.CASCADE_COUNT];
     private final long[] observedBrickStamps = new long[GiDirectSourceLayout.TOTAL_BRICKS];
     private final int[] observedOrigins = new int[GiLiveLayout.CASCADE_COUNT * 3];
+    /** World grid currently owned by each physical receiver-atlas cascade. */
+    private final int[] receiverOrigins = new int[GiLiveLayout.CASCADE_COUNT * 3];
     private final int[] scrollDeltaXBlocks = new int[GiLiveLayout.CASCADE_COUNT];
     private final int[] scrollDeltaYBlocks = new int[GiLiveLayout.CASCADE_COUNT];
     private final int[] scrollDeltaZBlocks = new int[GiLiveLayout.CASCADE_COUNT];
@@ -91,7 +94,10 @@ public final class GiLiveCoordinator implements AutoCloseable {
     private boolean capturedBasisAvailable;
     private boolean workAdmissionOccurred;
     private boolean fullResetRootOpen;
+    private int fullResetStablePublicationSubmits;
+    private long lastFullResetStableSubmit = -1L;
     private boolean admissionLogged;
+    private boolean receiverOriginsKnown;
 
     private boolean observed;
     @Nullable private String observedDimension;
@@ -190,6 +196,27 @@ public final class GiLiveCoordinator implements AutoCloseable {
                 field, dynamic, staticEpoch, staticHealthy, environmentDigest
         );
         if (changed) {
+            GiLiveUpdateClass pendingClass = classifyObservation(
+                    field, dynamic, staticEpoch, staticHealthy, environmentDigest
+            );
+            if (shouldHoldCompletedFullResetPublication(
+                    this.fullResetRootOpen, this.activeEpochAuthoritative,
+                    stats.allCascadesReady(), sameObservedStructuralRoot(field),
+                    sameObservedOrigins(field), pendingClass
+            )) {
+                recordDeferredObservation(pendingClass, submitIndex);
+                recordDeferredSourceMasks(
+                        field, dynamic, staticEpoch, staticHealthy, environmentDigest
+                );
+                // Keep one bounded, fully-exact publication interval observable by terrain and
+                // other consumers. Compatible child dirt is accumulated and applied immediately
+                // after the interval; scroll and structural reset never enter this path.
+                observeCompletion(stats, submitIndex);
+                publishFinalTelemetry(stats);
+                return STATUS_RETAINED_HISTORY;
+            }
+        }
+        if (changed) {
             // The accepted batch owns shared atlas writes until its asynchronous receipt. An
             // epoch rotation here could capture pre-completion masks while the old encoder later
             // publishes new-origin texels. Consume the receipt first, then coalesce latest input.
@@ -229,9 +256,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
                 this.activeEpochAuthoritative,
                 this.activeUpdateClass,
                 this.scrollCascade[0],
-                this.cascadePrepared[0],
-                this.handoffRetainedMasks[0],
-                this.requiredMasks[0]
+                this.cascadePrepared[0]
         )) {
             GiLiveEpoch epoch = Objects.requireNonNull(this.activeEpoch, "activeEpoch");
             long dispatchBaseline = stats.transportDispatches();
@@ -244,6 +269,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
             this.workAdmissionOccurred = true;
             this.capturedBasisAvailable = false;
             this.cascadePrepared[0] = true;
+            advanceReceiverOrigin(epoch, 0);
             this.completion.admit(
                     0, 0, true, 0L, epoch.version(),
                     dispatchBaseline, rejectBaseline
@@ -259,13 +285,15 @@ public final class GiLiveCoordinator implements AutoCloseable {
                         commandBuffer, fence, dynamicEpoch, dynamicHash, inputSourceTick
                 ) : null;
         if (available == null) {
-            return provisionalExactCoverageCanBind(
-                    this.activeEpochAuthoritative, this.exactMasks[0]
+            return provisionalReceiverHistoryCanBind(
+                    this.activeEpochAuthoritative, this.preserveExact,
+                    this.activeUpdateClass, this.cascadePrepared[0]
             ) ? STATUS_NO_WORK : STATUS_INPUT_NOT_READY;
         }
         if (!sourceMatchesObservation(field, available, dynamic)) {
-            return provisionalExactCoverageCanBind(
-                    this.activeEpochAuthoritative, this.exactMasks[0]
+            return provisionalReceiverHistoryCanBind(
+                    this.activeEpochAuthoritative, this.preserveExact,
+                    this.activeUpdateClass, this.cascadePrepared[0]
             ) ? STATUS_NO_WORK : STATUS_INPUT_NOT_READY;
         }
         if (!this.activeEpochAuthoritative
@@ -349,6 +377,7 @@ public final class GiLiveCoordinator implements AutoCloseable {
         this.workAdmissionOccurred = true;
         this.capturedBasisAvailable = false;
         this.cascadePrepared[cascade] = true;
+        if (prepare) advanceReceiverOrigin(epoch, cascade);
         this.completion.admit(
                 count, cascade, prepare, batchMask, epoch.version(),
                 dispatchBaseline, rejectBaseline
@@ -473,6 +502,8 @@ public final class GiLiveCoordinator implements AutoCloseable {
         if (observedUpdateClass == GiLiveUpdateClass.FULL_RESET
                 && !compatibleEnvironmentSuccessor) {
             this.fullResetRootOpen = true;
+            this.fullResetStablePublicationSubmits = 0;
+            this.lastFullResetStableSubmit = -1L;
         }
         long affectedSubmitIndex = this.deferredFirstAffectedSubmitIndex >= 0L
                 ? this.deferredFirstAffectedSubmitIndex : submitIndex;
@@ -496,6 +527,9 @@ public final class GiLiveCoordinator implements AutoCloseable {
         this.activeUpdateClass = observedUpdateClass;
         this.preserveExact = this.activeUpdateClass != GiLiveUpdateClass.FULL_RESET
                 || compatibleEnvironmentSuccessor;
+        if (!this.receiverOriginsKnown || !this.preserveExact) {
+            resetReceiverOrigins(field);
+        }
         computeProvisionalMasks(field);
         boolean exactAffectedMasks = copyCombinedAffectedMasks(
                 field, dynamic, staticEpoch, staticHealthy, environmentDigest
@@ -645,7 +679,9 @@ public final class GiLiveCoordinator implements AutoCloseable {
         if (handoff == EpochTransition.AUTHORITATIVE_REBASE) {
             for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
                 this.handoffRetainedMasks[cascade] = this.exactMasks[cascade];
-                this.scrollCascade[cascade] = false;
+                this.scrollCascade[cascade] = scrollRemapPendingAfterProvisionalRebase(
+                        this.scrollCascade[cascade], this.cascadePrepared[cascade]
+                );
             }
         }
         beginEpoch(
@@ -963,11 +999,22 @@ public final class GiLiveCoordinator implements AutoCloseable {
         }
         if (stats.allCascadesReady()) {
             this.publication.publishReady(this.activeEpoch, submitIndex);
+            if (this.fullResetRootOpen && this.activeEpochAuthoritative
+                    && this.lastFullResetStableSubmit != submitIndex) {
+                this.fullResetStablePublicationSubmits++;
+                this.lastFullResetStableSubmit = submitIndex;
+            }
             if (shouldCloseOpenFullResetRoot(
-                    this.fullResetRootOpen, this.activeEpochAuthoritative, true
+                    this.fullResetRootOpen, this.activeEpochAuthoritative, true,
+                    this.fullResetStablePublicationSubmits
             )) {
                 this.fullResetRootOpen = false;
+                this.fullResetStablePublicationSubmits = 0;
+                this.lastFullResetStableSubmit = -1L;
             }
+        } else if (this.fullResetRootOpen) {
+            this.fullResetStablePublicationSubmits = 0;
+            this.lastFullResetStableSubmit = -1L;
         }
     }
 
@@ -1034,33 +1081,42 @@ public final class GiLiveCoordinator implements AutoCloseable {
             }
             return;
         }
+        // Event attribution stays tied to the newly observed semantic/source mutation. A
+        // receiver cascade that still occupies an older physical grid nevertheless keeps its
+        // remap plan across those successor epochs. Reclassifying every source receipt as a new
+        // SCROLL churned the near barrier and delayed visible recovery until the next movement.
+        computePhysicalScrollPlan(field);
         if (this.activeUpdateClass == GiLiveUpdateClass.STATIC_SOURCE) {
             // Source dirt is supplied by G3's exact per-cascade affected masks. A simultaneous
             // semantic content receipt remains independently CPU-provable and must stay sticky
             // even while that source mask is unavailable.
             if (this.observedContent != field.contentGeneration()) {
-                computeChangedBlockMasks(field, this.requiredMasks);
+                mergeChangedBlockMasks(field, this.requiredMasks);
             }
             return;
         }
         if (this.activeUpdateClass == GiLiveUpdateClass.SCROLL) {
-            for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
-                int offset = cascade * 3;
-                int dx = field.originComponent(offset) - this.observedOrigins[offset];
-                int dy = field.originComponent(offset + 1) - this.observedOrigins[offset + 1];
-                int dz = field.originComponent(offset + 2) - this.observedOrigins[offset + 2];
-                this.scrollDeltaXBlocks[cascade] = dx;
-                this.scrollDeltaYBlocks[cascade] = dy;
-                this.scrollDeltaZBlocks[cascade] = dz;
-                this.scrollCascade[cascade] = dx != 0 || dy != 0 || dz != 0;
-                long exposed = this.scrollCascade[cascade]
-                        ? scrollExposedMask(cascade, dx, dy, dz)
-                        : 0L;
-                this.requiredMasks[cascade] = expandTransportHalo(exposed);
-            }
             return;
         }
-        computeChangedBlockMasks(field, this.requiredMasks);
+        mergeChangedBlockMasks(field, this.requiredMasks);
+    }
+
+    private void computePhysicalScrollPlan(final GiSemanticTransportFieldView field) {
+        for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
+            int offset = cascade * 3;
+            int dx = field.originComponent(offset) - this.receiverOrigins[offset];
+            int dy = field.originComponent(offset + 1) - this.receiverOrigins[offset + 1];
+            int dz = field.originComponent(offset + 2) - this.receiverOrigins[offset + 2];
+            this.scrollDeltaXBlocks[cascade] = dx;
+            this.scrollDeltaYBlocks[cascade] = dy;
+            this.scrollDeltaZBlocks[cascade] = dz;
+            this.scrollCascade[cascade] = dx != 0 || dy != 0 || dz != 0;
+            if (this.scrollCascade[cascade]) {
+                this.requiredMasks[cascade] |= expandTransportHalo(
+                        scrollExposedMask(cascade, dx, dy, dz)
+                );
+            }
+        }
     }
 
     private void computeCoalescedMasks(
@@ -1098,6 +1154,16 @@ public final class GiLiveCoordinator implements AutoCloseable {
         }
         for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
             destination[cascade] = expandTransportHalo(destination[cascade]);
+        }
+    }
+
+    private void mergeChangedBlockMasks(
+            final GiSemanticTransportFieldView field, final long[] destination
+    ) {
+        java.util.Arrays.fill(this.coalescedMasks, 0L);
+        computeChangedBlockMasks(field, this.coalescedMasks);
+        for (int cascade = 0; cascade < GiLiveLayout.CASCADE_COUNT; cascade++) {
+            destination[cascade] |= this.coalescedMasks[cascade];
         }
     }
 
@@ -1271,9 +1337,28 @@ public final class GiLiveCoordinator implements AutoCloseable {
     static boolean shouldCloseOpenFullResetRoot(
             final boolean fullResetRootOpen,
             final boolean activeEpochAuthoritative,
-            final boolean allCascadesReady
+            final boolean allCascadesReady,
+            final int stablePublicationSubmits
     ) {
-        return fullResetRootOpen && activeEpochAuthoritative && allCascadesReady;
+        if (stablePublicationSubmits < 0) {
+            throw new IllegalArgumentException("Negative G6 full-reset stability count");
+        }
+        return fullResetRootOpen && activeEpochAuthoritative && allCascadesReady
+                && stablePublicationSubmits >= FULL_RESET_STABLE_PUBLICATION_SUBMITS;
+    }
+
+    static boolean shouldHoldCompletedFullResetPublication(
+            final boolean fullResetRootOpen,
+            final boolean activeEpochAuthoritative,
+            final boolean allCascadesReady,
+            final boolean sameStructuralRoot,
+            final boolean sameOrigins,
+            final GiLiveUpdateClass pendingClass
+    ) {
+        return fullResetRootOpen && activeEpochAuthoritative && allCascadesReady
+                && sameStructuralRoot && sameOrigins
+                && (pendingClass == GiLiveUpdateClass.BLOCK
+                || pendingClass == GiLiveUpdateClass.STATIC_SOURCE);
     }
 
     static boolean shouldContinueAuthoritativePlanning(
@@ -1291,22 +1376,38 @@ public final class GiLiveCoordinator implements AutoCloseable {
             final boolean authoritative,
             final GiLiveUpdateClass updateClass,
             final boolean nearScroll,
-            final boolean nearPrepared,
-            final long retainedNearMask,
-            final long requiredNearMask
+            final boolean nearPrepared
     ) {
         return !authoritative
                 && updateClass == GiLiveUpdateClass.SCROLL
                 && nearScroll
-                && !nearPrepared
-                && (retainedNearMask & ~requiredNearMask) != 0L;
+                && !nearPrepared;
     }
 
-    static boolean provisionalExactCoverageCanBind(
-            final boolean authoritative,
-            final long exactNearMask
+    /** A provisional near remap cannot silently consume pending outer-cascade scrolls. */
+    static boolean scrollRemapPendingAfterProvisionalRebase(
+            final boolean scrolling,
+            final boolean provisionalRemapPrepared
     ) {
-        return !authoritative && exactNearMask != 0L;
+        return scrolling && !provisionalRemapPrepared;
+    }
+
+    /**
+     * A compatible receiver tuple is safe before any brick becomes exact. Native keeps its
+     * receiver mask separate from exact publication: same-origin invalidation retains it
+     * immediately, while scroll makes it usable only after the remap encoder has been admitted
+     * ahead of terrain draws. Requiring a non-zero exact mask here made ordinary walking bind
+     * global zero for several frames even though compatible receiver history already existed.
+     */
+    static boolean provisionalReceiverHistoryCanBind(
+            final boolean authoritative,
+            final boolean preserveExact,
+            final GiLiveUpdateClass updateClass,
+            final boolean nearPrepared
+    ) {
+        Objects.requireNonNull(updateClass, "updateClass");
+        return !authoritative && preserveExact
+                && (updateClass != GiLiveUpdateClass.SCROLL || nearPrepared);
     }
 
     static int unavailableAuthoritativeSourceStatus(
@@ -1694,6 +1795,27 @@ public final class GiLiveCoordinator implements AutoCloseable {
         for (int brick = 0; brick < this.observedBrickStamps.length; brick++) {
             this.observedBrickStamps[brick] = field.brickContentStamp(brick);
         }
+    }
+
+    private void resetReceiverOrigins(final GiSemanticTransportFieldView field) {
+        for (int index = 0; index < this.receiverOrigins.length; index++) {
+            this.receiverOrigins[index] = field.originComponent(index);
+        }
+        this.receiverOriginsKnown = true;
+    }
+
+    /**
+     * Native changes the physical atlas grid when it accepts a prepared encode. The encoder is
+     * ordered before terrain draws in the same command buffer; an asynchronous failure makes the
+     * whole G6 runtime invalid, so Java can advance this mirror at admission without ambiguity.
+     */
+    private void advanceReceiverOrigin(final GiLiveEpoch epoch, final int cascade) {
+        GiLiveEpoch.Origin origin = epoch.origin(cascade);
+        int offset = cascade * 3;
+        this.receiverOrigins[offset] = origin.x();
+        this.receiverOrigins[offset + 1] = origin.y();
+        this.receiverOrigins[offset + 2] = origin.z();
+        this.receiverOriginsKnown = true;
     }
 
     private void advanceSourceTick(final long inputSourceTick) {
