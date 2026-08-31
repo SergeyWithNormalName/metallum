@@ -444,6 +444,53 @@ tasks.register("giReceiverSourceChainUnitTest", JavaExec) {
 	jvmArgs "-ea"
 }
 
+tasks.register("giLiveReceiverSourceChainUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G6 three-cascade vertex-only source and generated Sodium MSL contracts"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveReceiverSourceChainTests")
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.register("giDynamicSourceCollectorUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates bounded camera-independent G6 held/entity source collection and expiry"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDynamicSourceCollectorTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giDynamicSourceInjectionUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates deterministic G6 dynamic-source injection and incremental invalidation"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.source.GiDynamicSourceInjectionTests")
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
+tasks.register("giLiveCpuUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates G6 live epochs, dirty scheduling, exact publication and recovery SLAs"
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveCpuTests")
+	jvmArgs "-ea"
+}
+
+tasks.register("giLiveAbiUnitTest", JavaExec) {
+	group = "verification"
+	description = "Validates the exact Java/Swift G6 live layout, stats ABI and bridge bounds"
+	onlyIf { isAppleSiliconMac }
+	dependsOn(tasks.named("testClasses"))
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass.set("com.metallum.client.gi.live.GiLiveAbiTests")
+	args "native"
+	jvmArgs "-ea", "--enable-native-access=ALL-UNNAMED"
+}
+
 tasks.register("giReceiverCarrierCoexistenceUnitTest", JavaExec) {
 	group = "verification"
 	description = "Validates the exact Sodium compact-position sideband shared by L8 and G5"
@@ -1723,6 +1770,41 @@ tasks.register("giG5RunnerContractTest", Exec) {
 	commandLine "bash", "tools/test_gi_g5_runner_contract.sh"
 }
 
+tasks.register("giG6RunnerContractTest", Exec) {
+	group = "verification"
+	description = "Validates persistent dynamic-GI source and recovery-matrix routes, isolation and receipts"
+	inputs.files(
+		"benchmark/routes/hdrtest-torch-toggle-v1.json",
+		"benchmark/routes/hdrtest-gi-g6-matrix-v1.json",
+		"benchmark/settings/native-hdr-fancy-gi-live-v1.json",
+		"docs/GI_G6.md",
+		"scripts/run_metal_benchmark.sh",
+		"src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java",
+		"tools/metal_benchmark_fixture.py",
+		"tools/metal_benchmark_report.py",
+		"tools/test_gi_g6_runner_contract.sh"
+	)
+	commandLine "bash", "tools/test_gi_g6_runner_contract.sh"
+}
+
+tasks.register("giG6EvidenceContractTest", Exec) {
+	group = "verification"
+	description = "Verifies the immutable source-bound G6 live, matrix and static-capture evidence"
+	dependsOn(tasks.named("classes"))
+	dependsOn(tasks.named("buildMacNative"))
+	inputs.files(
+		"benchmark/gi/g6-live-evidence-v1.json",
+		"benchmark/routes/hdrtest-torch-toggle-v1.json",
+		"benchmark/routes/hdrtest-gi-g6-matrix-v1.json",
+		"benchmark/settings/native-hdr-fancy-gi-live-v1.json",
+		"tools/gi_g6_evidence_contract.py",
+		"tools/metal_benchmark_fixture.py",
+		"tools/metal_benchmark_report.py"
+	)
+	inputs.dir("benchmark/gi/evidence/gi-g6-live-2026-08-30-v1")
+	commandLine "python3", "tools/gi_g6_evidence_contract.py", "--root", "."
+}
+
 tasks.register("giStageGateContractTest", Exec) {
 	group = "verification"
 	description = "Validates current G0 recovery, G1 revalidation and G2 completion evidence"
@@ -1767,6 +1849,8 @@ tasks.named("check") {
 	dependsOn(tasks.named("giG4RunnerContractTest"))
 	dependsOn(tasks.named("giG5ReceiverContractTest"))
 	dependsOn(tasks.named("giG5RunnerContractTest"))
+	dependsOn(tasks.named("giG6RunnerContractTest"))
+	dependsOn(tasks.named("giG6EvidenceContractTest"))
 	dependsOn(tasks.named("giReleaseContractGuardTest"))
 	dependsOn(tasks.named("giStageGateContractTest"))
     dependsOn(tasks.named("benchmarkFixtureContractTest"))
@@ -1777,6 +1861,11 @@ tasks.named("check") {
 	dependsOn(tasks.named("giTransportSourceChainUnitTest"))
 	dependsOn(tasks.named("giReceiverCpuUnitTest"))
 	dependsOn(tasks.named("giReceiverSourceChainUnitTest"))
+	dependsOn(tasks.named("giLiveReceiverSourceChainUnitTest"))
+	dependsOn(tasks.named("giDynamicSourceCollectorUnitTest"))
+	dependsOn(tasks.named("giDynamicSourceInjectionUnitTest"))
+	dependsOn(tasks.named("giLiveCpuUnitTest"))
+	dependsOn(tasks.named("giLiveAbiUnitTest"))
 	dependsOn(tasks.named("giReceiverCarrierCoexistenceUnitTest"))
 	dependsOn(tasks.named("giTransportGpuValidationSource"))
 	dependsOn(tasks.named("giTransportGpuValidationBundled"))

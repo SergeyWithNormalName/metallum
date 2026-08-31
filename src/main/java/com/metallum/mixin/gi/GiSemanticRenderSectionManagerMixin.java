@@ -10,8 +10,11 @@ import net.caffeinemc.mods.sodium.client.render.chunk.RenderSectionManager;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.tasks.ChunkBuilderMeshingTask;
 import net.caffeinemc.mods.sodium.client.render.chunk.storage.SectionStorage;
 import net.caffeinemc.mods.sodium.client.render.chunk.translucent_sorting.SortBehavior;
+import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.entity.Entity;
+import org.jspecify.annotations.Nullable;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -30,7 +33,17 @@ abstract class GiSemanticRenderSectionManagerMixin {
     private void metallum$openGiWorld(final ClientLevel level, final int distance,
                                       final SortBehavior sortBehavior, final CallbackInfo ci) {
         try {
-            GiSemanticController.global().openWorld(level, metallum$dimension(level));
+            Entity camera = metallum$cameraFor(level);
+            if (camera == null) {
+                GiSemanticController.global().openWorld(level, metallum$dimension(level));
+            } else {
+                GiSemanticController.global().openWorld(
+                        level, metallum$dimension(level),
+                        (int) Math.floor(camera.getX()),
+                        (int) Math.floor(camera.getY()),
+                        (int) Math.floor(camera.getZ())
+                );
+            }
             com.metallum.Metallum.LOGGER.info(
                     "[GI_G2] accepted-output semantic capture active for {}",
                     metallum$dimension(level)
@@ -107,5 +120,26 @@ abstract class GiSemanticRenderSectionManagerMixin {
 
     private static String metallum$dimension(final ClientLevel level) {
         return level.dimension().identifier().toString();
+    }
+
+    @Nullable
+    private static Entity metallum$cameraFor(final ClientLevel level) {
+        Minecraft minecraft = Minecraft.getInstance();
+        Entity camera = minecraft.getCameraEntity();
+        if (!metallum$isCurrentFiniteCamera(camera, level)) {
+            camera = minecraft.player;
+        }
+        return metallum$isCurrentFiniteCamera(camera, level) ? camera : null;
+    }
+
+    private static boolean metallum$isCurrentFiniteCamera(
+            @Nullable final Entity camera,
+            final ClientLevel level
+    ) {
+        return camera != null
+                && camera.level() == level
+                && Double.isFinite(camera.getX())
+                && Double.isFinite(camera.getY())
+                && Double.isFinite(camera.getZ());
     }
 }

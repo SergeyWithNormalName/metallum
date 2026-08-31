@@ -512,6 +512,11 @@ public final class MetalNativeBridge {
                     "metallum_gi_direct_source_await_ready_v1",
                     FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
             );
+            giDirectSourceRelabelV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_direct_source_relabel_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
             giDirectSourceResetV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_direct_source_reset_v1",
@@ -621,6 +626,58 @@ public final class MetalNativeBridge {
             giTransportReleaseContextV1 = downcallWithoutCritical(
                     lookup,
                     "metallum_gi_transport_release_context_v1",
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
+            );
+            giLiveAbiVersionV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_abi_version_v1",
+                    FunctionDescriptor.of(INT)
+            );
+            giLiveLayoutV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_layout_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, LONG)
+            );
+            giLiveCreateContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_create_context_v1",
+                    FunctionDescriptor.of(
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giLiveInvalidateV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_invalidate_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giLiveEncodeCascadeV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_encode_cascade_v1",
+                    FunctionDescriptor.of(
+                            INT,
+                            ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT,
+                            ValueLayout.ADDRESS, LONG, ValueLayout.ADDRESS, LONG
+                    )
+            );
+            giLiveBindVertexV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_bind_vertex_v1",
+                    FunctionDescriptor.of(
+                            INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, INT, INT
+                    )
+            );
+            giLiveGetStatsV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_get_stats_v1",
+                    FunctionDescriptor.of(INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS, LONG)
+            );
+            giLiveReleaseContextV1 = downcallWithoutCritical(
+                    lookup,
+                    "metallum_gi_live_release_context_v1",
                     FunctionDescriptor.ofVoid(ValueLayout.ADDRESS)
             );
             giReceiverAbiVersionV1 = downcallWithoutCritical(
@@ -1242,6 +1299,7 @@ public final class MetalNativeBridge {
     private static final MethodHandle giDirectSourceCreateContextV1;
     private static final MethodHandle giDirectSourceEncodeDirtyV1;
     private static final MethodHandle giDirectSourceAwaitReadyV1;
+    private static final MethodHandle giDirectSourceRelabelV1;
     private static final MethodHandle giDirectSourceResetV1;
     private static final MethodHandle giDirectSourceCaptureSliceOnceV1;
     private static final MethodHandle giDirectSourceGetStatsV1;
@@ -1259,6 +1317,14 @@ public final class MetalNativeBridge {
     private static final MethodHandle giTransportBeginDebugCaptureV1;
     private static final MethodHandle giTransportPollDebugCaptureV1;
     private static final MethodHandle giTransportReleaseContextV1;
+    private static final MethodHandle giLiveAbiVersionV1;
+    private static final MethodHandle giLiveLayoutV1;
+    private static final MethodHandle giLiveCreateContextV1;
+    private static final MethodHandle giLiveInvalidateV1;
+    private static final MethodHandle giLiveEncodeCascadeV1;
+    private static final MethodHandle giLiveBindVertexV1;
+    private static final MethodHandle giLiveGetStatsV1;
+    private static final MethodHandle giLiveReleaseContextV1;
     private static final MethodHandle giReceiverAbiVersionV1;
     private static final MethodHandle giReceiverLayoutV1;
     private static final MethodHandle giReceiverCreateContextV1;
@@ -2237,6 +2303,19 @@ public final class MetalNativeBridge {
         }
     }
 
+    public static int metallum_gi_direct_source_relabel_v1(
+            final MemorySegment context,
+            final MemorySegment header
+    ) {
+        try {
+            return (int) giDirectSourceRelabelV1.invokeExact(
+                    segment(context), segment(header), header.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_direct_source_relabel_v1", throwable);
+        }
+    }
+
     public static int metallum_gi_direct_source_reset_v1(
             final MemorySegment context,
             final long worldGeneration,
@@ -2470,6 +2549,110 @@ public final class MetalNativeBridge {
             giTransportReleaseContextV1.invokeExact(segment(context));
         } catch (Throwable throwable) {
             throw bridgeFailure("metallum_gi_transport_release_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_abi_version_v1() {
+        try {
+            return (int) giLiveAbiVersionV1.invokeExact();
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_abi_version_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_layout_v1(
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        requireDestinationBounds(destination, destinationBytes, "G6 live layout");
+        try {
+            return (int) giLiveLayoutV1.invokeExact(segment(destination), destinationBytes);
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_layout_v1", throwable);
+        }
+    }
+
+    public static MemorySegment metallum_gi_live_create_context_v1(
+            final MemorySegment device,
+            final MemorySegment queue,
+            final MemorySegment directContext,
+            final long worldGeneration
+    ) {
+        try {
+            return (MemorySegment) giLiveCreateContextV1.invokeExact(
+                    segment(device), segment(queue), segment(directContext), worldGeneration
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_create_context_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_invalidate_v1(
+            final MemorySegment context,
+            final MemorySegment header
+    ) {
+        try {
+            return (int) giLiveInvalidateV1.invokeExact(
+                    segment(context), segment(header), header.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_invalidate_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_encode_cascade_v1(
+            final MemorySegment context,
+            final MemorySegment commandBuffer,
+            final MemorySegment fence,
+            final int inFlightSlot,
+            final MemorySegment header,
+            final MemorySegment cells
+    ) {
+        try {
+            return (int) giLiveEncodeCascadeV1.invokeExact(
+                    segment(context), segment(commandBuffer), segment(fence), inFlightSlot,
+                    segment(header), header.byteSize(), segment(cells), cells.byteSize()
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_encode_cascade_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_bind_vertex_v1(
+            final MemorySegment context,
+            final MemorySegment encoder,
+            final int inFlightSlot,
+            final boolean carrierSafe
+    ) {
+        try {
+            return (int) giLiveBindVertexV1.invokeExact(
+                    segment(context), segment(encoder), inFlightSlot, carrierSafe ? 1 : 0
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_bind_vertex_v1", throwable);
+        }
+    }
+
+    public static int metallum_gi_live_get_stats_v1(
+            final MemorySegment context,
+            final MemorySegment destination,
+            final long destinationBytes
+    ) {
+        requireDestinationBounds(destination, destinationBytes, "G6 live stats");
+        try {
+            return (int) giLiveGetStatsV1.invokeExact(
+                    segment(context), segment(destination), destinationBytes
+            );
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_get_stats_v1", throwable);
+        }
+    }
+
+    public static void metallum_gi_live_release_context_v1(final MemorySegment context) {
+        try {
+            giLiveReleaseContextV1.invokeExact(segment(context));
+        } catch (Throwable throwable) {
+            throw bridgeFailure("metallum_gi_live_release_context_v1", throwable);
         }
     }
 
@@ -4099,6 +4282,20 @@ public final class MetalNativeBridge {
 
     private static MemorySegment segment(final MemorySegment pointer) {
         return pointer == null || pointer.address() == 0L ? MemorySegment.NULL : pointer;
+    }
+
+    /** Prevents a caller-supplied native byte count from exceeding its actual FFM segment. */
+    private static void requireDestinationBounds(
+            final MemorySegment destination,
+            final long destinationBytes,
+            final String label
+    ) {
+        if (destination == null || destinationBytes < 0L
+                || destinationBytes > destination.byteSize()) {
+            throw new IllegalArgumentException(
+                    label + " destination byte count exceeds its MemorySegment"
+            );
+        }
     }
 
     private static MemorySegment toCString(final Arena arena, final String value) {

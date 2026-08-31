@@ -234,6 +234,7 @@ G4_INJECT_ACTIVE_FRAMES = 24
 G4_REPORT_FRAMES = 300
 G4_METADATA_MODE = "g4_transport"
 G5_RECEIVER_METADATA_MODE = "g5_vertex_receiver"
+G6_LIVE_METADATA_MODE = "g6_live"
 GI_V3_METADATA_MODES = frozenset({
     G4_METADATA_MODE,
     G5_RECEIVER_METADATA_MODE,
@@ -1602,9 +1603,21 @@ def _parse_window(payload: Any, line: int) -> TimingWindow:
             raise ReportError(
                 f"line {line}: metadata mode {metadata_gi_mode} requires GI contract v3"
             )
-        if window.gi_transport_stage is not None and contract_version != 3:
+        if metadata_gi_mode == G6_LIVE_METADATA_MODE \
+                and (contract_version != 2
+                     or window.global_illumination["mode"] != "active"):
             raise ReportError(
-                f"line {line}: GI_TRANSPORT timing requires G4 contract v3"
+                f"line {line}: metadata mode g6_live requires active GI contract v2"
+            )
+        live_transport_timing = (
+            metadata_gi_mode == G6_LIVE_METADATA_MODE
+            and contract_version == 2
+        )
+        if window.gi_transport_stage is not None \
+                and contract_version != 3 and not live_transport_timing:
+            raise ReportError(
+                f"line {line}: GI_TRANSPORT timing requires G4 contract v3 "
+                "or production G6 contract v2"
             )
         _validate_g4_window_phase(window)
     return window
@@ -2701,6 +2714,10 @@ def summarize(
     if any(value is not None for value in renderer_generations):
         if not all(value is not None for value in renderer_generations):
             raise ReportError("selected windows mix renderer-generation telemetry presence")
+        g6_matrix_route = all(
+            window.metadata.get("route") == "hdrtest-gi-g6-matrix-v1"
+            for window in selected
+        )
         stable_generations = []
         for value in renderer_generations:
             stable = dict(value)
@@ -2709,7 +2726,24 @@ def summarize(
             # renderer/resource/work declaration must stay stable across windows.
             stable.pop("frame_id", None)
             work = stable.get("advanced_lighting_work")
-            if work is not None:
+            if g6_matrix_route:
+                # The G6 matrix deliberately performs a resource reload and two
+                # dimension transitions. Those events change per-frame identities,
+                # history, submit slots, headroom observations, and work counts while
+                # the renderer contract and resource declaration remain invariant.
+                for key in (
+                    "delta_seconds",
+                    "dimension_identity",
+                    "display_headroom",
+                    "history_generation",
+                    "in_flight_slot",
+                    "renderer_generation_id",
+                    "submit_index",
+                    "world_identity",
+                ):
+                    stable.pop(key, None)
+                stable.pop("advanced_lighting_work", None)
+            elif work is not None:
                 stable["advanced_lighting_work"] = {
                     key: item
                     for key, item in work.items()
@@ -5336,6 +5370,41 @@ def self_test() -> None:
             "selected windows mix renderer-generation declarations",
         )
 
+        g6_generation_transitions = root / "g6-generation-transitions.jsonl"
+        g6_transition_payloads = copy.deepcopy(mixed_work_payloads)
+        for index, payload in enumerate(g6_transition_payloads):
+            payload["metadata"]["route"] = "hdrtest-gi-g6-matrix-v1"
+            generation = payload["renderer_generation"]
+            generation["renderer_generation_id"] = (
+                generation.get("renderer_generation_id", 1) + index // 3
+            )
+            generation["history_generation"] = (
+                generation.get("history_generation", 1) + index
+            )
+            generation["world_identity"] = (
+                generation.get("world_identity", 1) + index // 5
+            )
+            generation["dimension_identity"] = (
+                generation.get("dimension_identity", 1) + index // 5
+            )
+            generation["submit_index"] = generation.get("submit_index", 1) + index
+        g6_generation_transitions.write_text(
+            "\n".join(json.dumps(payload) for payload in g6_transition_payloads) + "\n",
+            encoding="utf-8",
+        )
+        assert summarize(g6_generation_transitions, 3000, 0, "OFF")[
+            "metadata"
+        ]["route"] == "hdrtest-gi-g6-matrix-v1"
+        g6_transition_payloads[1]["renderer_generation"]["resource_bytes"]["hdr"] += 1
+        g6_generation_transitions.write_text(
+            "\n".join(json.dumps(payload) for payload in g6_transition_payloads) + "\n",
+            encoding="utf-8",
+        )
+        expect_error(
+            lambda: summarize(g6_generation_transitions, 3000, 0, "OFF"),
+            "selected windows mix renderer-generation declarations",
+        )
+
         # Cluster statistics are sampled and published from an asynchronous
         # command-buffer completion handler. A completed frame may therefore trail
         # the current renderer declaration, and its scene light count need not match
@@ -5602,6 +5671,34 @@ def self_test() -> None:
         assert active_window.gi_transport_stage["p95_ms"] == 0.34
         active_summary = summarize(schema6_gi_active_v3, 600, 0, "OFF")
         assert active_summary.get("stages", {}).get(GI_TRANSPORT_STAGE) is None
+
+        # G6 owns its live transport receipts separately while the raw timing
+        # window continues to report the strict G3 source-field contract v2.
+        # Its bounded live Jacobi work still uses the append-only GI_TRANSPORT
+        # profiler stage, so that stage must remain legal outside frozen G4.
+        g6_payload = g4_line(0, "measure", 0, timed_transport=True)
+        g6_payload["global_illumination"]["contract_version"] = 2
+        g6_payload["metadata"]["global_illumination_mode"] = G6_LIVE_METADATA_MODE
+        schema6_g6_live_v2 = root / "schema6-g6-live-v2.raw.jsonl"
+        schema6_g6_live_v2.write_text(
+            json.dumps(g6_payload) + "\n", encoding="utf-8"
+        )
+        g6_window = load_report(schema6_g6_live_v2)[0]
+        assert g6_window.metadata["global_illumination_mode"] == G6_LIVE_METADATA_MODE
+        assert g6_window.global_illumination["contract_version"] == 2
+        assert g6_window.gi_transport_stage is not None \
+            and g6_window.gi_transport_stage["frames"] == 1
+        invalid_g6_payload = copy.deepcopy(g6_payload)
+        invalid_g6_payload["global_illumination"]["contract_version"] = 1
+        invalid_g6_payload["global_illumination"].pop("full_volume_rebuilds")
+        invalid_g6_path = root / "schema6-g6-invalid-v1.raw.jsonl"
+        invalid_g6_path.write_text(
+            json.dumps(invalid_g6_payload) + "\n", encoding="utf-8"
+        )
+        expect_error(
+            lambda: load_report(invalid_g6_path),
+            "metadata mode g6_live requires active GI contract v2",
+        )
 
         # G5 reuses the G4 contract-v3 textures and telemetry instead of defining
         # a second field schema. FIELD therefore retains the populated G4 shape,

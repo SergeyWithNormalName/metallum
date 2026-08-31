@@ -48,6 +48,17 @@ public final class GiSemanticController {
     public static GiSemanticController global() { return GLOBAL; }
 
     public synchronized GiSemanticWorldToken openWorld(final Object world, final String dimensionId) {
+        return openWorld(world, dimensionId, 0, 0, 0);
+    }
+
+    /** Opens a world with the render camera origin already established before any task is stamped. */
+    public synchronized GiSemanticWorldToken openWorld(
+            final Object world,
+            final String dimensionId,
+            final int cameraX,
+            final int cameraY,
+            final int cameraZ
+    ) {
         Objects.requireNonNull(world, "world");
         requireDimension(dimensionId);
         WorldState current = this.worlds.get(world);
@@ -62,7 +73,9 @@ public final class GiSemanticController {
         );
         List<GiSemanticPalette.Seed> seeds = this.atlasSeeds == null ? List.of() : this.atlasSeeds;
         GiSemanticPalette palette = GiSemanticPalette.build(1L, token.resourceEpoch(), token.materialEpoch(), seeds);
-        this.worlds.put(world, new WorldState(token, palette, this.atlasSeeds != null));
+        this.worlds.put(world, new WorldState(
+                token, palette, this.atlasSeeds != null, cameraX, cameraY, cameraZ
+        ));
         refreshSoleWorldState();
         return token;
     }
@@ -83,9 +96,13 @@ public final class GiSemanticController {
         int cameraY = old == null ? 0 : old.cameraY;
         int cameraZ = old == null ? 0 : old.cameraZ;
         long paletteGeneration = old == null ? 1L : Math.incrementExact(old.palette.generation());
+        this.nextWorldGeneration = Math.incrementExact(this.nextWorldGeneration);
+        this.nextResourceEpoch = Math.max(
+                1L, Math.incrementExact(this.nextResourceEpoch)
+        );
         GiSemanticWorldToken token = new GiSemanticWorldToken(
-                Math.incrementExact(this.nextWorldGeneration),
-                Math.max(1L, Math.incrementExact(this.nextResourceEpoch)),
+                this.nextWorldGeneration,
+                this.nextResourceEpoch,
                 this.materialEpoch, dimensionId
         );
         GiSemanticPalette blockedPalette = GiSemanticPalette.build(

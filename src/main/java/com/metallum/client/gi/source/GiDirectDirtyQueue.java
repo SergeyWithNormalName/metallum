@@ -1,5 +1,7 @@
 package com.metallum.client.gi.source;
 
+import org.jspecify.annotations.Nullable;
+
 import java.util.Objects;
 
 /** Fixed-capacity render-thread queue; it only schedules dirty bricks and never rebuilds a volume. */
@@ -8,21 +10,42 @@ public final class GiDirectDirtyQueue {
 
     public enum OfferResult { ENQUEUED, COALESCED, STALE }
 
+    public enum CompletionResult { COMPLETED, STALE_EPOCH }
+
     public record Telemetry(
             long queued, long coalesced, long completed, long discarded,
-            int pending, long starvationPromotions, long fullVolumeRebuilds
+            int pending, int inFlight,
+            long starvationPromotions, long fullVolumeRebuilds
     ) {
+        public Telemetry(
+                final long queued,
+                final long coalesced,
+                final long completed,
+                final long discarded,
+                final int pending,
+                final long starvationPromotions,
+                final long fullVolumeRebuilds
+        ) {
+            this(queued, coalesced, completed, discarded, pending, 0,
+                    starvationPromotions, fullVolumeRebuilds);
+        }
+
+        public boolean algebraIsExact() {
+            return this.queued == this.completed + this.discarded
+                    + this.pending + this.inFlight;
+        }
     }
 
     /** Counters scoped to the active native epoch; lifetime telemetry above never resets. */
     public record EpochTelemetry(
-            long queued, long completed, long discarded, int pending,
+            long queued, long completed, long discarded, int pending, int inFlight,
             boolean fullVolumeEnqueued
     ) {
     }
 
     private static final class Pending {
         private boolean queued;
+        private boolean inFlight;
         private long enqueueTick;
         private long sequence;
         private int coalesced;
@@ -33,6 +56,7 @@ public final class GiDirectDirtyQueue {
     private long nextSequence;
     private long lastTick;
     private int pendingCount;
+    private int inFlightCount;
     private long queued;
     private long coalesced;
     private long completed;
@@ -50,6 +74,10 @@ public final class GiDirectDirtyQueue {
         }
     }
 
+    @Nullable GiDirectSourceEpoch activeEpoch() {
+        return this.epoch;
+    }
+
     /** Drops old scheduled work; the corresponding native output must be considered zero/invalid. */
     public void rotateEpoch(final GiDirectSourceEpoch next) {
         Objects.requireNonNull(next, "next");
@@ -57,15 +85,30 @@ public final class GiDirectDirtyQueue {
             return;
         }
         if (this.epoch != null) {
-            next.requireStrictlyNewerThan(this.epoch);
+            GiDirectSourceEpoch previous = this.epoch;
+            // Matches native headerIsNewerOrEqual/reset exactly: world generation is the root
+            // lifecycle identity, so only a strictly newer world may restart child counters.
+            if (next.g2WorldGeneration() <= previous.g2WorldGeneration()) {
+                try {
+                    next.requireStrictlyNewerThan(previous);
+                } catch (IllegalArgumentException exception) {
+                    throw new IllegalArgumentException(
+                            "G3 source epoch regressed or did not advance; previous="
+                                    + previous + ", next=" + next,
+                            exception
+                    );
+                }
+            }
         }
         for (Pending entry : this.pending) {
-            if (entry.queued) {
+            if (entry.queued || entry.inFlight) {
                 entry.queued = false;
+                entry.inFlight = false;
                 this.discarded++;
             }
         }
         this.pendingCount = 0;
+        this.inFlightCount = 0;
         this.epoch = next;
         this.epochQueued = 0L;
         this.epochCompleted = 0L;
@@ -77,11 +120,12 @@ public final class GiDirectDirtyQueue {
         GiDirectSourceLayout.validateBrickId(brickId);
         advanceTick(tick);
         if (this.epoch == null || !this.epoch.equals(expected)) {
+            this.queued++;
             this.discarded++;
             return OfferResult.STALE;
         }
         Pending entry = this.pending[brickId];
-        if (entry.queued) {
+        if (entry.queued || entry.inFlight) {
             entry.coalesced++;
             this.coalesced++;
             return OfferResult.COALESCED;
@@ -139,30 +183,40 @@ public final class GiDirectDirtyQueue {
                 this.starvationPromotions++;
             }
             entry.queued = false;
+            entry.inFlight = true;
             this.pendingCount--;
+            this.inFlightCount++;
             destination[count] = selected;
         }
         return count;
     }
 
     /** Marks a native-accepted batch complete without allocating per-entry state. */
-    public void completeBatch(
+    public CompletionResult completeBatch(
             final GiDirectSourceEpoch expected,
             final int[] brickIds,
             final int count
     ) {
         Objects.requireNonNull(brickIds, "brickIds");
-        if (this.epoch == null || !this.epoch.equals(expected)
-                || count < 0 || count > brickIds.length
+        if (count < 0 || count > brickIds.length
                 || count > GiDirectSourceLayout.MAX_DRAIN_PER_FRAME) {
             throw new IllegalArgumentException("G3 completed batch does not match the active epoch");
         }
+        if (this.epoch == null || !this.epoch.equals(expected)) {
+            return CompletionResult.STALE_EPOCH;
+        }
+        validateInFlight(brickIds, count);
+        for (int index = 0; index < count; index++) {
+            this.pending[brickIds[index]].inFlight = false;
+        }
+        this.inFlightCount -= count;
         this.completed = Math.addExact(this.completed, count);
         this.epochCompleted = Math.addExact(this.epochCompleted, count);
+        return CompletionResult.COMPLETED;
     }
 
     /** Requeues a transiently rejected batch under the same epoch. */
-    public void retryBatch(
+    public CompletionResult retryBatch(
             final GiDirectSourceEpoch expected,
             final int[] brickIds,
             final int count,
@@ -175,35 +229,44 @@ public final class GiDirectDirtyQueue {
         }
         advanceTick(tick);
         if (this.epoch == null || !this.epoch.equals(expected)) {
-            this.discarded = Math.addExact(this.discarded, count);
-            return;
+            return CompletionResult.STALE_EPOCH;
         }
+        validateInFlight(brickIds, count);
         for (int index = 0; index < count; index++) {
             int brickId = brickIds[index];
             GiDirectSourceLayout.validateBrickId(brickId);
             Pending entry = this.pending[brickId];
-            if (entry.queued) {
-                this.coalesced++;
-                continue;
-            }
+            entry.inFlight = false;
             entry.queued = true;
-            entry.enqueueTick = tick;
-            entry.sequence = this.nextSequence++;
+            // Preserve the original age/sequence so the next bounded drain repeats this
+            // accepted batch ahead of younger backlog instead of silently delaying recovery.
             this.pendingCount++;
         }
+        this.inFlightCount -= count;
+        return CompletionResult.COMPLETED;
     }
 
     public Telemetry telemetry() {
         return new Telemetry(this.queued, this.coalesced, this.completed, this.discarded,
-                this.pendingCount, this.starvationPromotions, this.fullVolumeRebuilds);
+                this.pendingCount, this.inFlightCount,
+                this.starvationPromotions, this.fullVolumeRebuilds);
     }
 
     public EpochTelemetry epochTelemetry() {
         return new EpochTelemetry(
                 this.epochQueued, this.epochCompleted, this.epochDiscarded,
-                this.pendingCount, this.epochFullVolumeEnqueued
+                this.pendingCount, this.inFlightCount, this.epochFullVolumeEnqueued
         );
     }
+
+    /* Package-private primitive view for the render-loop native telemetry packet. */
+    long queuedCount() { return this.queued; }
+    long completedCount() { return this.completed; }
+    long discardedCount() { return this.discarded; }
+    int pendingCount() { return this.pendingCount; }
+    int inFlightCount() { return this.inFlightCount; }
+    int ownedCount() { return Math.addExact(this.pendingCount, this.inFlightCount); }
+    long fullVolumeRebuildCount() { return this.fullVolumeRebuilds; }
 
     private int selectNext(final long tick) {
         int selected = -1;
@@ -217,6 +280,22 @@ public final class GiDirectDirtyQueue {
             }
         }
         return selected;
+    }
+
+    private void validateInFlight(final int[] brickIds, final int count) {
+        for (int index = 0; index < count; index++) {
+            int brickId = brickIds[index];
+            GiDirectSourceLayout.validateBrickId(brickId);
+            Pending entry = this.pending[brickId];
+            if (!entry.inFlight) {
+                throw new IllegalArgumentException("G3 completion does not own the brick");
+            }
+            for (int prior = 0; prior < index; prior++) {
+                if (brickIds[prior] == brickId) {
+                    throw new IllegalArgumentException("G3 completion repeats a brick");
+                }
+            }
+        }
     }
 
     private static boolean before(

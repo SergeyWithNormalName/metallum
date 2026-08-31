@@ -7,6 +7,7 @@ import com.metallum.client.hdr.SceneLinearPreflightGate;
 import com.metallum.client.gi.receiver.GiReceiverBindingAbi;
 import com.metallum.client.gi.receiver.GiReceiverLayout;
 import com.metallum.client.gi.receiver.GiReceiverRuntime;
+import com.metallum.client.gi.live.GiLiveRuntime;
 import com.metallum.client.lighting.reflection.VertexReflectionBindingAbi;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
 import com.metallum.client.lighting.shader.AdvancedDirectLightingShaderPatcher;
@@ -758,7 +759,7 @@ final class MetalCrossShaderCompiler {
             final HdrShaderFlavor flavor,
             final MetalCompiledRenderPipeline.ShaderVariantSource variant
     ) {
-        boolean g5Receiver = GiReceiverRuntime.isRequested()
+        boolean giReceiver = GiReceiverRuntime.isRequested()
                 && isSodiumReflectionTerrainPipeline(pipeline);
         for (MetalCompiledRenderPipeline.ResourceBinding binding : variant.resources()) {
             if (binding.kind() == MetalCompiledRenderPipeline.ResourceKind.UNIFORM_BUFFER
@@ -805,7 +806,8 @@ final class MetalCrossShaderCompiler {
         GiReceiverBindingAbi.validateMsl(
                 variant.vertexMsl(),
                 variant.fragmentMsl(),
-                g5Receiver
+                giReceiver,
+                GiLiveRuntime.isRequested() ? 3 : 1
         );
         String visibilityCacheMarker = "[[buffer("
                 + VoxelShadowBindingAbi.VISIBILITY_CACHE_BUFFER_SLOT + ")]]";
@@ -822,7 +824,7 @@ final class MetalCrossShaderCompiler {
             String marker = "[[buffer(" + slot + ")]]";
             boolean vertexFieldOwnsVoxelParams = slot == VoxelShadowBindingAbi.PARAMS_BUFFER_SLOT
                     && ((VertexReflectionExperiment.isLayoutEnabled()
-                    && isSodiumReflectionTerrainPipeline(pipeline)) || g5Receiver);
+                    && isSodiumReflectionTerrainPipeline(pipeline)) || giReceiver);
             boolean diagnosticProxyRemoved = slot == VoxelShadowBindingAbi.PROXY_BUFFER_SLOT
                     && com.metallum.client.benchmark.DiagnosticAblationMode
                     .getSystemCurrent().l6NoProxy() == 1;
@@ -844,7 +846,7 @@ final class MetalCrossShaderCompiler {
              slot <= VoxelShadowBindingAbi.METADATA_BUFFER_2_SLOT;
              slot++) {
             String marker = "[[buffer(" + slot + ")]]";
-            boolean g5OwnsVertexParams = g5Receiver
+            boolean g5OwnsVertexParams = giReceiver
                     && slot == GiReceiverLayout.PARAMS_BUFFER_SLOT;
             if (variant.fragmentMsl().contains(marker)
                     || (variant.vertexMsl().contains(marker) && !g5OwnsVertexParams)

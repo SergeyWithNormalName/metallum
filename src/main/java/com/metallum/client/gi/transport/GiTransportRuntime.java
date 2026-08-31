@@ -3,6 +3,7 @@ package com.metallum.client.gi.transport;
 import com.metallum.Metallum;
 import com.metallum.client.gi.GiRuntimeStages;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
+import com.metallum.client.gi.live.GiLiveRuntime;
 import com.metallum.client.lighting.EnvironmentDescriptor;
 
 import java.util.Locale;
@@ -15,9 +16,19 @@ public final class GiTransportRuntime {
     private static final boolean BENCHMARK_ACTIVE = isEnabled(
             System.getenv("METALLUM_BENCHMARK")
     );
-    private static final boolean EXPLICITLY_REQUESTED = requested(
-            isEnabled(System.getenv(TRANSPORT_ENV)), GiTransportDebugSettings.isEnabled()
+    /** Restart-stable view of the persisted diagnostic option; never re-read on a live frame. */
+    private static final boolean DEBUG_PREVIEW_REQUESTED = debugPreviewRequested(
+            GiLiveRuntime.isRequested(), BENCHMARK_ACTIVE, GiTransportDebugSettings.isEnabled()
     );
+    // Production G6 owns the same G3 field and must never construct the immutable G4
+    // diagnostic owner alongside it.  The Sodium toggle is the authoritative restart-time
+    // admission; stale diagnostic environment variables are deliberately shadowed here (and
+    // still rejected by the benchmark runner's preflight contract).
+    private static final boolean EXPLICITLY_REQUESTED = !GiLiveRuntime.isRequested()
+            && requested(
+                    isEnabled(System.getenv(TRANSPORT_ENV)),
+                    DEBUG_PREVIEW_REQUESTED
+            );
     private static final boolean REQUESTED = EXPLICITLY_REQUESTED
             || GiRuntimeStages.requiresG4Resources();
     private static final boolean POPULATION_REQUESTED = EXPLICITLY_REQUESTED
@@ -194,7 +205,7 @@ public final class GiTransportRuntime {
     }
 
     public static boolean isDebugPreviewRequested() {
-        return GiTransportDebugSettings.isEnabled() && !BENCHMARK_ACTIVE;
+        return DEBUG_PREVIEW_REQUESTED;
     }
 
     /** Freezes sun/sky input for the immutable interactive debug fixture. */
@@ -239,6 +250,14 @@ public final class GiTransportRuntime {
 
     static boolean requested(final boolean environmentRequested, final boolean debugEnabled) {
         return environmentRequested || debugEnabled;
+    }
+
+    static boolean debugPreviewRequested(
+            final boolean liveGiRequested,
+            final boolean benchmarkActive,
+            final boolean persistedDebugEnabled
+    ) {
+        return !liveGiRequested && !benchmarkActive && persistedDebugEnabled;
     }
 
     static boolean isEnabled(final String value) {

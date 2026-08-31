@@ -1,16 +1,20 @@
 package com.metallum.client.gi;
 
+import com.metallum.client.gi.live.GiLiveRuntime;
+
 import java.util.Locale;
 
 /** Cross-stage admission rules shared by the isolated G5 receiver runtime. */
 public final class GiRuntimeStages {
-    private static final ReceiverRequest ENV_RECEIVER_REQUEST = resolveIsolatedReceiverRequest(
-            System.getenv("METALLUM_GI_G5_RECEIVER"),
-            System.getenv("METALLUM_GI_G5_RECEIVER_ARM"),
-            enabled(System.getenv("METALLUM_GI_G2_CAPTURE")),
-            enabled(System.getenv("METALLUM_GI_G3_INJECT")),
-            enabled(System.getenv("METALLUM_GI_G4_TRANSPORT"))
-    );
+    private static final ReceiverRequest ENV_RECEIVER_REQUEST = GiLiveRuntime.isRequested()
+            ? resolveReceiverRequest(null, null)
+            : resolveIsolatedReceiverRequest(
+                    System.getenv("METALLUM_GI_G5_RECEIVER"),
+                    System.getenv("METALLUM_GI_G5_RECEIVER_ARM"),
+                    enabled(System.getenv("METALLUM_GI_G2_CAPTURE")),
+                    enabled(System.getenv("METALLUM_GI_G3_INJECT")),
+                    enabled(System.getenv("METALLUM_GI_G4_TRANSPORT"))
+            );
 
     public enum ReceiverArm {
         OFF(-1, false, false),

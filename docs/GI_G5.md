@@ -1,9 +1,9 @@
 # GI Stage G5: frozen vertex receiver feasibility
 
-Status: `IMPLEMENTED_PENDING_TIER_B`. G5 has an explicit implementation request,
-but no live dry A/B receipt is claimed by this document. The implementation may
-pass its mechanical contracts while the stage remains pending. G6 is blocked
-until a real, source-bound Tier B ABBA bundle passes the stop-gate below.
+Status: `PASSED_BY_EXPLICIT_USER_DECISION` on 2026-08-29. The user explicitly
+accepted G5, including performance, and opened G6. Visual acceptance was not
+performed and remains pending. No live dry A/B bundle is claimed by this
+document; the decision is recorded as a decision, not reconstructed evidence.
 The P1 carrier audit rejected the earlier packed light/color ownership scheme;
 it is not implementation or benchmark evidence. The only current carrier
 contract is the collision-free packed-position sideband defined below, and all
@@ -326,10 +326,10 @@ or presented as production FPS. Passing this gate supports only receiver
 feasibility. It is not Tier C, G6 live-update acceptance, G7 product acceptance
 or visual signoff.
 
-A result is `PASS_RECEIVER_FEASIBILITY` only when both pairs pass and every raw
+A measured result is `PASS_RECEIVER_FEASIBILITY` only when both pairs pass and every raw
 artifact is complete. Either pair exceeding a bound yields
-`REJECT_DRY_PERFORMANCE_GATE`; G6 remains blocked and G5 is removed or retained
-strictly as field/debug infrastructure.
+`REJECT_DRY_PERFORMANCE_GATE`. This measurement grammar remains the reproducible
+historical G5 gate even though the explicit 2026-08-29 user decision opened G6.
 
 ## Evidence boundary and reproduction
 
@@ -340,9 +340,9 @@ python3 tools/gi_g5_contract.py --root .
 ```
 
 When `benchmark/gi/g5-receiver-evidence-v1.json` is absent, a successful command
-means only `IMPLEMENTED_PENDING_TIER_B`. It must say that live evidence is
-pending and must not synthesize metrics, hashes or a PASS decision. Use
-`--require-evidence` when a caller requires the real Tier B decision.
+means only that the structural implementation is valid. It must not synthesize
+metrics, hashes or visual evidence. Use `--require-evidence` when a caller
+requires the real Tier B bundle rather than the explicit user decision.
 
 An evidence manifest, if added later, must bind the exact commit/source/artifact,
 the four raw reports and recomputed summaries/logs/transcripts, G5 memory census,
@@ -350,8 +350,9 @@ ABBA order and both pair deltas. The contract rejects a pending/final decision
 that is not backed by those files. Historical G4 raw receipts and
 `benchmark/gi/g4-transport-evidence-v1.json` remain unchanged.
 
-Before claiming G5 complete, also run the focused receiver CPU/runtime/shader
-tests, source-compiled and bundled validation, generated MSL inspection for all
+The explicit user decision is the stage-completion authority for G6 sequencing.
+It does not replace focused receiver CPU/runtime/shader tests, source-compiled
+and bundled validation, generated MSL inspection for all
 terrain variants, the existing G0-G4 contracts and the full project `check`.
 Those mechanical results do not replace the dry ABBA gate or a manual `field`
 inspection of the frozen red-wall/white-floor, zero-source and sealed-wall

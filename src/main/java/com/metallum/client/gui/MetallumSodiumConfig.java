@@ -16,6 +16,7 @@ import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.metalfx.MetalFxUpscalingMode;
 import com.metallum.client.metalfx.SpatialScalingMode;
 import com.metallum.client.metalfx.TemporalScalingMode;
+import com.metallum.client.renderer.GlobalIlluminationMode;
 import com.metallum.client.renderer.LightingPreset;
 import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.renderer.style.VisualStyle;
@@ -23,9 +24,11 @@ import com.metallum.client.renderer.style.VisualStyleRuntime;
 import com.metallum.client.voxel.VoxelPreviewMode;
 import com.metallum.client.voxel.VoxelPreviewSettings;
 import net.caffeinemc.mods.sodium.api.config.ConfigEntryPoint;
+import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
 import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.api.config.structure.ConfigBuilder;
+import net.caffeinemc.mods.sodium.client.config.structure.Config;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.client.Minecraft;
@@ -81,6 +84,9 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                                     MetallumSodiumConfig::setImprovedLighting,
                                     () -> RendererConfig.load().improvedLighting()
                             )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
                     )
                     .addOption(builder.createEnumOption(
                                 Identifier.fromNamespaceAndPath("metallum", "lighting_preset"),
@@ -106,7 +112,27 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                     )
                 )
                 .addOptionGroup(builder.createOptionGroup()
-                    .setName(Component.translatable("metallum.options.group.gi_debug"))
+                    .setName(Component.translatable("metallum.options.group.global_illumination"))
+                    .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                    "metallum", "global_illumination"
+                            ))
+                            .setStorageHandler(STORAGE_HANDLER)
+                            .setName(Component.translatable(
+                                    "metallum.options.global_illumination.name"
+                            ))
+                            .setTooltip(Component.translatable(
+                                    "metallum.options.global_illumination.tooltip"
+                            ))
+                            .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
+                            .setDefaultValue(false)
+                            .setBinding(
+                                    MetallumSodiumConfig::setGlobalIllumination,
+                                    () -> RendererConfig.load().globalIllumination().isDynamic()
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                            )
+                    )
                     .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
                                     "metallum", "gi_g4_debug_hud"
                             ))
@@ -120,8 +146,11 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
                             .setFlags(OptionFlag.REQUIRES_GAME_RESTART)
                             .setDefaultValue(false)
                             .setBinding(
-                                    GiTransportDebugSettings::setEnabled,
+                                    MetallumSodiumConfig::setGiTransportDebugEnabled,
                                     GiTransportDebugSettings::isEnabled
+                            )
+                            .setApplyHook(
+                                    MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
                             )
                     )
                 )
@@ -513,7 +542,7 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
     }
 
     private static void setImprovedLighting(final boolean enabled) {
-        RendererConfig.load().withImprovedLighting(enabled).save();
+        applyImprovedLightingSelection(RendererConfig.load(), enabled).save();
     }
 
     private static void setLightingPreset(final LightingPreset preset) {
@@ -526,6 +555,57 @@ public class MetallumSodiumConfig implements ConfigEntryPoint {
 
     private static void setVoxelDebugChecksum(final boolean enabled) {
         RendererConfig.load().withVoxelDebugChecksum(enabled).save();
+    }
+
+    private static void setGlobalIllumination(final boolean enabled) {
+        if (enabled) {
+            // Safe ordering: a failed production-config write may leave GI off, never overlapping
+            // the standalone frozen G4 diagnostic on the next launch.
+            GiTransportDebugSettings.setEnabled(false);
+        }
+        applyGlobalIlluminationSelection(RendererConfig.load(), enabled).save();
+    }
+
+    private static void setGiTransportDebugEnabled(final boolean enabled) {
+        if (enabled) {
+            // The standalone frozen G4 route and production G6 share owners but have incompatible
+            // admission semantics. Persist GI_OFF before enabling the diagnostic.
+            applyGlobalIlluminationSelection(RendererConfig.load(), false).save();
+        }
+        GiTransportDebugSettings.setEnabled(enabled);
+    }
+
+    /**
+     * The three GI policy bindings intentionally update one another. Sodium snapshots each
+     * option before the screen opens and otherwise refreshes only the option whose binding was
+     * saved, so those policy side effects would leave the still-open screen stale after Apply.
+     * Apply hooks run after every changed binding has been saved; reload the completed state once
+     * that transaction is visible rather than mutating sibling controls mid-apply.
+     */
+    static void resynchronizeCoupledSodiumBindings(final ConfigState state) {
+        if (state instanceof Config config) {
+            config.resetAllOptionsFromBindings();
+        }
+    }
+
+    static RendererConfig applyImprovedLightingSelection(
+            final RendererConfig current,
+            final boolean enabled
+    ) {
+        RendererConfig updated = current.withImprovedLighting(enabled);
+        return enabled
+                ? updated
+                : updated.withGlobalIllumination(GlobalIlluminationMode.OFF);
+    }
+
+    static RendererConfig applyGlobalIlluminationSelection(
+            final RendererConfig current,
+            final boolean enabled
+    ) {
+        RendererConfig updated = current.withGlobalIllumination(
+                enabled ? GlobalIlluminationMode.DYNAMIC : GlobalIlluminationMode.OFF
+        );
+        return enabled ? updated.withImprovedLighting(true) : updated;
     }
 
     private static void updateConfig(java.util.function.Function<HdrConfig, HdrConfig> updater) {

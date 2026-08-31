@@ -38,6 +38,7 @@ DIMENSION_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 BLOCK_ID_RE = re.compile(r"[a-z0-9_.-]+:[a-z0-9/._-]+")
 OPTION_BARE_RE = re.compile(r"[A-Za-z0-9_.+/-]+")
 PROPERTY_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9._-]*")
+G6_MATRIX_MEASURE_FRAMES = 3600
 
 
 class FixtureError(ValueError):
@@ -657,10 +658,10 @@ def _renderer_properties(
     }
     if schema_version == 3:
         global_illumination = expected.get("globalIllumination")
-        if global_illumination != "off":
+        if global_illumination not in {"off", "dynamic"}:
             raise FixtureError(
                 "benchmark settings renderer_properties.globalIllumination "
-                "must be off during Stage G0"
+                "must be off or dynamic"
             )
         result["globalIllumination"] = global_illumination
     return result
@@ -1168,7 +1169,7 @@ def route_values(path: Path) -> list[str]:
         raise FixtureError(f"cannot read route {path}: {error}") from error
     route = _object(payload, "root")
     schema_version = _integer(route.get("schema_version"), "schema_version", 1)
-    if schema_version not in (1, 2, 3, 4):
+    if schema_version not in (1, 2, 3, 4, 5):
         raise FixtureError("unsupported route schema_version")
     root_keys = {
         "schema_version", "id", "fixture", "player", "dimension",
@@ -1179,6 +1180,8 @@ def route_values(path: Path) -> list[str]:
         root_keys.add("torch_epoch")
     if schema_version == 4:
         root_keys.add("l6_dynamic_shadow")
+    if schema_version == 5:
+        root_keys.add("gi_g6_matrix")
     _exact_keys(route, "root", root_keys)
     route_id = _string(route.get("id"), "id", SAFE_ID_RE)
     fixture = _object(route.get("fixture"), "fixture")
@@ -1276,6 +1279,372 @@ def route_values(path: Path) -> list[str]:
     ]
     if schema_version == 1:
         return values
+
+    if schema_version == 5:
+        if dimension != "minecraft:overworld":
+            raise FixtureError("route GI G6 matrix must start in minecraft:overworld")
+        matrix = _object(route.get("gi_g6_matrix"), "gi_g6_matrix")
+        _exact_keys(
+            matrix,
+            "gi_g6_matrix",
+            {
+                "stationary_source", "lava", "camera_orbit",
+                "chunk_reload_after_measured_frames",
+                "resource_reload_after_measured_frames", "day", "night",
+                "rain_after_measured_frames", "clear_after_measured_frames",
+                "chunk_stream", "far_teleport", "nether_round_trip",
+            },
+        )
+
+        stationary_source = _object(
+            matrix.get("stationary_source"), "gi_g6_matrix.stationary_source"
+        )
+        _exact_keys(
+            stationary_source,
+            "gi_g6_matrix.stationary_source",
+            {"held_item", "entity_item", "entity_position"},
+        )
+        held_item = _string(
+            stationary_source.get("held_item"),
+            "gi_g6_matrix.stationary_source.held_item",
+            BLOCK_ID_RE,
+        )
+        entity_item = _string(
+            stationary_source.get("entity_item"),
+            "gi_g6_matrix.stationary_source.entity_item",
+            BLOCK_ID_RE,
+        )
+        if held_item != "minecraft:torch" or entity_item != "minecraft:torch":
+            raise FixtureError("route GI G6 matrix stationary sources must both be minecraft:torch")
+        entity_position = stationary_source.get("entity_position")
+        if not isinstance(entity_position, list) or len(entity_position) != 3:
+            raise FixtureError(
+                "route gi_g6_matrix.stationary_source.entity_position must contain three numbers"
+            )
+        entity_x, entity_y, entity_z = (
+            _number(
+                value,
+                f"gi_g6_matrix.stationary_source.entity_position[{index}]",
+            )
+            for index, value in enumerate(entity_position)
+        )
+
+        lava = _object(matrix.get("lava"), "gi_g6_matrix.lava")
+        _exact_keys(
+            lava,
+            "gi_g6_matrix.lava",
+            {
+                "position", "initial_block", "apply_after_measured_frames",
+                "remove_after_measured_frames",
+            },
+        )
+        lava_position = lava.get("position")
+        if not isinstance(lava_position, list) or len(lava_position) != 3:
+            raise FixtureError("route gi_g6_matrix.lava.position must contain three integers")
+        lava_x, lava_y, lava_z = (
+            _signed_integer(value, f"gi_g6_matrix.lava.position[{index}]")
+            for index, value in enumerate(lava_position)
+        )
+        lava_initial_block = _string(
+            lava.get("initial_block"), "gi_g6_matrix.lava.initial_block", BLOCK_ID_RE
+        )
+        if lava_initial_block != "minecraft:air":
+            raise FixtureError("route gi_g6_matrix.lava.initial_block must be minecraft:air")
+        lava_apply_frame = _integer(
+            lava.get("apply_after_measured_frames"),
+            "gi_g6_matrix.lava.apply_after_measured_frames",
+            1,
+        )
+        lava_remove_frame = _integer(
+            lava.get("remove_after_measured_frames"),
+            "gi_g6_matrix.lava.remove_after_measured_frames",
+            1,
+        )
+
+        camera_orbit = _object(
+            matrix.get("camera_orbit"), "gi_g6_matrix.camera_orbit"
+        )
+        _exact_keys(
+            camera_orbit,
+            "gi_g6_matrix.camera_orbit",
+            {
+                "start_after_measured_frames", "end_after_measured_frames",
+                "yaw_amplitude_degrees", "pitch_amplitude_degrees", "period_frames",
+            },
+        )
+        orbit_start_frame = _integer(
+            camera_orbit.get("start_after_measured_frames"),
+            "gi_g6_matrix.camera_orbit.start_after_measured_frames",
+            1,
+        )
+        orbit_end_frame = _integer(
+            camera_orbit.get("end_after_measured_frames"),
+            "gi_g6_matrix.camera_orbit.end_after_measured_frames",
+            1,
+        )
+        orbit_yaw_amplitude = _number(
+            camera_orbit.get("yaw_amplitude_degrees"),
+            "gi_g6_matrix.camera_orbit.yaw_amplitude_degrees",
+        )
+        orbit_pitch_amplitude = _number(
+            camera_orbit.get("pitch_amplitude_degrees"),
+            "gi_g6_matrix.camera_orbit.pitch_amplitude_degrees",
+        )
+        orbit_period = _integer(
+            camera_orbit.get("period_frames"),
+            "gi_g6_matrix.camera_orbit.period_frames",
+            1,
+        )
+        if not 0.0 < orbit_yaw_amplitude <= 45.0:
+            raise FixtureError("route GI G6 matrix yaw amplitude must be in (0, 45]")
+        if not 0.0 < orbit_pitch_amplitude <= 30.0:
+            raise FixtureError("route GI G6 matrix pitch amplitude must be in (0, 30]")
+        if orbit_period < 60 or orbit_period % 60 != 0:
+            raise FixtureError("route GI G6 matrix orbit period must be a multiple of 60")
+        if orbit_end_frame <= orbit_start_frame \
+                or (orbit_end_frame - orbit_start_frame) % orbit_period != 0:
+            raise FixtureError("route GI G6 matrix orbit window must contain whole periods")
+
+        chunk_reload_frame = _integer(
+            matrix.get("chunk_reload_after_measured_frames"),
+            "gi_g6_matrix.chunk_reload_after_measured_frames",
+            1,
+        )
+        resource_reload_frame = _integer(
+            matrix.get("resource_reload_after_measured_frames"),
+            "gi_g6_matrix.resource_reload_after_measured_frames",
+            1,
+        )
+
+        day = _object(matrix.get("day"), "gi_g6_matrix.day")
+        _exact_keys(day, "gi_g6_matrix.day", {"apply_after_measured_frames", "total_ticks"})
+        day_frame = _integer(
+            day.get("apply_after_measured_frames"),
+            "gi_g6_matrix.day.apply_after_measured_frames",
+            1,
+        )
+        day_ticks = _integer(day.get("total_ticks"), "gi_g6_matrix.day.total_ticks")
+        night = _object(matrix.get("night"), "gi_g6_matrix.night")
+        _exact_keys(
+            night,
+            "gi_g6_matrix.night",
+            {"apply_after_measured_frames", "total_ticks"},
+        )
+        night_frame = _integer(
+            night.get("apply_after_measured_frames"),
+            "gi_g6_matrix.night.apply_after_measured_frames",
+            1,
+        )
+        night_ticks = _integer(
+            night.get("total_ticks"), "gi_g6_matrix.night.total_ticks"
+        )
+        if day_ticks >= 12000 or night_ticks < 12000:
+            raise FixtureError("route GI G6 matrix day/night ticks do not select distinct phases")
+
+        rain_frame = _integer(
+            matrix.get("rain_after_measured_frames"),
+            "gi_g6_matrix.rain_after_measured_frames",
+            1,
+        )
+        clear_frame = _integer(
+            matrix.get("clear_after_measured_frames"),
+            "gi_g6_matrix.clear_after_measured_frames",
+            1,
+        )
+
+        chunk_stream = _object(
+            matrix.get("chunk_stream"), "gi_g6_matrix.chunk_stream"
+        )
+        _exact_keys(
+            chunk_stream,
+            "gi_g6_matrix.chunk_stream",
+            {"start_after_measured_frames", "step_frames", "offsets", "y_offsets"},
+        )
+        stream_start_frame = _integer(
+            chunk_stream.get("start_after_measured_frames"),
+            "gi_g6_matrix.chunk_stream.start_after_measured_frames",
+            1,
+        )
+        stream_step_frames = _integer(
+            chunk_stream.get("step_frames"),
+            "gi_g6_matrix.chunk_stream.step_frames",
+            1,
+        )
+        stream_offsets_raw = chunk_stream.get("offsets")
+        if not isinstance(stream_offsets_raw, list) or len(stream_offsets_raw) != 8:
+            raise FixtureError("route GI G6 matrix chunk stream must contain exactly 8 offsets")
+        stream_offsets = [
+            _signed_integer(value, f"gi_g6_matrix.chunk_stream.offsets[{index}]")
+            for index, value in enumerate(stream_offsets_raw)
+        ]
+        stream_y_offsets_raw = chunk_stream.get("y_offsets")
+        if not isinstance(stream_y_offsets_raw, list) or len(stream_y_offsets_raw) != 8:
+            raise FixtureError(
+                "route GI G6 matrix chunk stream must contain exactly 8 y offsets"
+            )
+        stream_y_offsets = [
+            _signed_integer(value, f"gi_g6_matrix.chunk_stream.y_offsets[{index}]")
+            for index, value in enumerate(stream_y_offsets_raw)
+        ]
+        if stream_step_frames < 40 or stream_step_frames > 60 \
+                or stream_offsets[-1] != 0 \
+                or stream_y_offsets[-1] != 0 \
+                or max(abs(value) for value in stream_offsets) < 32 \
+                or any(abs(value) > 64 for value in stream_offsets) \
+                or any(abs(value) > 64 for value in stream_y_offsets):
+            raise FixtureError("route GI G6 matrix chunk stream is not a bounded rapid round trip")
+        stream_end_frame = stream_start_frame + stream_step_frames * (len(stream_offsets) - 1)
+
+        far_teleport = _object(
+            matrix.get("far_teleport"), "gi_g6_matrix.far_teleport"
+        )
+        _exact_keys(
+            far_teleport,
+            "gi_g6_matrix.far_teleport",
+            {
+                "apply_after_measured_frames", "target_offset",
+                "return_after_measured_frames",
+            },
+        )
+        teleport_frame = _integer(
+            far_teleport.get("apply_after_measured_frames"),
+            "gi_g6_matrix.far_teleport.apply_after_measured_frames",
+            1,
+        )
+        teleport_offset = far_teleport.get("target_offset")
+        if not isinstance(teleport_offset, list) or len(teleport_offset) != 3:
+            raise FixtureError("route GI G6 matrix far teleport offset must contain three integers")
+        teleport_x, teleport_y, teleport_z = (
+            _signed_integer(value, f"gi_g6_matrix.far_teleport.target_offset[{index}]")
+            for index, value in enumerate(teleport_offset)
+        )
+        if max(abs(teleport_x), abs(teleport_z)) < 256:
+            raise FixtureError("route GI G6 matrix far teleport must cross at least 256 blocks")
+        teleport_return_frame = _integer(
+            far_teleport.get("return_after_measured_frames"),
+            "gi_g6_matrix.far_teleport.return_after_measured_frames",
+            1,
+        )
+
+        nether_round_trip = _object(
+            matrix.get("nether_round_trip"), "gi_g6_matrix.nether_round_trip"
+        )
+        _exact_keys(
+            nether_round_trip,
+            "gi_g6_matrix.nether_round_trip",
+            {
+                "enter_after_measured_frames", "position",
+                "return_after_measured_frames",
+            },
+        )
+        nether_enter_frame = _integer(
+            nether_round_trip.get("enter_after_measured_frames"),
+            "gi_g6_matrix.nether_round_trip.enter_after_measured_frames",
+            1,
+        )
+        nether_position = nether_round_trip.get("position")
+        if not isinstance(nether_position, list) or len(nether_position) != 3:
+            raise FixtureError("route GI G6 matrix Nether position must contain three integers")
+        nether_x, nether_y, nether_z = (
+            _signed_integer(value, f"gi_g6_matrix.nether_round_trip.position[{index}]")
+            for index, value in enumerate(nether_position)
+        )
+        nether_return_frame = _integer(
+            nether_round_trip.get("return_after_measured_frames"),
+            "gi_g6_matrix.nether_round_trip.return_after_measured_frames",
+            1,
+        )
+
+        ordered_events = [
+            orbit_start_frame, orbit_end_frame, lava_apply_frame, lava_remove_frame,
+            chunk_reload_frame, resource_reload_frame, day_frame, night_frame,
+            rain_frame, clear_frame, stream_start_frame, stream_end_frame,
+            teleport_frame, teleport_return_frame, nether_enter_frame,
+            nether_return_frame,
+        ]
+        if any(current >= following for current, following in zip(ordered_events, ordered_events[1:])):
+            raise FixtureError("route GI G6 matrix events must be strictly ordered and non-overlapping")
+        if nether_return_frame > G6_MATRIX_MEASURE_FRAMES:
+            raise FixtureError(
+                "route GI G6 matrix must complete within 3600 measured frames"
+            )
+        if resource_reload_frame - chunk_reload_frame < 270 \
+                or day_frame - resource_reload_frame < 270:
+            raise FixtureError(
+                "route GI G6 matrix reload recovery gaps must be at least 270 measured frames"
+            )
+        static_recovery_gaps = (
+            night_frame - day_frame,
+            rain_frame - night_frame,
+            clear_frame - rain_frame,
+            stream_start_frame - clear_frame,
+        )
+        if any(gap < 200 for gap in static_recovery_gaps):
+            raise FixtureError(
+                "route GI G6 matrix static recovery gaps must be at least 200 measured frames"
+            )
+        if teleport_frame - stream_end_frame < 60:
+            raise FixtureError(
+                "route GI G6 matrix final stream recovery gap must be at least 60 measured frames"
+            )
+        if teleport_return_frame - teleport_frame < 260:
+            raise FixtureError(
+                "route GI G6 matrix teleport stabilization gap must be at least 260 measured frames"
+            )
+        if nether_enter_frame - teleport_return_frame < 190:
+            raise FixtureError(
+                "route GI G6 matrix reset handoff gap must be at least 190 measured frames"
+            )
+        dimension_recovery_gaps = (
+            nether_return_frame - nether_enter_frame,
+            G6_MATRIX_MEASURE_FRAMES - nether_return_frame,
+        )
+        if any(gap < 470 for gap in dimension_recovery_gaps):
+            raise FixtureError(
+                "route GI G6 matrix dimension recovery gaps and final tail must be at least 470 measured frames"
+            )
+
+        return values + [
+            "GI_G6_MATRIX",
+            held_item,
+            entity_item,
+            repr(entity_x),
+            repr(entity_y),
+            repr(entity_z),
+            str(lava_x),
+            str(lava_y),
+            str(lava_z),
+            lava_initial_block,
+            str(lava_apply_frame),
+            str(lava_remove_frame),
+            str(orbit_start_frame),
+            str(orbit_end_frame),
+            repr(orbit_yaw_amplitude),
+            repr(orbit_pitch_amplitude),
+            str(orbit_period),
+            str(chunk_reload_frame),
+            str(resource_reload_frame),
+            str(day_frame),
+            str(day_ticks),
+            str(night_frame),
+            str(night_ticks),
+            str(rain_frame),
+            str(clear_frame),
+            str(stream_start_frame),
+            str(stream_step_frames),
+            *(str(value) for value in stream_offsets),
+            *(str(value) for value in stream_y_offsets),
+            str(teleport_frame),
+            str(teleport_x),
+            str(teleport_y),
+            str(teleport_z),
+            str(teleport_return_frame),
+            str(nether_enter_frame),
+            str(nether_x),
+            str(nether_y),
+            str(nether_z),
+            str(nether_return_frame),
+        ]
 
     if schema_version == 4:
         dynamic_shadow = _object(route.get("l6_dynamic_shadow"), "l6_dynamic_shadow")
@@ -1602,6 +1971,68 @@ def self_test() -> None:
             "4", "3.0", "65.0", "-4.0", "2.0", "0.35", "120",
         ]
 
+        g6_matrix_route_payload = json.loads(route.read_text(encoding="utf-8"))
+        g6_matrix_route_payload["schema_version"] = 5
+        g6_matrix_route_payload["id"] = "test-gi-g6-matrix-v1"
+        g6_matrix_route_payload["gi_g6_matrix"] = {
+            "stationary_source": {
+                "held_item": "minecraft:torch",
+                "entity_item": "minecraft:torch",
+                "entity_position": [3.5, 65.0, -4.0],
+            },
+            "lava": {
+                "position": [0, 65, -16],
+                "initial_block": "minecraft:air",
+                "apply_after_measured_frames": 300,
+                "remove_after_measured_frames": 420,
+            },
+            "camera_orbit": {
+                "start_after_measured_frames": 30,
+                "end_after_measured_frames": 270,
+                "yaw_amplitude_degrees": 30.0,
+                "pitch_amplitude_degrees": 10.0,
+                "period_frames": 120,
+            },
+            "chunk_reload_after_measured_frames": 490,
+            "resource_reload_after_measured_frames": 760,
+            "day": {"apply_after_measured_frames": 1030, "total_ticks": 1000},
+            "night": {"apply_after_measured_frames": 1230, "total_ticks": 13000},
+            "rain_after_measured_frames": 1430,
+            "clear_after_measured_frames": 1630,
+            "chunk_stream": {
+                "start_after_measured_frames": 1830,
+                "step_frames": 40,
+                "offsets": [8, 16, 24, 32, 24, 16, 8, 0],
+                "y_offsets": [1, 0, -1, -1, -1, 0, 1, 0],
+            },
+            "far_teleport": {
+                "apply_after_measured_frames": 2170,
+                "target_offset": [320, 32, 0],
+                "return_after_measured_frames": 2430,
+            },
+            "nether_round_trip": {
+                "enter_after_measured_frames": 2620,
+                "position": [0, 96, 0],
+                "return_after_measured_frames": 3090,
+            },
+        }
+        g6_matrix_route = root / "g6-matrix-route.json"
+        g6_matrix_route.write_text(
+            json.dumps(g6_matrix_route_payload), encoding="utf-8"
+        )
+        g6_matrix_values = route_values(g6_matrix_route)
+        assert g6_matrix_values[0] == "test-gi-g6-matrix-v1"
+        assert len(g6_matrix_values) == 72
+        assert g6_matrix_values[19:] == [
+            "GI_G6_MATRIX", "minecraft:torch", "minecraft:torch",
+            "3.5", "65.0", "-4.0", "0", "65", "-16", "minecraft:air",
+            "300", "420", "30", "270", "30.0", "10.0", "120",
+            "490", "760", "1030", "1000", "1230", "13000", "1430", "1630",
+            "1830", "40", "8", "16", "24", "32", "24", "16", "8", "0",
+            "1", "0", "-1", "-1", "-1", "0", "1", "0",
+            "2170", "320", "32", "0", "2430", "2620", "0", "96", "0", "3090",
+        ]
+
         invalid_route = root / "invalid-route.json"
 
         def expect_route_error(payload: dict[str, object], expected: str) -> None:
@@ -1636,6 +2067,100 @@ def self_test() -> None:
         invalid_l6_route = json.loads(json.dumps(l6_route_payload))
         invalid_l6_route["l6_dynamic_shadow"]["entity_probes"]["count"] = 3
         expect_route_error(invalid_l6_route, "exactly 4")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"]["offsets"].pop()
+        expect_route_error(invalid_g6_matrix_route, "exactly 8 offsets")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"]["y_offsets"].pop()
+        expect_route_error(invalid_g6_matrix_route, "exactly 8 y offsets")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"]["y_offsets"][-1] = 1
+        expect_route_error(invalid_g6_matrix_route, "bounded rapid round trip")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"]["step_frames"] = 39
+        expect_route_error(invalid_g6_matrix_route, "bounded rapid round trip")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"]["step_frames"] = 61
+        expect_route_error(invalid_g6_matrix_route, "bounded rapid round trip")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["far_teleport"][
+            "apply_after_measured_frames"
+        ] = 2169
+        expect_route_error(invalid_g6_matrix_route, "final stream recovery gap")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["far_teleport"][
+            "apply_after_measured_frames"
+        ] = 1900
+        expect_route_error(invalid_g6_matrix_route, "strictly ordered")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["nether_round_trip"][
+            "return_after_measured_frames"
+        ] = 3601
+        expect_route_error(invalid_g6_matrix_route, "within 3600 measured frames")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"][
+            "resource_reload_after_measured_frames"
+        ] = 759
+        expect_route_error(invalid_g6_matrix_route, "reload recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["day"][
+            "apply_after_measured_frames"
+        ] = 1029
+        expect_route_error(invalid_g6_matrix_route, "reload recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["night"][
+            "apply_after_measured_frames"
+        ] = 1229
+        expect_route_error(invalid_g6_matrix_route, "static recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["rain_after_measured_frames"] = 1429
+        expect_route_error(invalid_g6_matrix_route, "static recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["clear_after_measured_frames"] = 1629
+        expect_route_error(invalid_g6_matrix_route, "static recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["chunk_stream"][
+            "start_after_measured_frames"
+        ] = 1829
+        expect_route_error(invalid_g6_matrix_route, "static recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["far_teleport"][
+            "return_after_measured_frames"
+        ] = 2429
+        expect_route_error(invalid_g6_matrix_route, "teleport stabilization gap")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["nether_round_trip"][
+            "enter_after_measured_frames"
+        ] = 2619
+        expect_route_error(invalid_g6_matrix_route, "reset handoff gap")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["nether_round_trip"][
+            "return_after_measured_frames"
+        ] = 3089
+        expect_route_error(invalid_g6_matrix_route, "dimension recovery gaps")
+
+        invalid_g6_matrix_route = json.loads(json.dumps(g6_matrix_route_payload))
+        invalid_g6_matrix_route["gi_g6_matrix"]["nether_round_trip"][
+            "return_after_measured_frames"
+        ] = 3131
+        expect_route_error(invalid_g6_matrix_route, "final tail")
 
         options = root / "options.txt"
         options.write_text(
@@ -1897,6 +2422,28 @@ def self_test() -> None:
             assert "renderer property globalIllumination differs" in str(error)
         else:
             raise AssertionError("GI_ON runtime setting was accepted by the G0 profile")
+
+        gi_live_settings_payload = json.loads(g0_settings.read_text(encoding="utf-8"))
+        gi_live_settings_payload["id"] = "test-gi-live-v1"
+        gi_live_settings_payload["renderer_properties"]["improvedLighting"] = "true"
+        gi_live_settings_payload["renderer_properties"]["globalIllumination"] = "dynamic"
+        gi_live_settings = root / "gi-live-settings.json"
+        gi_live_settings.write_text(
+            json.dumps(gi_live_settings_payload), encoding="utf-8"
+        )
+        renderer.write_text(
+            "schemaVersion=5\nimprovedLighting=true\nlightingPreset=balanced\n"
+            "frameInterpolation=false\nglobalIllumination=dynamic\n",
+            encoding="utf-8",
+        )
+        gi_live_output = settings_values(
+            gi_live_settings, options, hdr, metalfx,
+            sodium_options, sodium_mixins, resourcepacks, fabric_default_packs,
+            renderer, temporal,
+        )
+        assert len(gi_live_output) == 34 and gi_live_output[-3:] == [
+            "true", "balanced", "dynamic",
+        ]
     print("metal benchmark fixture self-test passed")
 
 

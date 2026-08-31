@@ -11,6 +11,7 @@ import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteOrder;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
 
@@ -224,6 +225,23 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
             final int dirtyBrickCount,
             final AdvancedLight[] sourceScratch
     ) {
+        return prepare(
+                epoch, field, environment, registry, null,
+                dirtyBricks, dirtyBrickCount, sourceScratch
+        );
+    }
+
+    /** G6 overload merging an exact dynamic publication into the existing fixed source packet. */
+    public PreparedBatch prepare(
+            final GiDirectSourceEpoch epoch,
+            final GiSemanticDirectFieldView field,
+            final GiEnvironmentSource environment,
+            final AdvancedLightRegistry registry,
+            final @Nullable GiDynamicSourceSnapshot dynamicSources,
+            final int[] dirtyBricks,
+            final int dirtyBrickCount,
+            final AdvancedLight[] sourceScratch
+    ) {
         assertUsable();
         Objects.requireNonNull(epoch, "epoch");
         Objects.requireNonNull(field, "field");
@@ -243,6 +261,12 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                 || field.contentGeneration() != epoch.g2ContentGeneration()
                 || environment.epoch() != epoch.environmentEpoch()) {
             throw new IllegalArgumentException("G3 source inputs do not match their epoch");
+        }
+        if (dynamicSources != null
+                && !dynamicSources.epoch().world().equals(epoch.staticLightWorld())) {
+            throw new IllegalArgumentException(
+                    "G6 dynamic-source publication does not match the G3 world"
+            );
         }
 
         this.header.fill((byte) 0);
@@ -293,6 +317,12 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                     (double) minZ + span,
                     sourceScratch, 0, GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK
             );
+            selected = mergeDynamicSourcesForBrick(
+                    dynamicSources,
+                    minX, minY, minZ,
+                    (double) minX + span, (double) minY + span, (double) minZ + span,
+                    sourceScratch, selected
+            );
 
             long brickOffset = (long) batchIndex * BRICK_BYTES;
             this.bricks.asSlice(brickOffset, BRICK_BYTES).fill((byte) 0);
@@ -339,6 +369,107 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         );
     }
 
+    /**
+     * Allocation-free camera-independent merge shared by live preparation and focused CPU tests.
+     * The destination prefix remains globally ordered and deduplicated by stable source ID.
+     */
+    static int mergeDynamicSourcesForBrick(
+            final @Nullable GiDynamicSourceSnapshot dynamicSources,
+            final double minX,
+            final double minY,
+            final double minZ,
+            final double maxX,
+            final double maxY,
+            final double maxZ,
+            final AdvancedLight[] destination,
+            final int staticSourceCount
+    ) {
+        if (!Double.isFinite(minX) || !Double.isFinite(minY) || !Double.isFinite(minZ)
+                || !Double.isFinite(maxX) || !Double.isFinite(maxY)
+                || !Double.isFinite(maxZ) || minX > maxX || minY > maxY || minZ > maxZ) {
+            throw new IllegalArgumentException("G6 dynamic-source brick bounds are invalid");
+        }
+        if (destination == null || staticSourceCount < 0
+                || staticSourceCount > GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK
+                || destination.length < GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK) {
+            throw new IllegalArgumentException("G6 dynamic-source destination is invalid");
+        }
+        int selected = 0;
+        for (int index = 0; index < staticSourceCount; index++) {
+            selected = offerSourceTopK(destination, selected, destination[index]);
+        }
+        if (dynamicSources == null) {
+            return selected;
+        }
+        List<AdvancedLight> sources = dynamicSources.sources();
+        for (int index = 0; index < sources.size(); index++) {
+            AdvancedLight source = sources.get(index);
+            if (intersectsSphere(source, minX, minY, minZ, maxX, maxY, maxZ)) {
+                selected = offerSourceTopK(destination, selected, source);
+            }
+        }
+        return selected;
+    }
+
+    private static int offerSourceTopK(
+            final AdvancedLight[] destination,
+            int selected,
+            final AdvancedLight source
+    ) {
+        Objects.requireNonNull(source, "source");
+        for (int index = 0; index < selected; index++) {
+            if (destination[index].stableId() != source.stableId()) {
+                continue;
+            }
+            if (AdvancedLight.PRIORITY_ORDER.compare(source, destination[index]) >= 0) {
+                return selected;
+            }
+            int copyCount = selected - index - 1;
+            if (copyCount > 0) {
+                System.arraycopy(destination, index + 1, destination, index, copyCount);
+            }
+            destination[--selected] = null;
+            break;
+        }
+
+        int insertion = 0;
+        while (insertion < selected
+                && AdvancedLight.PRIORITY_ORDER.compare(destination[insertion], source) <= 0) {
+            insertion++;
+        }
+        int capacity = GiDirectSourceLayout.MAX_STATIC_SOURCES_PER_BRICK;
+        if (insertion >= capacity) {
+            return selected;
+        }
+        int nextCount = Math.min(capacity, selected + 1);
+        int copyCount = nextCount - insertion - 1;
+        if (copyCount > 0) {
+            System.arraycopy(
+                    destination, insertion,
+                    destination, insertion + 1,
+                    copyCount
+            );
+        }
+        destination[insertion] = source;
+        return nextCount;
+    }
+
+    static boolean intersectsSphere(
+            final AdvancedLight source,
+            final double minX,
+            final double minY,
+            final double minZ,
+            final double maxX,
+            final double maxY,
+            final double maxZ
+    ) {
+        double dx = Math.max(minX, Math.min(maxX, source.x())) - source.x();
+        double dy = Math.max(minY, Math.min(maxY, source.y())) - source.y();
+        double dz = Math.max(minZ, Math.min(maxZ, source.z())) - source.z();
+        return dx * dx + dy * dy + dz * dz
+                <= (double) source.radius() * source.radius();
+    }
+
     public int encode(
             final MemorySegment commandBuffer,
             final MemorySegment fence,
@@ -349,6 +480,50 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         return MetalNativeBridge.metallum_gi_direct_source_encode_dirty_v1(
                 this.context, commandBuffer, fence,
                 batch.header(), batch.bricks(), batch.cells(), batch.sources());
+    }
+
+    /**
+     * Allocation-free zero-dirty epoch adoption. Native validates that the ready field has the
+     * exact same structural origins and environment payload before changing metadata only.
+     */
+    public int relabelMetadataOnly(
+            final GiDirectSourceEpoch epoch,
+            final GiEnvironmentSource environment,
+            final int[] origins
+    ) {
+        assertUsable();
+        Objects.requireNonNull(epoch, "epoch");
+        Objects.requireNonNull(environment, "environment");
+        Objects.requireNonNull(origins, "origins");
+        if (origins.length != 9 || environment.epoch() != epoch.environmentEpoch()) {
+            throw new IllegalArgumentException("G3 metadata-only relabel inputs do not match");
+        }
+
+        this.header.fill((byte) 0);
+        this.header.set(LE_INT, 0L, ABI_VERSION);
+        this.header.set(LE_INT, 4L, HEADER_BYTES);
+        this.header.set(LE_LONG, 8L, epoch.g2WorldGeneration());
+        this.header.set(LE_LONG, 16L, epoch.g2ClipmapGeneration());
+        this.header.set(LE_LONG, 24L, epoch.g2PaletteGeneration());
+        this.header.set(LE_LONG, 32L, epoch.g2ContentGeneration());
+        this.header.set(LE_LONG, 40L, epoch.staticLightRegistryEpoch());
+        this.header.set(LE_LONG, 48L, epoch.environmentEpoch());
+        for (int index = 0; index < origins.length; index++) {
+            this.header.set(LE_INT, 56L + (long) index * Integer.BYTES, origins[index]);
+        }
+        float sunEnabled = environment.directionalRed() + environment.directionalGreen()
+                + environment.directionalBlue() > 0.0F ? 1.0F : 0.0F;
+        putFloat4(this.header, 96L, environment.toLightX(), environment.toLightY(),
+                environment.toLightZ(), sunEnabled);
+        putFloat4(this.header, 112L, environment.directionalRed(),
+                environment.directionalGreen(), environment.directionalBlue(), sunEnabled);
+        float skyEnabled = environment.skyRed() + environment.skyGreen()
+                + environment.skyBlue() > 0.0F ? 1.0F : 0.0F;
+        putFloat4(this.header, 128L, environment.skyRed(), environment.skyGreen(),
+                environment.skyBlue(), skyEnabled);
+        return MetalNativeBridge.metallum_gi_direct_source_relabel_v1(
+                this.context, this.header
+        );
     }
 
     public int reset(final GiDirectSourceEpoch epoch) {
@@ -371,14 +546,63 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
                 this.context, timeoutMillis) == STATUS_OK;
     }
 
+    /**
+     * Allocation-free poll for one native-accepted asynchronous batch. The completion handler
+     * serializes these counters with {@code buildInFlight}, so OK proves that native published
+     * {@code ready=true}; REJECTED means the accepted command buffer completed unsuccessfully.
+     */
+    int pollAcceptedBatchCompletion(
+            final GiDirectSourceEpoch acceptedEpoch,
+            final long batchesBaseline,
+            final long rejectedBaseline
+    ) {
+        assertUsable();
+        Objects.requireNonNull(acceptedEpoch, "acceptedEpoch");
+        if (batchesBaseline < 0L || rejectedBaseline < 0L) {
+            throw new IllegalArgumentException("G3 completion baselines cannot be negative");
+        }
+        queryStatsPacket();
+        if (this.stats.get(LE_INT, 4L) == 1) {
+            return STATUS_BUSY;
+        }
+        long batches = this.stats.get(LE_LONG, 80L);
+        long rejected = this.stats.get(LE_LONG, 128L);
+        if (batches == batchesBaseline
+                && rejected == Math.incrementExact(rejectedBaseline)) {
+            return STATUS_REJECTED;
+        }
+        if (batches == Math.incrementExact(batchesBaseline)
+                && rejected == rejectedBaseline
+                && this.stats.get(LE_INT, 0L) == 1
+                && this.stats.get(LE_LONG, 8L) == acceptedEpoch.g2WorldGeneration()
+                && this.stats.get(LE_LONG, 16L) == acceptedEpoch.g2ClipmapGeneration()
+                && this.stats.get(LE_LONG, 24L) == acceptedEpoch.g2PaletteGeneration()
+                && this.stats.get(LE_LONG, 32L) == acceptedEpoch.g2ContentGeneration()
+                && this.stats.get(LE_LONG, 40L) == acceptedEpoch.staticLightRegistryEpoch()
+                && this.stats.get(LE_LONG, 48L) == acceptedEpoch.environmentEpoch()) {
+            return STATUS_OK;
+        }
+        return STATUS_INVALID;
+    }
+
+    /** Captures the two monotonic counters before encode into caller-owned fixed storage. */
+    void captureCompletionBaselines(final long[] destination) {
+        assertUsable();
+        Objects.requireNonNull(destination, "destination");
+        if (destination.length < 2) {
+            throw new IllegalArgumentException("G3 completion baseline destination is too small");
+        }
+        queryStatsPacket();
+        if (this.stats.get(LE_INT, 4L) != 0) {
+            throw new IllegalStateException("G3 completion baseline captured during a build");
+        }
+        destination[0] = this.stats.get(LE_LONG, 80L);
+        destination[1] = this.stats.get(LE_LONG, 128L);
+    }
+
     public Stats stats() {
         assertUsable();
-        this.stats.fill((byte) 0);
-        int status = MetalNativeBridge.metallum_gi_direct_source_get_stats_v1(
-                this.context, this.stats, this.stats.byteSize());
-        if (status != STATUS_OK) {
-            throw new IllegalStateException("Native G3 stats query failed: " + status);
-        }
+        queryStatsPacket();
         return new Stats(
                 this.stats.get(LE_INT, 0L) == 1,
                 this.stats.get(LE_INT, 4L) == 1,
@@ -396,13 +620,49 @@ public final class GiDirectSourceGpuResources implements AutoCloseable {
         );
     }
 
+    /** Allocation-free readiness check used by the live G6 submit path. */
+    boolean fieldMatches(final GiDirectSourceEpoch epoch) {
+        assertUsable();
+        Objects.requireNonNull(epoch, "epoch");
+        queryStatsPacket();
+        return this.stats.get(LE_INT, 0L) == 1
+                && this.stats.get(LE_INT, 4L) == 0
+                && this.stats.get(LE_LONG, 8L) == epoch.g2WorldGeneration()
+                && this.stats.get(LE_LONG, 16L) == epoch.g2ClipmapGeneration()
+                && this.stats.get(LE_LONG, 24L) == epoch.g2PaletteGeneration()
+                && this.stats.get(LE_LONG, 32L) == epoch.g2ContentGeneration()
+                && this.stats.get(LE_LONG, 40L) == epoch.staticLightRegistryEpoch()
+                && this.stats.get(LE_LONG, 48L) == epoch.environmentEpoch();
+    }
+
+    private void queryStatsPacket() {
+        this.stats.fill((byte) 0);
+        int status = MetalNativeBridge.metallum_gi_direct_source_get_stats_v1(
+                this.context, this.stats, this.stats.byteSize());
+        if (status != STATUS_OK) {
+            throw new IllegalStateException("Native G3 stats query failed: " + status);
+        }
+    }
+
     public int publishScheduler(final GiDirectDirtyQueue.Telemetry telemetry) {
         assertUsable();
         Objects.requireNonNull(telemetry, "telemetry");
         return MetalNativeBridge.metallum_gi_direct_source_publish_scheduler_v1(
                 this.context,
-                telemetry.queued(), telemetry.completed(), telemetry.discarded(), telemetry.pending(),
+                telemetry.queued(), telemetry.completed(), telemetry.discarded(),
+                Math.addExact(telemetry.pending(), telemetry.inFlight()),
                 telemetry.fullVolumeRebuilds()
+        );
+    }
+
+    /** Allocation-free render-loop form; immutable snapshots remain available to diagnostics. */
+    int publishScheduler(final GiDirectDirtyQueue queue) {
+        assertUsable();
+        Objects.requireNonNull(queue, "queue");
+        return MetalNativeBridge.metallum_gi_direct_source_publish_scheduler_v1(
+                this.context,
+                queue.queuedCount(), queue.completedCount(), queue.discardedCount(),
+                queue.ownedCount(), queue.fullVolumeRebuildCount()
         );
     }
 

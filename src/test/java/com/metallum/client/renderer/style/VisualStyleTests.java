@@ -331,6 +331,14 @@ public final class VisualStyleTests {
         RendererConfig withLight = withStyle.withImprovedLighting(true);
         require(withLight.improvedLighting() && withLight.visualStyle() == VisualStyle.NATURAL,
                 "withImprovedLighting lost visualStyle");
+
+        RendererConfig withGi = withLight.withGlobalIllumination(GlobalIlluminationMode.DYNAMIC);
+        require(withGi.globalIllumination() == GlobalIlluminationMode.DYNAMIC
+                        && withGi.improvedLighting()
+                        && withGi.visualStyle() == VisualStyle.NATURAL,
+                "withGlobalIllumination lost another renderer axis");
+        require("dynamic".equals(GlobalIlluminationMode.DYNAMIC.persistentName()),
+                "dynamic GI persistent name changed");
     }
 
     private static void testLiveRuntimeSwitching() {

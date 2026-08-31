@@ -129,31 +129,50 @@ REQUIRED_SOURCE_MANIFEST = frozenset({
     "src/test/java/com/metallum/client/metal/render/framegraph/FrameGraphTests.java",
 })
 
-# A completed stage keeps its immutable receipt. The immediately following G5 stage may
-# change only these exact, review-pinned successor file contents. Combined with each historical
-# digest in the immutable G4 evidence this identifies the complete allowed diff, rather than
-# granting a whole-file pathname exemption. Values are pinned after the G5 tree is final.
-G5_SUCCESSOR_FILE_SHA256 = {
-    "build.gradle": "ff3a026bcc18de84ba1fa579e7b5ca4751530c6273398ec58f628dda1d3d9a41",
-    "scripts/run_metal_benchmark.sh": "e1872b2e2fd08a5908757228fd325fb07ca842f6d3d378ff7f2f1f410589b0a4",
-    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "5ed694ac9f4d7e4f7f9b39f19037d3510e79825986d4f7ec86dd8deb608a7f8f",
+# A completed stage keeps its immutable receipt. The following G5/G6 stages may change only
+# these exact, review-pinned successor file contents. Combined with each historical digest in
+# the immutable G4 evidence this identifies the complete allowed diff, rather than granting a
+# whole-file pathname exemption. Values are pinned after the accepted G6 tree is final.
+G6_SUCCESSOR_FILE_SHA256 = {
+    "build.gradle": "64e337af33bf847f9b6116be0c599245a64b38723b7a5e9cfbcac9544e5b722c",
+    "scripts/run_metal_benchmark.sh": "137b54ecd65317a600fa66e05edc6ba7eaf7c56d00fe7e1fb20035c934ee01db",
+    "src/main/java/com/metallum/client/benchmark/MetalFxBenchmarkController.java": "c6fe171e3c737123cc4bd3333d639adcd4fd6f0ee37ad3c4f3329d0a3c697ecb",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticController.java": "edd29d56bb05769f03404e4257a05ab95ccd6a3aa07f8905575560d8ef20de4f",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticFieldAssembler.java": "fe28e6efe6a850fc5a4c44c2e9587833dd5e25cf4d05199ab828233d1f43d6f6",
+    "src/main/java/com/metallum/client/gi/semantic/GiSemanticTransportFieldView.java": "506c1da34fc439109db6fc1d95078a29615ae4cb4c19d07917d06e89abc241cb",
+    "src/main/java/com/metallum/client/gi/source/GiDirectDirtyQueue.java": "424d1cabeca507e14efdac5d30f9c4cbf1e1f973de39d3e9f451f77c0c24cee5",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java": "922c7aa8d996b8c20d3b3f9a137373b6efd9e64f16a3cc8f1904a99b3f23786a",
+    "src/main/java/com/metallum/client/gi/source/GiDirectSourceGpuResources.java": "b99f284cea03d8273d312ca57522557245f57937a42efeba8d3722ab10024912",
     "src/main/java/com/metallum/client/gi/transport/GiTransportCoordinator.java": "3e4f421efb614a9e99fd19faa9bd2e7c123f890981d34cfc65a582649a377051",
-    "src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java": "86eeb42f9250787620599d2135145809df177579628b807838c0221472fe66da",
-    "src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java": "6b58d80f377c74681664c4e27f01880fa646e930f5ba899ef8a3f453913d8b17",
-    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "770781f4642c401768b412e2c7980b61d88e09a1adbceb8f52275a54664aab8b",
-    "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "ce4308a165e9b2a23477c5b2e1ba1e59262c567079d7697b0e8eb57dd6a85d87",
-    "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "72a8be9401a1dae68b55f27d6b010d290546d510873def395a086b4795f71161",
-    "src/main/native/MetallumNative.swift": "43c94f4e081232df61744d43adc15c5ecdb88b23cc9bd6cfb623fa53861e5332",
-    "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java": "526deabdfe205fd4aa1d525b74edba5dc4270727b71baed101d6c2762746f777",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportGpuResources.java": "6c33f400f7471ba7e4b71d78cbd4c708ed1321af434a0a961252c4b4796701a1",
+    "src/main/java/com/metallum/client/gi/transport/GiTransportRuntime.java": "c501fa915e93f809227c37c4bc926763b0260cbbc3414ed86f8201f44a48d8d6",
+    "src/main/java/com/metallum/client/gui/MetallumSodiumConfig.java": "ed61d924826362e3e58b65eb87ba0592ea5cfd31a2d062985c49f8f40e6dcc09",
+    "src/main/java/com/metallum/client/lighting/AdvancedLightRegistry.java": "420e0dd8369dcd90a6cc91f8b8daa7d21d49db88c4837782e94726e31a6568a4",
+    "src/main/java/com/metallum/client/metal/render/MetalCommandEncoder.java": "7c8b317744a4674115d078c13198abe03cb5ed35cfc86953d32afa122d881973",
+    "src/main/java/com/metallum/client/metal/render/MetalDevice.java": "78796d55269c17feacaea7afb7fcbfda9ce865d149ac1e2e4ccf93402cf2025e",
+    "src/main/java/com/metallum/client/metal/render/bridge/MetalNativeBridge.java": "7a849905f1607986e86449fc182d3fda5a344928310d8b987a71a3d58718d8b3",
+    "src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java": "0d647c058734a18f8a57e3ce47483c5b0d45097e7abe4fe26c2b4506f3ca8d27",
+    "src/main/java/com/metallum/mixin/render/GameRendererMetalFxMixin.java": "228d1bac4fb08f4581c38c803e550aade53c5daddc8dbd8d2013638c62199611",
+    "src/main/metal/MetallumGiTransport.metal": "1c3b40cd1feb0a6a84b03cd07950076dafa60400ea6c4954fd36dfe0d13e7fe8",
+    "src/main/native/MetallumNative.swift": "9b39c2315027c3fce42f0d1bf21c439b3f92fa5c8f4a2ffddab816acdf1d3039",
+    "src/main/resources/assets/metallum/lang/en_us.json": "bc2d4f73d1ba4ec07fbd559253caa00bc89fc62d6ca7f8afd6c33a29e9257a51",
+    "src/main/resources/assets/metallum/lang/ru_ru.json": "cd0b83dc13ab750febe475f973bc4e70b39b1df40f098e8431c73d2e28d3d032",
+    "src/test/java/com/metallum/client/benchmark/BenchmarkWindowContractTests.java": "aad4b4e9d459aaed52d7a848022c7cb75f7e8935b9f8d57fe11ac29d74e1246e",
+    "src/test/java/com/metallum/client/gi/semantic/GiSemanticCpuTests.java": "1a063a55698324b690fee52286c91910088387e038f66f9b100e18ad1342ced9",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceCpuTests.java": "06308c52b9e0a24cc36050842e15dd0b6413d23cdb0641eefd5e89421572957f",
+    "src/test/java/com/metallum/client/gi/source/GiDirectSourceSourceChainTests.java": "9311c50ed1bc6fa3881678f0b615af7ab8d1e14c323217268ab244ad9b727225",
+    "src/test/java/com/metallum/client/gi/source/GiTransportGpuValidation.java": "6f047f0de8dcf0d648747e7561fc955148e5bbace2209a2e66487154d46affb1",
+    "src/test/java/com/metallum/client/gi/transport/GiTransportCpuTests.java": "2ec4f0a64f8f6225fb25ce3392947a6eba4a04cbab3cd50a05e434c5239f9029",
+    "src/test/java/com/metallum/client/gi/transport/GiTransportSourceChainTests.java": "57f5c77303471a14a12444d7d554603ed397f4243c09c3e35d09ba6666798e58",
     "src/test/java/com/metallum/client/metal/render/MetalRuntimeTests.java": "61eedb5395de72903a51647d5786c9a27ac397e7b1c9609a8430a640d0a86b1a",
     "tools/gi_release_contract_guard.sh": "c8e924de80c1ada8df1bb17a08fa0607f930c9842806b6e1ce2f7a0317377ba9",
-    "tools/metal_benchmark_report.py": "b65f8eb92cc5d6b616c0316d068a77409def1a6d7a3b315e78530af9a74c9736",
+    "tools/metal_benchmark_report.py": "affb2e60e7b8e6e770cf030602781d17e205b0f14a64050278f22d1f06c1d4f8",
     "tools/test_gi_release_contract_guard.sh": "cb3c3888a6ab9e7ab5f4c4d90722873b2f0a729de26fa0de6693af1bdb73a941",
 }
 G4_CONTRACT_SELF_PATH = "tools/gi_g4_contract.py"
 # The value-bearing line is normalized before hashing, avoiding a circular digest while still
 # making every other byte of this verifier part of the exact successor seam.
-G4_CONTRACT_SELF_NORMALIZED_SHA256 = "15a1abed10f63cf58dc71549e903ce50830a86b4e1dc22eeaee3ddb15591bc28"
+G4_CONTRACT_SELF_NORMALIZED_SHA256 = "bd89e8b01e58ee262c17cd8d503b413f81db27975816994b399cd55918eeeb6b"
 
 G4_EXACT_GI_COUNTERS = {
     "contract_version": 3,
@@ -376,12 +395,12 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
         return
 
     drifted_paths = {relative for relative, _, _ in drifted}
-    exact_successor_paths = set(G5_SUCCESSOR_FILE_SHA256) | {G4_CONTRACT_SELF_PATH}
+    exact_successor_paths = set(G6_SUCCESSOR_FILE_SHA256) | {G4_CONTRACT_SELF_PATH}
     missing = sorted(exact_successor_paths - drifted_paths)
     unsupported = sorted(drifted_paths - exact_successor_paths)
     if missing or unsupported:
         raise ContractError(
-            "G4 exact G5 successor diff path set differs; "
+            "G4 exact G6 successor diff path set differs; "
             f"missing={missing}, unsupported={unsupported}"
         )
     base_commit = implementation.get("base_commit")
@@ -422,19 +441,24 @@ def verify_source_hashes(root: Path, implementation: dict[str, Any]) -> None:
                 raise ContractError(
                     "G4 verifier differs outside its exact reviewed successor seam"
                 )
-        elif actual != G5_SUCCESSOR_FILE_SHA256[relative]:
+        elif actual != G6_SUCCESSOR_FILE_SHA256[relative]:
             raise ContractError(
-                "G4 source differs from its exact reviewed G5 successor seam: "
+                "G4 source differs from its exact reviewed G6 successor seam: "
                 f"{relative}"
             )
 
-    # Structural G5 verification is supplemental. It cannot authorize any source drift: every
+    # Structural G5/G6 verification is supplemental. It cannot authorize any source drift: every
     # drifted G4-manifest file has already matched the exact content digest above.
     g5_contract = root / "tools/gi_g5_contract.py"
     g5_document = root / "docs/GI_G5.md"
+    g6_document = root / "docs/GI_G6.md"
+    g6_evidence = root / "benchmark/gi/g6-live-evidence-v1.json"
     if not g5_contract.is_file() or not g5_document.is_file() \
-            or "IMPLEMENTED_PENDING_TIER_B" not in g5_document.read_text(encoding="utf-8"):
-        raise ContractError("G4 source drift is not owned by a declared G5 successor")
+            or "PASSED_BY_EXPLICIT_USER_DECISION" not in g5_document.read_text(encoding="utf-8") \
+            or not g6_document.is_file() or not g6_evidence.is_file() \
+            or "PASS_LIVE_DYNAMIC_GI" not in g6_document.read_text(encoding="utf-8") \
+            or strict_object(g6_evidence).get("decision") != "PASS_LIVE_DYNAMIC_GI":
+        raise ContractError("G4 source drift is not owned by declared G5/G6 successors")
     successor = subprocess.run(
         [sys.executable, str(g5_contract), "--root", str(root)],
         cwd=root,
@@ -1767,8 +1791,9 @@ def verify_source_contract(root: Path) -> None:
         "texture2d", "depth", "lightmap", "camera", "history", "sceneColor",
         "terrain", "fragment ", "vertex ",
     ), "G4 Metal field-only source")
-    if metal_code.count("rho * (1.0f / metallumGiTransportPi) * direct") != 1:
-        raise ContractError("G4 must apply source rho/pi exactly once")
+    if metal_code.count("rho * (1.0f / metallumGiTransportPi) * direct") != 2 \
+            or metal_code.count("kernel void metallum_gi_live_jacobi_sh_v1") != 1:
+        raise ContractError("G4 frozen and G6 live transport must each apply source rho/pi once")
     if metal_code.count("kernel void metallum_gi_transport_jacobi_sh_v1") != 1:
         raise ContractError("G4 must contain exactly one Jacobi transport kernel")
 

@@ -3,6 +3,9 @@ package com.metallum.client.metal.render;
 import com.metallum.client.gi.semantic.GiSemanticDirectFieldView;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
+import com.metallum.client.gi.source.GiDynamicSourceSnapshot;
+import com.metallum.client.gi.live.GiLiveCoordinator;
+import com.metallum.client.gi.live.GiLiveLayout;
 import com.metallum.client.gi.transport.GiTransportCoordinator;
 import com.metallum.client.hdr.EdrCapabilities;
 import com.metallum.client.hdr.HdrConfig;
@@ -1310,6 +1313,44 @@ final class MetalCommandEncoder implements CommandEncoderBackend {
                 environment,
                 AdvancedLightRegistry.global(),
                 tick
+        );
+    }
+
+    int encodeGiDirectSource(
+            final GiDirectSourceCoordinator coordinator,
+            final GiSemanticDirectFieldView field,
+            final EnvironmentDescriptor environment,
+            final GiDynamicSourceSnapshot dynamicSources,
+            final long sourceTick
+    ) {
+        submitRenderPass();
+        endEncoder();
+        return coordinator.encodeFrame(
+                commandBuffer().handle(),
+                this.fence,
+                field,
+                environment,
+                AdvancedLightRegistry.global(),
+                dynamicSources,
+                sourceTick
+        );
+    }
+
+    int encodeGiLive(
+            final GiLiveCoordinator coordinator,
+            final GiSemanticTransportFieldView field,
+            final GiDynamicSourceSnapshot dynamicSources,
+            final EnvironmentDescriptor environment,
+            final long sourceTick,
+            final long submitIndex
+    ) {
+        submitRenderPass();
+        endEncoder();
+        int inFlightSlot = (int) (submitIndex % GiLiveLayout.IN_FLIGHT_SLOTS);
+        return coordinator.observeAndEncode(
+                commandBuffer().handle(), this.fence, inFlightSlot,
+                field, dynamicSources, environment, AdvancedLightRegistry.global(),
+                sourceTick, submitIndex
         );
     }
 

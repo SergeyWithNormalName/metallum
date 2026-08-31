@@ -1,5 +1,7 @@
 package com.metallum.client.gi.source;
 
+import com.metallum.client.gi.live.GiLiveRuntime;
+
 import java.util.Locale;
 
 /** Explicit field-only G3 admission; absence of the environment variable is structural off. */
@@ -10,6 +12,9 @@ public final class GiDirectSourceRuntime {
     }
 
     public static boolean isRequested() {
+        if (GiLiveRuntime.isRequested()) {
+            return true;
+        }
         String value = System.getenv(INJECT_ENV);
         if (value == null) {
             return false;

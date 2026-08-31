@@ -65,9 +65,6 @@ public record RendererConfig(
         if (globalIllumination == null) {
             throw new NullPointerException("globalIllumination");
         }
-        if (globalIllumination != GlobalIlluminationMode.OFF) {
-            throw new IllegalArgumentException("Stage G0 admits only GI_OFF");
-        }
     }
 
     public static RendererConfig defaults() {
@@ -80,6 +77,43 @@ public record RendererConfig(
     public static RendererConfig load() {
         Path path = FabricLoader.getInstance().getConfigDir().resolve(FILE_NAME);
         return load(path);
+    }
+
+    /**
+     * Reads the persistent policy for the early mixin gate without creating, migrating or
+     * rewriting the file and without changing benchmark load provenance.
+     */
+    public static RendererConfig loadForStartupGate() {
+        // Plain JVM contract tests load renderer classes without a Fabric game directory.
+        // Some Fabric Loader versions fail inside getConfigDir() before they can return null,
+        // so the complete lookup must remain behind this fail-closed boundary. A real client
+        // startup supplies the directory before mixin selection.
+        try {
+            Path configDirectory = FabricLoader.getInstance().getConfigDir();
+            return configDirectory == null
+                    ? defaults()
+                    : loadForStartupGate(configDirectory.resolve(FILE_NAME));
+        } catch (RuntimeException | LinkageError unavailableLoader) {
+            return defaults();
+        }
+    }
+
+    static RendererConfig loadForStartupGate(final Path path) {
+        if (!Files.isRegularFile(path)) {
+            return defaults();
+        }
+        Properties properties = new Properties();
+        try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
+            properties.load(reader);
+            return from(properties);
+        } catch (IOException | IllegalArgumentException exception) {
+            Metallum.LOGGER.warn(
+                    "Failed to read {} for the startup mixin gate; keeping global illumination off",
+                    path,
+                    exception
+            );
+            return defaults();
+        }
     }
 
     static RendererConfig load(final Path path) {
@@ -247,6 +281,13 @@ public record RendererConfig(
         return new RendererConfig(
                 this.improvedLighting, this.lightingPreset, this.frameInterpolation,
                 this.voxelDebugChecksum, style, this.globalIllumination
+        );
+    }
+
+    public RendererConfig withGlobalIllumination(final GlobalIlluminationMode mode) {
+        return new RendererConfig(
+                this.improvedLighting, this.lightingPreset, this.frameInterpolation,
+                this.voxelDebugChecksum, this.visualStyle, mode
         );
     }
 

@@ -1,0 +1,285 @@
+{
+  "schema_version": 2,
+  "id": "gi-g6-live-evidence-v1",
+  "stage": "G6",
+  "status": "G6_COMPLETE_LIVE_DYNAMIC",
+  "decision": "PASS_LIVE_DYNAMIC_GI",
+  "g7_allowed": true,
+  "implementation": {
+    "base_commit": "9862da8f4ce6",
+    "runtime_source_sha256": "10f157bef162025e874219b53a9574d572329408e31201490374359995b55092",
+    "runtime_artifact_sha256": "2dae57f64db16658d10326b3ad5ed21a95f8759d789b7e203a96dcbc64bd8bbb",
+    "dirty_worktree": true,
+    "persistent_sodium_option": "global_illumination",
+    "persistent_renderer_value": "globalIllumination=dynamic",
+    "production_default_enabled": false,
+    "restart_gated": true,
+    "off_is_structural": true
+  },
+  "scope": {
+    "production_receiver": true,
+    "dynamic_updates": true,
+    "cascade_count": 3,
+    "near_to_far_incremental_bricks": true,
+    "block_placement_and_removal": true,
+    "camera_independent_held_and_entity_sources": true,
+    "clipmap_scroll_overlap": true,
+    "fail_closed_world_device_resource_reset": true,
+    "receiver_stage": "vertex_only",
+    "fragment_texture3d_samples": 0,
+    "bounce_count": 1
+  },
+  "live_receipt": {
+    "classification": "SOURCE_BOUND_G6_LIVE_CONTRACT_NOT_COMPARATIVE_TIER_C",
+    "profile": "Apple M1 Pro, built-in Retina 3024x1964@120 HDR, Advanced/Balanced, Fancy 16/12, native resolution, MetalFX and VSync off",
+    "route": "hdrtest-torch-toggle-v1",
+    "route_sha256": "7f0a03058371964e81ef95002644a1744793def24958ccebb8c808fb91e46cc8",
+    "fixture": "hdrtest-static-v1",
+    "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+    "settings": "native-hdr-fancy-gi-live-v1",
+    "settings_sha256": "46bda4e1537db4ce145d4322ec985a034a30dd3b371dc918e6f4d60b36960c6c",
+    "settings_spec_sha256": "8bf845b207048cc442620b2ef0e8bc05e6ca6721bc27018ab6121eba8ebd1817",
+    "warmup_frames": 1800,
+    "measure_frames": 3000,
+    "windows": 10,
+    "thermal_state": "nominal",
+    "dropped_timing_events": 0,
+    "fps_elapsed_weighted": 40.22678103249251,
+    "fps_minimum_window": 38.521267415276654,
+    "one_percent_low_window_weighted": 27.232947431006952,
+    "zero_point_one_percent_low_window_weighted": 25.082914217618715,
+    "presenting_gpu_p50_ms_window_weighted": 26.35510833351873,
+    "presenting_gpu_p95_ms_window_weighted": 28.19068749959115,
+    "presenting_gpu_p99_ms_window_weighted": 29.38420833379496,
+    "maximum_presenting_gpu_ms": 50.712041673250496,
+    "admission": {
+      "status": "PASS",
+      "device_generation": 1,
+      "ready_mask": 7,
+      "field_generation": 297,
+      "source_tick": 409,
+      "dynamic": true,
+      "vertex_only": true,
+      "fragment_texture3d": 0,
+      "stale": 0,
+      "rejected": 0
+    },
+    "torch_epoch": {
+      "position": [80, 75, -112],
+      "apply_requested_frame": 300,
+      "applied_frame": 301,
+      "remove_requested_frame": 450,
+      "removed_frame": 451,
+      "observation_end_frame": 600,
+      "ordered_receipt": "PASS"
+    },
+    "final": {
+      "status": "PASS",
+      "ready_mask": 7,
+      "build_in_flight": false,
+      "field_generation": 1049,
+      "source_tick": 2664,
+      "latest_terrain_device_generation": 1,
+      "latest_terrain_submit": 5210,
+      "latest_bind_status": 1,
+      "latest_carrier_safe": true,
+      "latest_frame_compatible": true,
+      "latest_exact_mask_nonzero": true,
+      "stale": 0,
+      "rejected": 0,
+      "block_samples": 178,
+      "block_p95_submits": 1,
+      "block_p99_submits": 1,
+      "block_sla": true
+    },
+    "memory": {
+      "combined_accounted_bytes": 24637728,
+      "cap_bytes": 25165824,
+      "within_cap": true
+    }
+  },
+  "matrix_receipt": {
+    "classification": "SOURCE_BOUND_G6_LIVE_CONTRACT_NOT_COMPARATIVE_TIER_C",
+    "profile": "Apple M1 Pro, built-in Retina 3024x1964@120 HDR, Advanced/Balanced, Fancy 16/12, native resolution, MetalFX and VSync off",
+    "route": "hdrtest-gi-g6-matrix-v1",
+    "route_sha256": "e7bc60c8082ef1bf98c487b6158f0c08b8595fc55deb1290f97d06fa412e3934",
+    "fixture": "hdrtest-static-v1",
+    "fixture_sha256": "a4a7e4fa34bed9e335856bc88f7ad1035ae1ba68e28851906ccaf9a65911e3c5",
+    "settings": "native-hdr-fancy-gi-live-v1",
+    "settings_sha256": "46bda4e1537db4ce145d4322ec985a034a30dd3b371dc918e6f4d60b36960c6c",
+    "settings_spec_sha256": "8bf845b207048cc442620b2ef0e8bc05e6ca6721bc27018ab6121eba8ebd1817",
+    "warmup_frames": 1800,
+    "measure_frames": 3600,
+    "windows": 12,
+    "thermal_state": "nominal",
+    "dropped_timing_events": 0,
+    "fps_elapsed_weighted": 31.006671373802394,
+    "fps_minimum_window": 15.22727868168723,
+    "one_percent_low_window_weighted": 16.403884830501998,
+    "zero_point_one_percent_low_window_weighted": 14.82213571360754,
+    "presenting_gpu_p50_ms_window_weighted": 27.90981944417581,
+    "presenting_gpu_p95_ms_window_weighted": 34.12413194989009,
+    "presenting_gpu_p99_ms_window_weighted": 35.74320486465391,
+    "maximum_presenting_gpu_ms": 55.49212501500733,
+    "admission": {
+      "status": "PASS",
+      "device_generation": 1,
+      "ready_mask": 3,
+      "field_generation": 191,
+      "source_tick": 392,
+      "dynamic": true,
+      "vertex_only": true,
+      "fragment_texture3d": 0,
+      "stale": 0,
+      "rejected": 0
+    },
+    "events": {
+      "ordered_receipt": "PASS",
+      "event_count": 22,
+      "recovery_count": 20,
+      "receipt_mask": 511
+    },
+    "final": {
+      "status": "PASS",
+      "ready_mask": 7,
+      "build_in_flight": false,
+      "field_generation": 2051,
+      "source_tick": 5434,
+      "stale": 0,
+      "rejected": 0,
+      "block_samples": 78,
+      "block_p95_submits": 1,
+      "block_p99_submits": 1,
+      "block_sla": true,
+      "static_samples": 661,
+      "static_p95_submits": 1,
+      "static_p99_submits": 2,
+      "static_sla": true,
+      "scroll_samples": 8,
+      "scroll_p95_submits": 12,
+      "scroll_p99_submits": 12,
+      "scroll_sla": true,
+      "reset_samples": 12,
+      "reset_p95_submits": 20,
+      "reset_p99_submits": 20,
+      "reset_sla": true,
+      "queue_queued": 24604,
+      "queue_completed": 6859,
+      "queue_discarded": 17745,
+      "queue_pending": 0,
+      "queue_in_flight": 0,
+      "queue_algebra": true,
+      "measurement_start_bytes": 24637728,
+      "combined_accounted_bytes": 24637728,
+      "cap_bytes": 25165824,
+      "accounted_delta": 0,
+      "readback_bytes": 0,
+      "receipts": 511,
+      "orbit_field_stable": true,
+      "queue_converged": true
+    },
+    "memory": {
+      "combined_accounted_bytes": 24637728,
+      "cap_bytes": 25165824,
+      "within_cap": true
+    }
+  },
+  "static_visual_receipt": {
+    "classification": "PASS_STATIC_REFERENCE_ONLY_NOT_MOTION_ACCEPTANCE",
+    "phase": "TORCH_ON",
+    "measured_frame": 400,
+    "framebuffer": "3024x1964",
+    "capture_source": "full-resolution SDR GUI composite",
+    "ordered_between_torch_apply_and_remove": true,
+    "g6_final_ready_mask": 7,
+    "g6_final_stale": 0,
+    "g6_final_rejected": 0,
+    "block_samples": 83,
+    "block_p95_submits": 1,
+    "block_p99_submits": 1,
+    "gross_artifact_review": "PASS",
+    "review_notes": "No black or zero atlas, NaN bands, cascade seams, broken geometry, or lost terrain detail; local warm illumination is spatially visible on terrain and foliage."
+  },
+  "artifacts": {
+    "live_raw": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104009Z-g9862da8f4ce6-dirty-gi-g6-live-final-off.raw.jsonl",
+      "sha256": "be414195eb071f00c9447942c1a287d9f502b84f06169208871312953b8bc2df"
+    },
+    "live_summary": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104009Z-g9862da8f4ce6-dirty-gi-g6-live-final-off.summary.json",
+      "sha256": "c5db05c366d8feb373e73eb339b3c45d34246b47f9d5b4dd1881dd3f7657fb96"
+    },
+    "live_minecraft_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104009Z-g9862da8f4ce6-dirty-gi-g6-live-final-off.minecraft.log",
+      "sha256": "84d367e37162b739dfcb52b3eeb7fa4c54bf9be3e1cf2cee5f0f50acbbf30afe"
+    },
+    "live_console_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104009Z-g9862da8f4ce6-dirty-gi-g6-live-final-off.console.log",
+      "sha256": "62e14d79cfecacee0aab0e969f3f8b22c1fd1e0d8e4e877e685c197036005fae"
+    },
+    "live_transcript_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104009Z-g9862da8f4ce6-dirty-gi-g6-live-final-off.transcript.log",
+      "sha256": "e52bea35868a9c9f13aa7d11416d3d39846f2659f07135309def5026e020d34d"
+    },
+    "matrix_raw": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T103601Z-g9862da8f4ce6-dirty-gi-g6-matrix-final-v18-off.raw.jsonl",
+      "sha256": "dbe3fc171986bed8626e51d48f63aa2ad0d60d837b2fd8870097ba43a53643fc"
+    },
+    "matrix_summary": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T103601Z-g9862da8f4ce6-dirty-gi-g6-matrix-final-v18-off.summary.json",
+      "sha256": "f679c4cd22d5864bf0758e611605eabab79c848d3dc1f70319a0c073545b1703"
+    },
+    "matrix_minecraft_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T103601Z-g9862da8f4ce6-dirty-gi-g6-matrix-final-v18-off.minecraft.log",
+      "sha256": "c242c6628b71fc9ef80791bfcc8563b762c9d980af8347794bdc789e189a02bf"
+    },
+    "matrix_console_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T103601Z-g9862da8f4ce6-dirty-gi-g6-matrix-final-v18-off.console.log",
+      "sha256": "dd94ee84da80318d010d08ad7d3e831f0dc96d140232fdbd504888c00b6c9e76"
+    },
+    "matrix_transcript_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T103601Z-g9862da8f4ce6-dirty-gi-g6-matrix-final-v18-off.transcript.log",
+      "sha256": "ea1da03753bda8a216f1ce56754c425a9e4985b4019934905c7542b36ba91a56"
+    },
+    "capture_raw": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.raw.jsonl",
+      "sha256": "79a215e3b3bc80dbefd216449e74189cf46b68a5e5675d22c916b2ead5485cc3"
+    },
+    "capture_summary": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.summary.json",
+      "sha256": "c2504684584241823afa08020dc77966b0976bed0860e1d9cbbc46fae1d67a91"
+    },
+    "capture_minecraft_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.minecraft.log",
+      "sha256": "f45935f827d412d92102a951d88c2a1eeb35e14d2307f3347b71e6a881b214d5"
+    },
+    "capture_console_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.console.log",
+      "sha256": "b187837734b8456cfb457098a69c980138d8bf4f06b0504ca1fbb8aa249f6573"
+    },
+    "capture_transcript_log": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.transcript.log",
+      "sha256": "06ac32829320095261d0ad6f6085fb509fe528d062a635b212479dfde6b5c4b8"
+    },
+    "png": {
+      "path": "benchmark/gi/evidence/gi-g6-live-2026-08-30-v1/20260831T104317Z-g9862da8f4ce6-dirty-gi-g6-image-final-off.png",
+      "sha256": "1a505700cfe0cd1edb30363812ebb4cda866a5533c82bbd5df588794a3b564f3"
+    }
+  },
+  "mechanical_verification": {
+    "focused_g3_g6_cpu_source_chain_abi": "PASS",
+    "source_compiled_g3_metal_validation": "PASS",
+    "bundled_g3_metal_validation": "PASS",
+    "generated_msl_full_and_ambient_only_all_terrain_flavors": "PASS",
+    "g6_runner_contract": "PASS",
+    "g6_evidence_contract": "PASS",
+    "gradle_check": "PASS"
+  },
+  "limitations": [
+    "The source-bound live and matrix runs prove the G6 update/receiver/SLA contract, not a comparative Tier C whole-frame performance delta.",
+    "The PNG is a static gross-artifact review, not full human motion or artistic product acceptance.",
+    "G5 visual acceptance remains missing by the user's explicit stage-boundary statement; it is not backfilled by this G6 receipt.",
+    "G7 remains the separate artistic, compatibility, and product-release matrix; it does not reopen the completed G6 functional update matrix."
+  ],
+  "next_gate": "G6 is complete; G7 remains the separate artistic, compatibility, and product-release matrix."
+}

@@ -552,6 +552,24 @@ public final class AdvancedLightRegistry {
         return new GiStaticSourceState(this.activeWorld.token, this.activeWorld.staticEpoch);
     }
 
+    /** Allocation-free identity sidecar used to pair the sole live G2 field with this L3 world. */
+    public synchronized @Nullable Object activeWorldIdentityForGi() {
+        return this.healthy && this.activeWorld != null ? this.activeWorld.identity : null;
+    }
+
+    /** Returns the resident token only while the exact ClientLevel identity and dimension agree. */
+    public synchronized @Nullable LightWorldToken activeWorldTokenForGi(
+            final Object expectedIdentity,
+            final String expectedDimension
+    ) {
+        requireWorldIdentity(expectedIdentity);
+        requireDimension(expectedDimension);
+        return this.healthy && this.activeWorld != null
+                && this.activeWorld.identity == expectedIdentity
+                && this.activeWorld.token.dimensionId().equals(expectedDimension)
+                ? this.activeWorld.token : null;
+    }
+
     /** Allocation-free identity check used after G4 has latched its private G3 source. */
     public synchronized boolean staticSourceIdentityMatchesForGi(
             final LightWorldToken expectedWorld,

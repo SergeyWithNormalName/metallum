@@ -16,7 +16,8 @@ public record FrameCapture(
         long dimensionIdentity,
         EnvironmentDescriptor environment,
         CloudShadowFrameState cloudShadow,
-        EnvironmentDescriptor giEnvironment
+        EnvironmentDescriptor giEnvironment,
+        boolean giEnvironmentReady
 ) {
     public FrameCapture {
         Objects.requireNonNull(transforms, "transforms");
@@ -62,7 +63,8 @@ public record FrameCapture(
                 cloudShadow,
                 environment.medium() == EnvironmentDescriptor.Medium.AIR
                         ? environment
-                        : EnvironmentDescriptor.NONE
+                        : EnvironmentDescriptor.NONE,
+                true
         );
     }
 
@@ -88,7 +90,8 @@ public record FrameCapture(
                 CloudShadowFrameState.disabled(),
                 environment.medium() == EnvironmentDescriptor.Medium.AIR
                         ? environment
-                        : EnvironmentDescriptor.NONE
+                        : EnvironmentDescriptor.NONE,
+                true
         );
     }
 
@@ -111,7 +114,8 @@ public record FrameCapture(
                 dimensionIdentity,
                 EnvironmentDescriptor.NONE,
                 CloudShadowFrameState.disabled(),
-                EnvironmentDescriptor.NONE
+                EnvironmentDescriptor.NONE,
+                true
         );
     }
 }

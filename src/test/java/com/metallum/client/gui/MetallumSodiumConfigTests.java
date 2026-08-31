@@ -1,18 +1,23 @@
 package com.metallum.client.gui;
 
+import com.metallum.client.renderer.GlobalIlluminationMode;
+import com.metallum.client.renderer.RendererConfig;
 import net.caffeinemc.mods.sodium.api.config.option.OptionFlag;
 import net.caffeinemc.mods.sodium.client.config.ConfigManager;
 import net.caffeinemc.mods.sodium.client.config.builder.ConfigBuilderImpl;
 import net.caffeinemc.mods.sodium.client.config.structure.BooleanOption;
+import net.caffeinemc.mods.sodium.client.config.structure.Config;
 import net.caffeinemc.mods.sodium.client.config.structure.EnumOption;
 import net.caffeinemc.mods.sodium.client.config.structure.IntegerOption;
 import net.caffeinemc.mods.sodium.client.config.structure.ModOptions;
 import net.caffeinemc.mods.sodium.client.config.structure.Option;
 import net.caffeinemc.mods.sodium.client.config.structure.OptionGroup;
 import net.caffeinemc.mods.sodium.client.config.structure.OptionPage;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Collection;
 
 /** Verifies the pinned Sodium 0.9.1 config structure exposed by Metallum. */
@@ -64,10 +69,38 @@ public final class MetallumSodiumConfigTests {
         require(lightingPreset.getFlags().contains(OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "Metallum lighting-preset option must require a full game restart");
 
-        requireRestartBoolean(
-                findOption(page, idField, "gi_g4_debug_hud"),
-                "G4 transport debug HUD"
+        Option globalIllumination = findOption(page, idField, "global_illumination");
+        requireRestartBoolean(globalIllumination, "production global illumination");
+        require(((BooleanOption) option).getApplyHook() != null
+                        && ((BooleanOption) globalIllumination).getApplyHook() != null,
+                "Advanced/GI coupling must resynchronize Sodium values after Apply");
+        OptionGroup globalIlluminationGroup = findGroup(
+                page,
+                idField,
+                "global_illumination"
         );
+        require(globalIlluminationGroup.options().size() == 2,
+                "Global Illumination group must contain production GI and the isolated G4 debug HUD");
+
+        Option giTransportDebug = findOption(page, idField, "gi_g4_debug_hud");
+        requireRestartBoolean(giTransportDebug, "G4 transport debug HUD");
+        require(((BooleanOption) giTransportDebug).getApplyHook() != null,
+                "GI/G4 mutual exclusion must resynchronize Sodium values after Apply");
+
+        RendererConfig dynamic = MetallumSodiumConfig.applyGlobalIlluminationSelection(
+                RendererConfig.defaults(),
+                true
+        );
+        require(dynamic.globalIllumination() == GlobalIlluminationMode.DYNAMIC
+                        && dynamic.improvedLighting(),
+                "Enabling production GI must also enable its Advanced Lighting prerequisite");
+        RendererConfig advancedDisabled = MetallumSodiumConfig.applyImprovedLightingSelection(
+                dynamic,
+                false
+        );
+        require(advancedDisabled.globalIllumination() == GlobalIlluminationMode.OFF
+                        && !advancedDisabled.improvedLighting(),
+                "Disabling Advanced Lighting must fail closed to GI_OFF");
 
         Option metalfxUpscaling = findOption(page, idField, "metalfx_upscaling");
         require(metalfxUpscaling instanceof EnumOption,
@@ -139,7 +172,112 @@ public final class MetallumSodiumConfigTests {
                         OptionFlag.REQUIRES_GAME_RESTART.getId()),
                 "cloud-reflection toggle must apply without a game restart");
 
+        testCoupledApplyResynchronization();
+
         System.out.println("Metallum Sodium config registration tests passed");
+    }
+
+    private static void testCoupledApplyResynchronization() {
+        boolean[] persisted = {false, false, false};
+        ConfigBuilderImpl builder = new ConfigBuilderImpl(
+                ignored -> new ConfigManager.ModMetadata("Coupled test", "test"),
+                "coupled_test"
+        );
+        builder.registerOwnModOptions()
+                .setName("Coupled test")
+                .addPage(builder.createOptionPage()
+                        .setName(Component.literal("Coupled test"))
+                        .addOptionGroup(builder.createOptionGroup()
+                                .setName(Component.literal("Coupled test"))
+                                .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                                "coupled_test", "advanced"
+                                        ))
+                                        .setStorageHandler(() -> { })
+                                        .setName(Component.literal("Advanced"))
+                                        .setTooltip(Component.literal("Advanced tooltip"))
+                                        .setDefaultValue(false)
+                                        .setBinding(value -> {
+                                            persisted[0] = value;
+                                            if (!value) {
+                                                persisted[1] = false;
+                                            }
+                                        }, () -> persisted[0])
+                                        .setApplyHook(
+                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                        ))
+                                .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                                "coupled_test", "gi"
+                                        ))
+                                        .setStorageHandler(() -> { })
+                                        .setName(Component.literal("GI"))
+                                        .setTooltip(Component.literal("GI tooltip"))
+                                        .setDefaultValue(false)
+                                        .setBinding(value -> {
+                                            persisted[1] = value;
+                                            if (value) {
+                                                persisted[0] = true;
+                                                persisted[2] = false;
+                                            }
+                                        }, () -> persisted[1])
+                                        .setApplyHook(
+                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                        ))
+                                .addOption(builder.createBooleanOption(Identifier.fromNamespaceAndPath(
+                                                "coupled_test", "debug"
+                                        ))
+                                        .setStorageHandler(() -> { })
+                                        .setName(Component.literal("Debug"))
+                                        .setTooltip(Component.literal("Debug tooltip"))
+                                        .setDefaultValue(false)
+                                        .setBinding(value -> {
+                                            persisted[2] = value;
+                                            if (value) {
+                                                persisted[1] = false;
+                                            }
+                                        }, () -> persisted[2])
+                                        .setApplyHook(
+                                                MetallumSodiumConfig::resynchronizeCoupledSodiumBindings
+                                        ))));
+
+        Config config = new Config(new ArrayList<>(builder.build()));
+        BooleanOption advanced = (BooleanOption) config.getOption(
+                Identifier.fromNamespaceAndPath("coupled_test", "advanced")
+        );
+        BooleanOption gi = (BooleanOption) config.getOption(
+                Identifier.fromNamespaceAndPath("coupled_test", "gi")
+        );
+        BooleanOption debug = (BooleanOption) config.getOption(
+                Identifier.fromNamespaceAndPath("coupled_test", "debug")
+        );
+
+        gi.modifyValue(true);
+        config.applyAllOptions();
+        require(persisted[0] && persisted[1] && !persisted[2]
+                        && Boolean.TRUE.equals(advanced.getAppliedValue())
+                        && Boolean.TRUE.equals(gi.getAppliedValue())
+                        && Boolean.FALSE.equals(debug.getAppliedValue())
+                        && !config.anyOptionChanged(),
+                "GI Apply left Sodium controls stale after enabling its prerequisite");
+
+        debug.modifyValue(true);
+        config.applyAllOptions();
+        require(persisted[0] && !persisted[1] && persisted[2]
+                        && Boolean.TRUE.equals(advanced.getAppliedValue())
+                        && Boolean.FALSE.equals(gi.getAppliedValue())
+                        && Boolean.TRUE.equals(debug.getAppliedValue())
+                        && !config.anyOptionChanged(),
+                "G4 Apply left the mutually exclusive GI control stale");
+
+        gi.modifyValue(true);
+        config.applyAllOptions();
+        advanced.modifyValue(false);
+        config.applyAllOptions();
+        require(!persisted[0] && !persisted[1] && !persisted[2]
+                        && Boolean.FALSE.equals(advanced.getAppliedValue())
+                        && Boolean.FALSE.equals(gi.getAppliedValue())
+                        && Boolean.FALSE.equals(debug.getAppliedValue())
+                        && !config.anyOptionChanged(),
+                "Advanced Apply left the dependent GI control stale after disabling it");
     }
 
     private static Option findOption(

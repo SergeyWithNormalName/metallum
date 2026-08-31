@@ -11,7 +11,7 @@ import java.util.Objects;
  * Reusable render-thread view used by G3 to copy only bounded dirty semantic bricks.
  * It never exposes the backing arrays or retains a snapshot of mutable field truth.
  */
-public final class GiSemanticDirectFieldView {
+public final class GiSemanticDirectFieldView implements GiSemanticFieldIdentityView {
     public static final int BRICK_EDGE = 8;
     public static final int BRICKS_PER_AXIS = GiFieldLayout.CELLS_PER_AXIS / BRICK_EDGE;
     public static final int BRICKS_PER_CASCADE = BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS;

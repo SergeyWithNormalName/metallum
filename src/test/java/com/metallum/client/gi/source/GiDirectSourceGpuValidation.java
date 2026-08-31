@@ -1,5 +1,6 @@
 package com.metallum.client.gi.source;
 
+import com.metallum.client.lighting.LightWorldToken;
 import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metal.render.mtl.MTLCommandBuffer;
 import com.metallum.client.metal.render.mtl.MTLCommandQueue;
@@ -36,6 +37,8 @@ public final class GiDirectSourceGpuValidation {
             require(!MetalNativeBridge.isNullHandle(layer), "Metal layer creation failed");
             queue = MTLCommandQueue.create(device, layer);
             validateField(device, queue);
+            validateMetadataOnlyRelabel(device, queue);
+            validateMetadataOnlyRelabelBusyRetry(device, queue);
             validateWrongThread(device, queue);
             validateReleaseWhileInFlight(device, queue);
             System.out.println("G3 bounded direct-source Metal validation passed (" + expectedMode + ")");
@@ -113,7 +116,7 @@ public final class GiDirectSourceGpuValidation {
             }
 
             require(resources.publishScheduler(new GiDirectDirtyQueue.Telemetry(
-                            15L, 0L, 15L, 0L, 0, 0L, 1L))
+                            15L, 0L, 15L, 0L, 0, 0, 0L, 1L))
                             == GiDirectSourceGpuResources.STATUS_OK,
                     "G3 scheduler telemetry publication failed");
             GiDirectSourceGpuResources.Stats completed = resources.stats();
@@ -148,6 +151,118 @@ public final class GiDirectSourceGpuValidation {
                     "G3 wrong-thread encode was admitted");
             commandBuffer.close();
             MetalNativeBridge.metallum_gi_direct_source_release_context_v1(context);
+        }
+    }
+
+    private static void validateMetadataOnlyRelabel(
+            final MemorySegment device,
+            final MTLCommandQueue queue
+    ) {
+        try (Arena arena = Arena.ofShared();
+             GiDirectSourceGpuResources resources = GiDirectSourceGpuResources.create(
+                     device, queue.nativeHandle(), 404L,
+                     MetalNativeBridge::metallum_gi_direct_source_release_context_v1)) {
+            require(resources != null, "G3 relabel context creation failed");
+            Packet initial = packet(arena, 404L, 1L, 1, false, true, false);
+            MTLCommandBuffer commandBuffer = queue.makeCommandBuffer("G3 relabel seed");
+            try {
+                require(resources.encode(
+                                commandBuffer.handle(), MemorySegment.NULL, initial.batch())
+                                == GiDirectSourceGpuResources.STATUS_OK,
+                        "G3 relabel seed encode failed");
+                commandBuffer.commit();
+                require(resources.awaitReady(10_000L), "G3 relabel seed did not complete");
+            } finally {
+                commandBuffer.close();
+            }
+
+            GiDirectSourceGpuResources.Stats before = resources.stats();
+            GiDirectSourceEpoch adopted = metadataEpoch(404L, 2L, 2L);
+            require(resources.relabelMetadataOnly(
+                            adopted, zeroEnvironment(), new int[9])
+                            == GiDirectSourceGpuResources.STATUS_OK,
+                    "ready G3 field rejected compatible metadata-only relabel");
+            GiDirectSourceGpuResources.Stats after = resources.stats();
+            require(resources.fieldMatches(adopted)
+                            && after.ready() && !after.buildInFlight()
+                            && after.contentGeneration() == 2L
+                            && after.staticSourceEpoch() == 2L,
+                    "G3 relabel did not publish the adopted native identity");
+            require(after.batches() == before.batches()
+                            && after.dirtyBricks() == before.dirtyBricks()
+                            && after.geometryApplyDispatches() == before.geometryApplyDispatches()
+                            && after.directInjectDispatches() == before.directInjectDispatches()
+                            && after.persistentBytes() == before.persistentBytes()
+                            && after.stagingBytes() == before.stagingBytes()
+                            && after.readbackBytes() == before.readbackBytes(),
+                    "G3 metadata-only relabel changed resources or dispatch counters");
+            GiDirectSourceGpuResources.Capture capture = resources.captureSliceOnce(0, 4);
+            require(capture != null, "G3 relabel-preserved field capture failed");
+            assertRedOnly(capture.directRgbaFloat16(), captureCell(4, 1));
+
+            GiDirectSourceEpoch stale = metadataEpoch(404L, 1L, 2L);
+            require(resources.relabelMetadataOnly(stale, zeroEnvironment(), new int[9])
+                            == GiDirectSourceGpuResources.STATUS_STALE,
+                    "G3 relabel admitted regressed content identity");
+            require(resources.fieldMatches(adopted),
+                    "stale G3 relabel changed the adopted native identity");
+        }
+    }
+
+    private static void validateMetadataOnlyRelabelBusyRetry(
+            final MemorySegment device,
+            final MTLCommandQueue queue
+    ) {
+        try (Arena arena = Arena.ofShared();
+             GiDirectSourceGpuResources resources = GiDirectSourceGpuResources.create(
+                     device, queue.nativeHandle(), 505L,
+                     MetalNativeBridge::metallum_gi_direct_source_release_context_v1)) {
+            require(resources != null, "G3 busy-retry context creation failed");
+            Packet seed = packet(arena, 505L, 1L, 1, false, false, false);
+            MTLCommandBuffer seedBuffer = queue.makeCommandBuffer("G3 busy-retry seed");
+            try {
+                require(resources.encode(seedBuffer.handle(), MemorySegment.NULL, seed.batch())
+                                == GiDirectSourceGpuResources.STATUS_OK,
+                        "G3 busy-retry seed encode failed");
+                seedBuffer.commit();
+                require(resources.awaitReady(10_000L), "G3 busy-retry seed did not complete");
+            } finally {
+                seedBuffer.close();
+            }
+
+            GiDirectSourceGpuResources.Stats before = resources.stats();
+            Packet inFlight = packet(arena, 505L, 2L, 1, false, false, false);
+            MTLCommandBuffer inFlightBuffer = queue.makeCommandBuffer("G3 relabel busy retry");
+            GiDirectSourceEpoch adopted = metadataEpoch(505L, 3L, 2L);
+            try {
+                require(resources.encode(
+                                inFlightBuffer.handle(), MemorySegment.NULL, inFlight.batch())
+                                == GiDirectSourceGpuResources.STATUS_OK,
+                        "G3 busy-retry in-flight encode failed");
+                require(resources.relabelMetadataOnly(
+                                adopted, zeroEnvironment(), new int[9])
+                                == GiDirectSourceGpuResources.STATUS_BUSY,
+                        "G3 metadata relabel did not return BUSY for an in-flight writer");
+                inFlightBuffer.commit();
+                require(resources.awaitReady(10_000L),
+                        "G3 busy-retry in-flight encode did not complete");
+            } finally {
+                inFlightBuffer.close();
+            }
+            require(resources.relabelMetadataOnly(
+                            adopted, zeroEnvironment(), new int[9])
+                            == GiDirectSourceGpuResources.STATUS_OK,
+                    "G3 metadata relabel did not succeed after BUSY retirement");
+            GiDirectSourceGpuResources.Stats after = resources.stats();
+            require(resources.fieldMatches(adopted)
+                            && after.batches() == before.batches() + 1L
+                            && after.dirtyBricks() == before.dirtyBricks() + 1L
+                            && after.geometryApplyDispatches()
+                            == before.geometryApplyDispatches() + 1L
+                            && after.directInjectDispatches()
+                            == before.directInjectDispatches() + 1L
+                            && after.busyRejects() == before.busyRejects() + 1L,
+                    "G3 BUSY retry changed relabel/dispatch accounting");
         }
     }
 
@@ -281,6 +396,24 @@ public final class GiDirectSourceGpuValidation {
         GiDirectSourceGpuResources.PreparedBatch batch = new GiDirectSourceGpuResources.PreparedBatch(
                 header, bricks, cells, sources, brickCount, sourceCount);
         return new Packet(header, bricks, cells, sources, batch);
+    }
+
+    private static GiDirectSourceEpoch metadataEpoch(
+            final long world,
+            final long content,
+            final long staticSources
+    ) {
+        return new GiDirectSourceEpoch(
+                world, 1L, 1L, 1L, 1L, content,
+                new LightWorldToken(1L, "minecraft:overworld"), staticSources, 1L
+        );
+    }
+
+    private static GiEnvironmentSource zeroEnvironment() {
+        return new GiEnvironmentSource(
+                1L, 0.0F, 0.0F, 0.0F,
+                0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F
+        );
     }
 
     private static int captureCell(final int x, final int y) {

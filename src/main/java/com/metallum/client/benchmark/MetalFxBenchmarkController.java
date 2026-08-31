@@ -7,6 +7,7 @@ import com.metallum.client.metal.render.bridge.MetalNativeBridge;
 import com.metallum.client.metalfx.BenchmarkScalingMode;
 import com.metallum.client.metalfx.MetalFxUpscaling;
 import com.metallum.client.lighting.AdvancedLightingRuntime;
+import com.metallum.client.gi.live.GiLiveRuntime;
 import com.metallum.client.gi.semantic.GiSemanticController;
 import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.gi.receiver.CompactPositionCarrierSafety;
@@ -64,6 +65,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import java.nio.charset.StandardCharsets;
@@ -76,9 +78,48 @@ import java.nio.charset.StandardCharsets;
  */
 public final class MetalFxBenchmarkController {
     private static final int WINDOW_TRANSITION_TIMEOUT_FRAMES = 240;
+    private static final int WINDOW_FOCUS_RETRY_INTERVAL_FRAMES = 30;
     private static final int G4_ADMISSION_TIMEOUT_FRAMES = 240;
+    private static final int G6_TORCH_ON_SCREENSHOT_MEASURED_FRAME = 400;
     private static final int G4_SOURCE_RECEIPT_FRAMES = 300;
     private static final int ROUTE_SERVER_CHECK_INTERVAL_FRAMES = 30;
+    private static final int G6_MATRIX_RECEIPT_ORBIT = 1;
+    private static final int G6_MATRIX_RECEIPT_LAVA = 1 << 1;
+    private static final int G6_MATRIX_RECEIPT_CHUNK_RELOAD = 1 << 2;
+    private static final int G6_MATRIX_RECEIPT_RESOURCE_RELOAD = 1 << 3;
+    private static final int G6_MATRIX_RECEIPT_DAY_NIGHT = 1 << 4;
+    private static final int G6_MATRIX_RECEIPT_RAIN = 1 << 5;
+    private static final int G6_MATRIX_RECEIPT_STREAM = 1 << 6;
+    private static final int G6_MATRIX_RECEIPT_TELEPORT = 1 << 7;
+    private static final int G6_MATRIX_RECEIPT_NETHER = 1 << 8;
+    private static final int G6_MATRIX_RECEIPT_ALL = (1 << 9) - 1;
+    private static final int G6_MATRIX_LATENCY_NONE = 0;
+    private static final int G6_MATRIX_LATENCY_BLOCK = 1;
+    private static final int G6_MATRIX_LATENCY_STATIC_SOURCE = 2;
+    private static final int G6_MATRIX_LATENCY_SCROLL = 3;
+    private static final int G6_MATRIX_LATENCY_FULL_RESET = 4;
+    private static final int G6_MATRIX_RECOVERY_TIMEOUT_FRAMES = 180;
+    /**
+     * Harness-only all-cascade stabilization budget; the production FULL_RESET SLA is near-only.
+     * Match the route's complete 260-frame gap so its final ten-frame poll can close before the
+     * return teleport is evaluated in the same frame.
+     */
+    private static final int G6_MATRIX_TELEPORT_STABILIZATION_TIMEOUT_FRAMES = 260;
+    /**
+     * Cold dimension streaming is a harness convergence window, not the near-only FULL_RESET
+     * SLA. Match the route's complete 470-frame gap so the final ten-frame polling boundary can
+     * close an all-cascade receipt before the return action is evaluated in the same frame.
+     */
+    private static final int G6_MATRIX_DIMENSION_STABILIZATION_TIMEOUT_FRAMES = 470;
+    private static final int G6_MATRIX_TERRAIN_RECOVERY_TIMEOUT_FRAMES = 240;
+    private static final int G6_MATRIX_RELOAD_RECOVERY_GAP_FRAMES = 270;
+    private static final int G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES = 200;
+    private static final int G6_MATRIX_SCROLL_STEP_MIN_FRAMES = 40;
+    private static final int G6_MATRIX_SCROLL_STEP_MAX_FRAMES = 60;
+    private static final int G6_MATRIX_SCROLL_FINAL_RECOVERY_GAP_FRAMES = 60;
+    private static final int G6_MATRIX_TELEPORT_RECOVERY_GAP_FRAMES = 260;
+    private static final int G6_MATRIX_RESET_RECOVERY_GAP_FRAMES = 190;
+    private static final int G6_MATRIX_DIMENSION_RECOVERY_GAP_FRAMES = 470;
     private static final int WINDOWED_WIDTH = 1280;
     private static final int WINDOWED_HEIGHT = 720;
     private static final String BENCHMARK_PLAYER_NAME = "MetallumBench";
@@ -163,21 +204,142 @@ public final class MetalFxBenchmarkController {
         MEASURE_END
     }
 
+    private enum G6MatrixServerAction {
+        LAVA_APPLY,
+        LAVA_REMOVE,
+        DAY,
+        NIGHT,
+        RAIN,
+        CLEAR,
+        STREAM,
+        TELEPORT,
+        TELEPORT_RETURN,
+        NETHER_ENTER,
+        NETHER_RETURN
+    }
+
     private enum WorkloadKind {
         STATIC,
         TORCH_EPOCH,
         TORCH_TOGGLE,
-        L6_DYNAMIC_SHADOW;
+        L6_DYNAMIC_SHADOW,
+        GI_G6_MATRIX;
 
         private static WorkloadKind fromEnvironment() {
             try {
                 return valueOf(requiredEnv("METALLUM_BENCHMARK_ROUTE_KIND"));
             } catch (IllegalArgumentException exception) {
                 throw new IllegalArgumentException(
-                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, TORCH_TOGGLE, or L6_DYNAMIC_SHADOW",
+                        "METALLUM_BENCHMARK_ROUTE_KIND must be STATIC, TORCH_EPOCH, TORCH_TOGGLE, L6_DYNAMIC_SHADOW, or GI_G6_MATRIX",
                         exception
                 );
             }
+        }
+    }
+
+    /** Exact schema-5 timeline for the production G6 live-update acceptance route. */
+    private record G6MatrixConfig(
+            String heldItem,
+            String entityItem,
+            double entityX,
+            double entityY,
+            double entityZ,
+            int lavaX,
+            int lavaY,
+            int lavaZ,
+            String lavaInitialBlock,
+            int lavaApplyFrame,
+            int lavaRemoveFrame,
+            int orbitStartFrame,
+            int orbitEndFrame,
+            float orbitYawAmplitudeDegrees,
+            float orbitPitchAmplitudeDegrees,
+            int orbitPeriodFrames,
+            int chunkReloadFrame,
+            int resourceReloadFrame,
+            int dayFrame,
+            long dayTicks,
+            int nightFrame,
+            long nightTicks,
+            int rainFrame,
+            int clearFrame,
+            int streamStartFrame,
+            int streamStepFrames,
+            int[] streamOffsets,
+            int[] streamYOffsets,
+            int teleportFrame,
+            int teleportOffsetX,
+            int teleportOffsetY,
+            int teleportOffsetZ,
+            int teleportReturnFrame,
+            int netherEnterFrame,
+            double netherX,
+            double netherY,
+            double netherZ,
+            int netherReturnFrame
+    ) {
+        private static G6MatrixConfig fromEnvironment() {
+            String held = requiredEnv("METALLUM_BENCHMARK_G6_MATRIX_HELD_ITEM");
+            String entity = requiredEnv("METALLUM_BENCHMARK_G6_MATRIX_ENTITY_ITEM");
+            String initial = requiredEnv("METALLUM_BENCHMARK_G6_MATRIX_LAVA_INITIAL_BLOCK");
+            if (!"minecraft:torch".equals(held) || !"minecraft:torch".equals(entity)
+                    || !"minecraft:air".equals(initial)) {
+                throw new IllegalArgumentException(
+                        "G6 matrix requires exact torch/torch/air source identities"
+                );
+            }
+            int[] stream = new int[8];
+            int[] streamY = new int[8];
+            for (int index = 0; index < stream.length; index++) {
+                stream[index] = integer("METALLUM_BENCHMARK_G6_MATRIX_STREAM_OFFSET_" + index);
+                streamY[index] = integer(
+                        "METALLUM_BENCHMARK_G6_MATRIX_STREAM_Y_OFFSET_" + index
+                );
+            }
+            return new G6MatrixConfig(
+                    held, entity,
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_ENTITY_POSITION_X"),
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_ENTITY_POSITION_Y"),
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_ENTITY_POSITION_Z"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_LAVA_POSITION_X"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_LAVA_POSITION_Y"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_LAVA_POSITION_Z"),
+                    initial,
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_LAVA_APPLY_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_LAVA_REMOVE_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_ORBIT_START_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_ORBIT_END_FRAME"),
+                    positiveFiniteFloat(
+                            "METALLUM_BENCHMARK_G6_MATRIX_ORBIT_YAW_AMPLITUDE_DEGREES"),
+                    positiveFiniteFloat(
+                            "METALLUM_BENCHMARK_G6_MATRIX_ORBIT_PITCH_AMPLITUDE_DEGREES"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_ORBIT_PERIOD_FRAMES"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_CHUNK_RELOAD_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_RESOURCE_RELOAD_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_DAY_FRAME"),
+                    nonNegativeLong("METALLUM_BENCHMARK_G6_MATRIX_DAY_TICKS"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_NIGHT_FRAME"),
+                    nonNegativeLong("METALLUM_BENCHMARK_G6_MATRIX_NIGHT_TICKS"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_RAIN_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_CLEAR_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_STREAM_START_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_STREAM_STEP_FRAMES"),
+                    stream, streamY,
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_TELEPORT_FRAME"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_TELEPORT_OFFSET_X"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_TELEPORT_OFFSET_Y"),
+                    integer("METALLUM_BENCHMARK_G6_MATRIX_TELEPORT_OFFSET_Z"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_TELEPORT_RETURN_FRAME"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_NETHER_ENTER_FRAME"),
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_X"),
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_Y"),
+                    finiteDouble("METALLUM_BENCHMARK_G6_MATRIX_NETHER_POSITION_Z"),
+                    positiveIntStrict("METALLUM_BENCHMARK_G6_MATRIX_NETHER_RETURN_FRAME")
+            );
+        }
+
+        private BlockPos lavaPosition() {
+            return new BlockPos(this.lavaX, this.lavaY, this.lavaZ);
         }
     }
 
@@ -303,7 +465,8 @@ public final class MetalFxBenchmarkController {
             float angleEpsilon,
             WorkloadKind workloadKind,
             TorchEpochConfig torchEpoch,
-            L6DynamicShadowConfig l6DynamicShadow
+            L6DynamicShadowConfig l6DynamicShadow,
+            G6MatrixConfig g6Matrix
     ) {
         private static RouteConfig fromEnvironment() {
             String routeId = requiredMatching("METALLUM_BENCHMARK_ROUTE_ID", SAFE_ID);
@@ -355,6 +518,9 @@ public final class MetalFxBenchmarkController {
             L6DynamicShadowConfig l6DynamicShadow = workloadKind == WorkloadKind.L6_DYNAMIC_SHADOW
                     ? L6DynamicShadowConfig.fromEnvironment()
                     : null;
+            G6MatrixConfig g6Matrix = workloadKind == WorkloadKind.GI_G6_MATRIX
+                    ? G6MatrixConfig.fromEnvironment()
+                    : null;
             return new RouteConfig(
                     routeId,
                     routeSha256,
@@ -379,7 +545,8 @@ public final class MetalFxBenchmarkController {
                     angleEpsilon,
                     workloadKind,
                     torchEpoch,
-                    l6DynamicShadow
+                    l6DynamicShadow,
+                    g6Matrix
             );
         }
     }
@@ -472,6 +639,44 @@ public final class MetalFxBenchmarkController {
     private ItemStack l6OriginalMainHand = ItemStack.EMPTY;
     private boolean l6OriginalMainHandCaptured;
     private final List<ItemEntity> l6ProbeEntities = new ArrayList<>();
+    private boolean g6MatrixReady;
+    private int g6MatrixReceiptMask;
+    private long g6MatrixOrbitFieldGeneration = -1L;
+    private long g6MatrixOrbitBlockSamples = -1L;
+    private long g6MatrixOrbitStaticSourceSamples = -1L;
+    private long g6MatrixOrbitScrollSamples = -1L;
+    private long g6MatrixOrbitFullResetSamples = -1L;
+    private boolean g6MatrixOrbitStarted;
+    private final AtomicBoolean g6MatrixServerTaskPending = new AtomicBoolean();
+    private volatile G6MatrixServerAction g6MatrixCompletedServerAction;
+    private volatile String g6MatrixServerFailure;
+    private G6MatrixServerAction g6MatrixAwaitingClientAction;
+    private int g6MatrixActiveRequestedFrame;
+    private int g6MatrixStreamIndex = -1;
+    private int g6MatrixStreamTargetOffset;
+    private int g6MatrixStreamTargetYOffset;
+    private CompletableFuture<Void> g6MatrixResourceReload;
+    private boolean g6MatrixChunkReloadRequested;
+    private boolean g6MatrixResourceReloadRequested;
+    private String g6MatrixAwaitingRecovery;
+    private long g6MatrixRecoveryFieldGeneration = -1L;
+    private long g6MatrixRecoverySampleCount = -1L;
+    private int g6MatrixRecoveryLatencyClass = G6_MATRIX_LATENCY_NONE;
+    private boolean g6MatrixRecoveryActionVisible;
+    private boolean g6MatrixRecoveryRequiresTerrainBinding;
+    private long g6MatrixRecoveryTerrainSubmit = -1L;
+    private long g6MatrixRecoveryTerrainDeviceGeneration = -1L;
+    private long g6MatrixRecoveryTerrainFieldGeneration = -1L;
+    private long g6MatrixRecoveryTerrainSourceTick = -1L;
+    private int g6MatrixRecoveryReceiptBit;
+    private int g6MatrixRecoveryRequestedFrame;
+    private int g6MatrixRecoveryDeadline;
+    private long g6MatrixMeasurementAccountedBytes = -1L;
+    private volatile boolean g6MatrixNetherPrepared;
+    private boolean g6MatrixNetherChunkForcedByBenchmark;
+    private int g6MatrixNetherChunkX;
+    private int g6MatrixNetherChunkZ;
+    private boolean g6MatrixFinalValidated;
     private boolean armed;
     private boolean resolutionOverlayOverridden;
     private boolean originalResolutionOverlayEnabled;
@@ -602,6 +807,50 @@ public final class MetalFxBenchmarkController {
                 error = "TORCH_EPOCH must end before the measurement segment ends";
             }
         }
+        if (error == null && parsedRoute != null && parsedRoute.g6Matrix() != null) {
+            G6MatrixConfig matrix = parsedRoute.g6Matrix();
+            long streamEndFrame = (long) matrix.streamStartFrame()
+                    + (long) (matrix.streamOffsets().length - 1) * matrix.streamStepFrames();
+            boolean ordered = matrix.orbitStartFrame() < matrix.orbitEndFrame()
+                    && matrix.orbitEndFrame() < matrix.lavaApplyFrame()
+                    && matrix.lavaApplyFrame() < matrix.lavaRemoveFrame()
+                    && matrix.lavaRemoveFrame() < matrix.chunkReloadFrame()
+                    && matrix.chunkReloadFrame() < matrix.resourceReloadFrame()
+                    && matrix.resourceReloadFrame() < matrix.dayFrame()
+                    && matrix.dayFrame() < matrix.nightFrame()
+                    && matrix.nightFrame() < matrix.rainFrame()
+                    && matrix.rainFrame() < matrix.clearFrame()
+                    && matrix.clearFrame() < matrix.streamStartFrame()
+                    && streamEndFrame < matrix.teleportFrame()
+                    && matrix.teleportFrame() < matrix.teleportReturnFrame()
+                    && matrix.teleportReturnFrame() < matrix.netherEnterFrame()
+                    && matrix.netherEnterFrame() < matrix.netherReturnFrame();
+            boolean recoveryWindows = g6MatrixRecoveryWindowsSufficient(
+                    matrix.chunkReloadFrame(), matrix.resourceReloadFrame(),
+                    matrix.dayFrame(), matrix.nightFrame(), matrix.rainFrame(),
+                    matrix.clearFrame(), matrix.streamStartFrame(),
+                    matrix.teleportFrame(), matrix.teleportReturnFrame(),
+                    matrix.netherEnterFrame(), matrix.netherReturnFrame(), this.measureFrames
+            );
+            boolean scrollWindows = g6MatrixScrollWindowsSufficient(
+                    matrix.streamStartFrame(), matrix.streamStepFrames(),
+                    matrix.streamOffsets().length, matrix.teleportFrame()
+            );
+            if (parsed.size() != 1) {
+                error = "GI_G6_MATRIX requires exactly one benchmark segment";
+            } else if (!ordered
+                    || matrix.streamYOffsets().length != matrix.streamOffsets().length
+                    || matrix.streamOffsets()[matrix.streamOffsets().length - 1] != 0
+                    || matrix.streamYOffsets()[matrix.streamYOffsets().length - 1] != 0
+                    || (matrix.orbitEndFrame() - matrix.orbitStartFrame())
+                    % matrix.orbitPeriodFrames() != 0) {
+                error = "GI_G6_MATRIX event schedule is not exact, ordered, and recoverable";
+            } else if (!recoveryWindows) {
+                error = "GI_G6_MATRIX recovery gaps are below the exact 270/200/260/190/470-frame floors";
+            } else if (!scrollWindows) {
+                error = "GI_G6_MATRIX scroll cadence/recovery is below the exact 40/60-frame floors";
+            }
+        }
         this.sequence = List.copyOf(parsed);
         this.route = parsedRoute;
         this.configurationError = error;
@@ -710,7 +959,12 @@ public final class MetalFxBenchmarkController {
             fail(minecraft, "G4 transport became invalid: " + GiTransportRuntime.invalidReason());
             return;
         }
-        if (GiReceiverRuntime.isRequested()
+        if (GiLiveRuntime.isRequested()
+                && GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.INVALID) {
+            fail(minecraft, "G6 live GI became invalid: " + GiLiveRuntime.invalidReason());
+            return;
+        }
+        if (GiReceiverRuntime.isFrozenRequested()
                 && (GiReceiverRuntime.admission().state()
                 == GiReceiverRuntime.AdmissionState.INVALID
                 || GiReceiverRuntime.admission().carrierSkipCount() != 0L)) {
@@ -753,9 +1007,35 @@ public final class MetalFxBenchmarkController {
                 this.measuredFrames++;
                 driveL6DynamicShadow(minecraft);
                 driveTorchEpoch(minecraft);
+                driveG6Matrix(minecraft);
                 driveNetherLavaStress(minecraft);
                 if (this.stage != Stage.RUNNING) {
                     return;
+                }
+                if (this.captureScreenshots
+                        && GiLiveRuntime.isRequested()
+                        && this.measuredFrames == G6_TORCH_ON_SCREENSHOT_MEASURED_FRAME) {
+                    if (!this.torchEpochAppliedLogged || this.torchEpochRemovalRequested) {
+                        fail(minecraft, "G6 torch-on screenshot frame is outside the confirmed torch epoch");
+                        return;
+                    }
+                    TorchEpochConfig torch = this.route.torchEpoch();
+                    if (torch == null || minecraft.level == null
+                            || !minecraft.level.getBlockState(torch.position()).is(Blocks.TORCH)) {
+                        fail(minecraft, "G6 torch-on screenshot lacks the synchronized client torch state");
+                        return;
+                    }
+                    if (!minecraft.levelRenderer.hasRenderedAllSections()) {
+                        fail(minecraft, "G6 torch-on screenshot terrain rebuild is still pending");
+                        return;
+                    }
+                    Screenshot.grab(minecraft, false);
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={} phase=TORCH_ON measured_frame={}",
+                            this.segmentIndex + 1,
+                            this.sequence.get(this.segmentIndex),
+                            this.measuredFrames
+                    );
                 }
                 if (this.captureScreenshots
                         && this.fiValidationRequired
@@ -769,6 +1049,11 @@ public final class MetalFxBenchmarkController {
                     );
                 }
                 if (this.measuredFrames >= this.measureFrames) {
+                    String g6MatrixFailure = completeG6Matrix();
+                    if (g6MatrixFailure != null) {
+                        fail(minecraft, g6MatrixFailure);
+                        return;
+                    }
                     String l6CoverageFailure = completeL6DynamicShadowCoverage();
                     if (l6CoverageFailure != null) {
                         fail(minecraft, l6CoverageFailure);
@@ -787,10 +1072,6 @@ public final class MetalFxBenchmarkController {
                         );
                     }
                     logSegmentEvent("MEASURE_END");
-                    MetalGpuTiming.completeBenchmark(
-                            this.segmentIndex,
-                            this.sequence.get(this.segmentIndex).name()
-                    );
                     beginBoundaryCheck(minecraft, RouteCheckEvent.MEASURE_END);
                 }
             }
@@ -1709,7 +1990,12 @@ public final class MetalFxBenchmarkController {
                     + GiTransportRuntime.invalidReason());
             return;
         }
-        if (GiReceiverRuntime.isRequested()
+        if (GiLiveRuntime.isRequested()
+                && GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.INVALID) {
+            fail(minecraft, "G6 live GI admission failed: " + GiLiveRuntime.invalidReason());
+            return;
+        }
+        if (GiReceiverRuntime.isFrozenRequested()
                 && (GiReceiverRuntime.admission().state()
                 == GiReceiverRuntime.AdmissionState.INVALID
                 || GiReceiverRuntime.admission().carrierSkipCount() != 0L)) {
@@ -1719,6 +2005,7 @@ public final class MetalFxBenchmarkController {
                     : GiReceiverRuntime.admission().invalidReason()));
             return;
         }
+        restoreBenchmarkWindowFocus(minecraft);
         String identityMismatch = clientIdentityMismatch(minecraft);
         if (identityMismatch != null) {
             fail(minecraft, identityMismatch);
@@ -1769,6 +2056,11 @@ public final class MetalFxBenchmarkController {
             String l6SetupFailure = ensureL6DynamicShadowReady(minecraft);
             if (l6SetupFailure != null) {
                 fail(minecraft, l6SetupFailure);
+                return;
+            }
+            String g6MatrixSetupFailure = ensureG6MatrixReady(minecraft);
+            if (g6MatrixSetupFailure != null) {
+                fail(minecraft, g6MatrixSetupFailure);
                 return;
             }
         }
@@ -1931,6 +2223,18 @@ public final class MetalFxBenchmarkController {
     }
 
     private void pollBoundaryCheck(final Minecraft minecraft) {
+        // The controller counts the current client tick before its render command buffer is
+        // registered. Keep native telemetry in MEASURE through that submission, then close it
+        // on the following tick so an N-frame benchmark produces exactly N measured frames.
+        if (shouldCloseBenchmarkTiming(
+                this.boundaryCheckEvent == RouteCheckEvent.MEASURE_END,
+                this.boundaryCheckFrames
+        )) {
+            MetalGpuTiming.completeBenchmark(
+                    this.segmentIndex,
+                    this.sequence.get(this.segmentIndex).name()
+            );
+        }
         this.boundaryCheckFrames++;
         if (this.boundaryCheckToken == 0L && !this.routeServerTaskPending.get()) {
             this.boundaryCheckToken = submitRouteServerCheck(minecraft, false);
@@ -1963,6 +2267,11 @@ public final class MetalFxBenchmarkController {
                 this.route.routeId()
         );
         if (this.boundaryCheckEvent == RouteCheckEvent.MEASURE_START) {
+            String g6WarmupFailure = verifyGiLiveWarmupAdmission();
+            if (g6WarmupFailure != null) {
+                fail(minecraft, g6WarmupFailure);
+                return;
+            }
             String reflectionAdmissionFailure = verifyVertexReflectionAdmission();
             if (reflectionAdmissionFailure != null) {
                 fail(minecraft, reflectionAdmissionFailure);
@@ -1974,6 +2283,11 @@ public final class MetalFxBenchmarkController {
                 return;
             }
             GiTransportRuntime.beginBenchmarkMeasurement();
+            GiLiveRuntime.beginBenchmarkMeasurement();
+            if (this.route.g6Matrix() != null) {
+                this.g6MatrixMeasurementAccountedBytes =
+                        GiLiveRuntime.finalSnapshot().accountedBytes();
+            }
             MetalGpuTiming.beginBenchmarkMeasurement(
                     this.segmentIndex,
                     this.sequence.get(this.segmentIndex).name()
@@ -1982,7 +2296,9 @@ public final class MetalFxBenchmarkController {
                 L6DynamicShadowBenchmarkTelemetry.begin();
             }
             com.metallum.client.lighting.AdvancedLightRegistry.global().resetBenchmarkTelemetry();
-            if (this.captureScreenshots && !this.fiValidationRequired) {
+            if (this.captureScreenshots
+                    && !this.fiValidationRequired
+                    && !GiLiveRuntime.isRequested()) {
                 Screenshot.grab(minecraft, false);
                 Metallum.LOGGER.info(
                         "METALLUM_BENCHMARK EVENT=SCREENSHOT_REQUESTED index={} mode={}",
@@ -1998,9 +2314,119 @@ public final class MetalFxBenchmarkController {
 
         this.segmentIndex++;
         if (this.segmentIndex >= this.sequence.size()) {
+            String g6FinalFailure = null;
             String g5FinalFailure = null;
             boolean completeLogged = false;
-            if (GiReceiverRuntime.isRequested()) {
+            if (GiLiveRuntime.isRequested()) {
+                GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+                long currentDeviceGeneration = GiLiveRuntime.deviceGeneration();
+                if (this.route.g6Matrix() != null) {
+                    if (!this.g6MatrixFinalValidated) {
+                        g6FinalFailure = "G6 matrix final receipt was not validated";
+                    } else {
+                        Metallum.LOGGER.info(
+                                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_FINAL route={} "
+                                        + "receipts=511 orbit_field_stable=true "
+                                        + "queue_converged=true accounted_delta=0 "
+                                        + "status=PASS contract=6",
+                                this.route.routeId()
+                        );
+                    }
+                }
+                if (GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                        || !GiLiveRuntime.finalReceiptIsCurrent(
+                        snapshot, currentDeviceGeneration
+                )
+                        || snapshot.readyMask() != 7
+                        || snapshot.buildInFlight()
+                        || snapshot.staleRejects() != 0L
+                        || snapshot.rejectedCount() != 0L
+                        || snapshot.accountedBytes() > 25_165_824L
+                        || snapshot.fieldGeneration() <= 0L
+                        || snapshot.sourceTick() < 0L
+                        || snapshot.blockSamples() <= 0L
+                        || snapshot.blockP95Submits() > 8
+                        || snapshot.blockP99Submits() > 16
+                        || !snapshot.blockSla()
+                        || snapshot.schedulerPending() != 0
+                        || snapshot.schedulerInFlight() != 0
+                        || !snapshot.schedulerAlgebraExact()
+                        || snapshot.schedulerQueued()
+                        != snapshot.schedulerCompleted() + snapshot.schedulerDiscarded()
+                        || snapshot.measurementStartAccountedBytes() <= 0L
+                        || snapshot.measurementStartAccountedBytes()
+                        != snapshot.accountedBytes()) {
+                    g6FinalFailure = (g6FinalFailure == null ? "" : g6FinalFailure + "; ")
+                            + (GiLiveRuntime.admissionState()
+                            == GiLiveRuntime.AdmissionState.INVALID
+                            ? GiLiveRuntime.invalidReason() + "; "
+                            + giG6CensusSummary(snapshot, currentDeviceGeneration)
+                            : "stable G6 ready/SLA/memory/current-receipt census was not clean; "
+                            + giG6CensusSummary(snapshot, currentDeviceGeneration));
+                } else {
+                    Metallum.LOGGER.info(
+                            "METALLUM_BENCHMARK EVENT=GI_G6_FINAL "
+                                    + "state=READY device_generation={} "
+                                    + "admission_emitted=true admission_device_generation={} "
+                                    + "ready_mask={} build_in_flight=false "
+                                    + "field_generation={} source_tick={} stale=0 rejected=0 "
+                                    + "latest_terrain_device_generation={} "
+                                    + "latest_terrain_submit={} latest_bind_status={} "
+                                    + "latest_carrier_safe={} latest_frame_compatible={} "
+                                    + "latest_ready_mask={} latest_exact_mask_nonzero={} "
+                                    + "latest_field_generation={} latest_source_tick={} "
+                                    + "combined_accounted_bytes={} cap_bytes=25165824 "
+                                    + "block_samples={} block_p95_submits={} "
+                                    + "block_p99_submits={} block_sla=true "
+                                    + "static_samples={} static_p95_submits={} "
+                                    + "static_p99_submits={} static_sla={} "
+                                    + "scroll_samples={} scroll_p95_submits={} "
+                                    + "scroll_p99_submits={} scroll_sla={} "
+                                    + "reset_samples={} reset_p95_submits={} "
+                                    + "reset_p99_submits={} reset_sla={} "
+                                    + "queue_queued={} queue_completed={} queue_discarded={} "
+                                    + "queue_pending=0 queue_in_flight=0 queue_algebra=true "
+                                    + "measurement_start_bytes={} accounted_delta=0 "
+                                    + "readback_bytes=0 "
+                                    + "status=PASS contract=6",
+                            currentDeviceGeneration,
+                            snapshot.admissionDeviceGeneration(),
+                            snapshot.readyMask(),
+                            snapshot.fieldGeneration(),
+                            snapshot.sourceTick(),
+                            snapshot.latestTerrainDeviceGeneration(),
+                            snapshot.latestTerrainSubmitIndex(),
+                            snapshot.latestTerrainBindStatus(),
+                            snapshot.latestTerrainCarrierSafe(),
+                            snapshot.latestTerrainFrameCompatible(),
+                            snapshot.latestTerrainReadyMask(),
+                            snapshot.latestTerrainExactMaskNonzero(),
+                            snapshot.latestTerrainFieldGeneration(),
+                            snapshot.latestTerrainSourceTick(),
+                            snapshot.accountedBytes(),
+                            snapshot.blockSamples(),
+                            snapshot.blockP95Submits(),
+                            snapshot.blockP99Submits(),
+                            snapshot.staticSourceSamples(),
+                            snapshot.staticSourceP95Submits(),
+                            snapshot.staticSourceP99Submits(),
+                            snapshot.staticSourceSla(),
+                            snapshot.scrollSamples(),
+                            snapshot.scrollP95Submits(),
+                            snapshot.scrollP99Submits(),
+                            snapshot.scrollSla(),
+                            snapshot.fullResetSamples(),
+                            snapshot.fullResetP95Submits(),
+                            snapshot.fullResetP99Submits(),
+                            snapshot.fullResetSla(),
+                            snapshot.schedulerQueued(),
+                            snapshot.schedulerCompleted(),
+                            snapshot.schedulerDiscarded(),
+                            snapshot.measurementStartAccountedBytes()
+                    );
+                }
+            }
+            if (GiReceiverRuntime.isFrozenRequested()) {
                 CompactPositionCarrierSafety.beginCarrierAwareDraw();
                 try {
                     GiReceiverRuntime.FinalSnapshot snapshot = GiReceiverRuntime.admission()
@@ -2055,6 +2481,10 @@ public final class MetalFxBenchmarkController {
                 } finally {
                     CompactPositionCarrierSafety.endCarrierAwareDraw();
                 }
+            }
+            if (g6FinalFailure != null) {
+                fail(minecraft, "G6 final live census failed: " + g6FinalFailure);
+                return;
             }
             if (g5FinalFailure != null) {
                 fail(minecraft, "G5 final carrier census failed: " + g5FinalFailure);
@@ -2149,6 +2579,8 @@ public final class MetalFxBenchmarkController {
         int chunkZ = Mth.floor(this.route.z()) >> 4;
         if (apply) {
             level.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+            String netherPreparationFailure = prepareG6MatrixNetherChunk(server);
+            if (netherPreparationFailure != null) return netherPreparationFailure;
             level.getGameRules().set(GameRules.ADVANCE_TIME, false, server);
             level.getGameRules().set(GameRules.ADVANCE_WEATHER, false, server);
             if (clock != null) {
@@ -2208,6 +2640,37 @@ public final class MetalFxBenchmarkController {
             }
         }
         return serverRouteMismatch(server, level, player, clock, chunkX, chunkZ);
+    }
+
+    private String prepareG6MatrixNetherChunk(final IntegratedServer server) {
+        G6MatrixConfig config = this.route.g6Matrix();
+        if (config == null || this.g6MatrixNetherPrepared) return null;
+        ServerLevel nether = server.getLevel(Level.NETHER);
+        if (nether == null) return "G6 matrix Nether dimension is unavailable during preparation";
+        int chunkX = Mth.floor(config.netherX()) >> 4;
+        int chunkZ = Mth.floor(config.netherZ()) >> 4;
+        long chunkKey = ChunkPos.pack(chunkX, chunkZ);
+        boolean alreadyForced = nether.getForceLoadedChunks().contains(chunkKey);
+        if (!alreadyForced) {
+            if (!nether.setChunkForced(chunkX, chunkZ, true)) {
+                return "G6 matrix Nether target chunk could not be forced before measurement";
+            }
+            this.g6MatrixNetherChunkForcedByBenchmark = true;
+        }
+        this.g6MatrixNetherChunkX = chunkX;
+        this.g6MatrixNetherChunkZ = chunkZ;
+        nether.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+        if (nether.getChunkSource().getChunkNow(chunkX, chunkZ) == null) {
+            return "G6 matrix Nether target chunk is not FULL after preparation";
+        }
+        this.g6MatrixNetherPrepared = true;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_NETHER_PREPARE route={} "
+                        + "target={},{},{} chunk={},{} full=true forced=true status=PASS",
+                this.route.routeId(), Mth.floor(config.netherX()), Mth.floor(config.netherY()),
+                Mth.floor(config.netherZ()), chunkX, chunkZ
+        );
+        return null;
     }
 
     static boolean shouldEmitServerTicksFrozenEvidence(
@@ -2348,6 +2811,11 @@ public final class MetalFxBenchmarkController {
     }
 
     private String serverWorkloadStateMismatch(final ServerLevel level) {
+        G6MatrixConfig matrix = this.route.g6Matrix();
+        if (matrix != null) {
+            return level.getBlockState(matrix.lavaPosition()).is(Blocks.AIR)
+                    ? null : "G6 matrix lava position differs from its air boundary state";
+        }
         TorchEpochConfig config = this.route.torchEpoch();
         if (config == null) {
             return null;
@@ -2372,6 +2840,18 @@ public final class MetalFxBenchmarkController {
     }
 
     private String clientWorkloadStateMismatch(final Minecraft minecraft) {
+        if (this.route.g6Matrix() != null) {
+            if (!this.g6MatrixReady || !minecraft.player.getMainHandItem().is(Items.TORCH)
+                    || this.l6ProbeEntities.size() != 1) {
+                return "G6 matrix did not retain its camera-independent sources";
+            }
+            ItemEntity probe = this.l6ProbeEntities.getFirst();
+            if (probe.isRemoved() || probe.level() != minecraft.level
+                    || !probe.getItem().is(Items.TORCH)) {
+                return "G6 matrix entity source is absent from the current route level";
+            }
+            return null;
+        }
         L6DynamicShadowConfig l6 = this.route.l6DynamicShadow();
         if (l6 != null) {
             if (!this.l6DynamicReady || !minecraft.player.getMainHandItem().is(Items.TORCH)) {
@@ -2469,12 +2949,1241 @@ public final class MetalFxBenchmarkController {
         }
     }
 
+    private String ensureG6MatrixReady(final Minecraft minecraft) {
+        G6MatrixConfig config = this.route.g6Matrix();
+        if (config == null || this.g6MatrixReady) {
+            return null;
+        }
+        if (minecraft.player == null || minecraft.level == null) {
+            return "G6 matrix requires a client player and level";
+        }
+        try {
+            this.l6OriginalMainHand = minecraft.player.getMainHandItem().copy();
+            this.l6OriginalMainHandCaptured = true;
+            minecraft.player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TORCH));
+            ItemEntity probe = new ItemEntity(
+                    minecraft.level,
+                    config.entityX(), config.entityY(), config.entityZ(),
+                    new ItemStack(Items.TORCH), 0.0, 0.0, 0.0
+            );
+            probe.setUUID(UUID.nameUUIDFromBytes(
+                    "metallum-g6-matrix-probe".getBytes(StandardCharsets.UTF_8)
+            ));
+            int probeId = 1_999_999_900;
+            if (minecraft.level.getEntity(probeId) != null
+                    || minecraft.level.getEntity(probe.getUUID()) != null) {
+                throw new IllegalStateException("G6 matrix probe identity collision");
+            }
+            probe.setId(probeId);
+            probe.setNoGravity(true);
+            probe.setDeltaMovement(0.0, 0.0, 0.0);
+            minecraft.level.addEntity(probe);
+            this.l6ProbeEntities.add(probe);
+            this.g6MatrixReady = true;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_READY route={} "
+                            + "held=minecraft:torch entity=minecraft:torch entity_id={} status=PASS",
+                    this.route.routeId(), probeId
+            );
+            return null;
+        } catch (RuntimeException exception) {
+            clearL6DynamicShadowRoute(minecraft);
+            this.g6MatrixReady = false;
+            Metallum.LOGGER.error("G6 matrix source setup failed", exception);
+            return "G6 matrix source setup failed: " + exception.getClass().getSimpleName();
+        }
+    }
+
     private void driveL6DynamicShadow(final Minecraft minecraft) {
         if (!this.l6DynamicReady || this.route.l6DynamicShadow() == null) {
             return;
         }
         this.l6MotionFrame++;
         applyL6DynamicShadowMotion(minecraft, this.l6MotionFrame);
+    }
+
+    private void driveG6Matrix(final Minecraft minecraft) {
+        G6MatrixConfig config = this.route.g6Matrix();
+        if (config == null || !this.g6MatrixReady) return;
+        if (this.g6MatrixServerFailure != null) {
+            fail(minecraft, this.g6MatrixServerFailure);
+            return;
+        }
+        pollG6MatrixServerAction(minecraft);
+        pollG6MatrixResourceReload(minecraft);
+        if (this.stage != Stage.RUNNING) return;
+        if (this.g6MatrixAwaitingRecovery != null && this.measuredFrames % 10 == 0) {
+            pollG6MatrixRecovery(minecraft);
+            if (this.stage != Stage.RUNNING) return;
+        }
+
+        int frame = this.measuredFrames;
+        if (frame == config.orbitStartFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "ORBIT_BEGIN"
+            );
+            if (snapshot == null) return;
+            this.g6MatrixOrbitFieldGeneration = snapshot.fieldGeneration();
+            this.g6MatrixOrbitBlockSamples = snapshot.blockSamples();
+            this.g6MatrixOrbitStaticSourceSamples = snapshot.staticSourceSamples();
+            this.g6MatrixOrbitScrollSamples = snapshot.scrollSamples();
+            this.g6MatrixOrbitFullResetSamples = snapshot.fullResetSamples();
+            this.g6MatrixOrbitStarted = true;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} "
+                            + "action=ORBIT_BEGIN measured_frame={} field_generation={} "
+                            + "block_samples={} static_source_samples={} scroll_samples={} "
+                            + "full_reset_samples={} status=PASS",
+                    this.route.routeId(), frame, this.g6MatrixOrbitFieldGeneration,
+                    this.g6MatrixOrbitBlockSamples, this.g6MatrixOrbitStaticSourceSamples,
+                    this.g6MatrixOrbitScrollSamples, this.g6MatrixOrbitFullResetSamples
+            );
+        }
+        if (this.g6MatrixOrbitStarted && frame >= config.orbitStartFrame()
+                && frame < config.orbitEndFrame() && minecraft.player != null) {
+            double phase = Math.TAU * (frame - config.orbitStartFrame())
+                    / config.orbitPeriodFrames();
+            float yaw = this.route.yaw()
+                    + config.orbitYawAmplitudeDegrees() * (float) Math.sin(phase);
+            float pitch = Mth.clamp(
+                    this.route.pitch()
+                            + config.orbitPitchAmplitudeDegrees() * (float) Math.sin(phase),
+                    -90.0F, 90.0F
+            );
+            minecraft.player.setYRot(yaw);
+            minecraft.player.setXRot(pitch);
+            minecraft.player.yRotO = yaw;
+            minecraft.player.xRotO = pitch;
+        }
+        if (frame == config.orbitEndFrame()) {
+            restoreG6MatrixPose(minecraft);
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "ORBIT_END"
+            );
+            if (snapshot == null) return;
+            if (!this.g6MatrixOrbitStarted || !g6MatrixOrbitStable(
+                    this.g6MatrixOrbitFieldGeneration, snapshot.fieldGeneration(),
+                    this.g6MatrixOrbitBlockSamples, snapshot.blockSamples(),
+                    this.g6MatrixOrbitStaticSourceSamples, snapshot.staticSourceSamples(),
+                    this.g6MatrixOrbitScrollSamples, snapshot.scrollSamples(),
+                    this.g6MatrixOrbitFullResetSamples, snapshot.fullResetSamples()
+            )) {
+                fail(minecraft, "G6 matrix camera orbit changed stationary-source field/latency identity");
+                return;
+            }
+            this.g6MatrixReceiptMask |= G6_MATRIX_RECEIPT_ORBIT;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} "
+                            + "action=ORBIT_END measured_frame={} baseline_generation={} "
+                            + "field_generation={} block_samples={} static_source_samples={} "
+                            + "scroll_samples={} full_reset_samples={} status=PASS",
+                    this.route.routeId(), frame, this.g6MatrixOrbitFieldGeneration,
+                    snapshot.fieldGeneration(), snapshot.blockSamples(),
+                    snapshot.staticSourceSamples(), snapshot.scrollSamples(),
+                    snapshot.fullResetSamples()
+            );
+        }
+
+        if (frame == config.lavaApplyFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "LAVA_APPLY"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.LAVA_APPLY, frame, snapshot
+            );
+        } else if (frame == config.lavaRemoveFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "LAVA_REMOVE"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.LAVA_REMOVE, frame, snapshot
+            );
+        } else if (frame == config.chunkReloadFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "CHUNK_RELOAD"
+            );
+            if (snapshot == null) return;
+            minecraft.levelExtractor.allChanged();
+            this.g6MatrixChunkReloadRequested = true;
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} "
+                            + "action=CHUNK_RELOAD requested_frame={} measured_frame={} status=PASS",
+                    this.route.routeId(), frame, frame
+            );
+            beginG6MatrixTerrainRecovery(
+                    "CHUNK_RELOAD", frame, snapshot, G6_MATRIX_RECEIPT_CHUNK_RELOAD
+            );
+        } else if (frame == config.resourceReloadFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "RESOURCE_RELOAD"
+            );
+            if (snapshot == null) return;
+            this.g6MatrixResourceReloadRequested = true;
+            this.g6MatrixResourceReload = minecraft.reloadResourcePacks();
+            beginG6MatrixRecovery(
+                    "RESOURCE_RELOAD", frame, snapshot, G6_MATRIX_LATENCY_FULL_RESET,
+                    G6_MATRIX_RECEIPT_RESOURCE_RELOAD, false
+            );
+            captureG6MatrixTerrainRecoveryBaseline(snapshot);
+        } else if (frame == config.dayFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(minecraft, "DAY");
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.DAY, frame, snapshot
+            );
+        } else if (frame == config.nightFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(minecraft, "NIGHT");
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.NIGHT, frame, snapshot
+            );
+        } else if (frame == config.rainFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(minecraft, "RAIN");
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.RAIN, frame, snapshot
+            );
+        } else if (frame == config.clearFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(minecraft, "CLEAR");
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.CLEAR, frame, snapshot
+            );
+        }
+
+        int streamEndFrame = config.streamStartFrame()
+                + (config.streamOffsets().length - 1) * config.streamStepFrames();
+        if (frame >= config.streamStartFrame() && frame <= streamEndFrame
+                && (frame - config.streamStartFrame()) % config.streamStepFrames() == 0) {
+            int index = (frame - config.streamStartFrame()) / config.streamStepFrames();
+            if (index == 0) {
+                this.g6MatrixStreamIndex = -1;
+            }
+            GiLiveRuntime.FinalSnapshot snapshot = index == 0
+                    ? requireCleanG6MatrixSnapshot(
+                    minecraft, g6MatrixStreamRecoveryName(index))
+                    : requireNearReadyG6MatrixSnapshot(
+                    minecraft, g6MatrixStreamRecoveryName(index));
+            if (snapshot == null) return;
+            this.g6MatrixStreamIndex = index;
+            this.g6MatrixStreamTargetOffset = config.streamOffsets()[index];
+            this.g6MatrixStreamTargetYOffset = config.streamYOffsets()[index];
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.STREAM, frame, snapshot
+            );
+        } else if (frame == config.teleportFrame()) {
+            // STEP_7's exact-near receipt must already be closed, but unfinished compatible
+            // mid/far scroll work is deliberately allowed here: the production coordinator
+            // must defer and merge this more severe FULL_RESET instead of exposing stale GI.
+            GiLiveRuntime.FinalSnapshot snapshot = requireNearReadyG6MatrixSnapshot(
+                    minecraft, "TELEPORT_OUT"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.TELEPORT, frame, snapshot
+            );
+        } else if (frame == config.teleportReturnFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "TELEPORT_RETURN"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.TELEPORT_RETURN, frame, snapshot
+            );
+        } else if (frame == config.netherEnterFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "NETHER_ENTER"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.NETHER_ENTER, frame, snapshot
+            );
+        } else if (frame == config.netherReturnFrame()) {
+            GiLiveRuntime.FinalSnapshot snapshot = requireCleanG6MatrixSnapshot(
+                    minecraft, "NETHER_RETURN"
+            );
+            if (snapshot == null) return;
+            requestG6MatrixServerAction(
+                    minecraft, G6MatrixServerAction.NETHER_RETURN, frame, snapshot
+            );
+        }
+    }
+
+    private GiLiveRuntime.FinalSnapshot requireCleanG6MatrixSnapshot(
+            final Minecraft minecraft, final String action
+    ) {
+        if (this.g6MatrixServerTaskPending.get()
+                || this.g6MatrixAwaitingClientAction != null
+                || this.g6MatrixAwaitingRecovery != null
+                || (this.g6MatrixResourceReload != null
+                && !this.g6MatrixResourceReload.isDone())) {
+            logG6MatrixPendingRecovery(minecraft, action);
+            fail(minecraft, "G6 matrix action " + action + " overlapped unfinished work");
+            return null;
+        }
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        if (GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                || !GiLiveRuntime.finalReceiptIsCurrent(snapshot, GiLiveRuntime.deviceGeneration())
+                || snapshot.readyMask() != 7 || snapshot.buildInFlight()
+                || snapshot.staleRejects() != 0L || snapshot.rejectedCount() != 0L) {
+            fail(minecraft, "G6 matrix action " + action + " lacks a clean current field");
+            return null;
+        }
+        return snapshot;
+    }
+
+    /** Rapid stream steps may supersede compatible mid/far work after exact near recovery. */
+    private GiLiveRuntime.FinalSnapshot requireNearReadyG6MatrixSnapshot(
+            final Minecraft minecraft, final String action
+    ) {
+        if (this.g6MatrixServerTaskPending.get()
+                || this.g6MatrixAwaitingClientAction != null
+                || this.g6MatrixAwaitingRecovery != null
+                || (this.g6MatrixResourceReload != null
+                && !this.g6MatrixResourceReload.isDone())) {
+            logG6MatrixPendingRecovery(minecraft, action);
+            fail(minecraft, "G6 matrix action " + action + " overlapped near recovery");
+            return null;
+        }
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        if (GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                || !GiLiveRuntime.finalReceiptIsCurrent(
+                snapshot, GiLiveRuntime.deviceGeneration())
+                || !g6MatrixRecoveryCoverageReady(
+                snapshot.readyMask(), snapshot.buildInFlight(), true)
+                || snapshot.staleRejects() != 0L || snapshot.rejectedCount() != 0L) {
+            fail(minecraft, "G6 matrix action " + action
+                    + " lacks current exact near coverage");
+            return null;
+        }
+        return snapshot;
+    }
+
+    private void logG6MatrixPendingRecovery(
+            final Minecraft minecraft, final String nextAction
+    ) {
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        long sampleAfter = g6MatrixLatencySamples(
+                snapshot, this.g6MatrixRecoveryLatencyClass
+        );
+        Metallum.LOGGER.error(
+                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_PENDING next_action={} "
+                        + "measured_frame={} server_task_pending={} awaiting_client={} "
+                        + "awaiting_recovery={} resource_reload_pending={} terrain_queue_empty={} "
+                        + "deadline={} admission={} final_current={} device_generation={} "
+                        + "receipt_device={} ready_mask={} build_in_flight={} stale={} rejected={} "
+                        + "field_generation={} source_tick={} latency_class={} sample_before={} "
+                        + "sample_after={} terrain_required={} terrain_submit_before={} "
+                        + "terrain_submit_after={} terrain_device_before={} terrain_device_after={} "
+                        + "terrain_field_before={} terrain_field_after={} terrain_source_before={} "
+                        + "terrain_source_after={} bind_status={} carrier_safe={} "
+                        + "frame_compatible={} exact_mask_nonzero={}",
+                nextAction, this.measuredFrames, this.g6MatrixServerTaskPending.get(),
+                this.g6MatrixAwaitingClientAction, this.g6MatrixAwaitingRecovery,
+                this.g6MatrixResourceReload != null && !this.g6MatrixResourceReload.isDone(),
+                minecraft.levelRenderer.hasRenderedAllSections(), this.g6MatrixRecoveryDeadline,
+                GiLiveRuntime.admissionState(),
+                GiLiveRuntime.finalReceiptIsCurrent(snapshot, GiLiveRuntime.deviceGeneration()),
+                GiLiveRuntime.deviceGeneration(), snapshot.deviceGeneration(), snapshot.readyMask(),
+                snapshot.buildInFlight(), snapshot.staleRejects(), snapshot.rejectedCount(),
+                snapshot.fieldGeneration(), snapshot.sourceTick(),
+                g6MatrixLatencyClassName(this.g6MatrixRecoveryLatencyClass),
+                this.g6MatrixRecoverySampleCount, sampleAfter,
+                this.g6MatrixRecoveryRequiresTerrainBinding,
+                this.g6MatrixRecoveryTerrainSubmit, snapshot.latestTerrainSubmitIndex(),
+                this.g6MatrixRecoveryTerrainDeviceGeneration,
+                snapshot.latestTerrainDeviceGeneration(),
+                this.g6MatrixRecoveryTerrainFieldGeneration,
+                snapshot.latestTerrainFieldGeneration(),
+                this.g6MatrixRecoveryTerrainSourceTick,
+                snapshot.latestTerrainSourceTick(), snapshot.latestTerrainBindStatus(),
+                snapshot.latestTerrainCarrierSafe(), snapshot.latestTerrainFrameCompatible(),
+                snapshot.latestTerrainExactMaskNonzero()
+        );
+        Metallum.LOGGER.error(
+                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_PENDING_STATE {}",
+                MetalDevice.getInstance().giLiveDebugSummary()
+        );
+    }
+
+    private void requestG6MatrixServerAction(
+            final Minecraft minecraft,
+            final G6MatrixServerAction action,
+            final int requestedFrame,
+            final GiLiveRuntime.FinalSnapshot baseline
+    ) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null || this.g6MatrixAwaitingClientAction != null
+                || !this.g6MatrixServerTaskPending.compareAndSet(false, true)) {
+            fail(minecraft, "G6 matrix could not serialize server action " + action);
+            return;
+        }
+        this.g6MatrixAwaitingClientAction = action;
+        this.g6MatrixActiveRequestedFrame = requestedFrame;
+        this.g6MatrixCompletedServerAction = null;
+        beginG6MatrixRecovery(
+                g6MatrixRecoveryName(action), requestedFrame, baseline,
+                g6MatrixLatencyClass(action), g6MatrixReceiptBit(action), false,
+                g6MatrixAllCascadeStabilizationTimeoutFrames(
+                        action == G6MatrixServerAction.TELEPORT,
+                        action == G6MatrixServerAction.NETHER_ENTER
+                                || action == G6MatrixServerAction.NETHER_RETURN
+                )
+        );
+        try {
+            server.execute(() -> {
+                try {
+                    this.g6MatrixServerFailure = applyG6MatrixServerAction(server, action);
+                    this.g6MatrixCompletedServerAction = action;
+                } catch (RuntimeException exception) {
+                    this.g6MatrixServerFailure = "G6 matrix server action " + action
+                            + " failed: " + exception.getClass().getSimpleName();
+                    Metallum.LOGGER.error("G6 matrix server action failed: " + action, exception);
+                } finally {
+                    this.g6MatrixServerTaskPending.set(false);
+                }
+            });
+        } catch (RuntimeException exception) {
+            this.g6MatrixServerTaskPending.set(false);
+            this.g6MatrixAwaitingClientAction = null;
+            fail(minecraft, "G6 matrix could not submit server action " + action);
+        }
+    }
+
+    private String applyG6MatrixServerAction(
+            final IntegratedServer server, final G6MatrixServerAction action
+    ) {
+        G6MatrixConfig config = this.route.g6Matrix();
+        ServerPlayer player = server.getPlayerList().getPlayer(this.route.playerUuid());
+        ServerLevel overworld = server.getLevel(this.route.dimension());
+        if (config == null || player == null || overworld == null) {
+            return "G6 matrix server state is unavailable";
+        }
+        switch (action) {
+            case LAVA_APPLY -> {
+                if (!overworld.getBlockState(config.lavaPosition()).is(Blocks.AIR)
+                        || !overworld.setBlock(
+                        config.lavaPosition(), Blocks.LAVA.defaultBlockState(), Block.UPDATE_ALL
+                )) return "G6 matrix lava placement was rejected";
+            }
+            case LAVA_REMOVE -> {
+                if (!overworld.getBlockState(config.lavaPosition()).is(Blocks.LAVA)
+                        || !overworld.setBlock(
+                        config.lavaPosition(), Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL
+                )) return "G6 matrix lava removal was rejected";
+            }
+            case DAY -> setG6MatrixClock(server, overworld, config.dayTicks());
+            case NIGHT -> setG6MatrixClock(server, overworld, config.nightTicks());
+            case RAIN -> setG6MatrixWeather(server, overworld, true);
+            // Keep each exact-attribution matrix event to one physical source mutation.
+            // DAY/NIGHT cover the clock; NETHER_RETURN restores the canonical route clock.
+            case CLEAR -> setG6MatrixWeather(server, overworld, false);
+            case STREAM -> {
+                String failure = teleportG6MatrixPlayer(
+                        server, player, overworld,
+                        this.route.x() + this.g6MatrixStreamTargetOffset,
+                        this.route.y() + this.g6MatrixStreamTargetYOffset,
+                        this.route.z(), this.route.yaw(), this.route.pitch(), true
+                );
+                if (failure != null) return failure;
+            }
+            case TELEPORT -> {
+                String failure = teleportG6MatrixPlayer(
+                        server, player, overworld,
+                        this.route.x() + config.teleportOffsetX(),
+                        this.route.y() + config.teleportOffsetY(),
+                        this.route.z() + config.teleportOffsetZ(),
+                        this.route.yaw(), this.route.pitch(), true
+                );
+                if (failure != null) return failure;
+            }
+            case TELEPORT_RETURN -> {
+                String failure = teleportG6MatrixPlayer(
+                        server, player, overworld,
+                        this.route.x(), this.route.y(), this.route.z(),
+                        this.route.yaw(), this.route.pitch(), true
+                );
+                if (failure != null) return failure;
+            }
+            case NETHER_ENTER -> {
+                ServerLevel nether = server.getLevel(Level.NETHER);
+                if (nether == null) return "G6 matrix Nether dimension is unavailable";
+                if (!this.g6MatrixNetherPrepared
+                        || nether.getChunkSource().getChunkNow(
+                        this.g6MatrixNetherChunkX, this.g6MatrixNetherChunkZ
+                ) == null) {
+                    return "G6 matrix Nether target chunk is not prepared and current";
+                }
+                String failure = teleportG6MatrixPlayer(
+                        server, player, nether,
+                        config.netherX(), config.netherY(), config.netherZ(),
+                        0.0F, 15.0F, false
+                );
+                if (failure != null) return failure;
+            }
+            case NETHER_RETURN -> {
+                setG6MatrixWeather(server, overworld, false);
+                setG6MatrixClock(server, overworld, this.route.clockTicks());
+                String failure = teleportG6MatrixPlayer(
+                        server, player, overworld,
+                        this.route.x(), this.route.y(), this.route.z(),
+                        this.route.yaw(), this.route.pitch(), true
+                );
+                if (failure != null) return failure;
+                releaseG6MatrixNetherChunk(server);
+            }
+        }
+        return null;
+    }
+
+    private void setG6MatrixClock(
+            final IntegratedServer server, final ServerLevel level, final long ticks
+    ) {
+        Holder<WorldClock> clock = level.dimensionType().defaultClock().orElse(null);
+        if (clock == null) throw new IllegalStateException("G6 matrix clock is unavailable");
+        server.clockManager().setTotalTicks(clock, ticks);
+        server.clockManager().setPaused(clock, true);
+    }
+
+    private static void setG6MatrixWeather(
+            final IntegratedServer server, final ServerLevel level, final boolean rain
+    ) {
+        server.setWeatherParameters(rain ? 0 : 6000, rain ? 6000 : 0, rain, false);
+        level.setRainLevel(rain ? 1.0F : 0.0F);
+        Minecraft minecraft = Minecraft.getInstance();
+        minecraft.execute(() -> {
+            if (minecraft.level != null
+                    && minecraft.level.dimension().equals(level.dimension())) {
+                minecraft.level.setRainLevel(rain ? 1.0F : 0.0F);
+            }
+        });
+    }
+
+    private static String teleportG6MatrixPlayer(
+            final IntegratedServer server,
+            final ServerPlayer player,
+            final ServerLevel target,
+            final double x,
+            final double y,
+            final double z,
+            final float yaw,
+            final float pitch,
+            final boolean allowChunkLoad
+    ) {
+        int chunkX = Mth.floor(x) >> 4;
+        int chunkZ = Mth.floor(z) >> 4;
+        if (allowChunkLoad) {
+            target.getChunkSource().getChunk(chunkX, chunkZ, ChunkStatus.FULL, true);
+        } else if (target.getChunkSource().getChunkNow(chunkX, chunkZ) == null) {
+            return "G6 matrix server teleport target chunk is not already loaded";
+        }
+        boolean frozen = server.tickRateManager().isFrozen();
+        try {
+            if (!player.level().dimension().equals(target.dimension()) && frozen) {
+                server.tickRateManager().setFrozen(false);
+            }
+            boolean teleported = player.teleportTo(
+                    target, x, y, z, Set.<Relative>of(), yaw, pitch, true
+            );
+            player.setDeltaMovement(0.0, 0.0, 0.0);
+            return teleported ? null : "G6 matrix server teleport was rejected";
+        } finally {
+            server.tickRateManager().setFrozen(frozen);
+        }
+    }
+
+    private void releaseG6MatrixNetherChunk(final IntegratedServer server) {
+        if (!this.g6MatrixNetherChunkForcedByBenchmark) return;
+        ServerLevel nether = server.getLevel(Level.NETHER);
+        if (nether == null || !nether.setChunkForced(
+                this.g6MatrixNetherChunkX, this.g6MatrixNetherChunkZ, false
+        )) {
+            throw new IllegalStateException("G6 matrix Nether target chunk could not be unforced");
+        }
+        this.g6MatrixNetherChunkForcedByBenchmark = false;
+    }
+
+    private void restoreG6MatrixNetherPreparation(final Minecraft minecraft) {
+        IntegratedServer server = minecraft.getSingleplayerServer();
+        if (server == null) return;
+        server.executeBlocking(() -> releaseG6MatrixNetherChunk(server));
+    }
+
+    private void pollG6MatrixServerAction(final Minecraft minecraft) {
+        G6MatrixServerAction action = this.g6MatrixAwaitingClientAction;
+        if (action == null || this.g6MatrixServerTaskPending.get()
+                || this.g6MatrixCompletedServerAction != action) return;
+        if (this.g6MatrixServerFailure != null) {
+            fail(minecraft, this.g6MatrixServerFailure);
+            return;
+        }
+        if (!g6MatrixClientActionIsVisible(minecraft, action)) return;
+        if (action == G6MatrixServerAction.NETHER_RETURN
+                && !restoreG6MatrixSourcesAfterDimension(minecraft)) return;
+        logG6MatrixServerAction(action);
+        this.g6MatrixAwaitingClientAction = null;
+        this.g6MatrixCompletedServerAction = null;
+        this.g6MatrixRecoveryActionVisible = true;
+    }
+
+    private boolean g6MatrixClientActionIsVisible(
+            final Minecraft minecraft, final G6MatrixServerAction action
+    ) {
+        G6MatrixConfig config = this.route.g6Matrix();
+        if (config == null || minecraft.player == null || minecraft.level == null) return false;
+        return switch (action) {
+            case LAVA_APPLY -> minecraft.level.dimension().equals(this.route.dimension())
+                    && minecraft.level.getBlockState(config.lavaPosition()).is(Blocks.LAVA);
+            case LAVA_REMOVE -> minecraft.level.dimension().equals(this.route.dimension())
+                    && minecraft.level.getBlockState(config.lavaPosition()).is(Blocks.AIR);
+            case DAY -> minecraft.level.dimension().equals(this.route.dimension())
+                    && minecraft.level.getDefaultClockTime() == config.dayTicks();
+            case NIGHT -> minecraft.level.dimension().equals(this.route.dimension())
+                    && minecraft.level.getDefaultClockTime() == config.nightTicks();
+            case RAIN -> minecraft.level.dimension().equals(this.route.dimension())
+                    && minecraft.level.isRaining();
+            case CLEAR -> g6MatrixClearVisible(
+                    minecraft.level.dimension().equals(this.route.dimension()),
+                    minecraft.level.getRainLevel(1.0F)
+            );
+            case STREAM -> sameG6MatrixPosition(
+                    minecraft.player,
+                    this.route.x() + this.g6MatrixStreamTargetOffset,
+                    this.route.y() + this.g6MatrixStreamTargetYOffset, this.route.z()
+            );
+            case TELEPORT -> sameG6MatrixPosition(
+                    minecraft.player,
+                    this.route.x() + config.teleportOffsetX(),
+                    this.route.y() + config.teleportOffsetY(),
+                    this.route.z() + config.teleportOffsetZ()
+            );
+            case TELEPORT_RETURN -> minecraft.level.dimension().equals(this.route.dimension())
+                    && sameG6MatrixPosition(
+                    minecraft.player, this.route.x(), this.route.y(), this.route.z()
+            );
+            case NETHER_ENTER -> minecraft.level.dimension().equals(Level.NETHER)
+                    && sameG6MatrixPosition(
+                    minecraft.player, config.netherX(), config.netherY(), config.netherZ()
+            );
+            case NETHER_RETURN -> minecraft.level.dimension().equals(this.route.dimension())
+                    && sameG6MatrixPosition(
+                    minecraft.player, this.route.x(), this.route.y(), this.route.z()
+            );
+        };
+    }
+
+    private boolean sameG6MatrixPosition(
+            final Entity entity, final double x, final double y, final double z
+    ) {
+        return Math.abs(entity.getX() - x) <= this.route.positionEpsilon()
+                && Math.abs(entity.getY() - y) <= this.route.positionEpsilon()
+                && Math.abs(entity.getZ() - z) <= this.route.positionEpsilon();
+    }
+
+    static boolean g6MatrixClearVisible(
+            final boolean inRouteDimension, final float rainLevel
+    ) {
+        return inRouteDimension && rainLevel == 0.0F;
+    }
+
+    private void logG6MatrixServerAction(final G6MatrixServerAction action) {
+        String marker = switch (action) {
+            case LAVA_APPLY -> "LAVA_APPLIED";
+            case LAVA_REMOVE -> "LAVA_REMOVED";
+            case DAY -> "DAY";
+            case NIGHT -> "NIGHT";
+            case RAIN -> "RAIN";
+            case CLEAR -> "CLEAR";
+            case STREAM -> "STREAM_STEP";
+            case TELEPORT -> "TELEPORT_OUT";
+            case TELEPORT_RETURN -> "TELEPORT_RETURN";
+            case NETHER_ENTER -> "NETHER_ENTER";
+            case NETHER_RETURN -> "OVERWORLD_RETURN";
+        };
+        if (action == G6MatrixServerAction.STREAM) {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} action={} "
+                            + "requested_frame={} measured_frame={} index={} offset={} "
+                            + "y_offset={} status=PASS",
+                    this.route.routeId(), marker, this.g6MatrixActiveRequestedFrame,
+                    this.measuredFrames, this.g6MatrixStreamIndex,
+                    this.g6MatrixStreamTargetOffset, this.g6MatrixStreamTargetYOffset
+            );
+        } else {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} action={} "
+                            + "requested_frame={} measured_frame={} status=PASS",
+                    this.route.routeId(), marker, this.g6MatrixActiveRequestedFrame,
+                    this.measuredFrames
+            );
+        }
+    }
+
+    private void pollG6MatrixResourceReload(final Minecraft minecraft) {
+        CompletableFuture<Void> reload = this.g6MatrixResourceReload;
+        if (reload == null || !reload.isDone()) return;
+        try {
+            reload.join();
+        } catch (RuntimeException exception) {
+            fail(minecraft, "G6 matrix resource reload failed: "
+                    + exception.getClass().getSimpleName());
+            return;
+        }
+        this.g6MatrixResourceReload = null;
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_EVENT route={} "
+                        + "action=RESOURCE_RELOAD requested_frame={} measured_frame={} status=PASS",
+                this.route.routeId(), this.route.g6Matrix().resourceReloadFrame(),
+                this.measuredFrames
+        );
+        this.g6MatrixRecoveryActionVisible = true;
+    }
+
+    private void beginG6MatrixRecovery(
+            final String action,
+            final int requestedFrame,
+            final GiLiveRuntime.FinalSnapshot baseline,
+            final int latencyClass,
+            final int receiptBit,
+            final boolean actionVisible
+    ) {
+        beginG6MatrixRecovery(
+                action, requestedFrame, baseline, latencyClass, receiptBit, actionVisible,
+                G6_MATRIX_RECOVERY_TIMEOUT_FRAMES
+        );
+    }
+
+    private void beginG6MatrixRecovery(
+            final String action,
+            final int requestedFrame,
+            final GiLiveRuntime.FinalSnapshot baseline,
+            final int latencyClass,
+            final int receiptBit,
+            final boolean actionVisible,
+            final int stabilizationTimeoutFrames
+    ) {
+        if (this.g6MatrixAwaitingRecovery != null || stabilizationTimeoutFrames <= 0) {
+            throw new IllegalStateException("G6 matrix recovery windows overlapped");
+        }
+        this.g6MatrixAwaitingRecovery = action;
+        this.g6MatrixRecoveryRequestedFrame = requestedFrame;
+        this.g6MatrixRecoveryFieldGeneration = baseline.fieldGeneration();
+        this.g6MatrixRecoverySampleCount = g6MatrixLatencySamples(baseline, latencyClass);
+        this.g6MatrixRecoveryLatencyClass = latencyClass;
+        this.g6MatrixRecoveryActionVisible = actionVisible;
+        this.g6MatrixRecoveryRequiresTerrainBinding = false;
+        this.g6MatrixRecoveryReceiptBit = receiptBit;
+        this.g6MatrixRecoveryDeadline = Math.addExact(
+                requestedFrame, stabilizationTimeoutFrames
+        );
+    }
+
+    private void beginG6MatrixTerrainRecovery(
+            final String action,
+            final int requestedFrame,
+            final GiLiveRuntime.FinalSnapshot baseline,
+            final int receiptBit
+    ) {
+        beginG6MatrixRecovery(
+                action, requestedFrame, baseline, G6_MATRIX_LATENCY_NONE, receiptBit, true
+        );
+        captureG6MatrixTerrainRecoveryBaseline(baseline);
+    }
+
+    private void captureG6MatrixTerrainRecoveryBaseline(
+            final GiLiveRuntime.FinalSnapshot baseline
+    ) {
+        this.g6MatrixRecoveryRequiresTerrainBinding = true;
+        this.g6MatrixRecoveryTerrainSubmit = baseline.latestTerrainSubmitIndex();
+        this.g6MatrixRecoveryTerrainDeviceGeneration =
+                baseline.latestTerrainDeviceGeneration();
+        this.g6MatrixRecoveryTerrainFieldGeneration = baseline.latestTerrainFieldGeneration();
+        this.g6MatrixRecoveryTerrainSourceTick = baseline.latestTerrainSourceTick();
+        this.g6MatrixRecoveryDeadline = Math.addExact(
+                this.g6MatrixRecoveryRequestedFrame,
+                G6_MATRIX_TERRAIN_RECOVERY_TIMEOUT_FRAMES
+        );
+    }
+
+    private String g6MatrixRecoveryName(final G6MatrixServerAction action) {
+        return switch (action) {
+            case LAVA_APPLY -> "LAVA_APPLY";
+            case LAVA_REMOVE -> "LAVA_REMOVE";
+            case DAY -> "DAY";
+            case NIGHT -> "NIGHT";
+            case RAIN -> "RAIN";
+            case CLEAR -> "CLEAR";
+            case STREAM -> g6MatrixStreamRecoveryName(this.g6MatrixStreamIndex);
+            case TELEPORT -> "TELEPORT_OUT";
+            case TELEPORT_RETURN -> "TELEPORT_RETURN";
+            case NETHER_ENTER -> "NETHER_ENTER";
+            case NETHER_RETURN -> "NETHER_RETURN";
+        };
+    }
+
+    private static String g6MatrixStreamRecoveryName(final int index) {
+        return switch (index) {
+            case 0 -> "STREAM_STEP_0";
+            case 1 -> "STREAM_STEP_1";
+            case 2 -> "STREAM_STEP_2";
+            case 3 -> "STREAM_STEP_3";
+            case 4 -> "STREAM_STEP_4";
+            case 5 -> "STREAM_STEP_5";
+            case 6 -> "STREAM_STEP_6";
+            case 7 -> "STREAM_STEP_7";
+            default -> throw new IllegalArgumentException("G6 matrix stream index is invalid");
+        };
+    }
+
+    private static int g6MatrixLatencyClass(final G6MatrixServerAction action) {
+        return switch (action) {
+            // Lava mutates both semantic occupancy and the static-emitter registry. G6 merges
+            // simultaneous content/source invalidation to the source class, so the matrix must
+            // predeclare that exact attribution instead of waiting on a BLOCK sample that cannot
+            // honestly describe this mutation.
+            case LAVA_APPLY, LAVA_REMOVE -> G6_MATRIX_LATENCY_STATIC_SOURCE;
+            // Time/weather rotates the global environment input for every G3/G6 brick. It is a
+            // full-volume field reset, unlike a bounded registry/dynamic source delta.
+            case DAY, NIGHT, RAIN, CLEAR -> G6_MATRIX_LATENCY_FULL_RESET;
+            case STREAM -> G6_MATRIX_LATENCY_SCROLL;
+            case TELEPORT, TELEPORT_RETURN, NETHER_ENTER, NETHER_RETURN ->
+                    G6_MATRIX_LATENCY_FULL_RESET;
+        };
+    }
+
+    private int g6MatrixReceiptBit(final G6MatrixServerAction action) {
+        return switch (action) {
+            case LAVA_REMOVE -> G6_MATRIX_RECEIPT_LAVA;
+            case NIGHT -> G6_MATRIX_RECEIPT_DAY_NIGHT;
+            case CLEAR -> G6_MATRIX_RECEIPT_RAIN;
+            case STREAM -> this.g6MatrixStreamIndex
+                    == this.route.g6Matrix().streamOffsets().length - 1
+                    ? G6_MATRIX_RECEIPT_STREAM : 0;
+            case TELEPORT_RETURN -> G6_MATRIX_RECEIPT_TELEPORT;
+            case NETHER_RETURN -> G6_MATRIX_RECEIPT_NETHER;
+            default -> 0;
+        };
+    }
+
+    private static long g6MatrixLatencySamples(
+            final GiLiveRuntime.FinalSnapshot snapshot, final int latencyClass
+    ) {
+        return switch (latencyClass) {
+            case G6_MATRIX_LATENCY_BLOCK -> snapshot.blockSamples();
+            case G6_MATRIX_LATENCY_STATIC_SOURCE -> snapshot.staticSourceSamples();
+            case G6_MATRIX_LATENCY_SCROLL -> snapshot.scrollSamples();
+            case G6_MATRIX_LATENCY_FULL_RESET -> snapshot.fullResetSamples();
+            default -> -1L;
+        };
+    }
+
+    private static String g6MatrixLatencyClassName(final int latencyClass) {
+        return switch (latencyClass) {
+            case G6_MATRIX_LATENCY_BLOCK -> "BLOCK";
+            case G6_MATRIX_LATENCY_STATIC_SOURCE -> "STATIC_SOURCE";
+            case G6_MATRIX_LATENCY_SCROLL -> "SCROLL";
+            case G6_MATRIX_LATENCY_FULL_RESET -> "FULL_RESET";
+            default -> "NONE";
+        };
+    }
+
+    static boolean g6MatrixMutationRecovered(
+            final long baselineGeneration,
+            final long currentGeneration,
+            final long sampleBefore,
+            final long sampleAfter
+    ) {
+        return baselineGeneration >= 0L && currentGeneration > baselineGeneration
+                && sampleBefore >= 0L && sampleAfter == sampleBefore + 1L;
+    }
+
+    static boolean g6MatrixOrbitStable(
+            final long baselineGeneration,
+            final long currentGeneration,
+            final long blockBefore,
+            final long blockAfter,
+            final long staticSourceBefore,
+            final long staticSourceAfter,
+            final long scrollBefore,
+            final long scrollAfter,
+            final long fullResetBefore,
+            final long fullResetAfter
+    ) {
+        return baselineGeneration >= 0L && currentGeneration == baselineGeneration
+                && blockBefore >= 0L && blockAfter == blockBefore
+                && staticSourceBefore >= 0L && staticSourceAfter == staticSourceBefore
+                && scrollBefore >= 0L && scrollAfter == scrollBefore
+                && fullResetBefore >= 0L && fullResetAfter == fullResetBefore;
+    }
+
+    static boolean g6MatrixTerrainReloadRecovered(
+            final long submitBefore,
+            final long deviceBefore,
+            final long submitAfter,
+            final long deviceAfter,
+            final long currentDevice,
+            final int bindStatus,
+            final boolean carrierSafe,
+            final boolean frameCompatible,
+            final boolean exactMaskNonzero
+    ) {
+        return submitBefore >= 0L && submitAfter > submitBefore
+                && deviceBefore > 0L && deviceAfter == deviceBefore
+                && deviceAfter == currentDevice && bindStatus == 1
+                && carrierSafe && frameCompatible && exactMaskNonzero;
+    }
+
+    static boolean g6MatrixRecoveryWindowsSufficient(
+            final long chunkReloadFrame,
+            final long resourceReloadFrame,
+            final long dayFrame,
+            final long nightFrame,
+            final long rainFrame,
+            final long clearFrame,
+            final long streamStartFrame,
+            final long teleportFrame,
+            final long teleportReturnFrame,
+            final long netherEnterFrame,
+            final long netherReturnFrame,
+            final long measureFrames
+    ) {
+        return resourceReloadFrame - chunkReloadFrame
+                >= G6_MATRIX_RELOAD_RECOVERY_GAP_FRAMES
+                && dayFrame - resourceReloadFrame
+                >= G6_MATRIX_RELOAD_RECOVERY_GAP_FRAMES
+                && nightFrame - dayFrame >= G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES
+                && rainFrame - nightFrame >= G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES
+                && clearFrame - rainFrame >= G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES
+                && streamStartFrame - clearFrame >= G6_MATRIX_STATIC_RECOVERY_GAP_FRAMES
+                && teleportReturnFrame - teleportFrame
+                >= G6_MATRIX_TELEPORT_RECOVERY_GAP_FRAMES
+                && netherEnterFrame - teleportReturnFrame
+                >= G6_MATRIX_RESET_RECOVERY_GAP_FRAMES
+                && netherReturnFrame - netherEnterFrame
+                >= G6_MATRIX_DIMENSION_RECOVERY_GAP_FRAMES
+                && measureFrames - netherReturnFrame
+                >= G6_MATRIX_DIMENSION_RECOVERY_GAP_FRAMES;
+    }
+
+    static int g6MatrixAllCascadeStabilizationTimeoutFrames(
+            final boolean teleportOut,
+            final boolean dimensionChange
+    ) {
+        if (teleportOut) return G6_MATRIX_TELEPORT_STABILIZATION_TIMEOUT_FRAMES;
+        return dimensionChange ? G6_MATRIX_DIMENSION_STABILIZATION_TIMEOUT_FRAMES
+                : G6_MATRIX_RECOVERY_TIMEOUT_FRAMES;
+    }
+
+    static boolean g6MatrixScrollWindowsSufficient(
+            final long streamStartFrame,
+            final long streamStepFrames,
+            final int streamStepCount,
+            final long teleportFrame
+    ) {
+        if (streamStartFrame < 0L || streamStepCount != 8
+                || streamStepFrames < G6_MATRIX_SCROLL_STEP_MIN_FRAMES
+                || streamStepFrames > G6_MATRIX_SCROLL_STEP_MAX_FRAMES) return false;
+        long streamEndFrame = Math.addExact(
+                streamStartFrame, Math.multiplyExact(streamStepFrames, streamStepCount - 1L)
+        );
+        return teleportFrame - streamEndFrame
+                >= G6_MATRIX_SCROLL_FINAL_RECOVERY_GAP_FRAMES;
+    }
+
+    static boolean g6MatrixRecoveryCoverageReady(
+            final int readyMask,
+            final boolean buildInFlight,
+            final boolean nearScrollRecovery
+    ) {
+        return nearScrollRecovery ? (readyMask & 1) != 0
+                : readyMask == 7 && !buildInFlight;
+    }
+
+    static boolean g6MatrixTerrainQueueGateSatisfied(
+            final boolean requiresTerrainBinding,
+            final boolean terrainQueueEmpty
+    ) {
+        return !requiresTerrainBinding || terrainQueueEmpty;
+    }
+
+    private void pollG6MatrixRecovery(final Minecraft minecraft) {
+        if (!this.g6MatrixRecoveryActionVisible) return;
+        if (this.measuredFrames > this.g6MatrixRecoveryDeadline) {
+            logG6MatrixPendingRecovery(minecraft, "RECOVERY_TIMEOUT");
+            fail(minecraft, "G6 matrix recovery timed out for " + this.g6MatrixAwaitingRecovery);
+            return;
+        }
+        if (minecraft.level == null || !g6MatrixTerrainQueueGateSatisfied(
+                this.g6MatrixRecoveryRequiresTerrainBinding,
+                minecraft.levelRenderer.hasRenderedAllSections()
+        )) return;
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        boolean nearScrollRecovery = this.g6MatrixRecoveryLatencyClass
+                == G6_MATRIX_LATENCY_SCROLL;
+        if (GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                || !GiLiveRuntime.finalReceiptIsCurrent(snapshot, GiLiveRuntime.deviceGeneration())
+                || !g6MatrixRecoveryCoverageReady(
+                snapshot.readyMask(), snapshot.buildInFlight(), nearScrollRecovery)) return;
+        if (snapshot.staleRejects() != 0L || snapshot.rejectedCount() != 0L) {
+            fail(minecraft, "G6 matrix recovery observed stale/rejected transport");
+            return;
+        }
+        long sampleCount = g6MatrixLatencySamples(
+                snapshot, this.g6MatrixRecoveryLatencyClass
+        );
+        boolean requiresMutationEvidence =
+                this.g6MatrixRecoveryLatencyClass != G6_MATRIX_LATENCY_NONE;
+        if (requiresMutationEvidence && !g6MatrixMutationRecovered(
+                this.g6MatrixRecoveryFieldGeneration, snapshot.fieldGeneration(),
+                this.g6MatrixRecoverySampleCount, sampleCount
+        )) return;
+        if (this.g6MatrixRecoveryRequiresTerrainBinding) {
+            if (!g6MatrixTerrainReloadRecovered(
+                    this.g6MatrixRecoveryTerrainSubmit,
+                    this.g6MatrixRecoveryTerrainDeviceGeneration,
+                    snapshot.latestTerrainSubmitIndex(),
+                    snapshot.latestTerrainDeviceGeneration(),
+                    GiLiveRuntime.deviceGeneration(),
+                    snapshot.latestTerrainBindStatus(),
+                    snapshot.latestTerrainCarrierSafe(),
+                    snapshot.latestTerrainFrameCompatible(),
+                    snapshot.latestTerrainExactMaskNonzero()
+            )) return;
+            if (requiresMutationEvidence) {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_RECOVERY route={} action={} "
+                                + "requested_frame={} measured_frame={} baseline_generation={} "
+                                + "field_generation={} latency_class={} sample_before={} "
+                                + "sample_after={} terrain_submit_before={} terrain_submit_after={} "
+                                + "terrain_device_before={} terrain_device_after={} current_device={} "
+                                + "terrain_field_before={} terrain_field_after={} current_field={} "
+                                + "terrain_source_before={} terrain_source_after={} current_source={} "
+                                + "bind_status=1 carrier_safe=true frame_compatible=true "
+                                + "exact_mask_nonzero=true ready_mask=7 "
+                                + "build_in_flight=false status=PASS",
+                        this.route.routeId(), this.g6MatrixAwaitingRecovery,
+                        this.g6MatrixRecoveryRequestedFrame, this.measuredFrames,
+                        this.g6MatrixRecoveryFieldGeneration, snapshot.fieldGeneration(),
+                        g6MatrixLatencyClassName(this.g6MatrixRecoveryLatencyClass),
+                        this.g6MatrixRecoverySampleCount, sampleCount,
+                        this.g6MatrixRecoveryTerrainSubmit, snapshot.latestTerrainSubmitIndex(),
+                        this.g6MatrixRecoveryTerrainDeviceGeneration,
+                        snapshot.latestTerrainDeviceGeneration(), GiLiveRuntime.deviceGeneration(),
+                        this.g6MatrixRecoveryTerrainFieldGeneration,
+                        snapshot.latestTerrainFieldGeneration(), snapshot.fieldGeneration(),
+                        this.g6MatrixRecoveryTerrainSourceTick,
+                        snapshot.latestTerrainSourceTick(), snapshot.sourceTick()
+                );
+            } else {
+                Metallum.LOGGER.info(
+                        "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_RECOVERY route={} action={} "
+                                + "requested_frame={} measured_frame={} "
+                                + "terrain_submit_before={} terrain_submit_after={} "
+                                + "terrain_device_before={} terrain_device_after={} current_device={} "
+                                + "terrain_field_before={} terrain_field_after={} current_field={} "
+                                + "terrain_source_before={} terrain_source_after={} current_source={} "
+                                + "bind_status=1 carrier_safe=true frame_compatible=true "
+                                + "exact_mask_nonzero=true ready_mask=7 "
+                                + "build_in_flight=false status=PASS",
+                        this.route.routeId(), this.g6MatrixAwaitingRecovery,
+                        this.g6MatrixRecoveryRequestedFrame, this.measuredFrames,
+                        this.g6MatrixRecoveryTerrainSubmit, snapshot.latestTerrainSubmitIndex(),
+                        this.g6MatrixRecoveryTerrainDeviceGeneration,
+                        snapshot.latestTerrainDeviceGeneration(), GiLiveRuntime.deviceGeneration(),
+                        this.g6MatrixRecoveryTerrainFieldGeneration,
+                        snapshot.latestTerrainFieldGeneration(), snapshot.fieldGeneration(),
+                        this.g6MatrixRecoveryTerrainSourceTick,
+                        snapshot.latestTerrainSourceTick(), snapshot.sourceTick()
+                );
+            }
+        } else {
+            Metallum.LOGGER.info(
+                    "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_RECOVERY route={} action={} "
+                            + "requested_frame={} measured_frame={} baseline_generation={} "
+                            + "field_generation={} latency_class={} sample_before={} "
+                            + "sample_after={} ready_mask={} build_in_flight={} status=PASS",
+                    this.route.routeId(), this.g6MatrixAwaitingRecovery,
+                    this.g6MatrixRecoveryRequestedFrame, this.measuredFrames,
+                    this.g6MatrixRecoveryFieldGeneration, snapshot.fieldGeneration(),
+                    g6MatrixLatencyClassName(this.g6MatrixRecoveryLatencyClass),
+                    this.g6MatrixRecoverySampleCount, sampleCount, snapshot.readyMask(),
+                    snapshot.buildInFlight()
+            );
+        }
+        this.g6MatrixReceiptMask |= this.g6MatrixRecoveryReceiptBit;
+        this.g6MatrixAwaitingRecovery = null;
+        this.g6MatrixRecoveryActionVisible = false;
+        this.g6MatrixRecoveryRequiresTerrainBinding = false;
+        this.g6MatrixRecoveryReceiptBit = 0;
+    }
+
+    private boolean restoreG6MatrixSourcesAfterDimension(final Minecraft minecraft) {
+        if (minecraft.player == null || minecraft.level == null
+                || !minecraft.level.dimension().equals(this.route.dimension())) return false;
+        for (ItemEntity probe : this.l6ProbeEntities) probe.discard();
+        this.l6ProbeEntities.clear();
+        minecraft.player.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(Items.TORCH));
+        G6MatrixConfig config = this.route.g6Matrix();
+        ItemEntity probe = new ItemEntity(
+                minecraft.level, config.entityX(), config.entityY(), config.entityZ(),
+                new ItemStack(Items.TORCH), 0.0, 0.0, 0.0
+        );
+        probe.setUUID(UUID.nameUUIDFromBytes(
+                "metallum-g6-matrix-probe-return".getBytes(StandardCharsets.UTF_8)
+        ));
+        int probeId = 1_999_999_899;
+        if (minecraft.level.getEntity(probeId) != null) return false;
+        probe.setId(probeId);
+        probe.setNoGravity(true);
+        probe.setDeltaMovement(0.0, 0.0, 0.0);
+        minecraft.level.addEntity(probe);
+        this.l6ProbeEntities.add(probe);
+        restoreG6MatrixPose(minecraft);
+        return true;
+    }
+
+    private void restoreG6MatrixPose(final Minecraft minecraft) {
+        if (minecraft.player == null) return;
+        minecraft.player.setPos(this.route.x(), this.route.y(), this.route.z());
+        minecraft.player.xOld = this.route.x();
+        minecraft.player.yOld = this.route.y();
+        minecraft.player.zOld = this.route.z();
+        minecraft.player.setYRot(this.route.yaw());
+        minecraft.player.setXRot(this.route.pitch());
+        minecraft.player.yRotO = this.route.yaw();
+        minecraft.player.xRotO = this.route.pitch();
+        minecraft.player.setDeltaMovement(0.0, 0.0, 0.0);
+    }
+
+    record G6MatrixFinalCensus(
+            long queuePending,
+            long queueInFlight,
+            long queueQueued,
+            long queueCompleted,
+            long queueDiscarded,
+            boolean queueAlgebra,
+            long accountedCurrent,
+            long accountedStart,
+            long accountedExpectedStart,
+            long blockChangeSamples,
+            long blockChangeP95Submits,
+            long blockChangeP99Submits,
+            boolean blockChangeSla,
+            long staticSourceSamples,
+            long staticSourceP95Submits,
+            long staticSourceP99Submits,
+            boolean staticSourceSla,
+            long scrollSamples,
+            long scrollP95Submits,
+            long scrollP99Submits,
+            boolean scrollSla,
+            long fullResetSamples,
+            long fullResetP95Submits,
+            long fullResetP99Submits,
+            boolean fullResetSla
+    ) {
+        boolean queueConverged() {
+            return this.queuePending == 0L && this.queueInFlight == 0L
+                    && this.queueAlgebra
+                    && this.queueQueued == this.queueCompleted + this.queueDiscarded;
+        }
+
+        long accountedDelta() {
+            return this.accountedCurrent - this.accountedExpectedStart;
+        }
+
+        boolean accountingStable() {
+            return accountedDelta() == 0L
+                    && this.accountedStart == this.accountedExpectedStart;
+        }
+
+        boolean latencyCensusComplete() {
+            return this.blockChangeSamples > 0L && this.blockChangeSla
+                    && this.staticSourceSamples > 0L && this.staticSourceSla
+                    && this.scrollSamples > 0L && this.scrollSla
+                    && this.fullResetSamples > 0L && this.fullResetSla;
+        }
+
+        boolean passed() {
+            return queueConverged() && accountingStable() && latencyCensusComplete();
+        }
+    }
+
+    private G6MatrixFinalCensus g6MatrixFinalCensus(
+            final GiLiveRuntime.FinalSnapshot snapshot
+    ) {
+        return new G6MatrixFinalCensus(
+                snapshot.schedulerPending(), snapshot.schedulerInFlight(),
+                snapshot.schedulerQueued(), snapshot.schedulerCompleted(),
+                snapshot.schedulerDiscarded(), snapshot.schedulerAlgebraExact(),
+                snapshot.accountedBytes(), snapshot.measurementStartAccountedBytes(),
+                this.g6MatrixMeasurementAccountedBytes,
+                snapshot.blockSamples(), snapshot.blockP95Submits(),
+                snapshot.blockP99Submits(), snapshot.blockSla(),
+                snapshot.staticSourceSamples(), snapshot.staticSourceP95Submits(),
+                snapshot.staticSourceP99Submits(), snapshot.staticSourceSla(),
+                snapshot.scrollSamples(), snapshot.scrollP95Submits(),
+                snapshot.scrollP99Submits(), snapshot.scrollSla(),
+                snapshot.fullResetSamples(), snapshot.fullResetP95Submits(),
+                snapshot.fullResetP99Submits(), snapshot.fullResetSla()
+        );
+    }
+
+    private void logG6MatrixFinalCensusFailure(final G6MatrixFinalCensus census) {
+        Metallum.LOGGER.error(
+                "METALLUM_BENCHMARK EVENT=GI_G6_MATRIX_FINAL_CENSUS route={} "
+                        + "queue_pending={} queue_in_flight={} queue_queued={} "
+                        + "queue_completed={} queue_discarded={} queue_algebra={} "
+                        + "queue_converged={} accounted_current={} accounted_start={} "
+                        + "accounted_expected_start={} accounted_delta={} accounting_stable={} "
+                        + "block_change_samples={} block_change_p95_submits={} "
+                        + "block_change_p99_submits={} block_change_sla={} "
+                        + "static_source_samples={} static_source_p95_submits={} "
+                        + "static_source_p99_submits={} static_source_sla={} "
+                        + "scroll_samples={} scroll_p95_submits={} scroll_p99_submits={} "
+                        + "scroll_sla={} full_reset_samples={} full_reset_p95_submits={} "
+                        + "full_reset_p99_submits={} full_reset_sla={} "
+                        + "latency_census_complete={} status=FAIL contract=6",
+                this.route.routeId(), census.queuePending(), census.queueInFlight(),
+                census.queueQueued(), census.queueCompleted(), census.queueDiscarded(),
+                census.queueAlgebra(), census.queueConverged(), census.accountedCurrent(),
+                census.accountedStart(), census.accountedExpectedStart(),
+                census.accountedDelta(), census.accountingStable(),
+                census.blockChangeSamples(), census.blockChangeP95Submits(),
+                census.blockChangeP99Submits(), census.blockChangeSla(),
+                census.staticSourceSamples(), census.staticSourceP95Submits(),
+                census.staticSourceP99Submits(), census.staticSourceSla(),
+                census.scrollSamples(), census.scrollP95Submits(),
+                census.scrollP99Submits(), census.scrollSla(),
+                census.fullResetSamples(), census.fullResetP95Submits(),
+                census.fullResetP99Submits(), census.fullResetSla(),
+                census.latencyCensusComplete()
+        );
+    }
+
+    private String completeG6Matrix() {
+        if (this.route.g6Matrix() == null) return null;
+        if (this.g6MatrixReceiptMask != G6_MATRIX_RECEIPT_ALL
+                || this.g6MatrixServerTaskPending.get()
+                || this.g6MatrixAwaitingClientAction != null
+                || this.g6MatrixAwaitingRecovery != null
+                || this.g6MatrixResourceReload != null
+                || !this.g6MatrixNetherPrepared
+                || this.g6MatrixNetherChunkForcedByBenchmark) {
+            return "G6 matrix did not complete every ordered live-update receipt: mask="
+                    + this.g6MatrixReceiptMask;
+        }
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        G6MatrixFinalCensus census = g6MatrixFinalCensus(snapshot);
+        if (!census.passed()) {
+            logG6MatrixFinalCensusFailure(census);
+            return "G6 matrix final queue/SLA/accounting census is incomplete; "
+                    + "see GI_G6_MATRIX_FINAL_CENSUS";
+        }
+        this.g6MatrixFinalValidated = true;
+        return null;
     }
 
     private void driveNetherLavaStress(final Minecraft minecraft) {
@@ -2546,11 +4255,7 @@ public final class MetalFxBenchmarkController {
 
     private void clearL6DynamicShadowRoute(final Minecraft minecraft) {
         restoreL6DynamicShadowMotion(minecraft);
-        if (minecraft.level != null) {
-            for (ItemEntity probe : this.l6ProbeEntities) {
-                minecraft.level.removeEntity(probe.getId(), Entity.RemovalReason.DISCARDED);
-            }
-        }
+        for (ItemEntity probe : this.l6ProbeEntities) probe.discard();
         this.l6ProbeEntities.clear();
         if (this.l6OriginalMainHandCaptured && minecraft.player != null) {
             minecraft.player.setItemInHand(InteractionHand.MAIN_HAND, this.l6OriginalMainHand);
@@ -2558,6 +4263,7 @@ public final class MetalFxBenchmarkController {
         this.l6OriginalMainHand = ItemStack.EMPTY;
         this.l6OriginalMainHandCaptured = false;
         this.l6DynamicReady = false;
+        this.g6MatrixReady = false;
         this.l6MotionFrame = 0;
     }
 
@@ -2624,6 +4330,38 @@ public final class MetalFxBenchmarkController {
                     + minecraft.getFramerateLimitTracker().getFramerateLimit() + ")";
         }
         return null;
+    }
+
+    private void restoreBenchmarkWindowFocus(final Minecraft minecraft) {
+        if (!shouldRequestBenchmarkWindowFocus(
+                minecraft.isWindowActive(),
+                this.stageFrames
+        )) {
+            return;
+        }
+        Window window = minecraft.getWindow();
+        GLFW.glfwFocusWindow(window.handle());
+        Metallum.LOGGER.info(
+                "METALLUM_BENCHMARK EVENT=WINDOW_FOCUS_REQUEST frame={} glfw_focused={}",
+                this.stageFrames,
+                GLFW.glfwGetWindowAttrib(window.handle(), GLFW.GLFW_FOCUSED) == GLFW.GLFW_TRUE
+        );
+    }
+
+    static boolean shouldRequestBenchmarkWindowFocus(
+            final boolean windowActive,
+            final int stageFrames
+    ) {
+        return !windowActive
+                && stageFrames >= 0
+                && stageFrames % WINDOW_FOCUS_RETRY_INTERVAL_FRAMES == 0;
+    }
+
+    static boolean shouldCloseBenchmarkTiming(
+            final boolean measureEndBoundary,
+            final int boundaryCheckFrames
+    ) {
+        return measureEndBoundary && boundaryCheckFrames == 0;
     }
 
     private String clientIdentityMismatch(final Minecraft minecraft) {
@@ -2741,10 +4479,44 @@ public final class MetalFxBenchmarkController {
         this.torchEpochFailure = null;
         this.torchEpochAppliedMeasuredFrame = -1;
         this.torchEpochRemovedMeasuredFrame = -1;
+        this.g6MatrixReceiptMask = 0;
+        this.g6MatrixOrbitFieldGeneration = -1L;
+        this.g6MatrixOrbitBlockSamples = -1L;
+        this.g6MatrixOrbitStaticSourceSamples = -1L;
+        this.g6MatrixOrbitScrollSamples = -1L;
+        this.g6MatrixOrbitFullResetSamples = -1L;
+        this.g6MatrixOrbitStarted = false;
+        this.g6MatrixServerTaskPending.set(false);
+        this.g6MatrixCompletedServerAction = null;
+        this.g6MatrixServerFailure = null;
+        this.g6MatrixAwaitingClientAction = null;
+        this.g6MatrixActiveRequestedFrame = 0;
+        this.g6MatrixStreamIndex = -1;
+        this.g6MatrixStreamTargetOffset = 0;
+        this.g6MatrixStreamTargetYOffset = 0;
+        this.g6MatrixResourceReload = null;
+        this.g6MatrixChunkReloadRequested = false;
+        this.g6MatrixResourceReloadRequested = false;
+        this.g6MatrixAwaitingRecovery = null;
+        this.g6MatrixRecoveryFieldGeneration = -1L;
+        this.g6MatrixRecoverySampleCount = -1L;
+        this.g6MatrixRecoveryLatencyClass = G6_MATRIX_LATENCY_NONE;
+        this.g6MatrixRecoveryActionVisible = false;
+        this.g6MatrixRecoveryRequiresTerrainBinding = false;
+        this.g6MatrixRecoveryTerrainSubmit = -1L;
+        this.g6MatrixRecoveryTerrainDeviceGeneration = -1L;
+        this.g6MatrixRecoveryTerrainFieldGeneration = -1L;
+        this.g6MatrixRecoveryTerrainSourceTick = -1L;
+        this.g6MatrixRecoveryReceiptBit = 0;
+        this.g6MatrixRecoveryRequestedFrame = 0;
+        this.g6MatrixRecoveryDeadline = 0;
+        this.g6MatrixMeasurementAccountedBytes = -1L;
+        this.g6MatrixFinalValidated = false;
         if (!this.g4ModePreapplied) {
             mode.apply();
         }
         GiTransportRuntime.beginBenchmarkWarmup();
+        GiLiveRuntime.beginBenchmarkWarmup();
         MetalGpuTiming.beginBenchmarkWarmup(this.segmentIndex, mode.name());
         this.segmentFrame = 0;
         this.measuredFrames = 0;
@@ -2809,6 +4581,72 @@ public final class MetalFxBenchmarkController {
             return "vertex reflection quality did not match the benchmark launch contract";
         }
         return null;
+    }
+
+    private @org.jspecify.annotations.Nullable String verifyGiLiveWarmupAdmission() {
+        if (!GiLiveRuntime.isRequested()) return null;
+        GiLiveRuntime.FinalSnapshot snapshot = GiLiveRuntime.finalSnapshot();
+        long currentDeviceGeneration = GiLiveRuntime.deviceGeneration();
+        if (GiLiveRuntime.admissionState() == GiLiveRuntime.AdmissionState.INVALID) {
+            return "G6 warmup became invalid: " + GiLiveRuntime.invalidReason() + "; "
+                    + giG6CensusSummary(snapshot, currentDeviceGeneration)
+                    + "; " + giG6RuntimeSummary();
+        }
+        if (GiLiveRuntime.admissionState() != GiLiveRuntime.AdmissionState.READY
+                || !snapshot.admissionReceiptEmitted()
+                || snapshot.admissionDeviceGeneration() != currentDeviceGeneration
+                || snapshot.admissionSubmitIndex() < 0L) {
+            return "G6 warmup ended without a current admission receipt; "
+                    + giG6CensusSummary(snapshot, currentDeviceGeneration)
+                    + "; " + giG6RuntimeSummary();
+        }
+        return null;
+    }
+
+    private static String giG6CensusSummary(
+            final GiLiveRuntime.FinalSnapshot snapshot,
+            final long currentDeviceGeneration
+    ) {
+        return String.format(
+                Locale.ROOT,
+                "state=%s current_device=%d telemetry_device=%d admission=%s/%d/%d "
+                        + "ready=%d in_flight=%s field=%d source=%d stale=%d rejected=%d "
+                        + "terrain=%s/%d/%d bind=%d carrier=%s frame=%s terrain_ready=%d "
+                        + "terrain_exact=%s terrain_field=%d terrain_source=%d bytes=%d "
+                        + "block_samples=%d block_p95=%d block_p99=%d block_sla=%s "
+                        + "static_samples=%d static_p95=%d static_p99=%d static_sla=%s "
+                        + "scroll_samples=%d scroll_p95=%d scroll_p99=%d scroll_sla=%s "
+                        + "reset_samples=%d reset_p95=%d reset_p99=%d reset_sla=%s "
+                        + "queue=%d/%d/%d/%d/%d queue_exact=%s measurement_bytes=%d",
+                GiLiveRuntime.admissionState(), currentDeviceGeneration,
+                snapshot.deviceGeneration(), snapshot.admissionReceiptEmitted(),
+                snapshot.admissionDeviceGeneration(), snapshot.admissionSubmitIndex(),
+                snapshot.readyMask(), snapshot.buildInFlight(), snapshot.fieldGeneration(),
+                snapshot.sourceTick(), snapshot.staleRejects(), snapshot.rejectedCount(),
+                snapshot.latestTerrainBindingObserved(),
+                snapshot.latestTerrainDeviceGeneration(), snapshot.latestTerrainSubmitIndex(),
+                snapshot.latestTerrainBindStatus(), snapshot.latestTerrainCarrierSafe(),
+                snapshot.latestTerrainFrameCompatible(), snapshot.latestTerrainReadyMask(),
+                snapshot.latestTerrainExactMaskNonzero(),
+                snapshot.latestTerrainFieldGeneration(), snapshot.latestTerrainSourceTick(),
+                snapshot.accountedBytes(), snapshot.blockSamples(), snapshot.blockP95Submits(),
+                snapshot.blockP99Submits(), snapshot.blockSla(),
+                snapshot.staticSourceSamples(), snapshot.staticSourceP95Submits(),
+                snapshot.staticSourceP99Submits(), snapshot.staticSourceSla(),
+                snapshot.scrollSamples(), snapshot.scrollP95Submits(),
+                snapshot.scrollP99Submits(), snapshot.scrollSla(),
+                snapshot.fullResetSamples(), snapshot.fullResetP95Submits(),
+                snapshot.fullResetP99Submits(), snapshot.fullResetSla(),
+                snapshot.schedulerQueued(), snapshot.schedulerCompleted(),
+                snapshot.schedulerDiscarded(), snapshot.schedulerPending(),
+                snapshot.schedulerInFlight(), snapshot.schedulerAlgebraExact(),
+                snapshot.measurementStartAccountedBytes()
+        );
+    }
+
+    private static String giG6RuntimeSummary() {
+        MetalDevice device = MetalDevice.getInstance();
+        return device == null ? "metal_device=null" : device.giLiveDebugSummary();
     }
 
     private static boolean matchesBooleanEnvironment(final String name, final boolean actual) {
@@ -3567,6 +5405,7 @@ public final class MetalFxBenchmarkController {
         SodiumRelightOracle.abortObservation();
         SodiumRelightFastPath.abortObservation();
         restoreSurvivalGuard(minecraft);
+        restoreG6MatrixNetherPreparation(minecraft);
         clearL6DynamicShadowRoute(minecraft);
         if (this.originalClientStateCaptured && this.originalCameraType != null) {
             minecraft.options.setCameraType(this.originalCameraType);
@@ -3585,6 +5424,9 @@ public final class MetalFxBenchmarkController {
 
     private void lockPlayerPose(final Minecraft minecraft) {
         if (this.route == null || minecraft.player == null) {
+            return;
+        }
+        if (this.route.g6Matrix() != null && this.segmentPhase == SegmentPhase.MEASURE) {
             return;
         }
         if (this.route.l6DynamicShadow() == null) {

@@ -1,6 +1,8 @@
 package com.metallum.mixin.render;
 
 import com.metallum.client.lighting.EnvironmentDescriptor;
+import com.metallum.client.gi.live.GiLiveRuntime;
+import com.metallum.client.gi.source.GiEnvironmentObservationLatch;
 import com.metallum.client.gi.source.GiDirectSourceRuntime;
 import com.metallum.client.gi.transport.GiTransportRuntime;
 import com.metallum.client.lighting.SurfaceMaterialPolicy;
@@ -60,6 +62,8 @@ abstract class GameRendererMetalFxMixin {
     private Entity metallum$previousCameraEntity;
     private Object metallum$dimensionKey;
     private long metallum$dimensionIdentity;
+    private final GiEnvironmentObservationLatch metallum$giEnvironmentLatch =
+            new GiEnvironmentObservationLatch();
 
     @Inject(method = "render", at = @At("HEAD"))
     private void metallum$applyDeferredScale(final CallbackInfo ci) {
@@ -248,13 +252,31 @@ abstract class GameRendererMetalFxMixin {
                 );
             }
             EnvironmentDescriptor environment = metallum$environmentDescriptor(camera, deltaTracker);
-            EnvironmentDescriptor giEnvironment = (GiDirectSourceRuntime.isRequested()
+            long worldIdentity = Integer.toUnsignedLong(
+                    System.identityHashCode(this.minecraft.level)
+            );
+            EnvironmentDescriptor observedGiEnvironment = (GiDirectSourceRuntime.isRequested()
                     || GiTransportRuntime.isRequested())
                     ? GiTransportRuntime.stabilizeDebugEnvironment(
                             this.metallum$dimensionIdentity,
                             metallum$environmentDescriptor(camera, deltaTracker, true)
                     )
                     : EnvironmentDescriptor.NONE;
+            EnvironmentDescriptor giEnvironment = observedGiEnvironment;
+            boolean giEnvironmentReady = true;
+            if (GiLiveRuntime.isRequested()) {
+                // The extractor refreshes all physical sky coefficients together only on this
+                // boundary. Retain that coherent source packet across intervening render submits;
+                // interpolated raw sun values are not a new source authority between ticks.
+                EnvironmentDescriptor coherentGiEnvironment =
+                        this.metallum$giEnvironmentLatch.observe(
+                                this.minecraft.level, observedGiEnvironment,
+                                this.gameRenderState.lightmapRenderState.needsUpdate
+                        );
+                giEnvironmentReady = coherentGiEnvironment != null;
+                giEnvironment = giEnvironmentReady
+                        ? coherentGiEnvironment : EnvironmentDescriptor.NONE;
+            }
             com.metallum.client.lighting.cloud.CloudShadowFrameState cloudShadow =
                     metallum$cloudShadowFrameState(environment, deltaTracker, device);
             device.publishFrameState(new FrameCapture(
@@ -263,11 +285,12 @@ abstract class GameRendererMetalFxMixin {
                     deltaSeconds,
                     0.05,
                     camera.depthFar,
-                    Integer.toUnsignedLong(System.identityHashCode(this.minecraft.level)),
+                    worldIdentity,
                     this.metallum$dimensionIdentity,
                     environment,
                     cloudShadow,
-                    giEnvironment
+                    giEnvironment,
+                    giEnvironmentReady
             ));
             return projectionBuffer.getBuffer(jitteredProjection);
         }

@@ -64,8 +64,21 @@ public final class GiReceiverBindingAbi {
             final String fragmentMsl,
             final boolean enabled
     ) {
+        validateMsl(vertexMsl, fragmentMsl, enabled, 1);
+    }
+
+    /** G5 samples one volume; G6 samples the same vertex-only bindings once per cascade. */
+    public static void validateMsl(
+            final String vertexMsl,
+            final String fragmentMsl,
+            final boolean enabled,
+            final int expectedSamplesPerTexture
+    ) {
         Objects.requireNonNull(vertexMsl, "vertexMsl");
         Objects.requireNonNull(fragmentMsl, "fragmentMsl");
+        if (expectedSamplesPerTexture <= 0) {
+            throw new IllegalArgumentException("GI receiver sample count must be positive");
+        }
         requireLegal();
         boolean vertexContains = containsReceiverSymbol(vertexMsl);
         List<String> fragmentSamplerSymbols = SAMPLERS.stream()
@@ -87,7 +100,8 @@ public final class GiReceiverBindingAbi {
             String name = SAMPLERS.get(index);
             int slot = TEXTURE_SLOTS[index];
             if (countOccurrences(vertexMsl, name) < 2
-                    || countOccurrences(vertexMsl, name + ".sample(") != 1
+                    || countOccurrences(vertexMsl, name + ".sample(")
+                    != expectedSamplesPerTexture
                     || countOccurrences(vertexMsl, "[[texture(" + slot + ")]]") != 1
                     || countOccurrences(vertexMsl, "[[sampler(" + slot + ")]]") != 1) {
                 throw new IllegalStateException(

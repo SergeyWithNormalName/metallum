@@ -4,6 +4,7 @@ import com.metallum.Metallum;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.gi.receiver.GiReceiverCompatibility;
 import com.metallum.client.lighting.reflection.VertexReflectionExperiment;
+import com.metallum.client.renderer.RendererConfig;
 import com.metallum.client.sodium.SodiumShadowCompatibility;
 import net.fabricmc.loader.api.FabricLoader;
 import org.objectweb.asm.tree.ClassNode;
@@ -106,6 +107,7 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
     private boolean sodiumRelightFastPathEnabled;
     private boolean sodiumShadowCompatible;
     private boolean giG2CaptureEnabled;
+    private boolean productionGiEnabled;
     private boolean compactPositionCarrierCompatible;
 
     @Override
@@ -116,10 +118,32 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
         this.benchmarkEnabled = "1".equals(System.getenv("METALLUM_BENCHMARK"));
         this.sodiumLightSidecarEnabled = isEnabled(System.getenv("METALLUM_SODIUM_LIGHT_SIDECAR"));
         this.sodiumShadowCompatible = SodiumShadowCompatibility.supportsInstalledRenderer();
+        RendererConfig rendererConfig = RendererConfig.loadForStartupGate();
+        boolean productionGiRequested = rendererConfig.globalIllumination().isDynamic();
+        this.productionGiEnabled = productionGiRequested && rendererConfig.improvedLighting();
+        if (productionGiRequested && !this.productionGiEnabled) {
+            Metallum.LOGGER.warn(
+                    "Dynamic global illumination requires Advanced Lighting; keeping GI structurally off"
+            );
+        }
+        boolean persistedGiTransportDebugEnabled = GiTransportDebugSettings.isEnabled();
+        if (this.productionGiEnabled && persistedGiTransportDebugEnabled) {
+            // A stale debug opt-in must not make the production receiver request invalid.
+            GiTransportDebugSettings.setEnabled(false);
+            persistedGiTransportDebugEnabled = false;
+            Metallum.LOGGER.info(
+                    "Disabled the standalone G4 debug route because production GI is enabled"
+            );
+        }
+        boolean giTransportDebugEnabled = persistedGiTransportDebugRequested(
+                this.benchmarkEnabled,
+                persistedGiTransportDebugEnabled
+        );
         boolean exactRelightVersions = hasExactRelightOracleVersions();
         boolean exactGiCaptureVersions = hasExactGiCaptureVersions();
         this.compactPositionCarrierCompatible = exactGiCaptureVersions
-                && (isEnabled(System.getenv(GI_G5_RECEIVER_ENV))
+                && (this.productionGiEnabled
+                || isEnabled(System.getenv(GI_G5_RECEIVER_ENV))
                 || VertexReflectionExperiment.isLayoutEnabled());
         boolean relightOracleRequested = "1".equals(System.getenv(SODIUM_RELIGHT_ORACLE_ENV));
         this.sodiumRelightFastPathEnabled = !relightOracleRequested
@@ -134,7 +158,8 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
                 || isEnabled(System.getenv(GI_G3_INJECT_ENV))
                 || isEnabled(System.getenv(GI_G4_TRANSPORT_ENV))
                 || isEnabled(System.getenv(GI_G5_RECEIVER_ENV))
-                || GiTransportDebugSettings.isEnabled();
+                || this.productionGiEnabled
+                || giTransportDebugEnabled;
         this.giG2CaptureEnabled = giG2CaptureRequested && exactGiCaptureVersions;
         Metallum.LOGGER.info(
                 "[GI_G2] mixin gate requested={} exact_versions={} enabled={}",
@@ -230,6 +255,14 @@ public final class MetallumMixinConfigPlugin implements IMixinConfigPlugin {
             case "1", "true", "yes", "on" -> true;
             default -> false;
         };
+    }
+
+    /** Persisted interactive G4 debug must not activate G2 capture in benchmark processes. */
+    private static boolean persistedGiTransportDebugRequested(
+            final boolean benchmarkEnabled,
+            final boolean persistedEnabled
+    ) {
+        return !benchmarkEnabled && persistedEnabled;
     }
 
     /**

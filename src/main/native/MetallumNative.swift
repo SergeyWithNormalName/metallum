@@ -16402,6 +16402,9 @@ private struct MetallumGiDirectPopulationEpochV1: Equatable {
     let origin2X: Int32
     let origin2Y: Int32
     let origin2Z: Int32
+    let sunDirectionAndEnabled: SIMD4<Float>
+    let sunRgbAndEnabled: SIMD4<Float>
+    let skyRgbAndEnabled: SIMD4<Float>
 
     init(_ header: MetallumGiDirectSourceHeaderV1) {
         worldGeneration = header.worldGeneration
@@ -16413,6 +16416,9 @@ private struct MetallumGiDirectPopulationEpochV1: Equatable {
         origin0X = header.origin0X; origin0Y = header.origin0Y; origin0Z = header.origin0Z
         origin1X = header.origin1X; origin1Y = header.origin1Y; origin1Z = header.origin1Z
         origin2X = header.origin2X; origin2Y = header.origin2Y; origin2Z = header.origin2Z
+        sunDirectionAndEnabled = header.sunDirectionAndEnabled
+        sunRgbAndEnabled = header.sunRgbAndEnabled
+        skyRgbAndEnabled = header.skyRgbAndEnabled
     }
 
     func matches(
@@ -16424,6 +16430,52 @@ private struct MetallumGiDirectPopulationEpochV1: Equatable {
             && paletteGeneration == palette && contentGeneration == content
             && staticSourceEpoch == staticSources && environmentEpoch == environment
             && origin0X == originX && origin0Y == originY && origin0Z == originZ
+    }
+
+    func matchesCurrentContext(
+        world: UInt64, clipmap: UInt64, palette: UInt64, content: UInt64,
+        staticSources: UInt64, environment: UInt64, origins: [Int32]
+    ) -> Bool {
+        origins.count == 9 && matchesCurrentContext(
+            world: world, clipmap: clipmap, palette: palette, content: content,
+            staticSources: staticSources, environment: environment,
+            origin0X: origins[0], origin0Y: origins[1], origin0Z: origins[2],
+            origin1X: origins[3], origin1Y: origins[4], origin1Z: origins[5],
+            origin2X: origins[6], origin2Y: origins[7], origin2Z: origins[8])
+    }
+
+    func matchesCurrentContext(
+        world: UInt64, clipmap: UInt64, palette: UInt64, content: UInt64,
+        staticSources: UInt64, environment: UInt64,
+        origin0X: Int32, origin0Y: Int32, origin0Z: Int32,
+        origin1X: Int32, origin1Y: Int32, origin1Z: Int32,
+        origin2X: Int32, origin2Y: Int32, origin2Z: Int32
+    ) -> Bool {
+        worldGeneration == world && clipmapGeneration == clipmap
+            && paletteGeneration == palette && contentGeneration == content
+            && staticSourceEpoch == staticSources && environmentEpoch == environment
+            && self.origin0X == origin0X && self.origin0Y == origin0Y
+            && self.origin0Z == origin0Z
+            && self.origin1X == origin1X && self.origin1Y == origin1Y
+            && self.origin1Z == origin1Z
+            && self.origin2X == origin2X && self.origin2Y == origin2Y
+            && self.origin2Z == origin2Z
+    }
+
+    func hasSameStructuralPayload(as previous: MetallumGiDirectPopulationEpochV1) -> Bool {
+        worldGeneration == previous.worldGeneration
+            && clipmapGeneration == previous.clipmapGeneration
+            && paletteGeneration == previous.paletteGeneration
+            && environmentEpoch == previous.environmentEpoch
+            && origin0X == previous.origin0X && origin0Y == previous.origin0Y
+            && origin0Z == previous.origin0Z
+            && origin1X == previous.origin1X && origin1Y == previous.origin1Y
+            && origin1Z == previous.origin1Z
+            && origin2X == previous.origin2X && origin2Y == previous.origin2Y
+            && origin2Z == previous.origin2Z
+            && sunDirectionAndEnabled == previous.sunDirectionAndEnabled
+            && sunRgbAndEnabled == previous.sunRgbAndEnabled
+            && skyRgbAndEnabled == previous.skyRgbAndEnabled
     }
 }
 
@@ -16466,6 +16518,9 @@ private final class MetallumGiDirectSourceContextV1 {
 
     private var ready = false
     private var buildInFlight = false
+    private var inFlightCommandBufferAddress: UInt = 0
+    private var inFlightFenceAddress: UInt = 0
+    private var inFlightPopulationEpoch: MetallumGiDirectPopulationEpochV1?
     private var captureConsumed = false
     private var worldGeneration: UInt64
     private var clipmapGeneration: UInt64 = 0
@@ -16591,6 +16646,12 @@ private final class MetallumGiDirectSourceContextV1 {
         UInt64(pthread_mach_thread_np(pthread_self())) == ownerThread
     }
 
+    private func clearInFlightSourceIdentityLocked() {
+        inFlightCommandBufferAddress = 0
+        inFlightFenceAddress = 0
+        inFlightPopulationEpoch = nil
+    }
+
     private func persistentBytes() -> UInt64 {
         zip(directTextures, geometryTextures).reduce(UInt64(0)) {
             $0 + UInt64($1.0.allocatedSize) + UInt64($1.1.allocatedSize)
@@ -16662,6 +16723,80 @@ private final class MetallumGiDirectSourceContextV1 {
             paletteGeneration: paletteGeneration, contentGeneration: contentGeneration,
             staticSourceEpoch: staticSourceEpoch, environmentEpoch: environmentEpoch,
             originX: origins[0], originY: origins[1], originZ: origins[2])
+    }
+
+    /// G6 hand-off for one scheduler-proven cascade. A settled source retains the strict
+    /// no-writer gate. The only in-flight exception is an exact same-command-buffer hand-off:
+    /// Java proves that the immutable accepted batch closes every selected-cascade gap, while
+    /// native independently proves this command buffer, fence and complete admitted header.
+    /// G3 updates that fence before G6 waits on it, and a failed shared command buffer publishes
+    /// neither completion, so this path cannot expose a prior-submit or partially written field.
+    func liveTransportSnapshot(
+        commandBuffer: MTLCommandBuffer, fence: MTLFence?, cascade: Int,
+        header: MetallumGiLiveHeaderV1
+    ) -> MetallumGiDirectTransportSnapshotV1? {
+        guard isOwnerThread(), cascade >= 0, cascade < Self.cascadeCount else { return nil }
+        condition.lock()
+        defer { condition.unlock() }
+        guard origins.count == Self.cascadeCount * 3 else { return nil }
+        let requestedOrigins = (
+            header.origin0X, header.origin0Y, header.origin0Z,
+            header.origin1X, header.origin1Y, header.origin1Z,
+            header.origin2X, header.origin2Y, header.origin2Z)
+        let populationMatches = populationEpoch?.matchesCurrentContext(
+            world: header.worldGeneration, clipmap: header.clipmapGeneration,
+            palette: header.paletteGeneration, content: header.contentGeneration,
+            staticSources: header.staticSourceEpoch, environment: header.environmentEpoch,
+            origin0X: requestedOrigins.0, origin0Y: requestedOrigins.1,
+            origin0Z: requestedOrigins.2,
+            origin1X: requestedOrigins.3, origin1Y: requestedOrigins.4,
+            origin1Z: requestedOrigins.5,
+            origin2X: requestedOrigins.6, origin2Y: requestedOrigins.7,
+            origin2Z: requestedOrigins.8) == true
+        let currentIdentityMatches = worldGeneration == header.worldGeneration
+            && clipmapGeneration == header.clipmapGeneration
+            && paletteGeneration == header.paletteGeneration
+            && contentGeneration == header.contentGeneration
+            && staticSourceEpoch == header.staticSourceEpoch
+            && environmentEpoch == header.environmentEpoch
+            && origins[0] == requestedOrigins.0 && origins[1] == requestedOrigins.1
+            && origins[2] == requestedOrigins.2 && origins[3] == requestedOrigins.3
+            && origins[4] == requestedOrigins.4 && origins[5] == requestedOrigins.5
+            && origins[6] == requestedOrigins.6 && origins[7] == requestedOrigins.7
+            && origins[8] == requestedOrigins.8
+        let settled = ready && !buildInFlight
+            && populationMatches && currentIdentityMatches
+        let sameCommandProjected = buildInFlight
+            && commandBuffer.status == .notEnqueued
+            && inFlightCommandBufferAddress == objectAddress(commandBuffer)
+            && fence.map { inFlightFenceAddress == objectAddress($0) } == true
+            && inFlightPopulationEpoch?.matchesCurrentContext(
+                world: header.worldGeneration, clipmap: header.clipmapGeneration,
+                palette: header.paletteGeneration, content: header.contentGeneration,
+                staticSources: header.staticSourceEpoch, environment: header.environmentEpoch,
+                origin0X: requestedOrigins.0, origin0Y: requestedOrigins.1,
+                origin0Z: requestedOrigins.2,
+                origin1X: requestedOrigins.3, origin1Y: requestedOrigins.4,
+                origin1Z: requestedOrigins.5,
+                origin2X: requestedOrigins.6, origin2Y: requestedOrigins.7,
+                origin2Z: requestedOrigins.8) == true
+        guard schedulerOwned, settled || sameCommandProjected
+        else { return nil }
+        let selectedOrigin: (Int32, Int32, Int32) = switch cascade {
+        case 0: (requestedOrigins.0, requestedOrigins.1, requestedOrigins.2)
+        case 1: (requestedOrigins.3, requestedOrigins.4, requestedOrigins.5)
+        default: (requestedOrigins.6, requestedOrigins.7, requestedOrigins.8)
+        }
+        return MetallumGiDirectTransportSnapshotV1(
+            directIrradiance: directTextures[cascade], geometry: geometryTextures[cascade],
+            worldGeneration: header.worldGeneration,
+            clipmapGeneration: header.clipmapGeneration,
+            paletteGeneration: header.paletteGeneration,
+            contentGeneration: header.contentGeneration,
+            staticSourceEpoch: header.staticSourceEpoch,
+            environmentEpoch: header.environmentEpoch,
+            originX: selectedOrigin.0, originY: selectedOrigin.1,
+            originZ: selectedOrigin.2)
     }
 
     func isTransportAttachmentOwnerThread() -> Bool {
@@ -16801,6 +16936,9 @@ private final class MetallumGiDirectSourceContextV1 {
         }
         slot.busy = true
         buildInFlight = true
+        inFlightCommandBufferAddress = objectAddress(commandBuffer)
+        inFlightFenceAddress = fence.map(objectAddress) ?? 0
+        inFlightPopulationEpoch = admittedPopulationEpoch
         ready = false
         captureConsumed = false
         if !schedulerOwned {
@@ -16820,6 +16958,7 @@ private final class MetallumGiDirectSourceContextV1 {
         guard let encoder = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: pass) else {
             condition.lock()
             slot.busy = false; buildInFlight = false
+            clearInFlightSourceIdentityLocked()
             if !schedulerOwned { pendingDirty = 0 }
             let result = rejectLocked(metallumGiDirectSourceStatusRejected, dirty: UInt64(header.dirtyBrickCount))
             condition.broadcast(); condition.unlock()
@@ -16864,6 +17003,7 @@ private final class MetallumGiDirectSourceContextV1 {
             condition.lock()
             slot.busy = false
             buildInFlight = false
+            clearInFlightSourceIdentityLocked()
             if !schedulerOwned { pendingDirty = 0 }
             if completed.status == .completed {
                 ready = true
@@ -16916,6 +17056,48 @@ private final class MetallumGiDirectSourceContextV1 {
         return ready ? metallumGiDirectSourceStatusOK : metallumGiDirectSourceStatusInvalid
     }
 
+    /// Adopts a zero-dirty logical epoch without touching any field resource or population proof.
+    /// This is intentionally separate from reset: only metadata that cannot change field bytes may
+    /// advance, and an in-flight writer must retire before the owner thread retries the adoption.
+    func relabelMetadataOnly(rawHeader: UnsafeRawPointer, headerBytes: UInt64) -> Int32 {
+        guard isOwnerThread() else { return metallumGiDirectSourceStatusWrongThread }
+        guard headerBytes == UInt64(metallumGiDirectSourceHeaderBytesV1),
+              MemoryLayout<MetallumGiDirectSourceHeaderV1>.size == metallumGiDirectSourceHeaderBytesV1
+        else { return metallumGiDirectSourceStatusInvalid }
+        let header = rawHeader.load(as: MetallumGiDirectSourceHeaderV1.self)
+        guard header.abiVersion == UInt32(metallumGiDirectSourceAbiVersionV1),
+              header.headerBytes == UInt32(metallumGiDirectSourceHeaderBytesV1),
+              header.flags == 0, header.reserved0 == 0,
+              header.worldGeneration > 0, header.clipmapGeneration > 0,
+              header.paletteGeneration > 0, header.contentGeneration > 0,
+              header.staticSourceEpoch > 0, header.environmentEpoch > 0,
+              header.dirtyBrickCount == 0, header.sourceCount == 0
+        else { return metallumGiDirectSourceStatusInvalid }
+        let adoptedEpoch = MetallumGiDirectPopulationEpochV1(header)
+
+        condition.lock()
+        defer { condition.unlock() }
+        guard !buildInFlight else { return rejectLocked(metallumGiDirectSourceStatusBusy) }
+        guard ready, let currentEpoch = populationEpoch else {
+            return rejectLocked(metallumGiDirectSourceStatusInvalid)
+        }
+        guard currentEpoch.matchesCurrentContext(
+                  world: worldGeneration, clipmap: clipmapGeneration,
+                  palette: paletteGeneration, content: contentGeneration,
+                  staticSources: staticSourceEpoch, environment: environmentEpoch,
+                  origins: origins),
+              adoptedEpoch.hasSameStructuralPayload(as: currentEpoch),
+              adoptedEpoch.contentGeneration >= contentGeneration,
+              adoptedEpoch.staticSourceEpoch >= staticSourceEpoch
+        else { return rejectLocked(metallumGiDirectSourceStatusStale) }
+
+        contentGeneration = adoptedEpoch.contentGeneration
+        staticSourceEpoch = adoptedEpoch.staticSourceEpoch
+        populationEpoch = adoptedEpoch
+        publishTelemetryLocked()
+        return metallumGiDirectSourceStatusOK
+    }
+
     func reset(world: UInt64, clipmap: UInt64, palette: UInt64, content: UInt64, staticSources: UInt64, environment: UInt64) -> Int32 {
         guard isOwnerThread() else { return metallumGiDirectSourceStatusWrongThread }
         guard world > 0, clipmap > 0, palette > 0, content > 0, staticSources > 0, environment > 0 else {
@@ -16924,11 +17106,11 @@ private final class MetallumGiDirectSourceContextV1 {
         condition.lock()
         defer { condition.unlock() }
         guard !buildInFlight else { return rejectLocked(metallumGiDirectSourceStatusBusy) }
-        let newerWorld = world > worldGeneration
-        guard newerWorld || (world == worldGeneration
-              && clipmap >= clipmapGeneration && palette >= paletteGeneration
-              && content >= contentGeneration && staticSources >= staticSourceEpoch
-              && environment >= environmentEpoch)
+        // This explicit owner-only reset is the trusted lifecycle boundary used before Java
+        // enqueues all 192 bricks again. Resource reload may recreate G2/L3 child owners while
+        // preserving the outer semantic world generation, so their counters may restart here.
+        // Ordinary dirty headers still pass headerIsNewerOrEqual and cannot roll anything back.
+        guard world >= worldGeneration
         else { return rejectLocked(metallumGiDirectSourceStatusStale) }
         worldGeneration = world; clipmapGeneration = clipmap; paletteGeneration = palette
         contentGeneration = content; staticSourceEpoch = staticSources; environmentEpoch = environment
@@ -17124,6 +17306,16 @@ public func metallum_gi_direct_source_await_ready_v1(_ rawContext: UnsafeMutable
           let context = MetallumGiDirectSourceContextRegistryV1.resolve(rawContext)
     else { return metallumGiDirectSourceStatusInvalid }
     return context.awaitReady(timeoutMilliseconds: timeoutMilliseconds)
+}
+
+@_cdecl("metallum_gi_direct_source_relabel_v1")
+public func metallum_gi_direct_source_relabel_v1(
+    _ rawContext: UnsafeMutableRawPointer?, _ header: UnsafeRawPointer?, _ headerBytes: UInt64
+) -> Int32 {
+    guard let rawContext, let header,
+          let context = MetallumGiDirectSourceContextRegistryV1.resolve(rawContext)
+    else { return metallumGiDirectSourceStatusInvalid }
+    return context.relabelMetadataOnly(rawHeader: header, headerBytes: headerBytes)
 }
 
 @_cdecl("metallum_gi_direct_source_reset_v1")
@@ -18127,6 +18319,1076 @@ public func metallum_gi_transport_poll_debug_capture_v1(
 public func metallum_gi_transport_release_context_v1(_ rawContext: UnsafeMutableRawPointer?) {
     guard let rawContext else { return }
     _ = MetallumGiTransportContextRegistryV1.unregister(rawContext)
+}
+
+// MARK: - G6 live three-cascade transport and vertex receiver
+
+private let metallumGiLiveAbiVersionV1: Int32 = 1
+private let metallumGiLiveLayoutBytesV1 = 160
+private let metallumGiLiveHeaderBytesV1 = 192
+private let metallumGiLiveStatsBytesV1 = 216
+private let metallumGiLiveParamsBytesV1 = 160
+private let metallumGiLiveCascadeCountV1 = 3
+private let metallumGiLiveAtlasDepthV1 = 96
+private let metallumGiLiveInFlightSlotsV1 = 3
+private let metallumGiLiveLifetimeOverheadBytesV1: UInt64 = 65_536
+private let metallumGiLiveFlagIncrementalV1: UInt32 = 1
+private let metallumGiLiveFlagPreserveExactV1: UInt32 = 1 << 1
+private let metallumGiLiveFlagScrollRemapV1: UInt32 = 1 << 2
+private let metallumGiLiveFlagPrepareCascadeV1: UInt32 = 1 << 3
+private let metallumGiLiveFlagRetainCapturedBasisV1: UInt32 = 1 << 4
+private let metallumGiLiveKnownFlagsV1: UInt32 = (1 << 5) - 1
+
+public struct MetallumGiLiveHeaderV1 {
+    public var abiVersion: UInt32
+    public var headerBytes: UInt32
+    public var worldGeneration: UInt64
+    public var clipmapGeneration: UInt64
+    public var paletteGeneration: UInt64
+    public var contentGeneration: UInt64
+    public var staticSourceEpoch: UInt64
+    public var dynamicSourceEpoch: UInt64
+    public var environmentEpoch: UInt64
+    public var origin0X: Int32
+    public var origin0Y: Int32
+    public var origin0Z: Int32
+    public var origin1X: Int32
+    public var origin1Y: Int32
+    public var origin1Z: Int32
+    public var origin2X: Int32
+    public var origin2Y: Int32
+    public var origin2Z: Int32
+    public var cascadeIndex: UInt32
+    public var cellCount: UInt32
+    public var iterationCount: UInt32
+    public var maximumDistance: UInt32
+    public var validSurfaceCount: UInt32
+    public var unknownCellCount: UInt32
+    public var formWeightNormalization: Float
+    public var fp16AbsoluteTolerance: Float
+    public var fp16RelativeTolerance: Float
+    public var flags: UInt32
+    public var sourceStamp: UInt64
+    public var fieldGeneration: UInt64
+    public var sourceTick: UInt64
+    public var resetKind: UInt32
+    public var reserved32: UInt32
+    public var reserved0: UInt64
+    public var reserved1: UInt64
+}
+
+public struct MetallumGiLiveStatsV1 {
+    public var readyMask: UInt32
+    public var buildInFlight: Int32
+    public var shaderLibraryMode: Int32
+    public var padding0: Int32
+    public var worldGeneration: UInt64
+    public var clipmapGeneration: UInt64
+    public var contentGeneration: UInt64
+    public var staticSourceEpoch: UInt64
+    public var dynamicSourceEpoch: UInt64
+    public var environmentEpoch: UInt64
+    public var fieldGeneration: UInt64
+    public var sourceTick: UInt64
+    public var allocatedBytes: UInt64
+    public var residentBytes: UInt64
+    public var stagingBytes: UInt64
+    public var transportDispatches: UInt64
+    public var cascadeBuilds0: UInt64
+    public var cascadeBuilds1: UInt64
+    public var cascadeBuilds2: UInt64
+    public var invalidations: UInt64
+    public var staleRejects: UInt64
+    public var busyRejects: UInt64
+    public var rejectedCount: UInt64
+    public var bindCount: UInt64
+    public var zeroBindings: UInt64
+    public var fieldBindings: UInt64
+    public var resetWorld: UInt32
+    public var resetTeleport: UInt32
+    public var resetScroll: UInt32
+    public var resetSource: UInt32
+    public var resetExplicit: UInt32
+    public var resetDevice: UInt32
+}
+
+private struct MetallumGiLiveRemapParamsV1 {
+    var cascadeIndex: UInt32
+    var deltaX: Int32
+    var deltaY: Int32
+    var deltaZ: Int32
+    var previousExactMask: UInt64
+    var requiredMask: UInt64
+}
+
+private final class MetallumGiLiveSharedStagingV1 {
+    let transportHeader: MTLBuffer
+    let cells: MTLBuffer
+
+    init?(device: MTLDevice) {
+        guard let header = device.makeBuffer(
+                length: metallumGiTransportHeaderBytesV1, options: .storageModeShared),
+              let cells = device.makeBuffer(
+                length: MetallumGiTransportContextV1.cellCount
+                    * metallumGiTransportCellBytesV1, options: .storageModeShared)
+        else { return nil }
+        header.label = "Metallum G6 live transport header"
+        cells.label = "Metallum G6 live semantic cells"
+        self.transportHeader = header
+        self.cells = cells
+    }
+
+    var allocatedBytes: UInt64 {
+        UInt64(transportHeader.allocatedSize + cells.allocatedSize)
+    }
+}
+
+private final class MetallumGiLiveParamsSlotV1 {
+    let params: MTLBuffer
+    var buildBusy = false
+
+    init?(device: MTLDevice) {
+        guard let params = device.makeBuffer(
+            length: metallumGiLiveParamsBytesV1, options: .storageModeShared)
+        else { return nil }
+        params.label = "Metallum G6 live receiver params"
+        memset(params.contents(), 0, params.length)
+        self.params = params
+    }
+}
+
+private final class MetallumGiLiveContextV1 {
+    private static let edge = MetallumGiTransportContextV1.edge
+    private static let cellCount = MetallumGiTransportContextV1.cellCount
+    private static let formWeightNormalization = Float(29.17999846648958)
+    private static let fp16AbsoluteTolerance = Float(1.0 / 1024.0)
+    private static let fp16RelativeTolerance = Float(1.0 / 512.0)
+
+    private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let direct: MetallumGiDirectSourceContextV1
+    private let shRed: MTLTexture
+    private let shGreen: MTLTexture
+    private let shBlue: MTLTexture
+    private let confidence: MTLTexture
+    private let scratchRed: MTLTexture
+    private let scratchGreen: MTLTexture
+    private let scratchBlue: MTLTexture
+    private let scratchConfidence: MTLTexture
+    private let sampler: MTLSamplerState
+    private let clearPipeline: MTLComputePipelineState
+    private let clearBricksPipeline: MTLComputePipelineState
+    private let remapPipeline: MTLComputePipelineState
+    private let publishRemapPipeline: MTLComputePipelineState
+    private let liveTransportPipeline: MTLComputePipelineState
+    private let sharedStaging: MetallumGiLiveSharedStagingV1
+    private let paramsSlots: [MetallumGiLiveParamsSlotV1]
+    private let ownerThread: UInt64
+    private let shaderLibraryMode: Int32
+    private let condition = NSCondition()
+
+    private var currentHeader: MetallumGiLiveHeaderV1?
+    private var retainedHeader: MetallumGiLiveHeaderV1?
+    private var capturedBasisWorkAdmitted = false
+    private var admittedScrollRemapMask: UInt32 = 0
+    private var readyMask: UInt32 = 0
+    private var exactBrickMasks = [UInt64](repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var retainedExactBrickMasks = [UInt64](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var requiredBrickMasks = [UInt64](
+        repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var preparedMask: UInt32 = 0
+    private var inFlightMask: UInt32 = 0
+    private var transportDispatches: UInt64 = 0
+    private var cascadeBuilds = [UInt64](repeating: 0, count: metallumGiLiveCascadeCountV1)
+    private var invalidations: UInt64 = 0
+    private var staleRejects: UInt64 = 0
+    private var busyRejects: UInt64 = 0
+    private var rejectedCount: UInt64 = 0
+    private var bindCount: UInt64 = 0
+    private var zeroBindings: UInt64 = 0
+    private var fieldBindings: UInt64 = 0
+    private var resetCounts = [UInt32](repeating: 0, count: 6)
+
+    init?(
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue,
+        direct: MetallumGiDirectSourceContextV1,
+        worldGeneration: UInt64
+    ) {
+        guard worldGeneration > 0,
+              objectAddress(commandQueue.device) == objectAddress(device),
+              direct.isTransportAttachmentOwnerThread(),
+              direct.isTransportAttachmentCompatible(device: device, commandQueue: commandQueue)
+        else { return nil }
+        self.device = device
+        self.commandQueue = commandQueue
+        self.direct = direct
+        self.ownerThread = UInt64(pthread_mach_thread_np(pthread_self()))
+
+        func makeTexture(
+            _ format: MTLPixelFormat, depth: Int, _ label: String
+        ) -> MTLTexture? {
+            let descriptor = MTLTextureDescriptor()
+            descriptor.textureType = .type3D
+            descriptor.pixelFormat = format
+            descriptor.width = Self.edge
+            descriptor.height = Self.edge
+            descriptor.depth = depth
+            descriptor.mipmapLevelCount = 1
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            descriptor.storageMode = .private
+            let texture = device.makeTexture(descriptor: descriptor)
+            texture?.label = label
+            return texture
+        }
+        guard let red = makeTexture(.rgba16Float, depth: metallumGiLiveAtlasDepthV1,
+                    "Metallum G6 live SH red atlas"),
+              let green = makeTexture(.rgba16Float, depth: metallumGiLiveAtlasDepthV1,
+                    "Metallum G6 live SH green atlas"),
+              let blue = makeTexture(.rgba16Float, depth: metallumGiLiveAtlasDepthV1,
+                    "Metallum G6 live SH blue atlas"),
+              let confidence = makeTexture(.r8Unorm, depth: metallumGiLiveAtlasDepthV1,
+                    "Metallum G6 live confidence atlas"),
+              let scratchRed = makeTexture(.rgba16Float, depth: Self.edge,
+                    "Metallum G6 live scroll red scratch"),
+              let scratchGreen = makeTexture(.rgba16Float, depth: Self.edge,
+                    "Metallum G6 live scroll green scratch"),
+              let scratchBlue = makeTexture(.rgba16Float, depth: Self.edge,
+                    "Metallum G6 live scroll blue scratch"),
+              let scratchConfidence = makeTexture(.r8Unorm, depth: Self.edge,
+                    "Metallum G6 live scroll confidence scratch"),
+              let sharedStaging = MetallumGiLiveSharedStagingV1(device: device)
+        else { return nil }
+
+        var slots: [MetallumGiLiveParamsSlotV1] = []
+        for _ in 0..<metallumGiLiveInFlightSlotsV1 {
+            guard let slot = MetallumGiLiveParamsSlotV1(device: device) else { return nil }
+            slots.append(slot)
+        }
+        let samplerDescriptor = MTLSamplerDescriptor()
+        samplerDescriptor.minFilter = .linear
+        samplerDescriptor.magFilter = .linear
+        samplerDescriptor.mipFilter = .notMipmapped
+        samplerDescriptor.sAddressMode = .clampToZero
+        samplerDescriptor.tAddressMode = .clampToZero
+        samplerDescriptor.rAddressMode = .clampToZero
+        samplerDescriptor.normalizedCoordinates = true
+        samplerDescriptor.label = "Metallum G6 live SH sampler"
+        guard let sampler = device.makeSamplerState(descriptor: samplerDescriptor) else { return nil }
+
+        do {
+            let library = try resolveBuiltinShaderLibrary(device: device, shaderSet: .giTransport)
+            guard let clear = library.makeFunction(name: "metallum_gi_live_clear_v1"),
+                  let clearBricks = library.makeFunction(
+                    name: "metallum_gi_live_clear_bricks_v1"),
+                  let remap = library.makeFunction(name: "metallum_gi_live_remap_v1"),
+                  let publishRemap = library.makeFunction(
+                    name: "metallum_gi_live_publish_remap_v1"),
+                  let liveTransport = library.makeFunction(name: "metallum_gi_live_jacobi_sh_v1")
+            else { return nil }
+            self.clearPipeline = try device.makeComputePipelineState(function: clear)
+            self.clearBricksPipeline = try device.makeComputePipelineState(function: clearBricks)
+            self.remapPipeline = try device.makeComputePipelineState(function: remap)
+            self.publishRemapPipeline = try device.makeComputePipelineState(
+                function: publishRemap)
+            self.liveTransportPipeline = try device.makeComputePipelineState(function: liveTransport)
+        } catch {
+            NSLog("[metallum] G6 live transport pipeline creation failed: %@", String(describing: error))
+            return nil
+        }
+        switch existingBuiltinShaderState(device: device)?.snapshot().mode {
+        case .precompiled: self.shaderLibraryMode = 1
+        case .sourceFallback: self.shaderLibraryMode = 2
+        default: return nil
+        }
+        self.shRed = red
+        self.shGreen = green
+        self.shBlue = blue
+        self.confidence = confidence
+        self.scratchRed = scratchRed
+        self.scratchGreen = scratchGreen
+        self.scratchBlue = scratchBlue
+        self.scratchConfidence = scratchConfidence
+        self.sampler = sampler
+        self.sharedStaging = sharedStaging
+        self.paramsSlots = slots
+
+        // Private atlas contents are undefined. Establish one admission-time
+        // exact zero; all later reset events publish readyMask=0 without a GPU
+        // clear, so incompatible texels can never be sampled.
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.label = "G6 live atlas create-time zero"
+        encoder.setComputePipelineState(clearPipeline)
+        encoder.setTexture(red, index: 0)
+        encoder.setTexture(green, index: 1)
+        encoder.setTexture(blue, index: 2)
+        encoder.setTexture(confidence, index: 3)
+        encoder.dispatchThreads(
+            MTLSize(width: Self.edge, height: Self.edge, depth: metallumGiLiveAtlasDepthV1),
+            threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 4))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        guard commandBuffer.status == .completed else { return nil }
+    }
+
+    fileprivate func isOwnerThread() -> Bool {
+        UInt64(pthread_mach_thread_np(pthread_self())) == ownerThread
+    }
+
+    private func headerValid(_ header: MetallumGiLiveHeaderV1) -> Bool {
+        header.abiVersion == UInt32(metallumGiLiveAbiVersionV1)
+            && header.headerBytes == UInt32(metallumGiLiveHeaderBytesV1)
+            && header.worldGeneration > 0 && header.clipmapGeneration > 0
+            && header.paletteGeneration > 0 && header.contentGeneration > 0
+            && header.staticSourceEpoch > 0 && header.dynamicSourceEpoch > 0
+            && header.environmentEpoch > 0
+            && header.cascadeIndex < UInt32(metallumGiLiveCascadeCountV1)
+            && header.cellCount == UInt32(Self.cellCount)
+            && header.iterationCount == 1 && header.maximumDistance == 8
+            && header.formWeightNormalization == Self.formWeightNormalization
+            && header.fp16AbsoluteTolerance == Self.fp16AbsoluteTolerance
+            && header.fp16RelativeTolerance == Self.fp16RelativeTolerance
+            && header.flags & ~metallumGiLiveKnownFlagsV1 == 0
+            && header.sourceStamp > 0
+            && header.fieldGeneration > 0
+            && header.resetKind < UInt32(resetCounts.count)
+            && header.reserved32 <= 8
+            && header.reserved0.nonzeroBitCount == Int(header.reserved32)
+            && ((header.flags & metallumGiLiveFlagIncrementalV1) != 0
+                || (header.reserved32 == 0 && header.reserved0 == 0 && header.reserved1 == 0))
+            && ((header.flags & metallumGiLiveFlagPrepareCascadeV1) != 0
+                || header.reserved1 == 0)
+            && ((header.flags & metallumGiLiveFlagScrollRemapV1) == 0
+                || (header.flags & (metallumGiLiveFlagPrepareCascadeV1
+                    | metallumGiLiveFlagPreserveExactV1))
+                    == (metallumGiLiveFlagPrepareCascadeV1
+                        | metallumGiLiveFlagPreserveExactV1))
+            && ((header.flags & metallumGiLiveFlagRetainCapturedBasisV1) == 0
+                || ((header.flags & (metallumGiLiveFlagIncrementalV1
+                    | metallumGiLiveFlagPreserveExactV1
+                    | metallumGiLiveFlagPrepareCascadeV1))
+                    == (metallumGiLiveFlagIncrementalV1
+                        | metallumGiLiveFlagPreserveExactV1
+                        | metallumGiLiveFlagPrepareCascadeV1)
+                    && header.reserved32 == 0 && header.reserved0 == 0))
+    }
+
+    private func sameEpoch(
+        _ left: MetallumGiLiveHeaderV1, _ right: MetallumGiLiveHeaderV1
+    ) -> Bool {
+        left.worldGeneration == right.worldGeneration
+            && left.clipmapGeneration == right.clipmapGeneration
+            && left.paletteGeneration == right.paletteGeneration
+            && left.contentGeneration == right.contentGeneration
+            && left.staticSourceEpoch == right.staticSourceEpoch
+            && left.dynamicSourceEpoch == right.dynamicSourceEpoch
+            && left.environmentEpoch == right.environmentEpoch
+            && left.origin0X == right.origin0X && left.origin0Y == right.origin0Y
+            && left.origin0Z == right.origin0Z && left.origin1X == right.origin1X
+            && left.origin1Y == right.origin1Y && left.origin1Z == right.origin1Z
+            && left.origin2X == right.origin2X && left.origin2Y == right.origin2Y
+            && left.origin2Z == right.origin2Z
+            && left.fieldGeneration == right.fieldGeneration
+    }
+
+    private func cascadeOrigin(
+        _ header: MetallumGiLiveHeaderV1, cascade: Int
+    ) -> (Int32, Int32, Int32) {
+        switch cascade {
+        case 0: return (header.origin0X, header.origin0Y, header.origin0Z)
+        case 1: return (header.origin1X, header.origin1Y, header.origin1Z)
+        default: return (header.origin2X, header.origin2Y, header.origin2Z)
+        }
+    }
+
+    /** Applies one cascade-local invalidation plan without admitting rebuilt work. */
+    private func applyCascadePlan(_ header: MetallumGiLiveHeaderV1) {
+        let cascade = Int(header.cascadeIndex)
+        let bit = UInt32(1) << UInt32(cascade)
+        requiredBrickMasks[cascade] = header.reserved1
+        let preserving = header.flags & metallumGiLiveFlagPreserveExactV1 != 0
+        let scrolling = header.flags & metallumGiLiveFlagScrollRemapV1 != 0
+        if preserving && !scrolling {
+            exactBrickMasks[cascade] = retainedExactBrickMasks[cascade]
+                & ~header.reserved1
+        } else {
+            exactBrickMasks[cascade] = 0
+        }
+        if exactBrickMasks[cascade] == UInt64.max {
+            readyMask |= bit
+        } else {
+            readyMask &= ~bit
+        }
+        preparedMask &= ~bit
+    }
+
+    func invalidate(rawHeader: UnsafeRawPointer, headerBytes: UInt64) -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        guard headerBytes == UInt64(metallumGiLiveHeaderBytesV1),
+              MemoryLayout<MetallumGiLiveHeaderV1>.size == metallumGiLiveHeaderBytesV1
+        else { return metallumGiTransportStatusInvalid }
+        let header = rawHeader.loadUnaligned(as: MetallumGiLiveHeaderV1.self)
+        guard headerValid(header) else { return metallumGiTransportStatusInvalid }
+        condition.lock()
+        defer { condition.unlock() }
+        // Invalidation mutates the shared atlas ownership tuple and may snapshot exact coverage.
+        // It is never safe while an older command buffer can still publish into that atlas.
+        if inFlightMask != 0 {
+            busyRejects &+= 1
+            return metallumGiTransportStatusBusy
+        }
+        let retainCapturedBasis =
+            (header.flags & metallumGiLiveFlagRetainCapturedBasisV1) != 0
+        if retainCapturedBasis && (retainedHeader == nil || capturedBasisWorkAdmitted) {
+            rejectedCount &+= 1
+            return metallumGiTransportStatusRejected
+        }
+        if let current = currentHeader {
+            if sameEpoch(current, header) {
+                guard header.sourceTick == current.sourceTick else {
+                    staleRejects &+= 1
+                    return metallumGiTransportStatusStale
+                }
+                applyCascadePlan(header)
+                return metallumGiTransportStatusOK
+            }
+            guard header.fieldGeneration > current.fieldGeneration,
+                  header.worldGeneration >= current.worldGeneration,
+                  header.worldGeneration != current.worldGeneration
+                    || header.sourceTick >= current.sourceTick
+            else {
+                staleRejects &+= 1
+                return metallumGiTransportStatusStale
+            }
+        }
+        let preserve = (header.flags & metallumGiLiveFlagPreserveExactV1) != 0
+        if preserve, let current = currentHeader {
+            if !retainCapturedBasis {
+                retainedHeader = current
+                for cascade in 0..<metallumGiLiveCascadeCountV1 {
+                    retainedExactBrickMasks[cascade] = exactBrickMasks[cascade]
+                }
+            }
+            // A compatible provisional/source handoff intentionally keeps the
+            // per-cascade tuple captured before the first provisional invalidation.
+        } else {
+            retainedHeader = nil
+            for cascade in 0..<metallumGiLiveCascadeCountV1 {
+                retainedExactBrickMasks[cascade] = 0
+            }
+        }
+        if !retainCapturedBasis {
+            capturedBasisWorkAdmitted = false
+            admittedScrollRemapMask = 0
+        }
+        currentHeader = header
+        readyMask = 0
+        for cascade in 0..<metallumGiLiveCascadeCountV1 {
+            exactBrickMasks[cascade] = 0
+            requiredBrickMasks[cascade] = 0
+        }
+        preparedMask = 0
+        applyCascadePlan(header)
+        invalidations &+= 1
+        resetCounts[Int(header.resetKind)] &+= 1
+        return metallumGiTransportStatusOK
+    }
+
+    private func scrollRetainedMask(
+        previousMask: UInt64, deltaX: Int32, deltaY: Int32, deltaZ: Int32
+    ) -> UInt64 {
+        var result: UInt64 = 0
+        for destinationBrick in 0..<64 {
+            let brickX = destinationBrick & 3
+            let brickY = (destinationBrick >> 2) & 3
+            let brickZ = destinationBrick >> 4
+            var compatible = true
+            for cornerZ in [0, 7] {
+                for cornerY in [0, 7] {
+                    for cornerX in [0, 7] {
+                        let sourceX = Int32(brickX * 8 + cornerX) + deltaX
+                        let sourceY = Int32(brickY * 8 + cornerY) + deltaY
+                        let sourceZ = Int32(brickZ * 8 + cornerZ) + deltaZ
+                        if sourceX < 0 || sourceX >= 32 || sourceY < 0 || sourceY >= 32
+                                || sourceZ < 0 || sourceZ >= 32 {
+                            compatible = false
+                            continue
+                        }
+                        let sourceBrick = (Int(sourceZ) >> 3) << 4
+                            | (Int(sourceY) >> 3) << 2 | (Int(sourceX) >> 3)
+                        if previousMask & (UInt64(1) << UInt64(sourceBrick)) == 0 {
+                            compatible = false
+                        }
+                    }
+                }
+            }
+            if compatible { result |= UInt64(1) << UInt64(destinationBrick) }
+        }
+        return result
+    }
+
+    private func rollbackAdmission(
+        cascade: Int, cascadeBit: UInt32, prepared: Bool,
+        slot: MetallumGiLiveParamsSlotV1
+    ) {
+        condition.lock()
+        inFlightMask &= ~cascadeBit
+        slot.buildBusy = false
+        if prepared {
+            preparedMask &= ~cascadeBit
+            exactBrickMasks[cascade] = 0
+            requiredBrickMasks[cascade] = 0
+            readyMask &= ~cascadeBit
+        }
+        rejectedCount &+= 1
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func encodeCascade(
+        commandBuffer: MTLCommandBuffer, fence: MTLFence?, inFlightSlot: Int,
+        rawHeader: UnsafeRawPointer, headerBytes: UInt64,
+        rawCells: UnsafeRawPointer, cellsBytes: UInt64
+    ) -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        let fenceCompatible = fence.map {
+            objectAddress($0.device) == objectAddress(device)
+        } ?? true
+        guard objectAddress(commandBuffer.device) == objectAddress(device),
+              objectAddress(commandBuffer.commandQueue) == objectAddress(commandQueue),
+              fenceCompatible, commandBuffer.status == .notEnqueued,
+              inFlightSlot >= 0 && inFlightSlot < paramsSlots.count,
+              headerBytes == UInt64(metallumGiLiveHeaderBytesV1),
+              cellsBytes == UInt64(Self.cellCount * metallumGiTransportCellBytesV1)
+        else { return metallumGiTransportStatusInvalid }
+        let header = rawHeader.loadUnaligned(as: MetallumGiLiveHeaderV1.self)
+        guard headerValid(header),
+              header.flags & metallumGiLiveFlagIncrementalV1 != 0
+        else { return metallumGiTransportStatusInvalid }
+        let cascade = Int(header.cascadeIndex)
+        let cascadeBit = UInt32(1) << UInt32(cascade)
+        let preparing = header.flags & metallumGiLiveFlagPrepareCascadeV1 != 0
+        let preserving = header.flags & metallumGiLiveFlagPreserveExactV1 != 0
+        let scrolling = header.flags & metallumGiLiveFlagScrollRemapV1 != 0
+        let remapOnly = preparing && preserving && scrolling
+            && header.reserved32 == 0 && header.reserved0 == 0
+        guard remapOnly || (header.reserved32 > 0 && header.reserved0 != 0) else {
+            return metallumGiTransportStatusInvalid
+        }
+        let origin = cascadeOrigin(header, cascade: cascade)
+        let source = remapOnly ? nil : direct.liveTransportSnapshot(
+            commandBuffer: commandBuffer, fence: fence, cascade: cascade, header: header)
+        if !remapOnly && source == nil {
+            condition.lock(); staleRejects &+= 1; condition.unlock()
+            return metallumGiTransportStatusStale
+        }
+
+        if preparing {
+            var actualValid: UInt32 = 0
+            var actualUnknown: UInt32 = 0
+            for index in 0..<Self.cellCount {
+                let cell = rawCells.advanced(by: index * metallumGiTransportCellBytesV1)
+                let validity = cell.loadUnaligned(fromByteOffset: 14, as: UInt8.self)
+                guard validity <= 3 else { return metallumGiTransportStatusInvalid }
+                if validity == 0 || validity == 3 { actualUnknown &+= 1 }
+                let occupancy = UInt16(littleEndian:
+                    cell.loadUnaligned(fromByteOffset: 6, as: UInt16.self))
+                let coverage = cell.loadUnaligned(fromByteOffset: 15, as: UInt8.self)
+                var hasFace = false
+                for face in 0..<6 where cell.loadUnaligned(
+                    fromByteOffset: 8 + face, as: UInt8.self) != 0 { hasFace = true }
+                if validity == 2, occupancy != 0, coverage != 0, hasFace {
+                    actualValid &+= 1
+                }
+            }
+            guard actualValid == header.validSurfaceCount,
+                  actualUnknown == header.unknownCellCount
+            else { return metallumGiTransportStatusInvalid }
+        }
+
+        var remapParams: MetallumGiLiveRemapParamsV1? = nil
+        condition.lock()
+        guard let current = currentHeader, sameEpoch(current, header),
+              current.sourceTick == header.sourceTick else {
+            staleRejects &+= 1; condition.unlock()
+            return metallumGiTransportStatusStale
+        }
+        let alreadyPrepared = preparedMask & cascadeBit != 0
+        guard preparing != alreadyPrepared,
+              preparing || header.reserved1 == 0,
+              !preparing || !scrolling || admittedScrollRemapMask & cascadeBit == 0 else {
+            rejectedCount &+= 1; condition.unlock()
+            return metallumGiTransportStatusRejected
+        }
+        let slot = paramsSlots[inFlightSlot]
+        if inFlightMask != 0 || slot.buildBusy {
+            busyRejects &+= 1; condition.unlock()
+            return metallumGiTransportStatusBusy
+        }
+        if preparing {
+            requiredBrickMasks[cascade] = header.reserved1
+            var retained: UInt64 = 0
+            if preserving, let previous = retainedHeader {
+                let previousOrigin = cascadeOrigin(previous, cascade: cascade)
+                let cellSize = Int32(1 << (cascade + 1))
+                let dxBlocks = origin.0 - previousOrigin.0
+                let dyBlocks = origin.1 - previousOrigin.1
+                let dzBlocks = origin.2 - previousOrigin.2
+                if scrolling {
+                    guard dxBlocks % cellSize == 0, dyBlocks % cellSize == 0,
+                          dzBlocks % cellSize == 0 else {
+                        rejectedCount &+= 1; condition.unlock()
+                        return metallumGiTransportStatusRejected
+                    }
+                    let dx = dxBlocks / cellSize
+                    let dy = dyBlocks / cellSize
+                    let dz = dzBlocks / cellSize
+                    guard abs(dx) < 32, abs(dy) < 32, abs(dz) < 32 else {
+                        rejectedCount &+= 1; condition.unlock()
+                        return metallumGiTransportStatusRejected
+                    }
+                    retained = scrollRetainedMask(
+                        previousMask: retainedExactBrickMasks[cascade],
+                        deltaX: dx, deltaY: dy, deltaZ: dz)
+                    remapParams = MetallumGiLiveRemapParamsV1(
+                        cascadeIndex: UInt32(cascade), deltaX: dx, deltaY: dy, deltaZ: dz,
+                        previousExactMask: retainedExactBrickMasks[cascade],
+                        requiredMask: header.reserved1)
+                } else {
+                    guard dxBlocks == 0, dyBlocks == 0, dzBlocks == 0 else {
+                        rejectedCount &+= 1; condition.unlock()
+                        return metallumGiTransportStatusRejected
+                    }
+                    retained = retainedExactBrickMasks[cascade]
+                }
+            }
+            exactBrickMasks[cascade] = retained & ~header.reserved1
+            preparedMask |= cascadeBit
+            readyMask &= ~cascadeBit
+        }
+        inFlightMask = cascadeBit
+        slot.buildBusy = true
+        let admittedGeneration = header.fieldGeneration
+        let admittedSourceTick = header.sourceTick
+        condition.unlock()
+
+        var transportHeader = MetallumGiTransportHeaderV1(
+            abiVersion: UInt32(metallumGiTransportAbiVersionV1),
+            headerBytes: UInt32(metallumGiTransportHeaderBytesV1),
+            worldGeneration: header.worldGeneration,
+            clipmapGeneration: header.clipmapGeneration,
+            paletteGeneration: header.paletteGeneration,
+            contentGeneration: header.contentGeneration,
+            staticSourceEpoch: header.staticSourceEpoch,
+            environmentEpoch: header.environmentEpoch,
+            originX: origin.0, originY: origin.1, originZ: origin.2,
+            cellCount: UInt32(Self.cellCount), iterationCount: 1, maximumDistance: 8,
+            validSurfaceCount: header.validSurfaceCount,
+            unknownCellCount: header.unknownCellCount,
+            formWeightNormalization: Self.formWeightNormalization,
+            fp16AbsoluteTolerance: Self.fp16AbsoluteTolerance,
+            fp16RelativeTolerance: Self.fp16RelativeTolerance,
+            flags: header.flags, sourceStamp: header.sourceStamp,
+            reserved0: header.reserved0, reserved1: header.reserved1)
+        withUnsafeBytes(of: &transportHeader) {
+            sharedStaging.transportHeader.contents().copyMemory(
+                from: $0.baseAddress!, byteCount: metallumGiTransportHeaderBytesV1)
+        }
+        if preparing {
+            sharedStaging.cells.contents().copyMemory(
+                from: rawCells, byteCount: Int(cellsBytes))
+        }
+
+        let pass = MTLComputePassDescriptor()
+        attachGpuTiming(pass, commandBuffer: commandBuffer, stage: .giTransport)
+        guard let encoder = trackedMakeComputeCommandEncoder(commandBuffer, descriptor: pass) else {
+            rollbackAdmission(cascade: cascade, cascadeBit: cascadeBit,
+                              prepared: preparing, slot: slot)
+            return metallumGiTransportStatusRejected
+        }
+        encoder.label = remapOnly
+            ? "G6 immediate compatible scroll remap cascade \(cascade)"
+            : "G6 bounded live bricks cascade \(cascade)"
+        if let fence { encoder.waitForFence(fence) }
+        let group = MTLSize(width: 4, height: 4, depth: 4)
+        if var remapParams {
+            guard MemoryLayout<MetallumGiLiveRemapParamsV1>.size == 32 else {
+                encoder.endEncoding()
+                rollbackAdmission(cascade: cascade, cascadeBit: cascadeBit,
+                                  prepared: preparing, slot: slot)
+                return metallumGiTransportStatusRejected
+            }
+            encoder.setComputePipelineState(remapPipeline)
+            encoder.setBytes(&remapParams, length: 32, index: 0)
+            encoder.setTexture(shRed, index: 0)
+            encoder.setTexture(shGreen, index: 1)
+            encoder.setTexture(shBlue, index: 2)
+            encoder.setTexture(confidence, index: 3)
+            encoder.setTexture(scratchRed, index: 4)
+            encoder.setTexture(scratchGreen, index: 5)
+            encoder.setTexture(scratchBlue, index: 6)
+            encoder.setTexture(scratchConfidence, index: 7)
+            encoder.dispatchThreads(
+                MTLSize(width: Self.edge, height: Self.edge, depth: Self.edge),
+                threadsPerThreadgroup: group)
+            encoder.memoryBarrier(scope: .textures)
+
+            // Publish from the disjoint scratch in the same encoder. Once the
+            // encoder exists, no later admission failure can leave an accepted
+            // scroll half-encoded or cause a retry to shift the atlas twice.
+            encoder.setComputePipelineState(publishRemapPipeline)
+            encoder.setBytes(&remapParams, length: 32, index: 0)
+            encoder.setTexture(scratchRed, index: 0)
+            encoder.setTexture(scratchGreen, index: 1)
+            encoder.setTexture(scratchBlue, index: 2)
+            encoder.setTexture(scratchConfidence, index: 3)
+            encoder.setTexture(shRed, index: 4)
+            encoder.setTexture(shGreen, index: 5)
+            encoder.setTexture(shBlue, index: 6)
+            encoder.setTexture(confidence, index: 7)
+            encoder.dispatchThreads(
+                MTLSize(width: Self.edge, height: Self.edge, depth: Self.edge),
+                threadsPerThreadgroup: group)
+            encoder.memoryBarrier(scope: .textures)
+        }
+        var cascadeWord = UInt32(cascade)
+        if preparing && !scrolling && header.reserved1 != 0 {
+            encoder.setComputePipelineState(clearBricksPipeline)
+            encoder.setBuffer(sharedStaging.transportHeader, offset: 0, index: 0)
+            encoder.setBytes(&cascadeWord, length: MemoryLayout<UInt32>.size, index: 1)
+            encoder.setTexture(shRed, index: 0)
+            encoder.setTexture(shGreen, index: 1)
+            encoder.setTexture(shBlue, index: 2)
+            encoder.setTexture(confidence, index: 3)
+            encoder.dispatchThreads(
+                MTLSize(width: 8, height: 8,
+                        depth: 8 * Int(header.reserved1.nonzeroBitCount)),
+                threadsPerThreadgroup: group)
+            encoder.memoryBarrier(scope: .textures)
+        }
+        if let source {
+            encoder.setComputePipelineState(liveTransportPipeline)
+            encoder.setBuffer(sharedStaging.transportHeader, offset: 0, index: 0)
+            encoder.setBuffer(sharedStaging.cells, offset: 0, index: 1)
+            encoder.setBytes(&cascadeWord, length: MemoryLayout<UInt32>.size, index: 2)
+            encoder.setTexture(source.directIrradiance, index: 0)
+            encoder.setTexture(source.geometry, index: 1)
+            encoder.setTexture(shRed, index: 2)
+            encoder.setTexture(shGreen, index: 3)
+            encoder.setTexture(shBlue, index: 4)
+            encoder.setTexture(confidence, index: 5)
+            encoder.dispatchThreads(
+                MTLSize(width: 8, height: 8, depth: 8 * Int(header.reserved32)),
+                threadsPerThreadgroup: group)
+        }
+        if let fence { encoder.updateFence(fence) }
+        encoder.endEncoding()
+
+        condition.lock()
+        capturedBasisWorkAdmitted = true
+        if preparing && scrolling {
+            admittedScrollRemapMask |= cascadeBit
+        }
+        condition.unlock()
+
+        let admittedBatchMask = header.reserved0
+        commandBuffer.addCompletedHandler { [self] completed in
+            condition.lock()
+            inFlightMask &= ~cascadeBit
+            slot.buildBusy = false
+            if completed.status == .completed {
+                transportDispatches &+= 1
+                cascadeBuilds[cascade] &+= 1
+                if let current = currentHeader,
+                   current.fieldGeneration == admittedGeneration,
+                   current.sourceTick == admittedSourceTick,
+                   sameEpoch(current, header) {
+                    exactBrickMasks[cascade] |= admittedBatchMask
+                    if exactBrickMasks[cascade] == UInt64.max {
+                        readyMask |= cascadeBit
+                    }
+                }
+            } else {
+                if preparing {
+                    preparedMask &= ~cascadeBit
+                    exactBrickMasks[cascade] = 0
+                    requiredBrickMasks[cascade] = 0
+                }
+                readyMask &= ~cascadeBit
+                rejectedCount &+= 1
+                NSLog("[metallum] G6 live brick encode failed: %@",
+                      String(describing: completed.error))
+            }
+            condition.broadcast()
+            condition.unlock()
+        }
+        return metallumGiTransportStatusOK
+    }
+
+    private func writeParams(_ buffer: MTLBuffer, carrierSafe: Bool) -> UInt32 {
+        let raw = buffer.contents()
+        memset(raw, 0, buffer.length)
+        condition.lock()
+        defer { condition.unlock() }
+        guard let header = currentHeader else { return 0 }
+        var visibleMask: UInt32 = 0
+        for cascade in 0..<metallumGiLiveCascadeCountV1 {
+            let origin = cascadeOrigin(header, cascade: cascade)
+            let base = cascade * 16
+            raw.storeBytes(of: origin.0, toByteOffset: base, as: Int32.self)
+            raw.storeBytes(of: origin.1, toByteOffset: base + 4, as: Int32.self)
+            raw.storeBytes(of: origin.2, toByteOffset: base + 8, as: Int32.self)
+            raw.storeBytes(of: Int32(Self.edge), toByteOffset: base + 12, as: Int32.self)
+            let cellSize = Int32(1 << (cascade + 1))
+            let inverseSpan = Float(1.0 / Float(Self.edge * Int(cellSize)))
+            let scaleBase = 48 + cascade * 16
+            raw.storeBytes(of: inverseSpan, toByteOffset: scaleBase, as: Float.self)
+            raw.storeBytes(of: inverseSpan, toByteOffset: scaleBase + 4, as: Float.self)
+            raw.storeBytes(of: inverseSpan, toByteOffset: scaleBase + 8, as: Float.self)
+            raw.storeBytes(of: Float(cellSize), toByteOffset: scaleBase + 12, as: Float.self)
+            let exact = carrierSafe ? exactBrickMasks[cascade] : 0
+            raw.storeBytes(of: exact, toByteOffset: 128 + cascade * 8, as: UInt64.self)
+            if exact != 0 { visibleMask |= UInt32(1) << UInt32(cascade) }
+        }
+        raw.storeBytes(of: visibleMask, toByteOffset: 96, as: UInt32.self)
+        raw.storeBytes(of: carrierSafe ? UInt32(1) : UInt32(0),
+                       toByteOffset: 100, as: UInt32.self)
+        raw.storeBytes(of: UInt32(metallumGiLiveAbiVersionV1),
+                       toByteOffset: 104, as: UInt32.self)
+        raw.storeBytes(of: UInt32(truncatingIfNeeded: header.fieldGeneration),
+                       toByteOffset: 108, as: UInt32.self)
+        raw.storeBytes(of: UInt32(metallumGiLiveAtlasDepthV1),
+                       toByteOffset: 112, as: UInt32.self)
+        raw.storeBytes(of: UInt32(4), toByteOffset: 116, as: UInt32.self)
+        raw.storeBytes(of: UInt32(truncatingIfNeeded: header.worldGeneration),
+                       toByteOffset: 120, as: UInt32.self)
+        raw.storeBytes(of: UInt32(truncatingIfNeeded: header.sourceTick),
+                       toByteOffset: 124, as: UInt32.self)
+        return visibleMask
+    }
+
+    func bindVertex(
+        encoder: MTLRenderCommandEncoder, inFlightSlot: Int, carrierSafe: Int32
+    ) -> Int32 {
+        guard isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+        guard inFlightSlot >= 0 && inFlightSlot < paramsSlots.count,
+              carrierSafe == 0 || carrierSafe == 1,
+              objectAddress(encoder.device) == objectAddress(device)
+        else { return metallumGiTransportStatusInvalid }
+        encoder.setVertexTexture(shRed, index: 6)
+        encoder.setVertexTexture(shGreen, index: 7)
+        encoder.setVertexTexture(shBlue, index: 8)
+        encoder.setVertexTexture(confidence, index: 9)
+        encoder.setVertexSamplerState(sampler, index: 6)
+        encoder.setVertexSamplerState(sampler, index: 7)
+        encoder.setVertexSamplerState(sampler, index: 8)
+        encoder.setVertexSamplerState(sampler, index: 9)
+        let slot = paramsSlots[inFlightSlot]
+        let mask = writeParams(slot.params, carrierSafe: carrierSafe == 1)
+        encoder.setVertexBuffer(slot.params, offset: 0, index: 25)
+        condition.lock()
+        bindCount &+= 1
+        if mask == 0 { zeroBindings &+= 1 } else { fieldBindings &+= 1 }
+        condition.unlock()
+        return mask == 0 ? 0 : metallumGiTransportStatusOK
+    }
+
+    private func residentBytes() -> UInt64 {
+        UInt64(shRed.allocatedSize + shGreen.allocatedSize + shBlue.allocatedSize
+            + confidence.allocatedSize + scratchRed.allocatedSize
+            + scratchGreen.allocatedSize + scratchBlue.allocatedSize
+            + scratchConfidence.allocatedSize)
+    }
+
+    private func stagingBytes() -> UInt64 {
+        var bytes = sharedStaging.allocatedBytes
+        for slot in paramsSlots { bytes += UInt64(slot.params.allocatedSize) }
+        return bytes
+    }
+
+    func stats() -> MetallumGiLiveStatsV1? {
+        guard isOwnerThread() else { return nil }
+        condition.lock()
+        defer { condition.unlock() }
+        let header = currentHeader
+        let resident = residentBytes()
+        let staging = stagingBytes()
+        return MetallumGiLiveStatsV1(
+            readyMask: readyMask, buildInFlight: inFlightMask == 0 ? 0 : 1,
+            shaderLibraryMode: shaderLibraryMode, padding0: 0,
+            worldGeneration: header?.worldGeneration ?? 0,
+            clipmapGeneration: header?.clipmapGeneration ?? 0,
+            contentGeneration: header?.contentGeneration ?? 0,
+            staticSourceEpoch: header?.staticSourceEpoch ?? 0,
+            dynamicSourceEpoch: header?.dynamicSourceEpoch ?? 0,
+            environmentEpoch: header?.environmentEpoch ?? 0,
+            fieldGeneration: header?.fieldGeneration ?? 0,
+            sourceTick: header?.sourceTick ?? 0,
+            allocatedBytes: resident + staging + metallumGiLiveLifetimeOverheadBytesV1,
+            residentBytes: resident, stagingBytes: staging,
+            transportDispatches: transportDispatches,
+            cascadeBuilds0: cascadeBuilds[0], cascadeBuilds1: cascadeBuilds[1],
+            cascadeBuilds2: cascadeBuilds[2], invalidations: invalidations,
+            staleRejects: staleRejects, busyRejects: busyRejects,
+            rejectedCount: rejectedCount, bindCount: bindCount,
+            zeroBindings: zeroBindings, fieldBindings: fieldBindings,
+            resetWorld: resetCounts[0], resetTeleport: resetCounts[1],
+            resetScroll: resetCounts[2], resetSource: resetCounts[3],
+            resetExplicit: resetCounts[4], resetDevice: resetCounts[5])
+    }
+}
+
+private enum MetallumGiLiveContextRegistryV1 {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var contexts: [UInt: MetallumGiLiveContextV1] = [:]
+
+    static func register(_ context: MetallumGiLiveContextV1) -> UnsafeMutableRawPointer {
+        let raw = Unmanaged.passRetained(context).toOpaque()
+        lock.lock(); contexts[UInt(bitPattern: raw)] = context; lock.unlock()
+        return raw
+    }
+
+    static func resolve(_ raw: UnsafeMutableRawPointer) -> MetallumGiLiveContextV1? {
+        lock.lock(); let context = contexts[UInt(bitPattern: raw)]; lock.unlock()
+        return context
+    }
+
+    static func unregister(_ raw: UnsafeMutableRawPointer) -> MetallumGiLiveContextV1? {
+        lock.lock(); let context = contexts.removeValue(forKey: UInt(bitPattern: raw)); lock.unlock()
+        guard context != nil else { return nil }
+        _ = Unmanaged<MetallumGiLiveContextV1>.fromOpaque(raw).takeRetainedValue()
+        return context
+    }
+}
+
+@_cdecl("metallum_gi_live_abi_version_v1")
+public func metallum_gi_live_abi_version_v1() -> Int32 { metallumGiLiveAbiVersionV1 }
+
+@_cdecl("metallum_gi_live_layout_v1")
+public func metallum_gi_live_layout_v1(
+    _ destination: UnsafeMutableRawPointer?, _ destinationBytes: UInt64
+) -> Int32 {
+    guard MemoryLayout<MetallumGiLiveHeaderV1>.size == metallumGiLiveHeaderBytesV1,
+          MemoryLayout<MetallumGiLiveStatsV1>.size == metallumGiLiveStatsBytesV1,
+          let destination, destinationBytes >= UInt64(metallumGiLiveLayoutBytesV1)
+    else { return metallumGiTransportStatusInvalid }
+    let words: [Int32] = [
+        metallumGiLiveAbiVersionV1, Int32(metallumGiLiveLayoutBytesV1),
+        Int32(metallumGiLiveHeaderBytesV1), Int32(metallumGiTransportCellBytesV1),
+        Int32(metallumGiLiveStatsBytesV1), Int32(metallumGiLiveParamsBytesV1),
+        Int32(MetallumGiTransportContextV1.edge),
+        Int32(MetallumGiTransportContextV1.cellCount),
+        Int32(metallumGiLiveCascadeCountV1), Int32(metallumGiLiveAtlasDepthV1),
+        Int32(metallumGiLiveInFlightSlotsV1), 6, 7, 8, 9, 25,
+        metallumGiTransportStatusOK, 0, metallumGiTransportStatusInvalid,
+        metallumGiTransportStatusBusy, metallumGiTransportStatusStale,
+        metallumGiTransportStatusWrongThread, metallumGiTransportStatusRejected,
+        Int32(metallumGiLiveLifetimeOverheadBytesV1),
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ]
+    words.withUnsafeBytes {
+        destination.copyMemory(from: $0.baseAddress!, byteCount: metallumGiLiveLayoutBytesV1)
+    }
+    return metallumGiTransportStatusOK
+}
+
+@_cdecl("metallum_gi_live_create_context_v1")
+public func metallum_gi_live_create_context_v1(
+    _ rawDevice: UnsafeMutableRawPointer?,
+    _ rawQueue: UnsafeMutableRawPointer?,
+    _ rawDirect: UnsafeMutableRawPointer?,
+    _ worldGeneration: UInt64
+) -> UnsafeMutableRawPointer? {
+    autoreleasepool {
+        guard let rawDevice, let rawQueue, let rawDirect,
+              let device = Unmanaged<AnyObject>.fromOpaque(rawDevice)
+                .takeUnretainedValue() as? MTLDevice,
+              let queue = Unmanaged<AnyObject>.fromOpaque(rawQueue)
+                .takeUnretainedValue() as? MTLCommandQueue,
+              let direct = MetallumGiDirectSourceContextRegistryV1.resolve(rawDirect),
+              let context = MetallumGiLiveContextV1(
+                device: device, commandQueue: queue, direct: direct,
+                worldGeneration: worldGeneration)
+        else { return nil }
+        return MetallumGiLiveContextRegistryV1.register(context)
+    }
+}
+
+@_cdecl("metallum_gi_live_invalidate_v1")
+public func metallum_gi_live_invalidate_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ rawHeader: UnsafeRawPointer?, _ headerBytes: UInt64
+) -> Int32 {
+    guard let rawContext, let rawHeader,
+          let context = MetallumGiLiveContextRegistryV1.resolve(rawContext)
+    else { return metallumGiTransportStatusInvalid }
+    return context.invalidate(rawHeader: rawHeader, headerBytes: headerBytes)
+}
+
+@_cdecl("metallum_gi_live_encode_cascade_v1")
+public func metallum_gi_live_encode_cascade_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ rawCommandBuffer: UnsafeMutableRawPointer?,
+    _ rawFence: UnsafeMutableRawPointer?,
+    _ inFlightSlot: Int32,
+    _ rawHeader: UnsafeRawPointer?, _ headerBytes: UInt64,
+    _ rawCells: UnsafeRawPointer?, _ cellsBytes: UInt64
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rawCommandBuffer, let rawHeader, let rawCells,
+              let context = MetallumGiLiveContextRegistryV1.resolve(rawContext),
+              let commandBuffer = Unmanaged<AnyObject>.fromOpaque(rawCommandBuffer)
+                .takeUnretainedValue() as? MTLCommandBuffer
+        else { return metallumGiTransportStatusInvalid }
+        let fence: MTLFence? = rawFence.flatMap {
+            Unmanaged<AnyObject>.fromOpaque($0).takeUnretainedValue() as? MTLFence
+        }
+        return context.encodeCascade(
+            commandBuffer: commandBuffer, fence: fence,
+            inFlightSlot: Int(inFlightSlot), rawHeader: rawHeader,
+            headerBytes: headerBytes, rawCells: rawCells, cellsBytes: cellsBytes)
+    }
+}
+
+@_cdecl("metallum_gi_live_bind_vertex_v1")
+public func metallum_gi_live_bind_vertex_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ rawEncoder: UnsafeMutableRawPointer?,
+    _ inFlightSlot: Int32, _ carrierSafe: Int32
+) -> Int32 {
+    autoreleasepool {
+        guard let rawContext, let rawEncoder,
+              let context = MetallumGiLiveContextRegistryV1.resolve(rawContext),
+              let encoder = Unmanaged<AnyObject>.fromOpaque(rawEncoder)
+                .takeUnretainedValue() as? MTLRenderCommandEncoder
+        else { return metallumGiTransportStatusInvalid }
+        return context.bindVertex(
+            encoder: encoder, inFlightSlot: Int(inFlightSlot), carrierSafe: carrierSafe)
+    }
+}
+
+@_cdecl("metallum_gi_live_get_stats_v1")
+public func metallum_gi_live_get_stats_v1(
+    _ rawContext: UnsafeMutableRawPointer?,
+    _ destination: UnsafeMutableRawPointer?, _ destinationBytes: UInt64
+) -> Int32 {
+    guard let rawContext, let destination,
+          destinationBytes >= UInt64(metallumGiLiveStatsBytesV1),
+          let context = MetallumGiLiveContextRegistryV1.resolve(rawContext)
+    else { return metallumGiTransportStatusInvalid }
+    guard context.isOwnerThread() else { return metallumGiTransportStatusWrongThread }
+    guard var stats = context.stats() else { return metallumGiTransportStatusInvalid }
+    destination.copyMemory(from: &stats, byteCount: metallumGiLiveStatsBytesV1)
+    return metallumGiTransportStatusOK
+}
+
+@_cdecl("metallum_gi_live_release_context_v1")
+public func metallum_gi_live_release_context_v1(_ rawContext: UnsafeMutableRawPointer?) {
+    guard let rawContext else { return }
+    _ = MetallumGiLiveContextRegistryV1.unregister(rawContext)
 }
 
 // MARK: - G5 vertex-only irradiance receiver

@@ -44,4 +44,20 @@ public record GiDirectSourceEpoch(
             throw new IllegalArgumentException("G3 source epoch regressed or did not advance");
         }
     }
+
+    /** Metadata-only successors may advance content/static identity, never field structure. */
+    boolean isMetadataOnlySuccessorOf(final GiDirectSourceEpoch previous) {
+        Objects.requireNonNull(previous, "previous");
+        return this.g2WorldGeneration == previous.g2WorldGeneration
+                && this.g2ResourceEpoch == previous.g2ResourceEpoch
+                && this.g2MaterialEpoch == previous.g2MaterialEpoch
+                && this.g2ClipmapGeneration == previous.g2ClipmapGeneration
+                && this.g2PaletteGeneration == previous.g2PaletteGeneration
+                && this.staticLightWorld.equals(previous.staticLightWorld)
+                && this.environmentEpoch == previous.environmentEpoch
+                && this.g2ContentGeneration >= previous.g2ContentGeneration
+                && this.staticLightRegistryEpoch >= previous.staticLightRegistryEpoch
+                && (this.g2ContentGeneration > previous.g2ContentGeneration
+                || this.staticLightRegistryEpoch > previous.staticLightRegistryEpoch);
+    }
 }

@@ -25,6 +25,8 @@ public final class GiSemanticCpuTests {
         acceptedQuadOverridesSeedMediumAndMaterial();
         unknownQuadMaterialFailsClosed();
         controllerGatesReloadAndRetiresCandidateLeases();
+        resourceReloadRootsAdvanceMonotonicallyAcrossReopen();
+        resourceCloseOpenSeedsCameraBeforeFirstPrepareFrame();
         activeFieldCacheTracksSoleWorldLifecycle();
         publicationOrderDoesNotChangeFieldTruth();
         cameraScrollPreservesNegativeCoordinateOverlap();
@@ -238,6 +240,66 @@ public final class GiSemanticCpuTests {
         require(!controller.publishAccepted(materialStale), "old material/palette candidate was accepted");
         require(controller.budgetSnapshot().activeCandidates() == 0,
                 "generation-stale candidates retained leases");
+    }
+
+    private static void resourceCloseOpenSeedsCameraBeforeFirstPrepareFrame() {
+        GiSemanticController controller = new GiSemanticController();
+        Object world = new Object();
+        int cameraX = 512;
+        int cameraY = 96;
+        int cameraZ = -640;
+        long cameraSection = GiSemanticCoordinates.sectionKey(
+                GiSemanticCoordinates.blockToSection(cameraX),
+                GiSemanticCoordinates.blockToSection(cameraY),
+                GiSemanticCoordinates.blockToSection(cameraZ)
+        );
+
+        controller.openWorld(world, DIMENSION, cameraX, cameraY, cameraZ);
+        controller.advanceMaterialAtlasEpoch(paletteSeeds());
+        GiSemanticWorldToken reloadRoot = controller.beginResourceReload(world, DIMENSION);
+        require(controller.beginSectionTask(world, DIMENSION, cameraSection) == null,
+                "resource reload admitted pre-atlas work");
+        controller.advanceMaterialAtlasEpoch(paletteSeeds());
+        require(controller.beginSectionTask(world, DIMENSION, cameraSection) != null,
+                "resource reload lost the established camera before frame preparation");
+
+        controller.closeWorld(world);
+        GiSemanticWorldToken reopened = controller.openWorld(
+                world, DIMENSION, cameraX, cameraY, cameraZ
+        );
+        require(reopened.worldGeneration() > reloadRoot.worldGeneration()
+                        && reopened.resourceEpoch() > reloadRoot.resourceEpoch(),
+                "reload close/open reused its already-issued G2 root token");
+        require(controller.beginSectionTask(world, DIMENSION, cameraSection) != null,
+                "resource close/open stamped a camera-local section outside the initial clipmap");
+        require(controller.beginSectionTask(
+                        world, DIMENSION, GiSemanticCoordinates.sectionKey(0, 0, 0)
+                ) == null,
+                "resource close/open silently rebuilt the clipmap around the zero origin");
+    }
+
+    private static void resourceReloadRootsAdvanceMonotonicallyAcrossReopen() {
+        GiSemanticController controller = new GiSemanticController();
+        Object world = new Object();
+        GiSemanticWorldToken opened = controller.openWorld(world, DIMENSION);
+        GiSemanticWorldToken firstReload = controller.beginResourceReload(world, DIMENSION);
+        GiSemanticWorldToken secondReload = controller.beginResourceReload(world, DIMENSION);
+
+        require(firstReload.worldGeneration() > opened.worldGeneration()
+                        && firstReload.resourceEpoch() > opened.resourceEpoch(),
+                "first resource reload reused the opened G2 root");
+        require(secondReload.worldGeneration() > firstReload.worldGeneration()
+                        && secondReload.resourceEpoch() > firstReload.resourceEpoch(),
+                "consecutive resource reloads did not advance the G2 root monotonically");
+        require(firstReload.materialEpoch() == opened.materialEpoch()
+                        && secondReload.materialEpoch() == opened.materialEpoch(),
+                "resource reload unexpectedly advanced the material epoch");
+
+        controller.closeWorld(world);
+        GiSemanticWorldToken reopened = controller.openWorld(world, DIMENSION);
+        require(reopened.worldGeneration() > secondReload.worldGeneration()
+                        && reopened.resourceEpoch() > secondReload.resourceEpoch(),
+                "reload close/open reused an already-issued G2 root token");
     }
 
     private static void publicationOrderDoesNotChangeFieldTruth() {

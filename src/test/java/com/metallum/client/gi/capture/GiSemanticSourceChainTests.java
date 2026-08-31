@@ -1,8 +1,11 @@
 package com.metallum.client.gi.capture;
 
+import com.metallum.client.gi.receiver.GiReceiverCompatibility;
+import com.metallum.mixin.MetallumMixinConfigPlugin;
 import com.mojang.blaze3d.platform.NativeImage;
 import net.minecraft.util.ARGB;
 
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -15,6 +18,7 @@ public final class GiSemanticSourceChainTests {
         validateStructuralGate();
         validatePinnedSodiumMethods();
         validateAcceptedSourceChain();
+        validateResourceReloadLifecycle();
         validateNoPrelitInputs();
         validateAtlasColorCopy();
         System.out.println("G2 Sodium accepted-output source-chain tests passed");
@@ -44,6 +48,11 @@ public final class GiSemanticSourceChainTests {
 
     private static void validateStructuralGate() throws Exception {
         String plugin = source("src/main/java/com/metallum/mixin/MetallumMixinConfigPlugin.java");
+        String fabricMetadata = source("src/main/resources/fabric.mod.json");
+        require(fabricMetadata.contains(
+                        "\"sodium\": \"=" + GiReceiverCompatibility.SODIUM_VERSION + "\""
+                ),
+                "Fabric metadata Sodium dependency drifted from the exact GI carrier gate");
         require(plugin.contains("METALLUM_GI_G2_CAPTURE"), "G2 explicit environment gate is absent");
         require(plugin.contains("MINECRAFT_EXACT_VERSION = \"26.2\"")
                         && plugin.contains("SODIUM_EXACT_VERSION = \"0.9.1+mc26.2\"")
@@ -54,6 +63,23 @@ public final class GiSemanticSourceChainTests {
                 "G2 mixins are not controlled as one structural set");
         require(plugin.contains("GiTransportDebugSettings.isEnabled()"),
                 "Sodium G4 debug does not structurally enable its required G2 mixins");
+        Method persistedDebugGate = MetallumMixinConfigPlugin.class.getDeclaredMethod(
+                "persistedGiTransportDebugRequested", boolean.class, boolean.class
+        );
+        persistedDebugGate.setAccessible(true);
+        require(!(boolean) persistedDebugGate.invoke(null, true, true)
+                        && (boolean) persistedDebugGate.invoke(null, false, true)
+                        && !(boolean) persistedDebugGate.invoke(null, true, false)
+                        && !(boolean) persistedDebugGate.invoke(null, false, false),
+                "Persisted G4 debug is not isolated from benchmark G2 capture");
+        require(plugin.contains(
+                        "this.productionGiEnabled && persistedGiTransportDebugEnabled"
+                ) && plugin.contains("GiTransportDebugSettings.setEnabled(false)"),
+                "Production GI no longer clears a stale persisted G4 debug request");
+        require(plugin.contains("RendererConfig.loadForStartupGate()")
+                        && plugin.contains("rendererConfig.globalIllumination().isDynamic()")
+                        && plugin.contains("this.productionGiEnabled"),
+                "Production GI does not structurally enable its startup Sodium mixins");
         int giVersions = plugin.indexOf("private static boolean hasExactGiCaptureVersions()");
         int nextMethod = plugin.indexOf("private static boolean hasExactVersion(", giVersions);
         require(giVersions >= 0 && nextMethod > giVersions
@@ -89,6 +115,40 @@ public final class GiSemanticSourceChainTests {
                         && upload.contains("output.section.isDisposed()")
                         && upload.contains("catch (Throwable ignored)"),
                 "G2 accepted upload publication is no longer fail-closed");
+    }
+
+    private static void validateResourceReloadLifecycle() throws Exception {
+        String reload = source("src/main/java/com/metallum/mixin/gi/GiSemanticLevelExtractorMixin.java");
+        String atlas = source("src/main/java/com/metallum/mixin/gi/GiSemanticAtlasMixin.java");
+        String manager = source(
+                "src/main/java/com/metallum/mixin/gi/GiSemanticRenderSectionManagerMixin.java"
+        );
+        require(reload.contains("@Mixin(Minecraft.class)")
+                        && reload.contains("reloadResourcePacks(ZLnet/minecraft/client/GameLoadCookie;)"
+                                + "Ljava/util/concurrent/CompletableFuture;")
+                        && reload.contains("PackRepository;reload()V")
+                        && reload.contains("shift = At.Shift.BEFORE")
+                        && reload.contains("require = 1")
+                        && reload.contains("allow = 1")
+                        && reload.contains("beginResourceReload("),
+                "G2 resource invalidation is not before the actual reload entrypoint");
+        require(!reload.contains("LevelExtractor.class")
+                        && !reload.contains("onResourceManagerReload"),
+                "G2 still invalidates its just-published palette from a late reload callback");
+        require(atlas.contains("method = \"upload\"")
+                        && atlas.contains("at = @At(\"TAIL\")")
+                        && atlas.contains("advanceMaterialAtlasEpoch(GiSemanticPaletteFactory.seeds())"),
+                "G2 block-atlas TAIL no longer publishes the complete post-reload palette");
+        require(manager.contains("getCameraEntity()")
+                        && manager.contains("openWorld(")
+                        && manager.contains("camera.getX()")
+                        && manager.contains("camera.getY()")
+                        && manager.contains("camera.getZ()")
+                        && manager.contains("camera.level() == level")
+                        && manager.contains("Double.isFinite(camera.getX())")
+                        && manager.contains("Double.isFinite(camera.getY())")
+                        && manager.contains("Double.isFinite(camera.getZ())"),
+                "G2 manager open no longer seeds the pre-frame camera clipmap");
     }
 
     private static void validateNoPrelitInputs() throws Exception {

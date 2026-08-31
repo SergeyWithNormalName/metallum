@@ -7,9 +7,11 @@ import java.util.Objects;
 
 /**
  * Render-thread view of the frozen near-cascade G2 material truth admitted for G4 transport.
- * It exposes neither the mutable backing arrays nor the two outer cascades.
+ * It exposes neither the mutable backing arrays nor retained snapshots. G4
+ * consumes only cascade zero; G6 may copy any one cascade into its fixed
+ * in-flight packet.
  */
-public final class GiSemanticTransportFieldView {
+public final class GiSemanticTransportFieldView implements GiSemanticFieldIdentityView {
     public static final int EDGE = GiFieldLayout.CELLS_PER_AXIS;
     public static final int CELL_COUNT = EDGE * EDGE * EDGE;
     /** ushort4 material, six ordered face weights, validity and known coverage. */
@@ -42,9 +44,19 @@ public final class GiSemanticTransportFieldView {
     public int nearOriginX() { return this.assembler.originComponent(0); }
     public int nearOriginY() { return this.assembler.originComponent(1); }
     public int nearOriginZ() { return this.assembler.originComponent(2); }
+    public int originComponent(final int index) { return this.assembler.originComponent(index); }
+    /** Exact G2 content identity for one of the fixed 8-cell bricks. */
+    public long brickContentStamp(final int brickId) {
+        return this.assembler.directBrickContentStamp(brickId);
+    }
 
     /** Copies one exact, deterministic near-cascade image without cloning the G2 backing arrays. */
     public CopyResult copyNearCascade(final MemorySegment destination) {
-        return this.assembler.copyTransportNearCascade(destination);
+        return copyCascade(0, destination);
+    }
+
+    /** Copies one exact cascade without cloning or retaining mutable G2 arrays. */
+    public CopyResult copyCascade(final int cascade, final MemorySegment destination) {
+        return this.assembler.copyTransportCascade(cascade, destination);
     }
 }

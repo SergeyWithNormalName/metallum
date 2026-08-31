@@ -86,6 +86,26 @@ public final class MinecraftLightPolicy {
     }
 
     /**
+     * Selects the interpolation phase for camera-independent entity-source extraction.
+     *
+     * <p>Minecraft deliberately reports {@code Player} as non-frozen even while the level-wide
+     * tick manager is frozen. After a server teleport that can leave the player's old pose on
+     * the pre-teleport coordinates while the render timer residual continues to change. A live
+     * GI source derived from that residual would then move every extracted frame despite the
+     * frozen world. The authoritative current pose is phase {@code 1}; normally running worlds
+     * retain their exact render interpolation phase.</p>
+     */
+    public static float worldSpaceEntityPartialTick(
+            final boolean worldRunsNormally,
+            final float runningPartialTick
+    ) {
+        if (!Float.isFinite(runningPartialTick)) {
+            throw new IllegalArgumentException("entity partial tick must be finite");
+        }
+        return worldRunsNormally ? runningPartialTick : 1.0F;
+    }
+
+    /**
      * Returns the local player's held-block light at a camera/hand anchor, or {@code null} when
      * the ordinary entity source is stronger (for example, a player on fire).
      */

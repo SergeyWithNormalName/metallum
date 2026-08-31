@@ -72,6 +72,12 @@ public final class GiTransportSourceChainTests {
                         && resources.contains("metallum_gi_transport_poll_debug_capture_v1")
                         && resources.contains("this.deferredRelease.accept(stale)"),
                 "G4 native encode/capture/deferred-retirement chain is incomplete");
+        String runtime = Files.readString(root.resolve("GiTransportRuntime.java"));
+        require(runtime.contains("private static final boolean DEBUG_PREVIEW_REQUESTED")
+                        && runtime.contains("return DEBUG_PREVIEW_REQUESTED;")
+                        && resources.contains("GiTransportRuntime.isDebugPreviewRequested()")
+                        && !resources.contains("GiTransportDebugSettings.isEnabled()"),
+                "G4 debug capture is not latched once at restart-time admission");
 
         String directCoordinator = Files.readString(Path.of(
                 "src/main/java/com/metallum/client/gi/source/GiDirectSourceCoordinator.java"

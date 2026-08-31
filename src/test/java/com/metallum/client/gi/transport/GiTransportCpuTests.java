@@ -89,6 +89,11 @@ public final class GiTransportCpuTests {
                         && GiTransportRuntime.requested(true, false)
                         && GiTransportRuntime.requested(false, true),
                 "G4 environment/Sodium request union changed");
+        require(GiTransportRuntime.debugPreviewRequested(false, false, true)
+                        && !GiTransportRuntime.debugPreviewRequested(true, false, true)
+                        && !GiTransportRuntime.debugPreviewRequested(false, true, true)
+                        && !GiTransportRuntime.debugPreviewRequested(false, false, false),
+                "G4 debug preview is not restart-isolated from G6 and benchmark admission");
         GiTransportRuntime.resetDeviceState();
         if (GiTransportRuntime.isRequested()) {
             Fixture fixture = fixture();

@@ -197,7 +197,7 @@ def decode_position_carrier_words(position_hi: int, position_lo: int) -> int:
 def verify_document(root: Path) -> None:
     document = text(root, "docs/GI_G5.md")
     for token in (
-            "IMPLEMENTED_PENDING_TIER_B",
+            "PASSED_BY_EXPLICIT_USER_DECISION",
             "METALLUM_GI_G5_RECEIVER=1",
             "METALLUM_GI_G5_RECEIVER_ARM=control|candidate|field",
             "metallumGiShRed", "metallumGiShGreen", "metallumGiShBlue",
@@ -1187,8 +1187,12 @@ def verify_native_sources(root: Path) -> None:
     require(not metal_matches,
             "G5 vertex receiver must not add a separate Metal field/pass source")
     transport_metal = text(root, "src/main/metal/MetallumGiTransport.metal")
+    transport_code = re.sub(
+        r"//[^\n]*|/\*.*?\*/", "", transport_metal,
+        flags=re.MULTILINE | re.DOTALL,
+    )
     for token in (*SHADER_NAMES, "metallum_gi_receiver", "terrain"):
-        require(token.lower() not in transport_metal.lower(),
+        require(token.lower() not in transport_code.lower(),
                 f"G5 leaked into the field-only G4 transport kernel: {token}")
 
     native_validation = text(
@@ -2397,7 +2401,7 @@ def verify(root: Path, require_evidence: bool) -> None:
         )
     print(
         "GI G5 receiver implementation contract passed: "
-        "IMPLEMENTED_PENDING_TIER_B (no live receipt claimed)"
+        "PASSED_BY_EXPLICIT_USER_DECISION (no live receipt claimed)"
     )
 
 

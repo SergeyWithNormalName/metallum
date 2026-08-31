@@ -1076,7 +1076,7 @@ public final class GiTransportGpuValidation {
             }
             require(this.resources.publishScheduler(new GiDirectDirtyQueue.Telemetry(
                             GiDirectSourceLayout.TOTAL_BRICKS, 0L,
-                            GiDirectSourceLayout.TOTAL_BRICKS, 0L, 0, 0L, 1L))
+                            GiDirectSourceLayout.TOTAL_BRICKS, 0L, 0, 0, 0L, 1L))
                             == GiDirectSourceGpuResources.STATUS_OK,
                     "complete G3 scheduler publication failed");
             GiDirectSourceGpuResources.Stats stats = this.resources.stats();

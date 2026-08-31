@@ -2,6 +2,7 @@ package com.metallum.client.gi.receiver;
 
 import com.metallum.client.gi.GiRuntimeStages;
 import com.metallum.client.gi.debug.GiTransportDebugSettings;
+import com.metallum.client.gi.live.GiLiveRuntime;
 
 import java.util.Objects;
 
@@ -209,29 +210,35 @@ public final class GiReceiverRuntime {
                     GiRuntimeStages.enabled(System.getenv("METALLUM_GI_G4_TRANSPORT"))
                             || GiTransportDebugSettings.isEnabled()
             );
-    private static volatile Admission admission = new Admission(REQUEST);
+    private static final GiRuntimeStages.ReceiverRequest EFFECTIVE_REQUEST = effectiveRequest();
+    private static volatile Admission admission = new Admission(EFFECTIVE_REQUEST);
 
     private GiReceiverRuntime() {
     }
 
     public static GiRuntimeStages.ReceiverRequest request() {
-        return REQUEST;
+        return EFFECTIVE_REQUEST;
     }
 
     public static GiRuntimeStages.ReceiverArm arm() {
-        return REQUEST.arm();
+        return EFFECTIVE_REQUEST.arm();
     }
 
     public static boolean isRequested() {
-        return REQUEST.requestsTransportResources();
+        return EFFECTIVE_REQUEST.requestsTransportResources();
+    }
+
+    /** True only for the isolated G5 experiment, never for the production G6 receiver. */
+    public static boolean isFrozenRequested() {
+        return !GiLiveRuntime.isRequested() && REQUEST.requestsTransportResources();
     }
 
     public static boolean requestsTransportPopulation() {
-        return REQUEST.requestsTransportPopulation();
+        return EFFECTIVE_REQUEST.requestsTransportPopulation();
     }
 
     public static boolean isConfigurationInvalid() {
-        return REQUEST.enabled() && !REQUEST.valid();
+        return EFFECTIVE_REQUEST.enabled() && !EFFECTIVE_REQUEST.valid();
     }
 
     public static Admission admission() {
@@ -272,6 +279,18 @@ public final class GiReceiverRuntime {
     }
 
     public static void resetDeviceState() {
-        admission = new Admission(REQUEST);
+        admission = new Admission(EFFECTIVE_REQUEST);
+    }
+
+    private static GiRuntimeStages.ReceiverRequest effectiveRequest() {
+        if (!GiLiveRuntime.isRequested()) {
+            return REQUEST;
+        }
+        // The restart-gated production setting owns G2-G6 as one route.  Legacy experiment
+        // variables must neither allocate a second frozen G4 owner nor invalidate the Sodium
+        // choice; the benchmark runner still rejects them to keep performance receipts clean.
+        return new GiRuntimeStages.ReceiverRequest(
+                true, GiRuntimeStages.ReceiverArm.FIELD, true, "none"
+        );
     }
 }

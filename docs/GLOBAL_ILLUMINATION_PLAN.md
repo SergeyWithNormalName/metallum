@@ -1,16 +1,20 @@
 # Global illumination: архитектура, этапы и критерии приёмки
 
-Статус: архитектурный план, обновлён 28 августа 2026 года. Исторический результат
+Статус: архитектурный план, обновлён 30 августа 2026 года. Исторический результат
 G0 `REJECTED_BASELINE_FLOOR` сохранён; отдельный текущий recovery gate имеет
 `PASS_RECOVERED_BASELINE`, а G1 — `PASS_ABSOLUTE_FLOOR_REVALIDATED`. Эти новые
 receipts не переписывают исходный G0 no-win. G2 остаётся diagnostic material
-truth, а G3 и G4 завершены только как private field-only этапы. Default-off G5
-receiver реализован по отдельному запросу, но остаётся
-`IMPLEMENTED_PENDING_TIER_B`: dry ABBA stop-gate и визуальная приёмка ещё не
-выполнены. P1 carrier-аудит отклонил прежнее владение через light/color;
+truth, а G3 и G4 завершены только как private field-only этапы. G5 receiver
+принят явным решением пользователя 29 августа, включая производительность;
+визуальная приёмка G5 не проводилась и остаётся отдельным пробелом evidence.
+Это решение открыло G6, но не создаёт отсутствующий ABBA bundle. G6 получил
+`PASS_LIVE_DYNAMIC_GI` 30 августа: production receiver, динамические
+обновления и Sodium toggle имеют source-bound live receipt и статический
+reference-capture. Это не заменяет G7 motion/product matrix. P1 carrier-аудит
+отклонил прежнее владение через light/color;
 текущий G5-контракт использует только collision-free 4-bit sideband в свободных
-position bits точного Sodium 0.9.1 layout и требует заново пройти mechanical
-receipts. Поэтому production GI по-прежнему не заявлен. Исходный аудит
+position bits точного Sodium 0.9.1 layout. Production G6 заявлен как
+работающий default-off путь; широкая release-приёмка остаётся G7. Исходный аудит
 voxel/radiance-наработок находится в
 [GI_VOXEL_AUDIT.md](GI_VOXEL_AUDIT.md).
 
@@ -521,7 +525,8 @@ light/color схема отвергнута и не является evidence.
 `FULL_PLANAR` terrain capture по-прежнему подавлен как второй неизмеренный
 raster. Exact encoder и generated-MSL контракты обязательны, но не являются dry
 Tier B receipt: до настоящего ABBA этап имеет статус
-`IMPLEMENTED_PENDING_TIER_B`, а G6 остаётся закрыт. Канонический контракт:
+`PASSED_BY_EXPLICIT_USER_DECISION`; визуальная приёмка остаётся pending.
+Канонический контракт:
 `docs/GI_G5.md`.
 
 ### G6 — live updates, scroll и динамические источники
@@ -547,6 +552,22 @@ release SLA, который G0 либо утверждает, либо меня�
 - teleport/full reset: incompatible coverage немедленно 0, новое near coverage
   p95 ≤ 32, p99 ≤ 64 submits.
 
+Time/weather меняют global environment input всех direct-field bricks и
+поэтом измеряются как full reset. Bounded registry/held/entity/block-emitter
+дельты остаются local static-source updates с SLA 8/16.
+
+Для block/static-source recovery закрывается только после полного exact near:
+сохранённые незатронутые bricks не считаются восстановлением. Для scroll/reset,
+которые сначала публикуют несовместимое покрытие как zero, recovery означает
+первый current exact near brick, реально допущенный тем же per-brick vertex
+receiver. Полная exact-готовность всех трёх каскадов остаётся отдельным
+publication/final convergence barrier.
+
+Bounded scroll сначала remap-ит совместимые exact near bricks в текущем command
+buffer без ожидания новой G3 source texture. Authoritative handoff затем
+перебазируется на завершённую маску и near-to-far достраивает exposed/source
+bricks; source churn больше не растягивает one-brick scroll zero-coverage window.
+
 Dynamic held/entity collector добавляется здесь отдельно: bounded world-space
 membership без camera frustum, stable source ID, explicit expiry и source epoch.
 Hard test поворачивает камеру, оставляя entity/source неподвижным внутри coverage:
@@ -559,6 +580,21 @@ field hash и GI contribution не должны измениться.
 - Queue overflow не включает старый свет: exact-valid cache можно удержать,
   incompatible cell — только fallback.
 - Ноль steady-state allocations/readbacks; counters сходятся по каждому epoch.
+
+Результат G6 от 31 августа 2026: `PASS_LIVE_DYNAMIC_GI`. Production G6
+live-owner, incremental
+near-to-far scheduler, clipmap overlap, dynamic held/entity collector с expiry,
+fail-closed reset/publication и трёхкаскадный vertex receiver реализованы.
+Persistent Sodium setting `globalIllumination=dynamic` включает путь только
+после restart; `off` структурно не создаёт G6 resources. Source-bound
+1800+3000 torch-toggle receipt завершился с `ready_mask=7`, zero stale/rejected,
+current terrain binding и block-update p95/p99 1/1 submits против SLA 8/16.
+Отдельная 1800+3600 functional matrix закрыла 22 события/20 recoveries:
+static p95/p99 1/2, scroll 12/12, full reset 20/20 submits, zero pending/in-flight,
+zero accounted-memory delta и zero readback. Статический torch-on PNG прошёл
+gross-artifact review; human motion/artistic product matrix остаётся G7.
+Канонический контракт: `docs/GI_G6.md`, evidence:
+`benchmark/gi/g6-live-evidence-v1.json`.
 
 ### G7 — продуктовая приёмка GI
 

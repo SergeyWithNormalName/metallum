@@ -402,6 +402,16 @@ public final class RendererArchitectureTests {
                         && styleEnabled.voxelDebugChecksum()
                         && styleEnabled.visualStyle() == VisualStyle.NATURAL,
                 "withVisualStyle helper changed another renderer policy axis");
+        RendererConfig giEnabled = styleEnabled.withGlobalIllumination(
+                GlobalIlluminationMode.DYNAMIC
+        );
+        require(giEnabled.globalIllumination() == GlobalIlluminationMode.DYNAMIC
+                        && !giEnabled.improvedLighting()
+                        && giEnabled.lightingPreset() == LightingPreset.BALANCED
+                        && giEnabled.frameInterpolation()
+                        && giEnabled.voxelDebugChecksum()
+                        && giEnabled.visualStyle() == VisualStyle.NATURAL,
+                "withGlobalIllumination helper changed another renderer policy axis");
         Path temporaryDirectory = null;
         try {
             temporaryDirectory = Files.createTempDirectory("metallum-renderer-config-");
@@ -409,6 +419,12 @@ public final class RendererArchitectureTests {
             Path hdrPath = temporaryDirectory.resolve("metallum-hdr.properties");
             String hdrSentinel = "mode=scene\nhdrStrength=1.37\n";
             Files.writeString(hdrPath, hdrSentinel);
+
+            RendererConfig.LoadStatus statusBeforeStartupGate = RendererConfig.lastLoadStatus();
+            require(RendererConfig.loadForStartupGate(configPath).equals(RendererConfig.defaults())
+                            && !Files.exists(configPath)
+                            && RendererConfig.lastLoadStatus().equals(statusBeforeStartupGate),
+                    "startup mixin gate created a config or changed benchmark load provenance");
 
             for (boolean legacyLighting : new boolean[]{false, true}) {
                 Files.writeString(
@@ -497,16 +513,23 @@ public final class RendererArchitectureTests {
 
             RendererConfig original = new RendererConfig(
                     false, LightingPreset.ULTRA, true, true,
-                    VisualStyle.NATURAL, GlobalIlluminationMode.OFF
+                    VisualStyle.NATURAL, GlobalIlluminationMode.DYNAMIC
             );
             original.save(configPath);
+            String dynamicConfig = Files.readString(configPath);
+            RendererConfig.LoadStatus statusBeforeDynamicStartupGate = RendererConfig.lastLoadStatus();
+            require(RendererConfig.loadForStartupGate(configPath).equals(original)
+                            && Files.readString(configPath).equals(dynamicConfig)
+                            && RendererConfig.lastLoadStatus().equals(statusBeforeDynamicStartupGate),
+                    "startup mixin gate rewrote or lost the dynamic GI policy");
             original.withImprovedLighting(true).save(configPath);
             RendererConfig persisted = RendererConfig.load(configPath);
             require(persisted.improvedLighting()
                             && persisted.lightingPreset() == LightingPreset.ULTRA
                             && persisted.frameInterpolation()
                             && persisted.voxelDebugChecksum()
-                            && persisted.visualStyle() == VisualStyle.NATURAL,
+                            && persisted.visualStyle() == VisualStyle.NATURAL
+                            && persisted.globalIllumination() == GlobalIlluminationMode.DYNAMIC,
                     "persisted lighting toggle lost another renderer config axis");
 
             for (String invalid : new String[]{

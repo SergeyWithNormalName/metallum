@@ -48,7 +48,7 @@ Metallum enforces an end-to-end fingerprinting chain to make a local benchmark r
 - **Artifact SHA256**: Computed via `python3 tools/metal_benchmark_fixture.py artifact-digest . build/classes/java/main build/resources/main build/generated/metallum/natives/macos/libmetallum.dylib`. Ensures the exact compiled binaries are tracked.
 - **Fixture SHA256**: Read-only world directory under `run/benchmark-fixtures/<fixture-id>/world`. Validated via `tools/metal_benchmark_fixture.py verify-fixture` before cloning and after teardown. Any world modification causes a preflight/teardown abort.
 - **Settings SHA256**: Computed via `tools/metal_benchmark_fixture.py settings-values`. Maps tracked settings JSON (`benchmark/settings/*.json`) to runtime `options.txt`, `metallum-*.properties`, and Sodium configs.
-- **Renderer settings contract**: Settings schema v3 additionally binds `improvedLighting`, `lightingPreset`, and `globalIllumination`. G0 release runs require `globalIllumination=off` in both the tracked profile and runtime renderer properties.
+- **Renderer settings contract**: Settings schema v3 additionally binds `improvedLighting`, `lightingPreset`, and `globalIllumination`. G0 release runs require `globalIllumination=off` in both the tracked profile and runtime renderer properties. The explicit `--gi-live` G6 route instead requires the tracked `dynamic` profile and never masquerades as a GI_OFF release attestation.
 - **Run World Identity**: Temporary world allocated at `run/saves/MetallumBenchmark-<stamp>`. Protected by a UUID owner marker file (`.metallum-benchmark-owner`) and filesystem inode verification (`stat -f '%d:%i'`) to prevent unsafe directory cleanup.
 
 ---
@@ -71,6 +71,19 @@ The GI G0 acceptance set uses three independent `STATIC` routes:
 exact profile, floors, fixture manifest, and receipt policy are defined in
 [GI_G0.md](GI_G0.md).
 
+G6 uses the explicit production validation mode:
+
+```bash
+scripts/run_metal_benchmark.sh --gi-live --preflight-only
+scripts/run_metal_benchmark.sh --gi-live --label gi-g6-live
+scripts/run_metal_benchmark.sh --gi-live --capture-reference --label gi-g6-image
+```
+
+The mode selects `hdrtest-torch-toggle-v1`, requires the persistent Sodium GI
+setting to be `dynamic`, and rejects every private G2--G5 diagnostic flag. The
+capture is a static visual artifact, not motion proof or a release attestation.
+See [GI_G6.md](GI_G6.md) for the admission/final and recovery contracts.
+
 ---
 
 ## 5. Existing Settings Profiles
@@ -86,6 +99,9 @@ Settings files (`benchmark/settings/*.json`) declare graphics options, render di
    - Nether fluid/lighting stress profile in HDR.
 4. **`benchmark/settings/fi-hdr-temporal-ultra-performance-v1.json`**:
    - Opt-in Frame Interpolation validation profile (`maxFps=30`, VSync on, Frame Interpolation enabled, Temporal Ultra Performance).
+5. **`benchmark/settings/native-hdr-fancy-gi-live-v1.json`**:
+   - G6 production-validation profile; identical native HDR/Fancy/Balanced
+     quality contract with persistent `globalIllumination=dynamic`.
 
 ---
 

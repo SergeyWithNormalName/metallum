@@ -172,6 +172,26 @@ kernel void metallum_gi_transport_clear_v1(
     confidence.write(half4(0.0h), position);
 }
 
+// G6 keeps the accepted G4 numerical kernel, but publishes all three clipmap
+// cascades through one texture per SH channel.  Z is the atlas axis: each
+// cascade owns one exact 32-slice slab.  The clear is admission/reset work and
+// never runs in the steady-state update loop.
+kernel void metallum_gi_live_clear_v1(
+    texture3d<half, access::write> shRed [[texture(0)]],
+    texture3d<half, access::write> shGreen [[texture(1)]],
+    texture3d<half, access::write> shBlue [[texture(2)]],
+    texture3d<half, access::write> confidence [[texture(3)]],
+    uint3 position [[thread_position_in_grid]]
+) {
+    if (position.x >= metallumGiTransportEdge
+            || position.y >= metallumGiTransportEdge
+            || position.z >= metallumGiTransportEdge * 3u) return;
+    shRed.write(half4(0.0h), position);
+    shGreen.write(half4(0.0h), position);
+    shBlue.write(half4(0.0h), position);
+    confidence.write(half4(0.0h), position);
+}
+
 kernel void metallum_gi_transport_bounce_init_v1(
     constant MetallumGiTransportHeaderV1 &header [[buffer(0)]],
     device const MetallumGiTransportCellV1 *cells [[buffer(1)]],
@@ -305,4 +325,246 @@ kernel void metallum_gi_transport_jacobi_sh_v1(
         coefficient0.b, float3(coefficientX.b, coefficientY.b, coefficientZ.b),
         header.fp16RelativeTolerance), position);
     confidence.write(half4(half(clamp(knownWeight, 0.0f, 1.0f)), 0.0h, 0.0h, 0.0h), position);
+}
+
+constant uint metallumGiLiveBrickEdge = 8u;
+
+struct MetallumGiLiveRemapParamsV1 {
+    uint cascadeIndex;
+    int deltaX;
+    int deltaY;
+    int deltaZ;
+    ulong previousExactMask;
+    ulong requiredMask;
+};
+
+static_assert(sizeof(MetallumGiLiveRemapParamsV1) == 32,
+    "G6 internal remap params must remain 32 bytes");
+
+inline uint metallum_gi_live_nth_brick(ulong mask, uint ordinal) {
+    for (uint brick = 0u; brick < 64u; ++brick) {
+        if ((mask & (1ul << brick)) == 0ul) continue;
+        if (ordinal == 0u) return brick;
+        --ordinal;
+    }
+    return 64u;
+}
+
+inline uint3 metallum_gi_live_brick_position(
+    ulong mask, uint3 dispatchedPosition
+) {
+    uint brick = metallum_gi_live_nth_brick(
+        mask, dispatchedPosition.z / metallumGiLiveBrickEdge);
+    uint brickX = brick & 3u;
+    uint brickY = (brick >> 2u) & 3u;
+    uint brickZ = brick >> 4u;
+    return uint3(brickX * metallumGiLiveBrickEdge + dispatchedPosition.x,
+        brickY * metallumGiLiveBrickEdge + dispatchedPosition.y,
+        brickZ * metallumGiLiveBrickEdge
+            + dispatchedPosition.z % metallumGiLiveBrickEdge);
+}
+
+// First-submit invalidation: every incompatible receiver cell becomes physical
+// zero before the same command buffer can reach a render draw.
+kernel void metallum_gi_live_clear_bricks_v1(
+    constant MetallumGiTransportHeaderV1 &header [[buffer(0)]],
+    constant uint &cascadeIndex [[buffer(1)]],
+    texture3d<half, access::write> shRed [[texture(0)]],
+    texture3d<half, access::write> shGreen [[texture(1)]],
+    texture3d<half, access::write> shBlue [[texture(2)]],
+    texture3d<half, access::write> confidence [[texture(3)]],
+    uint3 dispatchedPosition [[thread_position_in_grid]]
+) {
+    if (cascadeIndex >= 3u || header.reserved1 == 0ul
+            || dispatchedPosition.x >= metallumGiLiveBrickEdge
+            || dispatchedPosition.y >= metallumGiLiveBrickEdge) return;
+    uint3 position = metallum_gi_live_brick_position(
+        header.reserved1, dispatchedPosition);
+    if (any(position >= uint3(metallumGiTransportEdge))) return;
+    uint3 atlasPosition = uint3(position.x, position.y,
+        position.z + cascadeIndex * metallumGiTransportEdge);
+    shRed.write(half4(0.0h), atlasPosition);
+    shGreen.write(half4(0.0h), atlasPosition);
+    shBlue.write(half4(0.0h), atlasPosition);
+    confidence.write(half4(0.0h), atlasPosition);
+}
+
+// Scrolls always read the old atlas and write a distinct one-cascade scratch.
+// This removes the intra-dispatch overlap race for one-cell clipmap motion.
+kernel void metallum_gi_live_remap_v1(
+    constant MetallumGiLiveRemapParamsV1 &params [[buffer(0)]],
+    texture3d<half, access::read> oldRed [[texture(0)]],
+    texture3d<half, access::read> oldGreen [[texture(1)]],
+    texture3d<half, access::read> oldBlue [[texture(2)]],
+    texture3d<half, access::read> oldConfidence [[texture(3)]],
+    texture3d<half, access::write> scratchRed [[texture(4)]],
+    texture3d<half, access::write> scratchGreen [[texture(5)]],
+    texture3d<half, access::write> scratchBlue [[texture(6)]],
+    texture3d<half, access::write> scratchConfidence [[texture(7)]],
+    uint3 destination [[thread_position_in_grid]]
+) {
+    if (params.cascadeIndex >= 3u
+            || any(destination >= uint3(metallumGiTransportEdge))) return;
+    uint destinationBrick = ((destination.z >> 3u) << 4u)
+        | ((destination.y >> 3u) << 2u) | (destination.x >> 3u);
+    int3 source = int3(destination)
+        + int3(params.deltaX, params.deltaY, params.deltaZ);
+    bool sourceInside = metallum_gi_transport_inside(source);
+    uint sourceBrick = sourceInside
+        ? ((uint(source.z) >> 3u) << 4u) | ((uint(source.y) >> 3u) << 2u)
+            | (uint(source.x) >> 3u)
+        : 64u;
+    bool retain = sourceInside
+        && (params.requiredMask & (1ul << destinationBrick)) == 0ul
+        && (params.previousExactMask & (1ul << sourceBrick)) != 0ul;
+    if (!retain) {
+        scratchRed.write(half4(0.0h), destination);
+        scratchGreen.write(half4(0.0h), destination);
+        scratchBlue.write(half4(0.0h), destination);
+        scratchConfidence.write(half4(0.0h), destination);
+        return;
+    }
+    uint3 atlasSource = uint3(uint(source.x), uint(source.y),
+        uint(source.z) + params.cascadeIndex * metallumGiTransportEdge);
+    scratchRed.write(oldRed.read(atlasSource), destination);
+    scratchGreen.write(oldGreen.read(atlasSource), destination);
+    scratchBlue.write(oldBlue.read(atlasSource), destination);
+    scratchConfidence.write(oldConfidence.read(atlasSource), destination);
+}
+
+kernel void metallum_gi_live_publish_remap_v1(
+    constant MetallumGiLiveRemapParamsV1 &params [[buffer(0)]],
+    texture3d<half, access::read> scratchRed [[texture(0)]],
+    texture3d<half, access::read> scratchGreen [[texture(1)]],
+    texture3d<half, access::read> scratchBlue [[texture(2)]],
+    texture3d<half, access::read> scratchConfidence [[texture(3)]],
+    texture3d<half, access::write> shRed [[texture(4)]],
+    texture3d<half, access::write> shGreen [[texture(5)]],
+    texture3d<half, access::write> shBlue [[texture(6)]],
+    texture3d<half, access::write> confidence [[texture(7)]],
+    uint3 position [[thread_position_in_grid]]
+) {
+    if (params.cascadeIndex >= 3u
+            || any(position >= uint3(metallumGiTransportEdge))) return;
+    uint3 atlasPosition = uint3(position.x, position.y,
+        position.z + params.cascadeIndex * metallumGiTransportEdge);
+    shRed.write(scratchRed.read(position), atlasPosition);
+    shGreen.write(scratchGreen.read(position), atlasPosition);
+    shBlue.write(scratchBlue.read(position), atlasPosition);
+    confidence.write(scratchConfidence.read(position), atlasPosition);
+}
+
+// Live G6 retains the accepted G4 one-bounce/L1-SH equation but dispatches
+// only scheduler-owned receiver bricks. Endpoint outgoing radiance is computed
+// inline from E_direct, eliminating a whole-cascade shared bounce pass.
+kernel void metallum_gi_live_jacobi_sh_v1(
+    constant MetallumGiTransportHeaderV1 &header [[buffer(0)]],
+    device const MetallumGiTransportCellV1 *cells [[buffer(1)]],
+    constant uint &cascadeIndex [[buffer(2)]],
+    texture3d<half, access::read> directIrradiance [[texture(0)]],
+    texture3d<uint, access::read> geometry [[texture(1)]],
+    texture3d<half, access::write> shRed [[texture(2)]],
+    texture3d<half, access::write> shGreen [[texture(3)]],
+    texture3d<half, access::write> shBlue [[texture(4)]],
+    texture3d<half, access::write> confidence [[texture(5)]],
+    uint3 dispatchedPosition [[thread_position_in_grid]]
+) {
+    if (cascadeIndex >= 3u || header.reserved0 == 0ul
+            || dispatchedPosition.x >= metallumGiLiveBrickEdge
+            || dispatchedPosition.y >= metallumGiLiveBrickEdge
+            || header.cellCount != metallumGiTransportCellCount
+            || header.iterationCount != 1u || header.maximumDistance != 8u
+            || !(header.formWeightNormalization > 0.0f)) {
+        return;
+    }
+    uint3 position = metallum_gi_live_brick_position(
+        header.reserved0, dispatchedPosition);
+    if (any(position >= uint3(metallumGiTransportEdge))) return;
+
+    uint receiverIndex = metallum_gi_transport_index(position);
+    MetallumGiTransportCellV1 receiverCell = cells[receiverIndex];
+    uint3 atlasPosition = uint3(position.x, position.y,
+        position.z + cascadeIndex * metallumGiTransportEdge);
+    if (!metallum_gi_transport_surface_is_valid(receiverCell)
+            || geometry.read(position).r != metallumGiTransportValidityContent) {
+        shRed.write(half4(0.0h), atlasPosition);
+        shGreen.write(half4(0.0h), atlasPosition);
+        shBlue.write(half4(0.0h), atlasPosition);
+        confidence.write(half4(0.0h), atlasPosition);
+        return;
+    }
+
+    float3 coefficient0 = float3(0.0f);
+    float3 coefficientX = float3(0.0f);
+    float3 coefficientY = float3(0.0f);
+    float3 coefficientZ = float3(0.0f);
+    float knownWeight = 0.0f;
+    int3 receiver = int3(position);
+    for (int directionZ = -1; directionZ <= 1; ++directionZ) {
+        for (int directionY = -1; directionY <= 1; ++directionY) {
+            for (int directionX = -1; directionX <= 1; ++directionX) {
+                int3 direction = int3(directionX, directionY, directionZ);
+                if (all(direction == int3(0))) continue;
+                float directionWeight = rsqrt(float(directionX * directionX
+                    + directionY * directionY + directionZ * directionZ));
+                float3 omega = normalize(float3(direction));
+                for (uint distance = 1u; distance <= header.maximumDistance; ++distance) {
+                    float normalizedWeight = directionWeight
+                        / (float(distance * distance) * header.formWeightNormalization);
+                    int3 sourcePosition = receiver + direction * int(distance);
+                    if (!metallum_gi_transport_inside(sourcePosition)) continue;
+                    uint endpointState = geometry.read(uint3(sourcePosition)).r;
+                    if (endpointState == metallumGiTransportValidityUnknown
+                            || endpointState == metallumGiTransportValidityFallback) continue;
+                    MetallumGiTransportPathStatus path = metallum_gi_transport_path_status(
+                        geometry, receiver, direction, distance);
+                    if (path == MetallumGiTransportPathUnknown) continue;
+                    knownWeight += normalizedWeight;
+                    if (path == MetallumGiTransportPathOccluded
+                            || endpointState != metallumGiTransportValidityContent) continue;
+                    uint sourceIndex = metallum_gi_transport_index(uint3(sourcePosition));
+                    MetallumGiTransportCellV1 sourceCell = cells[sourceIndex];
+                    if (!metallum_gi_transport_surface_is_valid(sourceCell)) continue;
+                    float sourceSupport = metallum_gi_transport_source_face_support(
+                        sourceCell, -float3(direction));
+                    if (!(sourceSupport > 0.0f)) continue;
+                    float4 directSample = float4(
+                        directIrradiance.read(uint3(sourcePosition)));
+                    float3 direct = max(directSample.rgb, float3(0.0f));
+                    if (!all(isfinite(direct)) || !(directSample.a > 0.0f)) continue;
+                    float3 rho = clamp(float3(sourceCell.material.xyz)
+                        * (1.0f / 65535.0f), 0.0f, 1.0f);
+                    float3 outgoing = rho * (1.0f / metallumGiTransportPi) * direct;
+                    outgoing = all(isfinite(outgoing))
+                        ? max(outgoing, float3(0.0f)) : float3(0.0f);
+                    if (!all(isfinite(outgoing)) || !any(outgoing > float3(0.0f))) continue;
+                    float formFactor = metallumGiTransportPi * normalizedWeight * sourceSupport;
+                    float3 transfer = outgoing * formFactor;
+                    coefficient0 += transfer;
+                    coefficientX += transfer * omega.x;
+                    coefficientY += transfer * omega.y;
+                    coefficientZ += transfer * omega.z;
+                }
+            }
+        }
+    }
+
+    bool finite = all(isfinite(coefficient0)) && all(isfinite(coefficientX))
+        && all(isfinite(coefficientY)) && all(isfinite(coefficientZ));
+    if (!finite) {
+        coefficient0 = coefficientX = coefficientY = coefficientZ = float3(0.0f);
+        knownWeight = 0.0f;
+    }
+    coefficient0 = max(coefficient0, float3(0.0f));
+    shRed.write(metallum_gi_transport_quantize_sh(
+        coefficient0.r, float3(coefficientX.r, coefficientY.r, coefficientZ.r),
+        header.fp16RelativeTolerance), atlasPosition);
+    shGreen.write(metallum_gi_transport_quantize_sh(
+        coefficient0.g, float3(coefficientX.g, coefficientY.g, coefficientZ.g),
+        header.fp16RelativeTolerance), atlasPosition);
+    shBlue.write(metallum_gi_transport_quantize_sh(
+        coefficient0.b, float3(coefficientX.b, coefficientY.b, coefficientZ.b),
+        header.fp16RelativeTolerance), atlasPosition);
+    confidence.write(half4(half(clamp(knownWeight, 0.0f, 1.0f)),
+        0.0h, 0.0h, 0.0h), atlasPosition);
 }

@@ -1,6 +1,5 @@
 package com.metallum.client.gi.transport;
 
-import com.metallum.client.gi.debug.GiTransportDebugSettings;
 import com.metallum.client.gi.semantic.GiSemanticTransportFieldView;
 import com.metallum.client.gi.semantic.GiSemanticValidity;
 import com.metallum.client.gi.source.GiDirectSourceCoordinator;
@@ -194,8 +193,7 @@ public final class GiTransportGpuResources implements AutoCloseable {
         this.header = arena.allocate(GiTransportLayout.HEADER_BYTES, Long.BYTES);
         this.cells = arena.allocate(GiTransportLayout.CELLS_BYTES, Long.BYTES);
         this.stats = arena.allocate(GiTransportLayout.STATS_BYTES, Long.BYTES);
-        boolean debugCapture = GiTransportDebugSettings.isEnabled()
-                && !GiTransportRuntime.isBenchmarkActive();
+        boolean debugCapture = GiTransportRuntime.isDebugPreviewRequested();
         this.debugBounce = debugCapture
                 ? arena.allocate(GiTransportLayout.CAPTURE_RGBA_BYTES, Long.BYTES)
                 : MemorySegment.NULL;
